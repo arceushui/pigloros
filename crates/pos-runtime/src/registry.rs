@@ -5501,6 +5501,89 @@ mod tests {
     }
 
     #[test]
+    fn manifest_batch_preparation_rejects_reuse_and_nonlocal_registry_state() {
+        let (_, _, catalog) = manifest_validation_fixture();
+        let mut registry = gated_registry();
+        registry
+            .prepare_manifest_registration(catalog.clone())
+            .test_ok();
+        assert!(matches!(
+            registry.prepare_manifest_registration(catalog.clone()),
+            Err(ManifestRegistrationErrorV1::BatchState)
+        ));
+
+        let (mut populated, _, _) = manifest_validation_fixture();
+        populated.manifest_batch = None;
+        assert!(matches!(
+            populated.prepare_manifest_registration(catalog.clone()),
+            Err(ManifestRegistrationErrorV1::RegistryState)
+        ));
+
+        let mut replay = gated_registry();
+        replay.run_mode = RunMode::Replay;
+        assert!(matches!(
+            replay.prepare_manifest_registration(catalog.clone()),
+            Err(ManifestRegistrationErrorV1::RegistryState)
+        ));
+
+        let mut air_gapped = gated_registry();
+        air_gapped.composition_mode = PluginExecutionModeV1::AirGapped;
+        assert!(matches!(
+            air_gapped.prepare_manifest_registration(catalog),
+            Err(ManifestRegistrationErrorV1::RegistryState)
+        ));
+    }
+
+    #[test]
+    fn synthetic_manifest_fixture_exercises_private_capability_lifecycle() {
+        // The fixture edits private fields and is not an installed-source proof.
+        let (mut registry, id, catalog) = manifest_validation_fixture();
+        let admitted = registry.admit_complete_manifest_registration().test_ok();
+        assert_eq!(admitted.catalog(), &catalog);
+        assert!(registry.is_admitted_composition_current_for_generation(&admitted, 1));
+        assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 2));
+        assert!(!PluginRegistry::new()
+            .is_admitted_composition_current_for_generation(&admitted, 1));
+
+        let mut changed_owner = catalog.as_input().clone();
+        changed_owner.owner_id = [0x42; 32];
+        let changed_owner = ManifestAdmissionCatalogV1::new(changed_owner).test_ok();
+        assert!(matches!(
+            registry.revalidate_manifest_registration(changed_owner.clone()),
+            Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+
+        let mut changed_row = catalog.as_input().clone();
+        changed_row.rows[0].plugin_version.push('x');
+        let changed_row = ManifestAdmissionCatalogV1::new(changed_row).test_ok();
+        assert!(matches!(
+            registry.revalidate_manifest_registration(changed_row.clone()),
+            Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+
+        let revalidated = registry
+            .revalidate_manifest_registration(catalog.clone())
+            .test_ok();
+        assert_eq!(revalidated.catalog(), &catalog);
+        registry.registration_revision += 1;
+        assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 1));
+        registry.registration_revision -= 1;
+        let saved_batch = registry.manifest_batch.take();
+        assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 1));
+        registry.manifest_batch = saved_batch;
+        registry.manifest_batch = Some(changed_owner);
+        assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 1));
+        registry.manifest_batch = Some(changed_row);
+        assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 1));
+        registry.manifest_batch = Some(catalog);
+        registry.plugins.shift_remove(&id).test_ok();
+        assert!(matches!(
+            registry.admit_complete_manifest_registration(),
+            Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+    }
+
+    #[test]
     fn manifest_validation_rejects_missing_key_and_unverified_entry() {
         let (mut registry, id, catalog) = manifest_validation_fixture();
         registry
@@ -5598,6 +5681,36 @@ mod tests {
         registry
             .validate_complete_manifest_batch(&catalog)
             .test_ok();
+    }
+
+    #[test]
+    fn manifest_validation_rejects_each_static_row_identity_mismatch() {
+        let (registry, id, catalog) = manifest_validation_fixture();
+        let entry = registry.plugins.get(&id).test_ok();
+        let original = &catalog.as_input().rows[0];
+        let mut wrong_slot = original.clone();
+        wrong_slot.stable_slot = "other".to_owned();
+        assert!(matches!(
+            PluginRegistry::validate_manifest_entry(&wrong_slot, entry),
+            Err(ManifestRegistrationErrorV1::SlotMismatch)
+        ));
+
+        for field in ["name", "version", "id", "implementation", "eop1", "closure"] {
+            let mut row = original.clone();
+            match field {
+                "name" => row.plugin_name.push('x'),
+                "version" => row.plugin_version.push('x'),
+                "id" => row.plugin_id = PluginId::new(),
+                "implementation" => row.implementation_hash = Hash::from_bytes([0x71; 32]),
+                "eop1" => row.eop1_native_digest = Hash::from_bytes([0x72; 32]),
+                "closure" => row.closure_hash = Hash::from_bytes([0x73; 32]),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                PluginRegistry::validate_manifest_entry(&row, entry),
+                Err(ManifestRegistrationErrorV1::PluginMismatch)
+            ));
+        }
     }
 
     fn plugin_with_caps(
