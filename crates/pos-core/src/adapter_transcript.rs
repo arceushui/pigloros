@@ -56,7 +56,7 @@ pub struct AdapterInvocationInputV1 {
 }
 
 impl AdapterInvocationInputV1 {
-    const fn contract_key(&self, plugin_id: PluginId) -> AdapterContractKey<'_> {
+    fn contract_key(&self, plugin_id: PluginId) -> AdapterContractKey<'_> {
         AdapterContractKey {
             plugin_id,
             adapter_id: &self.adapter_id,
