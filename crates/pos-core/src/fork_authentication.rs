@@ -642,8 +642,8 @@ mod tests {
     };
     use crate::{Hash, OwnerIdV1, PrincipalRefV1};
 
-    fn principal(id: u8) -> PrincipalRefV1 {
-        PrincipalRefV1::try_new([id; 16], "local.test").expect("test Principal")
+    fn principal(id: u8) -> Result<PrincipalRefV1, crate::AuthorityErrorV1> {
+        PrincipalRefV1::try_new([id; 16], "local.test")
     }
 
     fn adapter() -> ForkAuthenticationAdapterPolicyV1 {
@@ -655,27 +655,28 @@ mod tests {
         }
     }
 
-    fn record() -> AuthenticatedPrincipalRecordV1 {
-        AuthenticatedPrincipalRecordV1 {
-            principal: principal(1),
+    fn record() -> Result<AuthenticatedPrincipalRecordV1, crate::AuthorityErrorV1> {
+        Ok(AuthenticatedPrincipalRecordV1 {
+            principal: principal(1)?,
             adapter_id: "local".to_owned(),
             assurance: 2,
             issued_at: 100,
             expires_at: 30_000_100,
             registry_binding: Hash::from_bytes([1; 32]),
             operation_nonce: [3; 32],
-        }
+        })
     }
 
     #[test]
-    fn policy_round_trip_and_rejects_noncanonical_and_unsorted_inputs() {
-        let policy = ForkAuthenticationPolicyV1::new(vec![adapter()]).expect("policy");
-        let bytes = policy.to_canonical_cbor().expect("policy CBOR");
+    fn policy_round_trip_and_rejects_noncanonical_and_unsorted_inputs(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let policy = ForkAuthenticationPolicyV1::new(vec![adapter()])?;
+        let bytes = policy.to_canonical_cbor()?;
         assert_eq!(
             ForkAuthenticationPolicyV1::from_canonical_cbor(&bytes),
             Ok(policy.clone())
         );
-        assert_ne!(policy.digest().expect("policy digest"), Hash::zero());
+        assert_ne!(policy.digest()?, Hash::zero());
         assert!(policy.adapter("local").is_some());
         assert!(policy.adapter("other").is_none());
         assert_eq!(policy.adapters().len(), 1);
@@ -686,7 +687,7 @@ mod tests {
             ForkAuthenticationPolicyV1::from_canonical_cbor(&noncanonical),
             Err(ForkAuthenticationCodecErrorV1::NonCanonical)
         );
-        let mut trailing = bytes.clone();
+        let mut trailing = bytes;
         trailing.push(0);
         assert_eq!(
             ForkAuthenticationPolicyV1::from_canonical_cbor(&trailing),
@@ -714,11 +715,12 @@ mod tests {
             ForkAuthenticationPolicyV1::new(Vec::new()),
             Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
         );
+        Ok(())
     }
 
     #[test]
-    fn normative_fap1_maximum_vector_is_exact() {
-        let key = hex_bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+    fn normative_fap1_maximum_vector_is_exact() -> Result<(), Box<dyn std::error::Error>> {
+        let key = hex_bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")?;
         let adapters = (0..16_u8)
             .map(|i| ForkAuthenticationAdapterPolicyV1 {
                 adapter_id: format!("{}{:02x}", "a".repeat(126), i),
@@ -734,8 +736,8 @@ mod tests {
                     .collect(),
             })
             .collect();
-        let policy = ForkAuthenticationPolicyV1::new(adapters).expect("maximum policy");
-        let bytes = policy.to_canonical_cbor().expect("maximum policy CBOR");
+        let policy = ForkAuthenticationPolicyV1::new(adapters)?;
+        let bytes = policy.to_canonical_cbor()?;
         assert_eq!(bytes.len(), MAX_FORK_AUTH_POLICY_BYTES_V1);
         assert_eq!(
             &bytes[..8],
@@ -743,7 +745,7 @@ mod tests {
         );
         assert_eq!(
             &Sha256::digest(&bytes)[..],
-            &hex_bytes::<32>("658d17498b51bb0b6c218077737daab5648df1d48c435e6c0cf9335fd6fa1fb3")
+            &hex_bytes::<32>("658d17498b51bb0b6c218077737daab5648df1d48c435e6c0cf9335fd6fa1fb3")?
         );
         let mut extra_adapter = policy.adapters().to_vec();
         let mut seventeenth = extra_adapter[15].clone();
@@ -773,35 +775,34 @@ mod tests {
             ForkAuthenticationPolicyV1::from_canonical_cbor(&bytes),
             Ok(policy)
         );
+        Ok(())
     }
 
-    fn hex_bytes<const N: usize>(source: &str) -> [u8; N] {
+    fn hex_bytes<const N: usize>(source: &str) -> Result<[u8; N], std::num::ParseIntError> {
         assert_eq!(source.len(), N * 2);
         let mut out = [0; N];
         for (index, byte) in out.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&source[index * 2..index * 2 + 2], 16)
-                .expect("literal hexadecimal");
+            *byte = u8::from_str_radix(&source[index * 2..index * 2 + 2], 16)?;
         }
-        out
+        Ok(out)
     }
 
     #[test]
-    fn registry_round_trip_and_forbidden_mappings() {
+    fn registry_round_trip_and_forbidden_mappings() -> Result<(), Box<dyn std::error::Error>> {
         let bindings = vec![
             LocalAccountBindingV1 {
                 uid: 1001,
-                principal: principal(1),
+                principal: principal(1)?,
                 owner: OwnerIdV1::from_static("alice"),
             },
             LocalAccountBindingV1 {
                 uid: 1002,
-                principal: principal(2),
+                principal: principal(2)?,
                 owner: OwnerIdV1::from_static("alice"),
             },
         ];
-        let registry = LocalAccountRegistryV1::new("local".to_owned(), 2, bindings.clone(), 1000)
-            .expect("registry");
-        let bytes = registry.to_canonical_cbor().expect("registry CBOR");
+        let registry = LocalAccountRegistryV1::new("local".to_owned(), 2, bindings.clone(), 1000)?;
+        let bytes = registry.to_canonical_cbor()?;
         assert_eq!(
             LocalAccountRegistryV1::from_canonical_cbor(&bytes, 1000),
             Ok(registry.clone())
@@ -812,15 +813,12 @@ mod tests {
         assert_eq!(registry.lookup_uid(1001), Some(&bindings[0]));
         assert_eq!(registry.lookup_uid(2000), None);
         assert_eq!(
-            registry.lookup_principal(&principal(2)),
+            registry.lookup_principal(&principal(2)?),
             Some(OwnerIdV1::from_static("alice"))
         );
-        assert_eq!(registry.lookup_principal(&principal(3)), None);
-        assert_ne!(registry.digest().expect("registry digest"), Hash::zero());
-        assert_ne!(
-            super::principal_digest_v1(&principal(1)).expect("Principal digest"),
-            Hash::zero()
-        );
+        assert_eq!(registry.lookup_principal(&principal(3)?), None);
+        assert_ne!(registry.digest()?, Hash::zero());
+        assert_ne!(super::principal_digest_v1(&principal(1)?)?, Hash::zero());
 
         for forbidden in [0, 65_534, 1000, u32::MAX] {
             let mut rows = bindings.clone();
@@ -842,20 +840,21 @@ mod tests {
             LocalAccountRegistryV1::new("local".to_owned(), 2, unsorted, 1000),
             Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
         );
+        Ok(())
     }
 
     #[test]
-    fn apr1_and_fae1_round_trip_with_rejected_timestamp_and_nonce() {
-        let record = record();
-        let apr = record.to_canonical_cbor().expect("APR1 CBOR");
+    fn apr1_and_fae1_round_trip_with_rejected_timestamp_and_nonce(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let record = record()?;
+        let apr = record.to_canonical_cbor()?;
         assert!(apr.len() <= MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1);
         assert_eq!(
             AuthenticatedPrincipalRecordV1::from_canonical_cbor(&apr),
             Ok(record.clone())
         );
-        let evidence =
-            AuthenticatedPrincipalEvidenceV1::new(record.clone(), [9; 64]).expect("evidence");
-        let fae = evidence.to_canonical_cbor().expect("FAE1 CBOR");
+        let evidence = AuthenticatedPrincipalEvidenceV1::new(record.clone(), [9; 64])?;
+        let fae = evidence.to_canonical_cbor()?;
         assert!(fae.len() <= MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1);
         assert_eq!(
             AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&fae),
@@ -863,7 +862,7 @@ mod tests {
         );
         assert_eq!(evidence.record(), &record);
         assert_eq!(evidence.signature(), &[9; 64]);
-        assert_ne!(evidence.digest().expect("evidence digest"), Hash::zero());
+        assert_ne!(evidence.digest()?, Hash::zero());
 
         let mut expired = record.clone();
         expired.expires_at = expired.issued_at;
@@ -883,13 +882,14 @@ mod tests {
             zero_binding.validate(),
             Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
         );
+        Ok(())
     }
 
     #[test]
-    fn normative_prn1_apr1_fae1_maximum_vectors_are_exact() {
-        let principal =
-            PrincipalRefV1::try_new([0xff; 16], "a".repeat(128)).expect("maximum Principal");
-        let prn = principal.encode().expect("PRN1 CBOR");
+    fn normative_prn1_apr1_fae1_maximum_vectors_are_exact() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let principal = PrincipalRefV1::try_new([0xff; 16], "a".repeat(128))?;
+        let prn = principal.encode()?;
         assert_eq!(prn.as_slice().len(), 154);
         assert_eq!(
             &prn.as_slice()[..8],
@@ -897,7 +897,7 @@ mod tests {
         );
         assert_eq!(
             &Sha256::digest(prn.as_slice())[..],
-            &hex_bytes::<32>("d272f30cfebd664ce92337a0dd28bb8c219e15658812ad7c329024a94ec49e92")
+            &hex_bytes::<32>("d272f30cfebd664ce92337a0dd28bb8c219e15658812ad7c329024a94ec49e92")?
         );
         assert_eq!(PrincipalRefV1::decode(&prn), Ok(principal.clone()));
 
@@ -910,12 +910,12 @@ mod tests {
             registry_binding: Hash::from_bytes([0xff; 32]),
             operation_nonce: [0xff; 32],
         };
-        let apr = record.to_canonical_cbor().expect("APR1 CBOR");
+        let apr = record.to_canonical_cbor()?;
         assert_eq!(apr.len(), MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1);
         assert_eq!(&apr[..8], &[0x89, 0x64, b'A', b'P', b'R', b'1', 0x01, 0x58]);
         assert_eq!(
             &Sha256::digest(&apr)[..],
-            &hex_bytes::<32>("73ea583c8d8c0705ed2e3a5088399753471eaed2a93ff22616f0b6c77398afe9")
+            &hex_bytes::<32>("73ea583c8d8c0705ed2e3a5088399753471eaed2a93ff22616f0b6c77398afe9")?
         );
         assert_eq!(
             AuthenticatedPrincipalRecordV1::from_canonical_cbor(&apr),
@@ -928,14 +928,13 @@ mod tests {
             Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
         );
 
-        let evidence =
-            AuthenticatedPrincipalEvidenceV1::new(record, [0xaa; 64]).expect("maximum evidence");
-        let fae = evidence.to_canonical_cbor().expect("FAE1 CBOR");
+        let evidence = AuthenticatedPrincipalEvidenceV1::new(record, [0xaa; 64])?;
+        let fae = evidence.to_canonical_cbor()?;
         assert_eq!(fae.len(), MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1);
         assert_eq!(&fae[..8], &[0x84, 0x64, b'F', b'A', b'E', b'1', 0x01, 0x59]);
         assert_eq!(
             &Sha256::digest(&fae)[..],
-            &hex_bytes::<32>("03815978b5a2cdf79f7ff9809104c80a8f02bc9005ddbad89e8c9eabe09965dc")
+            &hex_bytes::<32>("03815978b5a2cdf79f7ff9809104c80a8f02bc9005ddbad89e8c9eabe09965dc")?
         );
         assert_eq!(
             AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&fae),
@@ -950,5 +949,6 @@ mod tests {
         let mut old_marker = fae;
         old_marker[2..6].copy_from_slice(b"APS1");
         assert!(AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&old_marker).is_err());
+        Ok(())
     }
 }
