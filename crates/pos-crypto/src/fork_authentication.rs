@@ -10,7 +10,7 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use pos_core::{
     fork_authentication::{
-        AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
+        principal_digest_v1, AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
         ForkAuthenticationPolicyV1,
     },
     OwnerIdV1, Signature,
@@ -225,7 +225,7 @@ impl ForkHostSigningKeyV1 {
         command: &[u8],
         evidence: &VerifiedAuthenticatedPrincipalEvidenceV1,
     ) -> Result<Signature, ForkAuthenticationSignatureErrorV1> {
-        validate_command(command).and_then(|()| {
+        validate_command(command, evidence).and_then(|()| {
             evidence
                 .evidence()
                 .to_canonical_cbor()
@@ -353,9 +353,20 @@ fn validate_fao1(bytes: &[u8]) -> Result<(), ForkAuthenticationSignatureErrorV1>
     }
 }
 
-fn validate_command(bytes: &[u8]) -> Result<(), ForkAuthenticationSignatureErrorV1> {
+fn validate_command(
+    bytes: &[u8],
+    evidence: &VerifiedAuthenticatedPrincipalEvidenceV1,
+) -> Result<(), ForkAuthenticationSignatureErrorV1> {
+    let evidence_digest = evidence
+        .evidence()
+        .digest()
+        .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
+    let principal_digest = principal_digest_v1(&evidence.evidence().record().principal)
+        .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
     if let Ok(value) = canonical_array(bytes, MAX_POC1_BYTES, "POC1", 8) {
         return if value[2..7].iter().all(|field| fixed_nonzero(field, 32))
+            && matches!(&value[5], Value::Bytes(value) if value.as_slice() == evidence_digest.as_bytes())
+            && matches!(&value[6], Value::Bytes(value) if value.as_slice() == principal_digest.as_bytes())
             && matches!(&value[7], Value::Text(owner) if OwnerIdV1::new(owner.as_str()).is_ok())
         {
             Ok(())
@@ -365,6 +376,8 @@ fn validate_command(bytes: &[u8]) -> Result<(), ForkAuthenticationSignatureError
     }
     let value = canonical_array(bytes, MAX_FCC1_BYTES, "FCC1", 14)?;
     if value[2..7].iter().all(|field| fixed_nonzero(field, 32))
+        && matches!(&value[5], Value::Bytes(value) if value.as_slice() == evidence_digest.as_bytes())
+        && matches!(&value[6], Value::Bytes(value) if value.as_slice() == principal_digest.as_bytes())
         && matches!(&value[7], Value::Bytes(value) if value.len() == 16)
         && matches!((unsigned(&value[8]), unsigned(&value[9])), (Some(a), Some(b)) if a == b)
         && fixed_nonzero(&value[10], 32)
@@ -397,7 +410,10 @@ fn validate_frc1(bytes: &[u8]) -> Result<(), ForkAuthenticationSignatureErrorV1>
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use pos_core::{fork_authentication::ForkAuthenticationAdapterPolicyV1, Hash, PrincipalRefV1};
+    use pos_core::{
+        fork_authentication::{principal_digest_v1, ForkAuthenticationAdapterPolicyV1},
+        Hash, PrincipalRefV1,
+    };
     use std::error::Error;
 
     const ADAPTER_SEED: [u8; 32] = [
@@ -608,17 +624,19 @@ mod tests {
         let open = host.sign_open(&open_bytes)?;
         verify_host_signature(host.public_key(), OPEN_DOMAIN, &open_bytes, &open)?;
 
+        let evidence = verified_evidence()?;
+        let evidence_digest = evidence.evidence().digest()?;
+        let principal_digest = principal_digest_v1(&evidence.evidence().record().principal)?;
         let poc1 = encode(&Value::Array(vec![
             Value::Text("POC1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
             bytes(2, 32),
             bytes(3, 32),
-            bytes(4, 32),
-            bytes(5, 32),
+            Value::Bytes(evidence_digest.as_bytes().to_vec()),
+            Value::Bytes(principal_digest.as_bytes().to_vec()),
             Value::Text("owner".to_owned()),
         ]))?;
-        let evidence = verified_evidence()?;
         let command = host.sign_command(&poc1, &evidence)?;
         let evidence_bytes = evidence.evidence().to_canonical_cbor()?;
         let mut command_input = poc1;
@@ -631,8 +649,8 @@ mod tests {
             bytes(1, 32),
             bytes(2, 32),
             bytes(3, 32),
-            bytes(4, 32),
-            bytes(5, 32),
+            Value::Bytes(evidence_digest.as_bytes().to_vec()),
+            Value::Bytes(principal_digest.as_bytes().to_vec()),
             bytes(6, 16),
             Value::Integer(7.into()),
             Value::Integer(7.into()),
@@ -675,14 +693,16 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
         let evidence = verified_evidence()?;
+        let evidence_digest = evidence.evidence().digest()?;
+        let principal_digest = principal_digest_v1(&evidence.evidence().record().principal)?;
         let fcc1 = encode(&Value::Array(vec![
             Value::Text("FCC1".to_owned()),
             Value::Integer(1.into()),
             bytes(0xff, 32),
             bytes(0xfe, 32),
             bytes(0xfd, 32),
-            bytes(0xfc, 32),
-            bytes(0xfb, 32),
+            Value::Bytes(evidence_digest.as_bytes().to_vec()),
+            Value::Bytes(principal_digest.as_bytes().to_vec()),
             bytes(0xff, 16),
             Value::Integer(u64::MAX.into()),
             Value::Integer(u64::MAX.into()),
@@ -704,6 +724,75 @@ mod tests {
             host.sign_command(&oversized, &evidence),
             Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn host_signing_rejects_commands_with_mismatched_evidence_or_principal_digests(
+    ) -> Result<(), Box<dyn Error>> {
+        let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
+        let evidence = verified_evidence()?;
+        let evidence_digest = evidence.evidence().digest()?;
+        let principal_digest = principal_digest_v1(&evidence.evidence().record().principal)?;
+        for command in [
+            Value::Array(vec![
+                Value::Text("POC1".to_owned()),
+                Value::Integer(1.into()),
+                bytes(1, 32),
+                bytes(2, 32),
+                bytes(3, 32),
+                bytes(4, 32),
+                Value::Bytes(principal_digest.as_bytes().to_vec()),
+                Value::Text("owner".to_owned()),
+            ]),
+            Value::Array(vec![
+                Value::Text("POC1".to_owned()),
+                Value::Integer(1.into()),
+                bytes(1, 32),
+                bytes(2, 32),
+                bytes(3, 32),
+                Value::Bytes(evidence_digest.as_bytes().to_vec()),
+                bytes(4, 32),
+                Value::Text("owner".to_owned()),
+            ]),
+            Value::Array(vec![
+                Value::Text("FCC1".to_owned()),
+                Value::Integer(1.into()),
+                bytes(1, 32),
+                bytes(2, 32),
+                bytes(3, 32),
+                bytes(4, 32),
+                Value::Bytes(principal_digest.as_bytes().to_vec()),
+                bytes(5, 16),
+                Value::Integer(6.into()),
+                Value::Integer(6.into()),
+                bytes(7, 32),
+                bytes(8, 32),
+                Value::Integer(1.into()),
+                Value::Text("child".to_owned()),
+            ]),
+            Value::Array(vec![
+                Value::Text("FCC1".to_owned()),
+                Value::Integer(1.into()),
+                bytes(1, 32),
+                bytes(2, 32),
+                bytes(3, 32),
+                Value::Bytes(evidence_digest.as_bytes().to_vec()),
+                bytes(4, 32),
+                bytes(5, 16),
+                Value::Integer(6.into()),
+                Value::Integer(6.into()),
+                bytes(7, 32),
+                bytes(8, 32),
+                Value::Integer(1.into()),
+                Value::Text("child".to_owned()),
+            ]),
+        ] {
+            assert_eq!(
+                host.sign_command(&encode(&command)?, &evidence),
+                Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+            );
+        }
         Ok(())
     }
 
@@ -779,6 +868,8 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
         let evidence = verified_evidence()?;
+        let evidence_digest = evidence.evidence().digest()?;
+        let principal_digest = principal_digest_v1(&evidence.evidence().record().principal)?;
         let zero_initialize = encode(&Value::Array(vec![
             Value::Text("FAI1".to_owned()),
             Value::Integer(1.into()),
@@ -822,8 +913,8 @@ mod tests {
             bytes(1, 32),
             bytes(2, 32),
             bytes(3, 32),
-            bytes(4, 32),
-            bytes(5, 32),
+            Value::Bytes(evidence_digest.as_bytes().to_vec()),
+            Value::Bytes(principal_digest.as_bytes().to_vec()),
             Value::Text("owner".to_owned()),
         ]))?;
         let mut trailing = valid_poc1.clone();
