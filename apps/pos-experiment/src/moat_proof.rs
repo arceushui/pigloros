@@ -912,12 +912,17 @@ fn build_registry_for_admission(
 ) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
     let mut registry =
         pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
-    register_plugins_for_admission(&mut registry, topology, profile_id, admission).map(|()| registry)
+    register_plugins_for_admission(&mut registry, topology, profile_id, admission)
+        .map(|()| registry)
 }
 
 #[cfg(test)]
 fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
-    build_registry_for_admission(topology, "deterministic-local-v1", ProofAdmission::GeneratedFixture)
+    build_registry_for_admission(
+        topology,
+        "deterministic-local-v1",
+        ProofAdmission::GeneratedFixture,
+    )
 }
 
 const fn execution_profile_id(mode: ExecutionModeV1) -> &'static str {
@@ -2099,8 +2104,12 @@ fn failure_probe_fixture(
     resource_limit: u64,
 ) -> Result<PluginFailureV1, MoatProofError> {
     let sibling_steps = Arc::new(AtomicU64::new(0));
-    let sibling_plugin = SiblingProbePlugin { id: PluginId::new() };
-    let plugin = FailureProbePlugin { id: PluginId::new() };
+    let sibling_plugin = SiblingProbePlugin {
+        id: PluginId::new(),
+    };
+    let plugin = FailureProbePlugin {
+        id: PluginId::new(),
+    };
     let mut experiment = Experiment::new(ExperimentConfig {
         name: format!("wave8-failure-fixture-{class}"),
         stop: StopCondition::MaxTicks(1),
@@ -3481,7 +3490,8 @@ mod coverage_entrypoints {
             )))
         ));
         let empty =
-            test_ok(test_ok(MoatProofRun::new(input, ExecutionModeV1::Local)).run_fixture()).baseline;
+            test_ok(test_ok(MoatProofRun::new(input, ExecutionModeV1::Local)).run_fixture())
+                .baseline;
 
         let mut failed = MoatProofReport {
             baseline: empty.clone(),
