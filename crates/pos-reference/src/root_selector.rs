@@ -57,7 +57,6 @@ const CONTROL_LIMIT: u32 = 16 * 1024 * 1024;
 const CONTROL_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const SELECTOR_INPUT_LIMIT: u64 = 128 * 1024 * 1024;
 const CONTROL_ARTIFACT_LIMIT: u64 = 16 * 1024 * 1024;
-const IMAGE_ARTIFACT_LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_RETAINED_EVALUATION_NAMESPACES: usize = 256;
 const ROOT_UID: u32 = 0;
 const INITIAL_IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1715,27 +1714,22 @@ fn selected_image_and_launch(
             .map(|manifest| (sim1, manifest))
     })
     .and_then(|(sim1, manifest)| {
-        read_installed(
-            installed,
+        let root_image = installed.artifact(
             InstallationObjectKind::ROOT_IMAGE,
             manifest.root_image_blake3_digest,
-            IMAGE_ARTIFACT_LIMIT,
-        )
-        .map(|root_image| (sim1, manifest, root_image))
-    })
-    .and_then(|(sim1, manifest, root_image)| {
-        read_installed(
-            installed,
+        )?;
+        let executable = installed.artifact(
             InstallationObjectKind::SUBJECT_EXECUTABLE,
             manifest.executable_blake3_digest,
-            IMAGE_ARTIFACT_LIMIT,
-        )
-        .map(|executable| (sim1, root_image, executable))
-    })
-    .and_then(|(sim1, root_image, executable)| {
+        )?;
         admitted
             .provider()
-            .admit_image(&sim1, &root_image, &executable)
+            .admit_image_files(
+                &sim1,
+                root_image.file(),
+                executable.file(),
+                executable.object().byte_length(),
+            )
             .map_err(artifact_invalid)
     })
     .and_then(|image| {
@@ -2089,6 +2083,160 @@ fn root_peer(stream: &UnixStream, expected_uid: u32) -> bool {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    mod image_files {
+        //! Exercise retained image admission through the framed selector service.
+
+        use std::os::unix::fs::FileExt as _;
+
+        use super::*;
+        use crate::selector::installation::tests::{
+            admitted_state_with_image, remove_artifact, replace_image_file,
+            root_selector_fixture_from_state,
+        };
+
+        fn service(
+            admitted: AdmittedSelectorProvider,
+        ) -> TestResult<RootSelectorService<FixedProviderExecutor>> {
+            Ok(RootSelectorService {
+                admission: SelectorAdmission::for_test(admitted)?,
+                transport: FixedProviderExecutor(RefCell::new(Some(Err(
+                    ProviderTransportError::BeforeAdmission,
+                )))),
+                peer_uid: fs::metadata(".")?.uid(),
+                evaluation_namespaces: EvaluationNamespaceBindings::default(),
+                recovery_directory: test_recovery_directory()?,
+                recovery_owner: fs::metadata(".")?.uid(),
+            })
+        }
+
+        #[test]
+        fn selector_streams_multichunk_image_files_without_moving_shared_cursors() -> TestResult {
+            let image = vec![0x5a; 2 * 64 * 1024 + 17];
+            let executable = vec![0xa5; 64 * 1024 + 31];
+            let state = admitted_state_with_image(&image, &executable)?;
+            let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
+            let mut cursors = Vec::new();
+            for (kind, bytes) in [
+                (InstallationObjectKind::ROOT_IMAGE, image),
+                (InstallationObjectKind::SUBJECT_EXECUTABLE, executable),
+            ] {
+                let mut file = admitted
+                    .bootstrap()
+                    .installed()
+                    .artifact(kind, *blake3::hash(&bytes).as_bytes())?
+                    .file()
+                    .try_clone()?;
+                file.seek(SeekFrom::Start(3))?;
+                cursors.push(file);
+            }
+            let service = service(admitted)?;
+            assert_service_error(
+                &service,
+                &request,
+                resolved.attempt(),
+                SandboxLocalErrorCode::ProviderUnavailable,
+            )?;
+            // Reaching the executor proves content admission passed, even though this
+            // fixture deliberately supplies no provider execution or mount evidence.
+            assert!(service.transport.0.borrow().is_none());
+            for mut file in cursors {
+                assert_eq!(file.stream_position()?, 3);
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn selector_rejects_changed_truncated_or_extended_held_image_files() -> TestResult {
+            for kind in [
+                InstallationObjectKind::ROOT_IMAGE,
+                InstallationObjectKind::SUBJECT_EXECUTABLE,
+            ] {
+                for mutation in ["changed", "truncated", "extended"] {
+                    let image = vec![0x5a; 64 * 1024 + 17];
+                    let executable = vec![0xa5; 64 * 1024 + 31];
+                    let state = admitted_state_with_image(&image, &executable)?;
+                    let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
+                    let bytes = if kind == InstallationObjectKind::ROOT_IMAGE {
+                        &image
+                    } else {
+                        &executable
+                    };
+                    let file = admitted
+                        .bootstrap()
+                        .installed()
+                        .artifact(kind, *blake3::hash(bytes).as_bytes())?
+                        .file();
+                    let length = u64::try_from(bytes.len())?;
+                    // Test files are writable only to inject corruption after SIC1
+                    // admission; production installation files remain immutable.
+                    match mutation {
+                        "changed" => file.write_all_at(&[0xff], length - 1)?,
+                        "truncated" => file.set_len(length - 1)?,
+                        "extended" => file.write_all_at(&[0xff], length)?,
+                        _ => return Err("unknown mutation".into()),
+                    }
+                    let service = service(admitted)?;
+                    assert_service_error(
+                        &service,
+                        &request,
+                        resolved.attempt(),
+                        SandboxLocalErrorCode::PolicyUnavailable,
+                    )?;
+                    assert!(service.transport.0.borrow().is_some());
+                }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn selector_rejects_missing_held_image_files_before_provider_entry() -> TestResult {
+            let image = b"root-image";
+            let executable = b"adapter";
+            for (kind, bytes) in [
+                (InstallationObjectKind::ROOT_IMAGE, image.as_slice()),
+                (
+                    InstallationObjectKind::SUBJECT_EXECUTABLE,
+                    executable.as_slice(),
+                ),
+            ] {
+                let mut state = admitted_state_with_image(image, executable)?;
+                // SIC1 normally retains these files for the installation lifetime.
+                // Inject lost retention to exercise the service's fail-closed path.
+                remove_artifact(&mut state, kind, *blake3::hash(bytes).as_bytes());
+                let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
+                let service = service(admitted)?;
+                assert_service_error(
+                    &service,
+                    &request,
+                    resolved.attempt(),
+                    SandboxLocalErrorCode::PolicyUnavailable,
+                )?;
+                assert!(service.transport.0.borrow().is_some());
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn selector_rejects_unreadable_held_image_before_provider_entry() -> TestResult {
+            let image = b"root-image";
+            let mut state = admitted_state_with_image(image, b"adapter")?;
+            let mut file = tempfile::NamedTempFile::new()?;
+            file.write_all(image)?;
+            let unreadable = File::options().write(true).open(file.path())?;
+            replace_image_file(&mut state, *blake3::hash(image).as_bytes(), unreadable)?;
+            let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
+            let service = service(admitted)?;
+            assert_service_error(
+                &service,
+                &request,
+                resolved.attempt(),
+                SandboxLocalErrorCode::PolicyUnavailable,
+            )?;
+            assert!(service.transport.0.borrow().is_some());
+            Ok(())
+        }
+    }
+
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;

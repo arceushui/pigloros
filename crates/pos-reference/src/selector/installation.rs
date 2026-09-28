@@ -1380,6 +1380,13 @@ pub mod tests {
     }
 
     pub(crate) fn admitted_state() -> TestResult<InstalledSelectorState> {
+        admitted_state_with_image(b"root-image", b"adapter")
+    }
+
+    pub(crate) fn admitted_state_with_image(
+        root_image: &[u8],
+        executable: &[u8],
+    ) -> TestResult<InstalledSelectorState> {
         let authority = provider_authority();
         let trust = provider_trust(&authority)?;
         let trust_digest = signed_record_digest(&trust)?;
@@ -1406,8 +1413,6 @@ pub mod tests {
             host_digest,
         )?;
         let report_digest = signed_record_digest(&report)?;
-        let root_image = b"root-image";
-        let executable = b"adapter";
         let image = image_manifest(&authority, root_image, executable)?;
         let image_digest = signed_record_digest(&image)?;
         let launch = launch_policy(image_digest)?;
@@ -1440,16 +1445,8 @@ pub mod tests {
             (9, image_digest, image.as_slice()),
             (10, hard_caps_digest, hard_caps.as_slice()),
             (11, provider_binary_digest, provider_binary.as_slice()),
-            (
-                12,
-                *blake3::hash(root_image).as_bytes(),
-                root_image.as_slice(),
-            ),
-            (
-                13,
-                *blake3::hash(executable).as_bytes(),
-                executable.as_slice(),
-            ),
+            (12, *blake3::hash(root_image).as_bytes(), root_image),
+            (13, *blake3::hash(executable).as_bytes(), executable),
         ];
         let mut installed = BTreeMap::new();
         for (kind, identity, bytes) in artifacts {
@@ -1566,6 +1563,20 @@ pub mod tests {
         identity: [u8; 32],
     ) {
         state.artifacts.remove(&(kind, identity));
+    }
+
+    // Impossible-state I/O injection for the public selector service tests.
+    pub(crate) fn replace_image_file(
+        state: &mut InstalledSelectorState,
+        identity: [u8; 32],
+        file: File,
+    ) -> TestResult {
+        state
+            .artifacts
+            .get_mut(&(InstallationObjectKind::ROOT_IMAGE, identity))
+            .ok_or("root image missing")?
+            .file = file;
+        Ok(())
     }
 
     pub(crate) fn corrupt_artifact(
@@ -2233,9 +2244,18 @@ pub mod tests {
         ),
         Box<dyn std::error::Error>,
     > {
+        root_selector_fixture_from_state(admitted_state()?)
+    }
+
+    pub(crate) fn root_selector_fixture_from_state(
+        mut state: InstalledSelectorState,
+    ) -> TestResult<(
+        EvaluationRequest,
+        AdmittedSelectorProvider,
+        ResolvedInstalledCase,
+    )> {
         let corpus = crate::selector_test_support::air_gapped_corpus()?;
         let mut request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
-        let mut state = admitted_state()?;
         let object_identity = |kind| {
             state
                 .manifest

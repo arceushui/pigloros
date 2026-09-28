@@ -1,5 +1,7 @@
 //! Fail-closed provider and image admission for the root-owned selector.
 
+#[cfg(unix)]
+mod image_file;
 mod image_proof;
 mod network;
 pub use image_proof::SandboxImageProofError;
@@ -731,15 +733,25 @@ impl AdmittedSandboxProvider {
         root_image: &[u8],
         executable: &[u8],
     ) -> Result<AdmittedSandboxImage, SandboxAdmissionError> {
+        self.admit_image_by(manifest_bytes, |image| {
+            if image.root_image_length != root_image.len() as u64
+                || image.root_image_blake3_digest != digest_bytes(root_image)
+                || image.executable_blake3_digest != digest_bytes(executable)
+            {
+                return Err(SandboxAdmissionError::ArtifactMismatch);
+            }
+            Ok(())
+        })
+    }
+
+    fn admit_image_by(
+        &self,
+        manifest_bytes: &[u8],
+        verify_contents: impl FnOnce(&SignedImageManifest) -> Result<(), SandboxAdmissionError>,
+    ) -> Result<AdmittedSandboxImage, SandboxAdmissionError> {
         let image = SignedImageManifest::from_canonical_cbor(manifest_bytes)?;
         self.validate_image_selection(&image)?;
-        let image_length = root_image.len() as u64;
-        if image.root_image_length != image_length
-            || image.root_image_blake3_digest != digest_bytes(root_image)
-            || image.executable_blake3_digest != digest_bytes(executable)
-        {
-            return Err(SandboxAdmissionError::ArtifactMismatch);
-        }
+        verify_contents(&image)?;
         self.authenticate_image_manifest(&image)?;
         Ok(AdmittedSandboxImage { manifest: image })
     }
