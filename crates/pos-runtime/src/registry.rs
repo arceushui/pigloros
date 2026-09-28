@@ -22,9 +22,9 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
-use crate::output_admission::{InstalledCallbacksV1, InstalledOutputPolicySourceV1};
 #[cfg(any(test, feature = "test-support"))]
 use crate::output_admission::draft_execution_profile_artifact_v1;
+use crate::output_admission::{InstalledCallbacksV1, InstalledOutputPolicySourceV1};
 use crate::{
     composition::{
         AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
@@ -3283,7 +3283,9 @@ impl PluginRegistry {
         )?;
         let binding = binding.with_installed_action_approver(
             approver,
-            [Kind::new(crate::output_admission::WORLD_ACTION_EVENT_TYPE_V1)],
+            [Kind::new(
+                crate::output_admission::WORLD_ACTION_EVENT_TYPE_V1,
+            )],
         )?;
         match mode {
             CatalogueRegistrationModeV1::InstalledGateway => {
@@ -5922,10 +5924,8 @@ mod tests {
 
     #[test]
     fn catalogue_fixture_registers_without_installed_pin_or_append_gate() {
-        let selected = HostCatalogueEntryV1::gateway(
-            catalogue_fixture_details,
-            build_catalogue_fixture,
-        );
+        let selected =
+            HostCatalogueEntryV1::gateway(catalogue_fixture_details, build_catalogue_fixture);
         let mut registry = PluginRegistry::new().without_erasure_gate();
         registry
             .register_from_host_catalogue_entry_inner(
@@ -6009,7 +6009,10 @@ mod tests {
                 .and_then(|state| state.get("n"))
                 .and_then(serde_json::Value::as_u64)
         };
-        assert_eq!(registry.projections.reducer_names(), vec!["catalogue-fixture"; 2]);
+        assert_eq!(
+            registry.projections.reducer_names(),
+            vec!["catalogue-fixture"; 2]
+        );
         assert_eq!(count(&registry, first.id()), Some(1));
         assert_eq!(count(&registry, second_id), None);
         assert!(registry.composition().plugins[1].pin.is_none());
@@ -6060,7 +6063,10 @@ mod tests {
         ));
         assert_eq!(registry.len(), 1);
         assert!(registry.contains(&existing.id()));
-        assert_eq!(registry.projections.reducer_names(), vec!["catalogue-fixture"]);
+        assert_eq!(
+            registry.projections.reducer_names(),
+            vec!["catalogue-fixture"]
+        );
         assert_eq!(
             registry
                 .projections
@@ -6076,10 +6082,8 @@ mod tests {
 
     #[test]
     fn frozen_catalogue_configuration_changes_policy_identity() {
-        let selected = HostCatalogueEntryV1::gateway(
-            catalogue_fixture_details,
-            build_catalogue_fixture,
-        );
+        let selected =
+            HostCatalogueEntryV1::gateway(catalogue_fixture_details, build_catalogue_fixture);
         let plugin_id = PluginId::new();
         let mut first = PluginRegistry::new().without_erasure_gate();
         first

@@ -355,9 +355,7 @@ mod coverage_tests {
             super::frozen_gateway_details,
             counted_factory,
         );
-        let frozen = super::FrozenGatewayActionConfiguration {
-            bodies: Vec::new(),
-        };
+        let frozen = super::FrozenGatewayActionConfiguration { bodies: Vec::new() };
         let mut registry = PluginRegistry::new().without_erasure_gate();
         assert!(matches!(
             registry.register_from_host_catalogue_entry(&selected, frozen),
