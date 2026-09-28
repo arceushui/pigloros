@@ -920,11 +920,28 @@ impl PluginRegistry {
         timeline: TimelineId,
         subscriptions: &[ProjectionKey],
     ) -> Result<ObservationSnapshot, RuntimeError> {
-        let states = self.states_for_subscriptions(timeline, subscriptions)?;
-        Ok(ObservationSnapshot::from_subscriptions(
+        self.states_for_subscriptions(timeline, subscriptions)
+            .map(|states| {
+                ObservationSnapshot::from_subscriptions(subscriptions.iter(), |key| {
+                    states.get(key).cloned()
+                })
+            })
+    }
+
+    fn authorized_states_for_subscriptions(
+        &self,
+        timeline: TimelineId,
+        observed_through: Seq,
+        operation: &OperationContext,
+        subscriptions: &[ProjectionKey],
+    ) -> Result<HashMap<ProjectionKey, pos_core::State>, RuntimeError> {
+        self.authorize_snapshot_subscriptions(
+            timeline,
+            observed_through,
+            operation,
             subscriptions.iter(),
-            |key| states.get(key).cloned(),
-        ))
+        )?;
+        self.states_for_subscriptions(timeline, subscriptions)
     }
 
     fn with_erasure_fence<T>(
@@ -1551,13 +1568,12 @@ impl PluginRegistry {
         let mut event_cursors = Vec::new();
 
         let anchor = SnapshotAnchor::new(timeline, observed_through);
-        self.authorize_snapshot_subscriptions(
+        let states = self.authorized_states_for_subscriptions(
             timeline,
             observed_through,
             &operation,
-            subscriptions.iter(),
+            &subscriptions,
         )?;
-        let states = self.states_for_subscriptions(timeline, &subscriptions)?;
         let snapshot =
             ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
                 states.get(key).cloned()
