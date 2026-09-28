@@ -918,4 +918,77 @@ mod tests {
         ))
         .is_none());
     }
+
+    #[test]
+    fn host_cache_revocation_invalidates_before_exposure_on_both_stores() {
+        for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
+            let limits = test_ok(ErasureRecoveryLimitsV1::new(4, 4, 4));
+            let mut host = test_ok(ErasureExecutionHostV1::open_verified_empty(config, limits));
+            let timeline = test_ok(test_ok(host.command_sender()).create_timeline("authority"));
+            let fixture = active_decision(timeline.id());
+
+            let grant_key = test_ok(test_ok(host.command_sender()).cache_authorization(
+                timeline.id(),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
+            ))
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
+            assert_eq!(
+                test_ok(host.command_sender()).invalidate_cached_grant(fixture.parent_grant_id),
+                1
+            );
+            assert!(test_ok(test_ok(host.command_sender()).cached_authorization(
+                &grant_key,
+                WallTime::from_micros(20),
+                Seq::from_u64(20),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
+            ))
+            .is_none());
+
+            let consent_key = test_ok(test_ok(host.command_sender()).cache_authorization(
+                timeline.id(),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
+            ))
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
+            assert_eq!(
+                test_ok(host.command_sender()).invalidate_cached_consent(fixture.consent_reference),
+                1
+            );
+            assert!(test_ok(test_ok(host.command_sender()).cached_authorization(
+                &consent_key,
+                WallTime::from_micros(20),
+                Seq::from_u64(20),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
+            ))
+            .is_none());
+
+            let epoch_key = test_ok(test_ok(host.command_sender()).cache_authorization(
+                timeline.id(),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
+            ))
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
+            assert_eq!(
+                test_ok(host.command_sender()).retain_cached_revocation_epoch(timeline.id(), 1),
+                1
+            );
+            assert!(test_ok(test_ok(host.command_sender()).cached_authorization(
+                &epoch_key,
+                WallTime::from_micros(20),
+                Seq::from_u64(20),
+                &fixture.request,
+                &fixture.authority,
+                &fixture.registry,
+            ))
+            .is_none());
+        }
+    }
 }
