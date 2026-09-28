@@ -25,7 +25,7 @@ pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
 #[cfg(test)]
 use pos_core::store::{AppendIntent, AppendOrDuplicateOutcome};
 #[cfg(test)]
-use pos_core::ErasureContainmentGateV1;
+use pos_core::ErasureGate;
 use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -36,8 +36,8 @@ use pos_core::{
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1,
-    Plugin, ProposedAction,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureContainmentGateV1,
+    ErasureReferenceV1, Plugin, ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
