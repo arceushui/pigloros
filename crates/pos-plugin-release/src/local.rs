@@ -138,20 +138,36 @@ fn faulted_io_test<T, E>(
     }
 }
 
+// Keep each I/O expression in the same closure in test and production builds.
+// Only the test build supplies fault selection and the injected error.
+fn execute_io<T, E>(
+    operation: impl FnOnce() -> Result<T, E>,
+    #[cfg(test)] selected: bool,
+    #[cfg(test)] error: E,
+) -> Result<T, E> {
+    #[cfg(test)]
+    {
+        faulted_io_test(selected, error, operation)
+    }
+    #[cfg(not(test))]
+    {
+        operation()
+    }
+}
+
 macro_rules! faulted_io {
     ($operation:expr_2021) => {
         faulted_io!(false, injected_io_error(), $operation)
     };
-    ($selected:expr_2021, $error:expr_2021, $operation:expr_2021) => {{
-        #[cfg(test)]
-        {
-            faulted_io_test($selected, $error, || $operation)
-        }
-        #[cfg(not(test))]
-        {
-            $operation
-        }
-    }};
+    ($selected:expr_2021, $error:expr_2021, $operation:expr_2021) => {
+        execute_io(
+            || $operation,
+            #[cfg(test)]
+            $selected,
+            #[cfg(test)]
+            $error,
+        )
+    };
 }
 
 macro_rules! faulted_sync {
