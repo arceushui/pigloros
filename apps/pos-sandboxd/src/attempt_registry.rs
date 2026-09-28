@@ -3,7 +3,8 @@
 //! The private PAI1 format is exactly a version tag, `AttemptId` and SIM1 digest.
 //! The service name and directory component are injectively derived from the
 //! `AttemptId`. Unknown versions/stages fail closed. This local record does not
-//! replace ADR-069 lifecycle evidence or authorize image activation.
+//! replace ADR-069 lifecycle evidence or authorize image activation. The PAI2
+//! directory stage adds the held attempt/root device and inode identities.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -15,6 +16,9 @@ use rustix::fs::{
 };
 
 use crate::TransientServiceUnitName;
+
+mod directory;
+pub use directory::PreparedAttemptDirectory;
 
 const RECORD_SIZE: usize = 52;
 const REGISTRY_NAME: &str = "registry";
@@ -108,6 +112,7 @@ pub enum SystemdAttemptRegistryError {
 
 #[derive(Debug)]
 struct RegistryDirectory {
+    runtime: File,
     file: File,
     owner: u32,
 }
@@ -115,7 +120,7 @@ struct RegistryDirectory {
 /// The fixed root-owned registry at `/run/pigloros/sandbox/registry`.
 ///
 /// Startup provisions the directory with mode 0700. This component records
-/// planned ownership only. Restart inventory, resource reconciliation and
+/// planned and directory ownership only. Restart inventory, reconciliation and
 /// subsequent lifecycle extensions must finish before provider admission opens.
 #[derive(Debug)]
 pub struct SystemdAttemptRegistry {
@@ -161,6 +166,7 @@ impl SystemdAttemptRegistry {
         require_empty(&registry)?;
         Ok(Self {
             directory: Arc::new(RegistryDirectory {
+                runtime: parent.try_clone()?,
                 file: registry,
                 owner,
             }),
@@ -212,35 +218,13 @@ impl SystemdAttemptRegistry {
         intent: &PlannedAttemptIntent,
         sequence: u64,
     ) -> Result<(), SystemdAttemptRegistryError> {
-        validate_directory(&self.directory.file, self.directory.owner, true)?;
-        let temporary = format!(
-            ".planned-{}-{}-{sequence}",
-            intent.unit_name.attempt_component(),
-            std::process::id()
-        );
-        let mut file = File::from(registry_io(|| {
-            openat2(
-                &self.directory.file,
-                temporary.as_str(),
-                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-                Mode::RUSR | Mode::WUSR,
-                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
-            )
-            .map_err(io::Error::from)
-        })?);
-        registry_io(|| file.write_all(&intent.encode()))?;
-        registry_io(|| file.sync_all())?;
-        registry_io(|| {
-            renameat_with(
-                &self.directory.file,
-                temporary.as_str(),
-                &self.directory.file,
-                intent.unit_name.attempt_component(),
-                RenameFlags::NOREPLACE,
-            )
-            .map_err(io::Error::from)
-        })?;
-        registry_io(|| self.directory.file.sync_all())?;
+        publish_record(
+            &self.directory,
+            intent,
+            sequence,
+            &intent.encode(),
+            RenameFlags::NOREPLACE,
+        )?;
         verify_intent(&self.directory, intent)
     }
 }
@@ -277,6 +261,45 @@ impl CommittedPlannedAttempt {
         state.failed |= result.is_err();
         result
     }
+}
+
+fn publish_record(
+    directory: &RegistryDirectory,
+    intent: &PlannedAttemptIntent,
+    sequence: u64,
+    bytes: &[u8],
+    rename: RenameFlags,
+) -> Result<(), SystemdAttemptRegistryError> {
+    validate_directory(&directory.file, directory.owner, true)?;
+    let temporary = format!(
+        ".planned-{}-{}-{sequence}",
+        intent.unit_name.attempt_component(),
+        std::process::id()
+    );
+    let mut file = File::from(registry_io(|| {
+        openat2(
+            &directory.file,
+            temporary.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::RUSR | Mode::WUSR,
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+        )
+        .map_err(io::Error::from)
+    })?);
+    registry_io(|| file.write_all(bytes))?;
+    registry_io(|| file.sync_all())?;
+    registry_io(|| {
+        renameat_with(
+            &directory.file,
+            temporary.as_str(),
+            &directory.file,
+            intent.unit_name.attempt_component(),
+            rename,
+        )
+        .map_err(io::Error::from)
+    })?;
+    registry_io(|| directory.file.sync_all())?;
+    Ok(())
 }
 
 fn verify_intent(
@@ -351,11 +374,25 @@ fn read_record(
     directory: &RegistryDirectory,
     expected: &PlannedAttemptIntent,
 ) -> Result<PlannedAttemptIntent, SystemdAttemptRegistryError> {
+    let bytes = read_record_bytes::<RECORD_SIZE>(directory, &expected.unit_name)?;
+    PlannedAttemptIntent::decode(&bytes).and_then(|intent| {
+        if intent.attempt_id == expected.attempt_id {
+            Ok(intent)
+        } else {
+            Err(SystemdAttemptRegistryError::InvalidIntent)
+        }
+    })
+}
+
+fn read_record_bytes<const N: usize>(
+    directory: &RegistryDirectory,
+    unit: &TransientServiceUnitName,
+) -> Result<[u8; N], SystemdAttemptRegistryError> {
     validate_directory(&directory.file, directory.owner, true)?;
     let file = File::from(registry_io(|| {
         openat2(
             &directory.file,
-            expected.unit_name.attempt_component(),
+            unit.attempt_component(),
             OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
@@ -367,19 +404,13 @@ fn read_record(
         || metadata.uid() != directory.owner
         || metadata.nlink() != 1
         || metadata.mode() & 0o7777 != 0o600
-        || metadata.len() != RECORD_SIZE as u64
+        || metadata.len() != N as u64
     {
         return Err(SystemdAttemptRegistryError::UnsafeRegistry);
     }
-    let mut bytes = [0; RECORD_SIZE];
+    let mut bytes = [0; N];
     registry_io(|| file.read_exact_at(&mut bytes, 0))?;
-    PlannedAttemptIntent::decode(&bytes).and_then(|intent| {
-        if intent.attempt_id == expected.attempt_id {
-            Ok(intent)
-        } else {
-            Err(SystemdAttemptRegistryError::InvalidIntent)
-        }
-    })
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -456,7 +487,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    fn fixture() -> TestResult<(tempfile::TempDir, File, u32)> {
+    pub(super) fn fixture() -> TestResult<(tempfile::TempDir, File, u32)> {
         let directory = tempfile::tempdir()?;
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
         fs::create_dir(directory.path().join(REGISTRY_NAME))?;
