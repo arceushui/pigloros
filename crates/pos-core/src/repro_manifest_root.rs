@@ -3,7 +3,7 @@
 //! This record does not authenticate a cut, roster, adapter transcript, owner
 //! operation, or guarded `ReproManifest` release.
 
-use crate::{canonical_cbor_head::encode_head, Hash, WorldReplayHandleV1};
+use crate::{encode_head, Hash, WorldReplayHandleV1};
 
 /// Maximum canonical size of one MRM1 root.
 pub const MAX_REPRO_MANIFEST_ROOT_BYTES_V1: usize = 1_024;
