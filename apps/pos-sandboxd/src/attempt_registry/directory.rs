@@ -398,18 +398,18 @@ mod tests {
                         .state
                         .lock()
                         .map_err(|_| "poisoned fixture")?
-                        .failed = true
+                        .failed = true;
                 }
                 1 => {
                     registry
                         .state
                         .lock()
                         .map_err(|_| "poisoned fixture")?
-                        .next_sequence = u64::MAX
+                        .next_sequence = u64::MAX;
                 }
                 _ => assert!(std::panic::catch_unwind(|| {
                     let _guard = registry.state.lock();
-                    panic!("poisoned fixture");
+                    std::panic::resume_unwind(Box::new(()));
                 })
                 .is_err()),
             }
@@ -419,7 +419,7 @@ mod tests {
         let prepared = registry.commit_planned(&intent(1)?)?.prepare_directory()?;
         assert!(std::panic::catch_unwind(|| {
             let _guard = registry.state.lock();
-            panic!("poisoned fixture");
+            std::panic::resume_unwind(Box::new(()));
         })
         .is_err());
         assert!(prepared.verify_directory().is_err());
