@@ -42,17 +42,17 @@ fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() -> Result<(), Box<dyn st
     let mut binary_far1_marker = far1.clone();
     binary_far1_marker[1] = 0x44;
     assert!(ForkAdmissionRecordV1::from_canonical_cbor(&binary_far1_marker).is_err());
-    let frm1 = manifest.to_canonical_cbor();
-    assert_eq!(&frm1[..6], &[0x8d, 0x64, b'F', b'R', b'M', b'1']);
-    let mut binary_frm1_marker = frm1.clone();
-    binary_frm1_marker[1] = 0x44;
-    assert!(ForkReproManifestV1::from_canonical_cbor(&binary_frm1_marker).is_err());
+    let manifest_wire = manifest.to_canonical_cbor();
+    assert_eq!(&manifest_wire[..6], &[0x8d, 0x64, b'F', b'R', b'M', b'1']);
+    let mut binary_manifest_marker = manifest_wire.clone();
+    binary_manifest_marker[1] = 0x44;
+    assert!(ForkReproManifestV1::from_canonical_cbor(&binary_manifest_marker).is_err());
     assert_eq!(
         ForkAdmissionRecordV1::from_canonical_cbor(&far1),
         Ok(admission)
     );
     assert_eq!(
-        ForkReproManifestV1::from_canonical_cbor(&frm1),
+        ForkReproManifestV1::from_canonical_cbor(&manifest_wire),
         Ok(manifest.clone())
     );
     let outer = SignedForkReproManifestV1::new(
@@ -60,15 +60,15 @@ fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() -> Result<(), Box<dyn st
         manifest,
         pos_core::Signature::from_bytes([9; 64]),
     )?;
-    let fsm1 = outer.to_canonical_cbor();
-    assert_eq!(&fsm1[..6], &[0x87, 0x64, b'F', b'S', b'M', b'1']);
-    let mut binary_fsm1_marker = fsm1.clone();
-    binary_fsm1_marker[1] = 0x44;
-    assert!(SignedForkReproManifestV1::from_canonical_cbor(&binary_fsm1_marker).is_err());
+    let signed_wire = outer.to_canonical_cbor();
+    assert_eq!(&signed_wire[..6], &[0x87, 0x64, b'F', b'S', b'M', b'1']);
+    let mut binary_signed_marker = signed_wire.clone();
+    binary_signed_marker[1] = 0x44;
+    assert!(SignedForkReproManifestV1::from_canonical_cbor(&binary_signed_marker).is_err());
     assert_eq!(outer.manifest().to_canonical_cbor(), outer.manifest_bytes());
     assert_ne!(outer.record_id(), Hash::zero());
     assert_eq!(
-        SignedForkReproManifestV1::from_canonical_cbor(&fsm1),
+        SignedForkReproManifestV1::from_canonical_cbor(&signed_wire),
         Ok(outer)
     );
     Ok(())
