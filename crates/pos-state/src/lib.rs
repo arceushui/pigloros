@@ -2315,6 +2315,12 @@ mod wave3_tests {
         Event, Reducer, State,
     };
 
+    fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+        })
+    }
+
     struct TR;
 
     fn open_projection_registry() -> ProjectionRegistry {
