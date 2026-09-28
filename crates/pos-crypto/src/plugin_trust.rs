@@ -151,6 +151,8 @@ pub struct PluginRevocationRecordV1 {
 #[derive(Clone, Debug)]
 pub struct VerifiedPluginTrustEvidenceV1 {
     scope: String,
+    root_history: Vec<(u64, [u8; 32])>,
+    revocation_history: Vec<(u64, [u8; 32])>,
     root_version: u64,
     root_digest: [u8; 32],
     policy_epoch: u64,
@@ -173,6 +175,18 @@ impl VerifiedPluginTrustEvidenceV1 {
     #[must_use]
     pub fn policy_scope(&self) -> &str {
         &self.scope
+    }
+
+    /// Every authenticated PTR1 version and complete-record digest, from
+    /// pinned genesis through the verified terminal root.
+    pub fn verified_root_history(&self) -> impl Iterator<Item = (u64, [u8; 32])> + '_ {
+        self.root_history.iter().copied()
+    }
+
+    /// Every authenticated PRV1 epoch and complete-record digest, from
+    /// genesis through the verified terminal revocation record.
+    pub fn verified_revocation_history(&self) -> impl Iterator<Item = (u64, [u8; 32])> + '_ {
+        self.revocation_history.iter().copied()
     }
 
     /// Terminal PTR1 version and complete-record digest.
@@ -1015,6 +1029,14 @@ pub fn verify_plugin_trust_v1(
         .ok_or(PluginTrustErrorV1::ChainDiscontinuity)?;
     Ok(VerifiedPluginTrustEvidenceV1 {
         scope: anchor.scope.clone(),
+        root_history: roots
+            .iter()
+            .map(|root| (root.version, root.digest))
+            .collect(),
+        revocation_history: revocations
+            .iter()
+            .map(|revocation| (revocation.epoch, revocation.digest))
+            .collect(),
         root_version: terminal_root.version,
         root_digest: terminal_root.digest,
         policy_epoch: terminal_revocation.epoch,
@@ -1450,6 +1472,78 @@ mod tests {
         );
         assert_eq!(evidence.effective_key_revocations().count(), 0);
         assert_eq!(evidence.effective_artifact_revocations().count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn verified_history_exposes_only_complete_authenticated_chains(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signer, publisher, genesis_root, genesis_revocation) = fixture()?;
+        let genesis_root_digest = *blake3::hash(&genesis_root).as_bytes();
+        let genesis_revocation_digest = *blake3::hash(&genesis_revocation).as_bytes();
+        let next_root = root(&signer, publisher, 2, Some(genesis_root_digest))?;
+        let next_root_digest = *blake3::hash(&next_root).as_bytes();
+        let next_revocation = revocation(
+            &signer,
+            next_root_digest,
+            2,
+            Some(genesis_revocation_digest),
+            Vec::new(),
+        )?;
+        let next_revocation_digest = *blake3::hash(&next_revocation).as_bytes();
+        let anchor = TrustedPluginRootAnchorV1::new("scope", genesis_root_digest)?;
+
+        let evidence = verify_plugin_trust_v1(
+            &anchor,
+            &[&genesis_root, &next_root],
+            &[&genesis_revocation, &next_revocation],
+            50,
+            5,
+        )?;
+        assert_eq!(
+            evidence.verified_root_history().collect::<Vec<_>>(),
+            vec![(1, genesis_root_digest), (2, next_root_digest)]
+        );
+        assert_eq!(
+            evidence.verified_revocation_history().collect::<Vec<_>>(),
+            vec![(1, genesis_revocation_digest), (2, next_revocation_digest)]
+        );
+        assert_eq!(
+            evidence.verified_root_history().last(),
+            Some(evidence.terminal_root())
+        );
+        assert_eq!(
+            evidence.verified_revocation_history().last(),
+            Some(evidence.terminal_revocation())
+        );
+
+        let forked_root = root(&signer, publisher, 2, Some([0xa5; 32]))?;
+        let forked_revocation =
+            revocation(&signer, next_root_digest, 2, Some([0xa5; 32]), Vec::new())?;
+        assert!(verify_plugin_trust_v1(
+            &anchor,
+            &[&genesis_root, &forked_root],
+            &[&genesis_revocation, &next_revocation],
+            50,
+            5,
+        )
+        .is_err());
+        assert!(verify_plugin_trust_v1(
+            &anchor,
+            &[&genesis_root, &next_root],
+            &[&genesis_revocation, &forked_revocation],
+            50,
+            5,
+        )
+        .is_err());
+        assert!(verify_plugin_trust_v1(
+            &anchor,
+            &[&next_root],
+            &[&genesis_revocation, &next_revocation],
+            50,
+            5,
+        )
+        .is_err());
         Ok(())
     }
 
