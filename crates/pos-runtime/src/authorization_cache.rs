@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap};
 
 /// Exact invalidation identity for one cached active authorization decision.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct AuthorizationCacheKeyV1 {
+pub struct AuthorizationCacheKeyV1 {
     request_digest: Hash,
     target_timeline: TimelineId,
     authority_timeline: TimelineId,
@@ -55,7 +55,7 @@ impl AuthorizationCacheKeyV1 {
     }
 
     #[must_use]
-    pub(crate) const fn inventory_generation(&self) -> ErasureReferenceV1 {
+    pub const fn inventory_generation(&self) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest(self.inventory_generation)
     }
 
