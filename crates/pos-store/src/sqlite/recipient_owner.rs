@@ -26,6 +26,10 @@ fn storage_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Storage(error.to_string())
 }
 
+fn recipient_rng_error(error: std::io::Error) -> CoreError {
+    CoreError::Storage(format!("recipient key RNG failed: {error}"))
+}
+
 #[cfg(test)]
 thread_local! {
     static RECIPIENT_FSYNC_FAILURE: std::cell::Cell<Option<usize>> = const {
@@ -96,9 +100,7 @@ fn recipient_random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
 
 #[cfg(not(test))]
 fn recipient_random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
-    SysRng
-        .try_fill_bytes(bytes)
-        .map_err(|error| std::io::Error::other(error.to_string()))
+    SysRng.try_fill_bytes(bytes).map_err(std::io::Error::other)
 }
 
 #[cfg(test)]
@@ -449,9 +451,7 @@ impl SqliteStore {
             let identity =
                 KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, epoch);
             let mut ikm = Zeroizing::new([0_u8; 32]);
-            recipient_random_bytes(&mut *ikm).map_err(|error| {
-                CoreError::Storage(format!("recipient key RNG failed: {error}"))
-            })?;
+            recipient_random_bytes(&mut *ikm).map_err(recipient_rng_error)?;
             let (private_key, public_key) =
                 pos_crypto::recipient_key::derive_recipient_keypair_v1(&ikm);
             let private_key = Zeroizing::new(private_key);
@@ -1014,33 +1014,24 @@ fn quarantine_unregistered_staged_material(
         .map(std::ffi::OsStr::as_encoded_bytes)
         .map(<[u8]>::to_vec)
         .collect::<BTreeSet<_>>();
-    let mut directory = rustix::fs::Dir::read_from(&owner.directory_file).map_err(storage_error)?;
-    while let Some(entry) = directory.read() {
-        let entry = entry.map_err(storage_error)?;
-        let name = entry.file_name();
-        let bytes = name.to_bytes();
-        if !bytes.starts_with(b"recipient-")
-            || !bytes.ends_with(b".key")
-            || registered_names.contains(bytes)
-        {
-            continue;
-        }
-        let mut quarantine = Vec::with_capacity(bytes.len() + 8);
-        quarantine.extend_from_slice(b".");
-        quarantine.extend_from_slice(bytes);
-        quarantine.extend_from_slice(b".orphan");
-        let quarantine = std::ffi::CString::new(quarantine).map_err(storage_error)?;
-        renameat_with(
-            &owner.directory_file,
-            name,
-            &owner.directory_file,
-            quarantine.as_c_str(),
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(storage_error)?;
-        recipient_fsync(&owner.directory_file).map_err(storage_error)?;
-    }
-    Ok(())
+    rustix::fs::Dir::read_from(&owner.directory_file)
+        .map_err(storage_error)
+        .and_then(|mut directory| {
+            std::iter::from_fn(|| directory.read()).try_for_each(|entry| {
+                entry.map_err(storage_error).and_then(|entry| {
+                    let name = entry.file_name();
+                    let bytes = name.to_bytes();
+                    if !bytes.starts_with(b"recipient-")
+                        || !bytes.ends_with(b".key")
+                        || registered_names.contains(bytes)
+                    {
+                        Ok(())
+                    } else {
+                        quarantine_staged_entry(owner, name)
+                    }
+                })
+            })
+        })
 }
 
 fn quarantine_unregistered_owned_staged_material(
@@ -1048,24 +1039,46 @@ fn quarantine_unregistered_owned_staged_material(
 ) -> Result<(), CoreError> {
     use std::os::unix::ffi::OsStrExt;
 
-    let mut directory = rustix::fs::Dir::read_from(&owner.directory_file).map_err(storage_error)?;
-    while let Some(entry) = directory.read() {
-        let entry = entry.map_err(storage_error)?;
-        let name = entry.file_name();
-        let path = Path::new(std::ffi::OsStr::from_bytes(name.to_bytes()));
-        let Some(epoch) = staged_recipient_epoch(path.as_os_str()) else {
-            continue;
-        };
-        let material = read_unregistered_staged_private_key(owner, path)?;
-        let public_key = pos_crypto::recipient_key::recipient_public_key_from_private_v1(&material);
-        let descriptor = RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, epoch, public_key)
-            .map_err(storage_error)?;
-        if bound_name(&recipient_private_path(&owner.directory, descriptor))? != path {
-            continue;
-        }
-        quarantine_staged_entry(owner, name)?;
-    }
-    Ok(())
+    rustix::fs::Dir::read_from(&owner.directory_file)
+        .map_err(storage_error)
+        .and_then(|mut directory| {
+            std::iter::from_fn(|| directory.read()).try_for_each(|entry| {
+                entry.map_err(storage_error).and_then(|entry| {
+                    let name = entry.file_name();
+                    let path = Path::new(std::ffi::OsStr::from_bytes(name.to_bytes()));
+                    staged_recipient_epoch(path.as_os_str()).map_or_else(
+                        || Ok(()),
+                        |epoch| {
+                            read_unregistered_staged_private_key(owner, path).and_then(|material| {
+                                let public_key =
+                                    pos_crypto::recipient_key::recipient_public_key_from_private_v1(
+                                        &material,
+                                    );
+                                RecipientKeyDescriptorV1::for_grantee(
+                                    owner.grantee_id,
+                                    epoch,
+                                    public_key,
+                                )
+                                .map_err(storage_error)
+                                .and_then(|descriptor| {
+                                    bound_name(&recipient_private_path(
+                                        &owner.directory,
+                                        descriptor,
+                                    ))
+                                    .and_then(|expected| {
+                                        if expected == path {
+                                            quarantine_staged_entry(owner, name)
+                                        } else {
+                                            Ok(())
+                                        }
+                                    })
+                                })
+                            })
+                        },
+                    )
+                })
+            })
+        })
 }
 
 fn staged_recipient_epoch(name: &std::ffi::OsStr) -> Option<u64> {
@@ -1122,16 +1135,19 @@ fn quarantine_staged_entry(
     quarantine.extend_from_slice(b".");
     quarantine.extend_from_slice(bytes);
     quarantine.extend_from_slice(b".orphan");
-    let quarantine = std::ffi::CString::new(quarantine).map_err(storage_error)?;
-    renameat_with(
-        &owner.directory_file,
-        name,
-        &owner.directory_file,
-        quarantine.as_c_str(),
-        RenameFlags::NOREPLACE,
-    )
-    .map_err(storage_error)?;
-    recipient_fsync(&owner.directory_file).map_err(storage_error)
+    std::ffi::CString::new(quarantine)
+        .map_err(storage_error)
+        .and_then(|quarantine| {
+            renameat_with(
+                &owner.directory_file,
+                name,
+                &owner.directory_file,
+                quarantine.as_c_str(),
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(storage_error)
+        })
+        .and_then(|()| recipient_fsync(&owner.directory_file).map_err(storage_error))
 }
 
 fn validate_owner_directory(owner: &RecipientKeyOwnerV1) -> Result<(), CoreError> {
