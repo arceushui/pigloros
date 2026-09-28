@@ -813,9 +813,67 @@ fn fold_captured_range(
     registry: &mut PluginRegistry,
     captured: &CapturedRange,
 ) -> FoldedEventCount {
-    registry.fold_events(&captured.events);
+    registry.fold_events(captured.timeline.id(), &captured.events);
     boundary.folded_through = captured.through;
     FoldedEventCount(u64::try_from(captured.events.len()).unwrap_or(u64::MAX))
+}
+
+fn fold_host_captured_range(
+    store: &SharedEventStore,
+    boundary: &mut TickBoundaryCoordinator,
+    registry: &mut PluginRegistry,
+    captured: &CapturedRange,
+) -> Result<FoldedEventCount, ExperimentError> {
+    if registry
+        .validate_projection_source(captured.timeline.id())
+        .is_ok()
+    {
+        return Ok(fold_captured_range(boundary, registry, captured));
+    }
+    refold_host_projection_prefix(store, registry, captured.timeline.id(), captured.through)?;
+    boundary.folded_through = captured.through;
+    Ok(FoldedEventCount(
+        u64::try_from(captured.events.len()).unwrap_or(u64::MAX),
+    ))
+}
+
+fn refold_host_projection_prefix(
+    store: &SharedEventStore,
+    registry: &mut PluginRegistry,
+    timeline: TimelineId,
+    through: pos_core::clock::Seq,
+) -> Result<Vec<Event>, ExperimentError> {
+    let (events, generation) = lock_store(store).and_then(|store| {
+        let events = read_completed_prefix(store.as_ref(), timeline, through)?;
+        let generation = registry
+            .clone_erasure_gate()
+            .and_then(|gate| gate.inventory_generation().ok());
+        Ok((events, generation))
+    })?;
+    registry.refold_projection_events(timeline, &events, generation)?;
+    Ok(events)
+}
+
+fn authorized_result_projections(
+    store: &SharedEventStore,
+    mut registry: PluginRegistry,
+    timeline: TimelineId,
+    through: pos_core::clock::Seq,
+    token: Option<&ConsentCapabilityToken>,
+    public_events: &[Event],
+) -> Result<pos_state::ProjectionRegistry, ExperimentError> {
+    if registry.validate_projection_source(timeline).is_err() {
+        refold_host_projection_prefix(store, &mut registry, timeline, through)?;
+    }
+    registry
+        .into_authorized_projections(
+            timeline,
+            through,
+            current_now_secs(),
+            token,
+            Some(public_events),
+        )
+        .map_err(ExperimentError::Runtime)
 }
 
 fn append_driver_drafts(
@@ -993,8 +1051,12 @@ fn timeline_ancestry(
     Ok(reversed)
 }
 
-fn hydrate_projections(registry: &mut PluginRegistry, events: &[pos_core::Event]) {
-    registry.fold_events(events);
+fn hydrate_projections(
+    registry: &mut PluginRegistry,
+    timeline: TimelineId,
+    events: &[pos_core::Event],
+) {
+    registry.fold_events(timeline, events);
 }
 
 fn restore_inherited_eval_events(
@@ -1363,7 +1425,7 @@ impl Experiment {
         validate_captured_range(pos_core::clock::Seq::ZERO, folded_through, &events)?;
         let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
         self.registry.restore_driver_state(&ancestry, &events)?;
-        hydrate_projections(&mut self.registry, &events);
+        hydrate_projections(&mut self.registry, timeline_id, &events);
         let revoked_subjects = recovered_revoked_subjects(&events);
         let consent_revoked = events.iter().any(|event| {
             event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
@@ -1699,9 +1761,17 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        fold_captured_range(&mut self.boundary, &mut self.registry, &after);
+        self.finish_append_after(&after, emitted.len())
+    }
+
+    fn finish_append_after(
+        &mut self,
+        after: &CapturedRange,
+        emitted_count: usize,
+    ) -> Result<u64, ExperimentError> {
+        self.fold_captured_range_or_fault(after)?;
         self.total_events = self.boundary.folded_through.as_u64();
-        Ok(u64::try_from(emitted.len()).unwrap_or(u64::MAX))
+        Ok(u64::try_from(emitted_count).unwrap_or(u64::MAX))
     }
 
     /// Submit one external action through the owning Plugin's authority seam.
@@ -1868,7 +1938,7 @@ impl ExperimentSession {
             return Ok(TickOutcome::Stopped);
         }
 
-        let (mut folded_events, committed_events) = self.prepare_tick()?;
+        let (folded_events, committed_events) = self.prepare_tick()?;
 
         let drafts = match self.select_step_drafts(request, &committed_events) {
             Ok(drafts) => drafts,
@@ -1932,8 +2002,17 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        folded_events = folded_events
-            .saturating_add(fold_captured_range(&mut self.boundary, &mut self.registry, &after).0);
+        self.finish_step_boundary_after(after, folded_events, emitted_events)
+    }
+
+    fn finish_step_boundary_after(
+        &mut self,
+        after: CapturedRange,
+        mut folded_events: u64,
+        emitted_events: u64,
+    ) -> Result<TickOutcome, ExperimentError> {
+        let after_count = self.fold_captured_range_or_fault(&after)?;
+        folded_events = folded_events.saturating_add(after_count.0);
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events);
         self.ticks = self.ticks.saturating_add(1);
@@ -2010,7 +2089,16 @@ impl ExperimentSession {
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
             })?;
-        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &after);
+        self.finish_host_closure_after(after, subject, emitted_events)
+    }
+
+    fn finish_host_closure_after(
+        &mut self,
+        after: CapturedRange,
+        subject: Option<EntityId>,
+        emitted_events: u64,
+    ) -> Result<TickOutcome, ExperimentError> {
+        let folded_events = self.fold_captured_range_or_fault(&after)?;
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events.0);
         self.ticks = self.ticks.saturating_add(1);
@@ -2026,6 +2114,24 @@ impl ExperimentSession {
         })
     }
 
+    fn fold_captured_range_or_fault(
+        &mut self,
+        captured: &CapturedRange,
+    ) -> Result<FoldedEventCount, ExperimentError> {
+        match fold_host_captured_range(
+            &self.store,
+            &mut self.boundary,
+            &mut self.registry,
+            captured,
+        ) {
+            Ok(count) => Ok(count),
+            Err(error) => {
+                self.health = SessionHealth::Faulted;
+                Err(error)
+            }
+        }
+    }
+
     fn prepare_tick(&mut self) -> Result<(u64, Vec<pos_core::Event>), ExperimentError> {
         let before = lock_store(&self.store).and_then(|store| {
             capture_pending_range(
@@ -2034,16 +2140,51 @@ impl ExperimentSession {
                 self.boundary.folded_through,
             )
         })?;
-        let mut committed_events = lock_store(&self.store).and_then(|store| {
-            read_completed_prefix_at(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )
-        })?;
-        committed_events.extend(before.events.iter().cloned());
-        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &before);
+        let (folded_events, committed_events) = self.prepare_projection_view(&before)?;
         Ok((folded_events.0, committed_events))
+    }
+
+    fn prepare_projection_view(
+        &mut self,
+        before: &CapturedRange,
+    ) -> Result<(FoldedEventCount, Vec<pos_core::Event>), ExperimentError> {
+        let (folded_events, committed_events) = if self
+            .registry
+            .validate_projection_source(self.timeline.id())
+            .is_ok()
+        {
+            let mut committed_events = lock_store(&self.store).and_then(|store| {
+                read_completed_prefix_at(
+                    store.as_ref(),
+                    self.timeline.id(),
+                    self.boundary.folded_through,
+                )
+            })?;
+            committed_events.extend(before.events.iter().cloned());
+            (
+                fold_captured_range(&mut self.boundary, &mut self.registry, before),
+                committed_events,
+            )
+        } else {
+            let committed_events = match refold_host_projection_prefix(
+                &self.store,
+                &mut self.registry,
+                self.timeline.id(),
+                before.through,
+            ) {
+                Ok(events) => events,
+                Err(error) => {
+                    self.health = SessionHealth::Faulted;
+                    return Err(error);
+                }
+            };
+            self.boundary.folded_through = before.through;
+            (
+                FoldedEventCount(u64::try_from(before.events.len()).unwrap_or(u64::MAX)),
+                committed_events,
+            )
+        };
+        Ok((folded_events, committed_events))
     }
 
     fn hydrate_fork_registry(
@@ -2056,7 +2197,7 @@ impl ExperimentSession {
         let Some(token) = self.operation_token.as_ref() else {
             reject_protected_events(events)?;
             registry.restore_driver_state(ancestry, events)?;
-            hydrate_projections(registry, events);
+            hydrate_projections(registry, self.timeline.id(), events);
             return Ok(());
         };
         let gate = self
@@ -2068,7 +2209,7 @@ impl ExperimentSession {
             if let Err(error) = registry.restore_driver_state(ancestry, events) {
                 hydration_error = Some(error);
             } else {
-                hydrate_projections(registry, events);
+                hydrate_projections(registry, self.timeline.id(), events);
             }
         };
         gate.with_token_fence(
@@ -2245,16 +2386,14 @@ impl ExperimentSession {
         let protected_token = self.operation_token;
         let public_events = lock_store(&self.store)
             .and_then(|store| read_completed_prefix(store.as_ref(), timeline_id, timeline_head))?;
-        let projections = self
-            .registry
-            .into_authorized_projections(
-                timeline_id,
-                timeline_head,
-                current_now_secs(),
-                protected_token.as_ref(),
-                Some(&public_events),
-            )
-            .map_err(ExperimentError::Runtime)?;
+        let projections = authorized_result_projections(
+            &self.store,
+            self.registry,
+            timeline_id,
+            timeline_head,
+            protected_token.as_ref(),
+            &public_events,
+        )?;
         let ticks = self.ticks;
         let total_events = self.total_events;
         let store_config = self.recovery_store_config;
@@ -2577,7 +2716,7 @@ impl BacktestRunner {
             &mut eval_registry,
             erasure_gate,
         )?;
-        hydrate_projections(&mut eval_registry, &inherited);
+        hydrate_projections(&mut eval_registry, eval_tl_id, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
             store,
@@ -2779,6 +2918,24 @@ mod tests {
         );
     }
 
+    fn run_result_projection_event(subject: EntityId) -> Event {
+        Event {
+            id: pos_core::EventId::new(),
+            entity: subject,
+            event_type: Kind::new("projection.event"),
+            payload: pos_core::CanonicalBytes::from_static(b"projection"),
+            wall_time: pos_core::clock::WallTime::from_micros(0),
+            seq: pos_core::clock::Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: pos_core::event::SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: pos_core::crypto::Hash::zero(),
+        }
+    }
+
     #[test]
     fn protected_run_result_enforces_fork_and_export_capabilities() {
         let database = tempfile::NamedTempFile::new().test_ok();
@@ -2825,21 +2982,9 @@ mod tests {
         result
             .projections
             .register("projection", Box::new(CountReducer));
-        result.projections.apply_event(&Event {
-            id: pos_core::EventId::new(),
-            entity: subject_id,
-            event_type: Kind::new("projection.event"),
-            payload: pos_core::CanonicalBytes::from_static(b"projection"),
-            wall_time: pos_core::clock::WallTime::from_micros(0),
-            seq: pos_core::clock::Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: pos_core::event::SchemaVersion::V1,
-            signature: None,
-            signature_identity: None,
-            origin: None,
-            payload_hash: pos_core::crypto::Hash::zero(),
-        });
+        result
+            .projections
+            .apply_event(timeline_id, &run_result_projection_event(subject_id));
         let projected = result
             .projection_state_for_reducer("projection", subject_id, &token, 0)
             .test_ok()
@@ -3869,6 +4014,48 @@ mod tests {
         )
     }
 
+    struct PrefixDriver {
+        entity: EntityId,
+        observed: Arc<Mutex<Vec<Vec<u64>>>>,
+        event_types: Vec<Kind>,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Driver for PrefixDriver {
+        fn name(&self) -> &'static str {
+            "prefix-driver"
+        }
+
+        fn event_subscriptions(&self) -> &[Kind] {
+            &self.event_types
+        }
+
+        fn requires_verified_event_prefix(&self) -> bool {
+            true
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            let seqs = observations
+                .verified_prefix_events()
+                .ok_or(RuntimeError::InvalidRecoveryEvidence {
+                    reason: "missing verified Event prefix",
+                })?
+                .iter()
+                .map(|event| event.seq.as_u64())
+                .collect();
+            self.observed.lock().test_ok().push(seqs);
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.entity,
+                Kind::new("refresh.event"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )]))
+        }
+    }
+
     struct RecordingDriver {
         subscriptions: Vec<ProjectionKey>,
         seen_counts: Arc<Mutex<Vec<u64>>>,
@@ -4442,7 +4629,7 @@ mod tests {
         let mut replayed = pos_state::ProjectionRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         replayed.register("interleaving", Box::new(CountReducer));
-        replayed.fold_events(&events);
+        replayed.fold_events(timeline, &events);
         drop(store);
         assert!(replayed.state_for(timeline, &entity).test_ok().is_some());
     }
@@ -5377,6 +5564,75 @@ mod tests {
         let result = session.run_to_completion().test_ok();
         assert_eq!(result.ticks, 2);
         assert_eq!(result.total_events, 3);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn parent_driver_observes_refreshed_prefix_after_fork() {
+        let entity = EntityId::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let plugin = make_plugin_with_reducer("refresh", &["refresh.event"]);
+        let plugin_id = plugin.id;
+        let make_driver = {
+            let observed = Arc::clone(&observed);
+            move || PrefixDriver {
+                entity,
+                observed: Arc::clone(&observed),
+                event_types: vec![Kind::new("refresh.event")],
+            }
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "refresh-after-fork".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory({
+            let make_driver = make_driver.clone();
+            move || {
+                let plugin = TestPlugin {
+                    id: plugin_id,
+                    name: "refresh",
+                    event_types: vec![Kind::new("refresh.event")],
+                    has_driver: true,
+                    has_reducer: true,
+                };
+                let mut registry = PluginRegistry::new();
+                registry
+                    .register(
+                        &plugin,
+                        Some(Box::new(CountReducer)),
+                        Some(Box::new(make_driver())),
+                    )
+                    .test_ok();
+                Ok(registry)
+            }
+        });
+        experiment
+            .register(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                Some(Box::new(make_driver())),
+            )
+            .test_ok();
+
+        let mut parent = experiment.start().test_ok();
+        assert!(parent.step().test_ok());
+        let child = parent.fork("refresh-child").test_ok();
+        assert_eq!(
+            child.timeline().meta.fork_point.map(|(_, seq)| seq),
+            Some(Seq::from_u64(1))
+        );
+        assert!(parent.step().test_ok());
+        assert_eq!(&*observed.lock().test_ok(), &[vec![], vec![1]]);
+        let result = parent.run_to_completion().test_ok();
+        assert_eq!(
+            result
+                .projections
+                .state_for(result.timeline_id, &entity)
+                .test_ok()
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64)),
+            Some(2)
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

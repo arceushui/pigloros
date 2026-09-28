@@ -437,6 +437,11 @@ fn register_profile(registry: &mut ProjectionRegistry, reducer: Box<dyn Reducer>
         .test_ok();
 }
 
+fn test_timeline() -> TimelineId {
+    static TIMELINE: std::sync::OnceLock<TimelineId> = std::sync::OnceLock::new();
+    *TIMELINE.get_or_init(TimelineId::new)
+}
+
 #[test]
 fn authorized_materialization_ignores_every_other_subject() {
     let fixture = authority_fixture();
@@ -445,10 +450,13 @@ fn authorized_materialization_ignores_every_other_subject() {
     let timeline_id = TimelineId::new();
     let mut first = gated_registry();
     register_profile(&mut first, Box::new(CountReducer));
-    first.fold_events(&[event(subject, 1), event(other, 2)]);
+    first.fold_events(timeline_id, &[event(subject, 1), event(other, 2)]);
     let mut second = gated_registry();
     register_profile(&mut second, Box::new(CountReducer));
-    second.fold_events(&[event(subject, 1), event(other, 2), event(other, 3)]);
+    second.fold_events(
+        timeline_id,
+        &[event(subject, 1), event(other, 2), event(other, 3)],
+    );
 
     let first_snapshot = first
         .materialize_authorized_observation(
@@ -500,7 +508,7 @@ fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
     let subject = fixture.request.subject_id().test_ok();
     let mut registry = gated_registry();
     register_profile(&mut registry, Box::new(CountReducer));
-    registry.fold_events(&[event(subject, 1)]);
+    registry.fold_events(test_timeline(), &[event(subject, 1)]);
     let observation = registry
         .materialize_authorized_observation(
             &fixture.request,
@@ -508,7 +516,7 @@ fn observation_artifact_release_rejects_erased_or_invalidated_evidence() {
             &fixture.authority,
             &fixture.registry,
             Seq::from_u64(10),
-            &context(TimelineId::new()),
+            &context(test_timeline()),
         )
         .test_ok();
     let snapshot_evaluation = observation_evaluation(
@@ -584,7 +592,10 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
     let unrelated = authority_fixture();
     let mut registry = gated_registry();
     register_profile(&mut registry, Box::new(CountReducer));
-    registry.fold_events(&[event(fixture.request.subject_id().test_ok(), 1)]);
+    registry.fold_events(
+        test_timeline(),
+        &[event(fixture.request.subject_id().test_ok(), 1)],
+    );
     assert_eq!(
         registry.materialize_authorized_observation(
             &unrelated.request,
@@ -592,7 +603,7 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
             &fixture.authority,
             &fixture.registry,
             Seq::from_u64(10),
-            &context(TimelineId::new()),
+            &context(test_timeline()),
         ),
         Err(pos_core::AuthorityErrorV1::UnauthorizedSource)
     );
@@ -614,7 +625,7 @@ fn materialization_fails_closed_before_reading_without_active_exact_authorizatio
             &fixture.authority,
             &stripped_registry,
             Seq::from_u64(10),
-            &context(TimelineId::new()),
+            &context(test_timeline()),
         ),
         Err(current.error().test_ok())
     );
@@ -672,7 +683,7 @@ fn materialization_canonicalizes_nested_projection_values() {
             policy(vec!["nested".to_owned()]),
         )
         .test_ok();
-    registry.fold_events(&[event(subject, 1)]);
+    registry.fold_events(test_timeline(), &[event(subject, 1)]);
 
     let snapshot = registry
         .materialize_authorized_observation(
@@ -681,7 +692,7 @@ fn materialization_canonicalizes_nested_projection_values() {
             &fixture.authority,
             &fixture.registry,
             Seq::from_u64(10),
-            &context(TimelineId::new()),
+            &context(test_timeline()),
         )
         .test_ok();
     let snapshot = retained_observation(&snapshot);

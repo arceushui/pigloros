@@ -174,7 +174,7 @@ mod coverage_paths {
         marker.event_type = Kind::new(pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE);
         marker.seq = Seq::from_u64(4);
         let events = vec![event, location, cell, marker];
-        registry.fold_events(&events);
+        registry.fold_events(timeline, &events);
         assert!(registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(4))],
@@ -558,7 +558,7 @@ mod coverage_entrypoints {
             event(pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, 2),
         ];
 
-        registry.fold_events(&events);
+        registry.fold_events(timeline, &events);
         assert!(registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
@@ -1181,13 +1181,43 @@ impl PluginRegistry {
     }
 
     /// Fold a host-captured Event range into the registered reducers.
-    pub fn fold_events(&mut self, events: &[Event]) {
+    pub fn fold_events(&mut self, timeline: TimelineId, events: &[Event]) {
         let visible_events: Vec<Event> = events
             .iter()
             .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)
             .cloned()
             .collect();
-        self.projections.fold_events(&visible_events);
+        self.projections.fold_events(timeline, &visible_events);
+    }
+
+    /// Check whether the current projection state can still be used at this
+    /// host inventory generation.
+    ///
+    /// # Errors
+    /// Returns a closed source error for stale or unavailable projection state.
+    pub fn validate_projection_source(&self, timeline: TimelineId) -> Result<(), RuntimeError> {
+        self.projections.validate_fork_source(timeline)?;
+        Ok(())
+    }
+
+    /// Rebuild projections from a host-captured completed Event prefix.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the Timeline cannot be authorized.
+    pub fn refold_projection_events(
+        &mut self,
+        timeline: TimelineId,
+        events: &[Event],
+        expected_generation: Option<pos_core::ErasureReferenceV1>,
+    ) -> Result<(), RuntimeError> {
+        let visible_events: Vec<Event> = events
+            .iter()
+            .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)
+            .cloned()
+            .collect();
+        self.projections
+            .refold_events(timeline, &visible_events, expected_generation)?;
+        Ok(())
     }
 
     /// Consume the registry after authorizing its final projection snapshot.
@@ -2085,8 +2115,35 @@ impl PluginRegistry {
                 reason: "Fork point differs from the restored Timeline prefix",
             });
         }
+        self.projections.validate_fork_source(parent)?;
         let child = store.fork(parent, at_seq, name)?;
-        let handoff = CommittedForkHandoff::new(parent, child.id());
+        self.adopt_committed_fork_or_rollback(store, parent, child.id())?;
+        self.commit_fork_drivers_or_rollback(store, parent, child.id())?;
+        self.restored_binding = None;
+        Ok(child)
+    }
+
+    fn adopt_committed_fork_or_rollback(
+        &mut self,
+        store: &mut dyn pos_core::EventStore,
+        parent: TimelineId,
+        child: TimelineId,
+    ) -> Result<(), RuntimeError> {
+        if let Err(error) = self.projections.adopt_committed_fork(parent, child) {
+            self.restored_binding = None;
+            store.delete_timeline(child)?;
+            return Err(RuntimeError::Authority(error));
+        }
+        Ok(())
+    }
+
+    fn commit_fork_drivers_or_rollback(
+        &mut self,
+        store: &mut dyn pos_core::EventStore,
+        parent: TimelineId,
+        child: TimelineId,
+    ) -> Result<(), RuntimeError> {
+        let handoff = CommittedForkHandoff::new(parent, child);
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
                 let name = driver.name().to_owned();
@@ -2097,15 +2154,14 @@ impl PluginRegistry {
                 {
                     self.poisoned_driver = Some(name.clone());
                     self.restored_binding = None;
-                    return match store.delete_timeline(child.id()) {
+                    return match store.delete_timeline(child) {
                         Ok(()) => Err(RuntimeError::DriverForkPanicked { name }),
                         Err(source) => Err(RuntimeError::DriverForkRollbackFailed { name, source }),
                     };
                 }
             }
         }
-        self.restored_binding = None;
-        Ok(child)
+        Ok(())
     }
 
     fn restore_driver_state_live(
@@ -3011,6 +3067,109 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn restored_fork_rolls_back_a_child_missing_from_the_host_inventory() {
+        struct ForeignChildStore {
+            child: Option<TimelineId>,
+            delete_called: bool,
+            fail_rollback: bool,
+        }
+
+        impl pos_core::EventStore for ForeignChildStore {
+            fn create_timeline(&mut self, _: &str) -> Result<pos_core::Timeline, CoreError> {
+                Err(CoreError::ArtifactUnavailable)
+            }
+
+            fn append(&mut self, _: TimelineId, _: &[EventDraft]) -> Result<Vec<Event>, CoreError> {
+                Err(CoreError::ArtifactUnavailable)
+            }
+
+            fn read(
+                &self,
+                _: TimelineId,
+                _: pos_core::store::SeqRange,
+            ) -> Result<Vec<Event>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            fn fork(
+                &mut self,
+                parent: TimelineId,
+                at_seq: Seq,
+                name: &str,
+            ) -> Result<pos_core::Timeline, CoreError> {
+                let child = pos_core::Timeline::new(pos_core::TimelineMeta::forked_from(
+                    parent, at_seq, name,
+                ));
+                self.child = Some(child.id());
+                Ok(child)
+            }
+
+            fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
+                Ok(Vec::new())
+            }
+
+            fn get_timeline(&self, _: TimelineId) -> Result<Option<pos_core::Timeline>, CoreError> {
+                Ok(None)
+            }
+
+            fn delete_timeline(&mut self, child: TimelineId) -> Result<(), CoreError> {
+                assert_eq!(self.child, Some(child));
+                self.delete_called = true;
+                if self.fail_rollback {
+                    Err(CoreError::ArtifactUnavailable)
+                } else {
+                    self.child = None;
+                    Ok(())
+                }
+            }
+        }
+
+        for fail_rollback in [false, true] {
+            let mut host = crate::ErasureExecutionHostV1::open_verified_empty(
+                pos_store::StoreConfig::Memory,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok();
+            let parent = host
+                .command_sender()
+                .test_ok()
+                .create_timeline("known-parent")
+                .test_ok();
+            let mut registry = PluginRegistry::new().with_erasure_gate(host.containment_gate());
+            registry
+                .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
+                .test_ok();
+            let mut store = ForeignChildStore {
+                child: None,
+                delete_called: false,
+                fail_rollback,
+            };
+            let result = registry.fork_restored_timeline(
+                &mut store,
+                parent.id(),
+                Seq::ZERO,
+                "foreign-child",
+            );
+            if fail_rollback {
+                assert!(matches!(
+                    result,
+                    Err(RuntimeError::Store(CoreError::ArtifactUnavailable))
+                ));
+                assert!(store.child.is_some());
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(RuntimeError::Authority(
+                        pos_core::AuthorityErrorV1::SourceUnavailable
+                    ))
+                ));
+                assert!(store.child.is_none());
+            }
+            assert!(store.delete_called);
+        }
+    }
+
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
     }
@@ -3709,7 +3868,7 @@ mod tests {
             origin: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
-        reg.projections.apply_event(&event);
+        reg.projections.apply_event(timeline, &event);
         let state = reg
             .projections
             .state_for(timeline, &event.entity)
@@ -3718,7 +3877,7 @@ mod tests {
         assert_eq!(state.get("n").and_then(serde_json::Value::as_u64), Some(1));
         let mut protected = event;
         protected.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
-        reg.projections.apply_event(&protected);
+        reg.projections.apply_event(timeline, &protected);
         assert_eq!(
             reg.projections
                 .state_for(timeline, &protected.entity)
@@ -3789,11 +3948,11 @@ mod tests {
         };
         bound
             .projections
-            .apply_event(&projection_event(subject, Seq::from_u64(1)));
+            .apply_event(timeline, &projection_event(subject, Seq::from_u64(1)));
         let unrelated = EntityId::new();
         bound
             .projections
-            .apply_event(&projection_event(unrelated, Seq::from_u64(2)));
+            .apply_event(timeline, &projection_event(unrelated, Seq::from_u64(2)));
         let state = bound
             .projection_state_for_reducer(timeline, Seq::ZERO, 0, &token, "projection", subject)
             .test_ok()
@@ -4415,7 +4574,7 @@ mod tests {
 
         let mut reg = gated_registry();
         reg.projections.register("counter", Box::new(CountReducer));
-        reg.projections.apply_event(&event);
+        reg.projections.apply_event(timeline.id(), &event);
         let authority = ConsentAuthority::new();
         let grant = ConsentGrantedV1 {
             subject_id: observed_entity,
@@ -4543,7 +4702,7 @@ mod tests {
             origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
-        reg.projections.apply_event(&event);
+        reg.projections.apply_event(timeline, &event);
 
         let observed = ProjectionKey::new(observed_entity);
         let missing = ProjectionKey::new(missing_entity);
@@ -4566,6 +4725,7 @@ mod tests {
         assert!(reg
             .snapshot_for_subscriptions(timeline, &subscriptions)
             .is_err());
+        assert!(reg.refold_projection_events(timeline, &[], None).is_err());
     }
 
     struct AppendFailStore;

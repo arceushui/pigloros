@@ -17,8 +17,8 @@ use std::{collections::HashMap, sync::Arc};
 use pos_core::{
     AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
     CanonicalBytes, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
-    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, Event, Hash,
-    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1, Event,
+    Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
     ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
     Reducer, Relationship, Seq, State, StateRegistry, TimelineId, EVENT_TYPE_CONSENT_REVOKED_V1,
     MAX_OBSERVATION_SNAPSHOT_RECORDS,
@@ -79,6 +79,9 @@ pub struct ProjectionRegistry {
     /// Whether the current gate was supplied by the host composition root.
     /// The constructor's fail-closed gate can be replaced exactly once.
     erasure_gate_bound: bool,
+    source_timeline: Option<TimelineId>,
+    source_generation: Option<ErasureReferenceV1>,
+    mixed_sources: bool,
 }
 
 impl Default for ProjectionRegistry {
@@ -87,6 +90,9 @@ impl Default for ProjectionRegistry {
             slots: Vec::new(),
             erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
             erasure_gate_bound: false,
+            source_timeline: None,
+            source_generation: None,
+            mixed_sources: false,
         }
     }
 }
@@ -149,14 +155,44 @@ impl ProjectionRegistry {
         let gate = self
             .erasure_gate
             .as_ref()
+            .filter(|_| self.source_matches_timeline(timeline))
             .ok_or(AuthorityErrorV1::SourceUnavailable)?;
         let mut result = Err(AuthorityErrorV1::SourceUnavailable);
         let mut run = || {
-            result = effect(self);
+            result = self.apply_if_current_generation(gate.as_ref(), &mut effect);
         };
         gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut run)
             .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
         result
+    }
+
+    fn source_matches_timeline(&self, timeline: TimelineId) -> bool {
+        !self.mixed_sources && self.source_timeline.is_none_or(|source| source == timeline)
+    }
+
+    fn source_generation_is_current(&self, gate: &dyn ErasureGate) -> bool {
+        self.source_timeline.is_none() || self.source_generation == gate.inventory_generation().ok()
+    }
+
+    fn apply_if_current_generation<T>(
+        &self,
+        gate: &dyn ErasureGate,
+        effect: &mut impl FnMut(&Self) -> Result<T, AuthorityErrorV1>,
+    ) -> Result<T, AuthorityErrorV1> {
+        if self.source_generation_is_current(gate) {
+            effect(self)
+        } else {
+            Err(AuthorityErrorV1::SourceUnavailable)
+        }
+    }
+
+    /// Verify that accumulated state still belongs to this Timeline and the
+    /// currently installed inventory generation before a Fork can inherit it.
+    ///
+    /// # Errors
+    /// Returns a closed source error for a stale, mixed, or unavailable source.
+    pub fn validate_fork_source(&self, timeline: TimelineId) -> Result<(), AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |_| Ok(()))
     }
 
     /// Register a named reducer.
@@ -202,8 +238,16 @@ impl ProjectionRegistry {
         ));
     }
 
-    /// Apply a single event to every registered reducer.
-    pub fn apply_event(&mut self, event: &Event) {
+    /// Apply one Event from its host-identified Timeline to every registered
+    /// reducer. Mixing Timelines invalidates accumulated state until reset.
+    pub fn apply_event(&mut self, timeline: TimelineId, event: &Event) {
+        if !self.bind_event_source(timeline) {
+            return;
+        }
+        self.apply_bound_event(event);
+    }
+
+    fn apply_bound_event(&mut self, event: &Event) {
         if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
             if let Ok(revocation) = ConsentRevokedV1::decode(&event.payload) {
                 self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
@@ -223,11 +267,99 @@ impl ProjectionRegistry {
         }
     }
 
-    /// Batch-fold a slice of events into every registered reducer.
-    pub fn fold_events(&mut self, events: &[Event]) {
-        for event in events {
-            self.apply_event(event);
+    fn bind_event_source(&mut self, timeline: TimelineId) -> bool {
+        if self.mixed_sources {
+            return false;
         }
+        let generation = self
+            .erasure_gate
+            .as_ref()
+            .and_then(|gate| gate.inventory_generation().ok());
+        if self.source_timeline.is_some() && self.source_generation != generation {
+            self.clear_state();
+            self.mixed_sources = true;
+            return false;
+        }
+        match self.source_timeline {
+            Some(source) if source != timeline => {
+                self.clear_state();
+                self.mixed_sources = true;
+                return false;
+            }
+            None => {
+                self.source_timeline = Some(timeline);
+                self.source_generation = generation;
+            }
+            Some(_) => {}
+        }
+        true
+    }
+
+    /// Batch-fold Events from one host-identified Timeline into every reducer.
+    pub fn fold_events(&mut self, timeline: TimelineId, events: &[Event]) {
+        for event in events {
+            self.apply_event(timeline, event);
+        }
+    }
+
+    /// Rebuild state from one host-captured Timeline prefix under its current
+    /// containment fence after the inventory generation changes.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the Timeline cannot be authorized.
+    pub fn refold_events(
+        &mut self,
+        timeline: TimelineId,
+        events: &[Event],
+        expected_generation: Option<ErasureReferenceV1>,
+    ) -> Result<(), AuthorityErrorV1> {
+        let gate = self
+            .erasure_gate
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
+        let mut refolded = false;
+        let mut refold = || {
+            if gate.inventory_generation().ok() == expected_generation {
+                self.clear_state();
+                self.fold_events(timeline, events);
+                refolded = !self.mixed_sources;
+            }
+        };
+        gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut refold)
+            .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        refolded
+            .then_some(())
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
+    }
+
+    /// Rebind a restored parent projection only after its child Fork has been
+    /// committed and installed by the host. The child containment proof is
+    /// checked before the inherited state can be exposed under that identity.
+    ///
+    /// # Errors
+    /// Returns a closed source error for mixed or mismatched input or when the
+    /// committed child is not available in the current host gate.
+    pub fn adopt_committed_fork(
+        &mut self,
+        parent: TimelineId,
+        child: TimelineId,
+    ) -> Result<(), AuthorityErrorV1> {
+        if self.mixed_sources || self.source_timeline.is_some_and(|source| source != parent) {
+            return Err(AuthorityErrorV1::SourceUnavailable);
+        }
+        self.erasure_gate
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
+            .and_then(|gate| {
+                let mut bind = || {
+                    self.source_timeline = Some(child);
+                    self.source_generation = gate.inventory_generation().ok();
+                };
+                gate.with_fence(child, ErasureProtectedOperationV1::Fork, &mut bind)
+                    .map_err(|_| AuthorityErrorV1::SourceUnavailable)
+            })
     }
 
     /// Return owned state for an entity from the **first** registered reducer
@@ -436,6 +568,9 @@ impl ProjectionRegistry {
         for (_, slot) in &mut self.slots {
             slot.registry = StateRegistry::new();
         }
+        self.source_timeline = None;
+        self.source_generation = None;
+        self.mixed_sources = false;
     }
 
     /// Retain only one subject's accumulated state in every reducer.
@@ -454,17 +589,49 @@ impl ProjectionRegistry {
     ///
     /// This is the counterpart of [`Self::state_snapshot`] and is used by
     /// `pos-time` snapshot consistency verification to seed the incremental path.
+    /// The caller must preserve the source Timeline and captured generation
+    /// from the host-held snapshot. State is installed only while that exact
+    /// generation is current and the Timeline snapshot fence is held.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the generation is stale or the
+    /// Timeline snapshot fence is unavailable.
     pub fn restore_from_snapshot(
         &mut self,
+        timeline: TimelineId,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
-    ) {
-        self.clear_state();
-        for (name, slot) in &mut self.slots {
-            // Missing snapshot entries stay empty after `clear_state`.
-            if let Some(restored) = snapshot.get(name) {
-                slot.registry = restored.clone();
+        expected_generation: Option<ErasureReferenceV1>,
+    ) -> Result<(), AuthorityErrorV1> {
+        let gate = self
+            .erasure_gate
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
+        let mut restored = false;
+        let mut install = || {
+            let current_generation = gate.inventory_generation().ok();
+            if current_generation == expected_generation {
+                self.clear_state();
+                self.source_timeline = Some(timeline);
+                self.source_generation = current_generation;
+                for (name, slot) in &mut self.slots {
+                    // Missing snapshot entries stay empty after `clear_state`.
+                    if let Some(state) = snapshot.get(name) {
+                        slot.registry = state.clone();
+                    }
+                }
+                restored = true;
             }
-        }
+        };
+        gate.with_fence(
+            timeline,
+            ErasureProtectedOperationV1::Snapshot,
+            &mut install,
+        )
+        .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        restored
+            .then_some(())
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
     }
 
     /// Materialize a snapshot of all per-reducer state inside the current
@@ -898,6 +1065,11 @@ mod tests {
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
+    fn test_timeline() -> TimelineId {
+        static TIMELINE: std::sync::OnceLock<TimelineId> = std::sync::OnceLock::new();
+        *TIMELINE.get_or_init(TimelineId::new)
+    }
+
     trait ProjectionTestReads {
         fn state_for_test(&self, entity: &EntityId) -> Option<State>;
         fn state_for_reducer_test(&self, name: &str, entity: &EntityId) -> Option<State>;
@@ -905,11 +1077,11 @@ mod tests {
 
     impl ProjectionTestReads for ProjectionRegistry {
         fn state_for_test(&self, entity: &EntityId) -> Option<State> {
-            test_ok(self.state_for(TimelineId::new(), entity))
+            test_ok(self.state_for(test_timeline(), entity))
         }
 
         fn state_for_reducer_test(&self, name: &str, entity: &EntityId) -> Option<State> {
-            test_ok(self.state_for_reducer(TimelineId::new(), name, entity))
+            test_ok(self.state_for_reducer(test_timeline(), name, entity))
         }
     }
 
@@ -1188,7 +1360,7 @@ mod tests {
         registry.register("b", Box::new(EntityStateProjection));
 
         let entity = EntityId::new();
-        registry.apply_event(&make_event(entity));
+        registry.apply_event(test_timeline(), &make_event(entity));
 
         let count_a = registry
             .state_for_reducer_test("a", &entity)
@@ -1210,7 +1382,10 @@ mod tests {
         registry.register("b", Box::new(EntityStateProjection));
         let subject = EntityId::new();
         let unrelated = EntityId::new();
-        registry.fold_events(&[make_event(subject), make_event(unrelated)]);
+        registry.fold_events(
+            test_timeline(),
+            &[make_event(subject), make_event(unrelated)],
+        );
 
         registry.retain_subject(&subject);
 
@@ -1228,7 +1403,7 @@ mod tests {
 
         let entity = EntityId::new();
         let events: Vec<Event> = (0..5).map(|_| make_event(entity)).collect();
-        registry.fold_events(&events);
+        registry.fold_events(test_timeline(), &events);
 
         let count = registry
             .state_for_reducer_test("main", &entity)
@@ -1247,8 +1422,8 @@ mod tests {
         registry.register("b", Box::new(EntityStateProjection));
         let subject = EntityId::new();
         let other = EntityId::new();
-        registry.apply_event(&make_event(subject));
-        registry.apply_event(&make_event(other));
+        registry.apply_event(test_timeline(), &make_event(subject));
+        registry.apply_event(test_timeline(), &make_event(other));
 
         let revocation = ConsentRevokedV1 {
             subject_id: subject,
@@ -1260,7 +1435,7 @@ mod tests {
         event.payload = revocation.encode().unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
         });
-        registry.apply_event(&event);
+        registry.apply_event(test_timeline(), &event);
 
         assert!(registry.state_for_test(&subject).is_none());
         assert!(registry.state_for_reducer_test("b", &subject).is_none());
@@ -1273,10 +1448,10 @@ mod tests {
         let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         let subject = EntityId::new();
-        registry.apply_event(&make_event(subject));
+        registry.apply_event(test_timeline(), &make_event(subject));
 
         let malformed = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
-        registry.apply_event(&malformed);
+        registry.apply_event(test_timeline(), &malformed);
 
         assert!(registry.state_for_test(&subject).is_some());
     }
@@ -1302,7 +1477,7 @@ mod tests {
             origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
-        registry.apply_event(&consent_event);
+        registry.apply_event(test_timeline(), &consent_event);
         assert!(registry.state_for_test(&entity).is_none());
     }
 
@@ -1314,7 +1489,7 @@ mod tests {
         registry.register("second", Box::new(EntityStateProjection));
 
         let entity = EntityId::new();
-        registry.apply_event(&make_event(entity));
+        registry.apply_event(test_timeline(), &make_event(entity));
 
         let state = registry
             .state_for_test(&entity)
@@ -1341,7 +1516,7 @@ mod tests {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         registry.register("events", Box::new(EntityStateProjection));
-        registry.apply_event(&make_event(entity));
+        registry.apply_event(timeline, &make_event(entity));
         let snapshot = test_ok(registry.state_snapshot(timeline));
         assert!(test_ok(registry.state_for(timeline, &entity)).is_some());
         assert!(test_ok(registry.state_for_reducer(timeline, "events", &entity)).is_some());
@@ -1367,16 +1542,45 @@ mod tests {
     }
 
     #[test]
+    fn projection_state_cannot_be_read_through_another_timeline_fence() {
+        let source = TimelineId::new();
+        let unrelated = TimelineId::new();
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("events", Box::new(EntityStateProjection));
+        registry.apply_event(source, &make_event(entity));
+        assert!(test_ok(registry.state_for(source, &entity)).is_some());
+        assert_eq!(
+            registry.state_for(unrelated, &entity),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        registry.apply_event(unrelated, &make_event(entity));
+        assert_eq!(
+            registry.state_for(source, &entity),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        registry.apply_event(source, &make_event(entity));
+        assert_eq!(
+            registry.state_for(unrelated, &entity),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        registry.clear_state();
+        registry.apply_event(unrelated, &make_event(entity));
+        assert!(test_ok(registry.state_for(unrelated, &entity)).is_some());
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_restore_from_snapshot_skips_unknown_reducers() {
         let mut registry = open_projection_registry();
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
-        registry.apply_event(&make_event(entity));
+        registry.apply_event(test_timeline(), &make_event(entity));
 
         let mut snapshot = std::collections::HashMap::new();
         snapshot.insert("other".to_owned(), StateRegistry::new());
-        registry.restore_from_snapshot(&snapshot);
+        test_ok(registry.restore_from_snapshot(test_timeline(), &snapshot, None));
 
         let count = registry
             .state_for_reducer_test("registered", &entity)
@@ -1388,22 +1592,109 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_restore_from_snapshot_loads_matching_reducer() {
-        let timeline = TimelineId::new();
+        let timeline = test_timeline();
         let mut registry = open_projection_registry();
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
-        registry.apply_event(&make_event(entity));
+        registry.apply_event(test_timeline(), &make_event(entity));
         let snapshot = test_ok(registry.state_snapshot(timeline));
 
         let mut restored = open_projection_registry();
         restored.register("registered", Box::new(EntityStateProjection));
-        restored.restore_from_snapshot(&snapshot);
+        test_ok(restored.restore_from_snapshot(timeline, &snapshot, None));
 
         let count = restored
             .state_for_reducer_test("registered", &entity)
             .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn projection_registry_restore_rejects_stale_generation_and_blocked_timeline() {
+        let timeline = TimelineId::new();
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut source = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        source.register("events", Box::new(EntityStateProjection));
+        source.apply_event(timeline, &make_event(entity));
+        let snapshot = test_ok(source.state_snapshot(timeline));
+
+        let mut restored = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        restored.register("events", Box::new(EntityStateProjection));
+        assert_eq!(
+            restored.restore_from_snapshot(
+                timeline,
+                &snapshot,
+                Some(ErasureReferenceV1::from_digest([7; 32])),
+            ),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert!(test_ok(restored.state_for(timeline, &entity)).is_none());
+
+        gate.block_timeline(timeline);
+        assert_eq!(
+            restored.restore_from_snapshot(timeline, &snapshot, None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(
+            ProjectionRegistry::new().restore_from_snapshot(timeline, &snapshot, None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+
+    #[test]
+    fn projection_refold_replaces_state_only_at_the_captured_generation() {
+        let timeline = TimelineId::new();
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        registry.register("events", Box::new(EntityStateProjection));
+        let event = make_event(entity);
+        registry.fold_events(timeline, &[event.clone(), event.clone()]);
+
+        assert_eq!(
+            registry.refold_events(
+                timeline,
+                std::slice::from_ref(&event),
+                Some(ErasureReferenceV1::from_digest([3; 32])),
+            ),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        let count = |registry: &ProjectionRegistry| {
+            test_ok(registry.state_for_reducer(timeline, "events", &entity))
+                .and_then(|state| state.get("event_count").and_then(serde_json::Value::as_u64))
+        };
+        assert_eq!(count(&registry), Some(2));
+
+        test_ok(registry.refold_events(timeline, std::slice::from_ref(&event), None));
+        assert_eq!(count(&registry), Some(1));
+
+        gate.block_timeline(timeline);
+        assert_eq!(
+            registry.refold_events(timeline, std::slice::from_ref(&event), None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(
+            ProjectionRegistry::new().refold_events(timeline, &[event], None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+
+    #[test]
+    fn committed_fork_rejects_a_different_projection_parent() {
+        let source = TimelineId::new();
+        let unrelated = TimelineId::new();
+        let child = TimelineId::new();
+        let entity = EntityId::new();
+        let mut registry = open_projection_registry();
+        registry.register("events", Box::new(EntityStateProjection));
+        registry.apply_event(source, &make_event(entity));
+        assert_eq!(
+            registry.adopt_committed_fork(unrelated, child),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert!(test_ok(registry.state_for(source, &entity)).is_some());
     }
 
     #[test]
@@ -1597,11 +1888,11 @@ mod tests {
 
             let mut reg1 = open_projection_registry();
             reg1.register("p", Box::new(EntityStateProjection));
-            reg1.fold_events(&events);
+            reg1.fold_events(test_timeline(), &events);
 
             let mut reg2 = open_projection_registry();
             reg2.register("p", Box::new(EntityStateProjection));
-            reg2.fold_events(&events);
+            reg2.fold_events(test_timeline(), &events);
 
             let count1 = reg1
                 .state_for_reducer_test("p", &entity)
@@ -1840,7 +2131,7 @@ mod wave3_tests {
         let entity = EntityId::new();
         let mut reg = open_projection_registry();
         reg.register("r", Box::new(TR));
-        reg.apply_event(&ev(entity));
+        reg.apply_event(test_timeline(), &ev(entity));
 
         let snap = reg.snapshot_unfenced();
         let diff = test_ok(reg.diff_against_snapshot(test_timeline(), &snap, &[entity]));
@@ -1853,11 +2144,11 @@ mod wave3_tests {
         let entity = EntityId::new();
         let mut reg = open_projection_registry();
         reg.register("r", Box::new(TR));
-        reg.apply_event(&ev(entity));
+        reg.apply_event(test_timeline(), &ev(entity));
 
         let snap = reg.snapshot_unfenced();
         // Apply another event — now reg diverges from the snapshot
-        reg.apply_event(&ev(entity));
+        reg.apply_event(test_timeline(), &ev(entity));
         let diff = test_ok(reg.diff_against_snapshot(test_timeline(), &snap, &[entity]));
         assert!(diff.is_some());
         let (name, eid) =
@@ -1872,7 +2163,7 @@ mod wave3_tests {
         let entity = EntityId::new();
         let mut reg = open_projection_registry();
         reg.register("r", Box::new(TR));
-        reg.apply_event(&ev(entity));
+        reg.apply_event(test_timeline(), &ev(entity));
 
         let empty_snap = std::collections::HashMap::new();
         let diff = test_ok(reg.diff_against_snapshot(test_timeline(), &empty_snap, &[entity]));

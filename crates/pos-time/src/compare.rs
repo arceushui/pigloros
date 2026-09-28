@@ -104,8 +104,8 @@ fn compare_events(
     events_a: Vec<Event>,
     events_b: Vec<Event>,
 ) -> Result<ForkDiff, CoreError> {
-    registry_a.fold_events(&events_a);
-    registry_b.fold_events(&events_b);
+    registry_a.fold_events(a, &events_a);
+    registry_b.fold_events(b, &events_b);
     let all_entities: HashSet<EntityId> = events_a
         .iter()
         .chain(events_b.iter())

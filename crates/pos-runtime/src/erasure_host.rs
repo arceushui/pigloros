@@ -7466,6 +7466,57 @@ mod tests {
     }
 
     #[test]
+    fn projection_state_rejects_old_inventory_generation_until_refolded() {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let entity = EntityId::new();
+        let (timeline, events) = {
+            let mut sender = host
+                .command_sender()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            let timeline = sender
+                .create_timeline("projection-source")
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            let events = sender
+                .append(
+                    timeline.id(),
+                    &[EventDraft::new(
+                        entity,
+                        Kind::new("projection.public"),
+                        CanonicalBytes::from_vec(Vec::new()),
+                    )],
+                )
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            (timeline.id(), events)
+        };
+        let mut projections =
+            pos_state::ProjectionRegistry::new().with_erasure_gate(host.containment_gate());
+        projections.register("events", Box::new(pos_state::EntityStateProjection));
+        projections.fold_events(timeline, &events);
+        assert!(projections.state_for(timeline, &entity).is_ok());
+        assert_eq!(projections.validate_fork_source(timeline), Ok(()));
+
+        host.command_sender()
+            .and_then(|mut sender| sender.create_timeline("new-generation"))
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(
+            projections.state_for(timeline, &entity),
+            Err(pos_core::AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(
+            projections.validate_fork_source(timeline),
+            Err(pos_core::AuthorityErrorV1::SourceUnavailable)
+        );
+        projections.clear_state();
+        projections.fold_events(timeline, &events);
+        assert!(projections.state_for(timeline, &entity).is_ok());
+        assert_eq!(projections.validate_fork_source(timeline), Ok(()));
+    }
+
+    #[test]
     fn memory_topology_changes_republish_the_empty_inventory_generation() {
         assert_empty_topology_changes(StoreConfig::Memory);
     }

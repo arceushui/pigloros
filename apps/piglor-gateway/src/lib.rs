@@ -690,12 +690,41 @@ impl GatewayLimits {
 
 /// A bounded page of Timeline Events.
 ///
-/// `next_from_seq` is the inclusive sequence of the first omitted Event, or
-/// `None` only when the requested Timeline is exhausted.
+/// `next_cursor` is the generation-bound continuation for this page.
+/// `next_from_seq` reports the inclusive sequence of the first omitted Event;
+/// it can also be used to start a separate read.
 #[derive(Debug, PartialEq, Eq)]
 pub struct EventPage {
     pub events: Vec<Event>,
     pub next_from_seq: Option<Seq>,
+    pub next_cursor: Option<EventPageCursor>,
+}
+
+/// An opaque continuation bound to one Timeline and inventory generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventPageCursor {
+    timeline_id: TimelineId,
+    from_seq: Seq,
+    inventory_generation: Option<ErasureReferenceV1>,
+}
+
+fn cursor_from_seq(timeline_id: &str, cursor: EventPageCursor) -> Result<u64, GatewayError> {
+    if parse_timeline_id(timeline_id)? != cursor.timeline_id {
+        return Err(GatewayError::InvalidId(
+            "cursor timeline mismatch".to_owned(),
+        ));
+    }
+    Ok(cursor.from_seq.as_u64())
+}
+
+fn page_at_cursor(
+    bounded: GenerationBoundEventPage,
+    cursor: EventPageCursor,
+) -> Result<EventPage, GatewayError> {
+    if bounded.inventory_generation != cursor.inventory_generation {
+        return Err(GatewayError::StaleEventCursor);
+    }
+    Ok(bounded.page)
 }
 
 pub(crate) struct GenerationBoundEventPage {
@@ -1882,8 +1911,10 @@ impl Gateway {
 
     /// Poll one bounded page of Timeline events, starting at `from_seq` (inclusive).
     ///
-    /// The store is read for `limit + 1` Events. `next_from_seq` is `None` when
-    /// exhausted; otherwise it is the inclusive sequence of the first omitted Event.
+    /// The store is read for `limit + 1` Events. Use the returned
+    /// [`EventPage::next_cursor`] with [`Self::read_events_page_after`] to
+    /// continue within the same inventory generation. A new `from_seq` call
+    /// starts a separate read and does not promise a stable pagination view.
     ///
     /// # Errors
     /// Returns [`GatewayError::AuthorizationUnavailable`] when this Gateway
@@ -1896,7 +1927,7 @@ impl Gateway {
     /// # -> Result<(), piglor_gateway::GatewayError> {
     /// let page = gateway.read_events_page(timeline, 0, 100).await?;
     /// let _events = page.events;
-    /// let _cursor = page.next_from_seq;
+    /// let _cursor = page.next_cursor;
     /// # Ok(())
     /// # }
     /// ```
@@ -1909,6 +1940,30 @@ impl Gateway {
         self.read_events_page_at_generation(timeline_id, from_seq, limit, None)
             .await
             .map(|bounded| bounded.page)
+    }
+
+    /// Continue a Timeline page read at the generation recorded in `cursor`.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::StaleEventCursor`] when the inventory changed,
+    /// or [`GatewayError::InvalidId`] when the cursor belongs to another Timeline.
+    /// Other errors match [`Self::read_events_page`].
+    pub async fn read_events_page_after(
+        &self,
+        timeline_id: &str,
+        cursor: EventPageCursor,
+        limit: usize,
+    ) -> Result<EventPage, GatewayError> {
+        let from_seq = cursor_from_seq(timeline_id, cursor)?;
+        let bounded = self
+            .read_events_page_at_generation(
+                timeline_id,
+                from_seq,
+                limit,
+                cursor.inventory_generation,
+            )
+            .await?;
+        page_at_cursor(bounded, cursor)
     }
 
     pub(crate) async fn read_events_page_at_generation(
@@ -1991,6 +2046,11 @@ impl Gateway {
             page: EventPage {
                 events: visible,
                 next_from_seq,
+                next_cursor: next_from_seq.map(|from_seq| EventPageCursor {
+                    timeline_id: id,
+                    from_seq,
+                    inventory_generation: generation,
+                }),
             },
             inventory_generation: generation,
         })
@@ -2000,7 +2060,8 @@ impl Gateway {
     ///
     /// The commit fence is held through the store read, so a host authority
     /// replacement cannot race a protected read.  The same seam is used for
-    /// exports and other Gateway-owned projections as they are added.
+    /// exports and other Gateway-owned projections as they are added. Continue
+    /// the same read with [`Self::read_events_page_authorized_after`].
     ///
     /// # Errors
     /// Returns [`GatewayError::AuthorizationUnavailable`] or
@@ -2016,6 +2077,40 @@ impl Gateway {
         self.read_events_page_authorized_at_generation(timeline_id, from_seq, limit, request, None)
             .await
             .map(|bounded| bounded.page)
+    }
+
+    /// Continue an authorized Timeline page read at the cursor's generation.
+    /// The actor receives a fresh authority decision for this page.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::StaleEventCursor`] when the inventory changed,
+    /// or [`GatewayError::InvalidId`] when the cursor belongs to another Timeline.
+    /// Other errors match [`Self::read_events_page_authorized`].
+    pub async fn read_events_page_authorized_after(
+        &self,
+        timeline_id: &str,
+        cursor: EventPageCursor,
+        limit: usize,
+        actor_entity_id: EntityId,
+    ) -> Result<EventPage, GatewayError> {
+        let from_seq = cursor_from_seq(timeline_id, cursor)?;
+        let request = GatewayAuthorizationRequest::read(
+            actor_entity_id,
+            cursor.timeline_id,
+            from_seq,
+            limit,
+            WallTime::now(),
+        );
+        let bounded = self
+            .read_events_page_authorized_at_generation(
+                timeline_id,
+                from_seq,
+                limit,
+                request,
+                cursor.inventory_generation,
+            )
+            .await?;
+        page_at_cursor(bounded, cursor)
     }
 
     pub(crate) async fn read_events_page_authorized_at_generation(
@@ -2071,7 +2166,7 @@ impl Gateway {
     /// Compatibility shim for Timelines that fit in one bounded page.
     ///
     /// This method no longer aggregates the Timeline to exhaustion. New callers
-    /// must use [`Self::read_events_page`] and follow `next_from_seq`.
+    /// must use [`Self::read_events_page`] and follow `next_cursor`.
     ///
     /// # Errors
     /// Returns [`GatewayError::CompatibilityReadTruncated`] when more than one
@@ -2079,7 +2174,7 @@ impl Gateway {
     /// [`Self::read_events_page`].
     #[deprecated(
         since = "0.1.0",
-        note = "use read_events_page and follow EventPage::next_from_seq"
+        note = "use read_events_page and follow EventPage::next_cursor"
     )]
     pub async fn read_events_from(
         &self,
@@ -4190,6 +4285,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authorized_public_page_cursor_preserves_read_authorization() {
+        let actor = EntityId::new();
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [],
+            crate::authorization::test_authorization_for(actor),
+        );
+        let timeline = gateway
+            .create_timeline("authorized-public-cursor")
+            .await
+            .test_ok();
+        let id = timeline.id().to_string();
+        for marker in 1..=2 {
+            gateway
+                .append_action(
+                    &id,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({"marker": marker}),
+                )
+                .await
+                .test_ok();
+        }
+        let request =
+            GatewayAuthorizationRequest::read(actor, timeline.id(), 0, 1, WallTime::now());
+        let first = gateway
+            .read_events_page_authorized(&id, 0, 1, request)
+            .await
+            .test_ok();
+        let cursor = first.next_cursor.test_ok();
+        let second = gateway
+            .read_events_page_authorized_after(&id, cursor, 1, actor)
+            .await
+            .test_ok();
+        assert_eq!(second.events[0].seq.as_u64(), 2);
+        assert!(second.next_cursor.is_none());
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized_after("not-a-timeline", cursor, 1, actor)
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized_after(
+                    &TimelineId::new().to_string(),
+                    cursor,
+                    1,
+                    actor,
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized_after(&id, cursor, 1, EntityId::new())
+                .await,
+            Err(GatewayError::AuthorizationDenied)
+        ));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn cursor_without_inventory_generation_cannot_continue_host_read() {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let timeline = gateway
+            .create_timeline("generationless-cursor")
+            .await
+            .test_ok();
+        // A cursor issued by an unhosted Gateway cannot continue under a host.
+        let cursor = EventPageCursor {
+            timeline_id: timeline.id(),
+            from_seq: Seq::from_u64(1),
+            inventory_generation: None,
+        };
+        assert!(matches!(
+            gateway
+                .read_events_page_after(&timeline.id().to_string(), cursor, 1)
+                .await,
+            Err(GatewayError::StaleEventCursor)
+        ));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
     async fn authority_bound_gateway_rejects_action_capability_as_read() {
         let actor = EntityId::new();
         let timeline = TimelineId::new();
@@ -6240,7 +6427,10 @@ mod tests {
         let first = gateway.read_events_page(&timeline_id, 0, 1).await.test_ok();
         assert_eq!(first.events.len(), 1);
         assert_eq!(first.next_from_seq, Some(Seq::from_u64(2)));
-        let exhausted = gateway.read_events_page(&timeline_id, 2, 1).await.test_ok();
+        let exhausted = gateway
+            .read_events_page_after(&timeline_id, first.next_cursor.test_ok(), 1)
+            .await
+            .test_ok();
         assert_eq!(exhausted.events.len(), 1);
         assert_eq!(exhausted.next_from_seq, None);
         drop(gateway);
@@ -6279,13 +6469,19 @@ mod tests {
             vec![1]
         );
         assert_eq!(first.next_from_seq, Some(Seq::from_u64(3)));
-        let second = gateway.read_events_page(&timeline_id, 3, 1).await.test_ok();
+        let second = gateway
+            .read_events_page_after(&timeline_id, first.next_cursor.test_ok(), 1)
+            .await
+            .test_ok();
         assert_eq!(
             second.events.iter().map(event_seq).collect::<Vec<_>>(),
             vec![3]
         );
         assert_eq!(second.next_from_seq, Some(Seq::from_u64(5)));
-        let final_page = gateway.read_events_page(&timeline_id, 5, 1).await.test_ok();
+        let final_page = gateway
+            .read_events_page_after(&timeline_id, second.next_cursor.test_ok(), 1)
+            .await
+            .test_ok();
         assert_eq!(
             final_page.events.iter().map(event_seq).collect::<Vec<_>>(),
             vec![5]
@@ -6416,16 +6612,22 @@ mod tests {
             .await
             .test_ok();
 
-        let mut from_seq = 0;
+        let mut cursor = None;
         let mut count = 0;
         loop {
-            let page = gateway
-                .read_events_page(&child.id().to_string(), from_seq, MAX_EVENTS_PER_POLL)
-                .await
-                .test_ok();
+            let page = match cursor {
+                Some(cursor) => gateway
+                    .read_events_page_after(&child.id().to_string(), cursor, MAX_EVENTS_PER_POLL)
+                    .await
+                    .test_ok(),
+                None => gateway
+                    .read_events_page(&child.id().to_string(), 0, MAX_EVENTS_PER_POLL)
+                    .await
+                    .test_ok(),
+            };
             count += page.events.len();
-            match page.next_from_seq {
-                Some(next) => from_seq = next.as_u64(),
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
                 None => break,
             }
         }

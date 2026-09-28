@@ -384,6 +384,13 @@ mod erasure_gate_sealed {
 /// trait is sealed: it shares the host-issued gate as an object-safe interface
 /// and is not an extension point for caller-supplied authorization policies.
 pub trait ErasureGate: erasure_gate_sealed::Sealed + Send + Sync {
+    /// Return the generation of the currently installed complete inventory.
+    /// Call within [`Self::with_fence`] when binding a protected effect to it.
+    ///
+    /// # Errors
+    /// Returns a containment error when no verified inventory is available.
+    fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1>;
+
     /// Authorize one protected operation at its current host boundary.
     ///
     /// # Errors
@@ -1223,6 +1230,10 @@ impl ErasureContainmentGateV1 {
 impl erasure_gate_sealed::Sealed for ErasureContainmentGateV1 {}
 
 impl ErasureGate for ErasureContainmentGateV1 {
+    fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        Self::inventory_generation(self)
+    }
+
     fn authorize(
         &self,
         timeline: TimelineId,

@@ -1062,6 +1062,7 @@ mod tests {
             timeline: TimelineId::new(),
             at_seq: Seq::ZERO,
             registry,
+            inventory_generation: [0; 32],
         };
         assert_eq!(count_snapshot_entities(&snapshot), 0);
     }
@@ -1074,6 +1075,7 @@ mod tests {
             timeline: TimelineId::new(),
             at_seq: Seq::ZERO,
             registry,
+            inventory_generation: [0; 32],
         };
         FAIL_STATE_REG_JSON.with(|f| f.set(true));
         let n = count_snapshot_entities(&snapshot);
