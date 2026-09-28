@@ -7426,6 +7426,46 @@ mod tests {
     }
 
     #[test]
+    fn host_filters_frozen_roots_before_listing_and_counting_on_both_stores() {
+        for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
+            let mut host = ErasureExecutionHostV1::open_verified_empty(
+                config,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            let (frozen, visible, child) = {
+                let mut sender = host.command_sender().unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                });
+                let frozen = sender.create_timeline("frozen").unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                });
+                let visible = sender.create_timeline("visible").unwrap_or_else(|error| {
+                    std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                });
+                let child = sender
+                    .fork_timeline(visible.id(), Seq::ZERO, "visible-child")
+                    .unwrap_or_else(|error| {
+                        std::panic::resume_unwind(Box::new(format!("{error:?}")))
+                    });
+                (frozen.id(), visible.id(), child.id())
+            };
+            host.freeze_timeline_for_test(frozen);
+            let mut reader = host
+                .read_sender()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            let timelines = reader
+                .timelines()
+                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            assert_eq!(timelines.len(), 2);
+            assert!(timelines.iter().any(|item| item.id() == visible));
+            assert!(timelines.iter().any(|item| item.id() == child));
+            assert!(!timelines.iter().any(|item| item.id() == frozen));
+            assert_eq!(reader.root_timeline_count_bounded(2), Ok(1));
+        }
+    }
+
+    #[test]
     fn memory_topology_changes_republish_the_empty_inventory_generation() {
         assert_empty_topology_changes(StoreConfig::Memory);
     }

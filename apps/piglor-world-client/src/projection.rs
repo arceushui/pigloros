@@ -1,6 +1,10 @@
-use pos_core::{event::Event, ids::EntityId, state::State, TimelineExport};
+use pos_core::{
+    event::Event,
+    ids::EntityId,
+    state::{State, StateRegistry},
+    TimelineExport,
+};
 use pos_plugin_society::SocietyReducer;
-use pos_state::ProjectionRegistry;
 use ulid::Ulid;
 
 const FIXED_ENTITY_ID: u128 = 2;
@@ -42,16 +46,21 @@ impl ProjectionDigest {
 /// finite, bounded trust projection for the fixed fixture entity.
 pub fn project_fixture(export: &TimelineExport) -> Result<ProjectionDigest, crate::ClientError> {
     let events = sorted_events(&export.events);
-
-    let mut registry = ProjectionRegistry::new();
-    registry.register("society", Box::new(SocietyReducer));
-    registry.fold_events(&events);
+    let registry = project_states(&events);
 
     let entity = EntityId::from_ulid(Ulid::from(FIXED_ENTITY_ID));
     let state = registry
-        .state_for_reducer("society", &entity)
+        .get(&entity)
         .ok_or_else(|| crate::ClientError::Invalid("missing fixed entity state".to_owned()))?;
     digest_from_state(state)
+}
+
+fn project_states(events: &[Event]) -> StateRegistry {
+    let mut registry = StateRegistry::new();
+    for event in events {
+        registry.apply(&SocietyReducer, event);
+    }
+    registry
 }
 
 fn sorted_events(events: &[Event]) -> Vec<Event> {

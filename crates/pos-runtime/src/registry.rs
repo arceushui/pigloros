@@ -33,7 +33,10 @@ use crate::{
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 fn extend_unique_subscriptions(
     subscriptions: &mut Vec<ProjectionKey>,
@@ -413,12 +416,14 @@ mod coverage_entrypoints {
         let timeline = TimelineId::new();
         assert!(matches!(
             PluginRegistry::new()
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .without_consent_gate()
                 .tick_cadenced(timeline, 0),
             Err(RuntimeError::ConsentOperationUnavailable)
         ));
         assert!(matches!(
             PluginRegistry::new()
+                .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .without_consent_gate()
                 .step_all(timeline),
             Err(RuntimeError::ConsentOperationUnavailable)
@@ -896,10 +901,47 @@ impl PluginRegistry {
         }
     }
 
-    fn snapshot_for_subscriptions(&self, subscriptions: &[ProjectionKey]) -> ObservationSnapshot {
-        ObservationSnapshot::from_subscriptions(subscriptions.iter(), |key| {
-            self.projections.state_for(key.entity_id()).cloned()
-        })
+    fn states_for_subscriptions(
+        &self,
+        timeline: TimelineId,
+        subscriptions: &[ProjectionKey],
+    ) -> Result<HashMap<ProjectionKey, pos_core::State>, RuntimeError> {
+        let mut states = HashMap::new();
+        for key in subscriptions {
+            if let Some(state) = self.projections.state_for(timeline, key.entity_id())? {
+                states.insert(key.clone(), state);
+            }
+        }
+        Ok(states)
+    }
+
+    fn snapshot_for_subscriptions(
+        &self,
+        timeline: TimelineId,
+        subscriptions: &[ProjectionKey],
+    ) -> Result<ObservationSnapshot, RuntimeError> {
+        self.states_for_subscriptions(timeline, subscriptions)
+            .map(|states| {
+                ObservationSnapshot::from_subscriptions(subscriptions.iter(), |key| {
+                    states.get(key).cloned()
+                })
+            })
+    }
+
+    fn authorized_states_for_subscriptions(
+        &self,
+        timeline: TimelineId,
+        observed_through: Seq,
+        operation: &OperationContext,
+        subscriptions: &[ProjectionKey],
+    ) -> Result<HashMap<ProjectionKey, pos_core::State>, RuntimeError> {
+        self.authorize_snapshot_subscriptions(
+            timeline,
+            observed_through,
+            operation,
+            subscriptions.iter(),
+        )?;
+        self.states_for_subscriptions(timeline, subscriptions)
     }
 
     fn with_erasure_fence<T>(
@@ -967,7 +1009,7 @@ impl PluginRegistry {
                     operation,
                     subscriptions.iter(),
                 )?;
-                Ok(registry.snapshot_for_subscriptions(&subscriptions))
+                registry.snapshot_for_subscriptions(timeline, &subscriptions)
             },
         )
     }
@@ -1215,12 +1257,24 @@ impl PluginRegistry {
             .consent_gate
             .as_ref()
             .ok_or(RuntimeError::ConsentOperationUnavailable)?;
-        gate.authorize_projection(timeline, subject, timeline_head.as_u64(), now_secs, token)
-            .map_err(RuntimeError::Consent)?;
-        Ok(self
-            .projections
-            .state_for_reducer(reducer, &subject)
-            .cloned())
+        self.with_erasure_fence(
+            timeline,
+            ErasureProtectedOperationV1::Snapshot,
+            |registry| {
+                gate.authorize_projection(
+                    timeline,
+                    subject,
+                    timeline_head.as_u64(),
+                    now_secs,
+                    token,
+                )
+                .map_err(RuntimeError::Consent)?;
+                registry
+                    .projections
+                    .state_for_reducer(timeline, reducer, &subject)
+                    .map_err(RuntimeError::from)
+            },
+        )
     }
 
     fn validate_operation(
@@ -1514,15 +1568,15 @@ impl PluginRegistry {
         let mut event_cursors = Vec::new();
 
         let anchor = SnapshotAnchor::new(timeline, observed_through);
-        self.authorize_snapshot_subscriptions(
+        let states = self.authorized_states_for_subscriptions(
             timeline,
             observed_through,
             &operation,
-            subscriptions.iter(),
+            &subscriptions,
         )?;
         let snapshot =
             ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
-                self.projections.state_for(key.entity_id()).cloned()
+                states.get(key).cloned()
             });
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
@@ -2525,7 +2579,11 @@ impl PluginRegistry {
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_live_execution()?;
-        self.tick_cadenced_live(timeline, now_ns)
+        self.with_erasure_mut_fence(
+            timeline,
+            ErasureProtectedOperationV1::PluginInput,
+            |registry| registry.tick_cadenced_live(timeline, now_ns),
+        )
     }
 
     fn tick_cadenced_live(
@@ -2575,7 +2633,9 @@ impl PluginRegistry {
             &OperationContext::Public,
             due_subscriptions.iter(),
         )?;
-        let snapshot = self.snapshot_for_subscriptions(&due_subscriptions);
+        // Public cadence admits no projection subscriptions. The consent
+        // check above rejects them before any state is materialized.
+        let snapshot = ObservationSnapshot::default();
         for (id, entry) in &mut self.plugins {
             let Some(driver) = entry.driver.as_mut() else {
                 continue;
@@ -3628,7 +3688,8 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn register_plugin_with_reducer_wires_projections() {
-        let mut reg = PluginRegistry::new();
+        let mut reg = gated_registry();
+        let timeline = TimelineId::new();
         let p = plugin_with_caps("counter", &["counter.tick"], false, true);
         reg.register(&p, Some(Box::new(CountReducer)), None)
             .test_ok();
@@ -3649,16 +3710,20 @@ mod tests {
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         reg.projections.apply_event(&event);
-        let state = reg.projections.state_for(&event.entity).test_ok();
+        let state = reg
+            .projections
+            .state_for(timeline, &event.entity)
+            .test_ok()
+            .test_ok();
         assert_eq!(state.get("n").and_then(serde_json::Value::as_u64), Some(1));
         let mut protected = event;
         protected.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
         reg.projections.apply_event(&protected);
         assert_eq!(
             reg.projections
-                .state_for(&protected.entity)
-                .and_then(|state| state.get("n"))
-                .and_then(serde_json::Value::as_u64),
+                .state_for(timeline, &protected.entity)
+                .test_ok()
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64)),
             Some(1)
         );
     }
@@ -3683,7 +3748,7 @@ mod tests {
                 grant_seq: 1,
             },
         );
-        let unbound = PluginRegistry::new();
+        let unbound = gated_registry();
         assert!(unbound.clone_consent_gate().is_some());
         assert!(PluginRegistry::new()
             .with_consent_gate(Arc::new(ConsentAuthority::new()))
@@ -3702,7 +3767,7 @@ mod tests {
         ));
 
         let plugin = plugin_with_caps("projection", &["projection.event"], false, true);
-        let mut bound = PluginRegistry::new().with_consent_authority(authority);
+        let mut bound = gated_registry().with_consent_authority(authority);
         bound
             .register(&plugin, Some(Box::new(CountReducer)), None)
             .test_ok();
@@ -3742,9 +3807,10 @@ mod tests {
             .into_authorized_projections(timeline, Seq::from_u64(2), 0, Some(&token), None)
             .test_ok();
         assert!(authorized
-            .state_for_reducer("projection", &unrelated)
+            .state_for_reducer(timeline, "projection", &unrelated)
+            .test_ok()
             .is_none());
-        assert!(authorized.state_for(&subject).is_some());
+        assert!(authorized.state_for(timeline, &subject).test_ok().is_some());
     }
 
     #[test]
@@ -4378,10 +4444,18 @@ mod tests {
         reg.commit_step_at(Seq::ZERO, 0).test_ok();
 
         let drafts = reg
-            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
+            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token.clone(), 0, &[])
             .test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
+        reg.commit_step_at(Seq::ZERO, 0).test_ok();
+
+        // The runtime fence remains open, while a missing projection fence
+        // must still stop the protected Driver input path.
+        reg.projections = std::mem::take(&mut reg.projections).without_erasure_gate();
+        assert!(reg
+            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
+            .is_err());
     }
 
     #[test]
@@ -4448,7 +4522,8 @@ mod tests {
     fn snapshot_for_subscriptions_handles_duplicate_and_missing_projection_keys() {
         use crate::driver::ProjectionKey;
 
-        let mut reg = PluginRegistry::new();
+        let mut reg = gated_registry();
+        let timeline = TimelineId::new();
         reg.projections.register("counter", Box::new(CountReducer));
         let observed_entity = EntityId::new();
         let missing_entity = EntityId::new();
@@ -4473,7 +4548,9 @@ mod tests {
         let observed = ProjectionKey::new(observed_entity);
         let missing = ProjectionKey::new(missing_entity);
         let subscriptions = vec![observed.clone(), observed.clone(), missing.clone()];
-        let snapshot = reg.snapshot_for_subscriptions(&subscriptions);
+        let snapshot = reg
+            .snapshot_for_subscriptions(timeline, &subscriptions)
+            .test_ok();
         let view = snapshot.view_for(&subscriptions);
 
         assert_eq!(view.len(), 2);
@@ -4483,6 +4560,12 @@ mod tests {
             Some(1)
         );
         assert_eq!(view.state_for(&missing), None);
+
+        // A split host binding must fail closed before exposing any state.
+        reg.projections = std::mem::take(&mut reg.projections).without_erasure_gate();
+        assert!(reg
+            .snapshot_for_subscriptions(timeline, &subscriptions)
+            .is_err());
     }
 
     struct AppendFailStore;

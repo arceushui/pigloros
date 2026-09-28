@@ -17,10 +17,10 @@ use pos_core::{
     event::{EventDraft, Kind},
     ids::{EntityId, TimelineId},
     store::{EventReadBounds, EventStore, SeqRange},
-    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureHostErrorV1, Event,
-    ReproManifest, Seq, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureContainmentGateV1,
+    ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event, ReproManifest, Seq,
+    Timeline,
 };
-use pos_core::{ErasureContainmentGateV1, ErasureGate};
 use pos_runtime::PluginRegistry;
 use pos_store::StoreConfig;
 use std::collections::HashSet;
@@ -406,19 +406,48 @@ impl RunResult {
                     .map_err(ExperimentError::from)
             })
             .and_then(|timeline_head| {
-                gate.authorize_projection(
-                    self.timeline_id,
-                    subject,
-                    timeline_head.as_u64(),
-                    now_secs,
-                    token,
-                )
-                .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))
-            })
-            .map(|()| {
                 self.projections
-                    .state_for_reducer(reducer, &subject)
-                    .cloned()
+                    .clone_erasure_gate()
+                    .ok_or(ExperimentError::Runtime(
+                        pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                    ))
+                    .and_then(|erasure_gate| {
+                        let mut result = Err(ExperimentError::Runtime(
+                            pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                        ));
+                        let mut read = || {
+                            result = gate
+                                .authorize_projection(
+                                    self.timeline_id,
+                                    subject,
+                                    timeline_head.as_u64(),
+                                    now_secs,
+                                    token,
+                                )
+                                .map_err(|error| {
+                                    map_runtime_error(pos_runtime::RuntimeError::Consent(error))
+                                })
+                                .and_then(|()| {
+                                    self.projections
+                                        .state_for_reducer(self.timeline_id, reducer, &subject)
+                                        .or(Err(ExperimentError::Runtime(
+                                            pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                                        )))
+                                });
+                        };
+                        erasure_gate
+                            .with_fence(
+                                self.timeline_id,
+                                ErasureProtectedOperationV1::Snapshot,
+                                &mut read,
+                            )
+                            .map_err(|_| {
+                                ExperimentError::Runtime(
+                                    pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                                )
+                            })
+                            .and(result)
+                    })
             })
     }
 
@@ -2776,6 +2805,7 @@ mod tests {
             },
         );
         let gate: Arc<dyn ConsentGate> = Arc::new(authority);
+        let erasure_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut result = RunResult {
             timeline_id,
             ticks: 0,
@@ -2786,7 +2816,8 @@ mod tests {
                 pos_core::crypto::Hash::zero(),
                 pos_core::clock::WallTime::from_micros(0),
             ),
-            projections: pos_state::ProjectionRegistry::new(),
+            projections: pos_state::ProjectionRegistry::new()
+                .with_erasure_gate(erasure_gate.clone()),
             consent_gate: Some(Arc::clone(&gate)),
             protected_token: Some(token.clone()),
             store_config: Some(store_config),
@@ -2822,9 +2853,22 @@ mod tests {
             .test_ok()
             .is_none());
         assert!(matches!(
+            result.projection_state_for_reducer("projection", EntityId::new(), &token, 0),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::Consent(pos_core::ConsentError::NoConsent)
+            ))
+        ));
+        assert!(matches!(
             result.branch("forbidden"),
             Err(ExperimentError::Runtime(
                 pos_runtime::RuntimeError::Consent(pos_core::ConsentError::ForkNotPermitted)
+            ))
+        ));
+        erasure_gate.freeze_timeline_for_test(timeline_id);
+        assert!(matches!(
+            result.projection_state_for_reducer("projection", subject_id, &token, 0),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::ErasureOperationUnavailable
             ))
         ));
         assert!(matches!(
@@ -4395,11 +4439,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(1, 200), (2, 100)]
         );
-        let mut replayed = pos_state::ProjectionRegistry::new();
+        let mut replayed = pos_state::ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         replayed.register("interleaving", Box::new(CountReducer));
         replayed.fold_events(&events);
         drop(store);
-        assert!(replayed.state_for(&entity).is_some());
+        assert!(replayed.state_for(timeline, &entity).test_ok().is_some());
     }
 
     #[test]
@@ -6072,9 +6117,9 @@ mod tests {
         // state_for returns from the first reducer ("proj-plugin")
         let n = result
             .projections
-            .state_for(&entity)
-            .and_then(|s| s.get("n"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for(result.timeline_id, &entity)
+            .test_ok()
+            .and_then(|s| s.get("n").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(n, 3);
     }
@@ -8058,18 +8103,18 @@ mod integration_tests {
         // rule-agent is first registered reducer → state_for_reducer("rule-agent", ...)
         let decisions = result
             .projections
-            .state_for_reducer("rule-agent", &agent_entity)
-            .and_then(|s| s.get("decisions"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer(result.timeline_id, "rule-agent", &agent_entity)
+            .test_ok()
+            .and_then(|s| s.get("decisions").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(decisions, 5, "expected 5 decisions projected");
 
         // Verify obs state was projected (observation count should be 5)
         let obs_count = result
             .projections
-            .state_for_reducer("synthetic-obs", &obs_entity)
-            .and_then(|s| s.get("observations"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer(result.timeline_id, "synthetic-obs", &obs_entity)
+            .test_ok()
+            .and_then(|s| s.get("observations").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(obs_count, 5, "expected 5 observations projected");
     }
