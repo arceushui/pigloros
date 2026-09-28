@@ -18,15 +18,19 @@ use std::{
 use ciborium::value::Value;
 use pos_core::{
     fork_authentication::{
+        AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
         ForkAuthenticationPolicyV1, LocalAccountBindingV1, LocalAccountRegistryV1,
         MAX_FORK_AUTH_CREDENTIAL_BYTES_V1,
     },
     CanonicalBytes, OwnerIdV1, PrincipalRefV1,
 };
 use pos_crypto::fork_authentication::{
-    ForkAuthenticationAdapterSigningKeyV1, ForkAuthenticationSignatureErrorV1, ForkHostSigningKeyV1,
+    verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
+    ForkAuthenticationSignatureErrorV1, ForkHostSigningKeyV1,
+    VerifiedAuthenticatedPrincipalEvidenceV1,
 };
 use rustix::net::sockopt::socket_peercred;
+use rustix::rand::{getrandom, GetRandomFlags};
 use thiserror::Error;
 use zeroize::Zeroize;
 
@@ -34,6 +38,7 @@ const AUTH_CREDENTIAL_NAME: &str = "pigloros.fork-admission-auth";
 const HOST_CREDENTIAL_NAME: &str = "pigloros.fork-admission-host-signer";
 const FAHK1_BYTES: usize = 42;
 const CREDENTIAL_DIRECTORY_MODE: u32 = 0o022;
+const AUTHENTICATION_LIFETIME_MICROS: u64 = 30_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum LocalForkAuthenticationErrorV1 {
@@ -47,8 +52,7 @@ pub(crate) enum LocalForkAuthenticationErrorV1 {
 
 /// Loaded, purpose-separated authority inputs retained only by the host.
 pub(crate) struct LocalForkAuthenticationCredentialsV1 {
-    policy: ForkAuthenticationPolicyV1,
-    registry: LocalAccountRegistryV1,
+    resolver: PrincipalOwnerResolverV1,
     adapter_signer: ForkAuthenticationAdapterSigningKeyV1,
     _host_signer: LocalForkHostSignerV1,
 }
@@ -71,7 +75,7 @@ impl LocalForkAuthenticationCredentialsV1 {
 
     #[must_use]
     pub(crate) const fn policy(&self) -> &ForkAuthenticationPolicyV1 {
-        &self.policy
+        self.resolver.policy()
     }
 
     #[must_use]
@@ -89,13 +93,94 @@ impl LocalForkAuthenticationCredentialsV1 {
             .uid
             .as_raw();
         let binding = self
-            .registry
+            .resolver
+            .registry()
             .lookup_uid(uid)
             .ok_or(LocalForkAuthenticationErrorV1::PeerUnauthenticated)?;
         Ok(AuthenticatedUnixPeerV1 {
             principal: binding.principal.clone(),
-            owner: binding.owner,
         })
+    }
+
+    /// Produce one opaque FAE1 from an internally authenticated Unix peer.
+    pub(crate) fn produce(
+        &self,
+        peer: AuthenticatedUnixPeerV1,
+    ) -> Result<ProducedLocalAuthenticationEvidenceV1, LocalForkAuthenticationErrorV1> {
+        let issued_at = production_wall_time()?;
+        let expires_at = issued_at
+            .checked_add(AUTHENTICATION_LIFETIME_MICROS)
+            .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+        let registry_binding = self
+            .resolver
+            .registry()
+            .digest()
+            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+        let record = AuthenticatedPrincipalRecordV1 {
+            principal: peer.principal,
+            adapter_id: self.resolver.registry().adapter_id().to_owned(),
+            assurance: self.resolver.registry().assurance(),
+            issued_at,
+            expires_at,
+            registry_binding,
+            operation_nonce: operation_nonce()?,
+        };
+        self.adapter_signer
+            .sign_authenticated_principal(record)
+            .map(ProducedLocalAuthenticationEvidenceV1)
+            .map_err(signature_invalid)
+    }
+
+    /// Verify locally produced FAE1 and resolve its Owner from FACR1 only.
+    pub(crate) fn resolve(
+        &self,
+        evidence: ProducedLocalAuthenticationEvidenceV1,
+    ) -> Result<ResolvedLocalAuthenticationV1, LocalForkAuthenticationErrorV1> {
+        self.resolver.resolve(evidence.0)
+    }
+}
+
+/// Host-private Principal-to-Owner resolver over the protected FACR1 registry.
+pub(crate) struct PrincipalOwnerResolverV1 {
+    policy: ForkAuthenticationPolicyV1,
+    registry: LocalAccountRegistryV1,
+}
+
+impl PrincipalOwnerResolverV1 {
+    const fn new(policy: ForkAuthenticationPolicyV1, registry: LocalAccountRegistryV1) -> Self {
+        Self { policy, registry }
+    }
+
+    const fn policy(&self) -> &ForkAuthenticationPolicyV1 {
+        &self.policy
+    }
+
+    const fn registry(&self) -> &LocalAccountRegistryV1 {
+        &self.registry
+    }
+
+    fn resolve(
+        &self,
+        evidence: AuthenticatedPrincipalEvidenceV1,
+    ) -> Result<ResolvedLocalAuthenticationV1, LocalForkAuthenticationErrorV1> {
+        let verified = verify_authenticated_principal_evidence_v1(&self.policy, evidence)
+            .map_err(signature_invalid)?;
+        let record = verified.evidence().record();
+        let registry_binding = self
+            .registry
+            .digest()
+            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+        if record.adapter_id != self.registry.adapter_id()
+            || record.assurance != self.registry.assurance()
+            || record.registry_binding != registry_binding
+        {
+            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+        }
+        let owner = self
+            .registry
+            .lookup_principal(&record.principal)
+            .ok_or(LocalForkAuthenticationErrorV1::PeerUnauthenticated)?;
+        Ok(ResolvedLocalAuthenticationV1 { verified, owner })
     }
 }
 
@@ -110,7 +195,6 @@ pub(crate) struct LocalForkHostSignerV1 {
 /// Non-cloneable result of one kernel-authenticated Unix connection.
 pub(crate) struct AuthenticatedUnixPeerV1 {
     principal: PrincipalRefV1,
-    owner: OwnerIdV1,
 }
 
 impl AuthenticatedUnixPeerV1 {
@@ -118,10 +202,25 @@ impl AuthenticatedUnixPeerV1 {
     pub(crate) const fn principal(&self) -> &PrincipalRefV1 {
         &self.principal
     }
+}
 
+/// Opaque evidence created only from a kernel-authenticated Unix peer.
+pub(crate) struct ProducedLocalAuthenticationEvidenceV1(AuthenticatedPrincipalEvidenceV1);
+
+/// Verified local FAE1 together with the Owner resolved from the same FACR1 row.
+pub(crate) struct ResolvedLocalAuthenticationV1 {
+    verified: VerifiedAuthenticatedPrincipalEvidenceV1,
+    owner: OwnerIdV1,
+}
+
+impl ResolvedLocalAuthenticationV1 {
     #[must_use]
     pub(crate) const fn owner(&self) -> OwnerIdV1 {
         self.owner
+    }
+
+    pub(crate) const fn verified_evidence(&self) -> &VerifiedAuthenticatedPrincipalEvidenceV1 {
+        &self.verified
     }
 }
 
@@ -158,8 +257,7 @@ fn parse_credentials(
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
     Ok(LocalForkAuthenticationCredentialsV1 {
-        policy,
-        registry,
+        resolver: PrincipalOwnerResolverV1::new(policy, registry),
         adapter_signer,
         _host_signer: LocalForkHostSignerV1 {
             _signer: host_signer,
@@ -371,6 +469,34 @@ fn signature_invalid(_: ForkAuthenticationSignatureErrorV1) -> LocalForkAuthenti
     LocalForkAuthenticationErrorV1::CredentialInvalid
 }
 
+fn production_wall_time() -> Result<u64, LocalForkAuthenticationErrorV1> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        .and_then(|duration| {
+            u64::try_from(duration.as_micros())
+                .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        })
+}
+
+fn operation_nonce() -> Result<[u8; 32], LocalForkAuthenticationErrorV1> {
+    loop {
+        let mut nonce = [0; 32];
+        let mut remaining = nonce.as_mut_slice();
+        while !remaining.is_empty() {
+            let read = getrandom(remaining, GetRandomFlags::empty())
+                .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
+            if read == 0 {
+                return Err(LocalForkAuthenticationErrorV1::CredentialUnavailable);
+            }
+            remaining = &mut remaining[read..];
+        }
+        if nonce != [0; 32] {
+            return Ok(nonce);
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -483,7 +609,14 @@ mod tests {
         let (peer, _other) = test_ok(UnixStream::pair());
         let peer = test_ok(credentials.authenticate_peer(&peer));
         assert_eq!(peer.principal().trust_domain(), "unix.test");
-        assert_eq!(peer.owner(), OwnerIdV1::from_static("owner"));
+        let evidence = test_ok(credentials.produce(peer));
+        let resolved = test_ok(credentials.resolve(evidence));
+        assert_eq!(resolved.owner(), OwnerIdV1::from_static("owner"));
+        let record = resolved.verified_evidence().evidence().record();
+        assert_eq!(record.adapter_id, "local-unix");
+        assert_eq!(record.assurance, 2);
+        assert!(record.issued_at < record.expires_at);
+        assert_ne!(record.operation_nonce, [0; 32]);
     }
 
     #[test]
