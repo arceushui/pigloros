@@ -1181,12 +1181,9 @@ impl SelectorAdmission {
     }
 
     fn release(&self, attempt_id: [u8; 16], admitted: &Arc<AdmittedSelectorProvider>) {
-        let Ok(mut state) = self.state.lock() else {
+        let Ok(mut state) = self.lock_generation(admitted) else {
             return;
         };
-        if !Arc::ptr_eq(&state.admitted, admitted) {
-            return;
-        }
         if let std::collections::btree_map::Entry::Occupied(mut entry) =
             state.attempts.entry(attempt_id)
         {
@@ -1218,11 +1215,8 @@ impl SelectorAdmission {
         attempt_id: [u8; 16],
         admitted: &Arc<AdmittedSelectorProvider>,
     ) -> Result<(), ProviderTransportError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| ProviderTransportError::BeforeAdmission)?;
-        if !state.open || !Arc::ptr_eq(&state.admitted, admitted) {
+        let mut state = self.lock_generation(admitted)?;
+        if !state.open {
             return Err(ProviderTransportError::BeforeAdmission);
         }
         let attempt = state
@@ -1232,6 +1226,20 @@ impl SelectorAdmission {
         attempt.provider_entries_in_progress += 1;
         drop(state);
         Ok(())
+    }
+
+    fn lock_generation(
+        &self,
+        admitted: &Arc<AdmittedSelectorProvider>,
+    ) -> Result<std::sync::MutexGuard<'_, SelectorAdmissionState>, ProviderTransportError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+        if !Arc::ptr_eq(&state.admitted, admitted) {
+            return Err(ProviderTransportError::BeforeAdmission);
+        }
+        Ok(state)
     }
 
     fn finish_provider_entry(&self, attempt_id: [u8; 16], entered: bool) {
