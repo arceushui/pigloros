@@ -232,17 +232,32 @@ impl RecipientPrivateFileIdentityV1 {
     }
 
     fn from_inventory(inventory: &StoredRecipientKeyInventoryV1) -> Result<Self, CoreError> {
-        Ok(Self {
-            device: inventory.file_device.as_slice().try_into().map_err(|_| {
-                CoreError::Storage("recipient key inventory device is invalid".to_owned())
-            })?,
-            inode: inventory.file_inode.as_slice().try_into().map_err(|_| {
-                CoreError::Storage("recipient key inventory inode is invalid".to_owned())
-            })?,
-            uid: inventory.file_uid.as_slice().try_into().map_err(|_| {
-                CoreError::Storage("recipient key inventory owner is invalid".to_owned())
-            })?,
-        })
+        inventory
+            .file_device
+            .as_slice()
+            .try_into()
+            .map_err(|_| CoreError::Storage("recipient key inventory device is invalid".to_owned()))
+            .and_then(|device| {
+                inventory
+                    .file_inode
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| {
+                        CoreError::Storage("recipient key inventory inode is invalid".to_owned())
+                    })
+                    .and_then(|inode| {
+                        inventory
+                            .file_uid
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| {
+                                CoreError::Storage(
+                                    "recipient key inventory owner is invalid".to_owned(),
+                                )
+                            })
+                            .map(|uid| Self { device, inode, uid })
+                    })
+            })
     }
 }
 
@@ -657,7 +672,8 @@ fn is_expected_recipient_private_path(
     descriptor: RecipientKeyDescriptorV1,
 ) -> Result<bool, CoreError> {
     let expected = recipient_private_path(Path::new("."), descriptor);
-    Ok(bound_name(path)? == bound_name(&expected)?)
+    bound_name(path)
+        .and_then(|name| bound_name(&expected).map(|expected_name| name == expected_name))
 }
 
 fn ensure_recipient_custody_tables(connection: &rusqlite::Connection) -> Result<(), CoreError> {
@@ -804,15 +820,17 @@ fn record_recipient_destruction_receipt(
     receipt: pos_core::Hash,
 ) -> Result<(), CoreError> {
     let request_receipt = pos_core::deletion_receipt(&request);
-    connection
-        .execute(
+    i64::try_from(request.identity.epoch)
+        .map_err(storage_error)
+        .and_then(|epoch| {
+            connection
+                .execute(
             "INSERT INTO recipient_key_destruction_receipts_v1
              (owner_id, epoch, request_receipt, deletion_receipt, private_path, file_device, file_inode, file_uid)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 request.identity.owner_id.as_str(),
-                i64::try_from(request.identity.epoch)
-                    .map_err(storage_error)?,
+                epoch,
                 request_receipt.as_bytes().as_slice(),
                 receipt.as_bytes().as_slice(),
                 path.as_os_str().as_encoded_bytes(),
@@ -820,9 +838,10 @@ fn record_recipient_destruction_receipt(
                 identity.inode.as_slice(),
                 identity.uid.as_slice(),
             ],
-        )
-        .map(|_| ())
-        .map_err(storage_error)
+                )
+                .map(|_| ())
+                .map_err(storage_error)
+        })
 }
 
 fn quarantine_unregistered_staged_material(
