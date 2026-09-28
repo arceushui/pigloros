@@ -1449,10 +1449,7 @@ mod tests {
         for (arguments, operation) in [
             (args(&["replay", "unused.db", "timeline"]), "replay"),
             (args(&["snapshot", "unused.db", "timeline"]), "snapshot"),
-            (
-                args(&["compare", "unused.db", "a", "b", "0"]),
-                "compare",
-            ),
+            (args(&["compare", "unused.db", "a", "b", "0"]), "compare"),
         ] {
             let error = handle_timeline(&arguments).test_err();
             assert_eq!(
