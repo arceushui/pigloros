@@ -124,8 +124,7 @@ fn public_codecs_round_trip_commitments_and_registry_lookups(
 }
 
 #[test]
-fn public_policy_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::error::Error>>
-{
+fn public_policy_constructors_reject_each_semantic_bound() {
     let mut empty_adapter_id = adapter();
     empty_adapter_id.adapter_id.clear();
     let mut zero_key = adapter();
@@ -159,7 +158,6 @@ fn public_policy_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn
         ForkAuthenticationPolicyV1::new(Vec::new()),
         Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
     );
-    Ok(())
 }
 
 #[test]
