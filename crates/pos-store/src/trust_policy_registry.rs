@@ -6,7 +6,8 @@
 
 use pos_conformance::{ExecutionProfileV1, TrustPolicySnapshotV1};
 use rusqlite::{params, Connection, OpenFlags, Transaction, TransactionBehavior};
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Operator-approved identity pinned outside the incoming TPS1 record.
@@ -115,6 +116,8 @@ struct StoredSnapshot {
 pub struct DeploymentTrustPolicyRegistryV1 {
     connection: Connection,
     release: OperatorReleaseTrustV1,
+    path: PathBuf,
+    state_identity: (u64, u64),
 }
 
 impl DeploymentTrustPolicyRegistryV1 {
@@ -184,9 +187,12 @@ impl DeploymentTrustPolicyRegistryV1 {
         {
             return Err(TrustPolicyRegistryErrorV1::CorruptState);
         }
+        let state_identity = path_identity(path)?;
         Ok(Self {
             connection,
             release,
+            path: path.to_owned(),
+            state_identity,
         })
     }
 
@@ -219,6 +225,7 @@ impl DeploymentTrustPolicyRegistryV1 {
         now: u64,
         register: impl FnOnce(&AdmittedTrustSnapshotV1) -> Result<T, TrustPolicyRegistryErrorV1>,
     ) -> Result<T, TrustPolicyRegistryErrorV1> {
+        self.ensure_path_identity()?;
         let incoming = authenticate(exact_tps1, &self.release)?;
         require_global_position(&incoming)?;
         let raw_epf1_digest = verify_epf1(&incoming, &request, now)?;
@@ -254,12 +261,27 @@ impl DeploymentTrustPolicyRegistryV1 {
         transaction
             .commit()
             .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
+        self.ensure_path_identity()?;
         register(&AdmittedTrustSnapshotV1 {
             digest,
             epoch: incoming.epoch,
             raw_epf1_digest,
         })
     }
+
+    fn ensure_path_identity(&self) -> Result<(), TrustPolicyRegistryErrorV1> {
+        if path_identity(&self.path)? == self.state_identity {
+            Ok(())
+        } else {
+            Err(TrustPolicyRegistryErrorV1::CorruptState)
+        }
+    }
+}
+
+fn path_identity(path: &Path) -> Result<(u64, u64), TrustPolicyRegistryErrorV1> {
+    std::fs::metadata(path)
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+        .map_err(|_| TrustPolicyRegistryErrorV1::MissingState)
 }
 
 fn authenticate(
@@ -737,5 +759,35 @@ mod tests {
         assert_eq!(parse_utc_seconds("2024-13-01T00:00:00Z"), None);
         assert_eq!(parse_utc_seconds("2024-01-01T00:00:60Z"), None);
         assert_eq!(parse_utc_seconds("2030-01-01"), None);
+    }
+
+    #[test]
+    fn removal_of_live_state_path_denies_new_admission() {
+        let snapshot = fixture_snapshot();
+        let genesis = signed(snapshot.clone());
+        let directory = tempfile::tempdir().expect("temporary trust directory");
+        let path = directory.path().join("trust.db");
+        DeploymentTrustPolicyRegistryV1::provision_explicit(
+            &path,
+            &release(&snapshot, &genesis),
+            &genesis,
+        )
+        .expect("genesis");
+        let mut registry = DeploymentTrustPolicyRegistryV1::open_current(
+            &path,
+            release(&snapshot, &genesis),
+        )
+        .expect("open state");
+        std::fs::remove_file(&path).expect("remove temporary database path");
+        let profile = fixture_profile();
+        assert!(matches!(
+            registry.with_admitted_epf1_at(
+                &genesis,
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(())
+            ),
+            Err(TrustPolicyRegistryErrorV1::MissingState)
+        ));
     }
 }

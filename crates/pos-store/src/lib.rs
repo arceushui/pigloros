@@ -62,7 +62,7 @@ pub use timeline_range::{
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
-#[cfg(feature = "sqlite")]
+#[cfg(all(feature = "sqlite", target_os = "linux"))]
 pub mod trust_policy_registry;
 
 // Re-export the port, its append-deduplication surface, and Wave 6 export/import helpers so

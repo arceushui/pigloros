@@ -9,11 +9,11 @@ publish.workspace = true
 # Backend features — sqlite is on by default; disable with --no-default-features
 [features]
 default = ["sqlite"]
-sqlite = ["dep:rusqlite"]
+sqlite = ["dep:rusqlite", "dep:pos-conformance", "dep:blake3"]
 
 [dependencies]
-blake3 = { workspace = true }
-pos-conformance = { path = "../pos-conformance" }
+blake3 = { workspace = true, optional = true }
+pos-conformance = { path = "../pos-conformance", optional = true }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
 ciborium = { workspace = true }
@@ -25,6 +25,7 @@ rand = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
 tempfile = "3"
