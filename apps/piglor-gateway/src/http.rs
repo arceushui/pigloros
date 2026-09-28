@@ -81,6 +81,7 @@ mod coverage_tests {
                 page: crate::EventPage {
                     events: vec![event],
                     next_from_seq: None,
+                    next_cursor: None,
                 },
                 inventory_generation: None,
             },
@@ -1467,6 +1468,44 @@ osf_link = \"https://osf.io/example\"\n";
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn public_gateway_cursor_rejects_stale_generation_and_wrong_timeline() {
+        let (gateway, _, id, actor) = host_cursor_fixture("public-cursor-owner").await;
+        for marker in 1..=2 {
+            gateway
+                .append_action(
+                    &id,
+                    &actor,
+                    crate::EVENT_TYPE_ACTION,
+                    &json!({"marker": marker}),
+                )
+                .await
+                .test_ok();
+        }
+        let first = gateway.read_events_page(&id, 0, 1).await.test_ok();
+        let cursor = first.next_cursor.test_ok();
+        let second = gateway
+            .read_events_page_after(&id, cursor, 1)
+            .await
+            .test_ok();
+        assert_eq!(second.events[0].seq.as_u64(), 2);
+
+        let other = gateway
+            .create_timeline("public-cursor-other")
+            .await
+            .test_ok();
+        assert!(matches!(
+            gateway
+                .read_events_page_after(&other.id().to_string(), cursor, 1)
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway.read_events_page_after(&id, cursor, 1).await,
+            Err(GatewayError::StaleEventCursor)
+        ));
     }
 
     #[tokio::test]
