@@ -724,13 +724,16 @@ impl ProjectionRegistry {
     ///
     /// # Errors
     /// Returns a closed source error when the generation is stale or the
-    /// Timeline snapshot fence is unavailable.
+    /// Timeline snapshot fence is unavailable or reducer names are ambiguous.
     pub fn restore_from_snapshot(
         &mut self,
         timeline: TimelineId,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<(), AuthorityErrorV1> {
+        if self.has_duplicate_names() {
+            return Err(AuthorityErrorV1::SourceUnavailable);
+        }
         let gate = self
             .erasure_gate
             .as_ref()
@@ -805,7 +808,8 @@ impl ProjectionRegistry {
     /// when the states are identical.
     ///
     /// # Errors
-    /// Returns a closed source error when the Timeline has no verified access.
+    /// Returns a closed source error when Timeline access is unverified or
+    /// reducer names are ambiguous.
     pub fn diff_against_snapshot(
         &self,
         timeline: TimelineId,
@@ -813,6 +817,9 @@ impl ProjectionRegistry {
         all_entities: &[EntityId],
     ) -> Result<Option<(String, EntityId)>, AuthorityErrorV1> {
         self.with_erasure_fence(timeline, |registry| {
+            if registry.has_duplicate_names() {
+                return Err(AuthorityErrorV1::SourceUnavailable);
+            }
             for (name, slot) in &registry.slots {
                 let snap_reg = snapshot.get(name).cloned().unwrap_or_default();
                 for entity in all_entities {
@@ -2380,7 +2387,8 @@ mod wave3_tests {
         assert!(registry
             .register_installed_reducer(first, "same", Box::new(EntityStateProjection))
             .is_ok());
-        registry.apply_event(&ev(entity));
+        registry.apply_event(timeline, &ev(entity));
+        let single_slot_snapshot = test_ok(registry.state_snapshot(timeline));
         assert!(registry
             .register_installed_reducer(second, "same", Box::new(EntityStateProjection))
             .is_ok());
@@ -2392,12 +2400,22 @@ mod wave3_tests {
         };
         assert_eq!(count(&registry, first), Some(1));
         assert_eq!(count(&registry, second), None);
-        assert!(registry.state_for_reducer("same", &entity).is_none());
-        assert!(registry.state_for(&entity).is_none());
+        assert!(test_ok(registry.state_for_reducer(timeline, "same", &entity)).is_none());
+        assert!(test_ok(registry.state_for(timeline, &entity)).is_some());
         assert!(matches!(
             registry.state_snapshot(timeline),
             Err(AuthorityErrorV1::SourceUnavailable)
         ));
+        assert_eq!(
+            registry.restore_from_snapshot(timeline, &single_slot_snapshot, None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(count(&registry, first), Some(1));
+        assert_eq!(count(&registry, second), None);
+        assert_eq!(
+            registry.diff_against_snapshot(timeline, &single_slot_snapshot, &[entity]),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
         assert!(matches!(
             registry.register_installed_reducer(first, "other", Box::new(EntityStateProjection)),
             Err(ProjectionSlotErrorV1::DuplicatePluginId { .. })
@@ -2419,7 +2437,7 @@ mod wave3_tests {
             Err(ProjectionSlotErrorV1::InvalidName)
         );
         let denied: Result<(), &str> = registry.try_with_state_transaction(|candidate| {
-            candidate.apply_event(&ev(entity));
+            candidate.apply_event(timeline, &ev(entity));
             Err("denied")
         });
         assert_eq!(denied, Err("denied"));

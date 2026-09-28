@@ -442,7 +442,7 @@ mod tests {
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
-        ids::EntityId,
+        ids::{EntityId, PluginId},
         store::{EventReadBounds, EventStore},
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
         ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureContainmentGateV1,
@@ -789,6 +789,34 @@ mod tests {
         verified.register("count", Box::new(CountReducer));
         super::verify_snapshot_consistency(&mut reads, &captured, &mut verified, &closure)
             .test_ok();
+    }
+
+    #[test]
+    fn public_snapshot_verification_rejects_ambiguous_installed_reducers() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let timeline = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("ambiguous-snapshot").test_ok();
+            commands
+                .append(timeline.id(), &[draft(EntityId::new())])
+                .test_ok();
+            timeline.id()
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        projected
+            .register_installed_reducer(PluginId::new(), "same", Box::new(CountReducer))
+            .test_ok();
+        let mut reads = host.read_sender().test_ok();
+        let captured = super::snapshot(&mut reads, timeline, &mut projected, &closure).test_ok();
+        projected
+            .register_installed_reducer(PluginId::new(), "same", Box::new(CountReducer))
+            .test_ok();
+        assert!(matches!(
+            super::verify_snapshot_consistency(&mut reads, &captured, &mut projected, &closure),
+            Err(SnapshotError::ArtifactUnavailable)
+        ));
     }
 
     #[test]
