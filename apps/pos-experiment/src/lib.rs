@@ -17,8 +17,8 @@ use pos_core::{
     event::{EventDraft, Kind},
     ids::{EntityId, TimelineId},
     store::{EventReadBounds, EventStore, SeqRange},
-    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureHostErrorV1, Event,
-    ReproManifest, Seq, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureHostErrorV1,
+    ErasureProtectedOperationV1, Event, ReproManifest, Seq, Timeline,
 };
 use pos_core::{ErasureContainmentGateV1, ErasureGate};
 use pos_runtime::PluginRegistry;
@@ -406,22 +406,49 @@ impl RunResult {
                     .map_err(ExperimentError::from)
             })
             .and_then(|timeline_head| {
-                gate.authorize_projection(
-                    self.timeline_id,
-                    subject,
-                    timeline_head.as_u64(),
-                    now_secs,
-                    token,
-                )
-                .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))
-            })
-            .and_then(|()| {
                 self.projections
-                    .state_for_reducer(self.timeline_id, reducer, &subject)
-                    .map_err(|_| {
-                        ExperimentError::Runtime(
+                    .clone_erasure_gate()
+                    .ok_or(ExperimentError::Runtime(
+                        pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                    ))
+                    .and_then(|erasure_gate| {
+                        let mut result = Err(ExperimentError::Runtime(
                             pos_runtime::RuntimeError::ErasureOperationUnavailable,
-                        )
+                        ));
+                        let mut read = || {
+                            result = gate
+                                .authorize_projection(
+                                    self.timeline_id,
+                                    subject,
+                                    timeline_head.as_u64(),
+                                    now_secs,
+                                    token,
+                                )
+                                .map_err(|error| {
+                                    map_runtime_error(pos_runtime::RuntimeError::Consent(error))
+                                })
+                                .and_then(|()| {
+                                    self.projections
+                                        .state_for_reducer(self.timeline_id, reducer, &subject)
+                                        .map_err(|_| {
+                                            ExperimentError::Runtime(
+                                                pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                                            )
+                                        })
+                                });
+                        };
+                        erasure_gate
+                            .with_fence(
+                                self.timeline_id,
+                                ErasureProtectedOperationV1::Snapshot,
+                                &mut read,
+                            )
+                            .map_err(|_| {
+                                ExperimentError::Runtime(
+                                    pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                                )
+                            })
+                            .and(result)
                     })
             })
     }
