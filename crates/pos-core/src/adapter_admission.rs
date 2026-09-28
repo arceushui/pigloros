@@ -3,12 +3,25 @@
 //! These structural bytes do not prove owner admission, `PublicRecord`
 //! provenance, a complete Plugin roster, or authority to invoke an adapter.
 
-use crate::{
-    adapter_contract::{valid_adapter_identity, AdapterContractKey},
-    canonical_cbor_head::encode_head,
-    Hash, PluginId,
-};
+use crate::{encode_head, Hash, PluginId};
 use ulid::Ulid;
+
+/// One admitted Plugin operation, before any owner-authority claim.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct AdapterContractKey<'a> {
+    pub plugin_id: PluginId,
+    pub adapter_id: &'a str,
+    pub provider_id: &'a str,
+    pub operation_id: &'a str,
+    pub protocol_version: u64,
+}
+
+pub(crate) fn valid_adapter_identity(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
 
 /// Largest accepted MAA1 record, including all adapter entries.
 pub const MAX_ADAPTER_ADMISSION_BYTES_V1: usize = 16 * 1024 * 1024;
