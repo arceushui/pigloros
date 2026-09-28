@@ -160,7 +160,7 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     };
 
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
@@ -286,7 +286,7 @@ mod tests {
 
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut reads = host.read_sender().test_ok();
         assert!(matches!(
             super::replay(&mut reads, timeline, &mut registry, &closure),
@@ -447,11 +447,11 @@ mod tests {
             })
             .collect();
 
-        let closure = crate::test_support::closure_for_host_consumer(&host, timeline, "world");
+        let closure = crate::test_support::closure_for_host_consumer(&mut host, timeline, "world");
         let mut before = world_registry(gate.clone());
         let mut first = world_registry(gate.clone());
         let mut complete = world_registry(gate.clone());
-        let count_only = crate::test_support::closure_for_host(&host, timeline);
+        let count_only = crate::test_support::closure_for_host(&mut host, timeline);
         let mut reads = host.read_sender().test_ok();
         assert!(matches!(
             super::replay_at(&mut reads, timeline, action.seq, &mut before, &count_only),
@@ -494,7 +494,7 @@ mod tests {
             .test_ok()
             .append(timeline, &[telemetry])
             .test_ok();
-        let closure = crate::test_support::closure_for_host_consumer(&host, timeline, "world");
+        let closure = crate::test_support::closure_for_host_consumer(&mut host, timeline, "world");
         let mut with_telemetry = world_registry(gate);
         super::replay(
             &mut host.read_sender().test_ok(),
@@ -555,7 +555,7 @@ mod tests {
             .append(timeline, &invalid)
             .test_ok();
 
-        let closure = crate::test_support::closure_for_host_consumer(&host, timeline, "world");
+        let closure = crate::test_support::closure_for_host_consumer(&mut host, timeline, "world");
         let mut accepted = world_registry(gate.clone());
         let mut after_invalid = world_registry(gate);
         let mut reads = host.read_sender().test_ok();
@@ -603,7 +603,7 @@ mod tests {
                 .test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -637,7 +637,7 @@ mod tests {
                 .test_ok();
             (authorized.id(), requested.id())
         };
-        let closure = crate::test_support::closure_for_host(&host, authorized);
+        let closure = crate::test_support::closure_for_host(&mut host, authorized);
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -664,7 +664,7 @@ mod tests {
             commands.append(fork.id(), &[draft(entity)]).test_ok();
             (fork.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, fork);
+        let closure = crate::test_support::closure_for_host(&mut host, fork);
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -695,7 +695,7 @@ mod tests {
             commands.append(timeline.id(), &[draft(entity)]).test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -784,7 +784,7 @@ mod tests {
                 .test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -811,7 +811,7 @@ mod tests {
             commands.append(timeline.id(), &[draft(entity)]).test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -879,39 +879,7 @@ mod tests {
         calls: AtomicUsize,
     }
 
-    struct PoisonGateOnSecondVerification {
-        calls: AtomicUsize,
-        gate: Arc<Mutex<Option<Arc<ErasureContainmentGateV1>>>>,
-    }
-
     struct OneEventWorldReplayVerifier;
-
-    impl pos_runtime::WorldReplayVerifierV1 for PoisonGateOnSecondVerification {
-        fn verify(
-            &self,
-            closure: &pos_core::WorldReplayClosureV1,
-            requested_use: &pos_runtime::WorldReplayUseV1,
-            inventory_generation: pos_core::ErasureReferenceV1,
-        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
-        {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
-                if let Some(gate) = self
-                    .gate
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                {
-                    gate.poison();
-                }
-            }
-            Ok(pos_runtime::world_replay::test_verified_world_replay(
-                closure,
-                requested_use,
-                inventory_generation,
-                pos_core::ErasureReplayClaimV1::Exact,
-            ))
-        }
-    }
 
     impl pos_runtime::WorldReplayVerifierV1 for OneEventWorldReplayVerifier {
         fn verify(

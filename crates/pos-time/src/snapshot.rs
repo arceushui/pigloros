@@ -749,7 +749,7 @@ mod tests {
         };
         let mut projected = ProjectionRegistry::new().with_erasure_gate(gate);
         projected.register("count", Box::new(CountReducer));
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut reads = host.read_sender().test_ok();
         let result = super::snapshot(&mut reads, timeline, &mut projected, &closure);
         assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
@@ -772,7 +772,7 @@ mod tests {
                 .test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
         projected.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -796,7 +796,7 @@ mod tests {
                 .test_ok();
             timeline.id()
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut projected = ProjectionRegistry::new();
         projected.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -823,7 +823,7 @@ mod tests {
                 commands.append(timeline.id(), &[draft(entity)]).test_ok();
                 (timeline.id(), entity)
             };
-            let closure = crate::test_support::closure_for_host(&host, timeline);
+            let closure = crate::test_support::closure_for_host(&mut host, timeline);
             let mut projected = ProjectionRegistry::new().with_erasure_gate(gate);
             projected.register("count", Box::new(CountReducer));
             let mut reads = host.read_sender().test_ok();
@@ -851,7 +851,7 @@ mod tests {
             let mut commands = host.command_sender().test_ok();
             commands.create_timeline("future-snapshot").test_ok().id()
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("count", Box::new(CountReducer));
         let snapshot = Snapshot {
@@ -872,7 +872,7 @@ mod tests {
     fn snapshot_read_effect_rejects_an_unknown_timeline_after_admission() {
         let mut host = crate::test_support::open_exact_host();
         let timeline = TimelineId::new();
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut registry = ProjectionRegistry::new().with_erasure_gate(host.containment_gate());
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -928,7 +928,7 @@ mod tests {
             commands.append(timeline.id(), &[draft(entity)]).test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let snap = Snapshot {
             timeline,
             at_seq: Seq::ZERO,
@@ -955,7 +955,7 @@ mod tests {
             commands.append(timeline.id(), &[draft(entity)]).test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut projected = ProjectionRegistry::new();
         projected.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -990,7 +990,7 @@ mod tests {
             commands.append(timeline.id(), &[draft(entity)]).test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let snap = Snapshot {
             timeline,
             at_seq: Seq::ZERO,
@@ -1022,7 +1022,7 @@ mod tests {
             commands.append(timeline.id(), &[draft(entity)]).test_ok();
             (timeline.id(), entity)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut projected = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
         projected.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
@@ -1053,7 +1053,7 @@ mod tests {
                 .remove(0);
             (timeline.id(), foreign_event)
         };
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut extra_state = StateRegistry::new();
         extra_state.apply(&CountReducer, &foreign_event);
         let snapshot = Snapshot {
@@ -1082,7 +1082,7 @@ mod tests {
             .create_timeline("snapshot-extra-reducer")
             .test_ok()
             .id();
-        let closure = crate::test_support::closure_for_host(&host, timeline);
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let snapshot = Snapshot {
             timeline,
             at_seq: Seq::ZERO,

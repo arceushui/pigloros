@@ -139,18 +139,23 @@ pub mod test_support {
     }
 
     pub(crate) fn closure_for_host(
-        host: &ErasureExecutionHostV1,
+        host: &mut ErasureExecutionHostV1,
         timeline: pos_core::TimelineId,
     ) -> WorldReplayClosureV1 {
         closure_for_host_consumer(host, timeline, "count")
     }
 
     pub(crate) fn closure_for_host_consumer(
-        host: &ErasureExecutionHostV1,
+        host: &mut ErasureExecutionHostV1,
         timeline: pos_core::TimelineId,
         consumer_id: &str,
     ) -> WorldReplayClosureV1 {
-        let generation = test_ok(host.containment_gate().inventory_generation());
+        let (_, generation) = test_ok(test_ok(host.read_sender()).read_bounded_at_generation(
+            timeline,
+            pos_core::store::SeqRange::all(),
+            pos_core::store::EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+            None,
+        ));
         test_ok(WorldReplayClosureV1::test_fixture_for_timeline_consumer(
             timeline,
             Hash::from_bytes(generation.digest()),

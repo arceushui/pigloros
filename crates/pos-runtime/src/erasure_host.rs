@@ -4203,7 +4203,7 @@ mod tests {
             &composition,
             ErasureRecoveryLimitsV1::compiled_maximum(),
         ));
-        let generation = test_ok(host.containment_gate().inventory_generation());
+        let generation = test_ok(host.gate.inventory_generation());
         let closure = test_ok(
             WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes(
                 generation.digest(),
@@ -4218,7 +4218,7 @@ mod tests {
             StoreConfig::Memory,
             ErasureRecoveryLimitsV1::compiled_maximum(),
         ));
-        let absent_generation = test_ok(absent_host.containment_gate().inventory_generation());
+        let absent_generation = test_ok(absent_host.gate.inventory_generation());
         let absent_closure = test_ok(
             WorldReplayClosureV1::test_fixture_with_inventory_generation(Hash::from_bytes(
                 absent_generation.digest(),
@@ -4265,7 +4265,7 @@ mod tests {
         }
 
         let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
-        let generation = test_ok(host.containment_gate().inventory_generation());
+        let generation = test_ok(host.gate.inventory_generation());
         let mut reads = test_ok(host.read_sender());
         let requested_use = replay_use(&closure);
         let capability = test_ok(reads.admit_world_replay(&closure, &requested_use));
@@ -4323,7 +4323,7 @@ mod tests {
     #[test]
     fn world_replay_admission_rejects_a_stale_sender_before_verification() {
         let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
-        let current = test_ok(host.containment_gate().inventory_generation());
+        let current = test_ok(host.gate.inventory_generation());
         let stale = reference(1);
         assert_ne!(stale, current);
         let mut reads = ErasureReadSenderV1 {

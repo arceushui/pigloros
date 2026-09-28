@@ -582,13 +582,22 @@ mod tests {
             commands.append(fork_a.id(), &[draft(entity)]).test_ok();
             (fork_a.id(), fork_b.id(), fork_seq)
         };
-        let generation = gate.inventory_generation().test_ok();
+        let (_, generation) = host
+            .read_sender()
+            .test_ok()
+            .read_bounded_at_generation(
+                fork_a,
+                SeqRange::all(),
+                EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                None,
+            )
+            .test_ok();
         let mut registry_a = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         registry_a.register("count", Box::new(CountReducer));
         let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
         registry_b.register("count", Box::new(CountReducer));
-        let closure_a = crate::test_support::closure_for_host(&host, fork_a);
-        let closure_b = crate::test_support::closure_for_host(&host, fork_b);
+        let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
         let mut reads = host.read_sender().test_ok();
         let diff = super::compare(
             &mut reads,
@@ -635,8 +644,8 @@ mod tests {
                 .test_ok();
             (fork_a.id(), fork_b.id(), fork_seq, shared[0].seq, entity)
         };
-        let closure_a = crate::test_support::closure_for_host(&host, fork_a);
-        let closure_b = crate::test_support::closure_for_host(&host, fork_b);
+        let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
         let mut registry_a = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
         registry_a.register("count", Box::new(CountReducer));
         let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
@@ -718,8 +727,8 @@ mod tests {
             commands.append(fork_b.id(), &[draft(entity)]).test_ok();
             (fork_a.id(), fork_b.id(), fork_seq, entity)
         };
-        let closure_a = crate::test_support::closure_for_host(&host, fork_a);
-        let closure_b = crate::test_support::closure_for_host(&host, fork_b);
+        let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
         let mut registry_a = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
         registry_a.register("count", Box::new(CountReducer));
         let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
@@ -769,8 +778,8 @@ mod tests {
             commands.append(fork_b.id(), &[draft(entity)]).test_ok();
             (fork_a.id(), fork_b.id(), fork_seq, entity)
         };
-        let closure_a = crate::test_support::closure_for_host(&host, fork_a);
-        let closure_b = crate::test_support::closure_for_host(&host, fork_b);
+        let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
         let mut registry_a = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
         registry_a.register("count", Box::new(CountReducer));
         let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
