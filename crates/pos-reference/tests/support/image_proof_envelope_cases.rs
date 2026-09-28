@@ -30,6 +30,61 @@ mod envelope_cases {
     }
 
     #[test]
+    fn public_proof_verification_decodes_eight_maximum_size_certificates() -> TestResult {
+        const CERTIFICATE_BYTES: usize = 64 * 1024;
+        let mut selected = Vec::new();
+        let proof = edit_cms(PROOF, |cms_data| {
+            let mut choices = Vec::new();
+            for marker in 0_u8..8 {
+                let mut certificate = Certificate::from_der(CERTIFICATE)?;
+                if marker != 0 {
+                    certificate.tbs_certificate.serial_number =
+                        x509_cert::serial_number::SerialNumber::new(&[marker])?;
+                }
+                let padding_oid = ObjectIdentifier::new("1.2.3.4")?;
+                certificate
+                    .tbs_certificate
+                    .extensions
+                    .as_mut()
+                    .ok_or("missing extensions")?
+                    .push(Extension {
+                        extn_id: padding_oid,
+                        critical: false,
+                        extn_value: OctetString::new(vec![0; 60_000])?,
+                    });
+                let padding = 60_000 + CERTIFICATE_BYTES - certificate.to_der()?.len();
+                let extension = certificate
+                    .tbs_certificate
+                    .extensions
+                    .as_mut()
+                    .ok_or("missing extensions")?
+                    .iter_mut()
+                    .find(|extension| extension.extn_id == padding_oid)
+                    .ok_or("missing padding")?;
+                extension.extn_value = OctetString::new(vec![0; padding])?;
+                let encoded = certificate.to_der()?;
+                assert_eq!(encoded.len(), CERTIFICATE_BYTES);
+                if marker == 0 {
+                    selected = encoded;
+                }
+                choices.push(CertificateChoices::Certificate(certificate));
+            }
+            cms_data.certificates = Some(choices.try_into()?);
+            Ok(())
+        })?;
+        assert!(proof.len() > 8 * CERTIFICATE_BYTES);
+        assert!(proof.len() <= 8 * CERTIFICATE_BYTES + 4096);
+        // This passes both inclusive envelope limits and reaches path checks
+        // after eager certificate decoding. Eight self-issued certificates
+        // cannot be the selected signer's unique complete path.
+        assert_eq!(
+            verify(&fixture(&proof, &selected)?, NOW)?,
+            Err(SandboxImageProofError::InvalidPath)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn public_proof_verification_rejects_truncated_envelope_prefixes() -> TestResult {
         for count in 0..5 {
             let mut outer = ContentInfo::from_der(PROOF)?;

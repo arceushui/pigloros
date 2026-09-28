@@ -7,6 +7,7 @@ test harness. These measurements are not verifier-only RSS or a release limit.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -16,11 +17,23 @@ import subprocess
 import sys
 
 
+@dataclass(frozen=True)
+class ProofCase:
+    test: str
+    lower_bound: int = 1024 * 1024 - 4096
+    upper_bound: int = 1024 * 1024
+
+
 PREFIX = "image_proof_cases::envelope_cases::public_proof_verification_"
 CASES = {
-    "digest-set": PREFIX + "bounds_near_limit_digest_set_before_decoding",
-    "certificate": PREFIX + "bounds_near_limit_certificate_before_decoding",
-    "attributes": PREFIX + "rejects_near_limit_attributes_before_decoding",
+    "digest-set": ProofCase(PREFIX + "bounds_near_limit_digest_set_before_decoding"),
+    "certificate": ProofCase(PREFIX + "bounds_near_limit_certificate_before_decoding"),
+    "attributes": ProofCase(PREFIX + "rejects_near_limit_attributes_before_decoding"),
+    "maximum-certificate-set": ProofCase(
+        PREFIX + "decodes_eight_maximum_size_certificates",
+        lower_bound=8 * 64 * 1024,
+        upper_bound=8 * 64 * 1024 + 4096,
+    ),
 }
 
 
@@ -59,7 +72,7 @@ def peak_allocation(path: Path) -> dict[str, int]:
     return values
 
 
-def measure(executable: Path, directory: Path, label: str, case: str) -> dict[str, object]:
+def measure(executable: Path, directory: Path, label: str, case: ProofCase) -> dict[str, object]:
     trace = directory / f"{label}.massif"
     result = subprocess.run(
         [
@@ -70,7 +83,7 @@ def measure(executable: Path, directory: Path, label: str, case: str) -> dict[st
             "--peak-inaccuracy=0.0",
             f"--massif-out-file={trace}",
             str(executable),
-            case,
+            case.test,
             "--exact",
             "--test-threads=1",
         ],
@@ -92,9 +105,9 @@ def measure(executable: Path, directory: Path, label: str, case: str) -> dict[st
     )
     (directory / f"{label}.txt").write_text(rendered.stdout)
     return {
-        "case": case,
-        "proof_bytes_exclusive_lower_bound": 1024 * 1024 - 4096,
-        "proof_bytes_inclusive_upper_bound": 1024 * 1024,
+        "case": case.test,
+        "proof_bytes_exclusive_lower_bound": case.lower_bound,
+        "proof_bytes_inclusive_upper_bound": case.upper_bound,
         "peak": peak,
     }
 

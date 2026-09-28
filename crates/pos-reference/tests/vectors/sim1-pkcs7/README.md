@@ -104,11 +104,16 @@ mountable image or systemd/kernel acceptance evidence.
 ## Hosted allocation evidence
 
 The `sim1-proof-risk` workflow builds the public admission test executable and
-runs three adversarial cases in separate
+runs four adversarial cases in separate
 [Massif](https://valgrind.org/docs/manual/ms-manual.html) processes: an excessive
-digest set, an oversized certificate, and forbidden attributes. Each case
-asserts that its DER proof is larger than 1 MiB minus 4 KiB and at most 1 MiB,
-then checks rejection through `AdmittedSandboxProvider::verify_image_proof`.
+digest set, an oversized certificate, forbidden attributes, and eight certificates
+of exactly 64 KiB each. The first three cases assert a DER proof larger than
+1 MiB minus 4 KiB and at most 1 MiB, exercising rejection before eager decoding.
+The fourth asserts a proof larger than 512 KiB and at most 516 KiB; it passes
+the inclusive certificate size/count limits, exercises eager CMS decoding, and
+is rejected by path validation. All cases use
+`AdmittedSandboxProvider::verify_image_proof`. Mutated certificate signatures
+are not valid; these fixtures measure rejection paths, not new trusted chains.
 
 The artifact retains the raw heap traces, readable allocation trees, exact
 source and checkout commits, executable hash, compiler/profiler versions and
