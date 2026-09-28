@@ -22,6 +22,10 @@ use zeroize::Zeroizing;
 
 use super::{begin_immediate_sql, finish_immediate_transaction, CoreError, SqliteStore};
 
+fn storage_error(error: impl std::fmt::Display) -> CoreError {
+    CoreError::Storage(error.to_string())
+}
+
 #[cfg(test)]
 thread_local! {
     static RECIPIENT_FSYNC_FAILURE: std::cell::Cell<Option<usize>> = const {
@@ -230,8 +234,7 @@ impl RecipientKeyOwnerV1 {
     /// Returns a storage error when the directory is unavailable or unsafe.
     pub fn open(directory: impl Into<PathBuf>, grantee_id: EntityId) -> Result<Self, CoreError> {
         let directory = directory.into();
-        let metadata = std::fs::symlink_metadata(&directory)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let metadata = std::fs::symlink_metadata(&directory).map_err(storage_error)?;
         if !metadata.is_dir() {
             return Err(CoreError::Storage(
                 "recipient key directory is not a directory".to_owned(),
@@ -253,10 +256,8 @@ impl RecipientKeyOwnerV1 {
                 ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
             )
             .map(File::from)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-            let retained_metadata = directory_file
-                .metadata()
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(storage_error)?;
+            let retained_metadata = directory_file.metadata().map_err(storage_error)?;
             if retained_metadata.uid() != metadata.uid()
                 || retained_metadata.ino() != metadata.ino()
                 || retained_metadata.dev() != metadata.dev()
@@ -265,8 +266,7 @@ impl RecipientKeyOwnerV1 {
                     "recipient key directory changed while opening".to_owned(),
                 ));
             }
-            let current_metadata = std::fs::symlink_metadata(&directory)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let current_metadata = std::fs::symlink_metadata(&directory).map_err(storage_error)?;
             if !current_metadata.is_dir()
                 || current_metadata.file_type().is_symlink()
                 || current_metadata.mode() & 0o777 != 0o700
@@ -307,11 +307,10 @@ impl SqliteStore {
         &mut self,
         owner: &RecipientKeyOwnerV1,
     ) -> Result<RecipientKeyDescriptorV1, CoreError> {
-        let owner_id = recipient_owner_id_from_grantee(owner.grantee_id)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
         self.conn
             .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(storage_error)?;
         let result = (|| {
             validate_owner_directory(owner)?;
             ensure_recipient_custody_tables(&self.conn)?;
@@ -334,19 +333,19 @@ impl SqliteStore {
             })?;
             let (private_key, public_key) =
                 pos_crypto::recipient_key::derive_recipient_keypair_v1(&ikm)
-                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    .map_err(storage_error)?;
             let private_key = Zeroizing::new(private_key);
             let descriptor =
                 RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, epoch, public_key)
-                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    .map_err(storage_error)?;
             let private_path = recipient_private_path(&owner.directory, descriptor);
             let file_identity = write_private_key(owner, &private_path, &private_key)?;
             let material_digest = pos_crypto::key_roles::key_material_digest(&private_key);
             let mut next = registry;
             next.register_key(KeyRegistrationV1::new(identity, material_digest, None))
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            self.conn.execute("INSERT INTO recipient_key_inventory_v1 (owner_id, epoch, descriptor, material_digest, private_path, file_device, file_inode, file_uid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", rusqlite::params![identity.owner_id.as_str(), i64::try_from(epoch).map_err(|error| CoreError::Storage(error.to_string()))?, descriptor.encode(), material_digest.as_bytes().as_slice(), private_path.as_os_str().as_encoded_bytes(), file_identity.device.as_slice(), file_identity.inode.as_slice(), file_identity.uid.as_slice()])
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+                .map_err(storage_error)?;
+            self.conn.execute("INSERT INTO recipient_key_inventory_v1 (owner_id, epoch, descriptor, material_digest, private_path, file_device, file_inode, file_uid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", rusqlite::params![identity.owner_id.as_str(), i64::try_from(epoch).map_err(storage_error)?, descriptor.encode(), material_digest.as_bytes().as_slice(), private_path.as_os_str().as_encoded_bytes(), file_identity.device.as_slice(), file_identity.inode.as_slice(), file_identity.uid.as_slice()])
+                .map_err(storage_error)?;
             self.save_key_registry_in_transaction(&next)?;
             Ok(descriptor)
         })();
@@ -368,18 +367,18 @@ impl SqliteStore {
     ) -> Result<Vec<RecipientKeyDescriptorV1>, CoreError> {
         self.conn
             .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(storage_error)?;
         let result = (|| {
             validate_owner_directory(owner)?;
             ensure_recipient_custody_tables(&self.conn)?;
             claim_recipient_custody_directory(&self.conn, owner)?;
-            let owner_id = recipient_owner_id_from_grantee(owner.grantee_id)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let owner_id =
+                recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
             let registry = self.load_key_registry()?.ok_or_else(|| {
                 CoreError::Storage("recipient registry is unavailable".to_owned())
             })?;
             let mut statement = self.conn.prepare("SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 ORDER BY epoch")
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+                .map_err(storage_error)?;
             let rows = statement
                 .query_map(rusqlite::params![owner_id.as_str()], |row| {
                     Ok(StoredRecipientKeyInventoryV1 {
@@ -391,10 +390,8 @@ impl SqliteStore {
                         file_uid: row.get(5)?,
                     })
                 })
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
-            let inventories = rows
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+                .map_err(storage_error)?;
+            let inventories = rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
             let descriptors =
                 validate_recipient_key_inventory(owner, &owner_id, &registry, &inventories)?;
             quarantine_unregistered_staged_material(owner, &inventories)?;
@@ -417,13 +414,12 @@ impl SqliteStore {
         epoch: u64,
         authorization_digest: pos_core::Hash,
     ) -> Result<(), CoreError> {
-        let owner_id = recipient_owner_id_from_grantee(owner.grantee_id)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
         let identity =
             KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, epoch);
         self.conn
             .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(storage_error)?;
         let begun = (|| {
             ensure_recipient_custody_tables(&self.conn)?;
             claim_recipient_custody_directory(&self.conn, owner)?;
@@ -439,7 +435,7 @@ impl SqliteStore {
             let request = KeyDestructionRequestV1::new(identity, digest, authorization_digest);
             let outcome = registry
                 .begin_key_destruction(request)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+                .map_err(storage_error)?;
             if matches!(outcome, pos_core::KeyDestructionBeginOutcomeV1::Started) {
                 self.save_key_registry_in_transaction(&registry)?;
             }
@@ -462,7 +458,7 @@ impl SqliteStore {
     ) -> Result<(), CoreError> {
         self.conn
             .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(storage_error)?;
         let result = (|| {
             ensure_recipient_custody_tables(&self.conn)?;
             claim_recipient_custody_directory(&self.conn, owner)?;
@@ -492,18 +488,17 @@ impl SqliteStore {
             record_recipient_destruction_receipt(&self.conn, request, &path, bound_file, receipt)?;
             registry
                 .complete_key_destruction(request, receipt)
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+                .map_err(storage_error)?;
             let removed = self
                 .conn
                 .execute(
                     "DELETE FROM recipient_key_inventory_v1 WHERE owner_id = ?1 AND epoch = ?2",
                     rusqlite::params![
                         request.identity.owner_id.as_str(),
-                        i64::try_from(request.identity.epoch)
-                            .map_err(|error| CoreError::Storage(error.to_string()))?
+                        i64::try_from(request.identity.epoch).map_err(storage_error)?
                     ],
                 )
-                .map_err(|error| CoreError::Storage(error.to_string()))?;
+                .map_err(storage_error)?;
             if removed != 1 {
                 return Err(CoreError::Storage(
                     "recipient key inventory changed during destruction".to_owned(),
@@ -528,7 +523,7 @@ impl SqliteStore {
                 rusqlite::params![
                     identity.owner_id.as_str(),
                     i64::try_from(identity.epoch)
-                        .map_err(|error| CoreError::Storage(error.to_string()))?
+                        .map_err(storage_error)?
                 ],
                 |row| {
                     Ok(StoredRecipientKeyInventoryV1 {
@@ -541,9 +536,9 @@ impl SqliteStore {
                     })
                 },
             )
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let descriptor = RecipientKeyDescriptorV1::decode(&inventory.descriptor)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(storage_error)?;
+        let descriptor =
+            RecipientKeyDescriptorV1::decode(&inventory.descriptor).map_err(storage_error)?;
         if descriptor.identity() != identity || !descriptor.is_for_grantee(owner.grantee_id) {
             return Err(CoreError::Storage(
                 "recipient key inventory identity is invalid".to_owned(),
@@ -585,8 +580,8 @@ fn validate_recipient_key_inventory(
     let mut inventory_identities = BTreeSet::new();
     let mut descriptors = Vec::new();
     for inventory in inventories {
-        let descriptor = RecipientKeyDescriptorV1::decode(&inventory.descriptor)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let descriptor =
+            RecipientKeyDescriptorV1::decode(&inventory.descriptor).map_err(storage_error)?;
         if !descriptor.is_for_grantee(owner.grantee_id) || inventory.material_digest.len() != 32 {
             return Err(CoreError::Storage(
                 "recipient key inventory is invalid".to_owned(),
@@ -625,7 +620,7 @@ fn validate_recipient_key_inventory(
             ));
         }
         if pos_crypto::recipient_key::recipient_public_key_from_private_v1(&material)
-            .map_err(|error| CoreError::Storage(error.to_string()))?
+            .map_err(storage_error)?
             != descriptor.public_key()
         {
             return Err(CoreError::Storage(
@@ -692,7 +687,7 @@ fn ensure_recipient_custody_tables(connection: &rusqlite::Connection) -> Result<
                 PRIMARY KEY(owner_id, epoch)
             );",
         )
-        .map_err(|error| CoreError::Storage(error.to_string()))
+        .map_err(storage_error)
 }
 
 fn claim_recipient_custody_directory(
@@ -711,7 +706,7 @@ fn claim_recipient_custody_directory(
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        .map_err(storage_error)?;
     if let Some(claimed_grantee) = claimed_grantee {
         if claimed_grantee == grantee_id {
             return validate_directory_inventory_grantees(connection, owner);
@@ -733,7 +728,7 @@ fn claim_recipient_custody_directory(
             ],
         )
         .map(|_| ())
-        .map_err(|error| CoreError::Storage(error.to_string()))
+        .map_err(storage_error)
 }
 
 fn validate_directory_inventory_grantees(
@@ -747,7 +742,7 @@ fn validate_directory_inventory_grantees(
             "SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid
              FROM recipient_key_inventory_v1",
         )
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        .map_err(storage_error)?;
     let rows = statement
         .query_map([], |row| {
             Ok(StoredRecipientKeyInventoryV1 {
@@ -759,13 +754,11 @@ fn validate_directory_inventory_grantees(
                 file_uid: row.get(5)?,
             })
         })
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let inventories = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        .map_err(storage_error)?;
+    let inventories = rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
     for inventory in inventories {
-        let descriptor = RecipientKeyDescriptorV1::decode(&inventory.descriptor)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let descriptor =
+            RecipientKeyDescriptorV1::decode(&inventory.descriptor).map_err(storage_error)?;
         let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
         if !is_expected_recipient_private_path(&path, descriptor)? {
             return Err(CoreError::Storage(
@@ -823,7 +816,7 @@ fn record_recipient_destruction_receipt(
             rusqlite::params![
                 request.identity.owner_id.as_str(),
                 i64::try_from(request.identity.epoch)
-                    .map_err(|error| CoreError::Storage(error.to_string()))?,
+                    .map_err(storage_error)?,
                 request_receipt.as_bytes().as_slice(),
                 receipt.as_bytes().as_slice(),
                 path.as_os_str().as_encoded_bytes(),
@@ -833,7 +826,7 @@ fn record_recipient_destruction_receipt(
             ],
         )
         .map(|_| ())
-        .map_err(|error| CoreError::Storage(error.to_string()))
+        .map_err(storage_error)
 }
 
 fn quarantine_unregistered_staged_material(
@@ -848,10 +841,9 @@ fn quarantine_unregistered_staged_material(
         .map(std::ffi::OsStr::as_encoded_bytes)
         .map(<[u8]>::to_vec)
         .collect::<BTreeSet<_>>();
-    let mut directory = rustix::fs::Dir::read_from(&owner.directory_file)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    let mut directory = rustix::fs::Dir::read_from(&owner.directory_file).map_err(storage_error)?;
     while let Some(entry) = directory.read() {
-        let entry = entry.map_err(|error| CoreError::Storage(error.to_string()))?;
+        let entry = entry.map_err(storage_error)?;
         let name = entry.file_name();
         let bytes = name.to_bytes();
         if !bytes.starts_with(b"recipient-")
@@ -864,8 +856,7 @@ fn quarantine_unregistered_staged_material(
         quarantine.extend_from_slice(b".");
         quarantine.extend_from_slice(bytes);
         quarantine.extend_from_slice(b".orphan");
-        let quarantine = std::ffi::CString::new(quarantine)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let quarantine = std::ffi::CString::new(quarantine).map_err(storage_error)?;
         renameat_with(
             &owner.directory_file,
             name,
@@ -873,9 +864,8 @@ fn quarantine_unregistered_staged_material(
             quarantine.as_c_str(),
             RenameFlags::NOREPLACE,
         )
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-        recipient_fsync(&owner.directory_file)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        .map_err(storage_error)?;
+        recipient_fsync(&owner.directory_file).map_err(storage_error)?;
     }
     Ok(())
 }
@@ -883,10 +873,7 @@ fn quarantine_unregistered_staged_material(
 fn validate_owner_directory(owner: &RecipientKeyOwnerV1) -> Result<(), CoreError> {
     use std::os::unix::fs::MetadataExt;
 
-    let metadata = owner
-        .directory_file
-        .metadata()
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    let metadata = owner.directory_file.metadata().map_err(storage_error)?;
     if !metadata.is_dir()
         || metadata.mode() & 0o777 != 0o700
         || metadata.uid() != owner.directory_uid
@@ -933,7 +920,7 @@ fn verify_bound_entry(
     expected: RecipientPrivateFileIdentityV1,
 ) -> Result<(), CoreError> {
     let metadata = recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        .map_err(storage_error)?;
     if (metadata.st_mode & libc::S_IFMT) != libc::S_IFREG
         || metadata.st_nlink != 1
         || metadata.st_mode & 0o777 != 0o600
@@ -964,14 +951,11 @@ fn read_bound_private_key(
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    .map_err(storage_error)?;
+    let metadata = file.metadata().map_err(storage_error)?;
     validate_private_file(&metadata, expected)?;
     let mut material = Zeroizing::new(Vec::with_capacity(32));
-    file.read_to_end(&mut material)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    file.read_to_end(&mut material).map_err(storage_error)?;
     #[cfg(test)]
     if RECIPIENT_SHORT_READ.with(std::cell::Cell::get) {
         material.pop();
@@ -1000,14 +984,11 @@ fn delete_bound_private_key(
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    .map_err(storage_error)?;
+    let metadata = file.metadata().map_err(storage_error)?;
     validate_private_file(&metadata, expected)?;
     let mut material = Zeroizing::new(Vec::with_capacity(32));
-    file.read_to_end(&mut material)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    file.read_to_end(&mut material).map_err(storage_error)?;
     #[cfg(test)]
     if RECIPIENT_SHORT_READ.with(std::cell::Cell::get) {
         material.pop();
@@ -1021,11 +1002,10 @@ fn delete_bound_private_key(
             "recipient private key digest differs from pending destruction".to_owned(),
         ));
     }
-    recipient_fsync(&file).map_err(|error| CoreError::Storage(error.to_string()))?;
+    recipient_fsync(&file).map_err(storage_error)?;
     verify_bound_entry(owner, name, expected)?;
-    recipient_unlinkat(&owner.directory_file, name, AtFlags::empty())
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    recipient_fsync(&owner.directory_file).map_err(|error| CoreError::Storage(error.to_string()))
+    recipient_unlinkat(&owner.directory_file, name, AtFlags::empty()).map_err(storage_error)?;
+    recipient_fsync(&owner.directory_file).map_err(storage_error)
 }
 
 fn write_private_key(
@@ -1048,25 +1028,19 @@ fn write_private_key(
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
     )
     .map(File::from)
-    .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    .map_err(storage_error)?;
+    let metadata = file.metadata().map_err(storage_error)?;
     let identity = RecipientPrivateFileIdentityV1::from_metadata(&metadata);
     if identity.uid != owner.directory_uid.to_be_bytes() {
         return Err(CoreError::Storage(
             "recipient private file owner differs from private directory owner".to_owned(),
         ));
     }
-    file.write_all(private_key)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    recipient_fsync(&file).map_err(|error| CoreError::Storage(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    file.write_all(private_key).map_err(storage_error)?;
+    recipient_fsync(&file).map_err(storage_error)?;
+    let metadata = file.metadata().map_err(storage_error)?;
     validate_private_file(&metadata, identity)?;
-    recipient_fsync(&owner.directory_file)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    recipient_fsync(&owner.directory_file).map_err(storage_error)?;
     verify_bound_entry(owner, name, identity)?;
     Ok(identity)
 }
