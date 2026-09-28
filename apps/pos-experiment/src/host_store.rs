@@ -141,6 +141,7 @@ fn host_error(error: ErasureHostErrorV1) -> CoreError {
 mod host_store_tests {
     use super::*;
     use pos_core::{CanonicalBytes, Capability, EntityId, Kind, Plugin, PluginId, Reducer, State};
+    use std::cell::Cell;
 
     struct ProjectionProbe {
         id: PluginId,
@@ -178,6 +179,58 @@ mod host_store_tests {
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             state.set("count", serde_json::json!(count + 1));
+        }
+    }
+
+    struct FailSecondTimelineLookupStore {
+        inner: Box<dyn EventStore>,
+        lookups: Cell<u32>,
+    }
+
+    impl EventStore for FailSecondTimelineLookupStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            self.inner.create_timeline(name)
+        }
+
+        fn append(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            self.inner.append(timeline, drafts)
+        }
+
+        fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            self.inner.read(timeline, range)
+        }
+
+        fn fork(
+            &mut self,
+            parent: TimelineId,
+            at_seq: Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            self.inner.fork(parent, at_seq, name)
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            self.inner.list_timelines()
+        }
+
+        fn get_timeline(&self, timeline: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            let call = self.lookups.get() + 1;
+            self.lookups.set(call);
+            if call == 2 {
+                Err(CoreError::Storage(
+                    "injected prefix lookup failure".to_owned(),
+                ))
+            } else {
+                self.inner.get_timeline(timeline)
+            }
+        }
+
+        fn logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
+            self.inner.logical_head(timeline)
         }
     }
 
@@ -411,6 +464,55 @@ mod host_store_tests {
         retry.registry = std::mem::take(&mut retry.registry).without_erasure_gate();
         assert!(retry.prepare_tick().is_err());
         assert_eq!(retry.health, SessionHealth::Faulted);
+
+        let mut read_failure = Experiment::new(ExperimentConfig {
+            name: "prefix-read-failure".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        })
+        .start()?;
+        {
+            let mut store = lock_store(&read_failure.store)?;
+            let inner = std::mem::replace(&mut *store, Box::new(test_memory_store()));
+            *store = Box::new(FailSecondTimelineLookupStore {
+                inner,
+                lookups: Cell::new(0),
+            });
+        }
+        assert!(read_failure.prepare_tick().is_err());
+
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "failed-append-refresh".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        });
+        experiment.register(
+            &ProjectionProbe {
+                id: PluginId::new(),
+            },
+            Some(Box::new(CountReducer)),
+            None,
+        )?;
+        let mut append_session = experiment.start()?;
+        append_session.registry =
+            std::mem::take(&mut append_session.registry).without_erasure_gate();
+        assert!(append_session
+            .append_events(&[EventDraft::new(
+                EntityId::new(),
+                Kind::new("projection.public"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )])
+            .is_err());
+        assert_eq!(append_session.health, SessionHealth::Faulted);
+
+        let mut terminal = Experiment::new(ExperimentConfig {
+            name: "failed-result-refresh".to_owned(),
+            stop: StopCondition::MaxTicks(0),
+            store_config: pos_store::StoreConfig::Memory,
+        })
+        .start()?;
+        terminal.registry = std::mem::take(&mut terminal.registry).without_erasure_gate();
+        assert!(terminal.run_to_completion().is_err());
         Ok(())
     }
 
