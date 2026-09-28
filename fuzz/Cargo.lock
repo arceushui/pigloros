@@ -955,6 +955,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "pos-conformance",
  "pos-core",
  "pos-crypto",
  "rand",
