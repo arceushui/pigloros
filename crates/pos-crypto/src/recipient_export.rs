@@ -11,9 +11,9 @@ use hpke::{
     setup_receiver, setup_sender_with_rng, Deserializable, OpModeR, OpModeS, Serializable,
 };
 use pos_core::{
-    CanonicalBytes, CorrelationId, EntityId, Event, EventId, Hash, KeyIdentityV1, KeyRoleV1, Kind,
-    RecipientKeyDescriptorV1, SchemaVersion, Seq, Signature, Timeline, TimelineExport, TimelineId,
-    TimelineMeta, TimelineMode, WallTime,
+    CanonicalBytes, CorrelationId, EntityId, Event, EventId, EventOriginV1, Hash, KeyIdentityV1,
+    KeyRoleV1, Kind, RecipientKeyDescriptorV1, SchemaVersion, Seq, Signature, Timeline,
+    TimelineExport, TimelineId, TimelineMeta, TimelineMode, WallTime,
 };
 use rand::CryptoRng;
 use thiserror::Error;
@@ -79,6 +79,28 @@ pub struct RecipientTimelineExportV1 {
     pub header: RecipientExportHeaderV1,
     pub enc: [u8; 32],
     pub ciphertext_chunks: Vec<Vec<u8>>,
+}
+
+/// A complete encrypted recipient export and its private TEP1 identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EncryptedTimelineExportV1 {
+    pub envelope: RecipientTimelineExportV1,
+    pub payload_digest: Hash,
+}
+
+impl EncryptedTimelineExportV1 {
+    /// Return the exact deterministic CBOR TRX1 envelope bytes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        self.envelope.encode()
+    }
+}
+
+/// An authenticated candidate export and its private TEP1 identity.
+#[derive(Clone, Debug)]
+pub struct DecryptedTimelineExportV1 {
+    pub export: TimelineExport,
+    pub payload_digest: Hash,
 }
 
 impl RecipientTimelineExportV1 {
@@ -183,13 +205,13 @@ const fn validate_envelope_length(length: usize) -> Result<(), RecipientExportEr
 ///
 /// # Errors
 /// Returns a structural, bounds, identity, or encryption error before
-/// constructing a partial envelope.
+/// constructing a partial result.
 pub fn encrypt_timeline_export_v1(
     export: &TimelineExport,
     recipient: RecipientKeyDescriptorV1,
     export_id: [u8; 16],
     rng: &mut impl CryptoRng,
-) -> Result<RecipientTimelineExportV1, RecipientExportErrorV1> {
+) -> Result<EncryptedTimelineExportV1, RecipientExportErrorV1> {
     let payload = Zeroizing::new(encode_payload(export)?);
     // `encode_payload` caps these values; the sentinels fail header validation.
     let payload_length = u64::try_from(payload.len()).unwrap_or(u64::MAX);
@@ -230,10 +252,13 @@ pub fn encrypt_timeline_export_v1(
         );
     }
     // Header bounds and fixed HPKE tag width establish the envelope shape.
-    Ok(envelope)
+    Ok(EncryptedTimelineExportV1 {
+        envelope,
+        payload_digest: timeline_export_payload_digest_v1(&payload),
+    })
 }
 
-/// Authenticate and decode TRX1, returning only a structural candidate export.
+/// Authenticate and decode TRX1, returning a structural candidate export.
 ///
 /// # Errors
 /// Returns an encoding, identity, or authentication error without exposing
@@ -243,7 +268,7 @@ pub fn decrypt_timeline_export_v1(
     expected_export_id: [u8; 16],
     expected_recipient: RecipientKeyDescriptorV1,
     private_key: &[u8; 32],
-) -> Result<TimelineExport, RecipientExportErrorV1> {
+) -> Result<DecryptedTimelineExportV1, RecipientExportErrorV1> {
     let envelope = RecipientTimelineExportV1::decode(encoded)?;
     if envelope.header.export_id != expected_export_id
         || envelope.header.recipient != expected_recipient
@@ -276,14 +301,19 @@ pub fn decrypt_timeline_export_v1(
         );
         plaintext.extend_from_slice(&chunk);
     }
-    let export = decode_payload(&plaintext)?;
+    let payload_digest = timeline_export_payload_digest_v1(&plaintext);
+    let mut export = decode_payload(&plaintext)?;
+    reconstruct_event_origins(&mut export)?;
     if export.timeline.id() != envelope.header.timeline_id
         || export.timeline.head != envelope.header.local_head
         || export.parent_fork_hash != envelope.header.parent_fork_hash
     {
         return Err(RecipientExportErrorV1::SourceMismatch);
     }
-    Ok(export)
+    Ok(DecryptedTimelineExportV1 {
+        export,
+        payload_digest,
+    })
 }
 
 /// Return the private, local idempotency digest for exact TEP1 bytes.
@@ -425,6 +455,11 @@ fn validate_export(export: &TimelineExport) -> Result<(), RecipientExportErrorV1
         (None, None) | (Some(_), Some(_)) => {}
         _ => return Err(RecipientExportErrorV1::SourceMismatch),
     }
+    let inherited_prefix = export
+        .timeline
+        .meta
+        .fork_point
+        .map_or(0, |(_, sequence)| sequence.as_u64());
     for (index, event) in export.events.iter().enumerate() {
         if event.seq.as_u64() != u64::try_from(index + 1).unwrap_or(u64::MAX)
             || event.payload.len() > MAX_EVENT_PAYLOAD_BYTES
@@ -441,11 +476,46 @@ fn validate_export(export: &TimelineExport) -> Result<(), RecipientExportErrorV1
         }) {
             return Err(RecipientExportErrorV1::IdentityMismatch);
         }
+        let expected_origin =
+            expected_event_origin(export.timeline.id(), inherited_prefix, event.seq.as_u64())?;
+        if event.origin.is_some_and(|origin| origin != expected_origin) {
+            return Err(RecipientExportErrorV1::SourceMismatch);
+        }
     }
     if export.timeline.head.as_u64() != u64::try_from(export.events.len()).unwrap_or(u64::MAX) {
         return Err(RecipientExportErrorV1::SourceMismatch);
     }
     Ok(())
+}
+
+fn reconstruct_event_origins(export: &mut TimelineExport) -> Result<(), RecipientExportErrorV1> {
+    let inherited_prefix = export
+        .timeline
+        .meta
+        .fork_point
+        .map_or(0, |(_, sequence)| sequence.as_u64());
+    for event in &mut export.events {
+        event.origin = Some(expected_event_origin(
+            export.timeline.id(),
+            inherited_prefix,
+            event.seq.as_u64(),
+        )?);
+    }
+    Ok(())
+}
+
+fn expected_event_origin(
+    timeline_id: TimelineId,
+    inherited_prefix: u64,
+    local_sequence: u64,
+) -> Result<EventOriginV1, RecipientExportErrorV1> {
+    let origin_logical_seq = inherited_prefix
+        .checked_add(local_sequence)
+        .ok_or(RecipientExportErrorV1::FieldOutOfBounds)?;
+    Ok(EventOriginV1 {
+        origin_timeline_id: timeline_id,
+        origin_logical_seq: Seq::from_u64(origin_logical_seq),
+    })
 }
 
 fn encode_header(out: &mut Vec<u8>, header: &RecipientExportHeaderV1) {
@@ -945,17 +1015,26 @@ mod tests {
     }
 
     fn export(fork_sequence: Option<u64>, payload: Vec<u8>) -> TimelineExport {
-        let events = if payload.is_empty() {
+        let mut events = if payload.is_empty() {
             Vec::new()
         } else {
             vec![event(1, payload)]
         };
         let parent =
             fork_sequence.map(|sequence| (TimelineId::from_ulid(id(2)), Seq::from_u64(sequence)));
+        let timeline_id = TimelineId::from_ulid(id(3));
+        for event in &mut events {
+            event.origin = Some(EventOriginV1 {
+                origin_timeline_id: timeline_id,
+                origin_logical_seq: Seq::from_u64(
+                    fork_sequence.map_or(event.seq.as_u64(), |prefix| prefix + event.seq.as_u64()),
+                ),
+            });
+        }
         TimelineExport {
             timeline: Timeline {
                 meta: TimelineMeta {
-                    id: TimelineId::from_ulid(id(3)),
+                    id: timeline_id,
                     mode: TimelineMode::Live,
                     name: Some("candidate".to_owned()),
                     owner: Some(EntityId::from_ulid(id(4))),
@@ -975,14 +1054,22 @@ mod tests {
         let (recipient, private) = recipient()?;
         let source = export(fork_sequence, payload);
         let mut rng = StdRng::from_seed([6; 32]);
-        let envelope = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?;
-        let encoded = envelope.encode();
-        assert_eq!(RecipientTimelineExportV1::decode(&encoded)?, envelope);
+        let encrypted = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?;
+        let encoded = encrypted.encode();
+        assert_eq!(
+            RecipientTimelineExportV1::decode(&encoded)?,
+            encrypted.envelope
+        );
         let decoded = decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private)?;
-        assert_eq!(decoded.timeline.meta, source.timeline.meta);
-        assert_eq!(decoded.timeline.head, source.timeline.head);
-        assert_eq!(decoded.parent_fork_hash, source.parent_fork_hash);
-        assert_eq!(decoded.events, source.events);
+        assert_eq!(
+            encrypted.payload_digest,
+            timeline_export_payload_digest_v1(&encode_payload(&source)?)
+        );
+        assert_eq!(decoded.payload_digest, encrypted.payload_digest);
+        assert_eq!(decoded.export.timeline.meta, source.timeline.meta);
+        assert_eq!(decoded.export.timeline.head, source.timeline.head);
+        assert_eq!(decoded.export.parent_fork_hash, source.parent_fork_hash);
+        assert_eq!(decoded.export.events, source.events);
         Ok(())
     }
 
@@ -1202,12 +1289,15 @@ mod tests {
         let overhead = encode_payload(&export(None, vec![3; CHUNK_BYTES]))?.len() - CHUNK_BYTES;
         let source = export(None, vec![3; CHUNK_BYTES * 2 - overhead]);
         let mut rng = StdRng::from_seed([7; 32]);
-        let mut envelope = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?;
-        assert_eq!(envelope.ciphertext_chunks.len(), 2);
-        assert_eq!(envelope.header.payload_length, CHUNK_BYTES_U64 * 2);
-        envelope.ciphertext_chunks.swap(0, 1);
+        let mut encrypted = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?;
+        assert_eq!(encrypted.envelope.ciphertext_chunks.len(), 2);
+        assert_eq!(
+            encrypted.envelope.header.payload_length,
+            CHUNK_BYTES_U64 * 2
+        );
+        encrypted.envelope.ciphertext_chunks.swap(0, 1);
         assert!(matches!(
-            decrypt_timeline_export_v1(&envelope.encode(), [5; 16], recipient, &private),
+            decrypt_timeline_export_v1(&encrypted.encode(), [5; 16], recipient, &private),
             Err(RecipientExportErrorV1::AuthenticationFailed)
         ));
         Ok(())
@@ -1342,6 +1432,37 @@ mod tests {
             encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng),
             Err(RecipientExportErrorV1::IdentityMismatch)
         ));
+        source.events[0].signature = None;
+        source.events[0].signature_identity = None;
+        source.events[0].origin = Some(EventOriginV1 {
+            origin_timeline_id: TimelineId::from_ulid(id(99)),
+            origin_logical_seq: Seq::from_u64(1),
+        });
+        assert!(matches!(
+            encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng),
+            Err(RecipientExportErrorV1::SourceMismatch)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn round_trips_derived_event_origin_from_own_coordinates() -> Result<(), RecipientExportErrorV1>
+    {
+        let (recipient, private) = recipient()?;
+        let source = export(Some(9), b"source".to_vec());
+        let expected = EventOriginV1 {
+            origin_timeline_id: source.timeline.id(),
+            origin_logical_seq: Seq::from_u64(10),
+        };
+        assert_eq!(source.events[0].origin, Some(expected));
+
+        let mut rng = StdRng::from_seed([10; 32]);
+        let encrypted = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?;
+        let decrypted =
+            decrypt_timeline_export_v1(&encrypted.encode(), [5; 16], recipient, &private)?;
+        assert_eq!(decrypted.export.events[0].origin, Some(expected));
+        assert_eq!(decrypted.export.events, source.events);
         Ok(())
     }
 
@@ -1461,15 +1582,15 @@ mod tests {
         let mut rng = StdRng::from_seed([14; 32]);
         let encoded = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?.encode();
         let decoded = decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private)?;
-        assert_eq!(decoded.timeline.meta, source.timeline.meta);
-        assert_eq!(decoded.events, source.events);
+        assert_eq!(decoded.export.timeline.meta, source.timeline.meta);
+        assert_eq!(decoded.export.events, source.events);
 
         source.timeline.meta.mode = TimelineMode::Future;
         source.events[0].wall_time = WallTime::from_micros(0x1_0000_0000);
         let encoded = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?.encode();
         let decoded = decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private)?;
-        assert_eq!(decoded.timeline.meta, source.timeline.meta);
-        assert_eq!(decoded.events, source.events);
+        assert_eq!(decoded.export.timeline.meta, source.timeline.meta);
+        assert_eq!(decoded.export.events, source.events);
         assert_ne!(
             timeline_export_payload_digest_v1(b"one"),
             timeline_export_payload_digest_v1(b"two")
