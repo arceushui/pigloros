@@ -20,3 +20,10 @@ fn hex_bytes(value: &str) -> Result<Vec<u8>, &'static str> {
         })
         .collect()
 }
+
+#[test]
+fn fixed_plugin_trust_vectors_are_valid_hex() -> Result<(), &'static str> {
+    assert!(!hex_bytes(PTR1_HEX)?.is_empty());
+    assert!(!hex_bytes(PRV1_HEX)?.is_empty());
+    Ok(())
+}
