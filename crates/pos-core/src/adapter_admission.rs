@@ -3,7 +3,11 @@
 //! These structural bytes do not prove owner admission, `PublicRecord`
 //! provenance, a complete Plugin roster, or authority to invoke an adapter.
 
-use crate::{Hash, PluginId};
+use crate::{
+    adapter_contract::{valid_adapter_identity, AdapterContractKey},
+    canonical_cbor_head::encode_head,
+    Hash, PluginId,
+};
 use ulid::Ulid;
 
 /// Largest accepted MAA1 record, including all adapter entries.
@@ -49,6 +53,47 @@ pub enum AdapterAdmissionErrorV1 {
     InvalidOrder,
 }
 
+/// Data classification admitted by the first public adapter profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AdapterDataClassV1 {
+    /// Exact public input or output bytes.
+    PublicRecord = 2,
+}
+
+impl TryFrom<u8> for AdapterDataClassV1 {
+    type Error = AdapterAdmissionErrorV1;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            2 => Ok(Self::PublicRecord),
+            _ => Err(AdapterAdmissionErrorV1::InvalidEntry),
+        }
+    }
+}
+
+/// Effect behavior admitted by the first public adapter profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AdapterEffectModeV1 {
+    /// Provider call does not mutate external state.
+    ReadOnly = 0,
+    /// Provider enforces the owner-supplied idempotency key.
+    ExternallyIdempotent = 1,
+}
+
+impl TryFrom<u8> for AdapterEffectModeV1 {
+    type Error = AdapterAdmissionErrorV1;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::ReadOnly),
+            1 => Ok(Self::ExternallyIdempotent),
+            _ => Err(AdapterAdmissionErrorV1::InvalidEntry),
+        }
+    }
+}
+
 /// Untrusted adapter contract fields, subject to actual owner admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterAdmissionEntryV1 {
@@ -61,9 +106,21 @@ pub struct AdapterAdmissionEntryV1 {
     pub response_schema_digest: Hash,
     pub exact_configuration_bytes: Vec<u8>,
     pub configuration_digest: Hash,
-    pub input_data_class: u8,
-    pub output_data_class: u8,
-    pub effect_mode: u8,
+    pub input_data_class: AdapterDataClassV1,
+    pub output_data_class: AdapterDataClassV1,
+    pub effect_mode: AdapterEffectModeV1,
+}
+
+impl AdapterAdmissionEntryV1 {
+    pub(crate) const fn contract_key(&self) -> AdapterContractKey<'_> {
+        AdapterContractKey {
+            plugin_id: self.plugin_id,
+            adapter_id: &self.adapter_id,
+            provider_id: &self.provider_id,
+            operation_id: &self.operation_id,
+            protocol_version: self.protocol_version,
+        }
+    }
 }
 
 /// Untrusted snapshot fields. An owner must derive and compare them at commit.
@@ -100,7 +157,7 @@ impl AdapterAdmissionV1 {
         if input
             .entries
             .windows(2)
-            .any(|pair| sort_key(&pair[0]) >= sort_key(&pair[1]))
+            .any(|pair| pair[0].contract_key() >= pair[1].contract_key())
         {
             return Err(AdapterAdmissionErrorV1::InvalidOrder);
         }
@@ -140,9 +197,9 @@ impl AdapterAdmissionV1 {
             encode_bytes(&mut bytes, &entry.exact_configuration_bytes, 2);
             encode_hash(&mut bytes, entry.configuration_digest);
             for code in [
-                entry.input_data_class,
-                entry.output_data_class,
-                entry.effect_mode,
+                entry.input_data_class as u8,
+                entry.output_data_class as u8,
+                entry.effect_mode as u8,
             ] {
                 encode_head(&mut bytes, 0, u64::from(code));
             }
@@ -191,9 +248,9 @@ impl AdapterAdmissionV1 {
                 .bounded_bytes(2, MAX_ADAPTER_CONFIGURATION_BYTES_V1)?
                 .to_vec();
             let configuration_digest = reader.hash()?;
-            let input_data_class = reader.byte()?;
-            let output_data_class = reader.byte()?;
-            let effect_mode = reader.byte()?;
+            let input_data_class = AdapterDataClassV1::try_from(reader.byte()?)?;
+            let output_data_class = AdapterDataClassV1::try_from(reader.byte()?)?;
+            let effect_mode = AdapterEffectModeV1::try_from(reader.byte()?)?;
             entries.push(AdapterAdmissionEntryV1 {
                 plugin_id,
                 adapter_id,
@@ -259,36 +316,16 @@ fn validate_entry(entry: &AdapterAdmissionEntryV1) -> Result<(), AdapterAdmissio
     let schema = public_adapter_schema_digest_v1();
     if [&entry.adapter_id, &entry.provider_id, &entry.operation_id]
         .iter()
-        .any(|id| !valid_identity(id))
+        .any(|id| !valid_adapter_identity(id))
         || entry.protocol_version == 0
         || entry.request_schema_digest != schema
         || entry.response_schema_digest != schema
         || entry.configuration_digest
             != adapter_configuration_digest_v1(&entry.exact_configuration_bytes)
-        || entry.input_data_class != 2
-        || entry.output_data_class != 2
-        || entry.effect_mode > 1
     {
         return Err(AdapterAdmissionErrorV1::InvalidEntry);
     }
     Ok(())
-}
-
-fn valid_identity(id: &str) -> bool {
-    (1..=128).contains(&id.len())
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-fn sort_key(entry: &AdapterAdmissionEntryV1) -> (u128, &str, &str, &str, u64) {
-    (
-        u128::from(entry.plugin_id.inner()),
-        &entry.adapter_id,
-        &entry.provider_id,
-        &entry.operation_id,
-        entry.protocol_version,
-    )
 }
 
 fn encode_hash(out: &mut Vec<u8>, hash: Hash) {
@@ -299,27 +336,6 @@ fn encode_hash(out: &mut Vec<u8>, hash: Hash) {
 fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8], major: u8) {
     encode_head(out, major, bytes.len() as u64);
     out.extend_from_slice(bytes);
-}
-
-fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
-    let prefix = major << 5;
-    let full = value.to_be_bytes();
-    match value {
-        0..=23 => out.push(prefix | full[7]),
-        24..=0xff => out.extend_from_slice(&[prefix | 0x18, full[7]]),
-        0x100..=0xffff => {
-            out.push(prefix | 0x19);
-            out.extend_from_slice(&full[6..]);
-        }
-        0x1_0000..=0xffff_ffff => {
-            out.push(prefix | 0x1a);
-            out.extend_from_slice(&full[4..]);
-        }
-        _ => {
-            out.push(prefix | 0x1b);
-            out.extend_from_slice(&full);
-        }
-    }
 }
 
 struct Reader<'a> {

@@ -3,7 +3,7 @@
 //! This record does not authenticate a cut, roster, adapter transcript, owner
 //! operation, or guarded `ReproManifest` release.
 
-use crate::{Hash, WorldReplayHandleV1};
+use crate::{canonical_cbor_head::encode_head, Hash, WorldReplayHandleV1};
 
 /// Maximum canonical size of one MRM1 root.
 pub const MAX_REPRO_MANIFEST_ROOT_BYTES_V1: usize = 1_024;
@@ -133,27 +133,6 @@ fn encode_hash(bytes: &mut Vec<u8>, value: Hash) {
 fn encode_bytes(bytes: &mut Vec<u8>, value: &[u8], major: u8) {
     encode_head(bytes, major, value.len() as u64);
     bytes.extend_from_slice(value);
-}
-
-fn encode_head(bytes: &mut Vec<u8>, major: u8, value: u64) {
-    let prefix = major << 5;
-    let full = value.to_be_bytes();
-    match value {
-        0..=23 => bytes.push(prefix | full[7]),
-        24..=0xff => bytes.extend_from_slice(&[prefix | 0x18, full[7]]),
-        0x100..=0xffff => {
-            bytes.push(prefix | 0x19);
-            bytes.extend_from_slice(&full[6..]);
-        }
-        0x1_0000..=0xffff_ffff => {
-            bytes.push(prefix | 0x1a);
-            bytes.extend_from_slice(&full[4..]);
-        }
-        _ => {
-            bytes.push(prefix | 0x1b);
-            bytes.extend_from_slice(&full);
-        }
-    }
 }
 
 struct Reader<'a> {

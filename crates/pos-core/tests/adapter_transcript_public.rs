@@ -1,9 +1,9 @@
 use pos_core::{
     adapter_configuration_digest_v1, adapter_output_digest_v1, public_adapter_schema_digest_v1,
-    AdapterAdmissionEntryV1, AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterInvocationInputV1,
-    AdapterInvocationV1, AdapterTranscriptCallV1, AdapterTranscriptErrorV1,
-    AdapterTranscriptInputV1, AdapterTranscriptV1, Hash, PluginId, WorldReplayHandleV1,
-    MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+    AdapterAdmissionEntryV1, AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterDataClassV1,
+    AdapterEffectModeV1, AdapterInvocationInputV1, AdapterInvocationV1, AdapterTranscriptCallV1,
+    AdapterTranscriptErrorV1, AdapterTranscriptInputV1, AdapterTranscriptV1, Hash, PluginId,
+    WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -81,9 +81,9 @@ fn admitted_transcript() -> TestResult<(AdapterAdmissionV1, AdapterTranscriptV1)
         response_schema_digest: public_adapter_schema_digest_v1(),
         exact_configuration_bytes: configuration.clone(),
         configuration_digest,
-        input_data_class: 2,
-        output_data_class: 2,
-        effect_mode: 0,
+        input_data_class: AdapterDataClassV1::PublicRecord,
+        output_data_class: AdapterDataClassV1::PublicRecord,
+        effect_mode: AdapterEffectModeV1::ReadOnly,
     });
     let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
         owner_reference: base.owner_reference,

@@ -4,6 +4,7 @@ use super::{
     ArtifactDataClassV1, ArtifactKeyDependencyV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1,
     ErasureArtifactClassV1,
 };
+use crate::canonical_cbor_head::encode_head;
 use crate::{AdapterAdmissionV1, AdapterTranscriptV1, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1};
 use std::collections::BTreeSet;
 
@@ -155,18 +156,14 @@ impl ArtifactRegistrationV1 {
 
     /// Hash exact artifact bytes with class and length framing.
     ///
-    /// # Errors
-    /// Every byte slice fits the V1 length framing on supported targets.
-    pub fn artifact_digest(
-        artifact_class: ErasureArtifactClassV1,
-        bytes: &[u8],
-    ) -> Result<Hash, ArtifactRegistrationErrorV1> {
+    #[must_use]
+    pub fn artifact_digest(artifact_class: ErasureArtifactClassV1, bytes: &[u8]) -> Hash {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"PiglorOS.ArtifactBytes.v1\0");
         hasher.update(&[artifact_class_byte(artifact_class)]);
         hasher.update(&(bytes.len() as u64).to_be_bytes());
         hasher.update(bytes);
-        Ok(Hash::from_bytes(*hasher.finalize().as_bytes()))
+        Hash::from_bytes(*hasher.finalize().as_bytes())
     }
 
     /// Hash the exact canonical owner ID from the owner's catalog.
@@ -200,8 +197,7 @@ pub fn extract_adapter_admission_registration_v1(
     let admission = AdapterAdmissionV1::from_canonical_cbor(bytes)
         .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidAdmission)?;
     let artifact_digest =
-        ArtifactRegistrationV1::artifact_digest(ErasureArtifactClassV1::ReproManifest, bytes)
-            .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidAdmission)?;
+        ArtifactRegistrationV1::artifact_digest(ErasureArtifactClassV1::ReproManifest, bytes);
     ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
         artifact_class: ErasureArtifactClassV1::ReproManifest,
         artifact_digest,
@@ -246,8 +242,7 @@ pub fn extract_adapter_transcript_registration_v1(
     let artifact_digest = ArtifactRegistrationV1::artifact_digest(
         ErasureArtifactClassV1::ReproManifest,
         transcript_bytes,
-    )
-    .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidTranscript)?;
+    );
     ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
         artifact_class: ErasureArtifactClassV1::ReproManifest,
         artifact_digest,
@@ -389,29 +384,6 @@ fn encode_text(out: &mut Vec<u8>, text: &str) {
 fn encode_blob(out: &mut Vec<u8>, bytes: &[u8]) {
     encode_head(out, 2, bytes.len() as u64);
     out.extend_from_slice(bytes);
-}
-
-fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
-    let bytes = value.to_be_bytes();
-    match value {
-        0..=23 => out.push((major << 5) | bytes[7]),
-        24..=255 => {
-            out.push((major << 5) | 0x18);
-            out.push(bytes[7]);
-        }
-        256..=65_535 => {
-            out.push((major << 5) | 0x19);
-            out.extend_from_slice(&bytes[6..]);
-        }
-        65_536..=4_294_967_295 => {
-            out.push((major << 5) | 0x1a);
-            out.extend_from_slice(&bytes[4..]);
-        }
-        _ => {
-            out.push((major << 5) | 0x1b);
-            out.extend_from_slice(&bytes);
-        }
-    }
 }
 
 const fn data_class_code(value: ArtifactDataClassV1) -> u64 {

@@ -1,8 +1,8 @@
 use pos_core::{
     adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
-    AdapterAdmissionErrorV1, AdapterAdmissionInputV1, AdapterAdmissionV1, Hash, PluginId,
-    MAX_ADAPTER_ADMISSION_BYTES_V1, MAX_ADAPTER_ADMISSION_ENTRIES_V1,
-    MAX_ADAPTER_CONFIGURATION_BYTES_V1,
+    AdapterAdmissionErrorV1, AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterDataClassV1,
+    AdapterEffectModeV1, Hash, PluginId, MAX_ADAPTER_ADMISSION_BYTES_V1,
+    MAX_ADAPTER_ADMISSION_ENTRIES_V1, MAX_ADAPTER_CONFIGURATION_BYTES_V1,
 };
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -44,9 +44,9 @@ fn entry(plugin: u128, version: u64, configuration: Vec<u8>) -> AdapterAdmission
         response_schema_digest: schema,
         exact_configuration_bytes: configuration,
         configuration_digest,
-        input_data_class: 2,
-        output_data_class: 2,
-        effect_mode: 0,
+        input_data_class: AdapterDataClassV1::PublicRecord,
+        output_data_class: AdapterDataClassV1::PublicRecord,
+        effect_mode: AdapterEffectModeV1::ReadOnly,
     }
 }
 
@@ -97,7 +97,7 @@ fn ordered_entries_and_integer_and_configuration_boundaries_round_trip() -> Test
     long_names.adapter_id = "a".repeat(128);
     long_names.provider_id = "p".repeat(128);
     long_names.operation_id = "o".repeat(128);
-    long_names.effect_mode = 1;
+    long_names.effect_mode = AdapterEffectModeV1::ExternallyIdempotent;
     let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
         entries: vec![long_names],
         ..input()?
@@ -237,18 +237,6 @@ fn invalid_adapter_profile_and_configuration_length_reject() -> TestResult<()> {
             configuration_digest: Hash::zero(),
             ..good.clone()
         },
-        AdapterAdmissionEntryV1 {
-            input_data_class: 1,
-            ..good.clone()
-        },
-        AdapterAdmissionEntryV1 {
-            output_data_class: 4,
-            ..good.clone()
-        },
-        AdapterAdmissionEntryV1 {
-            effect_mode: 2,
-            ..good
-        },
     ] {
         assert_eq!(
             AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
@@ -378,6 +366,18 @@ fn malformed_adapter_entries_fail_at_the_public_decoder() -> TestResult<()> {
         AdapterAdmissionV1::from_canonical_cbor(&wrong_entry_shape),
         Err(AdapterAdmissionErrorV1::InvalidEncoding)
     );
+    for (offset, invalid_code) in [
+        (good.len() - 3, 1),
+        (good.len() - 2, 4),
+        (good.len() - 1, 2),
+    ] {
+        let mut wrong_profile = good.clone();
+        wrong_profile[offset] = invalid_code;
+        assert_eq!(
+            AdapterAdmissionV1::from_canonical_cbor(&wrong_profile),
+            Err(AdapterAdmissionErrorV1::InvalidEntry)
+        );
+    }
     let mut excessive_code = good.clone();
     excessive_code.pop();
     excessive_code.extend_from_slice(&[0x19, 0x01, 0x00]);
