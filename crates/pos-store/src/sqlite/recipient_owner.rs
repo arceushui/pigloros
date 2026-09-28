@@ -938,27 +938,39 @@ fn read_bound_private_key(
     path: &Path,
     expected: RecipientPrivateFileIdentityV1,
 ) -> Result<Zeroizing<[u8; 32]>, CoreError> {
-    validate_owner_directory(owner)?;
-    let name = bound_name(path)?;
-    let mut file = recipient_openat2(
-        &owner.directory_file,
-        name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )
-    .map(File::from)
-    .map_err(storage_error)?;
-    let metadata = file.metadata().map_err(storage_error)?;
-    validate_private_file(&metadata, expected)?;
-    let mut material = Zeroizing::new(Vec::with_capacity(32));
-    file.read_to_end(&mut material).map_err(storage_error)?;
-    verify_bound_entry(owner, name, expected)?;
-    material
-        .as_slice()
-        .try_into()
-        .map(Zeroizing::new)
-        .map_err(|_| CoreError::Storage("recipient private key width is invalid".to_owned()))
+    validate_owner_directory(owner).and_then(|()| {
+        bound_name(path).and_then(|name| {
+            recipient_openat2(
+                &owner.directory_file,
+                name,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+            )
+            .map(File::from)
+            .map_err(storage_error)
+            .and_then(|mut file| {
+                file.metadata().map_err(storage_error).and_then(|metadata| {
+                    validate_private_file(&metadata, expected).and_then(|()| {
+                        let mut material = Zeroizing::new(Vec::with_capacity(32));
+                        file.read_to_end(&mut material)
+                            .map_err(storage_error)
+                            .and_then(|_| {
+                                verify_bound_entry(owner, name, expected).and_then(|()| {
+                                    material.as_slice().try_into().map(Zeroizing::new).map_err(
+                                        |_| {
+                                            CoreError::Storage(
+                                                "recipient private key width is invalid".to_owned(),
+                                            )
+                                        },
+                                    )
+                                })
+                            })
+                    })
+                })
+            })
+        })
+    })
 }
 
 fn delete_bound_private_key(
@@ -967,34 +979,66 @@ fn delete_bound_private_key(
     expected: RecipientPrivateFileIdentityV1,
     material_digest: pos_core::Hash,
 ) -> Result<(), CoreError> {
-    validate_owner_directory(owner)?;
-    let name = bound_name(path)?;
-    let mut file = recipient_openat2(
-        &owner.directory_file,
-        name,
-        OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )
-    .map(File::from)
-    .map_err(storage_error)?;
-    let metadata = file.metadata().map_err(storage_error)?;
-    validate_private_file(&metadata, expected)?;
-    let mut material = Zeroizing::new(Vec::with_capacity(32));
-    file.read_to_end(&mut material).map_err(storage_error)?;
-    let material =
-        Zeroizing::new(material.as_slice().try_into().map_err(|_| {
-            CoreError::Storage("recipient private key width is invalid".to_owned())
-        })?);
-    if pos_crypto::key_roles::key_material_digest(&material) != material_digest {
-        return Err(CoreError::Storage(
-            "recipient private key digest differs from pending destruction".to_owned(),
-        ));
-    }
-    recipient_fsync(&file).map_err(storage_error)?;
-    verify_bound_entry(owner, name, expected)?;
-    recipient_unlinkat(&owner.directory_file, name, AtFlags::empty()).map_err(storage_error)?;
-    recipient_fsync(&owner.directory_file).map_err(storage_error)
+    validate_owner_directory(owner).and_then(|()| {
+        bound_name(path).and_then(|name| {
+            recipient_openat2(
+                &owner.directory_file,
+                name,
+                OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+            )
+            .map(File::from)
+            .map_err(storage_error)
+            .and_then(|mut file| {
+                file.metadata()
+                    .map_err(storage_error)
+                    .and_then(|metadata| {
+                        validate_private_file(&metadata, expected).and_then(|()| {
+                            let mut material = Zeroizing::new(Vec::with_capacity(32));
+                            file.read_to_end(&mut material)
+                                .map_err(storage_error)
+                                .and_then(|_| {
+                                    material.as_slice().try_into().map_err(|_| {
+                                        CoreError::Storage(
+                                            "recipient private key width is invalid".to_owned(),
+                                        )
+                                    })
+                                })
+                                .map(Zeroizing::new)
+                                .and_then(|material| {
+                                    if pos_crypto::key_roles::key_material_digest(&material)
+                                        != material_digest
+                                    {
+                                        return Err(CoreError::Storage(
+                                            "recipient private key digest differs from pending destruction"
+                                                .to_owned(),
+                                        ));
+                                    }
+                                    recipient_fsync(&file)
+                                        .map_err(storage_error)
+                                        .and_then(|()| {
+                                            verify_bound_entry(owner, name, expected).and_then(
+                                                |()| {
+                                                    recipient_unlinkat(
+                                                        &owner.directory_file,
+                                                        name,
+                                                        AtFlags::empty(),
+                                                    )
+                                                    .map_err(storage_error)
+                                                    .and_then(|()| {
+                                                        recipient_fsync(&owner.directory_file)
+                                                            .map_err(storage_error)
+                                                    })
+                                                },
+                                            )
+                                        })
+                                })
+                        })
+                    })
+            })
+        })
+    })
 }
 
 fn write_private_key(
@@ -1002,36 +1046,45 @@ fn write_private_key(
     path: &Path,
     private_key: &[u8; 32],
 ) -> Result<RecipientPrivateFileIdentityV1, CoreError> {
-    validate_owner_directory(owner)?;
-    let name = bound_name(path)?;
-    let mut file = recipient_openat2(
-        &owner.directory_file,
-        name,
-        OFlags::WRONLY
-            | OFlags::CREATE
-            | OFlags::EXCL
-            | OFlags::CLOEXEC
-            | OFlags::NONBLOCK
-            | OFlags::NOFOLLOW,
-        Mode::from_raw_mode(0o600),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )
-    .map(File::from)
-    .map_err(storage_error)?;
-    let metadata = file.metadata().map_err(storage_error)?;
-    let identity = RecipientPrivateFileIdentityV1::from_metadata(&metadata);
-    if identity.uid != owner.directory_uid.to_be_bytes() {
-        return Err(CoreError::Storage(
-            "recipient private file owner differs from private directory owner".to_owned(),
-        ));
-    }
-    file.write_all(private_key).map_err(storage_error)?;
-    recipient_fsync(&file).map_err(storage_error)?;
-    let metadata = file.metadata().map_err(storage_error)?;
-    validate_private_file(&metadata, identity)?;
-    recipient_fsync(&owner.directory_file).map_err(storage_error)?;
-    verify_bound_entry(owner, name, identity)?;
-    Ok(identity)
+    validate_owner_directory(owner).and_then(|()| {
+        bound_name(path).and_then(|name| {
+            recipient_openat2(
+                &owner.directory_file,
+                name,
+                OFlags::WRONLY
+                    | OFlags::CREATE
+                    | OFlags::EXCL
+                    | OFlags::CLOEXEC
+                    | OFlags::NONBLOCK
+                    | OFlags::NOFOLLOW,
+                Mode::from_raw_mode(0o600),
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+            )
+            .map(File::from)
+            .map_err(storage_error)
+            .and_then(|mut file| {
+                file.metadata().map_err(storage_error).and_then(|metadata| {
+                    let identity = RecipientPrivateFileIdentityV1::from_metadata(&metadata);
+                    if identity.uid != owner.directory_uid.to_be_bytes() {
+                        return Err(CoreError::Storage(
+                            "recipient private file owner differs from private directory owner"
+                                .to_owned(),
+                        ));
+                    }
+                    file.write_all(private_key)
+                        .map_err(storage_error)
+                        .and_then(|()| recipient_fsync(&file).map_err(storage_error))
+                        .and_then(|()| file.metadata().map_err(storage_error))
+                        .and_then(|metadata| validate_private_file(&metadata, identity))
+                        .and_then(|()| {
+                            recipient_fsync(&owner.directory_file).map_err(storage_error)
+                        })
+                        .and_then(|()| verify_bound_entry(owner, name, identity))
+                        .map(|()| identity)
+                })
+            })
+        })
+    })
 }
 
 #[cfg(test)]
