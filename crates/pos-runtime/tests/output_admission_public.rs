@@ -49,20 +49,11 @@ fn register_verified_fixture_driver<D: Driver + 'static>(
     plugin: &FixturePlugin,
     driver: D,
 ) -> TestResult {
-    let binding = verified_binding(plugin)?
-        .binding
-        .with_installed_driver(driver)?;
-    let pin = pos_runtime::PluginPinV1::try_new(
-        pos_runtime::DomainImplementationKindV1::Plugin,
-        pos_runtime::PluginIsolationV1::OperatorTrustedNative,
-        binding.policy().digest(),
-        vec![pos_runtime::installed_plugin_role_v1(plugin)],
-    )?;
-    registry.register_installed_output(
+    registry.register_with_verified_output_policy(
         plugin,
-        binding,
-        pos_runtime::PluginRegistrationV1::new(pin, pos_runtime::PluginAvailabilityV1::Available),
+        verified_binding(plugin)?.binding,
         None,
+        Some(Box::new(driver)),
     )?;
     Ok(())
 }
