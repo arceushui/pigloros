@@ -67,13 +67,13 @@ fn hex_bytes(value: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 #[test]
 fn eor1_and_fia1_match_fixed_public_bytes_and_digests() -> Result<(), Box<dyn std::error::Error>> {
     const EOR1_HEX: &str = concat!(
-        "8944454f52310150111111111111111111111111111111110950222222222222",
+        "8964454f52310150111111111111111111111111111111110950222222222222",
         "2222222222222222222201015820040404040404040404040404040404040404",
         "0404040404040404040404040404582005050505050505050505050505050505",
         "05050505050505050505050505050505",
     );
     const FIA1_HEX: &str = concat!(
-        "8a44464941310158200606060606060606060606060606060606060606060606",
+        "8a64464941310158200606060606060606060606060606060606060606060606",
         "0606060606060606065011111111111111111111111111111111095022222222",
         "2222222222222222222222225820070707070707070707070707070707070707",
         "0707070707070707070707070707582008080808080808080808080808080808",
@@ -92,13 +92,19 @@ fn eor1_and_fia1_match_fixed_public_bytes_and_digests() -> Result<(), Box<dyn st
     let intervention = intervention_record(&origin)?;
     assert_eq!(origin.to_canonical_cbor(), hex_bytes(EOR1_HEX)?);
     assert_eq!(intervention.to_canonical_cbor(), hex_bytes(FIA1_HEX)?);
+    let mut binary_eor1_marker = hex_bytes(EOR1_HEX)?;
+    binary_eor1_marker[1] = 0x44;
+    assert!(EventOriginRecordV1::from_canonical_cbor(&binary_eor1_marker).is_err());
+    let mut binary_fia1_marker = hex_bytes(FIA1_HEX)?;
+    binary_fia1_marker[1] = 0x44;
+    assert!(ForkInterventionAdmissionV1::from_canonical_cbor(&binary_fia1_marker).is_err());
     assert_eq!(
         origin.digest().as_bytes().to_vec(),
-        hex_bytes("a786d528859cd46b43577c4bfeba6ac29681ae326ddb185ce11beedb2be82b31")?
+        hex_bytes("8ad16936dbd67c51c47b07d3d65047753eef4431a49dd6a37f523f1791c25e52")?
     );
     assert_eq!(
         intervention.digest().as_bytes().to_vec(),
-        hex_bytes("4a98f9d3afe615e35d6a5bb3c488083b6a13699898611377d4ddb076ca2988f1")?
+        hex_bytes("3c99f7643d89dc0f97c37a91878ec1ff8293656d8efb68090a7dcd64a39eadf0")?
     );
     Ok(())
 }

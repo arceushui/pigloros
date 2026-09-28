@@ -264,7 +264,7 @@ impl EventOriginRecordV1 {
         let value = &self.0;
         let mut out = Vec::with_capacity(160);
         array(&mut out, 9);
-        bytes(&mut out, b"EOR1");
+        text(&mut out, "EOR1");
         uint(&mut out, 1);
         timeline(&mut out, value.fork_timeline_id);
         uint(&mut out, value.logical_seq);
@@ -364,7 +364,7 @@ impl ForkInterventionAdmissionV1 {
         let value = &self.0;
         let mut out = Vec::with_capacity(224);
         array(&mut out, 10);
-        bytes(&mut out, b"FIA1");
+        text(&mut out, "FIA1");
         uint(&mut out, 1);
         hash(&mut out, value.operation_id);
         timeline(&mut out, value.fork_timeline_id);
@@ -426,6 +426,10 @@ fn domain_digest(domain: &[u8], bytes_in: &[u8]) -> Hash {
 fn bytes(out: &mut Vec<u8>, value: &[u8]) {
     head(out, 2, value.len() as u64);
     out.extend_from_slice(value);
+}
+fn text(out: &mut Vec<u8>, value: &str) {
+    head(out, 3, value.len() as u64);
+    out.extend_from_slice(value.as_bytes());
 }
 fn timeline(out: &mut Vec<u8>, value: TimelineId) {
     bytes(out, &value.inner().to_bytes());
@@ -553,7 +557,7 @@ impl<'a> Reader<'a> {
         }
     }
     fn magic(&mut self, expected: [u8; 4]) -> Result<(), ForkEventProvenanceErrorV1> {
-        if self.fixed::<4>()? == expected {
+        if self.head(3)? == 4 && self.take(4)? == expected {
             Ok(())
         } else {
             Err(ForkEventProvenanceErrorV1::InvalidEncoding)
