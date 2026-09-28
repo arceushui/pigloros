@@ -516,12 +516,12 @@ mod tests {
     use pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1;
 
     fn test_ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
-        value.unwrap_or_else(|error| panic!("test setup failed: {error:?}"))
+        value.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
     }
 
-    fn encode(value: Value) -> Vec<u8> {
+    fn encode(value: &Value) -> Vec<u8> {
         let mut bytes = Vec::new();
-        test_ok(ciborium::into_writer(&value, &mut bytes));
+        test_ok(ciborium::into_writer(value, &mut bytes));
         bytes
     }
 
@@ -557,7 +557,7 @@ mod tests {
             },
         ]));
         let principal = test_ok(binding(uid).principal.encode());
-        let facr1 = encode(Value::Array(vec![
+        let facr1 = encode(&Value::Array(vec![
             Value::Text("FACR1".to_owned()),
             Value::Integer(1.into()),
             Value::Bytes(adapter_seed.to_vec()),
@@ -570,7 +570,7 @@ mod tests {
                 Value::Text("owner".to_owned()),
             ])]),
         ]));
-        let fahk1 = encode(Value::Array(vec![
+        let fahk1 = encode(&Value::Array(vec![
             Value::Text("FAHK1".to_owned()),
             Value::Integer(1.into()),
             Value::Bytes(host_seed.to_vec()),
@@ -593,17 +593,16 @@ mod tests {
     }
 
     #[test]
-    fn protected_credentials_bind_policy_registry_and_kernel_peer() {
+    fn protected_credentials_bind_policy_registry_and_kernel_peer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let uid = current_uid();
         if uid == 0 || uid == 65_534 {
-            return;
+            return Ok(());
         }
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
-        let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
-            directory.path(),
-            uid.saturating_add(1),
-        ));
+        let credentials =
+            LocalForkAuthenticationCredentialsV1::load(directory.path(), uid.saturating_add(1))?;
         assert_eq!(
             credentials
                 .policy()
@@ -612,17 +611,18 @@ mod tests {
             Some(2)
         );
         assert_ne!(credentials.adapter_public_key(), [0; 32]);
-        let (peer, _other) = test_ok(UnixStream::pair());
-        let peer = test_ok(credentials.authenticate_peer(&peer));
+        let (peer, _other) = UnixStream::pair()?;
+        let peer = credentials.authenticate_peer(&peer)?;
         assert_eq!(peer.principal().trust_domain(), "unix.test");
-        let evidence = test_ok(credentials.produce(peer));
-        let resolved = test_ok(credentials.resolve(evidence));
+        let evidence = credentials.produce(peer)?;
+        let resolved = credentials.resolve(evidence)?;
         assert_eq!(resolved.owner(), OwnerIdV1::from_static("owner"));
         let record = resolved.verified_evidence().evidence().record();
         assert_eq!(record.adapter_id, "local-unix");
         assert_eq!(record.assurance, 2);
         assert!(record.issued_at < record.expires_at);
         assert_ne!(record.operation_nonce, [0; 32]);
+        Ok(())
     }
 
     #[test]
@@ -657,22 +657,23 @@ mod tests {
     }
 
     #[test]
-    fn peer_without_a_registry_mapping_fails_closed() {
+    fn peer_without_a_registry_mapping_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
         let uid = current_uid();
         let mapped_uid = uid.saturating_add(1).max(1);
         if mapped_uid == 65_534 || mapped_uid == u32::MAX {
-            return;
+            return Ok(());
         }
         let (auth, host) = credential_bytes(mapped_uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
-        let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
+        let credentials = LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
             mapped_uid.saturating_add(1),
-        ));
-        let (peer, _other) = test_ok(UnixStream::pair());
+        )?;
+        let (peer, _other) = UnixStream::pair()?;
         assert!(matches!(
             credentials.authenticate_peer(&peer),
             Err(LocalForkAuthenticationErrorV1::PeerUnauthenticated)
         ));
+        Ok(())
     }
 }
