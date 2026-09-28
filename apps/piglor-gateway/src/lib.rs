@@ -353,7 +353,6 @@ mod coverage_tests {
         );
         let frozen = super::FrozenGatewayActionConfiguration {
             bodies: Vec::new(),
-            details: Vec::new(),
         };
         let mut registry = PluginRegistry::new().without_erasure_gate();
         assert!(matches!(
@@ -364,6 +363,34 @@ mod coverage_tests {
         ));
         assert_eq!(FACTORY_CALLS.load(Ordering::SeqCst), 1);
         assert!(registry.composition().plugins.is_empty());
+    }
+
+    #[test]
+    fn gateway_frozen_bodies_change_configuration_and_policy_identity() {
+        let plugin = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        let empty = super::FrozenGatewayActionConfiguration { bodies: Vec::new() };
+        let populated = super::FrozenGatewayActionConfiguration {
+            bodies: vec![EntityId::new()],
+        };
+        let empty_bytes = super::frozen_gateway_details(&empty);
+        let populated_bytes = super::frozen_gateway_details(&populated);
+        assert_ne!(empty_bytes, populated_bytes);
+
+        let binding = |details: &[u8]| {
+            pos_runtime::OutputPolicyBindingV1::from_installed_source(
+                &plugin,
+                pos_runtime::InstalledOutputPolicySourceV1::Generated,
+                details,
+                "deterministic-local-v1",
+            )
+            .test_ok()
+        };
+        assert_ne!(
+            binding(&empty_bytes).policy().digest(),
+            binding(&populated_bytes).policy().digest()
+        );
     }
 
     #[repr(transparent)]
@@ -954,12 +981,11 @@ fn gateway_configuration_details(bodies: &[EntityId]) -> Vec<u8> {
 #[cfg(test)]
 struct FrozenGatewayActionConfiguration {
     bodies: Vec<EntityId>,
-    details: Vec<u8>,
 }
 
 #[cfg(test)]
 fn frozen_gateway_details(configuration: &FrozenGatewayActionConfiguration) -> Vec<u8> {
-    configuration.details.clone()
+    gateway_configuration_details(&configuration.bodies)
 }
 
 #[cfg(test)]
