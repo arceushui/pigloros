@@ -50,9 +50,17 @@ use pos_core::{
     ErasureForkPersistencePortV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
     ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
     ErasurePersistencePortV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
-    ErasureReferenceV1, ErasureStateResolverV1, ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1,
-    ForkAdmissionHostBindingV1, ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1,
-    ForkAdmissionRecordV1, ForkAuthorityOriginV1, Hash, KeyDestructionOutcomeV1,
+    ErasureReferenceV1, ErasureStateResolverV1, EventOriginRecordInputV1, EventOriginRecordV1,
+    ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1, ForkAdmissionHostBindingV1,
+    ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
+    ForkAppendOperationInputV1, ForkAppendOperationV1, ForkAppendSourceIdentityV1,
+    ForkAppendSourcePermitV1, ForkAuthorityOriginV1, ForkClassifiedAppendReceiptV1,
+    ForkClassifierRegistrationInputV1, ForkClassifierRegistrationReceiptV1,
+    ForkClassifierRegistrationRequestV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
+    ForkClassifierTableInputV1, ForkClassifierTableV1, ForkEventAppendRequestV1,
+    ForkEventAuthorityBindingV1, ForkEventAuthorityErrorV1, ForkEventClassificationV1,
+    ForkEventOriginKindV1, ForkEventProvenanceAuthorityPortV1, ForkEventSourceV1,
+    ForkInterventionAdmissionInputV1, ForkInterventionAdmissionV1, Hash, KeyDestructionOutcomeV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
     LocalPrincipalOwnerBindingPermitV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1,
     PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1,
@@ -154,6 +162,7 @@ pub struct SqliteStore {
     erasure_gate_bound: bool,
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     fork_admission_host_binding: Option<ForkAdmissionHostBindingV1>,
+    fork_event_authority_binding: Option<ForkEventAuthorityBindingV1>,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -563,9 +572,26 @@ impl SqliteStore {
         timeline: TimelineId,
         draft: EventDraft,
     ) -> Result<Event, CoreError> {
+        Self::append_one_in_transaction_with_identity(
+            tx,
+            hasher,
+            timeline,
+            draft,
+            EventId::new(),
+            None,
+        )
+    }
+
+    fn append_one_in_transaction_with_identity(
+        tx: &rusqlite::Transaction<'_>,
+        hasher: &dyn Hasher,
+        timeline: TimelineId,
+        draft: EventDraft,
+        event_id: EventId,
+        wall_time: Option<WallTime>,
+    ) -> Result<Event, CoreError> {
         let context = read_append_context(tx, timeline, CoreError::TimelineNotFound(timeline))?;
         let seq = context.seq;
-        let event_id = EventId::new();
         let event_id_text = event_id.to_string();
         let payload_hash = hasher.hash_payload(&draft.payload);
         let next_chain_head = hasher.hash_event(
@@ -573,7 +599,7 @@ impl SqliteStore {
             event_id_text.as_bytes(),
             &draft.payload,
         );
-        let wall_time = draft.wall_time.unwrap_or_else(WallTime::now);
+        let wall_time = wall_time.or(draft.wall_time).unwrap_or_else(WallTime::now);
         if let Err(error) = tx.execute(
             "INSERT INTO events
              (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
@@ -740,6 +766,7 @@ impl SqliteStore {
             erasure_gate_bound,
             authority_persistence_binding: None,
             fork_admission_host_binding: None,
+            fork_event_authority_binding: None,
             #[cfg(test)]
             destruction_transaction_hook: None,
         };

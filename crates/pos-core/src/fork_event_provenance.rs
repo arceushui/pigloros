@@ -700,6 +700,37 @@ impl ForkEventAppendRequestV1 {
     pub fn digest(&self) -> Hash {
         domain_digest(APPEND_REQUEST_DOMAIN, &self.to_canonical_cbor())
     }
+
+    /// Decode exact canonical append-request preimage bytes.
+    pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
+        let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_APPEND_PAYLOAD_BYTES_V1 + 784)?;
+        wire.array(12)?;
+        wire.magic(*b"FEQ1")?;
+        wire.version()?;
+        let operation_id = wire.hash()?;
+        let child_timeline_id = wire.timeline()?;
+        let source = wire.source()?;
+        let entity_id = wire.entity()?;
+        let event_type = wire.text(MAX_FORK_EVENT_TYPE_BYTES_V1)?;
+        let payload = wire.bytes(MAX_FORK_EVENT_APPEND_PAYLOAD_BYTES_V1)?;
+        let causation_id = wire.optional_event()?;
+        let correlation_id = wire.optional_correlation()?;
+        wire.version()?;
+        let value = Self::new(Self {
+            operation_id,
+            child_timeline_id,
+            source,
+            entity_id,
+            event_type,
+            payload,
+            causation_id,
+            correlation_id,
+            wall_time_override: wire.optional_wall_time()?,
+        })?;
+        wire.finish()?;
+        canonical(bytes_in, &value.to_canonical_cbor())?;
+        Ok(value)
+    }
 }
 
 /// Construction fields for immutable append-operation evidence (`FOP1`).
@@ -772,6 +803,31 @@ impl ForkAppendOperationV1 {
     #[must_use]
     pub fn digest(&self) -> Hash {
         domain_digest(APPEND_OPERATION_DOMAIN, &self.to_canonical_cbor())
+    }
+
+    /// Decode exact canonical append-operation evidence bytes.
+    pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
+        let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1)?;
+        wire.array(14)?;
+        wire.magic(*b"FOP1")?;
+        wire.version()?;
+        let value = Self::new(ForkAppendOperationInputV1 {
+            operation_id: wire.hash()?,
+            child_timeline_id: wire.timeline()?,
+            logical_seq: wire.uint()?,
+            event_id: wire.event()?,
+            request_digest: wire.hash()?,
+            source: wire.source()?,
+            wall_time: WallTime::from_micros(wire.uint()?),
+            payload_hash: wire.hash()?,
+            classifier_revision_digest: wire.hash()?,
+            fork_admission_digest: wire.hash()?,
+            event_origin_digest: wire.hash()?,
+            intervention_admission_digest: wire.optional_hash()?,
+        })?;
+        wire.finish()?;
+        canonical(bytes_in, &value.to_canonical_cbor())?;
+        Ok(value)
     }
 }
 
@@ -1279,11 +1335,90 @@ impl<'a> Reader<'a> {
     fn hash(&mut self) -> Result<Hash, ForkEventProvenanceErrorV1> {
         Ok(Hash::from_bytes(self.fixed()?))
     }
+    fn bytes(&mut self, maximum: usize) -> Result<Vec<u8>, ForkEventProvenanceErrorV1> {
+        let length = usize::try_from(self.head(2)?)
+            .map_err(|_| ForkEventProvenanceErrorV1::FieldOutOfBounds)?;
+        if length > maximum {
+            return Err(ForkEventProvenanceErrorV1::FieldOutOfBounds);
+        }
+        Ok(self.take(length)?.to_vec())
+    }
     fn timeline(&mut self) -> Result<TimelineId, ForkEventProvenanceErrorV1> {
         Ok(TimelineId::from_ulid(ulid::Ulid::from_bytes(self.fixed()?)))
     }
     fn event(&mut self) -> Result<EventId, ForkEventProvenanceErrorV1> {
         Ok(EventId::from_ulid(ulid::Ulid::from_bytes(self.fixed()?)))
+    }
+    fn entity(&mut self) -> Result<EntityId, ForkEventProvenanceErrorV1> {
+        Ok(EntityId::from_ulid(ulid::Ulid::from_bytes(self.fixed()?)))
+    }
+    fn null(&mut self) -> Result<bool, ForkEventProvenanceErrorV1> {
+        if self.bytes.get(self.offset) == Some(&0xf6) {
+            self.offset += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    fn optional_event(&mut self) -> Result<Option<EventId>, ForkEventProvenanceErrorV1> {
+        if self.null()? {
+            Ok(None)
+        } else {
+            self.event().map(Some)
+        }
+    }
+    fn optional_correlation(
+        &mut self,
+    ) -> Result<Option<CorrelationId>, ForkEventProvenanceErrorV1> {
+        if self.null()? {
+            Ok(None)
+        } else {
+            Ok(Some(CorrelationId::from_ulid(ulid::Ulid::from_bytes(
+                self.fixed()?,
+            ))))
+        }
+    }
+    fn optional_wall_time(&mut self) -> Result<Option<WallTime>, ForkEventProvenanceErrorV1> {
+        if self.null()? {
+            Ok(None)
+        } else {
+            self.uint().map(WallTime::from_micros).map(Some)
+        }
+    }
+    fn optional_hash(&mut self) -> Result<Option<Hash>, ForkEventProvenanceErrorV1> {
+        if self.null()? {
+            Ok(None)
+        } else {
+            self.hash().map(Some)
+        }
+    }
+    fn source(&mut self) -> Result<ForkAppendSourceIdentityV1, ForkEventProvenanceErrorV1> {
+        match self.head(4)? {
+            1 => {
+                if self.uint()? == 0 {
+                    Ok(ForkAppendSourceIdentityV1::HostInternal)
+                } else {
+                    Err(ForkEventProvenanceErrorV1::InvalidEncoding)
+                }
+            }
+            4 => {
+                if self.uint()? != 1 {
+                    return Err(ForkEventProvenanceErrorV1::InvalidEncoding);
+                }
+                let adapter_identifier = self.text(MAX_FORK_EVENT_REGISTRAR_BYTES_V1)?;
+                let source = ForkEventSourceDescriptorV1::new(
+                    self.text(MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1)?,
+                    self.hash()?,
+                )?;
+                let source = ForkAppendSourceIdentityV1::ExternalInput {
+                    adapter_identifier,
+                    source,
+                };
+                source.validate()?;
+                Ok(source)
+            }
+            _ => Err(ForkEventProvenanceErrorV1::InvalidEncoding),
+        }
     }
     fn bool(&mut self) -> Result<bool, ForkEventProvenanceErrorV1> {
         match self.uint()? {
