@@ -112,7 +112,7 @@ pub struct AdapterAdmissionEntryV1 {
 }
 
 impl AdapterAdmissionEntryV1 {
-    pub(crate) const fn contract_key(&self) -> AdapterContractKey<'_> {
+    pub(crate) fn contract_key(&self) -> AdapterContractKey<'_> {
         AdapterContractKey {
             plugin_id: self.plugin_id,
             adapter_id: &self.adapter_id,
