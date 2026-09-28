@@ -2,6 +2,8 @@
 
 #[cfg(unix)]
 mod image_file;
+#[cfg(unix)]
+mod image_gpt;
 mod image_proof;
 mod network;
 pub use image_proof::SandboxImageProofError;
