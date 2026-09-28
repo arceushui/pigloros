@@ -4,6 +4,11 @@
 //! the Owner only through the same protected FACR1 registry. #450 owns all
 //! listener, FAH1, session, command, and durable-authority orchestration.
 
+#![expect(
+    clippy::redundant_pub_crate,
+    reason = "these types must be reachable by the crate-private #450 host, while the credential module remains private to this crate"
+)]
+
 use std::{
     fs::{self, OpenOptions},
     io::{Cursor, Read},
@@ -41,7 +46,7 @@ const CREDENTIAL_DIRECTORY_MODE: u32 = 0o022;
 const AUTHENTICATION_LIFETIME_MICROS: u64 = 30_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum LocalForkAuthenticationErrorV1 {
+pub(crate) enum LocalForkAuthenticationErrorV1 {
     #[error("fork admission credential unavailable")]
     CredentialUnavailable,
     #[error("fork admission credential invalid")]
@@ -51,7 +56,7 @@ pub enum LocalForkAuthenticationErrorV1 {
 }
 
 /// Loaded, purpose-separated authority inputs retained only by the host.
-pub struct LocalForkAuthenticationCredentialsV1 {
+pub(crate) struct LocalForkAuthenticationCredentialsV1 {
     resolver: PrincipalOwnerResolverV1,
     adapter_signer: ForkAuthenticationAdapterSigningKeyV1,
     _host_signer: LocalForkHostSignerV1,
@@ -141,7 +146,7 @@ impl LocalForkAuthenticationCredentialsV1 {
 }
 
 /// Host-private Principal-to-Owner resolver over the protected FACR1 registry.
-pub struct PrincipalOwnerResolverV1 {
+pub(crate) struct PrincipalOwnerResolverV1 {
     policy: ForkAuthenticationPolicyV1,
     registry: LocalAccountRegistryV1,
 }
@@ -188,12 +193,12 @@ impl PrincipalOwnerResolverV1 {
 ///
 /// #450 adds the crate-private methods that accept its typed host-derived
 /// commands. The raw purpose-limited signer never crosses this boundary.
-pub struct LocalForkHostSignerV1 {
+pub(crate) struct LocalForkHostSignerV1 {
     _signer: ForkHostSigningKeyV1,
 }
 
 /// Non-cloneable result of one kernel-authenticated Unix connection.
-pub struct AuthenticatedUnixPeerV1 {
+pub(crate) struct AuthenticatedUnixPeerV1 {
     principal: PrincipalRefV1,
 }
 
@@ -205,10 +210,10 @@ impl AuthenticatedUnixPeerV1 {
 }
 
 /// Opaque evidence created only from a kernel-authenticated Unix peer.
-pub struct ProducedLocalAuthenticationEvidenceV1(AuthenticatedPrincipalEvidenceV1);
+pub(crate) struct ProducedLocalAuthenticationEvidenceV1(AuthenticatedPrincipalEvidenceV1);
 
 /// Verified local FAE1 together with the Owner resolved from the same FACR1 row.
-pub struct ResolvedLocalAuthenticationV1 {
+pub(crate) struct ResolvedLocalAuthenticationV1 {
     verified: VerifiedAuthenticatedPrincipalEvidenceV1,
     owner: OwnerIdV1,
 }
@@ -511,7 +516,7 @@ mod tests {
     use pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1;
 
     fn test_ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
-        value.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+        value.unwrap_or_else(|error| panic!("test setup failed: {error:?}"))
     }
 
     fn encode(value: Value) -> Vec<u8> {
