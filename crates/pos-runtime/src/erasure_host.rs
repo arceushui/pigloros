@@ -6357,11 +6357,17 @@ mod tests {
 
     #[test]
     fn unaffected_fork_publication_failure_rolls_back_the_created_child() {
-        let mut host = ErasureExecutionHostV1::recover_verified_empty(
-            Box::new(MemoryStore::new().without_erasure_gate()),
-            4,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let directory =
+            tempfile::tempdir().unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        let path = directory
+            .path()
+            .join("rollback-fork.db")
+            .to_string_lossy()
+            .into_owned();
+        let config = StoreConfig::Sqlite { path };
+        let limits = ErasureRecoveryLimitsV1::compiled_maximum();
+        let mut host = ErasureExecutionHostV1::open_verified_empty(config.clone(), limits)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let parent = host
             .command_sender()
             .and_then(|mut sender| sender.create_timeline("publication-rollback-parent"))
@@ -6375,6 +6381,16 @@ mod tests {
             Err(ErasureHostErrorV1::RecoveryUnavailable)
         );
         assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+        drop(host);
+
+        let mut reopened = ErasureExecutionHostV1::open_verified_empty(config, limits)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let timelines = reopened
+            .read_sender()
+            .and_then(|mut sender| sender.timelines())
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert_eq!(timelines.len(), 1);
+        assert_eq!(timelines[0].id(), parent.id());
     }
 
     #[test]

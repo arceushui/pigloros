@@ -1756,6 +1756,20 @@ fn stale_generation_error_has_a_stable_round_trip_code() {
 }
 
 #[test]
+fn erasure_error_codes_round_trip_without_drift() {
+    for code in 0_u64..17 {
+        assert_eq!(
+            ErasureErrorV1::from_code(code).map(ErasureErrorV1::code),
+            Ok(code)
+        );
+    }
+    assert_eq!(
+        ErasureErrorV1::from_code(17),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+}
+
+#[test]
 fn erasure_host_errors_have_stable_payload_free_codes() {
     let errors = [
         ErasureHostErrorV1::RecoveryUnavailable,

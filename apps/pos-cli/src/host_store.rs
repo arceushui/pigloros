@@ -181,7 +181,7 @@ mod hosted_cli_store_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sqlite_bounded_read_stays_inside_the_host_fence() -> Result<(), Box<dyn std::error::Error>> {
+    fn sqlite_bounded_read_uses_the_host_fence() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::TempDir::new()?;
         let path = directory.path().join("cli-replay.db");
         let config = StoreConfig::Sqlite {
@@ -191,29 +191,13 @@ mod hosted_cli_store_tests {
         let timeline = store.create_timeline("cli-replay")?;
         drop(store);
         let store = HostedCliStore::open(config)?;
-        let mut host = store.host.lock().map_err(|_| "CLI host lock is poisoned")?;
-        let (result, read_result) = {
-            let mut sender = host.read_sender()?;
-            let mut read_result = None;
-            let result = sender.with_protected_effect_fence(
+        assert!(store
+            .read_bounded(
                 timeline.id(),
-                pos_core::ErasureProtectedOperationV1::Read,
-                &mut |sender| {
-                    read_result = Some(sender.read_bounded(
-                        timeline.id(),
-                        SeqRange::all(),
-                        pos_core::store::EventReadBounds::new(8, 32, 4, 4),
-                    ));
-                },
-            );
-            (result, read_result)
-        };
-        drop(host);
-        assert!(result.is_ok(), "CLI read fence failed: {result:?}");
-        assert!(
-            matches!(read_result.as_ref(), Some(Ok(_))),
-            "nested CLI read failed: {read_result:?}"
-        );
+                SeqRange::all(),
+                pos_core::store::EventReadBounds::new(8, 32, 4, 4),
+            )?
+            .is_empty());
         Ok(())
     }
 

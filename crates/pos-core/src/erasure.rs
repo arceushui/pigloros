@@ -3960,12 +3960,22 @@ impl ErasureForkRetryScopeRequirementV1 {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ForkChildDigestModeV1 {
+    Admission,
+    Historical,
+}
+
 fn update_fork_child_fields_without_fork_point(
     hasher: &mut blake3::Hasher,
     child: &crate::TimelineMeta,
-    mode_encoding: &[u8],
+    mode: ForkChildDigestModeV1,
 ) {
     hasher.update(&child.id.inner().to_bytes());
+    let mode_encoding: &[u8] = match mode {
+        ForkChildDigestModeV1::Admission => &[0],
+        ForkChildDigestModeV1::Historical => b"historical",
+    };
     hasher.update(mode_encoding);
     match &child.name {
         Some(name) => {
@@ -3999,14 +4009,13 @@ struct ForkAdmissionBindingDigestInput<'a> {
     next_manifest: ErasureReferenceV1,
     persistence_evidence: ErasureReferenceV1,
     child: &'a crate::TimelineMeta,
+    fork_point: (TimelineId, Seq),
 }
 
 fn fork_admission_binding_digest(
     input: &ForkAdmissionBindingDigestInput<'_>,
 ) -> ErasureReferenceV1 {
-    let Some((parent, at_seq)) = input.child.fork_point else {
-        return reference_zero();
-    };
+    let (parent, at_seq) = input.fork_point;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/erasure-fork-admission/v1");
     for reference in [
@@ -4021,7 +4030,11 @@ fn fork_admission_binding_digest(
     ] {
         hasher.update(&reference.digest());
     }
-    update_fork_child_fields_without_fork_point(&mut hasher, input.child, &[0]);
+    update_fork_child_fields_without_fork_point(
+        &mut hasher,
+        input.child,
+        ForkChildDigestModeV1::Admission,
+    );
     hasher.update(&parent.inner().to_bytes());
     hasher.update(&at_seq.as_u64().to_be_bytes());
     ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
@@ -4033,11 +4046,10 @@ fn fork_batch_binding_digest(
     child_scope: ErasureReferenceV1,
     successor_generation: ErasureReferenceV1,
     child: &crate::TimelineMeta,
+    fork_point: (TimelineId, Seq),
     admission_bindings: &[ErasureReferenceV1],
 ) -> ErasureReferenceV1 {
-    let Some((parent, at_seq)) = child.fork_point else {
-        return reference_zero();
-    };
+    let (parent, at_seq) = fork_point;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/erasure-fork-batch/v1");
     for reference in [
@@ -4048,7 +4060,11 @@ fn fork_batch_binding_digest(
     ] {
         hasher.update(&reference.digest());
     }
-    update_fork_child_fields_without_fork_point(&mut hasher, child, b"historical");
+    update_fork_child_fields_without_fork_point(
+        &mut hasher,
+        child,
+        ForkChildDigestModeV1::Historical,
+    );
     hasher.update(&parent.inner().to_bytes());
     hasher.update(&at_seq.as_u64().to_be_bytes());
     hasher.update(
@@ -4250,7 +4266,11 @@ impl ErasureForkRecoveryV1 {
         hasher.update(&expected_inventory_generation.digest());
         hasher.update(&child_scope.digest());
         hasher.update(&successor_generation.digest());
-        update_fork_child_fields_without_fork_point(&mut hasher, child, b"historical");
+        update_fork_child_fields_without_fork_point(
+            &mut hasher,
+            child,
+            ForkChildDigestModeV1::Historical,
+        );
         let (parent, at_seq) = fork_point;
         hasher.update(&parent.inner().to_bytes());
         hasher.update(&at_seq.as_u64().to_be_bytes());
@@ -4384,6 +4404,7 @@ impl PreparedErasureForkAdmissionV1 {
             next_manifest: mutation.next_manifest().digest(),
             persistence_evidence,
             child: &input.child,
+            fork_point: (parent, at_seq),
         });
         debug_assert_eq!(
             input.child.fork_point,
@@ -4468,6 +4489,7 @@ impl PreparedErasureForkBatchV1 {
             input.child_scope,
             successor_inventory.generation(),
             &input.child,
+            (parent, at_seq),
             &admission_bindings,
         );
         debug_assert_eq!(
@@ -4664,7 +4686,7 @@ impl ErasureForkRecoveryProofV1 {
         .and_then(|value| {
             let fields = exact_array(&value, 8)?;
             header(fields, ERASURE_FORK_RECOVERY_PROOF_TAG_V1)?;
-            let admissions = bounded_value_array(&fields[7], ERASURE_MAX_INVENTORY_REQUESTS)?
+            let admissions = array(&fields[7], ERASURE_MAX_INVENTORY_REQUESTS)?
                 .iter()
                 .map(recovery_mutation_from_value)
                 .collect::<Result<Vec<_>, _>>()?;
@@ -4754,6 +4776,7 @@ impl ErasureForkRecoveryProofV1 {
                 next_manifest: admission.next_manifest,
                 persistence_evidence: fork_recovery_mutation_evidence_digest(admission),
                 child: recovered.child(),
+                fork_point: recovered.fork_point(),
             });
             if expected != admission.binding_digest {
                 return Err(ErasureErrorV1::ProvenanceMissing);
@@ -4766,6 +4789,7 @@ impl ErasureForkRecoveryProofV1 {
             self.child_scope,
             self.successor_generation,
             recovered.child(),
+            recovered.fork_point(),
             &bindings,
         ) == self.binding_digest)
             .then_some(())
@@ -4985,27 +5009,19 @@ impl ErasureForkRecoveryContentV1 {
     }
 }
 
-fn bounded_value_array(value: &Value, maximum: usize) -> Result<&[Value], ErasureErrorV1> {
-    match value {
-        Value::Array(values) if values.len() <= maximum => Ok(values),
-        Value::Array(_) => Err(ErasureErrorV1::ScopeInvalid),
-        _ => Err(ErasureErrorV1::InvalidEncoding),
-    }
-}
-
 fn recovery_mutation_from_value(
     value: &Value,
 ) -> Result<ErasureForkRecoveryMutationV1, ErasureErrorV1> {
     let fields = exact_array(value, 15)?;
-    let objects = bounded_value_array(&fields[8], ERASURE_MAX_REFERENCES)?
+    let objects = array(&fields[8], ERASURE_MAX_REFERENCES)?
         .iter()
         .map(recovery_object_from_value)
         .collect::<Result<Vec<_>, _>>()?;
-    let states = bounded_value_array(&fields[9], ERASURE_MAX_REFERENCES)?
+    let states = array(&fields[9], ERASURE_MAX_REFERENCES)?
         .iter()
         .map(recovery_object_from_value)
         .collect::<Result<Vec<_>, _>>()?;
-    let index_inserts = bounded_value_array(&fields[10], ERASURE_MAX_REFERENCES)?
+    let index_inserts = array(&fields[10], ERASURE_MAX_REFERENCES)?
         .iter()
         .map(recovery_index_from_value)
         .collect::<Result<Vec<_>, _>>()?;
@@ -5963,7 +5979,7 @@ mod coordinator;
 #[path = "erasure/evidence.rs"]
 mod evidence;
 use evidence::{
-    acknowledgements_are_closure_subset, bytes32, cas_effect_from_fields, cas_effect_value,
+    acknowledgements_are_closure_subset, array, bytes32, cas_effect_from_fields, cas_effect_value,
     decode_limited, digest, domain_digest, encode_canonical, encode_limited, exact_array,
     freeze_is_monotonic, has_duplicate, has_duplicate_acknowledgement_identity, header,
     invalid_owner_sets, inventories_are_within_closure, inventories_exceed_bound,
@@ -7619,32 +7635,6 @@ mod coverage_paths {
         );
         assert_eq!(admission.effect_subject(), None);
 
-        let root = crate::TimelineMeta::root("proof-root");
-        assert_eq!(
-            fork_admission_binding_digest(&ForkAdmissionBindingDigestInput {
-                operation: reference(1),
-                expected_inventory_generation: reference(2),
-                child_scope: reference(3),
-                extension: reference(4),
-                mutation: reference(5),
-                predecessor: reference(6),
-                next_manifest: reference(7),
-                persistence_evidence: reference(8),
-                child: &root,
-            },),
-            reference_zero()
-        );
-        assert_eq!(
-            fork_batch_binding_digest(
-                reference(1),
-                reference(2),
-                reference(3),
-                reference(4),
-                &root,
-                &[],
-            ),
-            reference_zero()
-        );
         Ok(())
     }
 
@@ -8194,6 +8184,7 @@ mod coverage_paths {
                 next_manifest: admission.next_manifest,
                 persistence_evidence: fork_recovery_mutation_evidence_digest(admission),
                 child: result.child(),
+                fork_point: result.fork_point(),
             });
         let admission_binding = admission.binding_digest;
         mismatched_admission.binding_digest = fork_batch_binding_digest(
@@ -8202,6 +8193,7 @@ mod coverage_paths {
             mismatched_admission.child_scope,
             mismatched_admission.successor_generation,
             result.child(),
+            result.fork_point(),
             &[admission_binding],
         );
         let mismatched_result = ErasureForkRecoveryV1::new(
@@ -8226,6 +8218,7 @@ mod coverage_paths {
             shortened.child_scope,
             shortened.successor_generation,
             result.child(),
+            result.fork_point(),
             &[],
         );
         let rebound_result = ErasureForkRecoveryV1::new(

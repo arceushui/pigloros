@@ -1,6 +1,6 @@
 use piglor_gateway::{
-    router, AppState, Gateway, GatewayAuthorization, GatewayAuthorizationRequest, GatewayError,
-    LedgerWriteMode, LocalAuthenticationAdapter,
+    router, AppState, Gateway, GatewayAuthorization, GatewayError, LedgerWriteMode,
+    LocalAuthenticationAdapter,
 };
 use piglor_ledger::LedgerView;
 use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};
@@ -10,7 +10,7 @@ use pos_core::{
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
     ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1,
-    EventDraft, Hash, Kind, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    Event, EventDraft, Hash, Kind, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -760,7 +760,7 @@ async fn read_session_events_after_gateway_fail_closed(
     timeline: TimelineId,
     actor: EntityId,
     session: &pos_experiment::ExperimentSession,
-) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<Event>, Box<dyn std::error::Error + Send + Sync>> {
     let page = request_http_with_actor(
         address,
         "GET",
@@ -772,58 +772,39 @@ async fn read_session_events_after_gateway_fail_closed(
     assert_eq!(page.status, 503);
     let events = session.source_events().test_ok()?;
     assert_eq!(events.len(), 8);
-    Ok(events
-        .iter()
-        .map(|event| {
-            json!({
-                "seq": event.seq.as_u64(),
-                "event_type": event.event_type.as_str(),
-                "entity": event.entity.to_string(),
-            })
-        })
-        .collect())
+    Ok(events)
 }
 
 fn assert_event_order(
     human_entity: EntityId,
     fast_entity: EntityId,
     slow_entity: EntityId,
-    events: &[Value],
+    events: &[Event],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for (index, event) in events.iter().enumerate() {
-        assert_eq!(
-            event["seq"].as_u64().test_ok()?,
-            u64::try_from(index + 1).test_ok()?
-        );
+        assert_eq!(event.seq.as_u64(), u64::try_from(index + 1).test_ok()?);
     }
     let human_seq = events
         .iter()
         .find(|event| {
-            event["event_type"] == "world.action.v1" && event["entity"] == human_entity.to_string()
+            event.event_type.as_str() == "world.action.v1" && event.entity == human_entity
         })
-        .and_then(|event| event["seq"].as_u64())
+        .map(|event| event.seq.as_u64())
         .test_ok()?;
     let blocked_fast_seq = events
         .iter()
         .filter(|event| {
-            event["event_type"] == EVENT_TYPE_ACTION && event["entity"] == fast_entity.to_string()
+            event.event_type.as_str() == EVENT_TYPE_ACTION && event.entity == fast_entity
         })
-        .filter_map(|event| event["seq"].as_u64())
+        .map(|event| event.seq.as_u64())
         .find(|seq| *seq > human_seq)
         .test_ok()?;
     assert!(human_seq < blocked_fast_seq);
     let agent_order = events
         .iter()
-        .filter(|event| event["event_type"] == EVENT_TYPE_ACTION)
-        .map(
-            |event| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
-                Ok((
-                    event["seq"].as_u64().test_ok()?,
-                    event["entity"].as_str().test_ok()?.to_owned(),
-                ))
-            },
-        )
-        .collect::<Result<Vec<_>, _>>()?;
+        .filter(|event| event.event_type.as_str() == EVENT_TYPE_ACTION)
+        .map(|event| (event.seq.as_u64(), event.entity.to_string()))
+        .collect::<Vec<_>>();
     assert_eq!(
         agent_order,
         vec![
@@ -959,8 +940,8 @@ fn assert_replay(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn multi_rate_human_ai_replay_is_deterministic() {
-    let result = multi_rate_human_ai_replay_is_deterministic_impl().await;
+async fn multi_rate_simulated_human_and_ai_replay_is_deterministic() {
+    let result = multi_rate_simulated_human_and_ai_replay_is_deterministic_impl().await;
     assert!(result.is_ok(), "multi-rate replay failed: {result:?}");
 }
 
@@ -1008,7 +989,7 @@ async fn host_backed_http_action_and_poll_succeed_without_a_competing_writer(
     Ok(())
 }
 
-async fn multi_rate_human_ai_replay_is_deterministic_impl(
+async fn multi_rate_simulated_human_and_ai_replay_is_deterministic_impl(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut scenario =
         create_scenario()
@@ -1078,33 +1059,63 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
         [scenario.human_body],
         gateway_authorization_for(scenario.human_entity)?,
     )?;
-    let page = recovered_gateway
-        .read_events_page_authorized(
-            &scenario.timeline.to_string(),
-            0,
-            10,
-            GatewayAuthorizationRequest::read(
-                scenario.human_entity,
-                scenario.timeline,
-                0,
-                10,
-                WallTime::now(),
-            ),
-        )
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .test_ok()?;
-    drop(recovered_gateway);
-    assert_eq!(page.events.len(), events.len());
-    assert_eq!(page.next_from_seq, None);
-    for (actual, expected) in page.events.iter().zip(&events) {
-        assert_eq!(Some(actual.seq.as_u64()), expected["seq"].as_u64());
+    let address = listener.local_addr().test_ok()?;
+    let state = AppState {
+        gateway: recovered_gateway,
+        ledger_view: LedgerView::default(),
+        ledger_write: LedgerWriteMode::Disabled,
+    };
+    let (server_shutdown, shutdown_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(state))
+            .with_graceful_shutdown(async {
+                match shutdown_rx.await {
+                    Ok(()) | Err(()) => {}
+                }
+            })
+            .await
+    });
+    let guard = FixtureGuard {
+        policy_release: None,
+        server_shutdown: Some(server_shutdown),
+        server: Some(server),
+    };
+    let mut from_seq = 0;
+    for (page_index, expected_page) in events.chunks(2).enumerate() {
+        let page = request_http_with_actor(
+            address,
+            "GET",
+            &format!(
+                "/v1/timelines/{}/events?from_seq={from_seq}&limit=2",
+                scenario.timeline
+            ),
+            None,
+            Some(scenario.human_entity),
+        )
+        .await?;
+        assert_eq!(page.status, 200);
+        let actual_page = page.body["events"].as_array().test_ok()?;
+        assert_eq!(actual_page.len(), expected_page.len());
+        for (actual, expected) in actual_page.iter().zip(expected_page) {
+            assert_eq!(actual["seq"], expected.seq.as_u64());
+            assert_eq!(actual["event_type"], expected.event_type.as_str());
+            assert_eq!(actual["entity"], expected.entity.to_string());
+        }
+        let next = page.body["next_from_seq"].as_u64();
         assert_eq!(
-            Some(actual.event_type.as_str()),
-            expected["event_type"].as_str()
+            next,
+            events
+                .get((page_index + 1) * 2)
+                .map(|event| event.seq.as_u64())
         );
-        let actual_entity = actual.entity.to_string();
-        assert_eq!(Some(actual_entity.as_str()), expected["entity"].as_str());
+        if let Some(next) = next {
+            from_seq = next;
+        }
     }
+    guard.shutdown().await?;
     Ok(())
 }
 
