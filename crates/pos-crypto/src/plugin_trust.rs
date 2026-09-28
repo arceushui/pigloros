@@ -1069,12 +1069,10 @@ pub fn verify_plugin_trust_v1(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    mod plugin_trust_vectors {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/support/plugin_trust_vectors.rs"
-        ));
-    }
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/plugin_trust_vectors.rs"
+    ));
     use ciborium::value::Value;
     use ed25519_dalek::{Signer, SigningKey};
 
@@ -1289,18 +1287,14 @@ mod tests {
     #[test]
     fn independent_ptr1_prv1_golden_bytes_verify_and_bind_preimages(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let ptr1 = plugin_trust_vectors::hex_bytes(plugin_trust_vectors::PTR1_HEX)?;
-        let prv1 = plugin_trust_vectors::hex_bytes(plugin_trust_vectors::PRV1_HEX)?;
-        let expected_ptr1_preimage = plugin_trust_vectors::hex_bytes(GOLDEN_PTR1_PREIMAGE_HEX)?;
-        let expected_prv1_preimage = plugin_trust_vectors::hex_bytes(GOLDEN_PRV1_PREIMAGE_HEX)?;
+        let ptr1 = hex_bytes(PTR1_HEX)?;
+        let prv1 = hex_bytes(PRV1_HEX)?;
+        let expected_ptr1_preimage = hex_bytes(GOLDEN_PTR1_PREIMAGE_HEX)?;
+        let expected_prv1_preimage = hex_bytes(GOLDEN_PRV1_PREIMAGE_HEX)?;
         let expected_ptr1_digest: [u8; 32] =
-            plugin_trust_vectors::hex_bytes(GOLDEN_PTR1_DIGEST_HEX)?
-                .as_slice()
-                .try_into()?;
+            hex_bytes(GOLDEN_PTR1_DIGEST_HEX)?.as_slice().try_into()?;
         let expected_prv1_digest: [u8; 32] =
-            plugin_trust_vectors::hex_bytes(GOLDEN_PRV1_DIGEST_HEX)?
-                .as_slice()
-                .try_into()?;
+            hex_bytes(GOLDEN_PRV1_DIGEST_HEX)?.as_slice().try_into()?;
 
         let decoded_ptr1 = PluginTrustRootRecordV1::decode(&ptr1)?;
         let decoded_prv1 = PluginRevocationRecordV1::decode(&prv1)?;
