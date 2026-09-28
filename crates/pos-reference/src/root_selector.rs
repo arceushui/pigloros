@@ -3832,6 +3832,8 @@ mod tests {
             .installed()
             .artifact(kind, identity)?
             .file();
+        // The test installation retains writable temporary files solely for
+        // corruption injection; production installation descriptors are read-only.
         let execute = |request_admission: &mut SelectorProviderRequestAdmission<'_>| {
             transport.execute_staged(
                 &fixture.provider,
@@ -3890,7 +3892,9 @@ mod tests {
         ));
         // A failed recheck reserves no entry and cannot stall live-update closure.
         let closed = admission.close_and_snapshot()?;
-        assert_eq!(closed.live_attempt_ids, vec![[1; 16]]);
+        // Only the retry case has already entered a provider-owned attempt.
+        let expected: Vec<_> = mutate_before_retry.then_some([1; 16]).into_iter().collect();
+        assert_eq!(closed.live_attempt_ids, expected);
         Ok(())
     }
 
