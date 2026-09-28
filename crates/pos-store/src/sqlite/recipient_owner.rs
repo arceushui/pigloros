@@ -186,6 +186,29 @@ struct StoredRecipientKeyInventoryV1 {
     file_uid: Vec<u8>,
 }
 
+fn recipient_inventory_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<StoredRecipientKeyInventoryV1, rusqlite::Error> {
+    row.get(0).and_then(|descriptor| {
+        row.get(1).and_then(|material_digest| {
+            row.get(2).and_then(|private_path| {
+                row.get(3).and_then(|file_device| {
+                    row.get(4).and_then(|file_inode| {
+                        row.get(5).map(|file_uid| StoredRecipientKeyInventoryV1 {
+                            descriptor,
+                            material_digest,
+                            private_path,
+                            file_device,
+                            file_inode,
+                            file_uid,
+                        })
+                    })
+                })
+            })
+        })
+    })
+}
+
 impl RecipientPrivateDirectoryIdentityV1 {
     fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
@@ -377,16 +400,10 @@ impl SqliteStore {
             let mut statement = self.conn.prepare("SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 ORDER BY epoch")
                 .map_err(storage_error)?;
             let rows = statement
-                .query_map(rusqlite::params![owner_id.as_str()], |row| {
-                    Ok(StoredRecipientKeyInventoryV1 {
-                        descriptor: row.get(0)?,
-                        material_digest: row.get(1)?,
-                        private_path: row.get(2)?,
-                        file_device: row.get(3)?,
-                        file_inode: row.get(4)?,
-                        file_uid: row.get(5)?,
-                    })
-                })
+                .query_map(
+                    rusqlite::params![owner_id.as_str()],
+                    recipient_inventory_from_row,
+                )
                 .map_err(storage_error)?;
             let inventories = rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
             let descriptors =
@@ -522,16 +539,7 @@ impl SqliteStore {
                     i64::try_from(identity.epoch)
                         .map_err(storage_error)?
                 ],
-                |row| {
-                    Ok(StoredRecipientKeyInventoryV1 {
-                        descriptor: row.get(0)?,
-                        material_digest: row.get(1)?,
-                        private_path: row.get(2)?,
-                        file_device: row.get(3)?,
-                        file_inode: row.get(4)?,
-                        file_uid: row.get(5)?,
-                    })
-                },
+                recipient_inventory_from_row,
             )
             .map_err(storage_error)?;
         let descriptor =
@@ -741,16 +749,7 @@ fn validate_directory_inventory_grantees(
         )
         .map_err(storage_error)?;
     let rows = statement
-        .query_map([], |row| {
-            Ok(StoredRecipientKeyInventoryV1 {
-                descriptor: row.get(0)?,
-                material_digest: row.get(1)?,
-                private_path: row.get(2)?,
-                file_device: row.get(3)?,
-                file_inode: row.get(4)?,
-                file_uid: row.get(5)?,
-            })
-        })
+        .query_map([], recipient_inventory_from_row)
         .map_err(storage_error)?;
     let inventories = rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
     for inventory in inventories {
