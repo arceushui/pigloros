@@ -1068,6 +1068,9 @@ fn recipient_owner_public_contract_rejects_custody_schema_substitution(
 
     assert!(store.enroll_recipient_key(&owner).is_err());
     assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(store
+        .destroy_recipient_key(&owner, 1, Hash::from_bytes([98; 32]))
+        .is_err());
     assert!(store.load_key_registry()?.is_none());
     Ok(())
 }
@@ -1103,6 +1106,9 @@ fn recipient_owner_public_contract_rolls_back_registry_write_and_directory_claim
 
     assert!(store.enroll_recipient_key(&owner).is_err());
     assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(store
+        .destroy_recipient_key(&owner, 1, Hash::from_bytes([99; 32]))
+        .is_err());
     assert_eq!(
         connection.query_row(
             "SELECT COUNT(*) FROM recipient_custody_directory_claims_v1",
@@ -1111,5 +1117,57 @@ fn recipient_owner_public_contract_rolls_back_registry_write_and_directory_claim
         )?,
         0
     );
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_corrupt_registry_blocks_each_custody_transition(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let path = only_private_file(&temporary.path().join("recipient-private"))?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute("UPDATE key_registry SET state_cbor = X'01'", [])?;
+
+    assert!(store.enroll_recipient_key(&owner).is_err());
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(store
+        .destroy_recipient_key(
+            &owner,
+            descriptor.identity().epoch,
+            Hash::from_bytes([100; 32]),
+        )
+        .is_err());
+    assert!(path.exists());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_keeps_active_material_when_begin_cannot_persist(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
+    let path = only_private_file(&temporary.path().join("recipient-private"))?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute_batch(
+        "CREATE TRIGGER reject_recipient_destruction_begin
+         BEFORE UPDATE ON key_registry
+         BEGIN SELECT RAISE(ABORT, 'injected destruction persistence failure'); END;",
+    )?;
+
+    assert!(store
+        .destroy_recipient_key(
+            &owner,
+            descriptor.identity().epoch,
+            Hash::from_bytes([101; 32]),
+        )
+        .is_err());
+    assert!(path.exists());
+    let registry = store
+        .load_key_registry()?
+        .ok_or("recipient registry is absent")?;
+    assert!(registry.tombstone(descriptor.identity()).is_none());
+    assert!(registry
+        .key_record(descriptor.identity())
+        .and_then(|record| record.private_material_digest)
+        .is_some());
     Ok(())
 }
