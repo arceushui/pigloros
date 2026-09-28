@@ -2101,28 +2101,30 @@ impl ExperimentSession {
                 self.boundary.folded_through,
             )
         })?;
-        let mut committed_events = lock_store(&self.store).and_then(|store| {
-            read_completed_prefix_at(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )
-        })?;
-        committed_events.extend(before.events.iter().cloned());
-        let folded_events = if self
+        let (folded_events, committed_events) = if self
             .registry
             .validate_projection_source(self.timeline.id())
             .is_ok()
         {
-            fold_captured_range(&mut self.boundary, &mut self.registry, &before)
+            let mut committed_events = lock_store(&self.store).and_then(|store| {
+                read_completed_prefix_at(
+                    store.as_ref(),
+                    self.timeline.id(),
+                    self.boundary.folded_through,
+                )
+            })?;
+            committed_events.extend(before.events.iter().cloned());
+            (
+                fold_captured_range(&mut self.boundary, &mut self.registry, &before),
+                committed_events,
+            )
         } else {
-            let refreshed = refold_host_projection_prefix(
+            let committed_events = match refold_host_projection_prefix(
                 &self.store,
                 &mut self.registry,
                 self.timeline.id(),
                 before.through,
-            );
-            committed_events = match refreshed {
+            ) {
                 Ok(events) => events,
                 Err(error) => {
                     self.health = SessionHealth::Faulted;
@@ -2130,7 +2132,10 @@ impl ExperimentSession {
                 }
             };
             self.boundary.folded_through = before.through;
-            FoldedEventCount(u64::try_from(before.events.len()).unwrap_or(u64::MAX))
+            (
+                FoldedEventCount(u64::try_from(before.events.len()).unwrap_or(u64::MAX)),
+                committed_events,
+            )
         };
         Ok((folded_events.0, committed_events))
     }
@@ -3975,9 +3980,8 @@ mod tests {
 
     struct PrefixDriver {
         entity: EntityId,
-        observed: Arc<Mutex<Vec<(Vec<u64>, u64)>>>,
+        observed: Arc<Mutex<Vec<Vec<u64>>>>,
         event_types: Vec<Kind>,
-        projections: Vec<ProjectionKey>,
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -3988,10 +3992,6 @@ mod tests {
 
         fn event_subscriptions(&self) -> &[Kind] {
             &self.event_types
-        }
-
-        fn subscriptions(&self) -> &[ProjectionKey] {
-            &self.projections
         }
 
         fn requires_verified_event_prefix(&self) -> bool {
@@ -4011,12 +4011,7 @@ mod tests {
                 .iter()
                 .map(|event| event.seq.as_u64())
                 .collect();
-            let count = observations
-                .state_for(&self.projections[0])
-                .and_then(|state| state.get("n"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            self.observed.lock().test_ok().push((seqs, count));
+            self.observed.lock().test_ok().push(seqs);
             Ok(StepOutput::new(vec![EventDraft::new(
                 self.entity,
                 Kind::new("refresh.event"),
@@ -5548,7 +5543,6 @@ mod tests {
                 entity,
                 observed: Arc::clone(&observed),
                 event_types: vec![Kind::new("refresh.event")],
-                projections: vec![ProjectionKey::new(entity)],
             }
         };
         let mut experiment = Experiment::new(ExperimentConfig {
@@ -5593,7 +5587,16 @@ mod tests {
             Some(Seq::from_u64(1))
         );
         assert!(parent.step().test_ok());
-        assert_eq!(&*observed.lock().test_ok(), &[(vec![], 0), (vec![1], 1)]);
+        assert_eq!(&*observed.lock().test_ok(), &[vec![], vec![1]]);
+        let result = parent.run_to_completion().test_ok();
+        assert_eq!(
+            result
+                .projections
+                .state_for(result.timeline_id, &entity)
+                .test_ok()
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64)),
+            Some(2)
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
