@@ -4603,6 +4603,7 @@ dependencies = [
 name = "pos-plugin-society"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "ciborium",
  "pos-core",
  "pos-runtime",

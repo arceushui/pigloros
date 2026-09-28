@@ -113,6 +113,42 @@ fn catalog(
     })
 }
 
+fn independent_opc1_hash(binding: &OutputPolicyBindingV1) -> Hash {
+    let policy = binding.policy().to_canonical_cbor();
+    let budget = binding.budget().to_canonical_cbor();
+    let members = [
+        policy.as_slice(),
+        budget.as_slice(),
+        binding.implementation_artifact(),
+        binding.configuration_artifact(),
+        binding.execution_profile_artifact(),
+        binding.retention_policy_artifact(),
+    ];
+    let mut bytes = b"OPC1".to_vec();
+    for member in members {
+        bytes.extend_from_slice(&(member.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(member);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
+    hasher.update(&bytes);
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+#[test]
+fn opc1_hash_matches_independent_six_member_oracle() -> Result<(), Box<dyn Error>> {
+    // Generated supplies bytes for this oracle only; it cannot admit a Plugin.
+    let plugin = SocietySignalProjectionPlugin::new();
+    let binding = OutputPolicyBindingV1::from_installed_source(
+        &plugin,
+        InstalledOutputPolicySourceV1::Generated,
+        b"read-only-projection",
+        "deterministic-local-v1",
+    )?;
+    assert_eq!(binding.manifest_closure_hash()?, independent_opc1_hash(&binding));
+    Ok(())
+}
+
 fn register(registry: &mut PluginRegistry, fixture: InstalledFixture) -> Result<(), RuntimeError> {
     let InstalledFixture {
         plugin,

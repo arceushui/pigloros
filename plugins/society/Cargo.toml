@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 ciborium = { workspace = true }
 
 [dev-dependencies]
+blake3 = { workspace = true }
 pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 
 [lints]
