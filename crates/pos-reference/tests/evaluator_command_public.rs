@@ -548,14 +548,11 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
         .status()?
         .success());
 
-    let loaded_executable = directory.path().join("loaded-evaluator");
     let executable = directory.path().join("running-evaluator");
     let replacement = directory.path().join("replacement-evaluator");
-    fs::copy(
-        env!("CARGO_BIN_EXE_pos-reference-evaluator"),
-        &loaded_executable,
-    )?;
-    symlink(&loaded_executable, &executable)?;
+    // Use the built inode directly: a fresh copy briefly opens it for writing,
+    // which a concurrent child can inherit until exec and cause ETXTBSY.
+    symlink(env!("CARGO_BIN_EXE_pos-reference-evaluator"), &executable)?;
     fs::write(&replacement, b"replacement path contents")?;
     let mut command = Command::new(&executable);
     command
