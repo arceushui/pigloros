@@ -1792,4 +1792,24 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_the_low_order_recipient_key_at_the_public_encryption_boundary(
+    ) -> Result<(), RecipientExportErrorV1> {
+        let recipient =
+            RecipientKeyDescriptorV1::for_grantee(EntityId::from_ulid(id(1)), 1, [0; 32])
+                .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
+        let mut rng = StdRng::from_seed([22; 32]);
+        assert_eq!(
+            encrypt_timeline_export_v1(
+                &export(None, b"source".to_vec()),
+                recipient,
+                [5; 16],
+                &mut rng,
+            ),
+            Err(RecipientExportErrorV1::EncryptionFailed)
+        );
+        Ok(())
+    }
 }
