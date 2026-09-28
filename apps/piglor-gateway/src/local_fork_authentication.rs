@@ -50,7 +50,7 @@ pub(crate) struct LocalForkAuthenticationCredentialsV1 {
     policy: ForkAuthenticationPolicyV1,
     registry: LocalAccountRegistryV1,
     adapter_signer: ForkAuthenticationAdapterSigningKeyV1,
-    host_signer: LocalForkHostSignerV1,
+    _host_signer: LocalForkHostSignerV1,
 }
 
 impl LocalForkAuthenticationCredentialsV1 {
@@ -158,7 +158,7 @@ fn parse_credentials(
         policy,
         registry,
         adapter_signer,
-        host_signer: LocalForkHostSignerV1 {
+        _host_signer: LocalForkHostSignerV1 {
             _signer: host_signer,
         },
     })
