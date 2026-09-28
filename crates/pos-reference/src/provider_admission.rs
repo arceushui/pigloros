@@ -10,7 +10,9 @@ use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, LaunchPolicy, SandboxExecuteRequest, SignedImageManifest,
     VerifiedSandboxImageProof,
 };
-use crate::selector::installation::authority::AdmittedSelectorProvider;
+use crate::selector::installation::authority::{
+    AdmittedSelectorProvider, AuthenticatedSelectorBootstrap,
+};
 use crate::selector::installation::{InstallationObjectKind, InstalledSelectorState};
 use crate::selector::SelectorBoundaryError;
 
@@ -55,7 +57,7 @@ impl ProviderImageSnapshot {
     ) -> Result<Self, SelectorBoundaryError> {
         installed
             .authenticate_bootstrap()
-            .and_then(|bootstrap| bootstrap.admit_provider())
+            .and_then(AuthenticatedSelectorBootstrap::admit_provider)
             .and_then(|admitted| {
                 check_authority(&admitted, &request)?;
                 let (image, proof) = check_image(&admitted, &request, clock)?;
@@ -205,6 +207,7 @@ fn invalid<T>(_: T) -> SelectorBoundaryError {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::os::unix::fs::FileExt;
     use std::time::Duration;
@@ -336,6 +339,75 @@ mod tests {
                 fixture_time
             )
             .is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provider_rejects_mislabelled_image_and_launch_records() -> TestResult {
+        use crate::selector::installation::tests::reindex_artifact;
+
+        for kind in [
+            InstallationObjectKind::IMAGE_MANIFEST,
+            InstallationObjectKind::LAUNCH_POLICY,
+        ] {
+            let mut state = admitted_state()?;
+            let mut request = request_fixture()?;
+            let selected = if kind == InstallationObjectKind::IMAGE_MANIFEST {
+                &mut request.authority.sim1_digest
+            } else {
+                &mut request.authority.lps1_digest
+            };
+            let previous = *selected;
+            selected[0] ^= 1;
+            reindex_artifact(&mut state, kind, previous, *selected)?;
+            assert!(ProviderImageSnapshot::from_installation(
+                state,
+                canonical_request(request)?,
+                fixture_time
+            )
+            .is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provider_rejects_missing_image_descriptors() -> TestResult {
+        use crate::selector::installation::tests::omit_artifact;
+
+        for kind in [
+            InstallationObjectKind::ROOT_IMAGE,
+            InstallationObjectKind::SUBJECT_EXECUTABLE,
+        ] {
+            let mut state = admitted_state()?;
+            omit_artifact(&mut state, kind);
+            assert!(ProviderImageSnapshot::from_installation(
+                state,
+                request_fixture()?,
+                fixture_time
+            )
+            .is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provider_rejects_truncated_control_descriptors() -> TestResult {
+        for kind in [
+            InstallationObjectKind::IMAGE_MANIFEST,
+            InstallationObjectKind::LAUNCH_POLICY,
+        ] {
+            let state = admitted_state()?;
+            let request = request_fixture()?;
+            let identity = if kind == InstallationObjectKind::IMAGE_MANIFEST {
+                request.authority.sim1_digest
+            } else {
+                request.authority.lps1_digest
+            };
+            state.artifact(kind, identity)?.file().set_len(0)?;
+            assert!(
+                ProviderImageSnapshot::from_installation(state, request, fixture_time).is_err()
+            );
         }
         Ok(())
     }
