@@ -901,11 +901,6 @@ mod tests {
     trait ProjectionTestReads {
         fn state_for_test(&self, entity: &EntityId) -> Option<State>;
         fn state_for_reducer_test(&self, name: &str, entity: &EntityId) -> Option<State>;
-        fn diff_against_snapshot_test(
-            &self,
-            snapshot: &std::collections::HashMap<String, StateRegistry>,
-            all_entities: &[EntityId],
-        ) -> Option<(String, EntityId)>;
     }
 
     impl ProjectionTestReads for ProjectionRegistry {
@@ -915,14 +910,6 @@ mod tests {
 
         fn state_for_reducer_test(&self, name: &str, entity: &EntityId) -> Option<State> {
             test_ok(self.state_for_reducer(TimelineId::new(), name, entity))
-        }
-
-        fn diff_against_snapshot_test(
-            &self,
-            snapshot: &std::collections::HashMap<String, StateRegistry>,
-            all_entities: &[EntityId],
-        ) -> Option<(String, EntityId)> {
-            test_ok(self.diff_against_snapshot(TimelineId::new(), snapshot, all_entities))
         }
     }
 
@@ -1787,6 +1774,23 @@ mod wave3_tests {
     };
 
     struct TR;
+
+    fn open_projection_registry() -> ProjectionRegistry {
+        ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn test_timeline() -> TimelineId {
+        static TIMELINE: std::sync::OnceLock<TimelineId> = std::sync::OnceLock::new();
+        *TIMELINE.get_or_init(TimelineId::new)
+    }
+
+    fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+        })
+    }
+
     impl Reducer for TR {
         fn initial(&self) -> State {
             State::new()
@@ -1839,7 +1843,7 @@ mod wave3_tests {
         reg.apply_event(&ev(entity));
 
         let snap = reg.snapshot_unfenced();
-        let diff = reg.diff_against_snapshot_test(&snap, &[entity]);
+        let diff = test_ok(reg.diff_against_snapshot(test_timeline(), &snap, &[entity]));
         assert!(diff.is_none());
     }
 
@@ -1854,7 +1858,7 @@ mod wave3_tests {
         let snap = reg.snapshot_unfenced();
         // Apply another event — now reg diverges from the snapshot
         reg.apply_event(&ev(entity));
-        let diff = reg.diff_against_snapshot_test(&snap, &[entity]);
+        let diff = test_ok(reg.diff_against_snapshot(test_timeline(), &snap, &[entity]));
         assert!(diff.is_some());
         let (name, eid) =
             diff.unwrap_or_else(|| std::panic::resume_unwind(Box::new("diff should be present")));
@@ -1871,7 +1875,7 @@ mod wave3_tests {
         reg.apply_event(&ev(entity));
 
         let empty_snap = std::collections::HashMap::new();
-        let diff = reg.diff_against_snapshot_test(&empty_snap, &[entity]);
+        let diff = test_ok(reg.diff_against_snapshot(test_timeline(), &empty_snap, &[entity]));
         assert!(diff.is_some());
     }
 
