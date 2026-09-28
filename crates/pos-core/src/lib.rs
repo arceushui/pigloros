@@ -184,7 +184,8 @@ pub use executable_budget::{
 pub use fork_admission::{
     fork_admission_operation_commitment_from_records_v1, principal_digest_v1,
     CreateForkAdmittedRequestV1, ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1,
-    ForkAdmissionHostBindingV1, ForkAdmissionHostV1, ForkAdmissionReceiptV1, ForkAuthorityOriginV1,
+    ForkAdmissionHostBindingV1, ForkAdmissionHostV1, ForkAdmissionIntentInputV1,
+    ForkAdmissionReceiptV1, ForkAuthorityOriginV1,
     LocalPrincipalOwnerBindingPermitV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
 };
 pub use fork_attribution::{

@@ -108,26 +108,38 @@ struct ForkAdmissionIntentV1 {
     child_name: String,
 }
 
+/// Host-resolved fields for one admitted Fork creation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkAdmissionIntentInputV1 {
+    /// Stable operation identifier for the admitted Fork creation.
+    pub operation_id: Hash,
+    /// Parent Timeline from which the child Fork is created.
+    pub parent_timeline_id: TimelineId,
+    /// Completed Fold Cursor at the parent cut.
+    pub completed_fold_cursor: u64,
+    /// Tick Boundary that completed the parent fold.
+    pub post_fold_tick_boundary: u64,
+    /// Hash of the host-resolved Room revision descriptor.
+    pub room_revision_descriptor_hash: Hash,
+    /// Hash of the host-resolved Plugin composition.
+    pub plugin_composition_hash: Hash,
+    /// Whether the child Fork requires attribution.
+    pub attribution_required: bool,
+    /// Host-selected child Timeline name.
+    pub child_name: String,
+}
+
 impl ForkAdmissionIntentV1 {
-    fn new(
-        operation_id: Hash,
-        parent_timeline_id: TimelineId,
-        completed_fold_cursor: u64,
-        post_fold_tick_boundary: u64,
-        room_revision_descriptor_hash: Hash,
-        plugin_composition_hash: Hash,
-        attribution_required: bool,
-        child_name: String,
-    ) -> Result<Self, ForkAdmissionErrorV1> {
+    fn new(input: ForkAdmissionIntentInputV1) -> Result<Self, ForkAdmissionErrorV1> {
         let value = Self {
-            operation_id,
-            parent_timeline_id,
-            completed_fold_cursor,
-            post_fold_tick_boundary,
-            room_revision_descriptor_hash,
-            plugin_composition_hash,
-            attribution_required,
-            child_name,
+            operation_id: input.operation_id,
+            parent_timeline_id: input.parent_timeline_id,
+            completed_fold_cursor: input.completed_fold_cursor,
+            post_fold_tick_boundary: input.post_fold_tick_boundary,
+            room_revision_descriptor_hash: input.room_revision_descriptor_hash,
+            plugin_composition_hash: input.plugin_composition_hash,
+            attribution_required: input.attribution_required,
+            child_name: input.child_name,
         };
         value.validate()?;
         Ok(value)
@@ -159,6 +171,10 @@ pub struct PrincipalOwnerBindingInputV1 {
 pub struct PrincipalOwnerBindingV1(PrincipalOwnerBindingInputV1);
 
 impl PrincipalOwnerBindingV1 {
+    /// Construct a canonical local POB1 binding.
+    ///
+    /// # Errors
+    /// Returns `InvalidRequest` when either required digest is zero.
     pub fn new(input: PrincipalOwnerBindingInputV1) -> Result<Self, ForkAdmissionErrorV1> {
         if input.operation_id == Hash::zero() || input.principal_digest == Hash::zero() {
             return Err(ForkAdmissionErrorV1::InvalidRequest);
@@ -288,7 +304,7 @@ impl ForkAdmissionHostV1 {
     /// host, its permits, or a mutable authority adapter to untrusted code.
     ///
     /// # Errors
-    /// Returns InvalidRequest for an invalid trust policy.
+    /// Returns `InvalidRequest` for an invalid trust policy.
     pub fn new(
         adapter_id: String,
         minimum_assurance: u8,
@@ -316,7 +332,7 @@ impl ForkAdmissionHostV1 {
     /// Owner resolution stays in the host and is absent from the adapter port.
     ///
     /// # Errors
-    /// Returns Unauthenticated when authentication is not current under this host policy.
+    /// Returns `Unauthenticated` when authentication is not current under this host policy.
     pub fn permit_local_binding(
         &self,
         operation_id: Hash,
@@ -342,32 +358,16 @@ impl ForkAdmissionHostV1 {
     /// The request carries no Owner or raw authentication result.
     ///
     /// # Errors
-    /// Returns Unauthenticated when authentication is not current under this host policy.
+    /// Returns `Unauthenticated` when authentication is not current under this host policy.
     pub fn permit_fork_creation(
         &self,
         authenticated: &AuthenticatedPrincipalResultV1,
-        operation_id: Hash,
-        parent_timeline_id: TimelineId,
-        completed_fold_cursor: u64,
-        post_fold_tick_boundary: u64,
-        room_revision_descriptor_hash: Hash,
-        plugin_composition_hash: Hash,
-        attribution_required: bool,
-        child_name: String,
+        input: ForkAdmissionIntentInputV1,
         now: WallTime,
     ) -> Result<CreateForkAdmittedRequestV1, ForkAdmissionErrorV1> {
         self.trust.validate(authenticated, now)?;
         let principal_digest = principal_digest_v1(authenticated.principal())?;
-        let intent = ForkAdmissionIntentV1::new(
-            operation_id,
-            parent_timeline_id,
-            completed_fold_cursor,
-            post_fold_tick_boundary,
-            room_revision_descriptor_hash,
-            plugin_composition_hash,
-            attribution_required,
-            child_name,
-        )?;
+        let intent = ForkAdmissionIntentV1::new(input)?;
         let operation_commitment =
             fork_admission_operation_commitment_v1(principal_digest, &intent)?;
         Ok(CreateForkAdmittedRequestV1 {
@@ -386,7 +386,7 @@ impl ForkAdmissionHostV1 {
 /// reproduce this value.
 ///
 /// # Errors
-/// Returns InvalidRequest for invalid intent or a zero Principal digest.
+/// Returns `InvalidRequest` for invalid intent or a zero Principal digest.
 fn fork_admission_operation_commitment_v1(
     principal_digest: Hash,
     intent: &ForkAdmissionIntentV1,
@@ -415,11 +415,12 @@ fn fork_admission_operation_commitment_v1(
 }
 
 /// Recompute an immutable operation commitment from durable admission records.
+///
 /// POB1 provisioning and FAR1 creation have distinct operation identifiers;
 /// this computation uses the FAR1 identifier and the POB1 Principal digest.
 ///
 /// # Errors
-/// Returns CorruptAuthority when FAR1 and POB1 disagree.
+/// Returns `CorruptAuthority` when FAR1 and POB1 disagree.
 pub fn fork_admission_operation_commitment_from_records_v1(
     admission: &ForkAdmissionRecordV1,
     binding: &PrincipalOwnerBindingV1,
@@ -430,23 +431,23 @@ pub fn fork_admission_operation_commitment_from_records_v1(
     if record.principal_owner_binding_digest != binding.digest() || record.creator != pob1.owner {
         return Err(ForkAdmissionErrorV1::CorruptAuthority);
     }
-    let intent = ForkAdmissionIntentV1::new(
-        record.operation_id,
-        record.parent_timeline_id,
-        record.completed_fold_cursor,
-        record.post_fold_tick_boundary,
-        record.room_revision_descriptor_hash,
-        record.plugin_composition_hash,
-        record.attribution_required,
-        child_name.to_owned(),
-    )?;
+    let intent = ForkAdmissionIntentV1::new(ForkAdmissionIntentInputV1 {
+        operation_id: record.operation_id,
+        parent_timeline_id: record.parent_timeline_id,
+        completed_fold_cursor: record.completed_fold_cursor,
+        post_fold_tick_boundary: record.post_fold_tick_boundary,
+        room_revision_descriptor_hash: record.room_revision_descriptor_hash,
+        plugin_composition_hash: record.plugin_composition_hash,
+        attribution_required: record.attribution_required,
+        child_name: child_name.to_owned(),
+    })?;
     fork_admission_operation_commitment_v1(pob1.principal_digest, &intent)
 }
 
-/// Compute the exact ADR-099 PrincipalRefV1 digest.
+/// Compute the exact ADR-099 `PrincipalRefV1` digest.
 ///
 /// # Errors
-/// Returns Unauthenticated when the Principal cannot be canonically encoded.
+/// Returns `Unauthenticated` when the Principal cannot be canonically encoded.
 pub fn principal_digest_v1(principal: &PrincipalRefV1) -> Result<Hash, ForkAdmissionErrorV1> {
     principal
         .encode()
@@ -463,23 +464,36 @@ pub struct ForkAdmissionReceiptV1 {
 /// Storage authority for trusted local POB1 and atomic FAR1 child creation.
 pub trait ForkAdmissionAuthorityPortV1 {
     /// Bind the trusted composition root once. A different host must reject.
+    ///
+    /// # Errors
+    /// Returns `Unauthenticated` when a different host is already bound.
     fn bind_fork_admission_host(
         &mut self,
         host: ForkAdmissionHostBindingV1,
     ) -> Result<(), ForkAdmissionErrorV1>;
 
     /// Commit one exact host-authorized POB1 binding.
+    ///
+    /// # Errors
+    /// Returns an admission error when the permit is foreign, conflicts, or storage is corrupt.
     fn commit_local_binding(
         &mut self,
         permit: &LocalPrincipalOwnerBindingPermitV1,
     ) -> Result<PrincipalOwnerBindingV1, ForkAdmissionErrorV1>;
 
     /// Create child metadata and FAR1 in one transaction using an exact host permit.
+    ///
+    /// # Errors
+    /// Returns an admission error when the permit, parent boundary, or durable state is invalid.
     fn create_fork_admitted(
         &mut self,
         request: &CreateForkAdmittedRequestV1,
     ) -> Result<ForkAdmissionReceiptV1, ForkAdmissionErrorV1>;
 
+    /// Read the authenticated FAR1 record for a child Fork.
+    ///
+    /// # Errors
+    /// Returns an admission error when durable authority data is invalid or unavailable.
     fn read_fork_admission(
         &self,
         child_id: TimelineId,

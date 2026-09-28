@@ -2,8 +2,8 @@ use pos_core::store::EventStore;
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     CreateForkAdmittedRequestV1, ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1,
-    ForkAdmissionHostV1, Hash, LocalPrincipalOwnerBindingPermitV1, OwnerIdV1, PrincipalRefV1,
-    TimelineId, WallTime,
+    ForkAdmissionHostV1, ForkAdmissionIntentInputV1, Hash, LocalPrincipalOwnerBindingPermitV1,
+    OwnerIdV1, PrincipalRefV1, TimelineId, WallTime,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
@@ -53,14 +53,7 @@ fn request(
 ) -> Result<CreateForkAdmittedRequestV1, ForkAdmissionErrorV1> {
     host.permit_fork_creation(
         authenticated,
-        Hash::from_bytes([3; 32]),
-        parent,
-        0,
-        0,
-        Hash::from_bytes([4; 32]),
-        Hash::from_bytes([5; 32]),
-        true,
-        "admitted-child".to_owned(),
+        intent(parent, 0, Hash::from_bytes([3; 32]), "admitted-child"),
         WallTime::from_micros(20),
     )
 }
@@ -73,16 +66,32 @@ fn request_at_cut(
 ) -> Result<CreateForkAdmittedRequestV1, ForkAdmissionErrorV1> {
     host.permit_fork_creation(
         authenticated,
-        Hash::from_bytes([3; 32]),
-        parent,
-        completed_fold_cursor,
-        completed_fold_cursor,
-        Hash::from_bytes([4; 32]),
-        Hash::from_bytes([5; 32]),
-        true,
-        "admitted-child".to_owned(),
+        intent(
+            parent,
+            completed_fold_cursor,
+            Hash::from_bytes([3; 32]),
+            "admitted-child",
+        ),
         WallTime::from_micros(20),
     )
+}
+
+fn intent(
+    parent: TimelineId,
+    completed_fold_cursor: u64,
+    operation_id: Hash,
+    child_name: &str,
+) -> ForkAdmissionIntentInputV1 {
+    ForkAdmissionIntentInputV1 {
+        operation_id,
+        parent_timeline_id: parent,
+        completed_fold_cursor,
+        post_fold_tick_boundary: completed_fold_cursor,
+        room_revision_descriptor_hash: Hash::from_bytes([4; 32]),
+        plugin_composition_hash: Hash::from_bytes([5; 32]),
+        attribution_required: true,
+        child_name: child_name.to_owned(),
+    }
 }
 
 fn assert_contract<S: ForkAdmissionAuthorityPortV1 + EventStore>(
@@ -130,14 +139,7 @@ fn assert_contract<S: ForkAdmissionAuthorityPortV1 + EventStore>(
 
     let conflict = host.permit_fork_creation(
         &authenticated,
-        Hash::from_bytes([3; 32]),
-        parent,
-        0,
-        0,
-        Hash::from_bytes([4; 32]),
-        Hash::from_bytes([5; 32]),
-        true,
-        "other".to_owned(),
+        intent(parent, 0, Hash::from_bytes([3; 32]), "other"),
         WallTime::from_micros(20),
     )?;
     assert_eq!(
@@ -199,14 +201,7 @@ fn exact_permits_allow_retry_after_authentication_expiry() -> TestResult {
     assert_eq!(
         host.permit_fork_creation(
             &authenticated,
-            Hash::from_bytes([4; 32]),
-            parent.id(),
-            0,
-            0,
-            Hash::from_bytes([4; 32]),
-            Hash::from_bytes([5; 32]),
-            true,
-            "new-child".to_owned(),
+            intent(parent.id(), 0, Hash::from_bytes([4; 32]), "new-child"),
             WallTime::from_micros(101),
         ),
         Err(ForkAdmissionErrorV1::Unauthenticated)
