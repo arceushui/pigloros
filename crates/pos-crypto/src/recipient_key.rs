@@ -8,6 +8,7 @@ use x25519_dalek::{x25519, X25519_BASEPOINT_BYTES};
 /// The caller must zeroize `ikm` after this call and retain the returned
 /// private bytes only in the owner-managed durable boundary.
 ///
+#[must_use]
 pub fn derive_recipient_keypair_v1(ikm: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
     let (private_key, public_key) = X25519HkdfSha256::derive_keypair(ikm);
     let private_key = private_key.to_bytes();
@@ -19,6 +20,7 @@ pub fn derive_recipient_keypair_v1(ikm: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
 
 /// Derive the X25519 public key corresponding to stored HPKE private bytes.
 ///
+#[must_use]
 pub fn recipient_public_key_from_private_v1(private_key: &[u8; 32]) -> [u8; 32] {
     x25519(*private_key, X25519_BASEPOINT_BYTES)
 }
