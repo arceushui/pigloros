@@ -598,7 +598,7 @@ trait ProofRegistrationSink {
     ) -> Result<(), RuntimeError>;
 
     #[cfg(test)]
-    fn register_generated(
+    fn register_fixture_generated(
         &mut self,
         plugin: &dyn Plugin,
         reducer: Option<Box<dyn Reducer>>,
@@ -606,7 +606,7 @@ trait ProofRegistrationSink {
     ) -> Result<(), RuntimeError>;
 
     #[cfg(test)]
-    fn register_generated_with_approver(
+    fn register_fixture_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
         reducer: Option<Box<dyn Reducer>>,
@@ -618,17 +618,17 @@ trait ProofRegistrationSink {
 
 impl ProofRegistrationSink for Experiment {
     #[cfg(test)]
-    fn register_generated(
+    fn register_fixture_generated(
         &mut self,
         plugin: &dyn Plugin,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        Experiment::register_generated(self, plugin, reducer, driver)
+        Self::register_generated(self, plugin, reducer, driver)
     }
 
     #[cfg(test)]
-    fn register_generated_with_approver(
+    fn register_fixture_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
         reducer: Option<Box<dyn Reducer>>,
@@ -636,7 +636,7 @@ impl ProofRegistrationSink for Experiment {
         approver: Box<dyn pos_core::ActionApprover>,
         event_types: Vec<Kind>,
     ) -> Result<(), RuntimeError> {
-        Experiment::register_generated_with_approver(
+        Self::register_generated_with_approver(
             self,
             plugin,
             reducer,
@@ -686,17 +686,17 @@ impl ProofRegistrationSink for Experiment {
 
 impl ProofRegistrationSink for pos_runtime::PluginRegistry {
     #[cfg(test)]
-    fn register_generated(
+    fn register_fixture_generated(
         &mut self,
         plugin: &dyn Plugin,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        pos_runtime::PluginRegistry::register_generated(self, plugin, reducer, driver)
+        Self::register_generated(self, plugin, reducer, driver)
     }
 
     #[cfg(test)]
-    fn register_generated_with_approver(
+    fn register_fixture_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
         reducer: Option<Box<dyn Reducer>>,
@@ -704,7 +704,7 @@ impl ProofRegistrationSink for pos_runtime::PluginRegistry {
         approver: Box<dyn pos_core::ActionApprover>,
         event_types: Vec<Kind>,
     ) -> Result<(), RuntimeError> {
-        pos_runtime::PluginRegistry::register_generated_with_approver(
+        Self::register_generated_with_approver(
             self,
             plugin,
             reducer,
@@ -874,14 +874,14 @@ fn register_plugins_fixture(
 ) -> Result<(), RuntimeError> {
     result_pipeline! {
         world_driver(&topology.input, topology.body, topology.config_entity) => |world_driver|;
-        target.register_generated_with_approver(
+        target.register_fixture_generated_with_approver(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
             Some(Box::new(world_driver)),
             Box::new(topology.world_plugin.clone()),
             vec![Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        target.register_generated(
+        target.register_fixture_generated(
             &topology.agent_plugin,
             Some(Box::new(ProofAgentReducer)),
             Some(Box::new(ProofAgentDriver::new(
@@ -889,7 +889,7 @@ fn register_plugins_fixture(
                 topology.input.agent_response_threshold,
             ))),
         ) => |()|;
-        target.register_generated(
+        target.register_fixture_generated(
             &topology.society_plugin,
             Some(Box::new(SocietyReducer)),
             Some(Box::new(ProofSocietyDriver::new(topology.society))),
