@@ -4,6 +4,8 @@
 //! MAA1 policy, actual `PublicRecord` provenance, or protected-use authority.
 
 use crate::{
+    adapter_contract::{valid_adapter_identity, AdapterContractKey},
+    canonical_cbor_head::encode_head,
     public_adapter_schema_digest_v1, AdapterAdmissionV1, Hash, PluginId, WorldReplayHandleV1,
 };
 use std::collections::BTreeMap;
@@ -53,6 +55,18 @@ pub struct AdapterInvocationInputV1 {
     pub exact_request_payload: Vec<u8>,
 }
 
+impl AdapterInvocationInputV1 {
+    const fn contract_key(&self, plugin_id: PluginId) -> AdapterContractKey<'_> {
+        AdapterContractKey {
+            plugin_id,
+            adapter_id: &self.adapter_id,
+            provider_id: &self.provider_id,
+            operation_id: &self.operation_id,
+            protocol_version: self.protocol_version,
+        }
+    }
+}
+
 /// Canonical AIR1 request envelope without an admitted invocation claim.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdapterInvocationV1(AdapterInvocationInputV1);
@@ -65,7 +79,7 @@ impl AdapterInvocationV1 {
     pub fn new(input: AdapterInvocationInputV1) -> Result<Self, AdapterTranscriptErrorV1> {
         if [&input.adapter_id, &input.provider_id, &input.operation_id]
             .iter()
-            .any(|id| !valid_identity(id))
+            .any(|id| !valid_adapter_identity(id))
             || input.protocol_version == 0
             || input.request_schema_digest != public_adapter_schema_digest_v1()
             || input.response_schema_digest != public_adapter_schema_digest_v1()
@@ -254,23 +268,8 @@ impl AdapterTranscriptV1 {
         let entries = &admission.as_input().entries;
         for call in &self.0.calls {
             let input = call.input.as_input();
-            let key = (
-                call.plugin_id,
-                input.adapter_id.as_str(),
-                input.provider_id.as_str(),
-                input.operation_id.as_str(),
-                input.protocol_version,
-            );
-            let Ok(index) = entries.binary_search_by(|entry| {
-                (
-                    entry.plugin_id,
-                    entry.adapter_id.as_str(),
-                    entry.provider_id.as_str(),
-                    entry.operation_id.as_str(),
-                    entry.protocol_version,
-                )
-                    .cmp(&key)
-            }) else {
+            let key = input.contract_key(call.plugin_id);
+            let Ok(index) = entries.binary_search_by(|entry| entry.contract_key().cmp(&key)) else {
                 return Err(AdapterTranscriptErrorV1::InvalidCall);
             };
             let entry = &entries[index];
@@ -412,13 +411,6 @@ fn hash_bytes(domain: &[u8], bytes: &[u8]) -> Hash {
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn valid_identity(id: &str) -> bool {
-    (1..=128).contains(&id.len())
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
 fn invocation_size(input: &AdapterInvocationInputV1) -> usize {
     7 + [
         input.adapter_id.len(),
@@ -456,27 +448,6 @@ fn encode_hash(out: &mut Vec<u8>, hash: Hash) {
 fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8], major: u8) {
     encode_head(out, major, bytes.len() as u64);
     out.extend_from_slice(bytes);
-}
-
-fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
-    let prefix = major << 5;
-    let full = value.to_be_bytes();
-    match value {
-        0..=23 => out.push(prefix | full[7]),
-        24..=0xff => out.extend_from_slice(&[prefix | 0x18, full[7]]),
-        0x100..=0xffff => {
-            out.push(prefix | 0x19);
-            out.extend_from_slice(&full[6..]);
-        }
-        0x1_0000..=0xffff_ffff => {
-            out.push(prefix | 0x1a);
-            out.extend_from_slice(&full[4..]);
-        }
-        _ => {
-            out.push(prefix | 0x1b);
-            out.extend_from_slice(&full);
-        }
-    }
 }
 
 struct Reader<'a> {

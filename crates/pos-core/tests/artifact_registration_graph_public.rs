@@ -23,7 +23,7 @@ fn node(
         )
     });
     let artifact_digest =
-        ArtifactRegistrationV1::artifact_digest(artifact_class, &label.to_be_bytes())?;
+        ArtifactRegistrationV1::artifact_digest(artifact_class, &label.to_be_bytes());
     let required_key_roles = if keys.is_empty() {
         Vec::new()
     } else {

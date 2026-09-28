@@ -14,6 +14,16 @@ fn from_hex(text: &str) -> TestResult<Vec<u8>> {
         .collect()
 }
 
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
 fn admission_bytes() -> TestResult<Vec<u8>> {
     from_hex(concat!(
         "86444d414131015820365678ef2286c7e68ab7ada3f90f20feca822efbc88abc5a7bf60e950a6517",
@@ -40,8 +50,8 @@ fn admission_extractor_derives_the_complete_public_root_fields() -> TestResult<(
     let fields = registration.fields();
     assert_eq!(fields.artifact_class, ErasureArtifactClassV1::ReproManifest);
     assert_eq!(
-        fields.artifact_digest,
-        ArtifactRegistrationV1::artifact_digest(ErasureArtifactClassV1::ReproManifest, &bytes)?
+        hex(fields.artifact_digest.as_bytes()),
+        "b9985dff75c07700a95fe1b060b8b5965ab7c2173aceb7497d664f5f80d27caa"
     );
     assert_eq!(
         fields.owner_reference,
@@ -56,6 +66,17 @@ fn admission_extractor_derives_the_complete_public_root_fields() -> TestResult<(
     assert!(fields.required_key_roles.is_empty());
     assert!(fields.key_dependencies.is_empty());
     assert!(fields.child_artifacts.is_empty());
+    assert_eq!(
+        hex(registration.canonical_cbor()),
+        concat!(
+            "8b444152443101015820b9985dff75c07700a95fe1b060b8b5965ab7c2173aceb7497d664f5f80d27caa",
+            "5820365678ef2286c7e68ab7ada3f90f20feca822efbc88abc5a7bf60e950a65176c020000808080"
+        )
+    );
+    assert_eq!(
+        hex(registration.address().as_bytes()),
+        "6119adf54fe59d2967383e91d729416854c23415d73754f772a893607778f4d6"
+    );
     Ok(())
 }
 
@@ -72,11 +93,8 @@ fn transcript_extractor_binds_its_exact_required_admission_child() -> TestResult
     let fields = registration.fields();
     assert_eq!(fields.artifact_class, ErasureArtifactClassV1::ReproManifest);
     assert_eq!(
-        fields.artifact_digest,
-        ArtifactRegistrationV1::artifact_digest(
-            ErasureArtifactClassV1::ReproManifest,
-            &transcript_bytes
-        )?
+        hex(fields.artifact_digest.as_bytes()),
+        "d0d8004c71f5ffbecbfab85222600dcfa0924f6fee2a69837b093f0fd1394469"
     );
     assert_eq!(fields.child_artifacts.len(), 1);
     assert_eq!(
@@ -84,14 +102,27 @@ fn transcript_extractor_binds_its_exact_required_admission_child() -> TestResult
         ErasureArtifactClassV1::ReproManifest
     );
     assert_eq!(
-        fields.child_artifacts[0].artifact_digest,
-        admission.fields().artifact_digest
+        hex(fields.child_artifacts[0].artifact_digest.as_bytes()),
+        "b9985dff75c07700a95fe1b060b8b5965ab7c2173aceb7497d664f5f80d27caa"
     );
     assert_eq!(
-        fields.child_artifacts[0].registration_address,
-        admission.address()
+        hex(fields.child_artifacts[0].registration_address.as_bytes()),
+        "6119adf54fe59d2967383e91d729416854c23415d73754f772a893607778f4d6"
     );
     assert!(fields.child_artifacts[0].required);
+    assert_eq!(
+        hex(registration.canonical_cbor()),
+        concat!(
+            "8b444152443101015820d0d8004c71f5ffbecbfab85222600dcfa0924f6fee2a69837b093f0fd1394469",
+            "5820365678ef2286c7e68ab7ada3f90f20feca822efbc88abc5a7bf60e950a65176c020000808081",
+            "84015820b9985dff75c07700a95fe1b060b8b5965ab7c2173aceb7497d664f5f80d27caa",
+            "58206119adf54fe59d2967383e91d729416854c23415d73754f772a893607778f4d6f5"
+        )
+    );
+    assert_eq!(
+        hex(registration.address().as_bytes()),
+        "34d1de754b69a4c86a35bac6409b5524319ee01e405a9aa9f03beee723fa127a"
+    );
     Ok(())
 }
 
