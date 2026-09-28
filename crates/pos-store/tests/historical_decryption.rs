@@ -225,15 +225,13 @@ fn sqlite_read_only_historical_decryption_uses_the_registry_writer_lock(
     let mut reader = SqliteStore::open_read_only(path)?;
     assert_eq!(
         reader.with_decryption_authorization(identity, digest(1), || {
-            let contender = rusqlite::Connection::open(path).expect("open contender");
-            contender
-                .busy_timeout(Duration::ZERO)
-                .expect("set contender timeout");
+            let contender = rusqlite::Connection::open(path)?;
+            contender.busy_timeout(Duration::ZERO)?;
             assert!(contender
                 .execute_batch("BEGIN IMMEDIATE")
                 .is_err_and(|error| error.to_string().contains("database is locked")));
-            "plaintext"
-        })?,
+            Ok::<_, rusqlite::Error>("plaintext")
+        })??,
         "plaintext"
     );
 
@@ -271,7 +269,7 @@ fn sqlite_historical_decryption_releases_writer_lock_after_callback_panic(
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _authorization =
                 decrypting_store.with_decryption_authorization(identity, digest(1), || {
-                    panic!("intentional decryption callback panic");
+                    std::panic::resume_unwind(Box::new("intentional decryption callback panic"));
                 });
         }));
         assert!(result.is_err());
