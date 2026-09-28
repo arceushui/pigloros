@@ -131,7 +131,7 @@ impl From<CoreError> for SnapshotError {
         } else {
             Self::Store(error)
         }
-}
+    }
 }
 
 /// Verify that `snapshot` + tail events produces the same state as a full replay.
