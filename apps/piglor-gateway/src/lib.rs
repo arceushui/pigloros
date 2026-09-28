@@ -353,7 +353,7 @@ mod coverage_tests {
         let frozen = super::FrozenGatewayActionConfiguration { bodies: Vec::new() };
         let mut registry = PluginRegistry::new().without_erasure_gate();
         assert!(matches!(
-            registry.register_from_host_catalogue_entry(&selected, frozen),
+            registry.register_from_host_catalogue_entry(&selected, &frozen),
             Err(RuntimeError::OutputAdmission(
                 OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
             ))

@@ -3244,7 +3244,7 @@ impl PluginRegistry {
     pub fn register_from_host_catalogue_entry<C, P, A>(
         &mut self,
         entry: &HostCatalogueEntryV1<C, P, A>,
-        frozen_configuration: C,
+        frozen_configuration: &C,
     ) -> Result<(), RuntimeError>
     where
         P: Plugin,
@@ -3252,7 +3252,7 @@ impl PluginRegistry {
     {
         self.register_from_host_catalogue_entry_inner(
             entry,
-            &frozen_configuration,
+            frozen_configuration,
             CatalogueRegistrationModeV1::InstalledGateway,
         )
     }
@@ -3312,6 +3312,7 @@ impl PluginRegistry {
             }
             #[cfg(test)]
             CatalogueRegistrationModeV1::NonproductionFixture => {
+                let mut binding = binding;
                 let InstalledCallbacksV1 {
                     driver,
                     approver,
@@ -5959,7 +5960,7 @@ mod tests {
             catalogue_fixture_details,
             build_catalogue_reducer_fixture,
         );
-        let mut registry = PluginRegistry::new().without_erasure_gate();
+        let mut registry = gated_registry();
         let first = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
         let pin = crate::PluginPinV1::try_new(
             DomainImplementationKindV1::Plugin,
@@ -5992,7 +5993,8 @@ mod tests {
             origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
-        registry.projections.apply_event(&event);
+        let timeline = TimelineId::new();
+        registry.projections.apply_event(timeline, &event);
         let second_id = PluginId::new();
         registry
             .register_from_host_catalogue_entry_inner(
@@ -6007,9 +6009,9 @@ mod tests {
         let count = |registry: &PluginRegistry, id| {
             registry
                 .projections
-                .state_for_plugin(id, &entity)
-                .and_then(|state| state.get("n"))
-                .and_then(serde_json::Value::as_u64)
+                .state_for_plugin(timeline, id, &entity)
+                .test_ok()
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64))
         };
         assert_eq!(
             registry.projections.reducer_names(),
@@ -6019,7 +6021,7 @@ mod tests {
         assert_eq!(count(&registry, second_id), None);
         assert!(registry.composition().plugins[1].pin.is_none());
         event.seq = Seq::from_u64(2);
-        registry.projections.apply_event(&event);
+        registry.projections.apply_event(timeline, &event);
         assert_eq!(count(&registry, first.id()), Some(2));
         assert_eq!(count(&registry, second_id), Some(1));
     }
@@ -6030,27 +6032,31 @@ mod tests {
             catalogue_fixture_details,
             build_catalogue_missing_reducer_fixture,
         );
-        let mut registry = PluginRegistry::new().without_erasure_gate();
+        let mut registry = gated_registry();
         let existing = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
         registry
             .register_generated(&existing, Some(Box::new(CountReducer)), None)
             .test_ok();
         let entity = EntityId::new();
-        registry.projections.apply_event(&Event {
-            id: EventId::new(),
-            entity,
-            event_type: Kind::new("first.output"),
-            payload: CanonicalBytes::from_static(b"existing"),
-            wall_time: WallTime::from_micros(1),
-            seq: Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: SchemaVersion::V1,
-            signature: None,
-            signature_identity: None,
-            origin: None,
-            payload_hash: Hash::from_bytes([0; 32]),
-        });
+        let timeline = TimelineId::new();
+        registry.projections.apply_event(
+            timeline,
+            &Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new("first.output"),
+                payload: CanonicalBytes::from_static(b"existing"),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                origin: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            },
+        );
         let schemas_before = registry.schemas.len();
         assert!(matches!(
             registry.register_from_host_catalogue_entry_inner(
@@ -6072,9 +6078,9 @@ mod tests {
         assert_eq!(
             registry
                 .projections
-                .state_for_reducer("catalogue-fixture", &entity)
-                .and_then(|state| state.get("n"))
-                .and_then(serde_json::Value::as_u64),
+                .state_for_reducer(timeline, "catalogue-fixture", &entity)
+                .test_ok()
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64)),
             Some(1)
         );
         assert_eq!(registry.schemas.len(), schemas_before);
