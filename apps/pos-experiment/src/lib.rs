@@ -854,6 +854,28 @@ fn refold_host_projection_prefix(
     Ok(events)
 }
 
+fn authorized_result_projections(
+    store: &SharedEventStore,
+    mut registry: PluginRegistry,
+    timeline: TimelineId,
+    through: pos_core::clock::Seq,
+    token: Option<&ConsentCapabilityToken>,
+    public_events: &[Event],
+) -> Result<pos_state::ProjectionRegistry, ExperimentError> {
+    if registry.validate_projection_source(timeline).is_err() {
+        refold_host_projection_prefix(store, &mut registry, timeline, through)?;
+    }
+    registry
+        .into_authorized_projections(
+            timeline,
+            through,
+            current_now_secs(),
+            token,
+            Some(public_events),
+        )
+        .map_err(ExperimentError::Runtime)
+}
+
 fn append_driver_drafts(
     store: &mut dyn pos_core::store::EventStore,
     timeline_id: pos_core::ids::TimelineId,
@@ -1739,9 +1761,17 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        self.fold_captured_range_or_fault(&after)?;
+        self.finish_append_after(&after, emitted.len())
+    }
+
+    fn finish_append_after(
+        &mut self,
+        after: &CapturedRange,
+        emitted_count: usize,
+    ) -> Result<u64, ExperimentError> {
+        self.fold_captured_range_or_fault(after)?;
         self.total_events = self.boundary.folded_through.as_u64();
-        Ok(u64::try_from(emitted.len()).unwrap_or(u64::MAX))
+        Ok(u64::try_from(emitted_count).unwrap_or(u64::MAX))
     }
 
     /// Submit one external action through the owning Plugin's authority seam.
@@ -1908,7 +1938,7 @@ impl ExperimentSession {
             return Ok(TickOutcome::Stopped);
         }
 
-        let (mut folded_events, committed_events) = self.prepare_tick()?;
+        let (folded_events, committed_events) = self.prepare_tick()?;
 
         let drafts = match self.select_step_drafts(request, &committed_events) {
             Ok(drafts) => drafts,
@@ -1972,6 +2002,15 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
+        self.finish_step_boundary_after(after, folded_events, emitted_events)
+    }
+
+    fn finish_step_boundary_after(
+        &mut self,
+        after: CapturedRange,
+        mut folded_events: u64,
+        emitted_events: u64,
+    ) -> Result<TickOutcome, ExperimentError> {
         let after_count = self.fold_captured_range_or_fault(&after)?;
         folded_events = folded_events.saturating_add(after_count.0);
         self.timeline = after.timeline;
@@ -2050,6 +2089,15 @@ impl ExperimentSession {
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
             })?;
+        self.finish_host_closure_after(after, subject, emitted_events)
+    }
+
+    fn finish_host_closure_after(
+        &mut self,
+        after: CapturedRange,
+        subject: Option<EntityId>,
+        emitted_events: u64,
+    ) -> Result<TickOutcome, ExperimentError> {
         let folded_events = self.fold_captured_range_or_fault(&after)?;
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events.0);
@@ -2092,6 +2140,14 @@ impl ExperimentSession {
                 self.boundary.folded_through,
             )
         })?;
+        let (folded_events, committed_events) = self.prepare_projection_view(&before)?;
+        Ok((folded_events.0, committed_events))
+    }
+
+    fn prepare_projection_view(
+        &mut self,
+        before: &CapturedRange,
+    ) -> Result<(FoldedEventCount, Vec<pos_core::Event>), ExperimentError> {
         let (folded_events, committed_events) = if self
             .registry
             .validate_projection_source(self.timeline.id())
@@ -2128,7 +2184,7 @@ impl ExperimentSession {
                 committed_events,
             )
         };
-        Ok((folded_events.0, committed_events))
+        Ok((folded_events, committed_events))
     }
 
     fn hydrate_fork_registry(
@@ -2330,28 +2386,14 @@ impl ExperimentSession {
         let protected_token = self.operation_token;
         let public_events = lock_store(&self.store)
             .and_then(|store| read_completed_prefix(store.as_ref(), timeline_id, timeline_head))?;
-        if self
-            .registry
-            .validate_projection_source(timeline_id)
-            .is_err()
-        {
-            refold_host_projection_prefix(
-                &self.store,
-                &mut self.registry,
-                timeline_id,
-                timeline_head,
-            )?;
-        }
-        let projections = self
-            .registry
-            .into_authorized_projections(
-                timeline_id,
-                timeline_head,
-                current_now_secs(),
-                protected_token.as_ref(),
-                Some(&public_events),
-            )
-            .map_err(ExperimentError::Runtime)?;
+        let projections = authorized_result_projections(
+            &self.store,
+            self.registry,
+            timeline_id,
+            timeline_head,
+            protected_token.as_ref(),
+            &public_events,
+        )?;
         let ticks = self.ticks;
         let total_events = self.total_events;
         let store_config = self.recovery_store_config;

@@ -247,7 +247,19 @@ fn verify_snapshot_event_sets(
     let full_state = registry
         .state_snapshot(snap.timeline)
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;
-    for entity in &all_entities {
+    verify_snapshot_entities(&all_entities, &incremental_state, &full_state)?;
+    if incremental_state != full_state {
+        return Err(SnapshotError::InconsistentState);
+    }
+    Ok(())
+}
+
+fn verify_snapshot_entities(
+    entities: &[EntityId],
+    incremental_state: &HashMap<String, StateRegistry>,
+    full_state: &HashMap<String, StateRegistry>,
+) -> Result<(), SnapshotError> {
+    for entity in entities {
         for name in full_state.keys() {
             let incremental_registry = incremental_state.get(name).cloned().unwrap_or_default();
             let full_registry = full_state.get(name).cloned().unwrap_or_default();
@@ -255,9 +267,6 @@ fn verify_snapshot_event_sets(
                 return Err(SnapshotError::Inconsistent { entity: *entity });
             }
         }
-    }
-    if incremental_state != full_state {
-        return Err(SnapshotError::InconsistentState);
     }
     Ok(())
 }

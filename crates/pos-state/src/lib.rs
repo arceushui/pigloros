@@ -152,30 +152,29 @@ impl ProjectionRegistry {
         timeline: TimelineId,
         mut effect: impl FnMut(&Self) -> Result<T, AuthorityErrorV1>,
     ) -> Result<T, AuthorityErrorV1> {
-        if self.mixed_sources
-            || self
-                .source_timeline
-                .is_some_and(|source| source != timeline)
-        {
-            return Err(AuthorityErrorV1::SourceUnavailable);
-        }
         let gate = self
             .erasure_gate
             .as_ref()
+            .filter(|_| self.source_matches_timeline(timeline))
             .ok_or(AuthorityErrorV1::SourceUnavailable)?;
         let mut result = Err(AuthorityErrorV1::SourceUnavailable);
         let mut run = || {
-            if self.source_timeline.is_some()
-                && self.source_generation != gate.inventory_generation().ok()
-            {
-                result = Err(AuthorityErrorV1::SourceUnavailable);
-            } else {
-                result = effect(self);
-            }
+            result = self
+                .source_generation_is_current(gate.as_ref())
+                .then(|| effect(self))
+                .unwrap_or(Err(AuthorityErrorV1::SourceUnavailable));
         };
         gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut run)
             .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
         result
+    }
+
+    fn source_matches_timeline(&self, timeline: TimelineId) -> bool {
+        !self.mixed_sources && self.source_timeline.is_none_or(|source| source == timeline)
+    }
+
+    fn source_generation_is_current(&self, gate: &dyn ErasureGate) -> bool {
+        self.source_timeline.is_none() || self.source_generation == gate.inventory_generation().ok()
     }
 
     /// Verify that accumulated state still belongs to this Timeline and the
@@ -233,30 +232,13 @@ impl ProjectionRegistry {
     /// Apply one Event from its host-identified Timeline to every registered
     /// reducer. Mixing Timelines invalidates accumulated state until reset.
     pub fn apply_event(&mut self, timeline: TimelineId, event: &Event) {
-        if self.mixed_sources {
+        if !self.bind_event_source(timeline) {
             return;
         }
-        let generation = self
-            .erasure_gate
-            .as_ref()
-            .and_then(|gate| gate.inventory_generation().ok());
-        if self.source_timeline.is_some() && self.source_generation != generation {
-            self.clear_state();
-            self.mixed_sources = true;
-            return;
-        }
-        match self.source_timeline {
-            Some(source) if source != timeline => {
-                self.clear_state();
-                self.mixed_sources = true;
-                return;
-            }
-            None => {
-                self.source_timeline = Some(timeline);
-                self.source_generation = generation;
-            }
-            Some(_) => {}
-        }
+        self.apply_bound_event(event);
+    }
+
+    fn apply_bound_event(&mut self, event: &Event) {
         if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
             if let Ok(revocation) = ConsentRevokedV1::decode(&event.payload) {
                 self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
@@ -274,6 +256,34 @@ impl ProjectionRegistry {
         for (_, slot) in &mut self.slots {
             slot.registry.apply(slot.reducer.as_ref(), event);
         }
+    }
+
+    fn bind_event_source(&mut self, timeline: TimelineId) -> bool {
+        if self.mixed_sources {
+            return false;
+        }
+        let generation = self
+            .erasure_gate
+            .as_ref()
+            .and_then(|gate| gate.inventory_generation().ok());
+        if self.source_timeline.is_some() && self.source_generation != generation {
+            self.clear_state();
+            self.mixed_sources = true;
+            return false;
+        }
+        match self.source_timeline {
+            Some(source) if source != timeline => {
+                self.clear_state();
+                self.mixed_sources = true;
+                return false;
+            }
+            None => {
+                self.source_timeline = Some(timeline);
+                self.source_generation = generation;
+            }
+            Some(_) => {}
+        }
+        true
     }
 
     /// Batch-fold Events from one host-identified Timeline into every reducer.

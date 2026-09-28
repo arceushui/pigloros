@@ -2117,12 +2117,33 @@ impl PluginRegistry {
         }
         self.projections.validate_fork_source(parent)?;
         let child = store.fork(parent, at_seq, name)?;
-        if let Err(error) = self.projections.adopt_committed_fork(parent, child.id()) {
+        self.adopt_committed_fork_or_rollback(store, parent, child.id())?;
+        self.commit_fork_drivers_or_rollback(store, parent, child.id())?;
+        self.restored_binding = None;
+        Ok(child)
+    }
+
+    fn adopt_committed_fork_or_rollback(
+        &mut self,
+        store: &mut dyn pos_core::EventStore,
+        parent: TimelineId,
+        child: TimelineId,
+    ) -> Result<(), RuntimeError> {
+        if let Err(error) = self.projections.adopt_committed_fork(parent, child) {
             self.restored_binding = None;
-            store.delete_timeline(child.id())?;
+            store.delete_timeline(child)?;
             return Err(RuntimeError::Authority(error));
         }
-        let handoff = CommittedForkHandoff::new(parent, child.id());
+        Ok(())
+    }
+
+    fn commit_fork_drivers_or_rollback(
+        &mut self,
+        store: &mut dyn pos_core::EventStore,
+        parent: TimelineId,
+        child: TimelineId,
+    ) -> Result<(), RuntimeError> {
+        let handoff = CommittedForkHandoff::new(parent, child);
         for entry in self.plugins.values_mut() {
             if let Some(driver) = entry.driver.as_mut() {
                 let name = driver.name().to_owned();
@@ -2133,15 +2154,14 @@ impl PluginRegistry {
                 {
                     self.poisoned_driver = Some(name.clone());
                     self.restored_binding = None;
-                    return match store.delete_timeline(child.id()) {
+                    return match store.delete_timeline(child) {
                         Ok(()) => Err(RuntimeError::DriverForkPanicked { name }),
                         Err(source) => Err(RuntimeError::DriverForkRollbackFailed { name, source }),
                     };
                 }
             }
         }
-        self.restored_binding = None;
-        Ok(child)
+        Ok(())
     }
 
     fn restore_driver_state_live(
