@@ -2885,6 +2885,24 @@ mod tests {
         );
     }
 
+    fn run_result_projection_event(subject: EntityId) -> Event {
+        Event {
+            id: pos_core::EventId::new(),
+            entity: subject,
+            event_type: Kind::new("projection.event"),
+            payload: pos_core::CanonicalBytes::from_static(b"projection"),
+            wall_time: pos_core::clock::WallTime::from_micros(0),
+            seq: pos_core::clock::Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: pos_core::event::SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: pos_core::crypto::Hash::zero(),
+        }
+    }
+
     #[test]
     fn protected_run_result_enforces_fork_and_export_capabilities() {
         let database = tempfile::NamedTempFile::new().test_ok();
@@ -2931,24 +2949,9 @@ mod tests {
         result
             .projections
             .register("projection", Box::new(CountReducer));
-        result.projections.apply_event(
-            timeline_id,
-            &Event {
-                id: pos_core::EventId::new(),
-                entity: subject_id,
-                event_type: Kind::new("projection.event"),
-                payload: pos_core::CanonicalBytes::from_static(b"projection"),
-                wall_time: pos_core::clock::WallTime::from_micros(0),
-                seq: pos_core::clock::Seq::from_u64(1),
-                causation_id: None,
-                correlation_id: None,
-                schema_version: pos_core::event::SchemaVersion::V1,
-                signature: None,
-                signature_identity: None,
-                origin: None,
-                payload_hash: pos_core::crypto::Hash::zero(),
-            },
-        );
+        result
+            .projections
+            .apply_event(timeline_id, &run_result_projection_event(subject_id));
         let projected = result
             .projection_state_for_reducer("projection", subject_id, &token, 0)
             .test_ok()
