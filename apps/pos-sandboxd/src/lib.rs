@@ -18,8 +18,9 @@ struct CgroupRoot(std::fs::File);
 #[cfg(target_os = "linux")]
 pub use attempt_registry::{
     CommittedPlannedAttempt, PlannedAttemptIntent, PreparedAttemptDirectory,
-    RecoveredAttemptIntent, RegistryRecoveryEntry, SystemdAttemptRecovery, SystemdAttemptRegistry,
-    SystemdAttemptRegistryError,
+    RecoveredAttemptIntent, RecoveredUnmountedDirectory, RegistryRecoveryEntry,
+    SystemdAttemptRecovery, SystemdAttemptRegistry, SystemdAttemptRegistryError,
+    UnmountedDirectoryInventory,
 };
 
 pub use hardening::{
