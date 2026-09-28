@@ -918,8 +918,7 @@ mod tests {
     }
 
     fn recipient() -> Result<(RecipientKeyDescriptorV1, [u8; 32]), RecipientExportErrorV1> {
-        let (private, public) = derive_recipient_keypair_v1(&[9; 32])
-            .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?;
+        let (private, public) = derive_recipient_keypair_v1(&[9; 32]);
         let descriptor =
             RecipientKeyDescriptorV1::for_grantee(EntityId::from_ulid(id(1)), 1, public)
                 .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
