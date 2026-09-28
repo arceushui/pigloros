@@ -137,7 +137,7 @@ impl SystemdAttemptRegistry {
     /// mount crossing beneath `/run`, permissions other than 0700, another
     /// live owner, or any unreconciled record left by a previous owner.
     pub fn open() -> Result<Self, SystemdAttemptRegistryError> {
-        let root = File::open("/")?;
+        let root = registry_io(|| File::open("/"))?;
         validate_directory(&root, 0, false)?;
         let mut parent = open_directory(&root, "run", ResolveFlags::empty())?;
         validate_directory(&parent, 0, false)?;
@@ -155,7 +155,9 @@ impl SystemdAttemptRegistry {
         validate_directory(parent, owner, true)?;
         let registry = open_directory(parent, REGISTRY_NAME, ResolveFlags::NO_XDEV)?;
         validate_directory(&registry, owner, true)?;
-        flock(&registry, FlockOperation::NonBlockingLockExclusive).map_err(io::Error::from)?;
+        registry_io(|| {
+            flock(&registry, FlockOperation::NonBlockingLockExclusive).map_err(io::Error::from)
+        })?;
         require_empty(&registry)?;
         Ok(Self {
             directory: Arc::new(RegistryDirectory {
@@ -216,7 +218,7 @@ impl SystemdAttemptRegistry {
             intent.unit_name.attempt_component(),
             std::process::id()
         );
-        let mut file = File::from(
+        let mut file = File::from(registry_io(|| {
             openat2(
                 &self.directory.file,
                 temporary.as_str(),
@@ -224,19 +226,21 @@ impl SystemdAttemptRegistry {
                 Mode::RUSR | Mode::WUSR,
                 ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
             )
-            .map_err(io::Error::from)?,
-        );
-        file.write_all(&intent.encode())?;
-        file.sync_all()?;
-        renameat_with(
-            &self.directory.file,
-            temporary.as_str(),
-            &self.directory.file,
-            intent.unit_name.attempt_component(),
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(io::Error::from)?;
-        self.directory.file.sync_all()?;
+            .map_err(io::Error::from)
+        })?);
+        registry_io(|| file.write_all(&intent.encode()))?;
+        registry_io(|| file.sync_all())?;
+        registry_io(|| {
+            renameat_with(
+                &self.directory.file,
+                temporary.as_str(),
+                &self.directory.file,
+                intent.unit_name.attempt_component(),
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(io::Error::from)
+        })?;
+        registry_io(|| self.directory.file.sync_all())?;
         verify_intent(&self.directory, intent)
     }
 }
@@ -279,7 +283,7 @@ fn verify_intent(
     directory: &RegistryDirectory,
     intent: &PlannedAttemptIntent,
 ) -> Result<(), SystemdAttemptRegistryError> {
-    read_record(directory, intent.attempt_id).and_then(|observed| {
+    read_record(directory, intent).and_then(|observed| {
         if observed == *intent {
             Ok(())
         } else {
@@ -288,27 +292,38 @@ fn verify_intent(
     })
 }
 
+// Keep filesystem failure injection at the I/O boundary. Production always
+// performs the supplied operation; only tests can fail an operation before it
+// starts, including fsync/readback failures after a record was published.
+fn registry_io<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    #[cfg(test)]
+    tests::before_io()?;
+    operation()
+}
+
 fn open_directory(
     parent: &File,
     component: &str,
     mount_rule: ResolveFlags,
 ) -> Result<File, SystemdAttemptRegistryError> {
-    openat2(
-        parent,
-        component,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | mount_rule,
-    )
-    .map(File::from)
-    .map_err(io::Error::from)
+    registry_io(|| {
+        openat2(
+            parent,
+            component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | mount_rule,
+        )
+        .map(File::from)
+        .map_err(io::Error::from)
+    })
     .map_err(Into::into)
 }
 
 fn require_empty(directory: &File) -> Result<(), SystemdAttemptRegistryError> {
-    let entries = Dir::read_from(directory).map_err(io::Error::from)?;
+    let entries = registry_io(|| Dir::read_from(directory).map_err(io::Error::from))?;
     for entry in entries {
-        let entry = entry.map_err(io::Error::from)?;
+        let entry = registry_io(|| entry.map_err(io::Error::from))?;
         if entry.file_name().to_bytes() != b"." && entry.file_name().to_bytes() != b".." {
             return Err(SystemdAttemptRegistryError::ReconciliationRequired);
         }
@@ -321,7 +336,7 @@ fn validate_directory(
     owner: u32,
     private: bool,
 ) -> Result<(), SystemdAttemptRegistryError> {
-    let metadata = file.metadata()?;
+    let metadata = registry_io(|| file.metadata())?;
     if !metadata.is_dir()
         || metadata.uid() != owner
         || metadata.mode() & 0o022 != 0
@@ -334,22 +349,20 @@ fn validate_directory(
 
 fn read_record(
     directory: &RegistryDirectory,
-    attempt_id: [u8; 16],
+    expected: &PlannedAttemptIntent,
 ) -> Result<PlannedAttemptIntent, SystemdAttemptRegistryError> {
     validate_directory(&directory.file, directory.owner, true)?;
-    let unit = TransientServiceUnitName::from_attempt_id(attempt_id)
-        .map_err(|_| SystemdAttemptRegistryError::InvalidIntent)?;
-    let file = File::from(
+    let file = File::from(registry_io(|| {
         openat2(
             &directory.file,
-            unit.attempt_component(),
+            expected.unit_name.attempt_component(),
             OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
         )
-        .map_err(io::Error::from)?,
-    );
-    let metadata = file.metadata()?;
+        .map_err(io::Error::from)
+    })?);
+    let metadata = registry_io(|| file.metadata())?;
     if !metadata.is_file()
         || metadata.uid() != directory.owner
         || metadata.nlink() != 1
@@ -359,9 +372,9 @@ fn read_record(
         return Err(SystemdAttemptRegistryError::UnsafeRegistry);
     }
     let mut bytes = [0; RECORD_SIZE];
-    file.read_exact_at(&mut bytes, 0)?;
+    registry_io(|| file.read_exact_at(&mut bytes, 0))?;
     PlannedAttemptIntent::decode(&bytes).and_then(|intent| {
-        if intent.attempt_id == attempt_id {
+        if intent.attempt_id == expected.attempt_id {
             Ok(intent)
         } else {
             Err(SystemdAttemptRegistryError::InvalidIntent)
@@ -372,12 +385,43 @@ fn read_record(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::Cell;
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use super::*;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    std::thread_local! {
+        static IO_FAULT: Cell<(usize, Option<usize>)> = const { Cell::new((0, None)) };
+    }
+
+    pub(super) fn before_io() -> io::Result<()> {
+        IO_FAULT.with(|state| {
+            let (count, fail_at) = state.get();
+            state.set((count + 1, fail_at));
+            if fail_at == Some(count) {
+                Err(io::Error::other("injected registry I/O failure"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    struct RestoreIoFault((usize, Option<usize>));
+
+    impl Drop for RestoreIoFault {
+        fn drop(&mut self) {
+            IO_FAULT.with(|state| state.set(self.0));
+        }
+    }
+
+    fn with_io_fault<T>(fail_at: Option<usize>, operation: impl FnOnce() -> T) -> (T, usize) {
+        let _restore = RestoreIoFault(IO_FAULT.with(|state| state.replace((0, fail_at))));
+        let result = operation();
+        (result, IO_FAULT.with(|state| state.get().0))
+    }
 
     fn fixture() -> TestResult<(tempfile::TempDir, File, u32)> {
         let directory = tempfile::tempdir()?;
@@ -448,6 +492,14 @@ mod tests {
             "/run/pigloros/sandbox/held",
             "/run/pigloros/sandbox/registry",
         )?;
+        let (opened, operation_count) = with_io_fault(None, SystemdAttemptRegistry::open);
+        drop(opened?);
+        for fail_at in 0..operation_count {
+            let (result, observed) = with_io_fault(Some(fail_at), SystemdAttemptRegistry::open);
+            assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
+            assert_eq!(observed, fail_at + 1);
+            assert_eq!(fs::read_dir("/run/pigloros/sandbox/registry")?.count(), 0);
+        }
         let registry = SystemdAttemptRegistry::open()?;
         let intent = PlannedAttemptIntent::new([1; 16], [2; 32])?;
         let committed = registry.commit_planned(&intent)?;
@@ -536,6 +588,107 @@ mod tests {
         assert!(names
             .iter()
             .any(|name| name.to_string_lossy().starts_with(".planned-")));
+        Ok(())
+    }
+
+    #[test]
+    fn every_commit_io_failure_closes_owner_and_retains_recovery_records() -> TestResult {
+        let intent = PlannedAttemptIntent::new([1; 16], [2; 32])?;
+        let operation_count = {
+            let (_directory, parent, owner) = fixture()?;
+            let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
+            let (result, count) = with_io_fault(None, || registry.commit_planned(&intent));
+            result?;
+            count
+        };
+        let mut observed_temporary = false;
+        let mut observed_published = false;
+        for fail_at in 0..operation_count {
+            let (directory, parent, owner) = fixture()?;
+            let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
+            let (result, observed) =
+                with_io_fault(Some(fail_at), || registry.commit_planned(&intent));
+            assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
+            assert_eq!(observed, fail_at + 1);
+            assert!(matches!(
+                registry.commit_planned(&intent),
+                Err(SystemdAttemptRegistryError::ReconciliationRequired)
+            ));
+            let entries = fs::read_dir(directory.path().join(REGISTRY_NAME))?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert!(entries.len() <= 1);
+            for entry in &entries {
+                let name = entry.file_name();
+                let bytes = fs::read(entry.path())?;
+                if name == intent.unit_name.attempt_component() {
+                    observed_published = true;
+                    assert_eq!(bytes, intent.encode());
+                } else {
+                    observed_temporary = true;
+                    assert_eq!(
+                        name,
+                        format!(
+                            ".planned-{}-{}-1",
+                            intent.unit_name.attempt_component(),
+                            std::process::id()
+                        )
+                        .as_str()
+                    );
+                    assert!(bytes.is_empty() || bytes == intent.encode());
+                }
+            }
+            // No attempt directory was created; dropping the failed owner
+            // must neither remove evidence nor make a nonempty registry live.
+            assert_eq!(fs::read_dir(directory.path())?.count(), 1);
+            drop(registry);
+            assert_eq!(
+                fs::read_dir(directory.path().join(REGISTRY_NAME))?.count(),
+                entries.len()
+            );
+            if !entries.is_empty() {
+                assert!(matches!(
+                    SystemdAttemptRegistry::from_runtime_directory(&parent, owner),
+                    Err(SystemdAttemptRegistryError::ReconciliationRequired)
+                ));
+            }
+        }
+        assert!(observed_temporary);
+        assert!(observed_published);
+        Ok(())
+    }
+
+    #[test]
+    fn every_readback_io_failure_closes_owner_without_removing_record() -> TestResult {
+        let intent = PlannedAttemptIntent::new([1; 16], [2; 32])?;
+        let operation_count = {
+            let (_directory, parent, owner) = fixture()?;
+            let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
+            let committed = registry.commit_planned(&intent)?;
+            let (result, count) = with_io_fault(None, || committed.verify_record());
+            result?;
+            count
+        };
+        for fail_at in 0..operation_count {
+            let (directory, parent, owner) = fixture()?;
+            let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
+            let committed = registry.commit_planned(&intent)?;
+            let (result, observed) = with_io_fault(Some(fail_at), || committed.verify_record());
+            assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
+            assert_eq!(observed, fail_at + 1);
+            assert!(matches!(
+                registry.commit_planned(&intent),
+                Err(SystemdAttemptRegistryError::ReconciliationRequired)
+            ));
+            assert_eq!(
+                fs::read(
+                    directory
+                        .path()
+                        .join(REGISTRY_NAME)
+                        .join(intent.unit_name.attempt_component())
+                )?,
+                intent.encode()
+            );
+        }
         Ok(())
     }
 
