@@ -156,7 +156,7 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         timeline: unknown_timeline,
         at_seq: pos_core::clock::Seq::ZERO,
         registry: std::collections::HashMap::new(),
-        inventory_generation: None,
+        inventory_generation: [0; 32],
     };
     assert!(verify_snapshot_consistency(
         &mut reads,
@@ -192,21 +192,20 @@ fn snapshot_verification_rejects_old_or_missing_host_generation() {
             &evaluation(ArtifactStateV1::Retained),
         )
         .test_ok();
-        assert!(captured.inventory_generation.is_some());
-
-        let mut missing_generation = captured.clone();
-        missing_generation.inventory_generation = None;
-        let mut verification_registry = registry(&gate);
-        assert!(matches!(
-            verify_snapshot_consistency(
-                &mut reads,
-                &missing_generation,
-                &mut verification_registry,
-                SNAPSHOT_DIGEST,
-                &evaluation(ArtifactStateV1::Retained),
-            ),
-            Err(pos_time::SnapshotError::ArtifactUnavailable)
-        ));
+        assert_eq!(
+            captured.inventory_generation,
+            gate.inventory_generation().test_ok().digest()
+        );
+        let encoded = serde_json::to_value(&captured).test_ok();
+        let mut missing_generation = encoded.clone();
+        missing_generation
+            .as_object_mut()
+            .expect("snapshot serializes as an object")
+            .remove("inventory_generation");
+        assert!(serde_json::from_value::<pos_time::Snapshot>(missing_generation).is_err());
+        let mut null_generation = encoded;
+        null_generation["inventory_generation"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<pos_time::Snapshot>(null_generation).is_err());
 
         host.command_sender()
             .test_ok()
