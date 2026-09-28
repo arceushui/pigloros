@@ -1106,7 +1106,18 @@ fn indexed_release_rejects_excess_declared_closure_before_blob_reads(
 
 #[test]
 fn reader_rejects_incomplete_shapes_and_non_utf8_owner() -> Result<(), Box<dyn std::error::Error>> {
-    for mutation in 0..4 {
+    enum Mutation {
+        RenameOwner,
+        RenameDigestDirectory,
+        NonUtf8Owner,
+        RemoveReady,
+    }
+    for mutation in [
+        Mutation::RenameOwner,
+        Mutation::RenameDigestDirectory,
+        Mutation::NonUtf8Owner,
+        Mutation::RemoveReady,
+    ] {
         let root = PrivateRoot::new()?;
         let publisher = LocalOciPublisherV1::open(&root.0)?;
         let bundle = bundle()?;
@@ -1116,10 +1127,14 @@ fn reader_rejects_incomplete_shapes_and_non_utf8_owner() -> Result<(), Box<dyn s
             .join("releases")
             .join(&bundle.address().digest()[7..]);
         match mutation {
-            0 => fs::rename(release.join("OWNER"), release.join("unrecognized"))?,
-            1 => fs::rename(release.join("blobs/sha256"), release.join("blobs/other"))?,
-            2 => fs::write(release.join("OWNER"), [0xff])?,
-            _ => fs::remove_file(release.join("READY"))?,
+            Mutation::RenameOwner => {
+                fs::rename(release.join("OWNER"), release.join("unrecognized"))?
+            }
+            Mutation::RenameDigestDirectory => {
+                fs::rename(release.join("blobs/sha256"), release.join("blobs/other"))?
+            }
+            Mutation::NonUtf8Owner => fs::write(release.join("OWNER"), [0xff])?,
+            Mutation::RemoveReady => fs::remove_file(release.join("READY"))?,
         }
         assert_eq!(
             publisher.read_verified(bundle.address()),

@@ -1809,16 +1809,26 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum QuarantineIoScenario {
+        InvalidIndexedOwner,
+        InvalidFinalName,
+        IncompleteFinal,
+        InvalidNextIndexName,
+        NextIndexDirectory,
+        UnrecognizedStagingMember,
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn quarantine_io_scenario(
-        scenario: u8,
+        scenario: QuarantineIoScenario,
         target: usize,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let root = private_root("quarantine-io")?;
         let publisher = LocalOciPublisherV1::open(&root)?;
         let release = bundle()?;
         match scenario {
-            0 => {
+            QuarantineIoScenario::InvalidIndexedOwner => {
                 publisher.publish(&release)?;
                 std::fs::write(
                     root.join("releases")
@@ -1827,11 +1837,19 @@ mod tests {
                     b"invalid",
                 )?;
             }
-            1 => std::fs::create_dir(root.join("releases/invalid-final"))?,
-            2 => std::fs::create_dir(root.join("releases").join("a".repeat(64)))?,
-            3 => std::fs::write(root.join(".published.invalid.next"), b"invalid")?,
-            4 => std::fs::create_dir(root.join(format!(".published.{}.next", "a".repeat(32))))?,
-            _ => {
+            QuarantineIoScenario::InvalidFinalName => {
+                std::fs::create_dir(root.join("releases/invalid-final"))?
+            }
+            QuarantineIoScenario::IncompleteFinal => {
+                std::fs::create_dir(root.join("releases").join("a".repeat(64)))?
+            }
+            QuarantineIoScenario::InvalidNextIndexName => {
+                std::fs::write(root.join(".published.invalid.next"), b"invalid")?
+            }
+            QuarantineIoScenario::NextIndexDirectory => {
+                std::fs::create_dir(root.join(format!(".published.{}.next", "a".repeat(32))))?
+            }
+            QuarantineIoScenario::UnrecognizedStagingMember => {
                 assert!(publish_with_fault(
                     &publisher,
                     &release,
@@ -1848,7 +1866,7 @@ mod tests {
         let (result, calls) = with_io_fault(target, || publisher.recover_all());
         assert!(
             result.is_err(),
-            "unsafe recovery scenario {scenario}, I/O {target}"
+            "unsafe recovery scenario {scenario:?}, I/O {target}"
         );
         assert!(publisher.read_verified(release.address()).is_err());
         std::fs::remove_dir_all(root)?;
@@ -1859,7 +1877,14 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn quarantine_io_failures_keep_each_unsafe_entry_undiscoverable(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        for scenario in 0..6 {
+        for scenario in [
+            QuarantineIoScenario::InvalidIndexedOwner,
+            QuarantineIoScenario::InvalidFinalName,
+            QuarantineIoScenario::IncompleteFinal,
+            QuarantineIoScenario::InvalidNextIndexName,
+            QuarantineIoScenario::NextIndexDirectory,
+            QuarantineIoScenario::UnrecognizedStagingMember,
+        ] {
             let calls = quarantine_io_scenario(scenario, usize::MAX)?;
             assert!(calls > 0 && calls < 512);
             for target in 0..calls {
