@@ -534,34 +534,33 @@ mod operator_authentication_tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
-    fn signed_snapshot() -> (TrustPolicySnapshotV1, SigningKey) {
-        let bytes = crate::draft_trust_policy_snapshot_bytes_v1().expect("draft TPS1 fixture");
-        let mut snapshot =
-            TrustPolicySnapshotV1::from_canonical_cbor(&bytes).expect("canonical TPS1 fixture");
+    fn signed_snapshot() -> Result<(TrustPolicySnapshotV1, SigningKey), Box<dyn std::error::Error>>
+    {
+        let bytes = crate::draft_trust_policy_snapshot_bytes_v1()?;
+        let mut snapshot = TrustPolicySnapshotV1::from_canonical_cbor(&bytes)?;
         let signer = SigningKey::from_bytes(&[17; 32]);
-        let message = snapshot
-            .operator_signature_message_v1()
-            .expect("valid signature message");
+        let message = snapshot.operator_signature_message_v1()?;
         snapshot.operator_signature = signer.sign(&message).to_bytes();
-        (snapshot, signer)
+        Ok((snapshot, signer))
     }
 
     #[test]
-    fn exact_operator_preimage_has_domain_and_eleven_fields() {
-        let (snapshot, _) = signed_snapshot();
-        let message = snapshot
-            .operator_signature_message_v1()
-            .expect("valid signature message");
+    fn exact_operator_preimage_has_domain_and_eleven_fields(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (snapshot, _) = signed_snapshot()?;
+        let message = snapshot.operator_signature_message_v1()?;
         assert!(message.starts_with(OPERATOR_SIGNATURE_DOMAIN_V1));
         let unsigned = &message[OPERATOR_SIGNATURE_DOMAIN_V1.len()..];
-        let value = decode_value(unsigned).expect("canonical unsigned CBOR");
-        assert_eq!(array(&value, 11).expect("eleven fields").len(), 11);
-        assert_ne!(unsigned, snapshot.to_canonical_cbor().expect("full TPS1"));
+        let value = decode_value(unsigned)?;
+        assert_eq!(array(&value, 11)?.len(), 11);
+        assert_ne!(unsigned, snapshot.to_canonical_cbor()?);
+        Ok(())
     }
 
     #[test]
-    fn signed_snapshot_requires_pinned_operator_role_key_and_exact_fields() {
-        let (mut snapshot, signer) = signed_snapshot();
+    fn signed_snapshot_requires_pinned_operator_role_key_and_exact_fields(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut snapshot, signer) = signed_snapshot()?;
         let operator_key = signer.verifying_key().to_bytes();
         assert_eq!(
             snapshot.verify_operator_signature_v1(&operator_key, "deployment-operator"),
@@ -586,5 +585,6 @@ mod operator_authentication_tests {
             snapshot.verify_operator_signature_v1(&operator_key, "deployment-operator"),
             Err(TrustPolicySnapshotAuthenticationErrorV1::InvalidSnapshot)
         );
+        Ok(())
     }
 }

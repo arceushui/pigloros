@@ -141,21 +141,6 @@ impl ExecutionProfileV1 {
     }
 }
 
-#[cfg(test)]
-mod minimum_version_tests {
-    use super::ExecutionProfileV1;
-
-    #[test]
-    fn exact_execution_profile_minimum_uses_semantic_precedence() {
-        let bytes = crate::draft_execution_profile_bytes_v1("deterministic-local-v1")
-            .expect("draft profile fixture");
-        let profile = ExecutionProfileV1::from_canonical_cbor(&bytes).expect("canonical EPF1");
-        assert!(profile.meets_minimum_version_v1("1.0.0"));
-        assert!(!profile.meets_minimum_version_v1("999.0.0"));
-        assert!(!profile.meets_minimum_version_v1("invalid"));
-    }
-}
-
 fn encode_validated_profile(
     profile: &ExecutionProfileV1,
 ) -> Result<Vec<u8>, ExecutionProfileContractErrorV1> {
@@ -619,4 +604,20 @@ fn optional_digest(value: Option<&[u8; 32]>) -> Value {
 
 fn strings(values: &[String]) -> Value {
     Value::Array(values.iter().map(|value| text(value)).collect())
+}
+
+#[cfg(test)]
+mod minimum_version_tests {
+    use super::ExecutionProfileV1;
+
+    #[test]
+    fn exact_execution_profile_minimum_uses_semantic_precedence(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = crate::draft_execution_profile_bytes_v1("deterministic-local-v1")?;
+        let profile = ExecutionProfileV1::from_canonical_cbor(&bytes)?;
+        assert!(profile.meets_minimum_version_v1("1.0.0"));
+        assert!(!profile.meets_minimum_version_v1("999.0.0"));
+        assert!(!profile.meets_minimum_version_v1("invalid"));
+        Ok(())
+    }
 }
