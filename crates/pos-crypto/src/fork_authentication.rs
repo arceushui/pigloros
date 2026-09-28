@@ -396,6 +396,7 @@ fn validate_frc1(bytes: &[u8]) -> Result<(), ForkAuthenticationSignatureErrorV1>
 mod tests {
     use super::*;
     use pos_core::{fork_authentication::ForkAuthenticationAdapterPolicyV1, Hash, PrincipalRefV1};
+    use std::error::Error;
 
     const ADAPTER_SEED: [u8; 32] = [
         0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
@@ -408,46 +409,44 @@ mod tests {
         0x51, 0x1a,
     ];
 
-    fn encode(value: Value) -> Vec<u8> {
+    fn encode(value: Value) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(&value, &mut bytes).expect("test CBOR serializes");
-        bytes
+        ciborium::into_writer(&value, &mut bytes)?;
+        Ok(bytes)
     }
 
     fn bytes(value: u8, length: usize) -> Value {
         Value::Bytes(vec![value; length])
     }
 
-    fn record() -> AuthenticatedPrincipalRecordV1 {
-        AuthenticatedPrincipalRecordV1 {
-            principal: PrincipalRefV1::try_new([1; 16], "unix-user").expect("valid principal"),
+    fn record() -> Result<AuthenticatedPrincipalRecordV1, Box<dyn Error>> {
+        Ok(AuthenticatedPrincipalRecordV1 {
+            principal: PrincipalRefV1::try_new([1; 16], "unix-user")?,
             adapter_id: "local-unix".to_owned(),
             assurance: 2,
             issued_at: 1,
             expires_at: 2,
             registry_binding: Hash::from_bytes([2; 32]),
             operation_nonce: [3; 32],
-        }
+        })
     }
 
-    fn policy(key: [u8; 32]) -> ForkAuthenticationPolicyV1 {
-        ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
+    fn policy(key: [u8; 32]) -> Result<ForkAuthenticationPolicyV1, Box<dyn Error>> {
+        let policy = ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
             adapter_id: "local-unix".to_owned(),
             verifying_key: key,
             minimum_assurance: 2,
             registry_bindings: vec![Hash::from_bytes([2; 32])],
-        }])
-        .expect("valid policy")
+        }])?;
+        Ok(policy)
     }
 
-    fn verified_evidence() -> VerifiedAuthenticatedPrincipalEvidenceV1 {
-        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)
-            .expect("RFC seed is nonzero");
-        let evidence = adapter
-            .sign_authenticated_principal(record())
-            .expect("record is valid");
-        verify_authenticated_principal_evidence_v1(&policy(adapter.public_key()), evidence)
-            .expect("adapter evidence verifies")
+    fn verified_evidence() -> Result<VerifiedAuthenticatedPrincipalEvidenceV1, Box<dyn Error>> {
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)?;
+        let evidence = adapter.sign_authenticated_principal(record()?)?;
+        let verified =
+            verify_authenticated_principal_evidence_v1(&policy(adapter.public_key())?, evidence)?;
+        Ok(verified)
     }
 
     fn verify_host_signature(
@@ -455,28 +454,24 @@ mod tests {
         domain: &[u8],
         bytes: &[u8],
         signature: &Signature,
-    ) {
-        let verifying_key = VerifyingKey::from_bytes(&public_key).expect("host key is valid");
-        verify_signature(&verifying_key, domain, bytes, signature.as_bytes())
-            .expect("signature matches exact domain and bytes");
+    ) -> Result<(), Box<dyn Error>> {
+        let verifying_key = VerifyingKey::from_bytes(&public_key)?;
+        verify_signature(&verifying_key, domain, bytes, signature.as_bytes())?;
+        Ok(())
     }
 
     #[test]
-    fn adapter_signing_uses_rfc8032_key_and_policy_pinned_preimage() {
-        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)
-            .expect("RFC seed is nonzero");
+    fn adapter_signing_uses_rfc8032_key_and_policy_pinned_preimage() -> Result<(), Box<dyn Error>> {
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)?;
         assert_eq!(adapter.public_key(), RFC8032_PUBLIC_KEY);
-        let evidence = adapter
-            .sign_authenticated_principal(record())
-            .expect("record is valid");
+        let evidence = adapter.sign_authenticated_principal(record()?)?;
         let verified = verify_authenticated_principal_evidence_v1(
-            &policy(RFC8032_PUBLIC_KEY),
+            &policy(RFC8032_PUBLIC_KEY)?,
             evidence.clone(),
         );
         assert!(verified.is_ok());
-        let verifying_key =
-            VerifyingKey::from_bytes(&RFC8032_PUBLIC_KEY).expect("RFC key is valid");
-        let record_bytes = evidence.record().to_canonical_cbor().expect("APR1 CBOR");
+        let verifying_key = VerifyingKey::from_bytes(&RFC8032_PUBLIC_KEY)?;
+        let record_bytes = evidence.record().to_canonical_cbor()?;
         assert!(verify_signature(
             &verifying_key,
             ADAPTER_DOMAIN,
@@ -491,28 +486,28 @@ mod tests {
             evidence.signature(),
         )
         .is_err());
+        Ok(())
     }
 
     #[test]
-    fn policy_verification_rejects_wrong_assurance_binding_and_signature() {
-        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)
-            .expect("RFC seed is nonzero");
-        let evidence = adapter
-            .sign_authenticated_principal(record())
-            .expect("record is valid");
-        let insufficient = policy(adapter.public_key());
-        let entry = insufficient
-            .adapter("local-unix")
-            .expect("adapter is present");
-        assert_eq!(entry.minimum_assurance, 2);
+    fn policy_verification_rejects_wrong_assurance_binding_and_signature(
+    ) -> Result<(), Box<dyn Error>> {
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)?;
+        let evidence = adapter.sign_authenticated_principal(record()?)?;
+        let insufficient = policy(adapter.public_key())?;
+        assert_eq!(
+            insufficient
+                .adapter("local-unix")
+                .map(|entry| entry.minimum_assurance),
+            Some(2)
+        );
         let wrong_assurance =
             ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
                 adapter_id: "local-unix".to_owned(),
                 verifying_key: adapter.public_key(),
                 minimum_assurance: 3,
                 registry_bindings: vec![Hash::from_bytes([2; 32])],
-            }])
-            .expect("valid policy");
+            }])?;
         assert_eq!(
             verify_authenticated_principal_evidence_v1(&wrong_assurance, evidence.clone()),
             Err(ForkAuthenticationSignatureErrorV1::PolicyMismatch)
@@ -523,28 +518,29 @@ mod tests {
                 verifying_key: adapter.public_key(),
                 minimum_assurance: 2,
                 registry_bindings: vec![Hash::from_bytes([9; 32])],
-            }])
-            .expect("valid policy");
+            }])?;
         assert_eq!(
             verify_authenticated_principal_evidence_v1(&wrong_binding, evidence.clone()),
             Err(ForkAuthenticationSignatureErrorV1::PolicyMismatch)
         );
-        let mut altered = evidence.to_canonical_cbor().expect("FAE1 CBOR");
-        let last = altered.last_mut().expect("FAE1 is nonempty");
+        let mut altered = evidence.to_canonical_cbor()?;
+        let Some(last) = altered.last_mut() else {
+            return Err(std::io::Error::other("FAE1 is empty").into());
+        };
         *last ^= 1;
-        let altered = AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&altered)
-            .expect("signature bytes remain structurally valid");
+        let altered = AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&altered)?;
         assert_eq!(
             verify_authenticated_principal_evidence_v1(&insufficient, altered),
             Err(ForkAuthenticationSignatureErrorV1::InvalidSignature)
         );
+        Ok(())
     }
 
     #[test]
-    fn host_signing_is_purpose_limited_and_accepts_exact_adr106_shapes() {
-        let host = ForkHostSigningKeyV1::from_seed([4; 32]).expect("nonzero host seed");
-        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)
-            .expect("RFC seed is nonzero");
+    fn host_signing_is_purpose_limited_and_accepts_exact_adr106_shapes(
+    ) -> Result<(), Box<dyn Error>> {
+        let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)?;
         assert_ne!(host.public_key(), adapter.public_key());
 
         let fai1 = encode(Value::Array(vec![
@@ -554,12 +550,12 @@ mod tests {
             bytes(2, 32),
             Value::Bytes(host.public_key().to_vec()),
             bytes(4, 32),
-        ]));
+        ]))?;
         assert_eq!(fai1.len(), FAI1_BYTES);
-        let initialize = host.sign_initialize(&fai1).expect("FAI1 is valid");
-        verify_host_signature(host.public_key(), INITIALIZE_DOMAIN, &fai1, &initialize);
+        let initialize = host.sign_initialize(&fai1)?;
+        verify_host_signature(host.public_key(), INITIALIZE_DOMAIN, &fai1, &initialize)?;
         assert!(verify_signature(
-            &VerifyingKey::from_bytes(&host.public_key()).expect("valid host key"),
+            &VerifyingKey::from_bytes(&host.public_key())?,
             OPEN_DOMAIN,
             &fai1,
             initialize.as_bytes()
@@ -572,10 +568,10 @@ mod tests {
             bytes(1, 32),
             bytes(2, 32),
             bytes(3, 32),
-        ]));
+        ]))?;
         assert_eq!(fao1.len(), FAO1_BYTES);
-        let open = host.sign_open(&fao1).expect("FAO1 is valid");
-        verify_host_signature(host.public_key(), OPEN_DOMAIN, &fao1, &open);
+        let open = host.sign_open(&fao1)?;
+        verify_host_signature(host.public_key(), OPEN_DOMAIN, &fao1, &open)?;
 
         let poc1 = encode(Value::Array(vec![
             Value::Text("POC1".to_owned()),
@@ -586,13 +582,13 @@ mod tests {
             bytes(4, 32),
             bytes(5, 32),
             Value::Text("owner".to_owned()),
-        ]));
-        let evidence = verified_evidence();
-        let command = host.sign_command(&poc1, &evidence).expect("POC1 is valid");
-        let evidence_bytes = evidence.evidence().to_canonical_cbor().expect("FAE1 CBOR");
+        ]))?;
+        let evidence = verified_evidence()?;
+        let command = host.sign_command(&poc1, &evidence)?;
+        let evidence_bytes = evidence.evidence().to_canonical_cbor()?;
         let mut command_input = poc1.clone();
         command_input.extend_from_slice(&evidence_bytes);
-        verify_host_signature(host.public_key(), COMMAND_DOMAIN, &command_input, &command);
+        verify_host_signature(host.public_key(), COMMAND_DOMAIN, &command_input, &command)?;
 
         let fcc1 = encode(Value::Array(vec![
             Value::Text("FCC1".to_owned()),
@@ -609,8 +605,8 @@ mod tests {
             bytes(9, 32),
             Value::Integer(1.into()),
             Value::Text("child".to_owned()),
-        ]));
-        let fcc_signature = host.sign_command(&fcc1, &evidence).expect("FCC1 is valid");
+        ]))?;
+        let fcc_signature = host.sign_command(&fcc1, &evidence)?;
         let mut fcc_input = fcc1.clone();
         fcc_input.extend_from_slice(&evidence_bytes);
         verify_host_signature(
@@ -618,7 +614,7 @@ mod tests {
             COMMAND_DOMAIN,
             &fcc_input,
             &fcc_signature,
-        );
+        )?;
 
         let frc1 = encode(Value::Array(vec![
             Value::Text("FRC1".to_owned()),
@@ -627,16 +623,18 @@ mod tests {
             bytes(2, 32),
             Value::Integer(1.into()),
             bytes(3, 32),
-        ]));
+        ]))?;
         assert_eq!(frc1.len(), FRC1_BYTES);
-        let recovery = host.sign_recovery(&frc1).expect("FRC1 is valid");
-        verify_host_signature(host.public_key(), RECOVERY_DOMAIN, &frc1, &recovery);
+        let recovery = host.sign_recovery(&frc1)?;
+        verify_host_signature(host.public_key(), RECOVERY_DOMAIN, &frc1, &recovery)?;
+        Ok(())
     }
 
     #[test]
-    fn fcc1_reachable_maximum_is_accepted_and_one_byte_over_is_rejected() {
-        let host = ForkHostSigningKeyV1::from_seed([4; 32]).expect("nonzero host seed");
-        let evidence = verified_evidence();
+    fn fcc1_reachable_maximum_is_accepted_and_one_byte_over_is_rejected(
+    ) -> Result<(), Box<dyn Error>> {
+        let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
+        let evidence = verified_evidence()?;
         let fcc1 = encode(Value::Array(vec![
             Value::Text("FCC1".to_owned()),
             Value::Integer(1.into()),
@@ -652,7 +650,7 @@ mod tests {
             bytes(0xf9, 32),
             Value::Integer(1.into()),
             Value::Text("c".repeat(128)),
-        ]));
+        ]))?;
         assert_eq!(fcc1.len(), MAX_FCC1_BYTES);
         assert_eq!(
             &fcc1[..8],
@@ -666,10 +664,12 @@ mod tests {
             host.sign_command(&oversized, &evidence),
             Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
         );
+        Ok(())
     }
 
     #[test]
-    fn host_signing_rejects_zero_seeds_noncanonical_and_wrong_purpose_shapes() {
+    fn host_signing_rejects_zero_seeds_noncanonical_and_wrong_purpose_shapes(
+    ) -> Result<(), Box<dyn Error>> {
         assert!(matches!(
             ForkAuthenticationAdapterSigningKeyV1::from_seed([0; 32]),
             Err(ForkAuthenticationSignatureErrorV1::InvalidSeed)
@@ -678,14 +678,14 @@ mod tests {
             ForkHostSigningKeyV1::from_seed([0; 32]),
             Err(ForkAuthenticationSignatureErrorV1::InvalidSeed)
         ));
-        let host = ForkHostSigningKeyV1::from_seed([4; 32]).expect("nonzero host seed");
+        let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
         let wrong = encode(Value::Array(vec![
             Value::Text("FAO1".to_owned()),
             Value::Integer(1.into()),
             bytes(1, 32),
             bytes(2, 32),
             bytes(3, 32),
-        ]));
+        ]))?;
         assert_eq!(
             host.sign_initialize(&wrong),
             Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
@@ -697,7 +697,7 @@ mod tests {
             bytes(2, 32),
             bytes(3, 32),
             bytes(4, 32),
-        ]));
+        ]))?;
         assert_eq!(
             host.sign_initialize(&foreign_host),
             Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
@@ -717,9 +717,9 @@ mod tests {
             bytes(9, 32),
             Value::Integer(1.into()),
             Value::Text("child".to_owned()),
-        ]));
+        ]))?;
         assert_eq!(
-            host.sign_command(&malformed_fcc1, &verified_evidence()),
+            host.sign_command(&malformed_fcc1, &verified_evidence()?),
             Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
         );
         let noncanonical = [0x98, 0x05, b'F', b'A', b'O', b'1'];
@@ -731,5 +731,6 @@ mod tests {
             host.sign_recovery(&wrong),
             Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
         );
+        Ok(())
     }
 }
