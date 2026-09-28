@@ -234,7 +234,14 @@ fn verify_snapshot_event_sets(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    registry.restore_from_snapshot(snap.timeline, &snap.registry);
+    registry
+        .restore_from_snapshot(
+            snap.timeline,
+            &snap.registry,
+            snap.inventory_generation
+                .map(pos_core::ErasureReferenceV1::from_digest),
+        )
+        .map_err(|_| SnapshotError::ArtifactUnavailable)?;
     registry.fold_events(snap.timeline, tail_events);
     let incremental_state = registry
         .state_snapshot(snap.timeline)

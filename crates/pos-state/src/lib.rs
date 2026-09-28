@@ -530,24 +530,49 @@ impl ProjectionRegistry {
     ///
     /// This is the counterpart of [`Self::state_snapshot`] and is used by
     /// `pos-time` snapshot consistency verification to seed the incremental path.
-    /// The caller must preserve the source Timeline from the host-held snapshot.
+    /// The caller must preserve the source Timeline and captured generation
+    /// from the host-held snapshot. State is installed only while that exact
+    /// generation is current and the Timeline snapshot fence is held.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the generation is stale or the
+    /// Timeline snapshot fence is unavailable.
     pub fn restore_from_snapshot(
         &mut self,
         timeline: TimelineId,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
-    ) {
-        self.clear_state();
-        self.source_timeline = Some(timeline);
-        self.source_generation = self
+        expected_generation: Option<ErasureReferenceV1>,
+    ) -> Result<(), AuthorityErrorV1> {
+        let gate = self
             .erasure_gate
             .as_ref()
-            .and_then(|gate| gate.inventory_generation().ok());
-        for (name, slot) in &mut self.slots {
-            // Missing snapshot entries stay empty after `clear_state`.
-            if let Some(restored) = snapshot.get(name) {
-                slot.registry = restored.clone();
+            .map(Arc::clone)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
+        let mut restored = false;
+        let mut install = || {
+            let current_generation = gate.inventory_generation().ok();
+            if current_generation == expected_generation {
+                self.clear_state();
+                self.source_timeline = Some(timeline);
+                self.source_generation = current_generation;
+                for (name, slot) in &mut self.slots {
+                    // Missing snapshot entries stay empty after `clear_state`.
+                    if let Some(state) = snapshot.get(name) {
+                        slot.registry = state.clone();
+                    }
+                }
+                restored = true;
             }
-        }
+        };
+        gate.with_fence(
+            timeline,
+            ErasureProtectedOperationV1::Snapshot,
+            &mut install,
+        )
+        .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        restored
+            .then_some(())
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
     }
 
     /// Materialize a snapshot of all per-reducer state inside the current
@@ -1491,7 +1516,7 @@ mod tests {
 
         let mut snapshot = std::collections::HashMap::new();
         snapshot.insert("other".to_owned(), StateRegistry::new());
-        registry.restore_from_snapshot(test_timeline(), &snapshot);
+        test_ok(registry.restore_from_snapshot(test_timeline(), &snapshot, None));
 
         let count = registry
             .state_for_reducer_test("registered", &entity)
@@ -1512,13 +1537,42 @@ mod tests {
 
         let mut restored = open_projection_registry();
         restored.register("registered", Box::new(EntityStateProjection));
-        restored.restore_from_snapshot(timeline, &snapshot);
+        test_ok(restored.restore_from_snapshot(timeline, &snapshot, None));
 
         let count = restored
             .state_for_reducer_test("registered", &entity)
             .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn projection_registry_restore_rejects_stale_generation_and_blocked_timeline() {
+        let timeline = TimelineId::new();
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut source = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        source.register("events", Box::new(EntityStateProjection));
+        source.apply_event(timeline, &make_event(entity));
+        let snapshot = test_ok(source.state_snapshot(timeline));
+
+        let mut restored = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        restored.register("events", Box::new(EntityStateProjection));
+        assert_eq!(
+            restored.restore_from_snapshot(
+                timeline,
+                &snapshot,
+                Some(ErasureReferenceV1::from_digest([7; 32])),
+            ),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert!(test_ok(restored.state_for(timeline, &entity)).is_none());
+
+        gate.block_timeline(timeline);
+        assert_eq!(
+            restored.restore_from_snapshot(timeline, &snapshot, None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
     }
 
     #[test]
