@@ -393,6 +393,22 @@ mod tests {
         registry
     }
 
+    fn assert_world_states(
+        registry: &ProjectionRegistry,
+        timeline: TimelineId,
+        bodies: &[EntityId],
+        expected: &[State],
+    ) {
+        for (body, state) in bodies.iter().zip(expected) {
+            assert_eq!(
+                registry
+                    .state_for_reducer(timeline, "world", body)
+                    .test_ok(),
+                Some(state.clone())
+            );
+        }
+    }
+
     #[test]
     fn world_live_observations_replay_without_backend_at_exact_seq_boundaries() {
         let (mut host, timeline, bodies, action, committed) = committed_world_step();
@@ -443,14 +459,12 @@ mod tests {
             &evaluation,
         )
         .test_ok();
-        assert!(before
-            .state_for_reducer(timeline, "world", &bodies[0])
-            .test_ok()
-            .is_none());
-        assert!(before
-            .state_for_reducer(timeline, "world", &bodies[1])
-            .test_ok()
-            .is_none());
+        for body in &bodies {
+            assert!(before
+                .state_for_reducer(timeline, "world", body)
+                .test_ok()
+                .is_none());
+        }
         super::replay_at(
             &mut reads,
             timeline,
@@ -478,14 +492,7 @@ mod tests {
             &evaluation,
         )
         .test_ok();
-        for (body, state) in bodies.iter().zip(&expected) {
-            assert_eq!(
-                complete
-                    .state_for_reducer(timeline, "world", body)
-                    .test_ok(),
-                Some(state.clone())
-            );
-        }
+        assert_world_states(&complete, timeline, &bodies, &expected);
 
         let telemetry = EventDraft::new(
             bodies[0],
@@ -505,14 +512,7 @@ mod tests {
             &evaluation,
         )
         .test_ok();
-        for (body, state) in bodies.iter().zip(&expected) {
-            assert_eq!(
-                with_telemetry
-                    .state_for_reducer(timeline, "world", body)
-                    .test_ok(),
-                Some(state.clone())
-            );
-        }
+        assert_world_states(&with_telemetry, timeline, &bodies, &expected);
     }
 
     #[test]
