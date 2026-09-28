@@ -2080,6 +2080,7 @@ impl Gateway {
     }
 
     /// Continue an authorized Timeline page read at the cursor's generation.
+    /// The actor receives a fresh authority decision for this page.
     ///
     /// # Errors
     /// Returns [`GatewayError::StaleEventCursor`] when the inventory changed,
@@ -2090,9 +2091,16 @@ impl Gateway {
         timeline_id: &str,
         cursor: EventPageCursor,
         limit: usize,
-        request: GatewayAuthorizationRequest,
+        actor_entity_id: EntityId,
     ) -> Result<EventPage, GatewayError> {
         let from_seq = cursor_from_seq(timeline_id, cursor)?;
+        let request = GatewayAuthorizationRequest::read(
+            actor_entity_id,
+            cursor.timeline_id,
+            from_seq,
+            limit,
+            WallTime::now(),
+        );
         let bounded = self
             .read_events_page_authorized_at_generation(
                 timeline_id,
@@ -4303,17 +4311,18 @@ mod tests {
         let request =
             GatewayAuthorizationRequest::read(actor, timeline.id(), 0, 1, WallTime::now());
         let first = gateway
-            .read_events_page_authorized(&id, 0, 1, request.clone())
+            .read_events_page_authorized(&id, 0, 1, request)
             .await
             .test_ok();
         let cursor = first.next_cursor.test_ok();
         let second = gateway
-            .read_events_page_authorized_after(&id, cursor, 1, request)
+            .read_events_page_authorized_after(&id, cursor, 1, actor)
             .await
             .test_ok();
         assert_eq!(second.events[0].seq.as_u64(), 2);
         assert!(second.next_cursor.is_none());
         gateway.shutdown().await.test_ok();
+        drop(gateway);
     }
 
     #[tokio::test]
