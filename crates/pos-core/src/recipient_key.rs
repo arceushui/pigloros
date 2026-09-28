@@ -341,6 +341,7 @@ impl<'a> Rkp1Cursor<'a> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use ulid::Ulid;
@@ -400,6 +401,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_tests {
     use super::*;
 
