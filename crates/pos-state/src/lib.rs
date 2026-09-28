@@ -178,6 +178,15 @@ impl ProjectionRegistry {
         result
     }
 
+    /// Verify that accumulated state still belongs to this Timeline and the
+    /// currently installed inventory generation before a Fork can inherit it.
+    ///
+    /// # Errors
+    /// Returns a closed source error for a stale, mixed, or unavailable source.
+    pub fn validate_fork_source(&self, timeline: TimelineId) -> Result<(), AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |_| Ok(()))
+    }
+
     /// Register a named reducer.
     ///
     /// If a reducer with the same name was already registered it is replaced and

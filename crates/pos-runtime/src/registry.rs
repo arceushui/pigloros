@@ -2085,6 +2085,7 @@ impl PluginRegistry {
                 reason: "Fork point differs from the restored Timeline prefix",
             });
         }
+        self.projections.validate_fork_source(parent)?;
         let child = store.fork(parent, at_seq, name)?;
         if let Err(error) = self.projections.adopt_committed_fork(parent, child.id()) {
             self.restored_binding = None;

@@ -7497,6 +7497,7 @@ mod tests {
         projections.register("events", Box::new(pos_state::EntityStateProjection));
         projections.fold_events(timeline, &events);
         assert!(projections.state_for(timeline, &entity).is_ok());
+        assert_eq!(projections.validate_fork_source(timeline), Ok(()));
 
         host.command_sender()
             .and_then(|mut sender| sender.create_timeline("new-generation"))
@@ -7505,9 +7506,14 @@ mod tests {
             projections.state_for(timeline, &entity),
             Err(pos_core::AuthorityErrorV1::SourceUnavailable)
         );
+        assert_eq!(
+            projections.validate_fork_source(timeline),
+            Err(pos_core::AuthorityErrorV1::SourceUnavailable)
+        );
         projections.clear_state();
         projections.fold_events(timeline, &events);
         assert!(projections.state_for(timeline, &entity).is_ok());
+        assert_eq!(projections.validate_fork_source(timeline), Ok(()));
     }
 
     #[test]
