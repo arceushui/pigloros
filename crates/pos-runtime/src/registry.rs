@@ -3272,7 +3272,7 @@ impl PluginRegistry {
             &configuration_details,
             "deterministic-local-v1",
         )?;
-        let mut binding = binding.with_installed_action_approver(
+        let binding = binding.with_installed_action_approver(
             approver,
             [Kind::new(crate::output_admission::WORLD_ACTION_EVENT_TYPE_V1)],
         )?;
