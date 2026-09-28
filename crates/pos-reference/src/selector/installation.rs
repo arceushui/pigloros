@@ -735,9 +735,8 @@ impl<'a> PositionalReader<'a> {
 
 impl Read for PositionalReader<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read_at(bytes, self.offset).map(|read| {
+        self.file.read_at(bytes, self.offset).inspect(|&read| {
             self.offset += read as u64;
-            read
         })
     }
 }
