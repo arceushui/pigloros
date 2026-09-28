@@ -1932,83 +1932,67 @@ impl Gateway {
         limit: usize,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<GenerationBoundEventPage, GatewayError> {
+        const MAX_FILTER_SCAN_EVENTS: usize = 1_000;
         if limit == 0 || limit > MAX_EVENTS_PER_POLL {
             return Err(GatewayError::InvalidPageLimit {
                 maximum: MAX_EVENTS_PER_POLL,
             });
         }
         let id = parse_timeline_id(timeline_id)?;
-        let first_seq = from_seq.max(1);
-        let last_seq = first_seq.saturating_add(limit as u64);
-        let range = SeqRange {
-            from: Seq::from_u64(first_seq),
-            to: Some(Seq::from_u64(last_seq)),
-        };
-        let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
-            MAX_EVENT_PAYLOAD_BYTES,
-            MAX_EVENT_TYPE_BYTES,
-            MAX_FORK_DEPTH,
-            limit + 1,
-            (limit + 1) * (MAX_EVENT_PAYLOAD_BYTES + MAX_EVENT_TYPE_BYTES),
-            MAX_EVENTS_READ_TIME_MICROS,
-        );
-        let page = match self
-            .store
-            .read_page(id, range, bounds, expected_generation)
-            .await
-        {
-            Ok(page) => page,
-            Err(executor::StoreExecutorError::Store(CoreError::PayloadTooLarge { .. })) => {
-                return Err(GatewayError::EventPayloadTooLarge {
-                    maximum: MAX_EVENT_PAYLOAD_BYTES,
-                })
+        // A cursor is derived only from visible Events. Scan in bounded chunks
+        // so protected Events cannot hide later public Events in the same page.
+        let mut next_seq = from_seq.max(1);
+        let mut scanned = 0usize;
+        let mut visible = Vec::with_capacity(limit + 1);
+        let mut generation = expected_generation;
+        loop {
+            let chunk_size = (MAX_FILTER_SCAN_EVENTS - scanned).min(MAX_EVENTS_PER_POLL + 1);
+            if chunk_size == 0 {
+                return Err(GatewayError::ResourceUnavailable);
             }
-            Err(executor::StoreExecutorError::Store(CoreError::EventMetadataTooLarge {
-                field,
-                ..
-            })) => {
-                return Err(GatewayError::EventMetadataTooLarge {
-                    field,
-                    maximum: MAX_EVENT_TYPE_BYTES,
-                })
+            let range = SeqRange {
+                from: Seq::from_u64(next_seq),
+                to: Some(Seq::from_u64(
+                    next_seq.saturating_add(chunk_size as u64 - 1),
+                )),
+            };
+            let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
+                MAX_EVENT_PAYLOAD_BYTES,
+                MAX_EVENT_TYPE_BYTES,
+                MAX_FORK_DEPTH,
+                chunk_size,
+                chunk_size * (MAX_EVENT_PAYLOAD_BYTES + MAX_EVENT_TYPE_BYTES),
+                MAX_EVENTS_READ_TIME_MICROS,
+            );
+            let page = self
+                .store
+                .read_page(id, range, bounds, generation)
+                .await
+                .map_err(map_event_page_read_error)?;
+            generation = page.generation.or(generation);
+            let raw_count = page.events.len();
+            let last_seq = page.events.last().map_or(next_seq, event_seq);
+            scanned += raw_count;
+            visible.extend(
+                page.events
+                    .into_iter()
+                    .filter(|event| !is_subject_controlled_event_type(&event.event_type)),
+            );
+            if visible.len() > limit || raw_count < chunk_size {
+                break;
             }
-            Err(executor::StoreExecutorError::Store(CoreError::ForkDepthTooLarge { .. })) => {
-                return Err(GatewayError::ForkDepthTooLarge {
-                    maximum: MAX_FORK_DEPTH,
-                })
-            }
-            Err(executor::StoreExecutorError::Store(CoreError::ReadBytesTooLarge { .. })) => {
-                return Err(GatewayError::EventResponseTooLarge {
-                    maximum: MAX_EVENTS_RESPONSE_BYTES,
-                })
-            }
-            Err(
-                executor::StoreExecutorError::Store(CoreError::ReadTimeTooLarge { .. })
-                | executor::StoreExecutorError::DeadlineExceeded,
-            ) => {
-                return Err(GatewayError::EventReadTimeExceeded {
-                    maximum_micros: MAX_EVENTS_READ_TIME_MICROS,
-                })
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let mut events = page.events;
-        if events
-            .iter()
-            .any(|event| is_subject_controlled_event_type(&event.event_type))
-        {
-            return Err(GatewayError::ResourceUnavailable);
+            next_seq = last_seq.saturating_add(1);
         }
-        let next_from_seq = events
+        let next_from_seq = visible
             .get(limit)
             .map(|event| Seq::from_u64(event_seq(event)));
-        events.truncate(limit);
+        visible.truncate(limit);
         Ok(GenerationBoundEventPage {
             page: EventPage {
-                events,
+                events: visible,
                 next_from_seq,
             },
-            inventory_generation: page.generation,
+            inventory_generation: generation,
         })
     }
 
@@ -2997,6 +2981,37 @@ fn is_subject_controlled_event_type(event_type: &Kind) -> bool {
         || pos_core::is_consent_event_type(event_type)
         || event_type.as_str().starts_with("timeline.fork.")
         || event_type.as_str().starts_with("retention.")
+}
+
+fn map_event_page_read_error(error: executor::StoreExecutorError) -> GatewayError {
+    match error {
+        executor::StoreExecutorError::Store(CoreError::PayloadTooLarge { .. }) => {
+            GatewayError::EventPayloadTooLarge {
+                maximum: MAX_EVENT_PAYLOAD_BYTES,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::EventMetadataTooLarge { field, .. }) => {
+            GatewayError::EventMetadataTooLarge {
+                field,
+                maximum: MAX_EVENT_TYPE_BYTES,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::ForkDepthTooLarge { .. }) => {
+            GatewayError::ForkDepthTooLarge {
+                maximum: MAX_FORK_DEPTH,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::ReadBytesTooLarge { .. }) => {
+            GatewayError::EventResponseTooLarge {
+                maximum: MAX_EVENTS_RESPONSE_BYTES,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::ReadTimeTooLarge { .. })
+        | executor::StoreExecutorError::DeadlineExceeded => GatewayError::EventReadTimeExceeded {
+            maximum_micros: MAX_EVENTS_READ_TIME_MICROS,
+        },
+        error => error.into(),
+    }
 }
 
 fn normalize_protected_read_error(
@@ -4228,7 +4243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authority_bound_gateway_blocks_subject_controlled_reads_and_normalizes_missing() {
+    async fn authority_bound_gateway_filters_subject_controlled_reads_and_normalizes_missing() {
         let actor = EntityId::new();
         for event_type in [
             "persona.profile",
@@ -4245,7 +4260,7 @@ mod tests {
                 [],
                 crate::authorization::test_authorization_for(actor),
             );
-            let error = gateway
+            let page = gateway
                 .read_events_page_authorized(
                     &target.to_string(),
                     0,
@@ -4253,8 +4268,9 @@ mod tests {
                     GatewayAuthorizationRequest::read(actor, target, 0, 1, WallTime::now()),
                 )
                 .await
-                .test_err();
-            assert_eq!(error.to_string(), "resource not found");
+                .test_ok();
+            assert!(page.events.is_empty());
+            assert_eq!(page.next_from_seq, None);
             gateway.shutdown().await.test_ok();
             drop(gateway);
         }
@@ -5180,11 +5196,12 @@ mod tests {
             fence_error,
             GatewayError::ConsentRevocationFenceMismatch
         ));
-        let page_error = gateway
+        let page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 2)
             .await
-            .test_err();
-        assert!(matches!(page_error, GatewayError::ResourceUnavailable));
+            .test_ok();
+        assert!(page.events.is_empty());
+        assert_eq!(page.next_from_seq, None);
         drop(gateway);
     }
 
@@ -5286,7 +5303,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn public_gateway_read_rejects_geographic_events_from_an_adapter() {
+    async fn public_gateway_read_filters_geographic_events_from_an_adapter() {
         for event_type in [
             pos_core::GEOGRAPHIC_EVENT_TYPE,
             pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
@@ -5294,21 +5311,23 @@ mod tests {
             let gateway = Gateway::new(Box::new(ScriptedStore {
                 mode: ScriptMode::GeographicRead(event_type),
             }));
-            let error = gateway
+            let page = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)
                 .await
-                .test_err();
-            assert!(matches!(error, GatewayError::ResourceUnavailable));
+                .test_ok();
+            assert!(page.events.is_empty());
+            assert_eq!(page.next_from_seq, None);
             drop(gateway);
         }
         let gateway = Gateway::new(Box::new(ScriptedStore {
             mode: ScriptMode::ConsentRead(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
         }));
-        let error = gateway
+        let page = gateway
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
             .await
-            .test_err();
-        assert!(matches!(error, GatewayError::ResourceUnavailable));
+            .test_ok();
+        assert!(page.events.is_empty());
+        assert_eq!(page.next_from_seq, None);
         drop(gateway);
     }
 
@@ -6228,6 +6247,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn event_pages_filter_protected_events_before_deriving_cursors() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("mixed-scope").await.test_ok();
+        let timeline_id = timeline.id().to_string();
+        let drafts = [
+            EVENT_TYPE_ACTION,
+            "persona.profile",
+            EVENT_TYPE_ACTION,
+            "retention.policy",
+            EVENT_TYPE_ACTION,
+        ]
+        .into_iter()
+        .map(|kind| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(kind),
+                json_to_cbor(&serde_json::json!({})),
+            )
+        })
+        .collect::<Vec<_>>();
+        gateway
+            .store
+            .append(timeline.id(), drafts, None)
+            .await
+            .test_ok();
+
+        let first = gateway.read_events_page(&timeline_id, 0, 1).await.test_ok();
+        assert_eq!(
+            first.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(first.next_from_seq, Some(Seq::from_u64(3)));
+        let second = gateway.read_events_page(&timeline_id, 3, 1).await.test_ok();
+        assert_eq!(
+            second.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(second.next_from_seq, Some(Seq::from_u64(5)));
+        let final_page = gateway.read_events_page(&timeline_id, 5, 1).await.test_ok();
+        assert_eq!(
+            final_page.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![5]
+        );
+        assert_eq!(final_page.next_from_seq, None);
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn event_pages_bound_protected_scans_and_resume_at_public_events() {
+        let gateway = memory_gw();
+        let timeline = gateway
+            .create_timeline("protected-scan-cap")
+            .await
+            .test_ok();
+        let mut drafts = (0..1_000)
+            .map(|_| {
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("persona.profile"),
+                    json_to_cbor(&serde_json::json!({})),
+                )
+            })
+            .collect::<Vec<_>>();
+        drafts.extend((0..2).map(|_| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_ACTION),
+                json_to_cbor(&serde_json::json!({})),
+            )
+        }));
+        gateway
+            .store
+            .append(timeline.id(), drafts, None)
+            .await
+            .test_ok();
+        let id = timeline.id().to_string();
+        assert!(matches!(
+            gateway.read_events_page(&id, 0, 1).await,
+            Err(GatewayError::ResourceUnavailable)
+        ));
+        let page = gateway.read_events_page(&id, 900, 1).await.test_ok();
+        assert_eq!(
+            page.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![1001]
+        );
+        assert_eq!(page.next_from_seq, Some(Seq::from_u64(1002)));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[allow(deprecated)]
     async fn public_page_api_and_compatibility_shim_remain_bounded() {
@@ -7131,12 +7242,11 @@ mod coverage_entrypoints {
                 },
             )
             .await?;
-        assert!(matches!(
-            gateway
-                .read_events_page(&timeline.id().to_string(), 0, 8)
-                .await,
-            Err(GatewayError::ResourceUnavailable)
-        ));
+        let visible = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 8)
+            .await?;
+        assert_eq!(visible.events.len(), 2);
+        assert_eq!(visible.next_from_seq, None);
         gateway
             .purge_expired_ingress_identities(NonZeroUsize::MIN)
             .await?;

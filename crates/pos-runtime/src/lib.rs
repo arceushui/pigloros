@@ -24,6 +24,7 @@
 //! ```
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+pub mod authorization_cache;
 pub mod composition;
 pub mod driver;
 pub mod erasure_host;
@@ -35,6 +36,7 @@ pub mod scheduler;
 pub mod schema;
 pub mod world_profile;
 
+pub use authorization_cache::AuthorizationCacheKeyV1;
 pub use composition::{
     DomainImplementationKindV1, PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1,
     PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1,
