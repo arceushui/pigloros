@@ -456,13 +456,25 @@ impl ProjectionRegistry {
         })
     }
 
-    /// Return state from one installed Plugin's reducer slot.
-    #[must_use]
-    pub fn state_for_plugin(&self, plugin_id: PluginId, entity: &EntityId) -> Option<&State> {
-        self.slots
-            .iter()
-            .find(|(_, slot)| slot.plugin_id == Some(plugin_id))
-            .and_then(|(_, slot)| slot.registry.get(entity))
+    /// Return owned state from one installed Plugin's reducer slot under the
+    /// current Timeline fence.
+    ///
+    /// # Errors
+    /// Returns a closed source error when Timeline access is unverified.
+    pub fn state_for_plugin(
+        &self,
+        timeline: TimelineId,
+        plugin_id: PluginId,
+        entity: &EntityId,
+    ) -> Result<Option<State>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| {
+            Ok(registry
+                .slots
+                .iter()
+                .find(|(_, slot)| slot.plugin_id == Some(plugin_id))
+                .and_then(|(_, slot)| slot.registry.get(entity))
+                .cloned())
+        })
     }
 
     /// Materialize exactly one host-authorized participant observation.
@@ -2405,7 +2417,9 @@ mod wave3_tests {
             .is_ok());
         let count = |registry: &ProjectionRegistry, id| {
             registry
-                .state_for_plugin(id, &entity)
+                .state_for_plugin(timeline, id, &entity)
+                .ok()
+                .flatten()
                 .and_then(|state| state.get("event_count"))
                 .and_then(serde_json::Value::as_u64)
         };
@@ -2459,14 +2473,13 @@ mod wave3_tests {
     #[test]
     fn failed_state_transaction_restores_by_slot_after_registration_reorders_slots() {
         let entity = EntityId::new();
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("first", Box::new(EntityStateProjection));
-        registry.apply_event(&ev(entity));
+        registry.apply_event(test_timeline(), &ev(entity));
         registry.register("second", Box::new(EntityStateProjection));
-        registry.apply_event(&ev(entity));
+        registry.apply_event(test_timeline(), &ev(entity));
         let count = |registry: &ProjectionRegistry, name| {
-            registry
-                .state_for_reducer(name, &entity)
+            test_ok(registry.state_for_reducer(test_timeline(), name, &entity))
                 .and_then(|state| state.get("event_count"))
                 .and_then(serde_json::Value::as_u64)
         };
@@ -2476,7 +2489,7 @@ mod wave3_tests {
         let denied: Result<(), &str> = registry.try_with_state_transaction(|candidate| {
             candidate.register("first", Box::new(EntityStateProjection));
             candidate.register("third", Box::new(EntityStateProjection));
-            candidate.apply_event(&ev(entity));
+            candidate.apply_event(test_timeline(), &ev(entity));
             Err("denied")
         });
 

@@ -4603,7 +4603,8 @@ mod tests {
             )
             .test_ok();
         let entity = EntityId::new();
-        registry.projections.apply_event(&Event {
+        let timeline = TimelineId::new();
+        registry.projections.apply_event(timeline, &Event {
             id: EventId::new(),
             entity,
             event_type: Kind::new("first.output"),
@@ -4629,7 +4630,9 @@ mod tests {
         let count = |registry: &PluginRegistry, id| {
             registry
                 .projections
-                .state_for_plugin(id, &entity)
+                .state_for_plugin(timeline, id, &entity)
+                .ok()
+                .flatten()
                 .and_then(|state| state.get("n"))
                 .and_then(serde_json::Value::as_u64)
         };
