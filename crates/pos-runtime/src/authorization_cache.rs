@@ -392,6 +392,7 @@ mod tests {
         participant_id: Option<EntityId>,
         plugin_context: Option<(PluginId, [u8; 16])>,
         consent: ConsentEvidenceV1,
+        consent_timeline: Option<TimelineId>,
     ) -> AuthorizationRequestV1 {
         let (plugin_id, installation_id) = plugin_context.unzip();
         test_ok(AuthorizationRequestV1::try_from_draft(
@@ -411,7 +412,8 @@ mod tests {
                 at_time: base.at_time(),
                 authority_timeline: base.authority_timeline(),
                 at_position: base.at_position(),
-                consent_timeline: subject_id.map(|_| base.authority_timeline()),
+                consent_timeline: consent_timeline
+                    .or_else(|| subject_id.map(|_| base.authority_timeline())),
                 consent_at_position: subject_id.map(|_| base.at_position()),
                 use_count: base.use_count(),
                 budget: base.budget(),
@@ -618,6 +620,7 @@ mod tests {
             ConsentEvidenceV1::Resolved {
                 grants: vec![cache_consent_grant(50)],
             },
+            None,
         );
         let mut cache = AuthorizationCacheV1::new();
         assert!(cache
@@ -889,6 +892,58 @@ mod tests {
                 &fixture.registry,
             )
             .is_err());
+    }
+
+    #[test]
+    fn host_cache_fences_authority_and_consent_timelines() {
+        for freeze_consent in [false, true] {
+            let mut host = test_ok(ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Memory,
+                test_ok(ErasureRecoveryLimitsV1::new(4, 4, 4)),
+            ));
+            let (authority, consent, resource) = {
+                let mut sender = test_ok(host.command_sender());
+                (
+                    test_ok(sender.create_timeline("authority")),
+                    test_ok(sender.create_timeline("consent")),
+                    test_ok(sender.create_timeline("resource")),
+                )
+            };
+            let fixture = active_decision(authority.id());
+            let request = projection_request(
+                &fixture.request,
+                Some(EntityId::new()),
+                Some(EntityId::new()),
+                None,
+                ConsentEvidenceV1::Resolved {
+                    grants: vec![cache_consent_grant(50)],
+                },
+                Some(consent.id()),
+            );
+            assert!(test_ok(test_ok(host.command_sender()).cache_authorization(
+                resource.id(),
+                &request,
+                &fixture.authority,
+                &fixture.registry,
+            ))
+            .is_none());
+
+            let blocked = if freeze_consent {
+                consent.id()
+            } else {
+                authority.id()
+            };
+            host.containment_gate().freeze_timeline_for_test(blocked);
+            assert!(matches!(
+                test_ok(host.command_sender()).cache_authorization(
+                    resource.id(),
+                    &request,
+                    &fixture.authority,
+                    &fixture.registry,
+                ),
+                Err(pos_core::ErasureHostErrorV1::AccessFrozen)
+            ));
+        }
     }
 
     #[test]

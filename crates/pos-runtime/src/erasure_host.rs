@@ -2444,7 +2444,7 @@ impl ErasureCommandSenderV1<'_> {
         request: &AuthorizationRequestV1,
         mut effect: impl FnMut(&mut Self) -> T,
     ) -> Result<T, ErasureHostErrorV1> {
-        let mut result = None;
+        let mut result = Err(ErasureHostErrorV1::RecoveryUnavailable);
         let mut authority_result = Ok(());
         let mut consent_result = Ok(());
         self.with_protected_effect_fence(
@@ -2459,10 +2459,10 @@ impl ErasureCommandSenderV1<'_> {
                             consent_result = sender.with_protected_effect_fence(
                                 consent_timeline,
                                 ErasureProtectedOperationV1::Read,
-                                &mut |sender| result = Some(effect(sender)),
+                                &mut |sender| result = Ok(effect(sender)),
                             );
                         } else {
-                            result = Some(effect(sender));
+                            result = Ok(effect(sender));
                         }
                     },
                 );
@@ -2470,7 +2470,7 @@ impl ErasureCommandSenderV1<'_> {
         )?;
         authority_result?;
         consent_result?;
-        result.ok_or(ErasureHostErrorV1::RecoveryUnavailable)
+        result
     }
 
     /// Cache one freshly evaluated active decision under the installed host

@@ -2006,7 +2006,7 @@ impl Gateway {
             };
             generation = page.generation.or(generation);
             let raw_count = page.events.len();
-            let last_seq = page.events.last().map(event_seq);
+            let last_seq = page.events.last().map_or(next_seq, event_seq);
             scanned += raw_count;
             visible.extend(
                 page.events
@@ -2016,10 +2016,7 @@ impl Gateway {
             if visible.len() > limit || raw_count < chunk_size {
                 break;
             }
-            let Some(last_seq) = last_seq.filter(|last_seq| *last_seq < u64::MAX) else {
-                break;
-            };
-            next_seq = last_seq + 1;
+            next_seq = last_seq.saturating_add(1);
         }
         let next_from_seq = visible
             .get(limit)
@@ -6298,6 +6295,49 @@ mod tests {
             vec![5]
         );
         assert_eq!(final_page.next_from_seq, None);
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn event_pages_bound_protected_scans_and_resume_at_public_events() {
+        let gateway = memory_gw();
+        let timeline = gateway
+            .create_timeline("protected-scan-cap")
+            .await
+            .test_ok();
+        let mut drafts = (0..1_000)
+            .map(|_| {
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("persona.profile"),
+                    json_to_cbor(&serde_json::json!({})),
+                )
+            })
+            .collect::<Vec<_>>();
+        drafts.extend((0..2).map(|_| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_ACTION),
+                json_to_cbor(&serde_json::json!({})),
+            )
+        }));
+        gateway
+            .store
+            .append(timeline.id(), drafts, None)
+            .await
+            .test_ok();
+        let id = timeline.id().to_string();
+        assert!(matches!(
+            gateway.read_events_page(&id, 0, 1).await,
+            Err(GatewayError::ResourceUnavailable)
+        ));
+        let page = gateway.read_events_page(&id, 900, 1).await.test_ok();
+        assert_eq!(
+            page.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![1001]
+        );
+        assert_eq!(page.next_from_seq, Some(Seq::from_u64(1002)));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
