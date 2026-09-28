@@ -22,10 +22,9 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
+use crate::output_admission::{InstalledCallbacksV1, InstalledOutputPolicySourceV1};
 #[cfg(any(test, feature = "test-support"))]
-use crate::output_admission::{
-    draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1, OutputPolicyClosureV1,
-};
+use crate::output_admission::draft_execution_profile_artifact_v1;
 use crate::{
     composition::{
         AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
@@ -51,6 +50,35 @@ use std::{
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
+}
+
+/// One reviewed Gateway catalogue entry selected by the trusted composition root.
+///
+/// Its functions receive the same frozen configuration. The factory cannot
+/// supply a policy, registration pin, or registry mutation capability.
+pub struct HostCatalogueEntryV1<C, P, A> {
+    configuration_details: fn(&C) -> Vec<u8>,
+    build: fn(&C) -> (P, A),
+}
+
+impl<C, P, A> HostCatalogueEntryV1<C, P, A> {
+    /// Select the reviewed Gateway output entry.
+    #[must_use]
+    pub const fn gateway(
+        configuration_details: fn(&C) -> Vec<u8>,
+        build: fn(&C) -> (P, A),
+    ) -> Self {
+        Self {
+            configuration_details,
+            build,
+        }
+    }
+}
+
+struct InstalledPluginBundleV1<P, A> {
+    plugin: P,
+    approver: A,
+    configuration_details: Vec<u8>,
 }
 
 fn replay_policy_identity_digest(
@@ -3183,6 +3211,57 @@ impl PluginRegistry {
                 registration: None,
                 output_admission: None,
             },
+        )
+    }
+
+    /// Build and register the selected Gateway catalogue entry as one product.
+    ///
+    /// The trusted composition root owns `entry` and passes a frozen
+    /// configuration. Runtime invokes the selected factory once, keeps the
+    /// product private, and derives the binding and pin from its actual Plugin.
+    /// No installed Gateway EPF1 currently exists, so production fails closed
+    /// before any registry mutation.
+    ///
+    /// # Errors
+    /// Rejects an unavailable EPF1, foreign callback, invalid
+    /// artifact link, or incompatible registration without changing the registry.
+    pub fn register_from_host_catalogue_entry<C, P, A>(
+        &mut self,
+        entry: &HostCatalogueEntryV1<C, P, A>,
+        frozen_configuration: C,
+    ) -> Result<(), RuntimeError>
+    where
+        P: Plugin,
+        A: ActionApprover + 'static,
+    {
+        let configuration_details = (entry.configuration_details)(&frozen_configuration);
+        let (plugin, approver) = (entry.build)(&frozen_configuration);
+        let bundle = InstalledPluginBundleV1 {
+            plugin,
+            approver,
+            configuration_details,
+        };
+        let binding = OutputPolicyBindingV1::from_installed_source(
+            &bundle.plugin,
+            InstalledOutputPolicySourceV1::Gateway,
+            &bundle.configuration_details,
+            "deterministic-local-v1",
+        )?;
+        let binding = binding.with_installed_action_approver(
+            bundle.approver,
+            [Kind::new(crate::output_admission::WORLD_ACTION_EVENT_TYPE_V1)],
+        )?;
+        let pin = crate::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            binding.policy().digest(),
+            vec![crate::reviewed_policy::installed_plugin_role_v1(&bundle.plugin)],
+        )?;
+        self.register_installed_output(
+            &bundle.plugin,
+            binding,
+            PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+            None,
         )
     }
 

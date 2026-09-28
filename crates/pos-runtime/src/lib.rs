@@ -64,7 +64,7 @@ pub use output_admission::{
     MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1,
 };
 pub use recorder::{RecordedOutput, Recorder, RunMode};
-pub use registry::{AuthorizedDriverTargetV1, OperationContext, PluginRegistry};
+pub use registry::{AuthorizedDriverTargetV1, HostCatalogueEntryV1, OperationContext, PluginRegistry};
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
     implementation_artifact_hash_v1, installed_plugin_registration_v1, installed_plugin_role_v1,

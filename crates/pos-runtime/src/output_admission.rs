@@ -20,7 +20,7 @@ use pos_core::plugin::PluginOwnerTokenV1;
 
 use crate::driver::Driver;
 
-const WORLD_ACTION_EVENT_TYPE_V1: &str = "world.action.v1";
+pub(crate) const WORLD_ACTION_EVENT_TYPE_V1: &str = "world.action.v1";
 
 const MAX_EXECUTION_PROFILE_BYTES_V1: usize = 1024 * 1024;
 #[cfg(target_os = "linux")]
