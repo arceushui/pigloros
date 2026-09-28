@@ -83,10 +83,13 @@ pub fn verify_authenticated_principal_evidence_v1(
     }
     let verifying_key = VerifyingKey::from_bytes(&adapter.verifying_key)
         .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)?;
+    let record_bytes = record
+        .to_canonical_cbor()
+        .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
     verify_signature(
         &verifying_key,
         ADAPTER_DOMAIN,
-        &record.to_canonical_cbor(),
+        &record_bytes,
         evidence.signature(),
     )?;
     Ok(VerifiedAuthenticatedPrincipalEvidenceV1(evidence))
@@ -135,7 +138,9 @@ impl ForkAuthenticationAdapterSigningKeyV1 {
         record
             .validate()
             .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
-        let record_bytes = record.to_canonical_cbor();
+        let record_bytes = record
+            .to_canonical_cbor()
+            .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
         let signature = sign_preimage(&self.signing_key, ADAPTER_DOMAIN, &record_bytes);
         AuthenticatedPrincipalEvidenceV1::new(record, signature)
             .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)
@@ -215,7 +220,10 @@ impl ForkHostSigningKeyV1 {
         evidence: &VerifiedAuthenticatedPrincipalEvidenceV1,
     ) -> Result<Signature, ForkAuthenticationSignatureErrorV1> {
         validate_command(command)?;
-        let evidence_bytes = evidence.evidence().to_canonical_cbor();
+        let evidence_bytes = evidence
+            .evidence()
+            .to_canonical_cbor()
+            .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
         if evidence_bytes.len() > MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1 {
             return Err(ForkAuthenticationSignatureErrorV1::InvalidRecord);
         }
@@ -468,17 +476,18 @@ mod tests {
         assert!(verified.is_ok());
         let verifying_key =
             VerifyingKey::from_bytes(&RFC8032_PUBLIC_KEY).expect("RFC key is valid");
+        let record_bytes = evidence.record().to_canonical_cbor().expect("APR1 CBOR");
         assert!(verify_signature(
             &verifying_key,
             ADAPTER_DOMAIN,
-            &evidence.record().to_canonical_cbor(),
+            &record_bytes,
             evidence.signature(),
         )
         .is_ok());
         assert!(verify_signature(
             &verifying_key,
             OPEN_DOMAIN,
-            &evidence.record().to_canonical_cbor(),
+            &record_bytes,
             evidence.signature(),
         )
         .is_err());
@@ -520,7 +529,7 @@ mod tests {
             verify_authenticated_principal_evidence_v1(&wrong_binding, evidence.clone()),
             Err(ForkAuthenticationSignatureErrorV1::PolicyMismatch)
         );
-        let mut altered = evidence.to_canonical_cbor();
+        let mut altered = evidence.to_canonical_cbor().expect("APS1 CBOR");
         let last = altered.last_mut().expect("APS1 is nonempty");
         *last ^= 1;
         let altered = AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&altered)
@@ -580,7 +589,7 @@ mod tests {
         ]));
         let evidence = verified_evidence();
         let command = host.sign_command(&poc1, &evidence).expect("POC1 is valid");
-        let evidence_bytes = evidence.evidence().to_canonical_cbor();
+        let evidence_bytes = evidence.evidence().to_canonical_cbor().expect("APS1 CBOR");
         let mut command_input = poc1.clone();
         command_input.extend_from_slice(&evidence_bytes);
         verify_host_signature(host.public_key(), COMMAND_DOMAIN, &command_input, &command);
