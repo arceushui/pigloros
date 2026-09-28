@@ -175,8 +175,7 @@ fn same_name_plugin_ids_need_both_preassigned_slots() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn zero_output_reducer_is_in_complete_batch_but_not_wcs1_producers(
-) -> Result<(), Box<dyn Error>> {
+fn zero_output_reducer_is_in_complete_batch_but_not_wcs1_producers() -> Result<(), Box<dyn Error>> {
     let producer = fixture("producer", b"producer-policy")?;
     let projection = projection_fixture("projection")?;
     let producer_id = producer.plugin.id();
