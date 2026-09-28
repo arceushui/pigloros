@@ -124,7 +124,8 @@ fn public_codecs_round_trip_commitments_and_registry_lookups(
 }
 
 #[test]
-fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::error::Error>> {
+fn public_policy_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::error::Error>>
+{
     let mut empty_adapter_id = adapter();
     empty_adapter_id.adapter_id.clear();
     let mut zero_key = adapter();
@@ -158,7 +159,12 @@ fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::e
         ForkAuthenticationPolicyV1::new(Vec::new()),
         Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
     );
+    Ok(())
+}
 
+#[test]
+fn public_registry_constructors_reject_each_semantic_bound(
+) -> Result<(), Box<dyn std::error::Error>> {
     for uid in [0, 65_534, 1000, u32::MAX] {
         assert_eq!(
             LocalAccountRegistryV1::new(
@@ -206,7 +212,12 @@ fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::e
         LocalAccountRegistryV1::new("local".to_owned(), 2, vec![second, first], 1000),
         Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
     );
+    Ok(())
+}
 
+#[test]
+fn public_apr1_encoder_and_evidence_reject_invalid_records(
+) -> Result<(), Box<dyn std::error::Error>> {
     for invalid in [
         AuthenticatedPrincipalRecordV1 {
             adapter_id: String::new(),
