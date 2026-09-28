@@ -378,7 +378,7 @@ impl SignedForkReproManifestV1 {
         manifest: ForkReproManifestV1,
         signature: Signature,
     ) -> Result<Self, ForkAttributionCodecErrorV1> {
-        let record = Self::new(
+        Self::new(
             KeyIdentityV1::from_parts(
                 admission.input().creator,
                 KeyRoleV1::SubjectAttributionSigning,
@@ -386,9 +386,12 @@ impl SignedForkReproManifestV1 {
             ),
             manifest,
             signature,
-        )?;
-        record.validate_against_admission(admission)?;
-        Ok(record)
+        )
+        .and_then(|record| {
+            record
+                .validate_against_admission(admission)
+                .map(|()| record)
+        })
     }
 
     /// Require the wrapper creator and manifest fields to agree with local `FAR1`.

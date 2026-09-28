@@ -87,6 +87,15 @@ fn admission_bound_construction_derives_creator_and_rejects_creator_b_or_admissi
     )?;
     assert_eq!(derived.identity().owner_id, admission_a.input().creator);
     assert_eq!(derived.validate_against_admission(&admission_a), Ok(()));
+    assert_eq!(
+        SignedForkReproManifestV1::new_from_admission(
+            &admission_a,
+            0,
+            manifest_a.clone(),
+            pos_core::Signature::from_bytes([9; 64]),
+        ),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
 
     let creator_b = SignedForkReproManifestV1::new(
         KeyIdentityV1::new("creator-b", KeyRoleV1::SubjectAttributionSigning, 1),
