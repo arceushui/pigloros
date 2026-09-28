@@ -90,18 +90,17 @@ impl LocalForkAuthenticationCredentialsV1 {
         &self,
         stream: &UnixStream,
     ) -> Result<AuthenticatedUnixPeerV1, LocalForkAuthenticationErrorV1> {
-        let uid = socket_peercred(stream.as_fd())
-            .map_err(|_| LocalForkAuthenticationErrorV1::PeerUnauthenticated)?
-            .uid
-            .as_raw();
-        let binding = self
-            .resolver
-            .registry()
-            .lookup_uid(uid)
-            .ok_or(LocalForkAuthenticationErrorV1::PeerUnauthenticated)?;
-        Ok(AuthenticatedUnixPeerV1 {
-            principal: binding.principal.clone(),
-        })
+        socket_peercred(stream.as_fd())
+            .map_err(|_| LocalForkAuthenticationErrorV1::PeerUnauthenticated)
+            .and_then(|credentials| {
+                self.resolver
+                    .registry()
+                    .lookup_uid(credentials.uid.as_raw())
+                    .map(|binding| AuthenticatedUnixPeerV1 {
+                        principal: binding.principal.clone(),
+                    })
+                    .ok_or(LocalForkAuthenticationErrorV1::PeerUnauthenticated)
+            })
     }
 
     /// Produce one opaque FAE1 from an internally authenticated Unix peer.
@@ -122,24 +121,27 @@ impl LocalForkAuthenticationCredentialsV1 {
         let expires_at = issued_at
             .checked_add(AUTHENTICATION_LIFETIME_MICROS)
             .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-        let registry_binding = self
-            .resolver
+        self.resolver
             .registry()
             .digest()
-            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-        let record = AuthenticatedPrincipalRecordV1 {
-            principal: peer.principal,
-            adapter_id: self.resolver.registry().adapter_id().to_owned(),
-            assurance: self.resolver.registry().assurance(),
-            issued_at,
-            expires_at,
-            registry_binding,
-            operation_nonce: nonce()?,
-        };
-        self.adapter_signer
-            .sign_authenticated_principal(record)
-            .map(ProducedLocalAuthenticationEvidenceV1)
-            .map_err(signature_invalid)
+            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+            .and_then(|registry_binding| {
+                nonce().map(|operation_nonce| AuthenticatedPrincipalRecordV1 {
+                    principal: peer.principal,
+                    adapter_id: self.resolver.registry().adapter_id().to_owned(),
+                    assurance: self.resolver.registry().assurance(),
+                    issued_at,
+                    expires_at,
+                    registry_binding,
+                    operation_nonce,
+                })
+            })
+            .and_then(|record| {
+                self.adapter_signer
+                    .sign_authenticated_principal(record)
+                    .map(ProducedLocalAuthenticationEvidenceV1)
+                    .map_err(signature_invalid)
+            })
     }
 
     /// Verify locally produced FAE1 and resolve its Owner from FACR1 only.
@@ -174,24 +176,26 @@ impl PrincipalOwnerResolverV1 {
         &self,
         evidence: AuthenticatedPrincipalEvidenceV1,
     ) -> Result<ResolvedLocalAuthenticationV1, LocalForkAuthenticationErrorV1> {
-        let verified = verify_authenticated_principal_evidence_v1(&self.policy, evidence)
-            .map_err(signature_invalid)?;
-        let record = verified.evidence().record();
-        let registry_binding = self
-            .registry
-            .digest()
-            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-        if record.adapter_id != self.registry.adapter_id()
-            || record.assurance != self.registry.assurance()
-            || record.registry_binding != registry_binding
-        {
-            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-        }
-        let owner = self
-            .registry
-            .lookup_principal(&record.principal)
-            .ok_or(LocalForkAuthenticationErrorV1::PeerUnauthenticated)?;
-        Ok(ResolvedLocalAuthenticationV1 { verified, owner })
+        verify_authenticated_principal_evidence_v1(&self.policy, evidence)
+            .map_err(signature_invalid)
+            .and_then(|verified| {
+                let record = verified.evidence().record();
+                self.registry
+                    .digest()
+                    .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+                    .and_then(|registry_binding| {
+                        if record.adapter_id != self.registry.adapter_id()
+                            || record.assurance != self.registry.assurance()
+                            || record.registry_binding != registry_binding
+                        {
+                            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+                        }
+                        self.registry
+                            .lookup_principal(&record.principal)
+                            .map(|owner| ResolvedLocalAuthenticationV1 { verified, owner })
+                            .ok_or(LocalForkAuthenticationErrorV1::PeerUnauthenticated)
+                    })
+            })
     }
 }
 
@@ -247,29 +251,45 @@ fn parse_credentials(
     }
     // `from_seed` zeroizes its by-value seed copy. These guards retain the
     // extracted credential bytes across every fallible validation step.
-    let adapter_signer = ForkAuthenticationAdapterSigningKeyV1::from_seed(*adapter_seed)
-        .map_err(signature_invalid)?;
-    let adapter = policy
-        .adapter(registry.adapter_id())
-        .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    let registry_binding = registry
-        .digest()
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    if adapter.verifying_key != adapter_signer.public_key()
-        || registry.assurance() < adapter.minimum_assurance
-        || !adapter.registry_bindings.contains(&registry_binding)
-    {
-        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-    }
-    let host_signer = ForkHostSigningKeyV1::from_seed(*host_seed).map_err(signature_invalid)?;
-    ensure_distinct_signing_keys(adapter_signer.public_key(), host_signer.public_key())?;
-    Ok(LocalForkAuthenticationCredentialsV1 {
-        resolver: PrincipalOwnerResolverV1::new(policy, registry),
-        adapter_signer,
-        _host_signer: LocalForkHostSignerV1 {
-            _signer: host_signer,
-        },
-    })
+    ForkAuthenticationAdapterSigningKeyV1::from_seed(*adapter_seed)
+        .map_err(signature_invalid)
+        .and_then(|adapter_signer| {
+            policy
+                .adapter(registry.adapter_id())
+                .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
+                .and_then(|adapter| {
+                    registry
+                        .digest()
+                        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+                        .and_then(|registry_binding| {
+                            if adapter.verifying_key != adapter_signer.public_key()
+                                || registry.assurance() < adapter.minimum_assurance
+                                || !adapter.registry_bindings.contains(&registry_binding)
+                            {
+                                return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+                            }
+                            ForkHostSigningKeyV1::from_seed(*host_seed)
+                                .map_err(signature_invalid)
+                                .and_then(|host_signer| {
+                                    ensure_distinct_signing_keys(
+                                        adapter_signer.public_key(),
+                                        host_signer.public_key(),
+                                    )
+                                    .map(|()| {
+                                        LocalForkAuthenticationCredentialsV1 {
+                                            resolver: PrincipalOwnerResolverV1::new(
+                                                policy, registry,
+                                            ),
+                                            adapter_signer,
+                                            _host_signer: LocalForkHostSignerV1 {
+                                                _signer: host_signer,
+                                            },
+                                        }
+                                    })
+                                })
+                        })
+                })
+        })
 }
 
 fn ensure_distinct_signing_keys(
@@ -320,17 +340,24 @@ fn parse_fahk1(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, LocalForkAuthenticat
 }
 
 fn parse_binding(value: &Value) -> Result<LocalAccountBindingV1, LocalForkAuthenticationErrorV1> {
-    let fields = array(value, 3)?;
-    let uid = positive_u32(&fields[0])?;
-    let principal_bytes = bounded_bytes(&fields[1], 256)?;
-    let principal = PrincipalRefV1::decode(&CanonicalBytes::from_vec(principal_bytes.to_vec()))
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    let owner = OwnerIdV1::new(bounded_text(&fields[2])?)
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    Ok(LocalAccountBindingV1 {
-        uid,
-        principal,
-        owner,
+    array(value, 3).and_then(|fields| {
+        positive_u32(&fields[0]).and_then(|uid| {
+            bounded_bytes(&fields[1], 256).and_then(|principal_bytes| {
+                PrincipalRefV1::decode(&CanonicalBytes::from_vec(principal_bytes.to_vec()))
+                    .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+                    .and_then(|principal| {
+                        bounded_text(&fields[2]).and_then(|owner| {
+                            OwnerIdV1::new(owner)
+                                .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+                                .map(|owner| LocalAccountBindingV1 {
+                                    uid,
+                                    principal,
+                                    owner,
+                                })
+                        })
+                    })
+            })
+        })
     })
 }
 
@@ -347,30 +374,36 @@ fn validate_credential_directory(directory: &Path) -> Result<(), LocalForkAuthen
 }
 
 fn credential_names(directory: &Path) -> Result<(), LocalForkAuthenticationErrorV1> {
-    let mut names = fs::read_dir(directory)
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?
-        .map(|entry| entry.map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable))
-        .map(|entry| {
-            entry.and_then(|entry| {
-                entry
-                    .file_name()
-                    .into_string()
-                    .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
-            })
+    fs::read_dir(directory)
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        .and_then(|entries| {
+            entries
+                .map(|entry| {
+                    entry.map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
+                })
+                .map(|entry| {
+                    entry.and_then(|entry| {
+                        entry
+                            .file_name()
+                            .into_string()
+                            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    names.sort_unstable();
-    if names.len() < 2
-        && names
-            .iter()
-            .all(|name| name == AUTH_CREDENTIAL_NAME || name == HOST_CREDENTIAL_NAME)
-    {
-        return Err(LocalForkAuthenticationErrorV1::CredentialUnavailable);
-    }
-    match names.as_slice() {
-        [auth, host] if auth == AUTH_CREDENTIAL_NAME && host == HOST_CREDENTIAL_NAME => Ok(()),
-        _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
-    }
+        .and_then(|mut names| {
+            names.sort_unstable();
+            match names.as_slice() {
+                [] => Err(LocalForkAuthenticationErrorV1::CredentialUnavailable),
+                [name] if name == AUTH_CREDENTIAL_NAME || name == HOST_CREDENTIAL_NAME => {
+                    Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
+                }
+                [auth, host] if auth == AUTH_CREDENTIAL_NAME && host == HOST_CREDENTIAL_NAME => {
+                    Ok(())
+                }
+                _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
+            }
+        })
 }
 
 fn read_credential(
@@ -378,23 +411,28 @@ fn read_credential(
     name: &str,
 ) -> Result<Vec<u8>, LocalForkAuthenticationErrorV1> {
     let path = directory.join(name);
-    let mut file = OpenOptions::new()
+    OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
-    if !metadata.is_file() || metadata.mode() & CREDENTIAL_DIRECTORY_MODE != 0 {
-        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-    }
-    let size = usize::try_from(metadata.len())
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    if size > MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 {
-        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-    }
-    finish_credential_read(&mut file, size)
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        .and_then(|mut file| {
+            file.metadata()
+                .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
+                .and_then(|metadata| {
+                    if !metadata.is_file() || metadata.mode() & CREDENTIAL_DIRECTORY_MODE != 0 {
+                        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+                    }
+                    usize::try_from(metadata.len())
+                        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+                        .and_then(|size| {
+                            if size > MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 {
+                                return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+                            }
+                            finish_credential_read(&mut file, size)
+                        })
+                })
+        })
 }
 
 fn finish_credential_read(
@@ -1030,6 +1068,11 @@ mod tests {
         test_ok(fs::write(&auth_path, []));
         expect_unavailable(credential_names(directory.path()));
         test_ok(fs::remove_file(auth_path));
+
+        let host_path = directory.path().join(HOST_CREDENTIAL_NAME);
+        test_ok(fs::write(&host_path, []));
+        expect_unavailable(credential_names(directory.path()));
+        test_ok(fs::remove_file(host_path));
 
         test_ok(fs::write(
             directory.path().join(OsString::from_vec(vec![0xff])),
