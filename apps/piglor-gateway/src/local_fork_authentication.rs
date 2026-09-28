@@ -686,4 +686,55 @@ mod tests {
         ));
         Ok(())
     }
+
+    #[test]
+    fn credential_codec_fault_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let uid = current_uid().max(1);
+        let (auth, host) = credential_bytes(uid, [8; 32]);
+        assert!(parse_facr1(&auth, uid.saturating_add(1)).is_ok());
+        assert!(parse_fahk1(&host).is_ok());
+        assert_eq!(
+            parse_fahk1(&[0; FAHK1_BYTES]),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            canonical_array(&[], 1, "FACR1", 7),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            array(&Value::Integer(1.into()), 1),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            nonempty_array(&Value::Array(Vec::new()), 1),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            fixed_nonzero(&Value::Bytes(vec![0; 32]), 32),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            bounded_bytes(&Value::Bytes(Vec::new()), 1),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            bounded_text(&Value::Text(String::new())),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            positive_u8(&Value::Integer(0.into())),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            positive_u32(&Value::Integer(0.into())),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            signature_invalid(ForkAuthenticationSignatureErrorV1::InvalidSeed),
+            LocalForkAuthenticationErrorV1::CredentialInvalid
+        );
+        assert!(production_wall_time()? > 0);
+        assert_ne!(operation_nonce()?, [0; 32]);
+        Ok(())
+    }
 }
