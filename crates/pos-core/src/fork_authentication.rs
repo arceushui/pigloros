@@ -14,9 +14,9 @@ pub const MAX_FORK_AUTH_POLICY_BYTES_V1: usize = 37_528;
 /// Maximum complete FACR1 encoding, including its outer CBOR array.
 pub const MAX_FORK_AUTH_CREDENTIAL_BYTES_V1: usize = 65_536;
 /// Maximum complete APR1 encoding.
-pub const MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1: usize = 484;
-/// Maximum complete APS1 encoding.
-pub const MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1: usize = 560;
+pub const MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1: usize = 381;
+/// Maximum complete FAE1 encoding.
+pub const MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1: usize = 457;
 
 const POLICY_DOMAIN: &[u8] = b"pigloros/fork-admission-auth-policy/v1";
 const REGISTRY_DOMAIN: &[u8] = b"pigloros/local-account-auth-registry/v1";
@@ -414,7 +414,7 @@ impl AuthenticatedPrincipalRecordV1 {
     }
 }
 
-/// Complete APS1 adapter signature and its canonical APR1.
+/// Complete FAE1 adapter signature and its canonical APR1.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedPrincipalEvidenceV1 {
     record: AuthenticatedPrincipalRecordV1,
@@ -450,21 +450,21 @@ impl AuthenticatedPrincipalEvidenceV1 {
     /// Returns a closed codec error if a nested value cannot encode.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
         encode(&Value::Array(vec![
-            text("APS1"),
+            text("FAE1"),
             uint(1_u8),
             bytes(&self.record.to_canonical_cbor()?),
             bytes(&self.signature),
         ]))
     }
 
-    /// Decode exact canonical APS1 and its canonical APR1.
+    /// Decode exact canonical FAE1 and its canonical APR1.
     ///
     /// # Errors
     /// Rejects malformed, noncanonical, and out-of-bounds bytes.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAuthenticationCodecErrorV1> {
         let value = decode(bytes_in, MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1)?;
         let fields = array(&value, 4)?;
-        header(fields, "APS1")?;
+        header(fields, "FAE1")?;
         let record = AuthenticatedPrincipalRecordV1::from_canonical_cbor(bounded_bytes(
             &fields[2],
             MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1,
@@ -821,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn apr1_and_aps1_round_trip_with_rejected_timestamp_and_nonce() {
+    fn apr1_and_fae1_round_trip_with_rejected_timestamp_and_nonce() {
         let record = record();
         let apr = record.to_canonical_cbor().expect("APR1 CBOR");
         assert!(apr.len() <= MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1);
@@ -831,10 +831,10 @@ mod tests {
         );
         let evidence =
             AuthenticatedPrincipalEvidenceV1::new(record.clone(), [9; 64]).expect("evidence");
-        let aps = evidence.to_canonical_cbor().expect("APS1 CBOR");
-        assert!(aps.len() <= MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1);
+        let fae = evidence.to_canonical_cbor().expect("FAE1 CBOR");
+        assert!(fae.len() <= MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1);
         assert_eq!(
-            AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&aps),
+            AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&fae),
             Ok(evidence.clone())
         );
         assert_eq!(evidence.record(), &record);
@@ -859,5 +859,72 @@ mod tests {
             zero_binding.validate(),
             Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
         );
+    }
+
+    #[test]
+    fn normative_prn1_apr1_fae1_maximum_vectors_are_exact() {
+        let principal =
+            PrincipalRefV1::try_new([0xff; 16], "a".repeat(128)).expect("maximum Principal");
+        let prn = principal.encode().expect("PRN1 CBOR");
+        assert_eq!(prn.as_slice().len(), 154);
+        assert_eq!(
+            &prn.as_slice()[..8],
+            &[0x84, 0x44, b'P', b'R', b'N', b'1', 0x01, 0x50]
+        );
+        assert_eq!(
+            &Sha256::digest(prn.as_slice())[..],
+            &hex_bytes::<32>("d272f30cfebd664ce92337a0dd28bb8c219e15658812ad7c329024a94ec49e92")
+        );
+        assert_eq!(PrincipalRefV1::decode(&prn), Ok(principal.clone()));
+
+        let record = AuthenticatedPrincipalRecordV1 {
+            principal,
+            adapter_id: "b".repeat(128),
+            assurance: 255,
+            issued_at: u64::MAX - 1,
+            expires_at: u64::MAX,
+            registry_binding: Hash::from_bytes([0xff; 32]),
+            operation_nonce: [0xff; 32],
+        };
+        let apr = record.to_canonical_cbor().expect("APR1 CBOR");
+        assert_eq!(apr.len(), MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1);
+        assert_eq!(&apr[..8], &[0x89, 0x64, b'A', b'P', b'R', b'1', 0x01, 0x58]);
+        assert_eq!(
+            &Sha256::digest(&apr)[..],
+            &hex_bytes::<32>("73ea583c8d8c0705ed2e3a5088399753471eaed2a93ff22616f0b6c77398afe9")
+        );
+        assert_eq!(
+            AuthenticatedPrincipalRecordV1::from_canonical_cbor(&apr),
+            Ok(record.clone())
+        );
+        let mut oversized_apr = apr;
+        oversized_apr.push(0);
+        assert_eq!(
+            AuthenticatedPrincipalRecordV1::from_canonical_cbor(&oversized_apr),
+            Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+        );
+
+        let evidence =
+            AuthenticatedPrincipalEvidenceV1::new(record, [0xaa; 64]).expect("maximum evidence");
+        let fae = evidence.to_canonical_cbor().expect("FAE1 CBOR");
+        assert_eq!(fae.len(), MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1);
+        assert_eq!(&fae[..8], &[0x84, 0x64, b'F', b'A', b'E', b'1', 0x01, 0x59]);
+        assert_eq!(
+            &Sha256::digest(&fae)[..],
+            &hex_bytes::<32>("03815978b5a2cdf79f7ff9809104c80a8f02bc9005ddbad89e8c9eabe09965dc")
+        );
+        assert_eq!(
+            AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&fae),
+            Ok(evidence)
+        );
+        let mut oversized_fae = fae.clone();
+        oversized_fae.push(0);
+        assert_eq!(
+            AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&oversized_fae),
+            Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+        );
+        let mut old_marker = fae;
+        old_marker[2..6].copy_from_slice(b"APS1");
+        assert!(AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&old_marker).is_err());
     }
 }
