@@ -177,7 +177,7 @@ impl RecipientTimelineExportV1 {
     }
 }
 
-fn validate_envelope_length(length: usize) -> Result<(), RecipientExportErrorV1> {
+const fn validate_envelope_length(length: usize) -> Result<(), RecipientExportErrorV1> {
     if length > MAX_ENVELOPE_BYTES {
         return Err(RecipientExportErrorV1::FieldOutOfBounds);
     }
