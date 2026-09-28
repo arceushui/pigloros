@@ -1964,46 +1964,11 @@ impl Gateway {
                 chunk_size * (MAX_EVENT_PAYLOAD_BYTES + MAX_EVENT_TYPE_BYTES),
                 MAX_EVENTS_READ_TIME_MICROS,
             );
-            let page = match self.store.read_page(id, range, bounds, generation).await {
-                Ok(page) => page,
-                Err(executor::StoreExecutorError::Store(CoreError::PayloadTooLarge { .. })) => {
-                    return Err(GatewayError::EventPayloadTooLarge {
-                        maximum: MAX_EVENT_PAYLOAD_BYTES,
-                    })
-                }
-                Err(executor::StoreExecutorError::Store(CoreError::EventMetadataTooLarge {
-                    field,
-                    ..
-                })) => {
-                    return Err(GatewayError::EventMetadataTooLarge {
-                        field,
-                        maximum: MAX_EVENT_TYPE_BYTES,
-                    })
-                }
-                Err(executor::StoreExecutorError::Store(CoreError::ForkDepthTooLarge {
-                    ..
-                })) => {
-                    return Err(GatewayError::ForkDepthTooLarge {
-                        maximum: MAX_FORK_DEPTH,
-                    })
-                }
-                Err(executor::StoreExecutorError::Store(CoreError::ReadBytesTooLarge {
-                    ..
-                })) => {
-                    return Err(GatewayError::EventResponseTooLarge {
-                        maximum: MAX_EVENTS_RESPONSE_BYTES,
-                    })
-                }
-                Err(
-                    executor::StoreExecutorError::Store(CoreError::ReadTimeTooLarge { .. })
-                    | executor::StoreExecutorError::DeadlineExceeded,
-                ) => {
-                    return Err(GatewayError::EventReadTimeExceeded {
-                        maximum_micros: MAX_EVENTS_READ_TIME_MICROS,
-                    })
-                }
-                Err(error) => return Err(error.into()),
-            };
+            let page = self
+                .store
+                .read_page(id, range, bounds, generation)
+                .await
+                .map_err(map_event_page_read_error)?;
             generation = page.generation.or(generation);
             let raw_count = page.events.len();
             let last_seq = page.events.last().map_or(next_seq, event_seq);
@@ -3016,6 +2981,37 @@ fn is_subject_controlled_event_type(event_type: &Kind) -> bool {
         || pos_core::is_consent_event_type(event_type)
         || event_type.as_str().starts_with("timeline.fork.")
         || event_type.as_str().starts_with("retention.")
+}
+
+fn map_event_page_read_error(error: executor::StoreExecutorError) -> GatewayError {
+    match error {
+        executor::StoreExecutorError::Store(CoreError::PayloadTooLarge { .. }) => {
+            GatewayError::EventPayloadTooLarge {
+                maximum: MAX_EVENT_PAYLOAD_BYTES,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::EventMetadataTooLarge { field, .. }) => {
+            GatewayError::EventMetadataTooLarge {
+                field,
+                maximum: MAX_EVENT_TYPE_BYTES,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::ForkDepthTooLarge { .. }) => {
+            GatewayError::ForkDepthTooLarge {
+                maximum: MAX_FORK_DEPTH,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::ReadBytesTooLarge { .. }) => {
+            GatewayError::EventResponseTooLarge {
+                maximum: MAX_EVENTS_RESPONSE_BYTES,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::ReadTimeTooLarge { .. })
+        | executor::StoreExecutorError::DeadlineExceeded => GatewayError::EventReadTimeExceeded {
+            maximum_micros: MAX_EVENTS_READ_TIME_MICROS,
+        },
+        error => error.into(),
+    }
 }
 
 fn normalize_protected_read_error(
