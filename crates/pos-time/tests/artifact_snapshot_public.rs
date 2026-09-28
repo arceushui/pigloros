@@ -156,6 +156,7 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         timeline: unknown_timeline,
         at_seq: pos_core::clock::Seq::ZERO,
         registry: std::collections::HashMap::new(),
+        inventory_generation: None,
     };
     assert!(verify_snapshot_consistency(
         &mut reads,
@@ -165,4 +166,63 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         &evaluation(ArtifactStateV1::Retained),
     )
     .is_err());
+}
+
+#[test]
+fn snapshot_verification_rejects_old_or_missing_host_generation() {
+    for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            config,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let timeline = host
+            .command_sender()
+            .test_ok()
+            .create_timeline("snapshot-source")
+            .test_ok();
+        let mut reads = host.read_sender().test_ok();
+        let mut capture_registry = registry(&gate);
+        let captured = snapshot(
+            &mut reads,
+            timeline.id(),
+            &mut capture_registry,
+            SNAPSHOT_DIGEST,
+            &evaluation(ArtifactStateV1::Retained),
+        )
+        .test_ok();
+        assert!(captured.inventory_generation.is_some());
+
+        let mut missing_generation = captured.clone();
+        missing_generation.inventory_generation = None;
+        let mut verification_registry = registry(&gate);
+        assert!(matches!(
+            verify_snapshot_consistency(
+                &mut reads,
+                &missing_generation,
+                &mut verification_registry,
+                SNAPSHOT_DIGEST,
+                &evaluation(ArtifactStateV1::Retained),
+            ),
+            Err(pos_time::SnapshotError::ArtifactUnavailable)
+        ));
+
+        host.command_sender()
+            .test_ok()
+            .create_timeline("inventory-successor")
+            .test_ok();
+        let mut reads = host.read_sender().test_ok();
+        let mut verification_registry = registry(&gate);
+        assert!(matches!(
+            verify_snapshot_consistency(
+                &mut reads,
+                &captured,
+                &mut verification_registry,
+                SNAPSHOT_DIGEST,
+                &evaluation(ArtifactStateV1::Retained),
+            ),
+            Err(pos_time::SnapshotError::StaleGeneration)
+        ));
+    }
 }
