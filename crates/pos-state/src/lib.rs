@@ -748,14 +748,7 @@ impl ProjectionRegistry {
         snapshot: &std::collections::HashMap<String, StateRegistry>,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<(), AuthorityErrorV1> {
-        if self.has_duplicate_names() {
-            return Err(AuthorityErrorV1::SourceUnavailable);
-        }
-        let gate = self
-            .erasure_gate
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
+        let gate = self.unambiguous_snapshot_gate()?;
         let mut restored = false;
         let mut install = || {
             let current_generation = gate.inventory_generation().ok();
@@ -808,6 +801,16 @@ impl ProjectionRegistry {
     fn has_duplicate_names(&self) -> bool {
         let mut names = std::collections::HashSet::new();
         self.slots.iter().any(|(name, _)| !names.insert(name))
+    }
+
+    fn unambiguous_snapshot_gate(&self) -> Result<Arc<dyn ErasureGate>, AuthorityErrorV1> {
+        if self.has_duplicate_names() {
+            return Err(AuthorityErrorV1::SourceUnavailable);
+        }
+        self.erasure_gate
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
     }
 
     fn snapshot_unfenced(&self) -> std::collections::HashMap<String, StateRegistry> {
