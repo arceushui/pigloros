@@ -5440,8 +5440,8 @@ mod tests {
                 None,
                 "fixture",
             ),
-            Err(RuntimeError::ManifestRegistration(
-                ManifestRegistrationErrorV1::UnverifiedRegistration
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
             ))
         ));
         assert!(matches!(
