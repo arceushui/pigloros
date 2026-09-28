@@ -758,20 +758,20 @@ fn recipient_owner_public_contract_rejects_file_and_symlink_owner_paths(
 #[test]
 fn recipient_owner_public_contract_rejects_non_blob_inventory_and_claim_rows(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for column in [
-        "descriptor",
-        "material_digest",
-        "private_path",
-        "file_device",
-        "file_inode",
-        "file_uid",
+    for (column, value) in [
+        ("descriptor", rusqlite::types::Value::Integer(1)),
+        ("material_digest", rusqlite::types::Value::Integer(1)),
+        ("private_path", rusqlite::types::Value::Integer(1)),
+        ("file_device", rusqlite::types::Value::Text("0".repeat(8))),
+        ("file_inode", rusqlite::types::Value::Text("0".repeat(8))),
+        ("file_uid", rusqlite::types::Value::Text("0".repeat(4))),
     ] {
         let (temporary, store, owner, _) = enrolled_owner()?;
         let private = only_private_file(&temporary.path().join("recipient-private"))?;
         let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
         connection.execute(
             &format!("UPDATE recipient_key_inventory_v1 SET {column} = ?1"),
-            [rusqlite::types::Value::Integer(1)],
+            [value],
         )?;
         assert!(store.recover_recipient_keys(&owner).is_err(), "{column}");
         assert!(private.exists(), "{column}");
