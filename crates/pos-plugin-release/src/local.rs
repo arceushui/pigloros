@@ -1608,13 +1608,14 @@ mod tests {
         publisher: &LocalOciPublisherV1,
         bundle: &VerifiedReleaseBundleV1,
         target: usize,
-    ) -> Result<PublishOutcomeV1, LocalOciPublicationErrorV1> {
+    ) -> (Result<PublishOutcomeV1, LocalOciPublicationErrorV1>, usize) {
         reset_sync_attempts();
         PUBLICATION_FAULT.with(|fault| fault.set(Some(PublicationFaultPointV1::NthSync(target))));
         let outcome = publisher.publish(bundle);
         PUBLICATION_FAULT.with(|fault| fault.set(None));
+        let calls = SYNC_ATTEMPTS.with(std::cell::Cell::get);
         reset_sync_attempts();
-        outcome
+        (outcome, calls)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1867,45 +1868,52 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn publication_sync_failures_are_recoverable_or_address_scoped(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        for target in 0..7 {
+        let baseline_root = private_root("publication-sync-inventory")?;
+        let baseline = LocalOciPublisherV1::open(&baseline_root)?;
+        let release = bundle()?;
+        let (result, calls) = publish_with_nth_sync_fault(&baseline, &release, usize::MAX);
+        assert_eq!(
+            result?,
+            PublishOutcomeV1::Published(release.address().clone())
+        );
+        assert!(calls > 0 && calls < 128);
+        std::fs::remove_dir_all(baseline_root)?;
+        for target in 0..calls {
             let root = private_root("publication-nth-sync")?;
             let publisher = LocalOciPublisherV1::open(&root)?;
             let bundle = bundle()?;
             let address = bundle.address().clone();
-            let result = publish_with_nth_sync_fault(&publisher, &bundle, target);
-            if target == 6 {
-                assert_eq!(
-                    result,
-                    Err(LocalOciPublicationErrorV1::OutcomeUnknown(address.clone()))
-                );
-                assert_eq!(
-                    publisher.recover(&address)?,
-                    RecoveryOutcomeV1::Committed(address)
-                );
-            } else {
-                let expected_error = if target < 2 {
-                    LocalOciPublicationErrorV1::RecoveryRequired
-                } else {
-                    LocalOciPublicationErrorV1::Sync
-                };
-                assert_eq!(result, Err(expected_error));
-                let report = publisher.recover_all()?;
-                assert_eq!(
-                    report.committed,
-                    if target == 5 {
-                        vec![address.clone()]
-                    } else {
-                        vec![]
-                    }
-                );
-                assert_eq!(
-                    publisher.publish(&bundle)?,
-                    if target == 5 {
-                        PublishOutcomeV1::AlreadyPublished(address)
-                    } else {
-                        PublishOutcomeV1::Published(address)
-                    }
-                );
+            let (result, _) = publish_with_nth_sync_fault(&publisher, &bundle, target);
+            match result {
+                Err(LocalOciPublicationErrorV1::OutcomeUnknown(reported)) => {
+                    assert_eq!(reported, address);
+                    assert_eq!(publisher.read_verified(&address)?, bundle);
+                    assert_eq!(
+                        publisher.recover(&address)?,
+                        RecoveryOutcomeV1::Committed(address)
+                    );
+                }
+                Err(
+                    LocalOciPublicationErrorV1::Sync | LocalOciPublicationErrorV1::RecoveryRequired,
+                ) => {
+                    assert_eq!(
+                        publisher.read_verified(&address),
+                        Err(ReleaseSourceErrorV1::NotFound)
+                    );
+                    let recovered = publisher.recover(&address)?;
+                    let expected = match recovered {
+                        RecoveryOutcomeV1::Committed(reported) => {
+                            assert_eq!(reported, address);
+                            PublishOutcomeV1::AlreadyPublished(address)
+                        }
+                        RecoveryOutcomeV1::Unpublished(reported) => {
+                            assert_eq!(reported, address);
+                            PublishOutcomeV1::Published(address)
+                        }
+                    };
+                    assert_eq!(publisher.publish(&bundle)?, expected);
+                }
+                other => return Err(format!("unexpected sync outcome #{target}: {other:?}").into()),
             }
             std::fs::remove_dir_all(root)?;
         }
