@@ -11,6 +11,8 @@ pub mod authorization;
 pub mod executor;
 mod http;
 pub mod ledger_config;
+#[cfg(unix)]
+pub(crate) mod local_fork_authentication;
 pub mod owntracks;
 pub mod owntracks_http;
 
