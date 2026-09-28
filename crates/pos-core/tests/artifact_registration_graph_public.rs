@@ -380,6 +380,110 @@ fn shared_child_cannot_hide_a_longer_root_path() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
+fn shared_subtree_checks_its_longest_root_path() -> Result<(), Box<dyn std::error::Error>> {
+    let owner_id = owner()?;
+    for long_path_nodes in [3, 4] {
+        let leaf = node(
+            1_000,
+            owner_id,
+            ErasureArtifactClassV1::ConformanceReport,
+            ArtifactOptionalityV1::Required,
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut graph = vec![leaf.clone()];
+        let mut shared = leaf;
+        for offset in 0..59_u64 {
+            let next = node(
+                1_001 + offset,
+                owner_id,
+                ErasureArtifactClassV1::ConformanceReport,
+                ArtifactOptionalityV1::Required,
+                vec![edge(&shared, true)],
+                Vec::new(),
+            )?;
+            graph.push(next.clone());
+            shared = next;
+        }
+        let short = node(
+            2_000,
+            owner_id,
+            ErasureArtifactClassV1::CausalTrace,
+            ArtifactOptionalityV1::Required,
+            vec![edge(&shared, true)],
+            Vec::new(),
+        )?;
+        graph.push(short.clone());
+        let mut long = shared;
+        for offset in 0..long_path_nodes {
+            let next = node(
+                3_000 + offset,
+                owner_id,
+                ErasureArtifactClassV1::ForkOrSnapshot,
+                ArtifactOptionalityV1::Required,
+                vec![edge(&long, true)],
+                Vec::new(),
+            )?;
+            graph.push(next.clone());
+            long = next;
+        }
+        let root = node(
+            4_000,
+            owner_id,
+            ErasureArtifactClassV1::TimelineReplay,
+            ArtifactOptionalityV1::Required,
+            vec![edge(&short, true), edge(&long, true)],
+            Vec::new(),
+        )?;
+        let root_address = root.address;
+        graph.push(root);
+        let result = inspect_artifact_registration_graph_v1(root_address, &graph);
+        if long_path_nodes == 3 {
+            assert_eq!(result?.registrations, graph.len());
+        } else {
+            assert_eq!(result, Err(ArtifactRegistrationGraphErrorV1::BoundExceeded));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn catalog_identity_cannot_name_two_registration_addresses(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let owner_id = owner()?;
+    let required = node(
+        5_000,
+        owner_id,
+        ErasureArtifactClassV1::Export,
+        ArtifactOptionalityV1::Required,
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let optional = node(
+        5_000,
+        owner_id,
+        ErasureArtifactClassV1::Export,
+        ArtifactOptionalityV1::Optional,
+        Vec::new(),
+        Vec::new(),
+    )?;
+    assert_ne!(required.address, optional.address);
+    let root = node(
+        5_001,
+        owner_id,
+        ErasureArtifactClassV1::TimelineReplay,
+        ArtifactOptionalityV1::Required,
+        vec![edge(&required, true), edge(&optional, false)],
+        Vec::new(),
+    )?;
+    assert_eq!(
+        inspect_artifact_registration_graph_v1(root.address, &[root, required, optional]),
+        Err(ArtifactRegistrationGraphErrorV1::IdentityMismatch)
+    );
+    Ok(())
+}
+
+#[test]
 fn registration_count_is_bounded_before_catalog_use() -> Result<(), Box<dyn std::error::Error>> {
     let root = node(
         1,

@@ -156,21 +156,17 @@ impl ArtifactRegistrationV1 {
     /// Hash exact artifact bytes with class and length framing.
     ///
     /// # Errors
-    /// Rejects a byte length that cannot be represented by the wire framing.
+    /// Every byte slice fits the V1 length framing on supported targets.
     pub fn artifact_digest(
         artifact_class: ErasureArtifactClassV1,
         bytes: &[u8],
     ) -> Result<Hash, ArtifactRegistrationErrorV1> {
-        u64::try_from(bytes.len())
-            .map_err(|_| ArtifactRegistrationErrorV1::FieldOutOfBounds)
-            .map(|length| {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(b"PiglorOS.ArtifactBytes.v1\0");
-                hasher.update(&[artifact_class_byte(artifact_class)]);
-                hasher.update(&length.to_be_bytes());
-                hasher.update(bytes);
-                Hash::from_bytes(*hasher.finalize().as_bytes())
-            })
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.ArtifactBytes.v1\0");
+        hasher.update(&[artifact_class_byte(artifact_class)]);
+        hasher.update(&(bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+        Ok(Hash::from_bytes(*hasher.finalize().as_bytes()))
     }
 
     /// Hash the exact canonical owner ID from the owner's catalog.
