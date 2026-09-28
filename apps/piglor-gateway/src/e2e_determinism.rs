@@ -1,6 +1,6 @@
 use crate::{
-    router, AppState, Gateway, GatewayAuthorization, GatewayError, LedgerWriteMode,
-    LocalAuthenticationAdapter,
+    gateway_test_fixtures::gateway_with_erasure_host_and_authorization, router, AppState, Gateway,
+    GatewayAuthorization, GatewayError, LedgerWriteMode, LocalAuthenticationAdapter,
 };
 use piglor_ledger::LedgerView;
 use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};
@@ -533,7 +533,7 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         timeline.id()
     };
     let state = AppState {
-        gateway: Gateway::new_with_erasure_host_and_authorization_fixture(
+        gateway: gateway_with_erasure_host_and_authorization(
             host,
             [human_body],
             gateway_authorization_for(human_entity)?,
@@ -1130,7 +1130,7 @@ async fn assert_recovered_http_events(
         .test_ok()?;
     let address = listener.local_addr().test_ok()?;
     let state = AppState {
-        gateway: Gateway::new_with_erasure_host_and_authorization_fixture(
+        gateway: gateway_with_erasure_host_and_authorization(
             ErasureExecutionHostV1::open_verified_empty(
                 StoreConfig::Sqlite {
                     path: path.to_owned(),
