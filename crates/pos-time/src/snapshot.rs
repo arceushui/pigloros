@@ -872,7 +872,13 @@ mod tests {
     fn snapshot_read_effect_rejects_an_unknown_timeline_after_admission() {
         let mut host = crate::test_support::open_exact_host();
         let timeline = TimelineId::new();
-        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let generation = host.containment_gate().inventory_generation().test_ok();
+        let closure = WorldReplayClosureV1::test_fixture_for_timeline_consumer(
+            timeline,
+            pos_core::Hash::from_bytes(generation.digest()),
+            "count",
+        )
+        .test_ok();
         let mut registry = ProjectionRegistry::new().with_erasure_gate(host.containment_gate());
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
