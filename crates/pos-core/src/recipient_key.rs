@@ -326,10 +326,7 @@ impl<'a> Rkp1Cursor<'a> {
     }
 
     fn take(&mut self, length: usize) -> Result<&'a [u8], RecipientKeyDescriptorErrorV1> {
-        let end = self
-            .position
-            .checked_add(length)
-            .ok_or(RecipientKeyDescriptorErrorV1::InvalidEncoding)?;
+        let end = self.position.saturating_add(length);
         let result = self
             .bytes
             .get(self.position..end)
