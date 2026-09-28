@@ -680,7 +680,7 @@ fn evidence_with_closure_digest(
         {
             let fields = serde_json::Value::Object(state.fields.into_iter().collect());
             let state =
-                serde_json::Value::Object([("fields".to_owned(), fields)].into_iter().collect());
+                serde_json::Value::Object(std::iter::once(("fields".to_owned(), fields)).collect());
             projection_evidence.push(ProjectionEvidenceV1 {
                 reducer: name.to_owned(),
                 entity: entity.to_string(),
