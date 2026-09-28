@@ -922,10 +922,10 @@ fn gateway_action_registry_builder(
 // production registration authority. They never enter the release builder.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod gateway_test_fixtures {
+pub(crate) mod gateway_test_fixtures {
     use super::*;
 
-    pub fn action_registry_builder(
+    pub(crate) fn action_registry_builder(
         bodies: impl IntoIterator<Item = EntityId>,
         authority: Option<ConsentAuthority>,
     ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
@@ -957,7 +957,7 @@ mod gateway_test_fixtures {
         Ok(registry)
     }
 
-    pub fn gateway_with_erasure_host_and_authorization(
+    pub(crate) fn gateway_with_erasure_host_and_authorization(
         host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
         authorization: GatewayAuthorization,
