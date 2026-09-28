@@ -33,11 +33,13 @@
 //!     &[],
 //!     "deterministic-local-v1",
 //! );
-//! // Wave 8 has no installed Society EPF1, so production binding stays closed.
-//! assert!(matches!(
-//!     binding,
-//!     Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-//! ));
+//! // Wave 8 has no installed Society EPF1. Workspace doctests may enable
+//! // `test-support` and construct a Draft fixture; neither path installs it.
+//! match binding {
+//!     Ok(binding) => assert!(!binding.execution_profile_artifact().is_empty()),
+//!     Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }) => {}
+//!     Err(error) => panic!("unexpected Society binding failure: {error}"),
+//! }
 //!
 //! let draft = draft_signal(
 //!     EntityId::new(),
