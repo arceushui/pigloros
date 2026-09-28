@@ -52,6 +52,9 @@ thread_local! {
     static RECIPIENT_WRITE_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static RECIPIENT_FILE_OWNER_MISMATCH: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
     static RECIPIENT_OPEN_REPLACEMENT: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const {
         std::cell::RefCell::new(None)
     };
@@ -124,6 +127,21 @@ fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(not(test))]
 fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn recipient_private_file_identity(metadata: &std::fs::Metadata) -> RecipientPrivateFileIdentityV1 {
+    let mut identity = RecipientPrivateFileIdentityV1::from_metadata(metadata);
+    if RECIPIENT_FILE_OWNER_MISMATCH.with(std::cell::Cell::get) {
+        identity.uid[0] ^= 1;
+    }
+    identity
+}
+
+#[cfg(not(test))]
+fn recipient_private_file_identity(metadata: &std::fs::Metadata) -> RecipientPrivateFileIdentityV1 {
+    RecipientPrivateFileIdentityV1::from_metadata(metadata)
 }
 
 #[cfg(test)]
@@ -1123,7 +1141,7 @@ fn write_private_key(
             .map_err(storage_error)
             .and_then(|mut file| {
                 file.metadata().map_err(storage_error).and_then(|metadata| {
-                    let identity = RecipientPrivateFileIdentityV1::from_metadata(&metadata);
+                    let identity = recipient_private_file_identity(&metadata);
                     if identity.uid != owner.directory_uid.to_be_bytes() {
                         return Err(CoreError::Storage(
                             "recipient private file owner differs from private directory owner"
@@ -1203,6 +1221,10 @@ mod tests {
 
     fn set_write_failure(enabled: bool) {
         RECIPIENT_WRITE_FAILURE.with(|failure| failure.set(enabled));
+    }
+
+    fn set_file_owner_mismatch(enabled: bool) {
+        RECIPIENT_FILE_OWNER_MISMATCH.with(|mismatch| mismatch.set(enabled));
     }
 
     fn replace_directory_after_open(directory: PathBuf, replacement: PathBuf) {
@@ -1383,6 +1405,14 @@ mod tests {
             assert!(store.load_key_registry()?.is_none());
         }
 
+        {
+            let (_temporary, mut store, owner) = owner_fixture()?;
+            set_file_owner_mismatch(true);
+            assert!(store.enroll_recipient_key(&owner).is_err());
+            set_file_owner_mismatch(false);
+            assert!(store.load_key_registry()?.is_none());
+        }
+
         let (_temporary, mut store, owner) = owner_fixture()?;
         let descriptor = store.enroll_recipient_key(&owner)?;
         set_read_failure(true);
@@ -1442,6 +1472,23 @@ mod tests {
             .finish_recipient_key_destruction(&owner, unpending)
             .is_err());
         Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_retries_an_already_receipted_destruction() -> Result<(), CoreError> {
+        let (_temporary, mut store, owner) = owner_fixture()?;
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        let authorization = pos_core::Hash::from_bytes([52; 32]);
+        let registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        let digest = registry
+            .key_record(descriptor.identity())
+            .and_then(|record| record.private_material_digest)
+            .ok_or_else(|| CoreError::Storage("recipient material is absent".to_owned()))?;
+        let request = KeyDestructionRequestV1::new(descriptor.identity(), digest, authorization);
+        store.destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)?;
+        store.finish_recipient_key_destruction(&owner, request)
     }
 
     #[test]
