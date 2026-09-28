@@ -2420,8 +2420,7 @@ mod wave3_tests {
                 .state_for_plugin(timeline, id, &entity)
                 .ok()
                 .flatten()
-                .and_then(|state| state.get("event_count"))
-                .and_then(serde_json::Value::as_u64)
+                .and_then(|state| state.get("event_count").and_then(serde_json::Value::as_u64))
         };
         assert_eq!(count(&registry, first), Some(1));
         assert_eq!(count(&registry, second), None);
@@ -2480,8 +2479,7 @@ mod wave3_tests {
         registry.apply_event(test_timeline(), &ev(entity));
         let count = |registry: &ProjectionRegistry, name| {
             test_ok(registry.state_for_reducer(test_timeline(), name, &entity))
-                .and_then(|state| state.get("event_count"))
-                .and_then(serde_json::Value::as_u64)
+                .and_then(|state| state.get("event_count").and_then(serde_json::Value::as_u64))
         };
         assert_eq!(count(&registry, "first"), Some(2));
         assert_eq!(count(&registry, "second"), Some(1));

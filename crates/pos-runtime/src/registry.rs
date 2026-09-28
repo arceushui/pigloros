@@ -4633,8 +4633,7 @@ mod tests {
                 .state_for_plugin(timeline, id, &entity)
                 .ok()
                 .flatten()
-                .and_then(|state| state.get("n"))
-                .and_then(serde_json::Value::as_u64)
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64))
         };
         assert_eq!(count(&registry, first.id()), Some(1));
         assert_eq!(count(&registry, second.id()), None);
