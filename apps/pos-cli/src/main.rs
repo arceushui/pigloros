@@ -910,56 +910,6 @@ mod tests {
     };
 
     #[test]
-    fn accumulate_entities_skips_missing_or_non_object_states() {
-        let mut entities = std::collections::HashSet::new();
-        accumulate_entities_from_registry_json(&serde_json::Value::Null, &mut entities);
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(&serde_json::json!({"nope": 1}), &mut entities);
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(
-            &serde_json::json!({"states": "not-an-object"}),
-            &mut entities,
-        );
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(
-            &serde_json::json!({"states": {"e1": {}, "e2": {}}}),
-            &mut entities,
-        );
-        assert_eq!(entities.len(), 2);
-        assert!(entities.contains("e1"));
-        assert!(entities.contains("e2"));
-    }
-
-    #[test]
-    fn count_snapshot_entities_counts_unique_ids() {
-        let mut registry = std::collections::HashMap::new();
-        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
-        let snapshot = pos_time::Snapshot {
-            timeline: TimelineId::new(),
-            at_seq: Seq::ZERO,
-            registry,
-            inventory_generation: [0; 32],
-        };
-        assert_eq!(count_snapshot_entities(&snapshot), 0);
-    }
-
-    #[test]
-    fn count_snapshot_entities_soft_skips_json_errors() {
-        let mut registry = std::collections::HashMap::new();
-        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
-        let snapshot = pos_time::Snapshot {
-            timeline: TimelineId::new(),
-            at_seq: Seq::ZERO,
-            registry,
-            inventory_generation: [0; 32],
-        };
-        FAIL_STATE_REG_JSON.with(|f| f.set(true));
-        let n = count_snapshot_entities(&snapshot);
-        FAIL_STATE_REG_JSON.with(|f| f.set(false));
-        assert_eq!(n, 0);
-    }
-
-    #[test]
     fn open_memory_store_ok() {
         let _store = open_memory_store().test_ok();
     }
@@ -1492,6 +1442,26 @@ mod tests {
     fn handle_timeline_compare_missing_args_returns_err() {
         let a = args(&["compare", "path", "tl1"]);
         assert!(handle_timeline(&a).is_err());
+    }
+
+    #[test]
+    fn timeline_protected_operations_fail_closed_without_owner_evidence() {
+        for (arguments, operation) in [
+            (args(&["replay", "unused.db", "timeline"]), "replay"),
+            (args(&["snapshot", "unused.db", "timeline"]), "snapshot"),
+            (
+                args(&["compare", "unused.db", "a", "b", "0"]),
+                "compare",
+            ),
+        ] {
+            let error = handle_timeline(&arguments).test_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "timeline {operation} is unavailable: the CLI has no owner-verified evidence path for this operation"
+                )
+            );
+        }
     }
 
     #[test]

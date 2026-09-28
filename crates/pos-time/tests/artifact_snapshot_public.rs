@@ -99,6 +99,7 @@ fn snapshot_verification_requires_installed_world_verifier() {
         timeline: timeline.id(),
         at_seq: pos_core::clock::Seq::ZERO,
         registry: std::collections::HashMap::new(),
+        inventory_generation: generation.digest(),
     };
     let result = verify_snapshot_consistency(
         &mut reads,
@@ -213,8 +214,11 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
 #[test]
 fn snapshot_verification_rejects_old_or_missing_host_generation() {
     for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
-        let mut host = ErasureExecutionHostV1::open_verified_empty(
+        let composition = ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(ExactVerifier));
+        let mut host = ErasureExecutionHostV1::open_with_authority(
             config,
+            &composition,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
@@ -225,18 +229,26 @@ fn snapshot_verification_rejects_old_or_missing_host_generation() {
             .create_timeline("snapshot-source")
             .test_ok();
         let mut reads = host.read_sender().test_ok();
+        let (_, capture_generation) = reads
+            .read_bounded_at_generation(
+                timeline.id(),
+                pos_core::store::SeqRange::all(),
+                pos_core::store::EventReadBounds::new(8, 32, 4, 4),
+                None,
+            )
+            .test_ok();
+        let capture_closure =
+            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                timeline.id(),
+                Hash::from_bytes(capture_generation.digest()),
+            )
+            .test_ok();
         let mut capture_registry = registry(&gate);
-        let captured = snapshot(
-            &mut reads,
-            timeline.id(),
-            &mut capture_registry,
-            SNAPSHOT_DIGEST,
-            &evaluation(ArtifactStateV1::Retained),
-        )
-        .test_ok();
+        let captured = snapshot(&mut reads, timeline.id(), &mut capture_registry, &capture_closure)
+            .test_ok();
         assert_eq!(
             captured.inventory_generation,
-            gate.inventory_generation().test_ok().digest()
+            capture_generation.digest()
         );
         let encoded = serde_json::to_value(&captured).test_ok();
         let mut missing_generation = encoded.clone();
@@ -254,14 +266,27 @@ fn snapshot_verification_rejects_old_or_missing_host_generation() {
             .create_timeline("inventory-successor")
             .test_ok();
         let mut reads = host.read_sender().test_ok();
+        let (_, successor_generation) = reads
+            .read_bounded_at_generation(
+                timeline.id(),
+                pos_core::store::SeqRange::all(),
+                pos_core::store::EventReadBounds::new(8, 32, 4, 4),
+                None,
+            )
+            .test_ok();
+        let successor_closure =
+            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                timeline.id(),
+                Hash::from_bytes(successor_generation.digest()),
+            )
+            .test_ok();
         let mut verification_registry = registry(&gate);
         assert!(matches!(
             verify_snapshot_consistency(
                 &mut reads,
                 &captured,
                 &mut verification_registry,
-                SNAPSHOT_DIGEST,
-                &evaluation(ArtifactStateV1::Retained),
+                &successor_closure,
             ),
             Err(pos_time::SnapshotError::StaleGeneration)
         ));
