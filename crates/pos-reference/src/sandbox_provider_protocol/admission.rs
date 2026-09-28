@@ -1,7 +1,8 @@
 //! Fail-closed provider and image admission for the root-owned selector.
 
+mod image_proof;
 mod network;
-pub use crate::image_proof::SandboxImageProofError;
+pub use image_proof::SandboxImageProofError;
 pub use network::{LocalNetworkAdmission, NetworkProxyLimits};
 
 use std::ops::Deref;
@@ -762,7 +763,7 @@ impl AdmittedSandboxProvider {
         self.validate_image_selection(manifest)
             .and_then(|()| self.authenticate_image_manifest(manifest))
             .map_err(|_| SandboxImageProofError::AuthorityMismatch)?;
-        crate::image_proof::verify(image, admission_time)?;
+        image_proof::verify(image, admission_time)?;
         Ok(VerifiedSandboxImageProof {
             image: manifest.manifest_digest,
             proof: manifest.root_hash_signature.der_sha256,

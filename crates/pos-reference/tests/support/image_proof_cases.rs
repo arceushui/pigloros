@@ -335,6 +335,49 @@ mod image_proof_cases {
     }
 
     #[test]
+    fn public_proof_verification_rejects_foreign_mapping_and_revoked_image_key() -> TestResult {
+        let mut fixture = fixture(PROOF, CERTIFICATE)?;
+        let original = fixture.admit()?;
+        let image =
+            original.admit_image(&fixture.sim1, &fixture.root_image, &fixture.executable)?;
+
+        // These are independently authenticated provider snapshots, not a
+        // selector update transition; current-head continuity belongs to #438.
+        fixture.trust = fixture.authority.trust_with_certificate([77; 32])?;
+        fixture.revocation = revocation(&fixture.trust, &fixture.authority, vec![], vec![])?;
+        fixture.policy = fixture.policy_for_image(&fixture.sim1, &fixture.lps1)?;
+        assert_eq!(
+            fixture.admit()?.verify_image_proof(&image, NOW),
+            Err(SandboxImageProofError::AuthorityMismatch)
+        );
+
+        fixture.trust = fixture
+            .authority
+            .trust_with_certificate(Sha256::digest(CERTIFICATE).into())?;
+        let revoked = sign_record(
+            "RVS1",
+            Value::Array(vec![
+                Value::Text("RVS1".to_owned()),
+                integer(1),
+                bytes(fixture.trust.snapshot_digest()),
+                integer(3),
+                Value::Array(vec![Value::Text("image".to_owned())]),
+                Value::Array(vec![]),
+                Value::Array(vec![]),
+                Value::Text("policy".to_owned()),
+            ]),
+            &fixture.authority.policy,
+        )?;
+        fixture.revocation = SandboxRevocationSnapshot::authenticate(&revoked, &fixture.trust)?;
+        fixture.policy = fixture.policy_for_image(&fixture.sim1, &fixture.lps1)?;
+        assert_eq!(
+            fixture.admit()?.verify_image_proof(&image, NOW),
+            Err(SandboxImageProofError::AuthorityMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn public_proof_verification_rejects_extra_or_missing_certificate_material() -> TestResult {
         let absent = edit_cms(PROOF, |cms_data| {
             cms_data.certificates = None;
