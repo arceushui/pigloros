@@ -179,19 +179,21 @@ impl PrincipalOwnerResolverV1 {
         verify_authenticated_principal_evidence_v1(&self.policy, evidence)
             .map_err(signature_invalid)
             .and_then(|verified| {
-                let record = verified.evidence().record();
                 self.registry
                     .digest()
                     .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
                     .and_then(|registry_binding| {
-                        if record.adapter_id != self.registry.adapter_id()
-                            || record.assurance != self.registry.assurance()
-                            || record.registry_binding != registry_binding
-                        {
-                            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-                        }
-                        self.registry
-                            .lookup_principal(&record.principal)
+                        let owner = {
+                            let record = verified.evidence().record();
+                            if record.adapter_id != self.registry.adapter_id()
+                                || record.assurance != self.registry.assurance()
+                                || record.registry_binding != registry_binding
+                            {
+                                return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+                            }
+                            self.registry.lookup_principal(&record.principal)
+                        };
+                        owner
                             .map(|owner| ResolvedLocalAuthenticationV1 { verified, owner })
                             .ok_or(LocalForkAuthenticationErrorV1::PeerUnauthenticated)
                     })
@@ -254,39 +256,37 @@ fn parse_credentials(
     ForkAuthenticationAdapterSigningKeyV1::from_seed(*adapter_seed)
         .map_err(signature_invalid)
         .and_then(|adapter_signer| {
-            policy
-                .adapter(registry.adapter_id())
-                .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
-                .and_then(|adapter| {
-                    registry
-                        .digest()
-                        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
-                        .and_then(|registry_binding| {
-                            if adapter.verifying_key != adapter_signer.public_key()
-                                || registry.assurance() < adapter.minimum_assurance
-                                || !adapter.registry_bindings.contains(&registry_binding)
-                            {
-                                return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-                            }
-                            ForkHostSigningKeyV1::from_seed(*host_seed)
-                                .map_err(signature_invalid)
-                                .and_then(|host_signer| {
-                                    ensure_distinct_signing_keys(
-                                        adapter_signer.public_key(),
-                                        host_signer.public_key(),
-                                    )
-                                    .map(|()| {
-                                        LocalForkAuthenticationCredentialsV1 {
-                                            resolver: PrincipalOwnerResolverV1::new(
-                                                policy, registry,
-                                            ),
-                                            adapter_signer,
-                                            _host_signer: LocalForkHostSignerV1 {
-                                                _signer: host_signer,
-                                            },
-                                        }
-                                    })
-                                })
+            registry
+                .digest()
+                .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+                .and_then(|registry_binding| {
+                    let adapter_valid =
+                        policy
+                            .adapter(registry.adapter_id())
+                            .is_some_and(|adapter| {
+                                adapter.verifying_key == adapter_signer.public_key()
+                                    && registry.assurance() >= adapter.minimum_assurance
+                                    && adapter.registry_bindings.contains(&registry_binding)
+                            });
+                    if !adapter_valid {
+                        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+                    }
+                    ForkHostSigningKeyV1::from_seed(*host_seed)
+                        .map_err(signature_invalid)
+                        .and_then(|host_signer| {
+                            ensure_distinct_signing_keys(
+                                adapter_signer.public_key(),
+                                host_signer.public_key(),
+                            )
+                            .map(|()| {
+                                LocalForkAuthenticationCredentialsV1 {
+                                    resolver: PrincipalOwnerResolverV1::new(policy, registry),
+                                    adapter_signer,
+                                    _host_signer: LocalForkHostSignerV1 {
+                                        _signer: host_signer,
+                                    },
+                                }
+                            })
                         })
                 })
         })
