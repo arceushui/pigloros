@@ -5,7 +5,7 @@ mod image_file;
 #[cfg(unix)]
 mod image_gpt;
 #[cfg(all(test, unix))]
-pub(crate) use image_gpt::fault::ImageReadFault;
+pub use image_gpt::fault::ImageReadFault;
 mod image_proof;
 mod network;
 pub use image_proof::SandboxImageProofError;

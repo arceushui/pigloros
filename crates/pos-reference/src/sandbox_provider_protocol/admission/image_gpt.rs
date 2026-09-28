@@ -296,7 +296,7 @@ fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> Result<(), SandboxAdmi
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod fault {
+pub mod fault {
     //! Inject one read failure for an exact held inode and offset. Other
     //! concurrent selector tests and all production builds are unaffected.
 
@@ -307,7 +307,7 @@ pub(crate) mod fault {
 
     static FAULTS: Mutex<Vec<(u64, u64, u64)>> = Mutex::new(Vec::new());
 
-    pub(crate) struct ImageReadFault((u64, u64, u64));
+    pub struct ImageReadFault((u64, u64, u64));
 
     impl ImageReadFault {
         pub(crate) fn new(file: &File, offset: u64) -> io::Result<Self> {
