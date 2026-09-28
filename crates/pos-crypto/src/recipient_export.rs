@@ -1754,7 +1754,7 @@ mod tests {
             1,
         ));
         let payload = encode_payload(&source)?;
-        let edits: [fn(&mut Vec<Value>); 10] = [
+        let edits: [fn(&mut Vec<Value>); 12] = [
             |fields| fields[2] = Value::Bytes(Ulid::from(4_u128).to_bytes().to_vec()),
             |fields| fields[8] = Value::Integer(2_u64.into()),
             |fields| replace_event_field(fields, 5, Value::Integer(2_u64.into())),
@@ -1767,7 +1767,9 @@ mod tests {
                 );
             },
             |fields| replace_identity_field(fields, 0, Value::Text(String::new())),
+            |fields| replace_identity_field(fields, 0, Value::Bool(true)),
             |fields| replace_identity_field(fields, 1, Value::Integer(256_u64.into())),
+            |fields| replace_identity_field(fields, 1, Value::Bool(true)),
             |fields| replace_identity_field(fields, 1, Value::Integer(255_u64.into())),
             |fields| replace_identity_field(fields, 2, Value::Integer(0_u64.into())),
             |fields| {
@@ -1829,7 +1831,17 @@ mod tests {
             Err(RecipientExportErrorV1::NonCanonical)
         ));
 
-        for source in [export(Some(0), b"fork".to_vec()), export(None, Vec::new())] {
+        let mut redirected = export(None, b"source".to_vec());
+        redirected.timeline.meta.id = TimelineId::from_ulid(id(4));
+        redirected.events[0].origin = Some(EventOriginV1 {
+            origin_timeline_id: redirected.timeline.id(),
+            origin_logical_seq: Seq::from_u64(1),
+        });
+        for source in [
+            export(Some(0), b"fork".to_vec()),
+            export(None, Vec::new()),
+            redirected,
+        ] {
             let payload = encode_payload(&source)?;
             let encoded = encrypt_payload(&payload, recipient, [5; 16], &mut rng)?;
             assert!(matches!(
