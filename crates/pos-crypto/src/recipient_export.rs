@@ -87,9 +87,7 @@ impl RecipientTimelineExportV1 {
     /// # Errors
     /// Returns an encoding or bounds error for any invalid envelope.
     pub fn decode(encoded: &[u8]) -> Result<Self, RecipientExportErrorV1> {
-        if encoded.len() > MAX_ENVELOPE_BYTES {
-            return Err(RecipientExportErrorV1::FieldOutOfBounds);
-        }
+        validate_envelope_length(encoded.len())?;
         preflight_cbor(
             encoded,
             MAX_CHUNKS + 32,
@@ -177,6 +175,13 @@ impl RecipientTimelineExportV1 {
         }
         Ok(())
     }
+}
+
+fn validate_envelope_length(length: usize) -> Result<(), RecipientExportErrorV1> {
+    if length > MAX_ENVELOPE_BYTES {
+        return Err(RecipientExportErrorV1::FieldOutOfBounds);
+    }
+    Ok(())
 }
 
 /// Encrypt one complete TEP1 own-segment export into a new TRX1 envelope.
@@ -1493,6 +1498,10 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn rejects_reachable_cbor_preflight_forms_at_the_public_boundary() {
+        assert_eq!(
+            validate_envelope_length(MAX_ENVELOPE_BYTES + 1),
+            Err(RecipientExportErrorV1::FieldOutOfBounds)
+        );
         for encoded in [
             vec![0x81, 0xf6, 0xf6],
             vec![0x58, 1],
