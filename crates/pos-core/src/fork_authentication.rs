@@ -140,13 +140,15 @@ impl ForkAuthenticationPolicyV1 {
                 .map(ForkAuthenticationAdapterPolicyV1::from_value)
                 .collect::<Result<_, _>>()?,
         )?;
-        canonical(bytes_in, &policy.to_canonical_cbor())?;
+        canonical(bytes_in, &policy.to_canonical_cbor()?)?;
         Ok(policy)
     }
 
     /// Encode the exact FAP1 array.
-    #[must_use]
-    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    /// Returns a closed codec error if serialization fails.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
         encode(&Value::Array(vec![
             text("FAP1"),
             uint(1_u8),
@@ -160,9 +162,11 @@ impl ForkAuthenticationPolicyV1 {
     }
 
     /// Complete FAP1 byte commitment pinned by FAH1.
-    #[must_use]
-    pub fn digest(&self) -> Hash {
-        digest(POLICY_DOMAIN, &self.to_canonical_cbor())
+    ///
+    /// # Errors
+    /// Returns a closed codec error if serialization fails.
+    pub fn digest(&self) -> Result<Hash, ForkAuthenticationCodecErrorV1> {
+        Ok(digest(POLICY_DOMAIN, &self.to_canonical_cbor()?))
     }
 
     #[must_use]
@@ -219,14 +223,13 @@ impl LocalAccountRegistryV1 {
         if !bindings.windows(2).all(|pair| pair[0].uid < pair[1].uid) {
             return Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds);
         }
-        for (index, binding) in bindings.iter().enumerate() {
-            let current_digest = principal_digest_v1(&binding.principal);
-            if bindings[..index].iter().any(|prior| {
-                prior.principal == binding.principal
-                    || principal_digest_v1(&prior.principal) == current_digest
-            }) {
+        let mut seen_principals = Vec::with_capacity(bindings.len());
+        for binding in &bindings {
+            let current_digest = principal_digest_v1(&binding.principal)?;
+            if seen_principals.contains(&current_digest) {
                 return Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds);
             }
+            seen_principals.push(current_digest);
         }
         Ok(Self {
             adapter_id,
@@ -265,24 +268,35 @@ impl LocalAccountRegistryV1 {
             bindings,
             service_uid,
         )?;
-        canonical(bytes_in, &registry.to_canonical_cbor())?;
+        canonical(bytes_in, &registry.to_canonical_cbor()?)?;
         Ok(registry)
     }
 
-    #[must_use]
-    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+    /// Encode the exact LAR1 registry.
+    ///
+    /// # Errors
+    /// Returns a closed codec error if a Principal or CBOR value cannot encode.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
         encode(&Value::Array(vec![
             text("LAR1"),
             uint(1_u8),
             text(&self.adapter_id),
             uint(self.assurance),
-            Value::Array(self.bindings.iter().map(binding_value).collect()),
+            Value::Array(
+                self.bindings
+                    .iter()
+                    .map(binding_value)
+                    .collect::<Result<_, _>>()?,
+            ),
         ]))
     }
 
-    #[must_use]
-    pub fn digest(&self) -> Hash {
-        digest(REGISTRY_DOMAIN, &self.to_canonical_cbor())
+    /// Commit the exact LAR1 bytes.
+    ///
+    /// # Errors
+    /// Returns a closed codec error if serialization fails.
+    pub fn digest(&self) -> Result<Hash, ForkAuthenticationCodecErrorV1> {
+        Ok(digest(REGISTRY_DOMAIN, &self.to_canonical_cbor()?))
     }
 
     #[must_use]
@@ -314,18 +328,16 @@ impl LocalAccountRegistryV1 {
     }
 }
 
-fn binding_value(binding: &LocalAccountBindingV1) -> Value {
-    Value::Array(vec![
+fn binding_value(binding: &LocalAccountBindingV1) -> Result<Value, ForkAuthenticationCodecErrorV1> {
+    let principal = binding
+        .principal
+        .encode()
+        .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)?;
+    Ok(Value::Array(vec![
         uint(binding.uid),
-        bytes(
-            binding
-                .principal
-                .encode()
-                .expect("validated Principal")
-                .as_slice(),
-        ),
+        bytes(principal.as_slice()),
         text(binding.owner.as_str()),
-    ])
+    ]))
 }
 
 /// Exact unsigned APR1 content before adapter signing.
@@ -357,17 +369,19 @@ impl AuthenticatedPrincipalRecordV1 {
         Ok(())
     }
 
-    #[must_use]
-    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+    /// Encode the exact APR1 content.
+    ///
+    /// # Errors
+    /// Returns a closed codec error if the Principal or CBOR value cannot encode.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
+        let principal = self
+            .principal
+            .encode()
+            .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)?;
         encode(&Value::Array(vec![
             text("APR1"),
             uint(1_u8),
-            bytes(
-                self.principal
-                    .encode()
-                    .expect("validated Principal")
-                    .as_slice(),
-            ),
+            bytes(principal.as_slice()),
             text(&self.adapter_id),
             uint(self.assurance),
             uint(self.issued_at),
@@ -395,7 +409,7 @@ impl AuthenticatedPrincipalRecordV1 {
             operation_nonce: fixed(&fields[8])?,
         };
         result.validate()?;
-        canonical(bytes_in, &result.to_canonical_cbor())?;
+        canonical(bytes_in, &result.to_canonical_cbor()?)?;
         Ok(result)
     }
 }
@@ -430,12 +444,15 @@ impl AuthenticatedPrincipalEvidenceV1 {
         &self.signature
     }
 
-    #[must_use]
-    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+    /// Encode the complete signed authentication evidence.
+    ///
+    /// # Errors
+    /// Returns a closed codec error if a nested value cannot encode.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
         encode(&Value::Array(vec![
             text("APS1"),
             uint(1_u8),
-            bytes(&self.record.to_canonical_cbor()),
+            bytes(&self.record.to_canonical_cbor()?),
             bytes(&self.signature),
         ]))
     }
@@ -453,13 +470,16 @@ impl AuthenticatedPrincipalEvidenceV1 {
             MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1,
         )?)?;
         let result = Self::new(record, fixed(&fields[3])?)?;
-        canonical(bytes_in, &result.to_canonical_cbor())?;
+        canonical(bytes_in, &result.to_canonical_cbor()?)?;
         Ok(result)
     }
 
-    #[must_use]
-    pub fn digest(&self) -> Hash {
-        digest(EVIDENCE_DOMAIN, &self.to_canonical_cbor())
+    /// Commit the complete evidence bytes.
+    ///
+    /// # Errors
+    /// Returns a closed codec error if serialization fails.
+    pub fn digest(&self) -> Result<Hash, ForkAuthenticationCodecErrorV1> {
+        Ok(digest(EVIDENCE_DOMAIN, &self.to_canonical_cbor()?))
     }
 }
 
@@ -473,12 +493,19 @@ fn principal(value: &Value) -> Result<PrincipalRefV1, ForkAuthenticationCodecErr
 }
 
 /// Exact ADR-099 Principal digest used by POB1 and Fork admission commands.
-#[must_use]
-pub fn principal_digest_v1(principal: &PrincipalRefV1) -> Hash {
-    digest(
+///
+/// # Errors
+/// Returns a closed codec error if the Principal cannot encode.
+pub fn principal_digest_v1(
+    principal: &PrincipalRefV1,
+) -> Result<Hash, ForkAuthenticationCodecErrorV1> {
+    Ok(digest(
         PRINCIPAL_DOMAIN,
-        principal.encode().expect("validated Principal").as_slice(),
-    )
+        principal
+            .encode()
+            .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)?
+            .as_slice(),
+    ))
 }
 
 fn digest(domain: &[u8], content: &[u8]) -> Hash {
@@ -506,14 +533,15 @@ fn decode(bytes_in: &[u8], maximum: usize) -> Result<Value, ForkAuthenticationCo
     if cursor.position() != bytes_in.len() as u64 {
         return Err(ForkAuthenticationCodecErrorV1::InvalidEncoding);
     }
-    canonical(bytes_in, &encode(&value))?;
+    canonical(bytes_in, &encode(&value)?)?;
     Ok(value)
 }
 
-fn encode(value: &Value) -> Vec<u8> {
+fn encode(value: &Value) -> Result<Vec<u8>, ForkAuthenticationCodecErrorV1> {
     let mut result = Vec::new();
-    ciborium::into_writer(value, &mut result).expect("CBOR value serialization");
-    result
+    ciborium::into_writer(value, &mut result)
+        .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)?;
+    Ok(result)
 }
 
 fn canonical(actual: &[u8], expected: &[u8]) -> Result<(), ForkAuthenticationCodecErrorV1> {
@@ -642,12 +670,12 @@ mod tests {
     #[test]
     fn policy_round_trip_and_rejects_noncanonical_and_unsorted_inputs() {
         let policy = ForkAuthenticationPolicyV1::new(vec![adapter()]).expect("policy");
-        let bytes = policy.to_canonical_cbor();
+        let bytes = policy.to_canonical_cbor().expect("policy CBOR");
         assert_eq!(
             ForkAuthenticationPolicyV1::from_canonical_cbor(&bytes),
             Ok(policy.clone())
         );
-        assert_ne!(policy.digest(), Hash::zero());
+        assert_ne!(policy.digest().expect("policy digest"), Hash::zero());
         assert!(policy.adapter("local").is_some());
         assert!(policy.adapter("other").is_none());
         assert_eq!(policy.adapters().len(), 1);
@@ -707,15 +735,15 @@ mod tests {
             })
             .collect();
         let policy = ForkAuthenticationPolicyV1::new(adapters).expect("maximum policy");
-        let bytes = policy.to_canonical_cbor();
+        let bytes = policy.to_canonical_cbor().expect("maximum policy CBOR");
         assert_eq!(bytes.len(), MAX_FORK_AUTH_POLICY_BYTES_V1);
         assert_eq!(
             &bytes[..8],
             &[0x83, 0x64, b'F', b'A', b'P', b'1', 0x01, 0x90]
         );
         assert_eq!(
-            format!("{:x}", Sha256::digest(&bytes)),
-            "658d17498b51bb0b6c218077737daab5648df1d48c435e6c0cf9335fd6fa1fb3"
+            &Sha256::digest(&bytes)[..],
+            &hex_bytes::<32>("658d17498b51bb0b6c218077737daab5648df1d48c435e6c0cf9335fd6fa1fb3")
         );
         assert_eq!(
             ForkAuthenticationPolicyV1::from_canonical_cbor(&bytes),
@@ -749,7 +777,7 @@ mod tests {
         ];
         let registry = LocalAccountRegistryV1::new("local".to_owned(), 2, bindings.clone(), 1000)
             .expect("registry");
-        let bytes = registry.to_canonical_cbor();
+        let bytes = registry.to_canonical_cbor().expect("registry CBOR");
         assert_eq!(
             LocalAccountRegistryV1::from_canonical_cbor(&bytes, 1000),
             Ok(registry.clone())
@@ -764,8 +792,11 @@ mod tests {
             Some(OwnerIdV1::from_static("alice"))
         );
         assert_eq!(registry.lookup_principal(&principal(3)), None);
-        assert_ne!(registry.digest(), Hash::zero());
-        assert_ne!(super::principal_digest_v1(&principal(1)), Hash::zero());
+        assert_ne!(registry.digest().expect("registry digest"), Hash::zero());
+        assert_ne!(
+            super::principal_digest_v1(&principal(1)).expect("Principal digest"),
+            Hash::zero()
+        );
 
         for forbidden in [0, 65_534, 1000, u32::MAX] {
             let mut rows = bindings.clone();
@@ -792,7 +823,7 @@ mod tests {
     #[test]
     fn apr1_and_aps1_round_trip_with_rejected_timestamp_and_nonce() {
         let record = record();
-        let apr = record.to_canonical_cbor();
+        let apr = record.to_canonical_cbor().expect("APR1 CBOR");
         assert!(apr.len() <= MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1);
         assert_eq!(
             AuthenticatedPrincipalRecordV1::from_canonical_cbor(&apr),
@@ -800,7 +831,7 @@ mod tests {
         );
         let evidence =
             AuthenticatedPrincipalEvidenceV1::new(record.clone(), [9; 64]).expect("evidence");
-        let aps = evidence.to_canonical_cbor();
+        let aps = evidence.to_canonical_cbor().expect("APS1 CBOR");
         assert!(aps.len() <= MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1);
         assert_eq!(
             AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&aps),
@@ -808,7 +839,7 @@ mod tests {
         );
         assert_eq!(evidence.record(), &record);
         assert_eq!(evidence.signature(), &[9; 64]);
-        assert_ne!(evidence.digest(), Hash::zero());
+        assert_ne!(evidence.digest().expect("evidence digest"), Hash::zero());
 
         let mut expired = record.clone();
         expired.expires_at = expired.issued_at;
