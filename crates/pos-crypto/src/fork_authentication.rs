@@ -11,7 +11,7 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use pos_core::{
     fork_authentication::{
         AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
-        ForkAuthenticationPolicyV1, MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1,
+        ForkAuthenticationPolicyV1,
     },
     OwnerIdV1, Signature,
 };
@@ -127,7 +127,7 @@ impl ForkAuthenticationAdapterSigningKeyV1 {
         self.public_key
     }
 
-    /// Sign exactly one validated APR1 into APS1.
+    /// Sign exactly one validated APR1 into FAE1.
     ///
     /// # Errors
     /// Rejects an APR1 that fails its core structural validation.
@@ -224,9 +224,6 @@ impl ForkHostSigningKeyV1 {
             .evidence()
             .to_canonical_cbor()
             .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
-        if evidence_bytes.len() > MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1 {
-            return Err(ForkAuthenticationSignatureErrorV1::InvalidRecord);
-        }
         let mut preimage =
             Vec::with_capacity(COMMAND_DOMAIN.len() + command.len() + evidence_bytes.len());
         preimage.extend_from_slice(COMMAND_DOMAIN);
