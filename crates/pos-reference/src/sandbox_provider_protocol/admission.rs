@@ -1,6 +1,7 @@
 //! Fail-closed provider and image admission for the root-owned selector.
 
 mod network;
+pub use crate::image_proof::SandboxImageProofError;
 pub use network::{LocalNetworkAdmission, NetworkProxyLimits};
 
 use std::ops::Deref;
@@ -467,6 +468,28 @@ pub struct AdmittedSandboxImage {
     manifest: SignedImageManifest,
 }
 
+/// Independently verified image proof bound to immutable admission snapshots.
+///
+/// This value grants no mount or execution authority. The selector's held-image
+/// admission must still check descriptor identity and current authority heads.
+#[derive(Eq, PartialEq)]
+pub struct VerifiedSandboxImageProof {
+    image: [u8; 32],
+    proof: [u8; 32],
+    root_hash: [u8; 32],
+    signer: [u8; 32],
+    policy: ([u8; 32], u64),
+    trust: ([u8; 32], u64),
+    revocation: ([u8; 32], u64),
+    admission_time: u64,
+}
+
+impl std::fmt::Debug for VerifiedSandboxImageProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedSandboxImageProof { .. }")
+    }
+}
+
 impl AdmittedSandboxImage {
     /// Authenticated image manifest bound to exact admitted bytes.
     #[must_use]
@@ -708,6 +731,57 @@ impl AdmittedSandboxProvider {
         executable: &[u8],
     ) -> Result<AdmittedSandboxImage, SandboxAdmissionError> {
         let image = SignedImageManifest::from_canonical_cbor(manifest_bytes)?;
+        self.validate_image_selection(&image)?;
+        let image_length = root_image.len() as u64;
+        if image.root_image_length != image_length
+            || image.root_image_blake3_digest != digest_bytes(root_image)
+            || image.executable_blake3_digest != digest_bytes(executable)
+        {
+            return Err(SandboxAdmissionError::ArtifactMismatch);
+        }
+        self.authenticate_image_manifest(&image)?;
+        Ok(AdmittedSandboxImage { manifest: image })
+    }
+
+    /// Verify the exact detached SIM1 proof under this provider's authority.
+    ///
+    /// `admission_time` is the host-selected Unix timestamp in seconds. The
+    /// resulting value binds that time and these immutable APT1/TRS1/RVS1
+    /// snapshots; it does not assert that they remain the selector's heads.
+    ///
+    /// # Errors
+    /// Rejects an image not authorized by these snapshots, malformed or
+    /// unsupported CMS, an unauthorized signer, invalid certificate path,
+    /// purpose, validity, signature or resource bounds.
+    pub fn verify_image_proof(
+        &self,
+        image: &AdmittedSandboxImage,
+        admission_time: u64,
+    ) -> Result<VerifiedSandboxImageProof, SandboxImageProofError> {
+        let manifest = image.manifest();
+        self.validate_image_selection(manifest)
+            .and_then(|()| self.authenticate_image_manifest(manifest))
+            .map_err(|_| SandboxImageProofError::AuthorityMismatch)?;
+        crate::image_proof::verify(image, admission_time)?;
+        Ok(VerifiedSandboxImageProof {
+            image: manifest.manifest_digest,
+            proof: manifest.root_hash_signature.der_sha256,
+            root_hash: manifest.root_hash_sha256,
+            signer: manifest.signing_certificate_sha256,
+            policy: (self.policy.policy_digest(), self.policy.policy_epoch()),
+            trust: (self.trust.snapshot_digest(), self.trust.trust_epoch()),
+            revocation: (
+                self.revocation.snapshot_digest(),
+                self.revocation.revocation_epoch(),
+            ),
+            admission_time,
+        })
+    }
+
+    fn validate_image_selection(
+        &self,
+        image: &SignedImageManifest,
+    ) -> Result<(), SandboxAdmissionError> {
         if !self.policy.accepts_image(&image.manifest_digest) {
             return Err(SandboxAdmissionError::PolicyMismatch);
         }
@@ -727,13 +801,13 @@ impl AdmittedSandboxProvider {
         if image.image_trust_epoch != self.trust.trust_epoch() {
             return Err(SandboxAdmissionError::ConformanceMismatch);
         }
-        let image_length = root_image.len() as u64;
-        if image.root_image_length != image_length
-            || image.root_image_blake3_digest != digest_bytes(root_image)
-            || image.executable_blake3_digest != digest_bytes(executable)
-        {
-            return Err(SandboxAdmissionError::ArtifactMismatch);
-        }
+        Ok(())
+    }
+
+    fn authenticate_image_manifest(
+        &self,
+        image: &SignedImageManifest,
+    ) -> Result<(), SandboxAdmissionError> {
         let certificate_matches = self.trust.certificates().iter().any(|certificate| {
             certificate.fingerprint == image.signing_certificate_sha256
                 && certificate.keyring_serial == image.kernel_keyring_serial
@@ -748,7 +822,7 @@ impl AdmittedSandboxProvider {
             SandboxTrustRole::ImageProject,
         )?;
         image.verify_signature(&image_key)?;
-        Ok(AdmittedSandboxImage { manifest: image })
+        Ok(())
     }
 
     /// Admit an exact LPS1 for an already admitted image.

@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[doc(hidden)]
 pub mod control_framing;
 
+mod image_proof;
 mod non_interference_report;
 
 pub use non_interference_report::{
