@@ -5684,6 +5684,15 @@ mod tests {
 
     #[test]
     fn manifest_validation_rejects_each_static_row_identity_mismatch() {
+        enum Field {
+            Name,
+            Version,
+            Id,
+            Implementation,
+            Eop1,
+            Closure,
+        }
+
         let (registry, id, catalog) = manifest_validation_fixture();
         let entry = registry.plugins.get(&id).test_ok();
         let original = &catalog.as_input().rows[0];
@@ -5694,16 +5703,22 @@ mod tests {
             Err(ManifestRegistrationErrorV1::SlotMismatch)
         ));
 
-        for field in ["name", "version", "id", "implementation", "eop1", "closure"] {
+        for field in [
+            Field::Name,
+            Field::Version,
+            Field::Id,
+            Field::Implementation,
+            Field::Eop1,
+            Field::Closure,
+        ] {
             let mut row = original.clone();
             match field {
-                "name" => row.plugin_name.push('x'),
-                "version" => row.plugin_version.push('x'),
-                "id" => row.plugin_id = PluginId::new(),
-                "implementation" => row.implementation_hash = Hash::from_bytes([0x71; 32]),
-                "eop1" => row.eop1_native_digest = Hash::from_bytes([0x72; 32]),
-                "closure" => row.closure_hash = Hash::from_bytes([0x73; 32]),
-                _ => unreachable!(),
+                Field::Name => row.plugin_name.push('x'),
+                Field::Version => row.plugin_version.push('x'),
+                Field::Id => row.plugin_id = PluginId::new(),
+                Field::Implementation => row.implementation_hash = Hash::from_bytes([0x71; 32]),
+                Field::Eop1 => row.eop1_native_digest = Hash::from_bytes([0x72; 32]),
+                Field::Closure => row.closure_hash = Hash::from_bytes([0x73; 32]),
             }
             assert!(matches!(
                 PluginRegistry::validate_manifest_entry(&row, entry),
