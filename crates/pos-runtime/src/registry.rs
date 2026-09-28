@@ -1073,6 +1073,12 @@ struct RegistrationOptions {
     reducer_slot_by_plugin_id: bool,
 }
 
+struct RegistrationCallbacks<I> {
+    driver: Option<Box<dyn Driver>>,
+    approver: Option<Box<dyn ActionApprover>>,
+    approver_event_types: I,
+}
+
 const fn plugin_name(entry: &PluginEntry) -> &str {
     entry.name.as_str()
 }
@@ -3130,10 +3136,10 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            InstalledCallbacksV1 {
+            RegistrationCallbacks {
                 driver,
                 approver,
-                approver_event_types: approver_event_types.into_iter().collect(),
+                approver_event_types,
             },
             RegistrationOptions {
                 registration: Some(registration),
@@ -3216,10 +3222,10 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            InstalledCallbacksV1 {
+            RegistrationCallbacks {
                 driver,
                 approver,
-                approver_event_types: approver_event_types.into_iter().collect(),
+                approver_event_types,
             },
             RegistrationOptions {
                 registration: None,
@@ -3322,7 +3328,7 @@ impl PluginRegistry {
                     &plugin,
                     binding,
                     reducer,
-                    InstalledCallbacksV1 {
+                    RegistrationCallbacks {
                         driver,
                         approver,
                         approver_event_types,
@@ -3399,12 +3405,20 @@ impl PluginRegistry {
             return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
         }
         self.validate_installed_registration_details(plugin, &binding, &registration)?;
-        let callbacks = binding.take_callbacks();
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = binding.take_callbacks();
         self.register_with_verified_output_policy_inner(
             plugin,
             binding,
             reducer,
-            callbacks,
+            RegistrationCallbacks {
+                driver,
+                approver,
+                approver_event_types,
+            },
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: None,
@@ -3457,13 +3471,12 @@ impl PluginRegistry {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    fn register_with_verified_output_policy_inner(
+    fn register_with_verified_output_policy_inner<I: IntoIterator<Item = Kind>>(
         &mut self,
         plugin: &dyn Plugin,
         binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
-        callbacks: InstalledCallbacksV1,
+        callbacks: RegistrationCallbacks<I>,
         mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         // A prepared manifest batch admits only installed manifest-slot
@@ -3534,11 +3547,12 @@ impl PluginRegistry {
         )?;
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
         options.output_admission = Some(admission);
-        let InstalledCallbacksV1 {
+        let RegistrationCallbacks {
             driver,
             approver,
             approver_event_types,
         } = callbacks;
+        let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
             plugin,
             reducer,
