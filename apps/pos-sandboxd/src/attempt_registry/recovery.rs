@@ -280,17 +280,29 @@ fn parse_content(
     } else {
         return Err(SystemdAttemptRegistryError::InvalidIntent);
     };
-    if bytes.len() > size
-        || !temporary && bytes.len() != size
-        || bytes.len() >= 20 && bytes[4..20] != attempt_id
-    {
+    if bytes.len() > size || !temporary && bytes.len() != size {
         return Err(SystemdAttemptRegistryError::InvalidIntent);
     }
+    validate_record_prefix(bytes, attempt_id)?;
     if bytes.len() == size {
         RecoveredAttemptIntent::decode(bytes).map(Some)
     } else {
         Ok(None)
     }
+}
+
+fn validate_record_prefix(bytes: &[u8], attempt_id: [u8; 16]) -> RegistryResult<()> {
+    let available_id = bytes.get(4..).unwrap_or_default();
+    let id_length = available_id.len().min(16);
+    let root_device = bytes.get(68..).unwrap_or_default();
+    let device_length = root_device.len().min(8);
+    if available_id[..id_length] != attempt_id[..id_length]
+        || bytes.get(20..52).is_some_and(|digest| digest == [0; 32])
+        || device_length > 0 && root_device[..device_length] != bytes[52..52 + device_length]
+    {
+        return Err(SystemdAttemptRegistryError::InvalidIntent);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -409,6 +421,33 @@ mod tests {
                 assert_eq!(entry.intent().is_some(), length == bytes.len());
                 recovery.verify_unchanged()?;
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_records_reject_every_known_identity_contradiction() -> TestResult {
+        let name = format!(".planned-{KEY}-123-1");
+        for length in 5..20 {
+            let (directory, held) = fixture()?;
+            let mut bytes = planned()?;
+            bytes[length - 1] ^= 1;
+            write_record(directory.path(), &name, &bytes[..length])?;
+            assert!(SystemdAttemptRecovery::from_directory(held).is_err());
+        }
+        for length in 52..84 {
+            let (directory, held) = fixture()?;
+            let mut bytes = directory_record()?;
+            bytes[20..52].fill(0);
+            write_record(directory.path(), &name, &bytes[..length])?;
+            assert!(SystemdAttemptRecovery::from_directory(held).is_err());
+        }
+        for length in 69..84 {
+            let (directory, held) = fixture()?;
+            let mut bytes = directory_record()?;
+            bytes[length.min(76) - 1] ^= 1;
+            write_record(directory.path(), &name, &bytes[..length])?;
+            assert!(SystemdAttemptRecovery::from_directory(held).is_err());
         }
         Ok(())
     }
