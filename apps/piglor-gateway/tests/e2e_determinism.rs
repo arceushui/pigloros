@@ -1047,24 +1047,40 @@ async fn multi_rate_simulated_human_and_ai_replay_is_deterministic_impl(
     scenario.guard.shutdown().await.map_err(
         |error| -> Box<dyn std::error::Error + Send + Sync> { format!("shutdown: {error}").into() },
     )?;
-    let recovered_host = ErasureExecutionHostV1::open_verified_empty(
-        StoreConfig::Sqlite {
-            path: scenario.path.clone(),
-        },
-        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+    assert_recovered_http_events(
+        &scenario.path,
+        scenario.timeline,
+        scenario.human_body,
+        scenario.human_entity,
+        &events,
     )
-    .test_ok()?;
-    let recovered_gateway = Gateway::new_with_erasure_host_and_authorization(
-        recovered_host,
-        [scenario.human_body],
-        gateway_authorization_for(scenario.human_entity)?,
-    )?;
+    .await?;
+    Ok(())
+}
+
+async fn assert_recovered_http_events(
+    path: &str,
+    timeline: TimelineId,
+    human_body: EntityId,
+    human_entity: EntityId,
+    events: &[Event],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .test_ok()?;
     let address = listener.local_addr().test_ok()?;
     let state = AppState {
-        gateway: recovered_gateway,
+        gateway: Gateway::new_with_erasure_host_and_authorization(
+            ErasureExecutionHostV1::open_verified_empty(
+                StoreConfig::Sqlite {
+                    path: path.to_owned(),
+                },
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok()?,
+            [human_body],
+            gateway_authorization_for(human_entity)?,
+        )?,
         ledger_view: LedgerView::default(),
         ledger_write: LedgerWriteMode::Disabled,
     };
@@ -1090,10 +1106,10 @@ async fn multi_rate_simulated_human_and_ai_replay_is_deterministic_impl(
             "GET",
             &format!(
                 "/v1/timelines/{}/events?from_seq={from_seq}&limit=2",
-                scenario.timeline
+                timeline
             ),
             None,
-            Some(scenario.human_entity),
+            Some(human_entity),
         )
         .await?;
         assert_eq!(page.status, 200);

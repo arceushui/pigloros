@@ -4125,8 +4125,11 @@ impl EventStore for SqliteStore {
         expected_registry: &KeyRegistryStateV1,
     ) -> Result<Timeline, CoreError> {
         let scope = begin_immediate_scope(&self.conn)?;
-        let result =
-            self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
+        let result = self
+            .validate_erasure_inventory_data_version()
+            .and_then(|()| {
+                self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry)
+            });
         finish_immediate_scope(&self.conn, scope, result).map(|(timeline, _)| timeline)
     }
 

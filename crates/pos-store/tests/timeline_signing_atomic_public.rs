@@ -704,3 +704,18 @@ fn sqlite_destruction_winning_first_rejects_late_signing() -> Result<(), Box<dyn
     assert_eq!(unexpected_calls.get(), 0);
     Ok(())
 }
+
+#[test]
+fn sqlite_existing_ledger_initialization_requires_bound_inventory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = SqliteStore::open_in_memory()?;
+    store.create_timeline("existing-ledger")?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
+
+    assert!(matches!(
+        store.initialize_timeline_with_key_registry("existing-ledger", &KeyRegistryStateV1::new()),
+        Err(CoreError::ErasureContainmentUnavailable)
+    ));
+    assert!(store.load_key_registry()?.is_none());
+    Ok(())
+}

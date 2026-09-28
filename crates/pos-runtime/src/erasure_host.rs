@@ -6356,7 +6356,7 @@ mod tests {
     }
 
     #[test]
-    fn unaffected_fork_publication_failure_rolls_back_the_created_child() {
+    fn unaffected_fork_publication_failure_poisons_when_rollback_is_denied() {
         let directory =
             tempfile::tempdir().unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
         let path = directory
@@ -6389,8 +6389,15 @@ mod tests {
             .read_sender()
             .and_then(|mut sender| sender.timelines())
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        assert_eq!(timelines.len(), 1);
-        assert_eq!(timelines[0].id(), parent.id());
+        assert_eq!(timelines.len(), 2);
+        let recovered_child = timelines
+            .iter()
+            .find(|timeline| timeline.id() != parent.id())
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing recovered child")));
+        assert_eq!(
+            recovered_child.meta.fork_point,
+            Some((parent.id(), Seq::ZERO))
+        );
     }
 
     #[test]
