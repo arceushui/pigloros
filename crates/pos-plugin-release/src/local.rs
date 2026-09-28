@@ -61,6 +61,7 @@ enum PublicationFaultPointV1 {
     ReadMetadata,
     ReadBytes,
     NthSync(usize),
+    NthIo(usize),
 }
 
 #[cfg(test)]
@@ -69,6 +70,7 @@ thread_local! {
         std::cell::Cell::new(None)
     };
     static SYNC_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static IO_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -113,12 +115,23 @@ fn reset_sync_attempts() {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn injected_io_error<E: From<rustix::io::Errno>>() -> E {
+    rustix::io::Errno::IO.into()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn faulted_io_test<T, E>(
     selected: bool,
     error: E,
     operation: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
-    if selected {
+    let nth_selected = IO_ATTEMPTS.with(|attempts| {
+        let current = attempts.get();
+        attempts.set(current + 1);
+        fault_selected(PublicationFaultPointV1::NthIo(current))
+    });
+    if selected || nth_selected {
         Err(error)
     } else {
         operation()
@@ -126,6 +139,9 @@ fn faulted_io_test<T, E>(
 }
 
 macro_rules! faulted_io {
+    ($operation:expr_2021) => {
+        faulted_io!(false, injected_io_error(), $operation)
+    };
     ($selected:expr_2021, $error:expr_2021, $operation:expr_2021) => {{
         #[cfg(test)]
         {
@@ -151,11 +167,10 @@ macro_rules! faulted_sync {
 
 fn random_nonce_hex() -> Result<String, LocalOciPublicationErrorV1> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut source = File::open("/dev/urandom").map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    let mut source =
+        faulted_io!(File::open("/dev/urandom")).map_err(|_| LocalOciPublicationErrorV1::Io)?;
     let mut nonce = [0_u8; 16];
-    source
-        .read_exact(&mut nonce)
-        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    faulted_io!(source.read_exact(&mut nonce)).map_err(|_| LocalOciPublicationErrorV1::Io)?;
     let mut encoded = String::with_capacity(32);
     for byte in nonce {
         encoded.push(char::from(HEX[usize::from(byte >> 4)]));
@@ -259,13 +274,13 @@ impl LocalOciPublisherV1 {
         create_private_directory(&root, QUARANTINE_NAME, owner)?;
         #[cfg(test)]
         injected_fault(PublicationFaultPointV1::InitializeLock)?;
-        create_private_file(&root, LOCK_NAME, &[], owner)?;
+        create_private_file(&root, LOCK_NAME, &[])?;
         #[cfg(test)]
         injected_fault(PublicationFaultPointV1::InitializeIndex)?;
-        create_private_file(&root, INDEX_NAME, EMPTY_INDEX, owner)?;
+        create_private_file(&root, INDEX_NAME, EMPTY_INDEX)?;
         #[cfg(test)]
         injected_fault(PublicationFaultPointV1::InitializeRootSync)?;
-        fs::fsync(&root).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        faulted_sync!(None, &root, LocalOciPublicationErrorV1::Sync)?;
         Ok(Self { root, owner })
     }
 
@@ -284,12 +299,12 @@ impl LocalOciPublisherV1 {
     ) -> Result<PublishOutcomeV1, LocalOciPublicationErrorV1> {
         self.verify_root()?;
         let lock = open_private_file(&self.root, LOCK_NAME)?;
-        fs::flock(&lock, FlockOperation::LockExclusive)
+        faulted_io!(fs::flock(&lock, FlockOperation::LockExclusive))
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
         let result = self
             .recover_locked()
             .and_then(|_| self.publish_locked(bundle));
-        fs::flock(&lock, FlockOperation::Unlock)
+        faulted_io!(fs::flock(&lock, FlockOperation::Unlock))
             .map_err(|_| LocalOciPublicationErrorV1::OutcomeUnknown(bundle.address().clone()))?;
         result
     }
@@ -301,10 +316,10 @@ impl LocalOciPublisherV1 {
     pub fn recover_all(&self) -> Result<RecoveryReportV1, LocalOciPublicationErrorV1> {
         self.verify_root()?;
         let lock = open_private_file(&self.root, LOCK_NAME)?;
-        fs::flock(&lock, FlockOperation::LockExclusive)
+        faulted_io!(fs::flock(&lock, FlockOperation::LockExclusive))
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
         let result = self.recover_locked();
-        fs::flock(&lock, FlockOperation::Unlock)
+        faulted_io!(fs::flock(&lock, FlockOperation::Unlock))
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
         result
     }
@@ -320,10 +335,14 @@ impl LocalOciPublisherV1 {
     ) -> Result<RecoveryOutcomeV1, LocalOciPublicationErrorV1> {
         self.verify_root()?;
         let lock = open_private_file(&self.root, LOCK_NAME)?;
-        fs::flock(&lock, FlockOperation::LockExclusive)
+        faulted_io!(fs::flock(&lock, FlockOperation::LockExclusive))
             .map_err(|_| LocalOciPublicationErrorV1::LockUnavailable)?;
         let result = self.recover_locked().and_then(|_| {
-            fs::fsync(&self.root).map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+            faulted_sync!(
+                None,
+                &self.root,
+                LocalOciPublicationErrorV1::RecoveryRequired
+            )?;
             match self.read_locked(address) {
                 Ok(_) => Ok(RecoveryOutcomeV1::Committed(address.clone())),
                 Err(ReleaseSourceErrorV1::NotFound) => {
@@ -338,7 +357,7 @@ impl LocalOciPublisherV1 {
                 Err(_) => Err(LocalOciPublicationErrorV1::RecoveryRequired),
             }
         });
-        fs::flock(&lock, FlockOperation::Unlock)
+        faulted_io!(fs::flock(&lock, FlockOperation::Unlock))
             .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         result
     }
@@ -521,7 +540,7 @@ impl LocalOciPublisherV1 {
                 &self.root,
                 LocalOciPublicationErrorV1::RecoveryRequired
             )?;
-            fs::unlinkat(&self.root, name, AtFlags::empty())
+            faulted_io!(fs::unlinkat(&self.root, name, AtFlags::empty()))
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
             faulted_sync!(
                 None,
@@ -559,8 +578,12 @@ impl LocalOciPublisherV1 {
         let releases = open_directory(&self.root, RELEASES_NAME)?;
         let staging_nonce = random_nonce_hex()?;
         let staging_name = format!(".{}.staging.{staging_nonce}", &address.digest()[7..]);
-        fs::mkdirat(&releases, &staging_name, PRIVATE_DIRECTORY_MODE)
-            .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        faulted_io!(fs::mkdirat(
+            &releases,
+            &staging_name,
+            PRIVATE_DIRECTORY_MODE
+        ))
+        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         let staging = open_directory(&releases, &staging_name)?;
         write_private_file(
             &staging,
@@ -695,8 +718,7 @@ impl LocalOciPublisherV1 {
             })).collect::<Vec<_>>(),
             "version": 1,
         });
-        let bytes =
-            serde_json::to_vec(&value).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+        let bytes = value.to_string().into_bytes();
         let next = format!(".published.{}.next", &address.digest()[7..39]);
         write_private_file(&self.root, &next, &bytes)?;
         faulted_io!(
@@ -771,32 +793,32 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
     };
     if let Some(sha256) = &sha256 {
         for member in members {
-            fs::unlinkat(sha256, member, AtFlags::empty())
+            faulted_io!(fs::unlinkat(sha256, member, AtFlags::empty()))
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         }
         faulted_sync!(None, sha256, LocalOciPublicationErrorV1::Sync)?;
-        fs::unlinkat(
+        faulted_io!(fs::unlinkat(
             blobs
                 .as_ref()
                 .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?,
             "sha256",
             AtFlags::REMOVEDIR,
-        )
+        ))
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
     }
     if let Some(blobs) = &blobs {
         faulted_sync!(None, blobs, LocalOciPublicationErrorV1::Sync)?;
-        fs::unlinkat(&staging, "blobs", AtFlags::REMOVEDIR)
+        faulted_io!(fs::unlinkat(&staging, "blobs", AtFlags::REMOVEDIR))
             .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
     }
     for file in ["READY", "index.json", "oci-layout", "OWNER"] {
         if entries.iter().any(|entry| entry == file) {
-            fs::unlinkat(&staging, file, AtFlags::empty())
+            faulted_io!(fs::unlinkat(&staging, file, AtFlags::empty()))
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         }
     }
     faulted_sync!(None, &staging, LocalOciPublicationErrorV1::Sync)?;
-    fs::unlinkat(releases, name, AtFlags::REMOVEDIR)
+    faulted_io!(fs::unlinkat(releases, name, AtFlags::REMOVEDIR))
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
 }
 
@@ -808,9 +830,9 @@ fn directory_entries(
         rustix::io::Errno::IO,
         Dir::read_from(directory)
     )
-    .map_err(|_| LocalOciPublicationErrorV1::Io)?
-    .collect::<Result<Vec<_>, _>>()
     .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    let entries = faulted_io!(entries.collect::<Result<Vec<_>, _>>())
+        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
     let names = entries
         .into_iter()
         .map(|entry| {
@@ -833,12 +855,12 @@ impl ReleaseSourceV1 for LocalOciPublisherV1 {
             .map_err(|error| map_publication_to_source(&error))?;
         let lock = open_private_file(&self.root, LOCK_NAME)
             .map_err(|error| map_publication_to_source(&error))?;
-        fs::flock(&lock, FlockOperation::LockShared)
+        faulted_io!(fs::flock(&lock, FlockOperation::LockShared))
             .map_err(|_| ReleaseSourceErrorV1::LockUnavailable)?;
         let result = self
             .reader_recovery_floor()
             .and_then(|()| self.read_locked(address));
-        fs::flock(&lock, FlockOperation::Unlock)
+        faulted_io!(fs::flock(&lock, FlockOperation::Unlock))
             .map_err(|_| ReleaseSourceErrorV1::LockUnavailable)?;
         result
     }
@@ -996,14 +1018,16 @@ impl LocalOciPublisherV1 {
             return Err(ReleaseSourceErrorV1::BoundsExceeded);
         }
         let mut bytes = BTreeMap::new();
-        for (digest, _) in descriptors {
+        for (digest, size) in descriptors {
             let hex = digest
                 .strip_prefix("sha256:")
                 .ok_or(ReleaseSourceErrorV1::InvalidDescriptor)?;
             let blob = read_limited(
                 open_private_file(&sha256, hex)
                     .map_err(|error| map_publication_to_source(&error))?,
-                32 * 1024 * 1024,
+                usize::try_from(size)
+                    .unwrap_or(32 * 1024 * 1024)
+                    .min(32 * 1024 * 1024),
             )?;
             bytes.insert(digest, blob);
         }
@@ -1137,8 +1161,8 @@ fn create_private_directory(
     name: &str,
     owner: u32,
 ) -> Result<(), LocalOciPublicationErrorV1> {
-    match fs::mkdirat(root, name, PRIVATE_DIRECTORY_MODE) {
-        Ok(()) => fs::fsync(root).map_err(|_| LocalOciPublicationErrorV1::Sync)?,
+    match faulted_io!(fs::mkdirat(root, name, PRIVATE_DIRECTORY_MODE)) {
+        Ok(()) => faulted_sync!(None, root, LocalOciPublicationErrorV1::Sync)?,
         Err(rustix::io::Errno::EXIST) => {}
         Err(_) => return Err(LocalOciPublicationErrorV1::Io),
     }
@@ -1194,52 +1218,43 @@ fn write_private_file(
         fs::fsync(&file)
     )
     .map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-    fs::fsync(root).map_err(|_| LocalOciPublicationErrorV1::Sync)
+    faulted_sync!(None, root, LocalOciPublicationErrorV1::Sync)
 }
 
 fn create_private_file(
     root: &File,
     name: &str,
     initial: &[u8],
-    owner: u32,
 ) -> Result<(), LocalOciPublicationErrorV1> {
-    let created = match fs::openat2(
+    let created = match faulted_io!(fs::openat2(
         root,
         name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         PRIVATE_FILE_MODE,
         resolution(),
-    ) {
+    )) {
         Ok(file) => Some(File::from(file)),
         Err(rustix::io::Errno::EXIST) => None,
         Err(_) => return Err(LocalOciPublicationErrorV1::Io),
     };
     if let Some(mut file) = created {
-        file.write_all(initial)
-            .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-        fs::fsync(&file).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
-        fs::fsync(root).map_err(|_| LocalOciPublicationErrorV1::Sync)?;
+        faulted_io!(file.write_all(initial)).map_err(|_| LocalOciPublicationErrorV1::Io)?;
+        faulted_sync!(None, &file, LocalOciPublicationErrorV1::Sync)?;
+        faulted_sync!(None, root, LocalOciPublicationErrorV1::Sync)?;
     }
-    let mut file = open_private_file(root, name)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-    if !metadata.is_file()
-        || metadata.uid() != owner
-        || metadata.mode() & 0o7777 != 0o600
-        || metadata.len()
-            != u64::try_from(initial.len())
-                .map_err(|_| LocalOciPublicationErrorV1::BoundsExceeded)?
-    {
-        return Err(LocalOciPublicationErrorV1::InvalidLayout);
+    // Existing committed indexes survive process restart. Only a newly created
+    // index is initialized empty; every existing one is bounded and validated.
+    let actual = read_limited(open_private_file(root, name)?, crate::MAX_JCS_BYTES)
+        .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+    if name == INDEX_NAME {
+        parse_root_index(&actual)
+            .map(|_| ())
+            .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)
+    } else if actual == initial {
+        Ok(())
+    } else {
+        Err(LocalOciPublicationErrorV1::InvalidLayout)
     }
-    let mut actual = Vec::new();
-    file.read_to_end(&mut actual)
-        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-    if actual != initial {
-        return Err(LocalOciPublicationErrorV1::InvalidLayout);
-    }
-    Ok(())
 }
 
 fn open_directory(root: &File, name: &str) -> Result<File, LocalOciPublicationErrorV1> {
@@ -1300,9 +1315,8 @@ fn open_private_file(root: &File, name: &str) -> Result<File, LocalOciPublicatio
     )
     .map(File::from)
     .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
+    let metadata =
+        faulted_io!(file.metadata()).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
     if !metadata.is_file()
         || metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.mode() & 0o7777 != 0o600
@@ -1313,9 +1327,7 @@ fn open_private_file(root: &File, name: &str) -> Result<File, LocalOciPublicatio
 }
 
 fn validate_private_directory(file: &File, owner: u32) -> Result<(), LocalOciPublicationErrorV1> {
-    let metadata = file
-        .metadata()
-        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
+    let metadata = faulted_io!(file.metadata()).map_err(|_| LocalOciPublicationErrorV1::Io)?;
     if !metadata.is_dir() || metadata.uid() != owner || metadata.mode() & 0o7777 != 0o700 {
         return Err(LocalOciPublicationErrorV1::InvalidLayout);
     }
@@ -1339,6 +1351,107 @@ mod tests {
     use super::*;
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Clone, Copy, Debug)]
+    enum PublicIoScenario {
+        Initialize,
+        Publish,
+        Read,
+        RecoverCommitted,
+        RecoverAbsent,
+        RecoverStaging,
+        RecoverNextIndex,
+        RecoverFinal,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn with_io_fault<T>(target: usize, operation: impl FnOnce() -> T) -> (T, usize) {
+        IO_ATTEMPTS.with(|attempts| attempts.set(0));
+        PUBLICATION_FAULT.with(|fault| fault.set(Some(PublicationFaultPointV1::NthIo(target))));
+        let result = operation();
+        PUBLICATION_FAULT.with(|fault| fault.set(None));
+        let calls = IO_ATTEMPTS.with(std::cell::Cell::get);
+        (result, calls)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_io_scenario(
+        scenario: PublicIoScenario,
+        target: usize,
+    ) -> Result<(bool, usize), Box<dyn std::error::Error>> {
+        let root = private_root("public-io")?;
+        if let PublicIoScenario::Initialize = scenario {
+            let (result, calls) = with_io_fault(target, || LocalOciPublisherV1::open(&root));
+            let succeeded = result.is_ok();
+            drop(result);
+            std::fs::remove_dir_all(root)?;
+            return Ok((succeeded, calls));
+        }
+        let publisher = LocalOciPublisherV1::open(&root)?;
+        let release = bundle()?;
+        match scenario {
+            PublicIoScenario::Read | PublicIoScenario::RecoverCommitted => {
+                publisher.publish(&release)?;
+            }
+            PublicIoScenario::RecoverStaging
+            | PublicIoScenario::RecoverNextIndex
+            | PublicIoScenario::RecoverFinal => {
+                let point = match scenario {
+                    PublicIoScenario::RecoverStaging => PublicationFaultPointV1::ReadyWrite,
+                    PublicIoScenario::RecoverNextIndex => PublicationFaultPointV1::IndexRename,
+                    _ => PublicationFaultPointV1::NextIndexCreate,
+                };
+                assert!(publish_with_fault(&publisher, &release, point).is_err());
+            }
+            _ => {}
+        }
+        let (succeeded, calls) = with_io_fault(target, || match scenario {
+            PublicIoScenario::Initialize => false,
+            PublicIoScenario::Publish => publisher.publish(&release).is_ok(),
+            PublicIoScenario::Read => publisher.read_verified(release.address()).is_ok(),
+            PublicIoScenario::RecoverCommitted | PublicIoScenario::RecoverAbsent => {
+                publisher.recover(release.address()).is_ok()
+            }
+            PublicIoScenario::RecoverStaging
+            | PublicIoScenario::RecoverNextIndex
+            | PublicIoScenario::RecoverFinal => publisher.recover_all().is_ok(),
+        });
+        // An error may follow the durable commit. Any release that remains
+        // discoverable must nevertheless be the complete verified bundle.
+        if let Ok(visible) = publisher.read_verified(release.address()) {
+            assert_eq!(visible, release);
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok((succeeded, calls))
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn every_public_io_failure_keeps_partial_releases_undiscoverable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for scenario in [
+            PublicIoScenario::Initialize,
+            PublicIoScenario::Publish,
+            PublicIoScenario::Read,
+            PublicIoScenario::RecoverCommitted,
+            PublicIoScenario::RecoverAbsent,
+            PublicIoScenario::RecoverStaging,
+            PublicIoScenario::RecoverNextIndex,
+            PublicIoScenario::RecoverFinal,
+        ] {
+            let (succeeded, calls) = public_io_scenario(scenario, usize::MAX)?;
+            assert!(succeeded, "baseline {scenario:?}");
+            assert!(
+                calls > 0 && calls < 512,
+                "bounded I/O inventory {scenario:?}: {calls}"
+            );
+            for target in 0..calls {
+                let (succeeded, _) = public_io_scenario(scenario, target)?;
+                assert!(!succeeded, "ignored I/O failure {scenario:?} #{target}");
+            }
+        }
+        Ok(())
+    }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn digest(bytes: &[u8]) -> String {

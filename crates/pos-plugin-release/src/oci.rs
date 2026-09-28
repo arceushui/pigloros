@@ -11,8 +11,6 @@ const EMPTY_CONFIG_DIGEST: &str =
 const EMPTY_CONFIG_BYTES: &[u8] = b"{}";
 const MAX_MANIFEST_BYTES: usize = crate::MAX_JCS_BYTES;
 const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
-const MAX_STORED_BLOBS: usize = 359;
-const MAX_SCHEMAS: usize = 256;
 const MAX_LICENCES: usize = 32;
 const MAX_MIGRATION_FIXTURES: usize = 64;
 
@@ -203,7 +201,7 @@ pub enum ReleaseSourceErrorV1 {
 pub fn verify_oci_closure_v1(
     address: BundleAddressV1,
     manifest: Vec<u8>,
-    mut supplied_blobs: BTreeMap<String, Vec<u8>>,
+    supplied_blobs: BTreeMap<String, Vec<u8>>,
 ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
     if manifest.len() > MAX_MANIFEST_BYTES {
         return Err(ReleaseSourceErrorV1::BoundsExceeded);
@@ -254,8 +252,9 @@ pub fn verify_oci_closure_v1(
         .and_then(serde_json::Value::as_array)
         .ok_or(ReleaseSourceErrorV1::InvalidDescriptor)?;
     let members = parse_layers(layers, &mut expected)?;
-    if expected.len() + 1 > MAX_STORED_BLOBS
-        || supplied_blobs.len() != expected.len()
+    // The manifest byte limit permits at most 241 layers, below the inherited
+    // 359-object ceiling. Check the exact key set before pairing sorted maps.
+    if supplied_blobs.len() != expected.len()
         || supplied_blobs
             .keys()
             .any(|digest| !expected.contains_key(digest))
@@ -263,10 +262,7 @@ pub fn verify_oci_closure_v1(
         return Err(ReleaseSourceErrorV1::BoundsExceeded);
     }
     let mut blobs = Vec::with_capacity(expected.len());
-    for (digest, size) in expected {
-        let bytes = supplied_blobs
-            .remove(&digest)
-            .ok_or(ReleaseSourceErrorV1::NotFound)?;
+    for ((digest, size), bytes) in expected.into_iter().zip(supplied_blobs.into_values()) {
         if bytes.len() > MAX_BLOB_BYTES {
             return Err(ReleaseSourceErrorV1::BoundsExceeded);
         }
@@ -296,6 +292,7 @@ fn parse_layers(
     let mut members = Vec::with_capacity(layers.len());
     let mut roles = BTreeMap::<String, usize>::new();
     let mut seen_digests = BTreeSet::new();
+    let mut previous: Option<(u8, &str)> = None;
     for layer in layers {
         let object = layer
             .as_object()
@@ -331,7 +328,13 @@ fn parse_layers(
         if !seen_digests.insert(digest.to_owned()) {
             return Err(ReleaseSourceErrorV1::DuplicateMember);
         }
-        let (role, _) = layer_role(member, digest, media_type)?;
+        let (role, rank) = layer_role(member, digest, media_type)?;
+        if previous.is_some_and(|(previous_rank, previous_digest)| {
+            rank < previous_rank || (rank == previous_rank && digest <= previous_digest)
+        }) {
+            return Err(ReleaseSourceErrorV1::InvalidDescriptor);
+        }
+        previous = Some((rank, digest));
         *roles.entry(role.to_owned()).or_default() += 1;
         if expected.insert(digest.to_owned(), size).is_some() {
             return Err(ReleaseSourceErrorV1::DuplicateMember);
@@ -343,7 +346,7 @@ fn parse_layers(
             size,
         });
     }
-    validate_layer_order_and_counts(&members, &roles)?;
+    validate_layer_counts(&roles)?;
     Ok(members)
 }
 
@@ -401,36 +404,16 @@ fn layer_role<'a>(
     Err(ReleaseSourceErrorV1::InvalidDescriptor)
 }
 
-fn validate_layer_order_and_counts(
-    members: &[BundleMemberV1],
-    roles: &BTreeMap<String, usize>,
-) -> Result<(), ReleaseSourceErrorV1> {
+fn validate_layer_counts(roles: &BTreeMap<String, usize>) -> Result<(), ReleaseSourceErrorV1> {
     for role in ["pmf1", "component", "wit", "provenance", "sbom"] {
         if roles.get(role) != Some(&1) {
             return Err(ReleaseSourceErrorV1::InvalidDescriptor);
         }
     }
     if !(1..=MAX_LICENCES).contains(roles.get("licence").unwrap_or(&0))
-        || roles.get("schema").copied().unwrap_or(0) > MAX_SCHEMAS
         || roles.get("migration-fixture").copied().unwrap_or(0) > MAX_MIGRATION_FIXTURES
     {
         return Err(ReleaseSourceErrorV1::BoundsExceeded);
-    }
-    let ranks = members
-        .iter()
-        .map(|member| {
-            layer_role(&member.member, &member.digest, &member.media_type).map(|(_, rank)| rank)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if !ranks.windows(2).all(|pair| pair[0] <= pair[1]) {
-        return Err(ReleaseSourceErrorV1::InvalidDescriptor);
-    }
-    for window in members.windows(2) {
-        let (left, _) = layer_role(&window[0].member, &window[0].digest, &window[0].media_type)?;
-        let (right, _) = layer_role(&window[1].member, &window[1].digest, &window[1].media_type)?;
-        if left == right && left != "pmf1" && window[0].digest >= window[1].digest {
-            return Err(ReleaseSourceErrorV1::InvalidDescriptor);
-        }
     }
     Ok(())
 }

@@ -57,6 +57,107 @@ fn layer(member: &str, media_type: &str, bytes: &[u8]) -> serde_json::Value {
     })
 }
 
+fn maximum_layer_closure(
+    licence_count: usize,
+    schema_count: usize,
+    migration_count: usize,
+    pmf1_size: usize,
+) -> Result<ClosureInput, Box<dyn std::error::Error>> {
+    let mut next_byte = 0_u8;
+    let mut next_blob = |size: usize| {
+        let byte = next_byte;
+        next_byte = next_byte.checked_add(1).ok_or("fixture byte exhausted")?;
+        Ok::<_, Box<dyn std::error::Error>>(vec![byte; size])
+    };
+    let pmf1 = next_blob(pmf1_size)?;
+    let component = next_blob(2)?;
+    let wit = next_blob(2)?;
+    let provenance = next_blob(2)?;
+    let sbom = next_blob(2)?;
+    let mut schemas = (0..schema_count)
+        .map(|_| next_blob(2).map(|bytes| (digest(&bytes), bytes)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut licences = (0..licence_count)
+        .map(|_| next_blob(2).map(|bytes| (digest(&bytes), bytes)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut migrations = (0..migration_count)
+        .map(|_| next_blob(2).map(|bytes| (digest(&bytes), bytes)))
+        .collect::<Result<Vec<_>, _>>()?;
+    schemas.sort_by(|left, right| left.0.cmp(&right.0));
+    licences.sort_by(|left, right| left.0.cmp(&right.0));
+    migrations.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut layers = vec![
+        layer(
+            "pmf1",
+            "application/vnd.pigloros.plugin.manifest.v1+cbor",
+            &pmf1,
+        ),
+        layer(
+            "component",
+            "application/vnd.pigloros.plugin.component.v1+wasm",
+            &component,
+        ),
+        layer("wit", "application/vnd.pigloros.plugin.wit.v1+tar", &wit),
+    ];
+    for (digest, bytes) in &schemas {
+        layers.push(layer(
+            &format!("schema/{}", &digest[7..]),
+            "application/vnd.pigloros.plugin.schema.v1+json",
+            bytes,
+        ));
+    }
+    layers.push(layer(
+        "provenance",
+        "application/vnd.in-toto+json",
+        &provenance,
+    ));
+    layers.push(layer("sbom", "application/spdx+json", &sbom));
+    for (digest, bytes) in &licences {
+        layers.push(layer(
+            &format!("licence/{}", &digest[7..]),
+            "text/plain; charset=utf-8",
+            bytes,
+        ));
+    }
+    for (digest, bytes) in &migrations {
+        layers.push(layer(
+            &format!("migration-fixture/{}", &digest[7..]),
+            "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
+            bytes,
+        ));
+    }
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "artifactType": "application/vnd.pigloros.plugin.release.v1",
+        "config": {
+            "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "mediaType": "application/vnd.oci.empty.v1+json",
+            "size": 2,
+        },
+        "layers": layers,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "schemaVersion": 2,
+    }))?;
+    // Oversized fixtures use a bounded address so the verifier's independent
+    // input-byte bound is exercised before descriptor matching.
+    let address = BundleAddressV1::new(
+        digest(&manifest),
+        u64::try_from(manifest.len().min(64 * 1024))?,
+    )?;
+    let mut blobs = BTreeMap::new();
+    for bytes in [pmf1, component, wit, provenance, sbom] {
+        blobs.insert(digest(&bytes), bytes);
+    }
+    for (_, bytes) in schemas.into_iter().chain(licences).chain(migrations) {
+        blobs.insert(digest(&bytes), bytes);
+    }
+    blobs.insert(
+        "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a".to_owned(),
+        b"{}".to_vec(),
+    );
+    Ok((address, manifest, blobs))
+}
+
 fn bundle() -> Result<VerifiedReleaseBundleV1, Box<dyn std::error::Error>> {
     bundle_with_component(b"component")
 }
@@ -646,6 +747,95 @@ fn recovery_enforces_bounded_inventory_before_adopting_any_final(
     assert_eq!(
         publisher.recover_all(),
         Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    Ok(())
+}
+
+#[test]
+fn enforces_reachable_layer_and_manifest_byte_limits() -> Result<(), Box<dyn std::error::Error>> {
+    // The accepted 241-layer profile is five required non-licence roles,
+    // 27 licences, 204 schemas, and five migration fixtures. The root
+    // descriptor binds PMF1; this transport fixture intentionally has no
+    // PMF1-internal descriptor list to self-reference that layer.
+    let (address, manifest, blobs) = maximum_layer_closure(27, 204, 5, 2)?;
+    assert_eq!(manifest.len(), 65_535);
+    let verified = verify_oci_closure_v1(address, manifest, blobs)?;
+    assert_eq!(verified.members().len(), 241);
+    assert_eq!(verified.blobs().len() + 1, 243);
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    publisher.publish(&verified)?;
+    drop(publisher);
+    let reopened = LocalOciPublisherV1::open(&root.0)?;
+    assert_eq!(reopened.read_verified(verified.address())?, verified);
+    assert_eq!(
+        reopened.recover(verified.address())?,
+        RecoveryOutcomeV1::Committed(verified.address().clone())
+    );
+
+    let (address, manifest, blobs) = maximum_layer_closure(27, 204, 5, 10)?;
+    assert_eq!(manifest.len(), 65_536);
+    let verified = verify_oci_closure_v1(address, manifest, blobs)?;
+    assert_eq!(verified.members().len(), 241);
+    assert_eq!(verified.blobs().len() + 1, 243);
+
+    let (address, manifest, blobs) = maximum_layer_closure(27, 204, 5, 100)?;
+    assert_eq!(manifest.len(), 65_537);
+    assert_eq!(
+        verify_oci_closure_v1(address, manifest, blobs),
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
+    );
+
+    let (address, manifest, blobs) = maximum_layer_closure(32, 205, 0, 2)?;
+    assert_eq!(manifest.len(), 65_599);
+    assert_eq!(
+        verify_oci_closure_v1(address, manifest, blobs),
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_noncanonical_and_deeply_nested_json_at_public_verifier(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for manifest in [
+        b"{\"b\":0,\"a\":0}".to_vec(),
+        b"[".to_vec(),
+        b"[0".to_vec(),
+        b"{\"a\":false".to_vec(),
+        b"{\"a\":}".to_vec(),
+        b"{\"a\": [0,]}".to_vec(),
+        format!("{}0{}", "[".repeat(129), "]".repeat(129)).into_bytes(),
+    ] {
+        let address = BundleAddressV1::new(digest(&manifest), u64::try_from(manifest.len())?)?;
+        assert_eq!(
+            verify_oci_closure_v1(address, manifest, BTreeMap::new()),
+            Err(ReleaseSourceErrorV1::InvalidDescriptor)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn reader_bounds_actual_blob_bytes_by_the_declared_size() -> Result<(), Box<dyn std::error::Error>>
+{
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let release = bundle()?;
+    publisher.publish(&release)?;
+    let member = &release.blobs()[0];
+    let path = root
+        .0
+        .join("releases")
+        .join(&release.address().digest()[7..])
+        .join("blobs/sha256")
+        .join(&member.digest()[7..]);
+    let mut enlarged = member.bytes().to_vec();
+    enlarged.push(0);
+    fs::write(path, enlarged)?;
+    assert_eq!(
+        publisher.read_verified(release.address()),
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
     );
     Ok(())
 }
