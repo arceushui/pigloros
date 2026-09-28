@@ -1,7 +1,7 @@
 use ciborium::value::Value;
 use pos_core::{
     fork_authentication::{
-        AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
+        principal_digest_v1, AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
         ForkAuthenticationAdapterPolicyV1, ForkAuthenticationCodecErrorV1,
         ForkAuthenticationPolicyV1, LocalAccountBindingV1, LocalAccountRegistryV1,
         MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1, MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1,
@@ -67,6 +67,131 @@ fn fields(value: &mut Value) -> std::io::Result<&mut Vec<Value>> {
     value
         .as_array_mut()
         .ok_or_else(|| std::io::Error::other("fixture must be a CBOR array"))
+}
+
+#[test]
+fn public_codecs_round_trip_commitments_and_registry_lookups(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let policy = policy()?;
+    let policy_bytes = policy.to_canonical_cbor()?;
+    assert_eq!(
+        ForkAuthenticationPolicyV1::from_canonical_cbor(&policy_bytes)?,
+        policy
+    );
+    assert_eq!(policy.adapter("local"), Some(&adapter()));
+    assert_eq!(policy.adapters(), [adapter()]);
+    assert_ne!(policy.digest()?, Hash::zero());
+    assert_ne!(principal_digest_v1(&principal(1)?)?, Hash::zero());
+
+    let registry = registry()?;
+    let registry_bytes = registry.to_canonical_cbor()?;
+    assert_eq!(
+        LocalAccountRegistryV1::from_canonical_cbor(&registry_bytes, 1000)?,
+        registry
+    );
+    assert_eq!(
+        registry.lookup_uid(1001).map(|binding| binding.owner),
+        Some(OwnerIdV1::from_static("alice"))
+    );
+    assert_eq!(
+        registry.lookup_principal(&principal(1)?),
+        Some(OwnerIdV1::from_static("alice"))
+    );
+    assert_eq!(registry.adapter_id(), "local");
+    assert_eq!(registry.assurance(), 2);
+    assert_eq!(registry.bindings().len(), 1);
+    assert_ne!(registry.digest()?, Hash::zero());
+
+    let record = record()?;
+    let record_bytes = record.to_canonical_cbor()?;
+    assert_eq!(
+        AuthenticatedPrincipalRecordV1::from_canonical_cbor(&record_bytes)?,
+        record
+    );
+    let evidence = AuthenticatedPrincipalEvidenceV1::new(record, [9; 64])?;
+    let evidence_bytes = evidence.to_canonical_cbor()?;
+    assert_eq!(
+        AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&evidence_bytes)?,
+        evidence
+    );
+    assert_eq!(evidence.signature(), &[9; 64]);
+    assert_ne!(evidence.digest()?, Hash::zero());
+    Ok(())
+}
+
+#[test]
+fn public_constructors_reject_each_semantic_bound() -> Result<(), Box<dyn std::error::Error>> {
+    let mut empty_adapter_id = adapter();
+    empty_adapter_id.adapter_id.clear();
+    let mut zero_key = adapter();
+    zero_key.verifying_key = [0; 32];
+    let mut zero_assurance = adapter();
+    zero_assurance.minimum_assurance = 0;
+    let mut no_bindings = adapter();
+    no_bindings.registry_bindings.clear();
+    let mut zero_binding = adapter();
+    zero_binding.registry_bindings = vec![Hash::zero()];
+    for invalid in [
+        empty_adapter_id,
+        zero_key,
+        zero_assurance,
+        no_bindings,
+        zero_binding,
+    ] {
+        assert_eq!(
+            ForkAuthenticationPolicyV1::new(vec![invalid]),
+            Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+
+    for uid in [0, 65_534, 1000, u32::MAX] {
+        assert_eq!(
+            LocalAccountRegistryV1::new(
+                "local".to_owned(),
+                2,
+                vec![LocalAccountBindingV1 {
+                    uid,
+                    principal: principal(1)?,
+                    owner: OwnerIdV1::from_static("alice"),
+                }],
+                1000,
+            ),
+            Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+    assert_eq!(
+        LocalAccountRegistryV1::new("local".to_owned(), 0, vec![], 1000),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+
+    for invalid in [
+        AuthenticatedPrincipalRecordV1 {
+            adapter_id: String::new(),
+            ..record()?
+        },
+        AuthenticatedPrincipalRecordV1 {
+            assurance: 0,
+            ..record()?
+        },
+        AuthenticatedPrincipalRecordV1 {
+            expires_at: 100,
+            ..record()?
+        },
+        AuthenticatedPrincipalRecordV1 {
+            registry_binding: Hash::zero(),
+            ..record()?
+        },
+        AuthenticatedPrincipalRecordV1 {
+            operation_nonce: [0; 32],
+            ..record()?
+        },
+    ] {
+        assert_eq!(
+            AuthenticatedPrincipalEvidenceV1::new(invalid, [9; 64]),
+            Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+    Ok(())
 }
 
 #[test]
