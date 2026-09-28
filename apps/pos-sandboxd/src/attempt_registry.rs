@@ -423,6 +423,28 @@ mod tests {
         (result, IO_FAULT.with(|state| state.get().0))
     }
 
+    // A concurrent test's fork can retain an O_CLOEXEC flock descriptor until
+    // exec. Run lock-release assertions alone in a fresh process, opening their
+    // fixtures only after exec; do not accept lock contention as reconciliation.
+    pub(super) fn in_lock_test_process(name: &str) -> TestResult<bool> {
+        const CHILD: &str = "PIGLOROS_REGISTRY_LOCK_TEST";
+        if std::env::var(CHILD).as_deref() == Ok(name) {
+            return Ok(true);
+        }
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", name, "--test-threads=1"])
+            .env(CHILD, name)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "isolated lock test {name} failed: {:?}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(false)
+    }
+
     fn fixture() -> TestResult<(tempfile::TempDir, File, u32)> {
         let directory = tempfile::tempdir()?;
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
@@ -593,6 +615,9 @@ mod tests {
 
     #[test]
     fn every_commit_io_failure_closes_owner_and_retains_recovery_records() -> TestResult {
+        if !in_lock_test_process("attempt_registry::tests::every_commit_io_failure_closes_owner_and_retains_recovery_records")? {
+            return Ok(());
+        }
         let intent = PlannedAttemptIntent::new([1; 16], [2; 32])?;
         let operation_count = {
             let (_directory, parent, owner) = fixture()?;
@@ -646,10 +671,14 @@ mod tests {
                 entries.len()
             );
             if !entries.is_empty() {
-                assert!(matches!(
-                    SystemdAttemptRegistry::from_runtime_directory(&parent, owner),
-                    Err(SystemdAttemptRegistryError::ReconciliationRequired)
-                ));
+                let reopened = SystemdAttemptRegistry::from_runtime_directory(&parent, owner);
+                assert!(
+                    matches!(
+                        reopened,
+                        Err(SystemdAttemptRegistryError::ReconciliationRequired)
+                    ),
+                    "reopen after injected I/O failure {fail_at}: {reopened:?}"
+                );
             }
         }
         assert!(observed_temporary);
@@ -694,6 +723,11 @@ mod tests {
 
     #[test]
     fn owner_lock_survives_until_all_committed_handles_drop() -> TestResult {
+        if !in_lock_test_process(
+            "attempt_registry::tests::owner_lock_survives_until_all_committed_handles_drop",
+        )? {
+            return Ok(());
+        }
         let (_directory, parent, owner) = fixture()?;
         let registry = SystemdAttemptRegistry::from_runtime_directory(&parent, owner)?;
         assert!(SystemdAttemptRegistry::from_runtime_directory(&parent, owner).is_err());
