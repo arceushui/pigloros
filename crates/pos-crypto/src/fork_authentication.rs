@@ -142,7 +142,7 @@ impl ForkAuthenticationAdapterSigningKeyV1 {
             .to_canonical_cbor()
             .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)?;
         let signature = sign_preimage(&self.signing_key, ADAPTER_DOMAIN, &record_bytes);
-        AuthenticatedPrincipalEvidenceV1::new(record, signature)
+        AuthenticatedPrincipalEvidenceV1::new(record, *signature.as_bytes())
             .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidRecord)
     }
 }
