@@ -925,6 +925,10 @@ fn gateway_action_registry_builder(
 pub mod gateway_test_fixtures {
     use super::*;
 
+    /// Build a nonproduction Gateway registry without an installed profile or pin.
+    ///
+    /// # Errors
+    /// Returns an error when canonical body validation or fixture registration fails.
     pub fn action_registry_builder(
         bodies: impl IntoIterator<Item = EntityId>,
         authority: Option<ConsentAuthority>,
@@ -957,6 +961,10 @@ pub mod gateway_test_fixtures {
         Ok(registry)
     }
 
+    /// Build a nonproduction Gateway around a verified erasure host.
+    ///
+    /// # Errors
+    /// Returns an error when the store, fixture registry, or Gateway cannot be built.
     pub fn gateway_with_erasure_host_and_authorization(
         host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
