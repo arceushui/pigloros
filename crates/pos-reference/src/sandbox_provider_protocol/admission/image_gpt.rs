@@ -33,7 +33,7 @@ pub(super) fn verify(
     image: &SignedImageManifest,
 ) -> Result<(), SandboxAdmissionError> {
     let mut probe = [0_u8; 8192];
-    file.read_exact_at(&mut probe, 0).map_err(io_error)?;
+    read_at(file, &mut probe, 0)?;
     let mut sectors = [512_usize, 1024, 2048, 4096]
         .into_iter()
         .filter(|offset| &probe[*offset..*offset + 8] == GPT_SIGNATURE);
@@ -108,8 +108,7 @@ fn read_header(
         (last_lba, 1)
     };
     let mut bytes = vec![0_u8; sector];
-    file.read_exact_at(&mut bytes, current * sector as u64)
-        .map_err(io_error)?;
+    read_at(file, &mut bytes, current * sector as u64)?;
     let size = u64::from(le32(&bytes, 12));
     if &bytes[..8] != GPT_SIGNATURE
         || le32(&bytes, 8) != 0x0001_0000
@@ -259,8 +258,7 @@ fn read_range(
         let count = usize::try_from(remaining)
             .unwrap_or(buffer.len())
             .min(buffer.len());
-        file.read_exact_at(&mut buffer[..count], offset)
-            .map_err(io_error)?;
+        read_at(file, &mut buffer[..count], offset)?;
         consume(&buffer[..count])?;
         remaining -= count as u64;
         offset += count as u64;
@@ -286,4 +284,70 @@ fn guid(bytes: &[u8]) -> [u8; 16] {
 
 fn io_error(_: std::io::Error) -> SandboxAdmissionError {
     INVALID
+}
+
+fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> Result<(), SandboxAdmissionError> {
+    #[cfg(test)]
+    if fault::take(file, offset) {
+        return Err(INVALID);
+    }
+    file.read_exact_at(bytes, offset).map_err(io_error)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) mod fault {
+    //! Inject one read failure for an exact held inode and offset. Other
+    //! concurrent selector tests and all production builds are unaffected.
+
+    use std::fs::File;
+    use std::io;
+    use std::os::unix::fs::MetadataExt as _;
+    use std::sync::Mutex;
+
+    static FAULTS: Mutex<Vec<(u64, u64, u64)>> = Mutex::new(Vec::new());
+
+    pub(crate) struct ImageReadFault((u64, u64, u64));
+
+    impl ImageReadFault {
+        pub(crate) fn new(file: &File, offset: u64) -> io::Result<Self> {
+            let metadata = file.metadata()?;
+            let key = (metadata.dev(), metadata.ino(), offset);
+            FAULTS
+                .lock()
+                .map_err(|_| io::Error::other("image read fault registry poisoned"))?
+                .push(key);
+            Ok(Self(key))
+        }
+
+        pub(crate) fn was_triggered(&self) -> io::Result<bool> {
+            FAULTS
+                .lock()
+                .map(|faults| !faults.contains(&self.0))
+                .map_err(|_| io::Error::other("image read fault registry poisoned"))
+        }
+    }
+
+    impl Drop for ImageReadFault {
+        fn drop(&mut self) {
+            if let Ok(mut faults) = FAULTS.lock() {
+                faults.retain(|key| key != &self.0);
+            }
+        }
+    }
+
+    pub(super) fn take(file: &File, offset: u64) -> bool {
+        let Ok(metadata) = file.metadata() else {
+            return false;
+        };
+        let Ok(mut faults) = FAULTS.lock() else {
+            return false;
+        };
+        let key = (metadata.dev(), metadata.ino(), offset);
+        let Some(index) = faults.iter().position(|fault| *fault == key) else {
+            return false;
+        };
+        faults.remove(index);
+        true
+    }
 }

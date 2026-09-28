@@ -2446,6 +2446,45 @@ mod tests {
         }
 
         #[test]
+        fn selector_rejects_read_failure_at_each_gpt_admission_stage() -> TestResult {
+            let image = gpt_fixture("512-128")?;
+            let backup = u64::try_from(image.len())? - 512;
+            let partitions = gpt_partitions("512-128", &image)?;
+            for offset in [
+                0,
+                512,
+                backup,
+                1024,
+                backup - 16384,
+                partitions[0].start_bytes,
+                partitions[1].start_bytes,
+                partitions[2].start_bytes,
+            ] {
+                let state = admitted_state_with_image(&image, b"adapter")?;
+                let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
+                let file = admitted
+                    .bootstrap()
+                    .installed()
+                    .artifact(
+                        InstallationObjectKind::ROOT_IMAGE,
+                        *blake3::hash(&image).as_bytes(),
+                    )?
+                    .file();
+                let fault = crate::sandbox_provider_protocol::ImageReadFault::new(file, offset)?;
+                let service = service(admitted)?;
+                assert_service_error(
+                    &service,
+                    &request,
+                    resolved.attempt(),
+                    SandboxLocalErrorCode::PolicyUnavailable,
+                )?;
+                assert!(fault.was_triggered()?);
+                assert!(service.transport.0.borrow().is_some());
+            }
+            Ok(())
+        }
+
+        #[test]
         fn selector_binds_each_partition_digest_even_when_whole_image_matches() -> TestResult {
             let image = gpt_fixture("512-128")?;
             for ordinal in 0..3 {
