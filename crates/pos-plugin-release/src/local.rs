@@ -770,12 +770,22 @@ fn read_ready_release(
     Ok(address)
 }
 
+fn staging_blob_members(sha256: &File) -> Result<Vec<String>, LocalOciPublicationErrorV1> {
+    let names = bounded_directory_entries(sha256, 359)?;
+    for member in &names {
+        if !lowercase_hex(member, 64) {
+            return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+        }
+        open_private_file(sha256, member)?;
+    }
+    Ok(names)
+}
+
 fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPublicationErrorV1> {
     let staging = open_directory(releases, name)?;
     let mut entries = bounded_directory_entries(&staging, 5)?;
     entries.sort();
     if !entries.iter().any(|entry| entry == "OWNER")
-        || entries.len() > 5
         || entries.iter().any(|entry| {
             !["OWNER", "READY", "oci-layout", "index.json", "blobs"].contains(&entry.as_str())
         })
@@ -794,7 +804,7 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
     };
     let sha256 = if let Some(blobs) = &blobs {
         let children = bounded_directory_entries(blobs, 1)?;
-        if children.len() > 1 || children.iter().any(|name| name != "sha256") {
+        if children.iter().any(|name| name != "sha256") {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
         if children.is_empty() {
@@ -806,14 +816,7 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
         None
     };
     let members = if let Some(sha256) = &sha256 {
-        let names = bounded_directory_entries(sha256, 359)?;
-        for member in &names {
-            if !lowercase_hex(member, 64) {
-                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-            }
-            open_private_file(sha256, member)?;
-        }
-        names
+        staging_blob_members(sha256)?
     } else {
         Vec::new()
     };
