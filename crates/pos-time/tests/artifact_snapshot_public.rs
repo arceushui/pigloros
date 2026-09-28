@@ -244,12 +244,14 @@ fn snapshot_verification_rejects_old_or_missing_host_generation() {
             )
             .test_ok();
         let mut capture_registry = registry(&gate);
-        let captured = snapshot(&mut reads, timeline.id(), &mut capture_registry, &capture_closure)
-            .test_ok();
-        assert_eq!(
-            captured.inventory_generation,
-            capture_generation.digest()
-        );
+        let captured = snapshot(
+            &mut reads,
+            timeline.id(),
+            &mut capture_registry,
+            &capture_closure,
+        )
+        .test_ok();
+        assert_eq!(captured.inventory_generation, capture_generation.digest());
         let encoded = serde_json::to_value(&captured).test_ok();
         let mut missing_generation = encoded.clone();
         let removed_generation = missing_generation
