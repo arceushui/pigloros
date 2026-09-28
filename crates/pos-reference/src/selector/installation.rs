@@ -809,6 +809,8 @@ pub mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
 
+    use crate::sandbox_provider_protocol::{PartitionDescriptor, PartitionRole};
+
     use crate::evaluator_protocol::{
         EvaluationRequest, RequiredProviderCapability, SandboxRequirement, SubjectAdapterKind,
     };
@@ -1279,33 +1281,19 @@ pub mod tests {
         authority: &ProviderAuthority,
         root_image: &[u8],
         executable: &[u8],
+        descriptors: &[PartitionDescriptor; 3],
     ) -> TestResult<Vec<u8>> {
-        const PARTITION_TYPES: [[u8; 16]; 3] = [
-            [
-                0x4f, 0x68, 0xbc, 0xe3, 0xe8, 0xcd, 0x4d, 0xb1, 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84,
-                0xb7, 0x09,
-            ],
-            [
-                0x2c, 0x73, 0x57, 0xed, 0xeb, 0xd2, 0x46, 0xd9, 0xae, 0xc1, 0x23, 0xd4, 0x37, 0xec,
-                0x2b, 0xf5,
-            ],
-            [
-                0x41, 0x09, 0x2b, 0x05, 0x9f, 0xc8, 0x45, 0x23, 0x99, 0x4f, 0x2d, 0xef, 0x04, 0x08,
-                0xb1, 0x76,
-            ],
-        ];
-        let partitions = PARTITION_TYPES
-            .into_iter()
+        let partitions = descriptors
+            .iter()
             .enumerate()
-            .map(|(index, partition_type)| {
-                let ordinal = u8::try_from(index + 1)?;
+            .map(|(index, partition)| {
                 Ok(Value::Array(vec![
                     integer(u64::try_from(index)?),
-                    Value::Bytes(partition_type.to_vec()),
-                    Value::Bytes(vec![ordinal; 16]),
-                    integer(u64::try_from(index)?),
-                    integer(1),
-                    digest([ordinal; 32]),
+                    Value::Bytes(partition.partition_type_uuid.to_vec()),
+                    Value::Bytes(partition.partition_instance_uuid.to_vec()),
+                    integer(partition.start_bytes),
+                    integer(partition.length_bytes),
+                    digest(partition.content_blake3_digest),
                 ]))
             })
             .collect::<TestResult<Vec<_>>>()?;
@@ -1379,13 +1367,82 @@ pub mod tests {
         ]))
     }
 
+    fn gpt_vector(name: &str) -> TestResult<(&'static [u8], &'static [u8])> {
+        macro_rules! vector {
+            ($name:literal) => {
+                (
+                    include_bytes!(concat!("../../tests/vectors/gpt-v1/", $name, ".img.gz"))
+                        .as_slice(),
+                    include_bytes!(concat!("../../tests/vectors/gpt-v1/", $name, ".json"))
+                        .as_slice(),
+                )
+            };
+        }
+        Ok(match name {
+            "512-128" => vector!("512-128"),
+            "1024-128" => vector!("1024-128"),
+            "2048-128" => vector!("2048-128"),
+            "4096-128" => vector!("4096-128"),
+            "512-256" => vector!("512-256"),
+            "512-131072" => vector!("512-131072"),
+            _ => return Err("unknown GPT fixture".into()),
+        })
+    }
+
+    pub(crate) fn gpt_fixture(name: &str) -> TestResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        flate2::read::GzDecoder::new(gpt_vector(name)?.0).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn gpt_partitions(name: &str, image: &[u8]) -> TestResult<[PartitionDescriptor; 3]> {
+        let declared: [([u8; 16], [u8; 16], u64, u64); 3] =
+            serde_json::from_slice(gpt_vector(name)?.1)?;
+        let mut partitions = Vec::new();
+        for (role, (partition_type_uuid, partition_instance_uuid, start_bytes, length_bytes)) in [
+            PartitionRole::RootData,
+            PartitionRole::RootVerity,
+            PartitionRole::RootVeritySignature,
+        ]
+        .into_iter()
+        .zip(declared)
+        {
+            let start = usize::try_from(start_bytes)?;
+            let end = usize::try_from(start_bytes + length_bytes)?;
+            let bytes = image.get(start..end).ok_or("fixture extent missing")?;
+            partitions.push(PartitionDescriptor {
+                role,
+                partition_type_uuid,
+                partition_instance_uuid,
+                start_bytes,
+                length_bytes,
+                content_blake3_digest: *blake3::hash(bytes).as_bytes(),
+            });
+        }
+        partitions
+            .try_into()
+            .map_err(|_| "fixture partition count".into())
+    }
+
     pub(crate) fn admitted_state() -> TestResult<InstalledSelectorState> {
-        admitted_state_with_image(b"root-image", b"adapter")
+        admitted_state_with_image(&gpt_fixture("512-128")?, b"adapter")
     }
 
     pub(crate) fn admitted_state_with_image(
         root_image: &[u8],
         executable: &[u8],
+    ) -> TestResult<InstalledSelectorState> {
+        admitted_state_with_partitions(
+            root_image,
+            executable,
+            &gpt_partitions("512-128", root_image)?,
+        )
+    }
+
+    pub(crate) fn admitted_state_with_partitions(
+        root_image: &[u8],
+        executable: &[u8],
+        partitions: &[PartitionDescriptor; 3],
     ) -> TestResult<InstalledSelectorState> {
         let authority = provider_authority();
         let trust = provider_trust(&authority)?;
@@ -1413,7 +1470,7 @@ pub mod tests {
             host_digest,
         )?;
         let report_digest = signed_record_digest(&report)?;
-        let image = image_manifest(&authority, root_image, executable)?;
+        let image = image_manifest(&authority, root_image, executable, partitions)?;
         let image_digest = signed_record_digest(&image)?;
         let launch = launch_policy(image_digest)?;
         let launch_digest = signed_record_digest(&launch)?;
@@ -1568,12 +1625,13 @@ pub mod tests {
     // Impossible-state I/O injection for the public selector service tests.
     pub(crate) fn replace_image_file(
         state: &mut InstalledSelectorState,
+        kind: InstallationObjectKind,
         identity: [u8; 32],
         file: File,
     ) -> TestResult {
         state
             .artifacts
-            .get_mut(&(InstallationObjectKind::ROOT_IMAGE, identity))
+            .get_mut(&(kind, identity))
             .ok_or("root image missing")?
             .file = file;
         Ok(())

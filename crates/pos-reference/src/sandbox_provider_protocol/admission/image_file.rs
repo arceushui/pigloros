@@ -16,6 +16,7 @@ impl AdmittedSandboxProvider {
         executable_length: u64,
     ) -> Result<AdmittedSandboxImage, SandboxAdmissionError> {
         self.admit_image_by(manifest_bytes, |image| {
+            super::image_gpt::verify(root_image, image)?;
             verify_file(
                 root_image,
                 image.root_image_length,

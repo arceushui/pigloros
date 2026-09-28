@@ -2090,8 +2090,8 @@ mod tests {
 
         use super::*;
         use crate::selector::installation::tests::{
-            admitted_state_with_image, remove_artifact, replace_image_file,
-            root_selector_fixture_from_state,
+            admitted_state_with_image, admitted_state_with_partitions, gpt_fixture, gpt_partitions,
+            remove_artifact, replace_image_file, root_selector_fixture_from_state,
         };
 
         fn service(
@@ -2111,7 +2111,7 @@ mod tests {
 
         #[test]
         fn selector_streams_multichunk_image_files_without_moving_shared_cursors() -> TestResult {
-            let image = vec![0x5a; 2 * 64 * 1024 + 17];
+            let image = gpt_fixture("512-128")?;
             let executable = vec![0xa5; 64 * 1024 + 31];
             let state = admitted_state_with_image(&image, &executable)?;
             let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
@@ -2152,7 +2152,7 @@ mod tests {
                 InstallationObjectKind::SUBJECT_EXECUTABLE,
             ] {
                 for mutation in ["changed", "truncated", "extended"] {
-                    let image = vec![0x5a; 64 * 1024 + 17];
+                    let image = gpt_fixture("512-128")?;
                     let executable = vec![0xa5; 64 * 1024 + 31];
                     let state = admitted_state_with_image(&image, &executable)?;
                     let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
@@ -2170,7 +2170,14 @@ mod tests {
                     // Test files are writable only to inject corruption after SIC1
                     // admission; production installation files remain immutable.
                     match mutation {
-                        "changed" => file.write_all_at(&[0xff], length - 1)?,
+                        "changed" => {
+                            let offset = if kind == InstallationObjectKind::ROOT_IMAGE {
+                                0
+                            } else {
+                                length - 1
+                            };
+                            file.write_all_at(&[0xff], offset)?;
+                        }
                         "truncated" => file.set_len(length - 1)?,
                         "extended" => file.write_all_at(&[0xff], length)?,
                         _ => return Err("unknown mutation".into()),
@@ -2190,7 +2197,7 @@ mod tests {
 
         #[test]
         fn selector_rejects_missing_held_image_files_before_provider_entry() -> TestResult {
-            let image = b"root-image";
+            let image = gpt_fixture("512-128")?;
             let executable = b"adapter";
             for (kind, bytes) in [
                 (InstallationObjectKind::ROOT_IMAGE, image.as_slice()),
@@ -2199,7 +2206,7 @@ mod tests {
                     executable.as_slice(),
                 ),
             ] {
-                let mut state = admitted_state_with_image(image, executable)?;
+                let mut state = admitted_state_with_image(&image, executable)?;
                 // SIC1 normally retains these files for the installation lifetime.
                 // Inject lost retention to exercise the service's fail-closed path.
                 remove_artifact(&mut state, kind, *blake3::hash(bytes).as_bytes());
@@ -2218,21 +2225,273 @@ mod tests {
 
         #[test]
         fn selector_rejects_unreadable_held_image_before_provider_entry() -> TestResult {
-            let image = b"root-image";
-            let mut state = admitted_state_with_image(image, b"adapter")?;
-            let mut file = tempfile::NamedTempFile::new()?;
-            file.write_all(image)?;
-            let unreadable = File::options().write(true).open(file.path())?;
-            replace_image_file(&mut state, *blake3::hash(image).as_bytes(), unreadable)?;
+            for kind in [
+                InstallationObjectKind::ROOT_IMAGE,
+                InstallationObjectKind::SUBJECT_EXECUTABLE,
+            ] {
+                let image = gpt_fixture("512-128")?;
+                let mut state = admitted_state_with_image(&image, b"adapter")?;
+                let bytes = if kind == InstallationObjectKind::ROOT_IMAGE {
+                    image.as_slice()
+                } else {
+                    b"adapter"
+                };
+                let mut file = tempfile::NamedTempFile::new()?;
+                file.write_all(bytes)?;
+                let unreadable = File::options().write(true).open(file.path())?;
+                replace_image_file(
+                    &mut state,
+                    kind,
+                    *blake3::hash(bytes).as_bytes(),
+                    unreadable,
+                )?;
+                let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
+                let service = service(admitted)?;
+                assert_service_error(
+                    &service,
+                    &request,
+                    resolved.attempt(),
+                    SandboxLocalErrorCode::PolicyUnavailable,
+                )?;
+                assert!(service.transport.0.borrow().is_some());
+            }
+            Ok(())
+        }
+
+        fn assert_gpt_admission(
+            image: &[u8],
+            partitions: &[crate::sandbox_provider_protocol::PartitionDescriptor; 3],
+            accepted: bool,
+        ) -> TestResult {
+            let state = admitted_state_with_partitions(image, b"adapter", partitions)?;
             let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
             let service = service(admitted)?;
-            assert_service_error(
-                &service,
-                &request,
-                resolved.attempt(),
-                SandboxLocalErrorCode::PolicyUnavailable,
-            )?;
-            assert!(service.transport.0.borrow().is_some());
+            let expected = if accepted {
+                SandboxLocalErrorCode::ProviderUnavailable
+            } else {
+                SandboxLocalErrorCode::PolicyUnavailable
+            };
+            assert_service_error(&service, &request, resolved.attempt(), expected)?;
+            assert_eq!(service.transport.0.borrow().is_none(), accepted);
+            Ok(())
+        }
+
+        fn refresh_header_crc(image: &mut [u8], offset: usize, sector: usize) -> TestResult {
+            let size = usize::try_from(u32::from_le_bytes(
+                image[offset + 12..offset + 16].try_into()?,
+            ))?
+            .min(sector);
+            image[offset + 16..offset + 20].fill(0);
+            let mut crc = flate2::Crc::new();
+            crc.update(&image[offset..offset + size]);
+            image[offset + 16..offset + 20].copy_from_slice(&crc.sum().to_le_bytes());
+            Ok(())
+        }
+
+        fn refresh_table_crc(image: &mut [u8], header: usize, sector: usize) -> TestResult {
+            let entries = usize::try_from(u64::from_le_bytes(
+                image[header + 72..header + 80].try_into()?,
+            ))? * sector;
+            let count = usize::try_from(u32::from_le_bytes(
+                image[header + 80..header + 84].try_into()?,
+            ))?;
+            let size = usize::try_from(u32::from_le_bytes(
+                image[header + 84..header + 88].try_into()?,
+            ))?;
+            let mut crc = flate2::Crc::new();
+            crc.update(&image[entries..entries + count * size]);
+            image[header + 88..header + 92].copy_from_slice(&crc.sum().to_le_bytes());
+            refresh_header_crc(image, header, sector)
+        }
+
+        #[test]
+        fn selector_accepts_independent_gpt_vectors_and_entry_extensions() -> TestResult {
+            for name in [
+                "512-128",
+                "1024-128",
+                "2048-128",
+                "4096-128",
+                "512-256",
+                "512-131072",
+            ] {
+                let image = gpt_fixture(name)?;
+                assert_gpt_admission(&image, &gpt_partitions(name, &image)?, true)?;
+            }
+            // Table position and slot order are not authority. Root remains
+            // bound by its GUID and extent even when its entry moves.
+            let mut image = gpt_fixture("512-128")?;
+            for table in [1024, image.len() - 512 - 16384] {
+                let first: [u8; 128] = image[table..table + 128].try_into()?;
+                let second: [u8; 128] = image[table + 128..table + 256].try_into()?;
+                image[table..table + 128].copy_from_slice(&second);
+                image[table + 128..table + 256].copy_from_slice(&first);
+            }
+            let backup = image.len() - 512;
+            refresh_table_crc(&mut image, 512, 512)?;
+            refresh_table_crc(&mut image, backup, 512)?;
+            assert_gpt_admission(&image, &gpt_partitions("512-128", &image)?, true)?;
+            Ok(())
+        }
+
+        #[test]
+        fn selector_rejects_gpt_probe_and_protective_mbr_errors() -> TestResult {
+            let original = gpt_fixture("512-128")?;
+            let partitions = gpt_partitions("512-128", &original)?;
+            for (offset, bytes) in [
+                (512, vec![0; 8]),
+                (2048, b"EFI PART".to_vec()),
+                (510, vec![0; 2]),
+                (446, vec![0; 16]),
+                (446, vec![0x80]),
+                (450, vec![0x83]),
+                (454, 2_u32.to_le_bytes().to_vec()),
+                (458, 1_u32.to_le_bytes().to_vec()),
+                (462, vec![1]),
+            ] {
+                let mut image = original.clone();
+                image[offset..offset + bytes.len()].copy_from_slice(&bytes);
+                assert_gpt_admission(&image, &partitions, false)?;
+            }
+            let mut unaligned = original;
+            unaligned.push(0);
+            assert_gpt_admission(&unaligned, &partitions, false)?;
+            Ok(())
+        }
+
+        #[test]
+        fn selector_rejects_gpt_header_checksums_bounds_and_divergence() -> TestResult {
+            let original = gpt_fixture("512-128")?;
+            let partitions = gpt_partitions("512-128", &original)?;
+            let backup = original.len() - 512;
+            for (field, bytes) in [
+                (8, 2_u32.to_le_bytes().to_vec()),
+                (12, 91_u32.to_le_bytes().to_vec()),
+                (12, 513_u32.to_le_bytes().to_vec()),
+                (20, 1_u32.to_le_bytes().to_vec()),
+                (24, 2_u64.to_le_bytes().to_vec()),
+                (32, 2_u64.to_le_bytes().to_vec()),
+                (92, vec![1]),
+                (56, vec![0; 16]),
+                (80, 0_u32.to_le_bytes().to_vec()),
+                (84, 64_u32.to_le_bytes().to_vec()),
+                (84, 192_u32.to_le_bytes().to_vec()),
+                (40, 400_u64.to_le_bytes().to_vec()),
+                (40, 2_u64.to_le_bytes().to_vec()),
+                (48, 383_u64.to_le_bytes().to_vec()),
+                (48, 382_u64.to_le_bytes().to_vec()),
+                (72, 1_u64.to_le_bytes().to_vec()),
+                (72, 400_u64.to_le_bytes().to_vec()),
+                (72, 33_u64.to_le_bytes().to_vec()),
+            ] {
+                let mut image = original.clone();
+                image[512 + field..512 + field + bytes.len()].copy_from_slice(&bytes);
+                refresh_header_crc(&mut image, 512, 512)?;
+                assert_gpt_admission(&image, &partitions, false)?;
+            }
+            for offset in [512 + 16, backup, backup + 16] {
+                let mut image = original.clone();
+                image[offset] ^= 1;
+                assert_gpt_admission(&image, &partitions, false)?;
+            }
+            // Valid backup header with a different disk identity.
+            let mut image = original.clone();
+            image[backup + 56] ^= 1;
+            refresh_header_crc(&mut image, backup, 512)?;
+            assert_gpt_admission(&image, &partitions, false)?;
+            // Valid individual tables whose ignored name bytes differ.
+            let mut image = original;
+            image[backup - 16384 + 56] = b'x';
+            refresh_table_crc(&mut image, backup, 512)?;
+            assert_gpt_admission(&image, &partitions, false)?;
+            Ok(())
+        }
+
+        #[test]
+        fn selector_rejects_gpt_partition_mismatches_and_surplus_entries() -> TestResult {
+            let original = gpt_fixture("512-128")?;
+            let partitions = gpt_partitions("512-128", &original)?;
+            let backup = original.len() - 512;
+            for (field, bytes) in [
+                (0, vec![9; 16]),
+                (16, vec![9; 16]),
+                (32, 1_u64.to_le_bytes().to_vec()),
+                (32, 256_u64.to_le_bytes().to_vec()),
+                (40, 400_u64.to_le_bytes().to_vec()),
+                (32, 129_u64.to_le_bytes().to_vec()),
+                (40, 254_u64.to_le_bytes().to_vec()),
+                (48, 8_u64.to_le_bytes().to_vec()),
+                (256, vec![0; 16]),
+                (384, original[1024..1152].to_vec()),
+            ] {
+                let mut image = original.clone();
+                for table in [1024, backup - 16384] {
+                    image[table + field..table + field + bytes.len()].copy_from_slice(&bytes);
+                }
+                refresh_table_crc(&mut image, 512, 512)?;
+                refresh_table_crc(&mut image, backup, 512)?;
+                assert_gpt_admission(&image, &partitions, false)?;
+            }
+            // CRC failure with otherwise accepted entries.
+            let mut image = original;
+            image[1024 + 56] = b'x';
+            assert_gpt_admission(&image, &partitions, false)?;
+            // Reserved extensions must remain zero, including across chunks.
+            for name in ["512-256", "512-131072"] {
+                let mut image = gpt_fixture(name)?;
+                let partitions = gpt_partitions(name, &image)?;
+                image[1024 + 128] = 1;
+                assert_gpt_admission(&image, &partitions, false)?;
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn selector_rejects_read_failure_at_each_gpt_admission_stage() -> TestResult {
+            let image = gpt_fixture("512-128")?;
+            let backup = u64::try_from(image.len())? - 512;
+            let partitions = gpt_partitions("512-128", &image)?;
+            for offset in [
+                0,
+                512,
+                backup,
+                1024,
+                backup - 16384,
+                partitions[0].start_bytes,
+                partitions[1].start_bytes,
+                partitions[2].start_bytes,
+            ] {
+                let state = admitted_state_with_image(&image, b"adapter")?;
+                let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
+                let file = admitted
+                    .bootstrap()
+                    .installed()
+                    .artifact(
+                        InstallationObjectKind::ROOT_IMAGE,
+                        *blake3::hash(&image).as_bytes(),
+                    )?
+                    .file();
+                let fault = crate::image_read_fault::ImageReadFault::new(file, offset)?;
+                let service = service(admitted)?;
+                assert_service_error(
+                    &service,
+                    &request,
+                    resolved.attempt(),
+                    SandboxLocalErrorCode::PolicyUnavailable,
+                )?;
+                assert!(fault.was_triggered()?);
+                assert!(service.transport.0.borrow().is_some());
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn selector_binds_each_partition_digest_even_when_whole_image_matches() -> TestResult {
+            let image = gpt_fixture("512-128")?;
+            for ordinal in 0..3 {
+                let mut partitions = gpt_partitions("512-128", &image)?;
+                partitions[ordinal].content_blake3_digest = [0x99; 32];
+                assert_gpt_admission(&image, &partitions, false)?;
+            }
             Ok(())
         }
     }
