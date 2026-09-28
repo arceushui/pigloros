@@ -2199,7 +2199,7 @@ mod tests {
             assert_eq!(publisher.read_verified(&address), Err(expected), "{label}");
             assert_eq!(
                 publisher.recover(&address),
-                Err(LocalOciPublicationErrorV1::RecoveryRequired),
+                Err(LocalOciPublicationErrorV1::InvalidLayout),
                 "{label}"
             );
             assert_eq!(
