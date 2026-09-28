@@ -1103,3 +1103,140 @@ fn indexed_release_rejects_excess_declared_closure_before_blob_reads(
     assert_one_quarantined(&root)?;
     Ok(())
 }
+
+#[test]
+fn reader_rejects_incomplete_shapes_and_non_utf8_owner() -> Result<(), Box<dyn std::error::Error>> {
+    for mutation in 0..4 {
+        let root = PrivateRoot::new()?;
+        let publisher = LocalOciPublisherV1::open(&root.0)?;
+        let bundle = bundle()?;
+        publisher.publish(&bundle)?;
+        let release = root
+            .0
+            .join("releases")
+            .join(&bundle.address().digest()[7..]);
+        match mutation {
+            0 => fs::rename(release.join("OWNER"), release.join("unrecognized"))?,
+            1 => fs::rename(release.join("blobs/sha256"), release.join("blobs/other"))?,
+            2 => fs::write(release.join("OWNER"), [0xff])?,
+            _ => fs::remove_file(release.join("READY"))?,
+        }
+        assert_eq!(
+            publisher.read_verified(bundle.address()),
+            Err(ReleaseSourceErrorV1::InvalidLayout)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn reader_rejects_malformed_descriptor_preflight() -> Result<(), Box<dyn std::error::Error>> {
+    let digest = digest(b"component");
+    for (bytes, expected) in [
+        (Vec::new(), ReleaseSourceErrorV1::InvalidDescriptor),
+        (b"{}".to_vec(), ReleaseSourceErrorV1::SizeMismatch),
+        (
+            serde_json::to_vec(&serde_json::json!({"config":{"digest":digest,"size":"bad"}}))?,
+            ReleaseSourceErrorV1::InvalidDescriptor,
+        ),
+        (
+            serde_json::to_vec(
+                &serde_json::json!({"config":{"digest":digest,"size":9},"layers":[{"digest":digest,"size":9}]}),
+            )?,
+            ReleaseSourceErrorV1::DuplicateMember,
+        ),
+        (
+            serde_json::to_vec(&serde_json::json!({"config":{"digest":digest,"size":u64::MAX}}))?,
+            ReleaseSourceErrorV1::BoundsExceeded,
+        ),
+    ] {
+        let root = PrivateRoot::new()?;
+        let publisher = LocalOciPublisherV1::open(&root.0)?;
+        let bundle = bundle()?;
+        publisher.publish(&bundle)?;
+        let hex = &bundle.address().digest()[7..];
+        fs::write(
+            root.0
+                .join("releases")
+                .join(hex)
+                .join("blobs/sha256")
+                .join(hex),
+            bytes,
+        )?;
+        assert_eq!(publisher.read_verified(bundle.address()), Err(expected));
+    }
+    Ok(())
+}
+
+#[test]
+fn initialization_and_discovery_reject_mutated_private_metadata(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    fs::write(root.0.join(".publisher.lock"), b"unexpected")?;
+    assert!(matches!(
+        LocalOciPublisherV1::open(&root.0),
+        Err(LocalOciPublicationErrorV1::InvalidLayout)
+    ));
+    fs::write(root.0.join(".publisher.lock"), b"")?;
+    let bundle = bundle()?;
+    publisher.publish(&bundle)?;
+    let other = bundle_with_component(b"other component")?;
+    publisher.publish(&other)?;
+    fs::remove_dir_all(root.0.join("releases").join(&other.address().digest()[7..]))?;
+    assert_eq!(
+        publisher.read_verified(bundle.address()),
+        Err(ReleaseSourceErrorV1::RecoveryRequired)
+    );
+    fs::write(
+        root.0.join("published.json"),
+        serde_json::to_vec(
+            &serde_json::json!({"addresses":[{"digest":1,"mediaType":bundle.address().media_type(),"size":bundle.address().size()}],"version":1}),
+        )?,
+    )?;
+    assert_eq!(
+        publisher.read_verified(bundle.address()),
+        Err(ReleaseSourceErrorV1::InvalidLayout)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_zero_size_ready_address() -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let bundle = bundle()?;
+    publisher.publish(&bundle)?;
+    fs::write(
+        root.0.join("published.json"),
+        b"{\"addresses\":[],\"version\":1}",
+    )?;
+    fs::write(
+        root.0
+            .join("releases")
+            .join(&bundle.address().digest()[7..])
+            .join("READY"),
+        format!(
+            "pigloros-local-oci-ready-v1\n{}\n0\n",
+            bundle.address().digest()
+        ),
+    )?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_one_quarantined(&root)?;
+    Ok(())
+}
+
+#[test]
+fn verifier_bounds_actual_blob_size_before_digest_validation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (address, manifest, mut blobs) = closure_input()?;
+    blobs.insert(digest(b"component"), vec![0; 32 * 1024 * 1024 + 1]);
+    assert_eq!(
+        verify_oci_closure_v1(address, manifest, blobs),
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
+    );
+    Ok(())
+}

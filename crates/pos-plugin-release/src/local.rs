@@ -1809,6 +1809,66 @@ mod tests {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn quarantine_io_scenario(
+        scenario: u8,
+        target: usize,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let root = private_root("quarantine-io")?;
+        let publisher = LocalOciPublisherV1::open(&root)?;
+        let release = bundle()?;
+        match scenario {
+            0 => {
+                publisher.publish(&release)?;
+                std::fs::write(
+                    root.join("releases")
+                        .join(&release.address().digest()[7..])
+                        .join("OWNER"),
+                    b"invalid",
+                )?;
+            }
+            1 => std::fs::create_dir(root.join("releases/invalid-final"))?,
+            2 => std::fs::create_dir(root.join("releases").join("a".repeat(64)))?,
+            3 => std::fs::write(root.join(".published.invalid.next"), b"invalid")?,
+            4 => std::fs::create_dir(root.join(format!(".published.{}.next", "a".repeat(32))))?,
+            _ => {
+                assert!(publish_with_fault(
+                    &publisher,
+                    &release,
+                    PublicationFaultPointV1::ReadyWrite
+                )
+                .is_err());
+                let stage = std::fs::read_dir(root.join("releases"))?
+                    .next()
+                    .ok_or("missing stage")??
+                    .path();
+                std::fs::write(stage.join("unexpected"), b"unrecognized")?;
+            }
+        }
+        let (result, calls) = with_io_fault(target, || publisher.recover_all());
+        assert!(
+            result.is_err(),
+            "unsafe recovery scenario {scenario}, I/O {target}"
+        );
+        assert!(publisher.read_verified(release.address()).is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(calls)
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn quarantine_io_failures_keep_each_unsafe_entry_undiscoverable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for scenario in 0..6 {
+            let calls = quarantine_io_scenario(scenario, usize::MAX)?;
+            assert!(calls > 0 && calls < 512);
+            for target in 0..calls {
+                quarantine_io_scenario(scenario, target)?;
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn recovery_cleanup_sync_fault_requires_retry_before_publication(
