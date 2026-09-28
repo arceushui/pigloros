@@ -2819,7 +2819,7 @@ mod tests {
                 pos_core::clock::WallTime::from_micros(0),
             ),
             projections: pos_state::ProjectionRegistry::new()
-                .with_erasure_gate(Arc::clone(&erasure_gate)),
+                .with_erasure_gate(erasure_gate.clone()),
             consent_gate: Some(Arc::clone(&gate)),
             protected_token: Some(token.clone()),
             store_config: Some(store_config),

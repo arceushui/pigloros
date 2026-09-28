@@ -1339,7 +1339,7 @@ mod tests {
         let timeline = TimelineId::new();
         let entity = EntityId::new();
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate.clone());
         registry.register("events", Box::new(EntityStateProjection));
         registry.apply_event(&make_event(entity));
         let snapshot = test_ok(registry.state_snapshot(timeline));
