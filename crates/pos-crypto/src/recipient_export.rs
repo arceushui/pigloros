@@ -115,10 +115,7 @@ impl RecipientTimelineExportV1 {
         let Value::Array(chunks) = &fields[7] else {
             return Err(RecipientExportErrorV1::InvalidEncoding);
         };
-        if chunks.len()
-            != usize::try_from(header.chunk_count)
-                .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?
-        {
+        if chunks.len() != usize::from(header.chunk_count) {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
         let ciphertext_chunks = chunks.iter().map(bytes).collect::<Result<Vec<_>, _>>()?;
@@ -164,15 +161,13 @@ impl RecipientTimelineExportV1 {
         {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
-        let expected_count =
-            usize::try_from((self.header.payload_length - 1) / CHUNK_BYTES_U64 + 1)
-                .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+        let expected_count = usize::from(self.header.chunk_count);
         if expected_count != self.ciphertext_chunks.len() {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
         let final_plain_len =
             usize::try_from((self.header.payload_length - 1) % CHUNK_BYTES_U64 + 1)
-                .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+                .expect("validated recipient export payload length fits usize");
         for (index, chunk) in self.ciphertext_chunks.iter().enumerate() {
             let plain_len = chunk
                 .len()
@@ -203,10 +198,10 @@ pub fn encrypt_timeline_export_v1(
     rng: &mut impl CryptoRng,
 ) -> Result<RecipientTimelineExportV1, RecipientExportErrorV1> {
     let payload = Zeroizing::new(encode_payload(export)?);
-    let payload_length =
-        u64::try_from(payload.len()).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+    let payload_length = u64::try_from(payload.len())
+        .expect("usize fits u64 on supported recipient export platforms");
     let chunk_count = u32::try_from(payload.len().div_ceil(CHUNK_BYTES))
-        .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
+        .expect("validated recipient export payload has at most MAX_CHUNKS chunks");
     let header = RecipientExportHeaderV1 {
         export_id,
         timeline_id: export.timeline.id(),
@@ -233,18 +228,12 @@ pub fn encrypt_timeline_export_v1(
             rng,
         )
         .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?;
-    envelope.enc = enc
-        .to_bytes()
-        .as_slice()
-        .try_into()
-        .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?;
+    envelope.enc.copy_from_slice(enc.to_bytes().as_slice());
     for (index, plaintext) in payload.chunks(CHUNK_BYTES).enumerate() {
         let aad = chunk_aad(
             header_digest,
-            u32::try_from(index).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
-            index + 1
-                == usize::try_from(chunk_count)
-                    .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
+            u32::try_from(index).expect("validated recipient export has at most MAX_CHUNKS chunks"),
+            index + 1 == usize::from(chunk_count),
         );
         envelope.ciphertext_chunks.push(
             context
@@ -414,9 +403,6 @@ fn decode_payload(bytes: &[u8]) -> Result<TimelineExport, RecipientExportErrorV1
     let Value::Array(raw_events) = &fields[10] else {
         return Err(RecipientExportErrorV1::InvalidEncoding);
     };
-    if raw_events.len() > MAX_EVENTS {
-        return Err(RecipientExportErrorV1::FieldOutOfBounds);
-    }
     let events = raw_events
         .iter()
         .map(decode_event)
@@ -1454,6 +1440,126 @@ mod tests {
             decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &[8; 32]),
             Err(RecipientExportErrorV1::AuthenticationFailed)
         ));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn preserves_canonical_metadata_and_signed_event_forms_at_the_public_boundary(
+    ) -> Result<(), RecipientExportErrorV1> {
+        let (recipient, private) = recipient()?;
+        let mut source = export(None, b"source".to_vec());
+        source.timeline.meta.mode = TimelineMode::Historical;
+        source.timeline.meta.name = None;
+        source.timeline.meta.owner = None;
+        let event = &mut source.events[0];
+        event.wall_time = WallTime::from_micros(0x100);
+        event.causation_id = Some(EventId::from_ulid(id(301)));
+        event.correlation_id = Some(CorrelationId::from_ulid(id(302)));
+        event.signature = Some(Signature::from_bytes([6; 64]));
+        event.signature_identity = Some(KeyIdentityV1::from_parts(
+            pos_core::OwnerIdV1::new("source")
+                .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?,
+            KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ));
+        let mut rng = StdRng::from_seed([14; 32]);
+        let encoded = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?.encode();
+        let decoded = decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private)?;
+        assert_eq!(decoded.timeline.meta, source.timeline.meta);
+        assert_eq!(decoded.events, source.events);
+
+        source.timeline.meta.mode = TimelineMode::Future;
+        source.events[0].wall_time = WallTime::from_micros(0x1_0000_0000);
+        let encoded = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?.encode();
+        let decoded = decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private)?;
+        assert_eq!(decoded.timeline.meta, source.timeline.meta);
+        assert_eq!(decoded.events, source.events);
+        assert_ne!(
+            timeline_export_payload_digest_v1(b"one"),
+            timeline_export_payload_digest_v1(b"two")
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_reachable_cbor_preflight_forms_at_the_public_boundary() {
+        for encoded in [
+            vec![0x81, 0xf6, 0xf6],
+            vec![0x58, 1],
+            vec![0x1c],
+            vec![0x18],
+        ] {
+            assert_eq!(
+                RecipientTimelineExportV1::decode(&encoded),
+                Err(RecipientExportErrorV1::InvalidEncoding)
+            );
+        }
+        for encoded in [vec![0x5a, 0, 1, 0, 1], vec![0x9a, 0, 0, 0x40, 1]] {
+            assert_eq!(
+                RecipientTimelineExportV1::decode(&encoded),
+                Err(RecipientExportErrorV1::FieldOutOfBounds)
+            );
+        }
+        let mut too_deep = vec![0x81; MAX_NESTING + 2];
+        too_deep.push(0xf6);
+        assert_eq!(
+            RecipientTimelineExportV1::decode(&too_deep),
+            Err(RecipientExportErrorV1::FieldOutOfBounds)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_authenticated_reachable_tep1_schema_variants_at_the_public_boundary(
+    ) -> Result<(), RecipientExportErrorV1> {
+        let (recipient, private) = recipient()?;
+        let payload = encode_payload(&export(None, b"source".to_vec()))?;
+        let mut rng = StdRng::from_seed([15; 32]);
+        let edits: [fn(&mut Vec<Value>); 8] = [
+            |fields: &mut Vec<Value>| fields.truncate(10),
+            |fields: &mut Vec<Value>| fields[4] = Value::Text("x".repeat(MAX_NAME_BYTES + 1)),
+            |fields: &mut Vec<Value>| fields[10] = Value::Null,
+            |fields: &mut Vec<Value>| {
+                if let Value::Array(events) = &mut fields[10] {
+                    events[0] = Value::Null;
+                }
+            },
+            |fields: &mut Vec<Value>| {
+                if let Value::Array(events) = &mut fields[10] {
+                    if let Value::Array(event) = &mut events[0] {
+                        event.truncate(11);
+                    }
+                }
+            },
+            |fields: &mut Vec<Value>| {
+                if let Value::Array(events) = &mut fields[10] {
+                    if let Value::Array(event) = &mut events[0] {
+                        event[2] = Value::Text(String::new());
+                    }
+                }
+            },
+            |fields: &mut Vec<Value>| {
+                if let Value::Array(events) = &mut fields[10] {
+                    if let Value::Array(event) = &mut events[0] {
+                        event[8] = Value::Integer(2_u64.into());
+                    }
+                }
+            },
+            |fields: &mut Vec<Value>| {
+                if let Value::Array(events) = &mut fields[10] {
+                    if let Value::Array(event) = &mut events[0] {
+                        event[11] = Value::Bytes(vec![0; 32]);
+                    }
+                }
+            },
+        ];
+        for edit in edits {
+            let malformed = rewrite_payload(&payload, edit)?;
+            let encoded = encrypt_payload(&malformed, recipient, [5; 16], &mut rng)?;
+            assert!(decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private).is_err());
+        }
         Ok(())
     }
 }
