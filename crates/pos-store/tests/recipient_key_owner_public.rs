@@ -25,6 +25,20 @@ fn enrolled_owner() -> Result<
     ),
     Box<dyn std::error::Error>,
 > {
+    enrolled_owner_for(EntityId::new())
+}
+
+fn enrolled_owner_for(
+    grantee: EntityId,
+) -> Result<
+    (
+        tempfile::TempDir,
+        SqliteStore,
+        RecipientKeyOwnerV1,
+        pos_core::RecipientKeyDescriptorV1,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let temporary = tempfile::tempdir()?;
     let private_directory = private_directory(temporary.path())?;
     let mut store = SqliteStore::open(
@@ -34,7 +48,7 @@ fn enrolled_owner() -> Result<
             .to_str()
             .ok_or("database path is not UTF-8")?,
     )?;
-    let owner = RecipientKeyOwnerV1::open(private_directory, EntityId::new())?;
+    let owner = RecipientKeyOwnerV1::open(private_directory, grantee)?;
     let descriptor = store.enroll_recipient_key(&owner)?;
     Ok((temporary, store, owner, descriptor))
 }
@@ -890,6 +904,104 @@ fn recipient_owner_public_contract_keeps_pending_when_receipt_insert_rolls_back(
             |row| row.get::<_, i64>(0),
         )?;
     assert_eq!(receipt_count, 0);
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_recovery_rejects_bound_material_digest_and_public_key_mismatches(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, store, owner, _) = enrolled_owner()?;
+    let path = only_private_file(&temporary.path().join("recipient-private"))?;
+    std::fs::write(&path, [17_u8; 32])?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+
+    let grantee = EntityId::new();
+    let (temporary, store, owner, descriptor) = enrolled_owner_for(grantee)?;
+    let mut changed_public_key = descriptor.public_key();
+    changed_public_key[0] ^= 1;
+    let changed_descriptor = pos_core::RecipientKeyDescriptorV1::for_grantee(
+        grantee,
+        descriptor.identity().epoch,
+        changed_public_key,
+    )?;
+    let directory = temporary.path().join("recipient-private");
+    let original_path = only_private_file(&directory)?;
+    let changed_path = recipient_private_path(&directory, changed_descriptor);
+    std::fs::rename(&original_path, &changed_path)?;
+    let metadata = std::fs::metadata(&changed_path)?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute(
+        "UPDATE recipient_key_inventory_v1
+         SET descriptor = ?1, private_path = ?2, file_device = ?3, file_inode = ?4, file_uid = ?5",
+        rusqlite::params![
+            changed_descriptor.encode(),
+            changed_path.as_os_str().as_encoded_bytes(),
+            std::os::unix::fs::MetadataExt::dev(&metadata).to_be_bytes(),
+            std::os::unix::fs::MetadataExt::ino(&metadata).to_be_bytes(),
+            std::os::unix::fs::MetadataExt::uid(&metadata).to_be_bytes(),
+        ],
+    )?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_foreign_bound_directory_inventory_and_orphan_collision(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let grantee = EntityId::new();
+    let (temporary, store, owner, descriptor) = enrolled_owner_for(grantee)?;
+    let foreign_descriptor = pos_core::RecipientKeyDescriptorV1::for_grantee(
+        EntityId::new(),
+        descriptor.identity().epoch,
+        descriptor.public_key(),
+    )?;
+    let directory = temporary.path().join("recipient-private");
+    let original_path = only_private_file(&directory)?;
+    let foreign_path = recipient_private_path(&directory, foreign_descriptor);
+    std::fs::rename(&original_path, &foreign_path)?;
+    let metadata = std::fs::metadata(&foreign_path)?;
+    let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?;
+    connection.execute(
+        "UPDATE recipient_key_inventory_v1
+         SET descriptor = ?1, private_path = ?2, file_device = ?3, file_inode = ?4, file_uid = ?5",
+        rusqlite::params![
+            foreign_descriptor.encode(),
+            foreign_path.as_os_str().as_encoded_bytes(),
+            std::os::unix::fs::MetadataExt::dev(&metadata).to_be_bytes(),
+            std::os::unix::fs::MetadataExt::ino(&metadata).to_be_bytes(),
+            std::os::unix::fs::MetadataExt::uid(&metadata).to_be_bytes(),
+        ],
+    )?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+
+    let (temporary, store, owner, _) = enrolled_owner()?;
+    let directory = temporary.path().join("recipient-private");
+    let staged = directory.join("recipient-unregistered.key");
+    std::fs::write(&staged, [23_u8; 32])?;
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::write(directory.join(".recipient-unregistered.key.orphan"), [])?;
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(staged.exists());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_destruction_when_no_registry_exists(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = private_directory(temporary.path())?;
+    let mut store = SqliteStore::open(
+        temporary
+            .path()
+            .join("recipient.sqlite")
+            .to_str()
+            .ok_or("database path is not UTF-8")?,
+    )?;
+    let owner = RecipientKeyOwnerV1::open(directory, EntityId::new())?;
+    assert!(store
+        .destroy_recipient_key(&owner, 1, Hash::from_bytes([97_u8; 32]))
+        .is_err());
     Ok(())
 }
 
