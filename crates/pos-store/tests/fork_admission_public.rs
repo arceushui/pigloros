@@ -1,13 +1,19 @@
 use pos_core::store::EventStore;
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    CreateForkAdmittedRequestV1, ForkAdmissionAuthorityPortV1, ForkAdmissionErrorV1,
-    ForkAdmissionHostV1, ForkAdmissionIntentInputV1, Hash, LocalPrincipalOwnerBindingPermitV1,
-    OwnerIdV1, PrincipalRefV1, TimelineId, WallTime,
+    CreateForkAdmittedRequestV1, ErasureContainmentGateV1, ForkAdmissionAuthorityPortV1,
+    ForkAdmissionErrorV1, ForkAdmissionHostV1, ForkAdmissionIntentInputV1, Hash,
+    LocalPrincipalOwnerBindingPermitV1, OwnerIdV1, PrincipalRefV1, TimelineId, WallTime,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
+use std::sync::Arc;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn bind_test_erasure_gate(store: &mut impl EventStore) -> TestResult {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    Ok(())
+}
 
 fn authenticated() -> Result<AuthenticatedPrincipalResultV1, Box<dyn std::error::Error>> {
     Ok(AuthenticatedPrincipalResultV1::try_from_draft(
@@ -98,6 +104,7 @@ fn assert_contract<S: ForkAdmissionAuthorityPortV1 + EventStore>(
     store: &mut S,
     parent: TimelineId,
 ) -> TestResult {
+    bind_test_erasure_gate(store)?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
     store.bind_fork_admission_host(host.host_binding())?;
@@ -174,8 +181,52 @@ fn sqlite_fork_admission_is_atomic_and_idempotent_at_the_public_port() -> TestRe
 }
 
 #[test]
+fn sqlite_admitted_fork_requires_an_available_erasure_gate() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-erasure-gate.db");
+    let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
+    let parent = store.create_timeline("parent")?;
+    let authenticated = authenticated()?;
+    let host = host(&authenticated)?;
+    store.bind_fork_admission_host(host.host_binding())?;
+    store.commit_local_binding(&binding_permit(
+        &host,
+        &authenticated,
+        Hash::from_bytes([1; 32]),
+        OwnerIdV1::new("creator")?,
+    )?)?;
+    let admission = request(&host, parent.id(), &authenticated)?;
+    assert_eq!(
+        store.create_fork_admitted(&admission),
+        Err(ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    let timeline_count: i64 = rusqlite::Connection::open(&path)?.query_row(
+        "SELECT count(*) FROM timelines",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(timeline_count, 1);
+
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    gate.poison();
+    assert_eq!(
+        store.create_fork_admitted(&admission),
+        Err(ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    let timeline_count: i64 = rusqlite::Connection::open(&path)?.query_row(
+        "SELECT count(*) FROM timelines",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(timeline_count, 1);
+    Ok(())
+}
+
+#[test]
 fn exact_permits_allow_retry_after_authentication_expiry() -> TestResult {
     let mut store = MemoryStore::new();
+    bind_test_erasure_gate(&mut store)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
@@ -217,6 +268,7 @@ fn exact_permits_allow_retry_after_authentication_expiry() -> TestResult {
 #[test]
 fn admission_rejects_a_parent_head_outside_the_completed_fold_boundary() -> TestResult {
     let mut store = MemoryStore::new();
+    bind_test_erasure_gate(&mut store)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
@@ -240,6 +292,7 @@ fn admission_rejects_a_parent_head_outside_the_completed_fold_boundary() -> Test
 #[test]
 fn foreign_host_binding_and_permits_fail_closed() -> TestResult {
     let mut store = MemoryStore::new();
+    bind_test_erasure_gate(&mut store)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     let trusted_host = host(&authenticated)?;
@@ -270,6 +323,7 @@ fn foreign_host_binding_and_permits_fail_closed() -> TestResult {
 #[test]
 fn far1_rejects_reserved_import_origin_code_two() -> TestResult {
     let mut store = MemoryStore::new();
+    bind_test_erasure_gate(&mut store)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
@@ -299,6 +353,7 @@ fn sqlite_corrupt_far1_or_pob1_rows_fail_closed_at_the_public_read_port() -> Tes
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission.db");
     let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
+    bind_test_erasure_gate(&mut store)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
@@ -328,6 +383,7 @@ fn sqlite_corrupt_pob1_row_fails_closed_on_exact_operation_retry() -> TestResult
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-binding-retry.db");
     let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
+    bind_test_erasure_gate(&mut store)?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
     store.bind_fork_admission_host(host.host_binding())?;
@@ -354,6 +410,7 @@ fn sqlite_corrupt_far1_bytes_fail_closed_at_the_public_read_port() -> TestResult
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission.db");
     let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
+    bind_test_erasure_gate(&mut store)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
@@ -380,6 +437,7 @@ fn sqlite_corrupt_far1_operation_commitment_fails_closed_on_read_and_retry() -> 
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission.db");
     let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
+    bind_test_erasure_gate(&mut store)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
@@ -413,6 +471,7 @@ fn sqlite_corrupt_far1_operation_id_row_fails_closed_at_the_public_read_port() -
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission.db");
     let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
+    bind_test_erasure_gate(&mut store)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
@@ -441,6 +500,7 @@ fn sqlite_rolls_back_child_metadata_when_far1_insert_fails() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fork-admission.db");
     let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF-8 SQLite path")?)?;
+    bind_test_erasure_gate(&mut store)?;
     let parent = store.create_timeline("parent")?;
     let authenticated = authenticated()?;
     let host = host(&authenticated)?;
