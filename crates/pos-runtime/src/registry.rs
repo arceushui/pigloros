@@ -5819,6 +5819,14 @@ mod tests {
         (plugin, Some(Box::new(CountReducer)), approver)
     }
 
+    fn build_catalogue_missing_reducer_fixture(
+        configuration: &CatalogueFixtureConfiguration,
+    ) -> (TestPlugin, Option<Box<dyn Reducer>>, MockActionApprover) {
+        let (mut plugin, _, approver) = build_catalogue_fixture(configuration);
+        plugin.cap.has_reducer = true;
+        (plugin, None, approver)
+    }
+
     #[test]
     fn catalogue_fixture_registers_without_installed_pin_or_append_gate() {
         let selected = HostCatalogueEntryV1::gateway(
@@ -5869,6 +5877,31 @@ mod tests {
             .test_ok();
         assert_eq!(registry.projections.reducer_names(), vec!["catalogue-fixture"]);
         assert!(registry.composition().plugins[0].pin.is_none());
+    }
+
+    #[test]
+    fn catalogue_rejects_missing_reducer_without_partial_visibility() {
+        let selected = HostCatalogueEntryV1::gateway(
+            catalogue_fixture_details,
+            build_catalogue_missing_reducer_fixture,
+        );
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        assert!(matches!(
+            registry.register_from_host_catalogue_entry_inner(
+                &selected,
+                CatalogueFixtureConfiguration {
+                    plugin_id: PluginId::new(),
+                    details: Vec::new(),
+                },
+                CatalogueRegistrationModeV1::NonproductionFixture,
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(registry.is_empty());
+        assert!(registry.projections.reducer_names().is_empty());
+        assert!(registry.schemas.is_empty());
+        assert!(registry.approver_map.is_empty());
+        assert!(registry.output_policy_digests().next().is_none());
     }
 
     #[test]
