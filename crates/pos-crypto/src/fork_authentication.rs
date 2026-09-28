@@ -537,6 +537,35 @@ mod tests {
     }
 
     #[test]
+    fn adapter_rejects_missing_policy_invalid_key_and_invalid_record() -> Result<(), Box<dyn Error>>
+    {
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(ADAPTER_SEED)?;
+        let evidence = adapter.sign_authenticated_principal(record()?)?;
+        let missing = ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
+            adapter_id: "another-adapter".to_owned(),
+            verifying_key: adapter.public_key(),
+            minimum_assurance: 2,
+            registry_bindings: vec![Hash::from_bytes([2; 32])],
+        }])?;
+        assert_eq!(
+            verify_authenticated_principal_evidence_v1(&missing, evidence.clone()),
+            Err(ForkAuthenticationSignatureErrorV1::PolicyMismatch)
+        );
+        let invalid_key = policy([0xff; 32])?;
+        assert_eq!(
+            verify_authenticated_principal_evidence_v1(&invalid_key, evidence),
+            Err(ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)
+        );
+        let mut invalid_record = record()?;
+        invalid_record.assurance = 0;
+        assert_eq!(
+            adapter.sign_authenticated_principal(invalid_record),
+            Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn host_signing_is_purpose_limited_and_accepts_exact_adr106_shapes(
     ) -> Result<(), Box<dyn Error>> {
         let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
@@ -734,6 +763,92 @@ mod tests {
         );
         assert_eq!(
             host.sign_recovery(&wrong),
+            Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn host_signing_rejects_canonical_invalid_fields_and_noncanonical_forms(
+    ) -> Result<(), Box<dyn Error>> {
+        let host = ForkHostSigningKeyV1::from_seed([4; 32])?;
+        let evidence = verified_evidence()?;
+        let zero_initialize = encode(&Value::Array(vec![
+            Value::Text("FAI1".to_owned()),
+            Value::Integer(1.into()),
+            bytes(0, 32),
+            bytes(2, 32),
+            Value::Bytes(host.public_key().to_vec()),
+            bytes(4, 32),
+        ]))?;
+        assert_eq!(
+            host.sign_initialize(&zero_initialize),
+            Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+        );
+        let zero_open = encode(&Value::Array(vec![
+            Value::Text("FAO1".to_owned()),
+            Value::Integer(1.into()),
+            bytes(1, 32),
+            bytes(0, 32),
+            bytes(3, 32),
+        ]))?;
+        assert_eq!(
+            host.sign_open(&zero_open),
+            Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+        );
+        let invalid_owner = encode(&Value::Array(vec![
+            Value::Text("POC1".to_owned()),
+            Value::Integer(1.into()),
+            bytes(1, 32),
+            bytes(2, 32),
+            bytes(3, 32),
+            bytes(4, 32),
+            bytes(5, 32),
+            Value::Text(String::new()),
+        ]))?;
+        assert_eq!(
+            host.sign_command(&invalid_owner, &evidence),
+            Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+        );
+        let valid_poc1 = encode(&Value::Array(vec![
+            Value::Text("POC1".to_owned()),
+            Value::Integer(1.into()),
+            bytes(1, 32),
+            bytes(2, 32),
+            bytes(3, 32),
+            bytes(4, 32),
+            bytes(5, 32),
+            Value::Text("owner".to_owned()),
+        ]))?;
+        let mut trailing = valid_poc1.clone();
+        trailing.push(0);
+        assert_eq!(
+            host.sign_command(&trailing, &evidence),
+            Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+        );
+        let mut noncanonical = valid_poc1;
+        noncanonical[6] = 0x18;
+        noncanonical.insert(7, 1);
+        assert_eq!(
+            host.sign_command(&noncanonical, &evidence),
+            Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+        );
+        for malformed in [vec![0xff], encode(&Value::Integer(1.into()))?] {
+            assert_eq!(
+                host.sign_command(&malformed, &evidence),
+                Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
+            );
+        }
+        let invalid_kind = encode(&Value::Array(vec![
+            Value::Text("FRC1".to_owned()),
+            Value::Integer(1.into()),
+            bytes(1, 32),
+            bytes(2, 32),
+            Value::Integer(3.into()),
+            bytes(3, 32),
+        ]))?;
+        assert_eq!(
+            host.sign_recovery(&invalid_kind),
             Err(ForkAuthenticationSignatureErrorV1::InvalidRecord)
         );
         Ok(())
