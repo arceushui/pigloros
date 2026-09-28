@@ -39,6 +39,12 @@ thread_local! {
     static RECIPIENT_SHORT_READ: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static RECIPIENT_STAT_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static RECIPIENT_OPEN_REPLACEMENT: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const {
+        std::cell::RefCell::new(None)
+    };
 }
 
 #[cfg(test)]
@@ -75,7 +81,15 @@ fn recipient_openat2(
     if RECIPIENT_OPEN_FAILURE.with(std::cell::Cell::get) {
         Err(rustix::io::Errno::IO)
     } else {
-        openat2(directory, path, flags, mode, resolve)
+        let opened = openat2(directory, path, flags, mode, resolve)?;
+        RECIPIENT_OPEN_REPLACEMENT.with(|replacement| {
+            if let Some((directory, replacement)) = replacement.borrow_mut().take() {
+                std::fs::rename(&directory, directory.with_extension("original"))
+                    .map_err(|_| rustix::io::Errno::IO)?;
+                std::fs::rename(replacement, directory).map_err(|_| rustix::io::Errno::IO)?;
+            }
+            Ok(opened)
+        })
     }
 }
 
@@ -102,6 +116,29 @@ fn recipient_unlinkat(
     } else {
         unlinkat(directory, name, flags)
     }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn recipient_statat(
+    directory: impl rustix::fd::AsFd,
+    name: impl rustix::path::Arg,
+    flags: AtFlags,
+) -> Result<rustix::fs::Stat, rustix::io::Errno> {
+    if RECIPIENT_STAT_FAILURE.with(std::cell::Cell::get) {
+        Err(rustix::io::Errno::IO)
+    } else {
+        statat(directory, name, flags)
+    }
+}
+
+#[cfg(not(test))]
+fn recipient_statat(
+    directory: impl rustix::fd::AsFd,
+    name: impl rustix::path::Arg,
+    flags: AtFlags,
+) -> Result<rustix::fs::Stat, rustix::io::Errno> {
+    statat(directory, name, flags)
 }
 
 #[cfg(not(test))]
@@ -732,7 +769,7 @@ fn validate_directory_inventory_grantees(
                         == owner.directory_identity
             })
         });
-        let entry = statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW);
+        let entry = recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW);
         let is_bound_here = match entry {
             Ok(metadata) => {
                 let matches_inventory = metadata.st_dev.to_be_bytes() == file_identity.device
@@ -882,7 +919,7 @@ fn verify_bound_entry(
     name: &Path,
     expected: RecipientPrivateFileIdentityV1,
 ) -> Result<(), CoreError> {
-    let metadata = statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW)
+    let metadata = recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|error| CoreError::Storage(error.to_string()))?;
     if (metadata.st_mode & libc::S_IFMT) != libc::S_IFREG
         || metadata.st_nlink != 1
@@ -1067,6 +1104,14 @@ mod tests {
         RECIPIENT_SHORT_READ.with(|failure| failure.set(enabled));
     }
 
+    fn set_stat_failure(enabled: bool) {
+        RECIPIENT_STAT_FAILURE.with(|failure| failure.set(enabled));
+    }
+
+    fn replace_directory_after_open(directory: PathBuf, replacement: PathBuf) {
+        RECIPIENT_OPEN_REPLACEMENT.with(|fault| fault.replace(Some((directory, replacement))));
+    }
+
     #[test]
     fn recipient_custody_sync_failures_leave_enrollment_and_destruction_unfinalized(
     ) -> Result<(), CoreError> {
@@ -1188,6 +1233,137 @@ mod tests {
             .load_key_registry()?
             .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
         assert!(registry.tombstone(descriptor.identity()).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_rejects_a_directory_replaced_during_owner_open() -> Result<(), CoreError> {
+        let temporary =
+            tempfile::tempdir().map_err(|error| CoreError::Storage(error.to_string()))?;
+        let directory = temporary.path().join("recipient-private");
+        let replacement = temporary.path().join("replacement-private");
+        std::fs::create_dir(&directory).map_err(|error| CoreError::Storage(error.to_string()))?;
+        std::fs::create_dir(&replacement).map_err(|error| CoreError::Storage(error.to_string()))?;
+        for path in [&directory, &replacement] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+        }
+        replace_directory_after_open(directory.clone(), replacement);
+
+        assert!(RecipientKeyOwnerV1::open(&directory, EntityId::new()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_rejects_epoch_overflow_without_registering_material(
+    ) -> Result<(), CoreError> {
+        let (_temporary, mut store, owner) = owner_fixture()?;
+        let owner_id = recipient_owner_id_from_grantee(owner.grantee_id)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let identity =
+            KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, u64::MAX);
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                pos_core::Hash::from_bytes([1; 32]),
+                None,
+            ))
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        store.save_key_registry(&registry)?;
+
+        assert!(store.enroll_recipient_key(&owner).is_err());
+        assert_eq!(store.load_key_registry()?, Some(registry));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_rejects_injected_directory_inventory_stat_fault() -> Result<(), CoreError>
+    {
+        let (_temporary, store, owner) = owner_fixture()?;
+        let mut store = store;
+        store.enroll_recipient_key(&owner)?;
+        set_stat_failure(true);
+        assert!(store.recover_recipient_keys(&owner).is_err());
+        set_stat_failure(false);
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_rejects_unavailable_or_unpending_finish_requests() -> Result<(), CoreError>
+    {
+        let (_temporary, store, owner) = owner_fixture()?;
+        let identity = KeyIdentityV1::from_parts(
+            recipient_owner_id_from_grantee(owner.grantee_id)
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+            KeyRoleV1::ExportRecipientEncryption,
+            1,
+        );
+        let unavailable = KeyDestructionRequestV1::new(
+            identity,
+            pos_core::Hash::from_bytes([2; 32]),
+            pos_core::Hash::from_bytes([3; 32]),
+        );
+        assert!(store
+            .finish_recipient_key_destruction(&owner, unavailable)
+            .is_err());
+
+        let mut store = store;
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        let registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        let digest = registry
+            .key_record(descriptor.identity())
+            .and_then(|record| record.private_material_digest)
+            .ok_or_else(|| CoreError::Storage("recipient material is absent".to_owned()))?;
+        let unpending = KeyDestructionRequestV1::new(
+            descriptor.identity(),
+            digest,
+            pos_core::Hash::from_bytes([4; 32]),
+        );
+        assert!(store
+            .finish_recipient_key_destruction(&owner, unpending)
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_rejects_inventory_identity_and_post_open_binding_mismatches(
+    ) -> Result<(), CoreError> {
+        let (temporary, mut store, owner) = owner_fixture()?;
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        let connection = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let foreign = RecipientKeyDescriptorV1::for_grantee(
+            EntityId::new(),
+            descriptor.identity().epoch,
+            descriptor.public_key(),
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        connection
+            .execute(
+                "UPDATE recipient_key_inventory_v1 SET descriptor = ?1",
+                [foreign.encode()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        assert!(store
+            .recipient_inventory_path(&owner, descriptor.identity())
+            .is_err());
+
+        connection
+            .execute(
+                "UPDATE recipient_key_inventory_v1 SET descriptor = ?1",
+                [descriptor.encode()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let path = recipient_private_path(&owner.directory, descriptor);
+        let name = bound_name(&path)?;
+        let metadata =
+            std::fs::metadata(&path).map_err(|error| CoreError::Storage(error.to_string()))?;
+        let mut wrong = RecipientPrivateFileIdentityV1::from_metadata(&metadata);
+        wrong.inode[0] ^= 1;
+        assert!(verify_bound_entry(&owner, name, wrong).is_err());
         Ok(())
     }
 }
