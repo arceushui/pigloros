@@ -12,7 +12,7 @@ fn sample_fields() -> Result<ArtifactRegistrationFieldsV1, Box<dyn std::error::E
         artifact_digest: ArtifactRegistrationV1::artifact_digest(
             ErasureArtifactClassV1::TimelineReplay,
             b"abc",
-        )?,
+        ),
         owner_reference: ArtifactRegistrationV1::owner_reference(&OwnerIdV1::new("alice")?),
         data_class: ArtifactDataClassV1::StructuralAuditMetadata,
         optionality: ArtifactOptionalityV1::Required,
@@ -165,7 +165,7 @@ fn every_closed_field_code_and_unsigned_width_round_trips() -> Result<(), Box<dy
             class_digests.insert(ArtifactRegistrationV1::artifact_digest(
                 artifact_class,
                 b"abc"
-            )?)
+            ))
         );
         for data_class in data_classes {
             for optionality in optionalities {

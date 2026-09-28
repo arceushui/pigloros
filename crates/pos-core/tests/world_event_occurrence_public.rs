@@ -74,7 +74,7 @@ fn normative_wor1_bytes_and_both_digests_match() -> TestResult<()> {
         from_hex("c50509a22c36676988e27eec683b8a960de20e6d40bac3b69cca043ac41cc8ba")?
     );
     assert_eq!(
-        ArtifactRegistrationV1::artifact_digest(ErasureArtifactClassV1::TimelineReplay, &bytes)?
+        ArtifactRegistrationV1::artifact_digest(ErasureArtifactClassV1::TimelineReplay, &bytes)
             .as_bytes()
             .to_vec(),
         from_hex("3fb69ba4546a64846264f0224d17b5d03a96d8482538e941b0e1fa8a331c8241")?
