@@ -55,6 +55,12 @@ impl TransientServiceUnitName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The exact 32-character attempt-directory component derived from the ID.
+    #[must_use]
+    pub fn attempt_component(&self) -> &str {
+        &self.0[UNIT_PREFIX.len()..self.0.len() - UNIT_SUFFIX.len()]
+    }
 }
 
 /// Failure to construct a valid transient service-unit name.
