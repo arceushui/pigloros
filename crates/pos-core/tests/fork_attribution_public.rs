@@ -1,7 +1,10 @@
 use pos_core::{
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,
-    ForkAttributionOriginV1, ForkReproManifestInputV1, ForkReproManifestV1, Hash, KeyIdentityV1,
-    KeyRoleV1, SignedForkReproManifestV1, TimelineId,
+    ForkAttributionOriginV1, ForkPublicationArtifactInputV1, ForkPublicationArtifactV1,
+    ForkPublicationBindingInputV1, ForkPublicationBindingV1, ForkPublicationOperationInputV1,
+    ForkPublicationOperationV1, ForkPublicationReceiptV1, ForkReproManifestInputV1,
+    ForkReproManifestV1, Hash, KeyIdentityV1, KeyRoleV1, PublicKey, SignedForkReproManifestV1,
+    TimelineId,
 };
 
 const fn hash(value: u8) -> Hash {
@@ -30,6 +33,107 @@ fn manifest(
     admission: &ForkAdmissionRecordV1,
 ) -> Result<ForkReproManifestV1, ForkAttributionCodecErrorV1> {
     ForkReproManifestV1::from_admission(admission, vec![5, 7], 7, hash(6))
+}
+
+fn publication_records(
+    admission: &ForkAdmissionRecordV1,
+) -> Result<
+    (
+        ForkPublicationOperationV1,
+        ForkPublicationBindingV1,
+        ForkPublicationArtifactV1,
+    ),
+    ForkAttributionCodecErrorV1,
+> {
+    let signed = SignedForkReproManifestV1::new_from_admission(
+        admission,
+        1,
+        manifest(admission)?,
+        pos_core::Signature::from_bytes([9; 64]),
+    )?;
+    let operation_id = hash(7);
+    let operation = ForkPublicationOperationV1::new(ForkPublicationOperationInputV1 {
+        operation_id,
+        child_timeline_id: admission.input().child_timeline_id,
+        final_logical_head: 7,
+        final_chain_head_hash: hash(6),
+        admission_digest: admission.digest(),
+        signing_identity: signed.identity(),
+        private_material_digest: hash(8),
+        public_verification_key: PublicKey::from_bytes([10; 32]),
+        signed_manifest_record_id: signed.record_id(),
+        origin: ForkAttributionOriginV1::Local,
+    })?;
+    let binding = ForkPublicationBindingV1::new(ForkPublicationBindingInputV1 {
+        child_timeline_id: admission.input().child_timeline_id,
+        final_logical_head: 7,
+        operation_id,
+        signed_manifest_record_id: signed.record_id(),
+    })?;
+    let artifact = ForkPublicationArtifactV1::new(ForkPublicationArtifactInputV1 {
+        signed_manifest_record_id: signed.record_id(),
+        operation_id,
+        signed_manifest_bytes: signed.to_canonical_cbor(),
+    })?;
+    Ok((operation, binding, artifact))
+}
+
+#[test]
+fn local_fpo1_fpb1_fpa1_and_derived_fpr1_round_trip_at_public_seam(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    assert_eq!(
+        &operation.to_canonical_cbor()[..6],
+        &[0x8e, 0x64, b'F', b'P', b'O', b'1']
+    );
+    assert_eq!(
+        &binding.to_canonical_cbor()[..6],
+        &[0x86, 0x64, b'F', b'P', b'B', b'1']
+    );
+    assert_eq!(
+        &artifact.to_canonical_cbor()[..6],
+        &[0x85, 0x64, b'F', b'P', b'A', b'1']
+    );
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&operation.to_canonical_cbor()),
+        Ok(operation.clone())
+    );
+    assert_eq!(
+        ForkPublicationBindingV1::from_canonical_cbor(&binding.to_canonical_cbor()),
+        Ok(binding.clone())
+    );
+    assert_eq!(
+        ForkPublicationArtifactV1::from_canonical_cbor(&artifact.to_canonical_cbor()),
+        Ok(artifact)
+    );
+    let receipt = ForkPublicationReceiptV1::from_records(&operation, &binding)?;
+    assert_eq!(
+        &receipt.to_canonical_cbor()[..6],
+        &[0x86, 0x64, b'F', b'P', b'R', b'1']
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_codecs_reject_import_origin_and_mismatched_artifact(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, _binding, artifact) = publication_records(&admission)?;
+    let mut imported = operation.to_canonical_cbor();
+    let last = imported.len() - 1;
+    imported[last] = 2;
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&imported),
+        Err(ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable)
+    );
+    let mut mismatched = artifact.input().clone();
+    mismatched.signed_manifest_record_id = hash(99);
+    assert_eq!(
+        ForkPublicationArtifactV1::new(mismatched),
+        Err(ForkAttributionCodecErrorV1::FieldMismatch)
+    );
+    Ok(())
 }
 
 #[test]
