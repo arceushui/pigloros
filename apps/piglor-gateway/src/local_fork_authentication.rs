@@ -284,7 +284,7 @@ fn parse_facr1(
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
     let adapter_id = bounded_text(&fields[4])?;
     let assurance = positive_u8(&fields[5])?;
-    let entries = array(&fields[6], 64)?;
+    let entries = nonempty_array(&fields[6], 64)?;
     let bindings = entries
         .iter()
         .map(parse_binding)
@@ -416,6 +416,16 @@ fn canonical_array(
 fn array(value: &Value, length: usize) -> Result<Vec<Value>, LocalForkAuthenticationErrorV1> {
     match value {
         Value::Array(values) if values.len() == length => Ok(values.clone()),
+        _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
+    }
+}
+
+fn nonempty_array(
+    value: &Value,
+    maximum: usize,
+) -> Result<Vec<Value>, LocalForkAuthenticationErrorV1> {
+    match value {
+        Value::Array(values) if (1..=maximum).contains(&values.len()) => Ok(values.clone()),
         _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
     }
 }
