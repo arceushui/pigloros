@@ -117,7 +117,7 @@ impl RecipientTimelineExportV1 {
         };
         if chunks.len()
             != usize::try_from(header.chunk_count)
-                .expect("u32 recipient export chunk count fits usize")
+                .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?
         {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
@@ -165,13 +165,13 @@ impl RecipientTimelineExportV1 {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
         let expected_count = usize::try_from(self.header.chunk_count)
-            .expect("u32 recipient export chunk count fits usize");
+            .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
         if expected_count != self.ciphertext_chunks.len() {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
         let final_plain_len =
             usize::try_from((self.header.payload_length - 1) % CHUNK_BYTES_U64 + 1)
-                .expect("validated recipient export payload length fits usize");
+                .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
         for (index, chunk) in self.ciphertext_chunks.iter().enumerate() {
             let plain_len = chunk
                 .len()
@@ -202,10 +202,10 @@ pub fn encrypt_timeline_export_v1(
     rng: &mut impl CryptoRng,
 ) -> Result<RecipientTimelineExportV1, RecipientExportErrorV1> {
     let payload = Zeroizing::new(encode_payload(export)?);
-    let payload_length = u64::try_from(payload.len())
-        .expect("usize fits u64 on supported recipient export platforms");
+    let payload_length =
+        u64::try_from(payload.len()).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
     let chunk_count = u32::try_from(payload.len().div_ceil(CHUNK_BYTES))
-        .expect("validated recipient export payload has at most MAX_CHUNKS chunks");
+        .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
     let header = RecipientExportHeaderV1 {
         export_id,
         timeline_id: export.timeline.id(),
@@ -236,10 +236,10 @@ pub fn encrypt_timeline_export_v1(
     for (index, plaintext) in payload.chunks(CHUNK_BYTES).enumerate() {
         let aad = chunk_aad(
             header_digest,
-            u32::try_from(index).expect("validated recipient export has at most MAX_CHUNKS chunks"),
+            u32::try_from(index).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
             index + 1
                 == usize::try_from(chunk_count)
-                    .expect("u32 recipient export chunk count fits usize"),
+                    .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
         );
         envelope.ciphertext_chunks.push(
             context
