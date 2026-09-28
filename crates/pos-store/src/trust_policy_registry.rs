@@ -539,7 +539,10 @@ mod tests {
         )
     }
 
-    fn request<'a>(snapshot: &'a TrustPolicySnapshotV1, profile: &'a [u8]) -> GatewayEpf1TrustRequestV1<'a> {
+    fn request<'a>(
+        snapshot: &'a TrustPolicySnapshotV1,
+        profile: &'a [u8],
+    ) -> GatewayEpf1TrustRequestV1<'a> {
         GatewayEpf1TrustRequestV1 {
             exact_epf1: profile,
             signing_key_id: &snapshot.trust_roots[0].key_id,
@@ -560,7 +563,9 @@ mod tests {
         ));
         DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)
             .expect("explicit genesis");
-        assert!(DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis).is_err());
+        assert!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis).is_err()
+        );
         let mut registry = DeploymentTrustPolicyRegistryV1::open_current(&path, anchor)
             .expect("reopen authenticated state");
         let profile = fixture_profile();
@@ -591,10 +596,20 @@ mod tests {
         let mut registry = DeploymentTrustPolicyRegistryV1::open_current(&path, anchor)
             .expect("open current state");
         registry
-            .with_admitted_epf1_at(&successor_bytes, request(&successor, &profile), TEST_NOW, |_| Ok(()))
+            .with_admitted_epf1_at(
+                &successor_bytes,
+                request(&successor, &profile),
+                TEST_NOW,
+                |_| Ok(()),
+            )
             .expect("signed successor");
         assert!(matches!(
-            registry.with_admitted_epf1_at(&genesis, request(&snapshot, &profile), TEST_NOW, |_| Ok(())),
+            registry.with_admitted_epf1_at(
+                &genesis,
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(())
+            ),
             Err(TrustPolicyRegistryErrorV1::StaleSnapshot)
         ));
         drop(registry);
@@ -604,7 +619,12 @@ mod tests {
         )
         .expect("restart on durable successor");
         reopened
-            .with_admitted_epf1_at(&successor_bytes, request(&successor, &profile), TEST_NOW, |_| Ok(()))
+            .with_admitted_epf1_at(
+                &successor_bytes,
+                request(&successor, &profile),
+                TEST_NOW,
+                |_| Ok(()),
+            )
             .expect("same successor after restart");
         let audit_count: i64 = reopened.connection.query_row(
             "SELECT COUNT(*) FROM deployment_trust_audit",
@@ -637,7 +657,12 @@ mod tests {
         nonzero.previous_snapshot_digest = Some(raw_digest(&genesis));
         nonzero.effective_timeline_position = 1;
         assert!(matches!(
-            registry.with_admitted_epf1_at(&signed(nonzero), request(&snapshot, &profile), TEST_NOW, |_| Ok(())),
+            registry.with_admitted_epf1_at(
+                &signed(nonzero),
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(())
+            ),
             Err(TrustPolicyRegistryErrorV1::UnsupportedPosition)
         ));
         let mut revoked = snapshot.clone();
@@ -645,7 +670,27 @@ mod tests {
         revoked.previous_snapshot_digest = Some(raw_digest(&genesis));
         revoked.revoked_artifact_digests.push(raw_digest(&profile));
         assert!(matches!(
-            registry.with_admitted_epf1_at(&signed(revoked), request(&snapshot, &profile), TEST_NOW, |_| Ok(())),
+            registry.with_admitted_epf1_at(
+                &signed(revoked),
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(())
+            ),
+            Err(TrustPolicyRegistryErrorV1::Revoked)
+        ));
+        let mut revoked_key = snapshot.clone();
+        revoked_key.epoch = 2;
+        revoked_key.previous_snapshot_digest = Some(raw_digest(&genesis));
+        revoked_key
+            .revoked_key_ids
+            .push(snapshot.trust_roots[0].key_id.clone());
+        assert!(matches!(
+            registry.with_admitted_epf1_at(
+                &signed(revoked_key),
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(())
+            ),
             Err(TrustPolicyRegistryErrorV1::Revoked)
         ));
         let embedded = ExecutionProfileV1::from_canonical_cbor(&profile)
@@ -657,7 +702,12 @@ mod tests {
         embedded_only.previous_snapshot_digest = Some(raw_digest(&genesis));
         embedded_only.revoked_artifact_digests.push(embedded);
         registry
-            .with_admitted_epf1_at(&signed(embedded_only), request(&snapshot, &profile), TEST_NOW, |_| Ok(()))
+            .with_admitted_epf1_at(
+                &signed(embedded_only),
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(()),
+            )
             .expect("embedded digest is not raw EPF1 revocation");
     }
 
@@ -683,11 +733,21 @@ mod tests {
         forged.epoch = 2;
         let forged_bytes = forged.to_canonical_cbor().expect("structural TPS1");
         assert!(matches!(
-            registry.with_admitted_epf1_at(&forged_bytes, request(&snapshot, &profile), TEST_NOW, |_| Ok(())),
+            registry.with_admitted_epf1_at(
+                &forged_bytes,
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(())
+            ),
             Err(TrustPolicyRegistryErrorV1::InvalidOperatorSignature)
         ));
         assert!(matches!(
-            registry.with_admitted_epf1_at(&genesis, request(&snapshot, &profile), u64::MAX, |_| Ok(())),
+            registry.with_admitted_epf1_at(
+                &genesis,
+                request(&snapshot, &profile),
+                u64::MAX,
+                |_| Ok(())
+            ),
             Err(TrustPolicyRegistryErrorV1::Expired)
         ));
         let bad_root = GatewayEpf1TrustRequestV1 {
@@ -717,6 +777,34 @@ mod tests {
             ),
             Err(TrustPolicyRegistryErrorV1::UnsupportedVersion)
         ));
+        let mut no_minimum = snapshot.clone();
+        no_minimum.epoch = 2;
+        no_minimum.previous_snapshot_digest = Some(raw_digest(&genesis));
+        no_minimum
+            .minimum_versions
+            .retain(|minimum| minimum.artifact_kind != "execution-profile");
+        assert!(matches!(
+            registry.with_admitted_epf1_at(
+                &signed(no_minimum),
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(())
+            ),
+            Err(TrustPolicyRegistryErrorV1::UnsupportedVersion)
+        ));
+        let mut malformed_expiry = snapshot.clone();
+        malformed_expiry.epoch = 2;
+        malformed_expiry.previous_snapshot_digest = Some(raw_digest(&genesis));
+        malformed_expiry.offline_valid_through = "unparseable".to_owned();
+        assert!(matches!(
+            registry.with_admitted_epf1_at(
+                &signed(malformed_expiry),
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(())
+            ),
+            Err(TrustPolicyRegistryErrorV1::Expired)
+        ));
         let mut discontinuous = snapshot.clone();
         discontinuous.epoch = 2;
         discontinuous.previous_snapshot_digest = Some([9; 32]);
@@ -728,6 +816,26 @@ mod tests {
                 |_| Ok(())
             ),
             Err(TrustPolicyRegistryErrorV1::StaleSnapshot)
+        ));
+        let mut same_epoch_changed = snapshot.clone();
+        same_epoch_changed.offline_valid_through = "2031-01-01T00:00:00Z".to_owned();
+        assert!(matches!(
+            registry.with_admitted_epf1_at(
+                &signed(same_epoch_changed),
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(())
+            ),
+            Err(TrustPolicyRegistryErrorV1::StaleSnapshot)
+        ));
+        let invalid_epf1 = GatewayEpf1TrustRequestV1 {
+            exact_epf1: b"not canonical EPF1",
+            signing_key_id: &snapshot.trust_roots[0].key_id,
+            signing_root_version: snapshot.trust_roots[0].root_version,
+        };
+        assert!(matches!(
+            registry.with_admitted_epf1_at(&genesis, invalid_epf1, TEST_NOW, |_| Ok(())),
+            Err(TrustPolicyRegistryErrorV1::InvalidEpf1)
         ));
         drop(registry);
         let foreign_release = OperatorReleaseTrustV1::new(
