@@ -4,9 +4,7 @@
 //! authorize use. The installed owner must compare these bytes with its
 //! immutable registration and live or tombstoned row under the release fence.
 
-use crate::{
-    canonical_cbor_head::encode_head, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey,
-};
+use crate::{encode_head, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey};
 
 /// Maximum preferred-CBOR size of one WKE1 record.
 pub const MAX_WORLD_KEY_EVIDENCE_BYTES_V1: usize = 256;
