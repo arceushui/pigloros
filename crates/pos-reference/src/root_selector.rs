@@ -2352,7 +2352,7 @@ mod tests {
                 image[offset..offset + bytes.len()].copy_from_slice(&bytes);
                 assert_gpt_admission(&image, &partitions, false)?;
             }
-            let mut unaligned = original.clone();
+            let mut unaligned = original;
             unaligned.push(0);
             assert_gpt_admission(&unaligned, &partitions, false)?;
             Ok(())
@@ -2399,7 +2399,7 @@ mod tests {
             refresh_header_crc(&mut image, backup, 512)?;
             assert_gpt_admission(&image, &partitions, false)?;
             // Valid individual tables whose ignored name bytes differ.
-            let mut image = original.clone();
+            let mut image = original;
             image[backup - 16384 + 56] = b'x';
             refresh_table_crc(&mut image, backup, 512)?;
             assert_gpt_admission(&image, &partitions, false)?;
@@ -2432,7 +2432,7 @@ mod tests {
                 assert_gpt_admission(&image, &partitions, false)?;
             }
             // CRC failure with otherwise accepted entries.
-            let mut image = original.clone();
+            let mut image = original;
             image[1024 + 56] = b'x';
             assert_gpt_admission(&image, &partitions, false)?;
             // Reserved extensions must remain zero, including across chunks.
