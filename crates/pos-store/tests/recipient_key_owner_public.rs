@@ -4,7 +4,9 @@
 
 use std::{os::unix::fs::PermissionsExt, sync::mpsc, thread};
 
-use pos_core::{EntityId, EventStore, Hash, KeyDestructionRequestV1, KeyRoleV1};
+use pos_core::{
+    EntityId, EventStore, Hash, KeyDestructionRequestV1, KeyRegistryStateV1, KeyRoleV1,
+};
 use pos_store::sqlite::{RecipientKeyOwnerV1, SqliteStore};
 
 fn private_directory(
@@ -1050,5 +1052,64 @@ fn recipient_owner_public_contract_rejects_destruction_after_receipt(
         .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
         .is_err());
     assert!(store.recover_recipient_keys(&owner)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rejects_custody_schema_substitution(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = private_directory(temporary.path())?;
+    let database = temporary.path().join("recipient.sqlite");
+    let mut store = SqliteStore::open(database.to_str().ok_or("database path is not UTF-8")?)?;
+    let owner = RecipientKeyOwnerV1::open(directory, EntityId::new())?;
+    let connection = rusqlite::Connection::open(&database)?;
+    connection.execute_batch("CREATE VIEW recipient_key_inventory_v1 AS SELECT 1 AS marker;")?;
+
+    assert!(store.enroll_recipient_key(&owner).is_err());
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(store.load_key_registry()?.is_none());
+    Ok(())
+}
+
+#[test]
+fn recipient_owner_public_contract_rolls_back_registry_write_and_directory_claim_failures(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temporary = tempfile::tempdir()?;
+    let directory = private_directory(temporary.path())?;
+    let database = temporary.path().join("recipient.sqlite");
+    let mut store = SqliteStore::open(database.to_str().ok_or("database path is not UTF-8")?)?;
+    let owner = RecipientKeyOwnerV1::open(directory.clone(), EntityId::new())?;
+    store.save_key_registry(&KeyRegistryStateV1::new())?;
+    let connection = rusqlite::Connection::open(&database)?;
+    connection.execute_batch(
+        "CREATE TRIGGER reject_recipient_registry_write
+         BEFORE UPDATE ON key_registry
+         BEGIN SELECT RAISE(ABORT, 'injected registry write failure'); END;",
+    )?;
+
+    assert!(store.enroll_recipient_key(&owner).is_err());
+    assert!(store.recover_recipient_keys(&owner)?.is_empty());
+    assert!(std::fs::read_dir(&directory)?.next().is_some());
+
+    connection.execute_batch("DROP TRIGGER reject_recipient_registry_write;")?;
+    assert!(store.recover_recipient_keys(&owner)?.is_empty());
+    connection.execute_batch("DELETE FROM recipient_custody_directory_claims_v1;")?;
+    connection.execute_batch(
+        "CREATE TRIGGER reject_recipient_directory_claim
+         BEFORE INSERT ON recipient_custody_directory_claims_v1
+         BEGIN SELECT RAISE(ABORT, 'injected directory claim failure'); END;",
+    )?;
+
+    assert!(store.enroll_recipient_key(&owner).is_err());
+    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert_eq!(
+        connection.query_row(
+            "SELECT COUNT(*) FROM recipient_custody_directory_claims_v1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        0
+    );
     Ok(())
 }
