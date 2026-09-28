@@ -1067,6 +1067,8 @@ impl Plugin for GeneratedDriverPlugin {
 struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
+    manifest_slot: Option<String>,
+    reducer_slot_by_plugin_id: bool,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -3137,6 +3139,8 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: None,
+                manifest_slot: None,
+                reducer_slot_by_plugin_id: true,
             },
         )
     }
@@ -3218,6 +3222,8 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration: None,
                 output_admission: None,
+                manifest_slot: None,
+                reducer_slot_by_plugin_id: false,
             },
         )
     }
@@ -3311,10 +3317,14 @@ impl PluginRegistry {
                     &plugin,
                     binding,
                     reducer,
-                    driver,
-                    approver,
+                    RegistrationCallbacks { driver, approver },
                     approver_event_types,
-                    None,
+                    RegistrationOptions {
+                        registration: None,
+                        output_admission: None,
+                        manifest_slot: None,
+                        reducer_slot_by_plugin_id: true,
+                    },
                 )
             }
         }
@@ -3360,7 +3370,88 @@ impl PluginRegistry {
         _reducer: Option<Box<dyn Reducer>>,
         _stable_slot: &str,
     ) -> Result<(), RuntimeError> {
-        Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into())
+        self.register_installed_output_inner(
+            plugin,
+            binding,
+            registration,
+            reducer,
+            Some(stable_slot),
+        )
+    }
+
+    fn register_installed_output_inner<P: Plugin>(
+        &mut self,
+        plugin: &P,
+        mut binding: OutputPolicyBindingV1,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+        stable_slot: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        if !binding.has_installed_profile_provenance() {
+            return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
+        }
+        self.validate_installed_registration_details(plugin, &binding, &registration)?;
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = binding.take_callbacks();
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            RegistrationCallbacks { driver, approver },
+            approver_event_types,
+            RegistrationOptions {
+                registration: Some(registration),
+                output_admission: None,
+                manifest_slot: stable_slot.map(str::to_owned),
+                reducer_slot_by_plugin_id: true,
+            },
+        )
+    }
+
+    // Pure validation is also exercised by nonproduction structural fixtures.
+    // It never installs a profile, registers a Plugin, or mints a pin.
+    fn validate_installed_registration_details<P: Plugin>(
+        &self,
+        plugin: &P,
+        binding: &OutputPolicyBindingV1,
+        registration: &PluginRegistrationV1,
+    ) -> Result<(), RuntimeError> {
+        if !binding.verifies_owner_instance(plugin) {
+            return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
+        }
+        let id = plugin.id();
+        let pin = registration.pin();
+        let incompatible = if pin.implementation_kind() != DomainImplementationKindV1::Plugin {
+            Some(PluginPinFieldV1::ImplementationKind)
+        } else if pin.isolation() != PluginIsolationV1::OperatorTrustedNative {
+            Some(PluginPinFieldV1::Isolation)
+        } else if pin.configuration_digest() != binding.policy().digest() {
+            Some(PluginPinFieldV1::ConfigurationDigest)
+        } else if pin.roles() != [crate::reviewed_policy::installed_plugin_role_v1(plugin)] {
+            Some(PluginPinFieldV1::Roles)
+        } else {
+            None
+        };
+        if let Some(field) = incompatible {
+            return Err(PluginCompositionErrorV1::IncompatibleImplementation {
+                plugin_id: id,
+                field,
+            }
+            .into());
+        }
+        if registration.availability() != PluginAvailabilityV1::Available {
+            return Err(PluginCompositionErrorV1::ImplementationUnavailable {
+                plugin_id: id,
+                availability: registration.availability(),
+            }
+            .into());
+        }
+        Self::validate_required_installed_approver(binding)?;
+        self.validate_registration_roles(registration)?;
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3621,13 +3712,13 @@ impl PluginRegistry {
         // All fallible installed-slot checks precede the first registry mutation.
         Self::validate_installed_reducer_name(
             &name,
-            options.registration.is_some(),
+            options.reducer_slot_by_plugin_id,
             reducer.is_some(),
         )?;
         let version = plugin.version().to_owned();
 
         // The only fallible commit action runs before schemas or routes mutate.
-        self.install_reducer(id, &name, reducer, options.registration.is_some())?;
+        self.install_reducer(id, &name, reducer, options.reducer_slot_by_plugin_id)?;
 
         // Register event type schemas
         for kind in &cap.owned_event_types {
@@ -5040,6 +5131,8 @@ mod tests {
                         PluginAvailabilityV1::Available,
                     )),
                     output_admission: None,
+                    manifest_slot: None,
+                    reducer_slot_by_plugin_id: true,
                 },
             ),
             Err(RuntimeError::CapabilityMismatch { .. })
@@ -5865,18 +5958,65 @@ mod tests {
             build_catalogue_reducer_fixture,
         );
         let mut registry = PluginRegistry::new().without_erasure_gate();
+        let first = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
+        let pin = crate::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([1; 32]),
+            vec!["first-role".to_owned()],
+        )
+        .test_ok();
+        registry
+            .register_pinned_generated(
+                &first,
+                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                Some(Box::new(CountReducer)),
+                None,
+            )
+            .test_ok();
+        let entity = EntityId::new();
+        let mut event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("first.output"),
+            payload: CanonicalBytes::from_static(b"existing"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        registry.projections.apply_event(&event);
+        let second_id = PluginId::new();
         registry
             .register_from_host_catalogue_entry_inner(
                 &selected,
                 CatalogueFixtureConfiguration {
-                    plugin_id: PluginId::new(),
+                    plugin_id: second_id,
                     details: Vec::new(),
                 },
                 CatalogueRegistrationModeV1::NonproductionFixture,
             )
             .test_ok();
-        assert_eq!(registry.projections.reducer_names(), vec!["catalogue-fixture"]);
-        assert!(registry.composition().plugins[0].pin.is_none());
+        let count = |registry: &PluginRegistry, id| {
+            registry
+                .projections
+                .state_for_plugin(id, &entity)
+                .and_then(|state| state.get("n"))
+                .and_then(serde_json::Value::as_u64)
+        };
+        assert_eq!(registry.projections.reducer_names(), vec!["catalogue-fixture"; 2]);
+        assert_eq!(count(&registry, first.id()), Some(1));
+        assert_eq!(count(&registry, second_id), None);
+        assert!(registry.composition().plugins[1].pin.is_none());
+        event.seq = Seq::from_u64(2);
+        registry.projections.apply_event(&event);
+        assert_eq!(count(&registry, first.id()), Some(2));
+        assert_eq!(count(&registry, second_id), Some(1));
     }
 
     #[test]
