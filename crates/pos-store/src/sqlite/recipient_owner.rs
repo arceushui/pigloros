@@ -36,6 +36,9 @@ thread_local! {
     static RECIPIENT_OPEN_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static RECIPIENT_SHORT_READ: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
 }
 
 #[cfg(test)]
@@ -919,6 +922,10 @@ fn read_bound_private_key(
     let mut material = Zeroizing::new(Vec::with_capacity(32));
     file.read_to_end(&mut material)
         .map_err(|error| CoreError::Storage(error.to_string()))?;
+    #[cfg(test)]
+    if RECIPIENT_SHORT_READ.with(std::cell::Cell::get) {
+        material.pop();
+    }
     verify_bound_entry(owner, name, expected)?;
     material
         .as_slice()
@@ -951,6 +958,10 @@ fn delete_bound_private_key(
     let mut material = Zeroizing::new(Vec::with_capacity(32));
     file.read_to_end(&mut material)
         .map_err(|error| CoreError::Storage(error.to_string()))?;
+    #[cfg(test)]
+    if RECIPIENT_SHORT_READ.with(std::cell::Cell::get) {
+        material.pop();
+    }
     let material =
         Zeroizing::new(material.as_slice().try_into().map_err(|_| {
             CoreError::Storage("recipient private key width is invalid".to_owned())
@@ -1050,6 +1061,10 @@ mod tests {
 
     fn set_open_failure(enabled: bool) {
         RECIPIENT_OPEN_FAILURE.with(|failure| failure.set(enabled));
+    }
+
+    fn set_short_read(enabled: bool) {
+        RECIPIENT_SHORT_READ.with(|failure| failure.set(enabled));
     }
 
     #[test]
@@ -1152,6 +1167,27 @@ mod tests {
         assert!(registry
             .pending_destruction_requests()
             .any(|request| request.identity == descriptor.identity()));
+        Ok(())
+    }
+    #[test]
+    fn recipient_custody_short_reads_fail_closed_at_public_recovery_and_destruction(
+    ) -> Result<(), CoreError> {
+        let (_temporary, mut store, owner) = owner_fixture()?;
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        set_short_read(true);
+        assert!(store.recover_recipient_keys(&owner).is_err());
+        assert!(store
+            .destroy_recipient_key(
+                &owner,
+                descriptor.identity().epoch,
+                pos_core::Hash::from_bytes([51; 32])
+            )
+            .is_err());
+        set_short_read(false);
+        let registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        assert!(registry.tombstone(descriptor.identity()).is_none());
         Ok(())
     }
 }
