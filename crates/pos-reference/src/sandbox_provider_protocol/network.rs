@@ -1,5 +1,8 @@
 //! ADR-069 captured network evidence and offline Replay validation.
 
+mod frames;
+pub use frames::{NetworkExchangeFailure, NetworkExchangeReply, NetworkExchangeRequest};
+
 use ciborium::value::Value;
 
 use super::{
@@ -154,41 +157,49 @@ impl NetworkExchangeTranscript {
         if attempt_id == [0; 16] {
             return Err(SandboxProviderProtocolError::FieldOutOfBounds);
         }
-        NetworkRetentionPolicy::RetainIndefinitely
-            .digest()
-            .and_then(|retention| {
-                if retention != plan.retention_policy_digest {
-                    return Err(SandboxProviderProtocolError::InconsistentFields);
-                }
-                if response.len() as u64 > plan.response_maximum {
-                    return Err(SandboxProviderProtocolError::DigestMismatch);
-                }
-                let response_digest = content_digest(RESPONSE_DOMAIN, response);
-                if response_digest != plan.expected_response_digest {
-                    return Err(SandboxProviderProtocolError::DigestMismatch);
-                }
-                let unsigned = Value::Array(vec![
-                    text_value("NXT1"),
-                    uint_value(1),
-                    bytes_value(&attempt_id),
-                    bytes_value(&plan.exchange_id),
-                    uint_value(plan.occurrence),
-                    bytes_value(&plan.plan_digest),
-                    uint_value(plan.request_length),
-                    bytes_value(&plan.request_digest),
-                    uint_value(response.len() as u64),
-                    bytes_value(&response_digest),
-                    bytes_value(&response_digest),
-                    bytes_value(&retention),
-                ]);
-                digest_with_domain(TRANSCRIPT_DOMAIN, &unsigned)
-                    .map(|digest| Self { unsigned, digest })
-            })
+        validate_retention(plan).and_then(|retention| {
+            if response.len() as u64 > plan.response_maximum {
+                return Err(SandboxProviderProtocolError::DigestMismatch);
+            }
+            let response_digest = content_digest(RESPONSE_DOMAIN, response);
+            if response_digest != plan.expected_response_digest {
+                return Err(SandboxProviderProtocolError::DigestMismatch);
+            }
+            let unsigned = Value::Array(vec![
+                text_value("NXT1"),
+                uint_value(1),
+                bytes_value(&attempt_id),
+                bytes_value(&plan.exchange_id),
+                uint_value(plan.occurrence),
+                bytes_value(&plan.plan_digest),
+                uint_value(plan.request_length),
+                bytes_value(&plan.request_digest),
+                uint_value(response.len() as u64),
+                bytes_value(&response_digest),
+                bytes_value(&response_digest),
+                bytes_value(&retention),
+            ]);
+            digest_with_domain(TRANSCRIPT_DOMAIN, &unsigned).map(|digest| Self { unsigned, digest })
+        })
     }
 
     fn document(&self) -> Value {
         Value::Array(vec![self.unsigned.clone(), bytes_value(&self.digest)])
     }
+}
+
+fn validate_retention(
+    plan: &NetworkExchangePlan,
+) -> Result<[u8; 32], SandboxProviderProtocolError> {
+    NetworkRetentionPolicy::RetainIndefinitely
+        .digest()
+        .and_then(|retention| {
+            if retention == plan.retention_policy_digest {
+                Ok(retention)
+            } else {
+                Err(SandboxProviderProtocolError::InconsistentFields)
+            }
+        })
 }
 
 fn content_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {

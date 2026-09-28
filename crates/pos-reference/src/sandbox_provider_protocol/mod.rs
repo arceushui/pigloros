@@ -35,7 +35,10 @@ pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
     "uts-namespace",
 ];
 
-pub use network::{NetworkExchangeTranscript, NetworkRetentionPolicy};
+pub use network::{
+    NetworkExchangeFailure, NetworkExchangeReply, NetworkExchangeRequest,
+    NetworkExchangeTranscript, NetworkRetentionPolicy,
+};
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use revocation_update::{
