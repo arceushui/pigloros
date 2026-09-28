@@ -1190,6 +1190,36 @@ impl PluginRegistry {
         self.projections.fold_events(timeline, &visible_events);
     }
 
+    /// Check whether the current projection state can still be used at this
+    /// host inventory generation.
+    ///
+    /// # Errors
+    /// Returns a closed source error for stale or unavailable projection state.
+    pub fn validate_projection_source(&self, timeline: TimelineId) -> Result<(), RuntimeError> {
+        self.projections.validate_fork_source(timeline)?;
+        Ok(())
+    }
+
+    /// Rebuild projections from a host-captured completed Event prefix.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the Timeline cannot be authorized.
+    pub fn refold_projection_events(
+        &mut self,
+        timeline: TimelineId,
+        events: &[Event],
+        expected_generation: Option<pos_core::ErasureReferenceV1>,
+    ) -> Result<(), RuntimeError> {
+        let visible_events: Vec<Event> = events
+            .iter()
+            .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)
+            .cloned()
+            .collect();
+        self.projections
+            .refold_events(timeline, &visible_events, expected_generation)?;
+        Ok(())
+    }
+
     /// Consume the registry after authorizing its final projection snapshot.
     ///
     /// A protected registry requires a token issued by the bound host authority;

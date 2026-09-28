@@ -818,6 +818,42 @@ fn fold_captured_range(
     FoldedEventCount(u64::try_from(captured.events.len()).unwrap_or(u64::MAX))
 }
 
+fn fold_host_captured_range(
+    store: &SharedEventStore,
+    boundary: &mut TickBoundaryCoordinator,
+    registry: &mut PluginRegistry,
+    captured: &CapturedRange,
+) -> Result<FoldedEventCount, ExperimentError> {
+    if registry
+        .validate_projection_source(captured.timeline.id())
+        .is_ok()
+    {
+        return Ok(fold_captured_range(boundary, registry, captured));
+    }
+    refold_host_projection_prefix(store, registry, captured.timeline.id(), captured.through)?;
+    boundary.folded_through = captured.through;
+    Ok(FoldedEventCount(
+        u64::try_from(captured.events.len()).unwrap_or(u64::MAX),
+    ))
+}
+
+fn refold_host_projection_prefix(
+    store: &SharedEventStore,
+    registry: &mut PluginRegistry,
+    timeline: TimelineId,
+    through: pos_core::clock::Seq,
+) -> Result<(), ExperimentError> {
+    let (events, generation) = lock_store(store).and_then(|store| {
+        let events = read_completed_prefix(store.as_ref(), timeline, through)?;
+        let generation = registry
+            .clone_erasure_gate()
+            .and_then(|gate| gate.inventory_generation().ok());
+        Ok((events, generation))
+    })?;
+    registry.refold_projection_events(timeline, &events, generation)?;
+    Ok(())
+}
+
 fn append_driver_drafts(
     store: &mut dyn pos_core::store::EventStore,
     timeline_id: pos_core::ids::TimelineId,
@@ -1703,7 +1739,12 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        fold_captured_range(&mut self.boundary, &mut self.registry, &after);
+        if let Err(error) =
+            fold_host_captured_range(&self.store, &mut self.boundary, &mut self.registry, &after)
+        {
+            self.health = SessionHealth::Faulted;
+            return Err(error);
+        }
         self.total_events = self.boundary.folded_through.as_u64();
         Ok(u64::try_from(emitted.len()).unwrap_or(u64::MAX))
     }
@@ -1936,8 +1977,19 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        folded_events = folded_events
-            .saturating_add(fold_captured_range(&mut self.boundary, &mut self.registry, &after).0);
+        let after_count = match fold_host_captured_range(
+            &self.store,
+            &mut self.boundary,
+            &mut self.registry,
+            &after,
+        ) {
+            Ok(count) => count,
+            Err(error) => {
+                self.health = SessionHealth::Faulted;
+                return Err(error);
+            }
+        };
+        folded_events = folded_events.saturating_add(after_count.0);
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events);
         self.ticks = self.ticks.saturating_add(1);
@@ -2014,7 +2066,18 @@ impl ExperimentSession {
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
             })?;
-        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &after);
+        let folded_events = match fold_host_captured_range(
+            &self.store,
+            &mut self.boundary,
+            &mut self.registry,
+            &after,
+        ) {
+            Ok(count) => count,
+            Err(error) => {
+                self.health = SessionHealth::Faulted;
+                return Err(error);
+            }
+        };
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events.0);
         self.ticks = self.ticks.saturating_add(1);
@@ -2046,7 +2109,25 @@ impl ExperimentSession {
             )
         })?;
         committed_events.extend(before.events.iter().cloned());
-        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &before);
+        let folded_events = if self
+            .registry
+            .validate_projection_source(self.timeline.id())
+            .is_ok()
+        {
+            fold_captured_range(&mut self.boundary, &mut self.registry, &before)
+        } else {
+            if let Err(error) = refold_host_projection_prefix(
+                &self.store,
+                &mut self.registry,
+                self.timeline.id(),
+                before.through,
+            ) {
+                self.health = SessionHealth::Faulted;
+                return Err(error);
+            }
+            self.boundary.folded_through = before.through;
+            FoldedEventCount(u64::try_from(before.events.len()).unwrap_or(u64::MAX))
+        };
         Ok((folded_events.0, committed_events))
     }
 
@@ -2249,6 +2330,18 @@ impl ExperimentSession {
         let protected_token = self.operation_token;
         let public_events = lock_store(&self.store)
             .and_then(|store| read_completed_prefix(store.as_ref(), timeline_id, timeline_head))?;
+        if self
+            .registry
+            .validate_projection_source(timeline_id)
+            .is_err()
+        {
+            refold_host_projection_prefix(
+                &self.store,
+                &mut self.registry,
+                timeline_id,
+                timeline_head,
+            )?;
+        }
         let projections = self
             .registry
             .into_authorized_projections(

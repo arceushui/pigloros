@@ -283,6 +283,37 @@ impl ProjectionRegistry {
         }
     }
 
+    /// Rebuild state from one host-captured Timeline prefix under its current
+    /// containment fence after the inventory generation changes.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the Timeline cannot be authorized.
+    pub fn refold_events(
+        &mut self,
+        timeline: TimelineId,
+        events: &[Event],
+        expected_generation: Option<ErasureReferenceV1>,
+    ) -> Result<(), AuthorityErrorV1> {
+        let gate = self
+            .erasure_gate
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
+        let mut refolded = false;
+        let mut refold = || {
+            if gate.inventory_generation().ok() == expected_generation {
+                self.clear_state();
+                self.fold_events(timeline, events);
+                refolded = !self.mixed_sources;
+            }
+        };
+        gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut refold)
+            .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        refolded
+            .then_some(())
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
+    }
+
     /// Rebind a restored parent projection only after its child Fork has been
     /// committed and installed by the host. The child containment proof is
     /// checked before the inherited state can be exposed under that identity.
