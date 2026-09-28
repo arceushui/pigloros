@@ -58,6 +58,7 @@ hpke = { version = "=0.14.1", default-features = false, features = [
   "x25519",
   "chacha",
 ] }
+x25519-dalek = "=3.0.0"
 libc = "0.2"
 rustix = { version = "1.1.4", default-features = false, features = [
   "fs",

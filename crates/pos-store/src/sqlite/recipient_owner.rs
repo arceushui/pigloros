@@ -453,8 +453,7 @@ impl SqliteStore {
                 CoreError::Storage(format!("recipient key RNG failed: {error}"))
             })?;
             let (private_key, public_key) =
-                pos_crypto::recipient_key::derive_recipient_keypair_v1(&ikm)
-                    .map_err(storage_error)?;
+                pos_crypto::recipient_key::derive_recipient_keypair_v1(&ikm);
             let private_key = Zeroizing::new(private_key);
             let descriptor =
                 RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, epoch, public_key)
@@ -494,13 +493,8 @@ impl SqliteStore {
             .and_then(|()| claim_recipient_custody_directory(&self.conn, owner))
             .and_then(|()| recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error))
             .and_then(|owner_id| {
-                self.load_key_registry()
-                    .and_then(|registry| {
-                        registry.ok_or_else(|| {
-                            CoreError::Storage("recipient registry is unavailable".to_owned())
-                        })
-                    })
-                    .and_then(|registry| {
+                self.load_key_registry().and_then(|registry| match registry {
+                    Some(registry) => {
                         self.conn
                             .prepare("SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 ORDER BY epoch")
                             .map_err(storage_error)
@@ -528,7 +522,13 @@ impl SqliteStore {
                                         .map(|()| descriptors)
                                 })
                             })
-                    })
+                    }
+                    None => quarantine_unregistered_owned_staged_material(owner).and_then(|()| {
+                        Err(CoreError::Storage(
+                            "recipient registry is unavailable".to_owned(),
+                        ))
+                    }),
+                })
             });
         finish_immediate_transaction(&self.conn, result)
     }
@@ -789,7 +789,6 @@ fn validate_recipient_key_inventory(
             ));
         }
         if pos_crypto::recipient_key::recipient_public_key_from_private_v1(&material)
-            .map_err(storage_error)?
             != descriptor.public_key()
         {
             return Err(CoreError::Storage(
@@ -1042,6 +1041,98 @@ fn quarantine_unregistered_staged_material(
         recipient_fsync(&owner.directory_file).map_err(storage_error)?;
     }
     Ok(())
+}
+
+fn quarantine_unregistered_owned_staged_material(
+    owner: &RecipientKeyOwnerV1,
+) -> Result<(), CoreError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut directory = rustix::fs::Dir::read_from(&owner.directory_file).map_err(storage_error)?;
+    while let Some(entry) = directory.read() {
+        let entry = entry.map_err(storage_error)?;
+        let name = entry.file_name();
+        let Some(epoch) = staged_recipient_epoch(name) else {
+            continue;
+        };
+        let material = read_unregistered_staged_private_key(owner, name)?;
+        let public_key = pos_crypto::recipient_key::recipient_public_key_from_private_v1(&material);
+        let descriptor = RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, epoch, public_key)
+            .map_err(storage_error)?;
+        if bound_name(&recipient_private_path(&owner.directory, descriptor))? != Path::new(name) {
+            continue;
+        }
+        quarantine_staged_entry(owner, name)?;
+    }
+    Ok(())
+}
+
+fn staged_recipient_epoch(name: &std::ffi::OsStr) -> Option<u64> {
+    let name = name.to_str()?;
+    let epoch = name
+        .strip_prefix("recipient-")?
+        .strip_suffix(".key")?
+        .split_once('-')?
+        .0;
+    let epoch = epoch.parse().ok()?;
+    (epoch != 0).then_some(epoch)
+}
+
+fn read_unregistered_staged_private_key(
+    owner: &RecipientKeyOwnerV1,
+    name: &Path,
+) -> Result<Zeroizing<[u8; 32]>, CoreError> {
+    validate_owner_directory(owner).and_then(|()| {
+        recipient_openat2(
+            &owner.directory_file,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        )
+        .map(File::from)
+        .map_err(storage_error)
+        .and_then(|mut file| {
+            file.metadata().map_err(storage_error).and_then(|metadata| {
+                let identity = recipient_private_file_identity(&metadata);
+                if identity.uid != owner.directory_uid.to_be_bytes() {
+                    return Err(CoreError::Storage(
+                        "recipient private file owner differs from private directory owner"
+                            .to_owned(),
+                    ));
+                }
+                validate_private_file(&metadata, identity).and_then(|()| {
+                    let mut material = Zeroizing::new([0_u8; 32]);
+                    recipient_read_exact(&mut file, &mut *material)
+                        .map_err(storage_error)
+                        .and_then(|()| verify_bound_entry(owner, name, identity).map(|()| material))
+                })
+            })
+        })
+    })
+}
+
+fn quarantine_staged_entry(
+    owner: &RecipientKeyOwnerV1,
+    name: &std::ffi::OsStr,
+) -> Result<(), CoreError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = name.to_bytes();
+    let mut quarantine = Vec::with_capacity(bytes.len() + 8);
+    quarantine.extend_from_slice(b".");
+    quarantine.extend_from_slice(bytes);
+    quarantine.extend_from_slice(b".orphan");
+    let quarantine = std::ffi::CString::new(quarantine).map_err(storage_error)?;
+    renameat_with(
+        &owner.directory_file,
+        name,
+        &owner.directory_file,
+        quarantine.as_c_str(),
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(storage_error)?;
+    recipient_fsync(&owner.directory_file).map_err(storage_error)
 }
 
 fn validate_owner_directory(owner: &RecipientKeyOwnerV1) -> Result<(), CoreError> {
@@ -1345,12 +1436,10 @@ mod tests {
                 .into_iter()
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
-            // A registry-free recovery deliberately stops before it can classify
-            // the staged file. It must leave that material unavailable rather
-            // than move an entry that could belong to a live registry.
-            assert!(names.iter().any(|name| {
+            assert!(!names.iter().any(|name| {
                 std::path::Path::new(name).extension() == Some(std::ffi::OsStr::new("key"))
             }));
+            assert!(names.iter().any(|name| name.ends_with(".orphan")));
         }
 
         for failure in [0, 1] {
