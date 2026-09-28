@@ -43,6 +43,15 @@ thread_local! {
     static RECIPIENT_STAT_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static RECIPIENT_RANDOM_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static RECIPIENT_READ_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static RECIPIENT_WRITE_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
     static RECIPIENT_OPEN_REPLACEMENT: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const {
         std::cell::RefCell::new(None)
     };
@@ -68,6 +77,53 @@ fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
 #[cfg(not(test))]
 fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
     fsync(fd)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn recipient_random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
+    if RECIPIENT_RANDOM_FAILURE.with(std::cell::Cell::get) {
+        Err(std::io::Error::other("injected recipient RNG failure"))
+    } else {
+        SysRng
+            .try_fill_bytes(bytes)
+            .map_err(|error| std::io::Error::other(error.to_string()))
+    }
+}
+
+#[cfg(not(test))]
+fn recipient_random_bytes(bytes: &mut [u8]) -> Result<(), impl std::fmt::Display> {
+    SysRng.try_fill_bytes(bytes)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn recipient_read_exact(file: &mut File, bytes: &mut [u8]) -> std::io::Result<()> {
+    if RECIPIENT_READ_FAILURE.with(std::cell::Cell::get) {
+        Err(std::io::Error::other("injected recipient read failure"))
+    } else {
+        file.read_exact(bytes)
+    }
+}
+
+#[cfg(not(test))]
+fn recipient_read_exact(file: &mut File, bytes: &mut [u8]) -> std::io::Result<()> {
+    file.read_exact(bytes)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    if RECIPIENT_WRITE_FAILURE.with(std::cell::Cell::get) {
+        Err(std::io::Error::other("injected recipient write failure"))
+    } else {
+        file.write_all(bytes)
+    }
+}
+
+#[cfg(not(test))]
+fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    file.write_all(bytes)
 }
 
 #[cfg(test)]
@@ -363,7 +419,7 @@ impl SqliteStore {
             let identity =
                 KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, epoch);
             let mut ikm = Zeroizing::new([0_u8; 32]);
-            SysRng.try_fill_bytes(&mut *ikm).map_err(|error| {
+            recipient_random_bytes(&mut *ikm).map_err(|error| {
                 CoreError::Storage(format!("recipient key RNG failed: {error}"))
             })?;
             let (private_key, public_key) =
@@ -971,7 +1027,7 @@ fn read_bound_private_key(
                 file.metadata().map_err(storage_error).and_then(|metadata| {
                     validate_private_file(&metadata, expected).and_then(|()| {
                         let mut material = Zeroizing::new([0_u8; 32]);
-                        file.read_exact(&mut *material)
+                        recipient_read_exact(&mut file, &mut *material)
                             .map_err(storage_error)
                             .and_then(|_| {
                                 verify_bound_entry(owner, name, expected).map(|()| material)
@@ -1006,7 +1062,7 @@ fn delete_bound_private_key(
                     .and_then(|metadata| {
                         validate_private_file(&metadata, expected).and_then(|()| {
                             let mut material = Zeroizing::new([0_u8; 32]);
-                            file.read_exact(&mut *material)
+                            recipient_read_exact(&mut file, &mut *material)
                                 .map_err(storage_error)
                                 .map(|_| material)
                                 .and_then(|material| {
@@ -1074,7 +1130,7 @@ fn write_private_key(
                                 .to_owned(),
                         ));
                     }
-                    file.write_all(private_key)
+                    recipient_write_all(&mut file, private_key)
                         .map_err(storage_error)
                         .and_then(|()| recipient_fsync(&file).map_err(storage_error))
                         .and_then(|()| file.metadata().map_err(storage_error))
@@ -1135,6 +1191,18 @@ mod tests {
 
     fn set_stat_failure(enabled: bool) {
         RECIPIENT_STAT_FAILURE.with(|failure| failure.set(enabled));
+    }
+
+    fn set_random_failure(enabled: bool) {
+        RECIPIENT_RANDOM_FAILURE.with(|failure| failure.set(enabled));
+    }
+
+    fn set_read_failure(enabled: bool) {
+        RECIPIENT_READ_FAILURE.with(|failure| failure.set(enabled));
+    }
+
+    fn set_write_failure(enabled: bool) {
+        RECIPIENT_WRITE_FAILURE.with(|failure| failure.set(enabled));
     }
 
     fn replace_directory_after_open(directory: PathBuf, replacement: PathBuf) {
@@ -1293,6 +1361,47 @@ mod tests {
         set_stat_failure(true);
         assert!(store.recover_recipient_keys(&owner).is_err());
         set_stat_failure(false);
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_custody_injected_entropy_and_material_io_failures_remain_closed(
+    ) -> Result<(), CoreError> {
+        {
+            let (_temporary, mut store, owner) = owner_fixture()?;
+            set_random_failure(true);
+            assert!(store.enroll_recipient_key(&owner).is_err());
+            set_random_failure(false);
+            assert!(store.load_key_registry()?.is_none());
+        }
+
+        {
+            let (_temporary, mut store, owner) = owner_fixture()?;
+            set_write_failure(true);
+            assert!(store.enroll_recipient_key(&owner).is_err());
+            set_write_failure(false);
+            assert!(store.load_key_registry()?.is_none());
+        }
+
+        let (_temporary, mut store, owner) = owner_fixture()?;
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        set_read_failure(true);
+        assert!(store.recover_recipient_keys(&owner).is_err());
+        assert!(store
+            .destroy_recipient_key(
+                &owner,
+                descriptor.identity().epoch,
+                pos_core::Hash::from_bytes([51; 32]),
+            )
+            .is_err());
+        set_read_failure(false);
+        let registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        assert!(registry.tombstone(descriptor.identity()).is_none());
+        assert!(registry
+            .pending_destruction_requests()
+            .any(|request| request.identity == descriptor.identity()));
         Ok(())
     }
 
