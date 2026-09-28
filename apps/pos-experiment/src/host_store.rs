@@ -140,7 +140,46 @@ fn host_error(error: ErasureHostErrorV1) -> CoreError {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod host_store_tests {
     use super::*;
-    use pos_core::{CanonicalBytes, EntityId, Kind};
+    use pos_core::{CanonicalBytes, Capability, EntityId, Kind, Plugin, PluginId, Reducer, State};
+
+    struct ProjectionProbe {
+        id: PluginId,
+    }
+
+    impl Plugin for ProjectionProbe {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "projection-probe"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: vec![Kind::new("projection.public")],
+                owned_entity_kinds: vec![],
+                has_driver: false,
+                has_reducer: true,
+            }
+        }
+    }
+
+    struct CountReducer;
+
+    impl Reducer for CountReducer {
+        fn initial(&self) -> State {
+            State::new()
+        }
+
+        fn apply(&self, state: &mut State, _: &Event) {
+            let count = state
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            state.set("count", serde_json::json!(count + 1));
+        }
+    }
 
     #[test]
     fn delegates_the_experiment_store_surface() -> Result<(), Box<dyn std::error::Error>> {
@@ -226,16 +265,24 @@ mod host_store_tests {
     {
         let mut store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
         let timeline = store.create_timeline("projection-source")?;
+        let entity = EntityId::new();
         let events = store.append(
             timeline.id(),
             &[EventDraft::new(
-                EntityId::new(),
+                entity,
                 Kind::new("projection.public"),
                 CanonicalBytes::from_vec(Vec::new()),
             )],
         )?;
         let mut registry =
             pos_runtime::PluginRegistry::new().with_erasure_gate(store.containment_gate());
+        registry.register(
+            &ProjectionProbe {
+                id: PluginId::new(),
+            },
+            Some(Box::new(CountReducer)),
+            None,
+        )?;
         registry.fold_events(timeline.id(), &events);
         assert!(registry.validate_projection_source(timeline.id()).is_ok());
 
@@ -264,7 +311,20 @@ mod host_store_tests {
             captured.through
         )
         .is_err());
-        registry = registry.without_erasure_gate();
+        let projections = registry.into_authorized_projections(
+            timeline.id(),
+            captured.through,
+            0,
+            None,
+            Some(&events),
+        )?;
+        assert_eq!(
+            projections
+                .state_for_reducer(timeline.id(), "projection-probe", &entity)?
+                .and_then(|state| state.get("count").and_then(serde_json::Value::as_u64)),
+            Some(1)
+        );
+        let mut registry = pos_runtime::PluginRegistry::new().without_erasure_gate();
         assert!(
             fold_host_captured_range(&shared, &mut boundary, &mut registry, &captured).is_err()
         );
@@ -274,17 +334,25 @@ mod host_store_tests {
     #[test]
     fn session_refreshes_projection_source_after_inventory_change(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut session = Experiment::new(ExperimentConfig {
+        let mut experiment = Experiment::new(ExperimentConfig {
             name: "generation-refresh".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: pos_store::StoreConfig::Memory,
-        })
-        .start()?;
+        });
+        experiment.register(
+            &ProjectionProbe {
+                id: PluginId::new(),
+            },
+            Some(Box::new(CountReducer)),
+            None,
+        )?;
+        let mut session = experiment.start()?;
         let timeline = session.timeline.id();
+        let entity = EntityId::new();
         lock_store(&session.store)?.append(
             timeline,
             &[EventDraft::new(
-                EntityId::new(),
+                entity,
                 Kind::new("projection.public"),
                 CanonicalBytes::from_vec(Vec::new()),
             )],
@@ -309,6 +377,13 @@ mod host_store_tests {
         let result = session.run_to_completion()?;
         assert_eq!(result.total_events, 1);
         assert_eq!(result.timeline_id, timeline);
+        assert_eq!(
+            result
+                .projections
+                .state_for_reducer(timeline, "projection-probe", &entity)?
+                .and_then(|state| state.get("count").and_then(serde_json::Value::as_u64)),
+            Some(1)
+        );
         Ok(())
     }
 

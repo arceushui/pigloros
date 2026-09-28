@@ -3050,7 +3050,8 @@ mod tests {
     #[test]
     fn restored_fork_rolls_back_a_child_missing_from_the_host_inventory() {
         struct ForeignChildStore {
-            deleted: bool,
+            child: Option<TimelineId>,
+            delete_called: bool,
             fail_rollback: bool,
         }
 
@@ -3077,9 +3078,11 @@ mod tests {
                 at_seq: Seq,
                 name: &str,
             ) -> Result<pos_core::Timeline, CoreError> {
-                Ok(pos_core::Timeline::new(
-                    pos_core::TimelineMeta::forked_from(parent, at_seq, name),
-                ))
+                let child = pos_core::Timeline::new(pos_core::TimelineMeta::forked_from(
+                    parent, at_seq, name,
+                ));
+                self.child = Some(child.id());
+                Ok(child)
             }
 
             fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
@@ -3090,11 +3093,13 @@ mod tests {
                 Ok(None)
             }
 
-            fn delete_timeline(&mut self, _: TimelineId) -> Result<(), CoreError> {
-                self.deleted = true;
+            fn delete_timeline(&mut self, child: TimelineId) -> Result<(), CoreError> {
+                assert_eq!(self.child, Some(child));
+                self.delete_called = true;
                 if self.fail_rollback {
                     Err(CoreError::ArtifactUnavailable)
                 } else {
+                    self.child = None;
                     Ok(())
                 }
             }
@@ -3116,13 +3121,30 @@ mod tests {
                 .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
                 .test_ok();
             let mut store = ForeignChildStore {
-                deleted: false,
+                child: None,
+                delete_called: false,
                 fail_rollback,
             };
-            assert!(registry
-                .fork_restored_timeline(&mut store, parent.id(), Seq::ZERO, "foreign-child")
-                .is_err());
-            assert!(store.deleted);
+            let result = registry.fork_restored_timeline(
+                &mut store,
+                parent.id(),
+                Seq::ZERO,
+                "foreign-child",
+            );
+            if fail_rollback {
+                assert!(matches!(
+                    result,
+                    Err(RuntimeError::Store(CoreError::ArtifactUnavailable))
+                ));
+                assert!(store.child.is_some());
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(RuntimeError::Authority(AuthorityErrorV1::SourceUnavailable))
+                ));
+                assert!(store.child.is_none());
+            }
+            assert!(store.delete_called);
         }
     }
 
