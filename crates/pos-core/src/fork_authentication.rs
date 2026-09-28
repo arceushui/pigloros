@@ -11,8 +11,10 @@ use crate::{CanonicalBytes, Hash, OwnerIdV1, PrincipalRefV1};
 
 /// Maximum complete FAP1 encoding, including its outer CBOR array.
 pub const MAX_FORK_AUTH_POLICY_BYTES_V1: usize = 37_528;
-/// Maximum accepted LAR1 encoding reconstructed from a protected FACR1 credential.
-pub const MAX_LOCAL_ACCOUNT_REGISTRY_BYTES_V1: usize = 65_536;
+/// Maximum accepted protected FACR1 authentication credential encoding.
+pub const MAX_FORK_AUTH_CREDENTIAL_BYTES_V1: usize = 65_536;
+/// Maximum accepted LAR1 registry encoding reconstructed from FACR1.
+pub const MAX_LOCAL_ACCOUNT_REGISTRY_BYTES_V1: usize = MAX_FORK_AUTH_CREDENTIAL_BYTES_V1;
 /// Maximum complete APR1 encoding.
 pub const MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1: usize = 381;
 /// Maximum complete FAE1 encoding.
