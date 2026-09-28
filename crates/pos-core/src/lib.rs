@@ -11,8 +11,10 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod adapter_admission;
+mod adapter_contract;
 pub mod adapter_transcript;
 pub mod authority;
+mod canonical_cbor_head;
 #[cfg(test)]
 extern crate self as pos_core;
 
@@ -63,8 +65,8 @@ pub mod world_transform;
 
 pub use adapter_admission::{
     adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
-    AdapterAdmissionErrorV1, AdapterAdmissionInputV1, AdapterAdmissionV1,
-    MAX_ADAPTER_ADMISSION_BYTES_V1, MAX_ADAPTER_ADMISSION_ENTRIES_V1,
+    AdapterAdmissionErrorV1, AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterDataClassV1,
+    AdapterEffectModeV1, MAX_ADAPTER_ADMISSION_BYTES_V1, MAX_ADAPTER_ADMISSION_ENTRIES_V1,
     MAX_ADAPTER_CONFIGURATION_BYTES_V1,
 };
 pub use adapter_transcript::{
