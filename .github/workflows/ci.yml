@@ -472,10 +472,14 @@ jobs:
           --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
           --no-github-summary
       - name: Enforce workspace coverage floor
-        run: >
-          cargo llvm-cov report --json --summary-only --show-missing-lines
-          --fail-under-lines 99
-          --fail-under-regions 99
+        run: |
+          jq -er '
+            .data[0].totals
+            | "Workspace coverage: lines \(.lines.covered)/\(.lines.count) (\(.lines.percent)%); regions \(.regions.covered)/\(.regions.count) (\(.regions.percent)%)"
+          ' "${{ runner.temp }}/coverage.json"
+          cargo llvm-cov report --json --summary-only --show-missing-lines \
+            --fail-under-lines 99 \
+            --fail-under-regions 99
       - name: Preserve failed coverage diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
