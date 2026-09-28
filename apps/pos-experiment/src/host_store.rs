@@ -182,6 +182,46 @@ mod host_store_tests {
     }
 
     #[test]
+    fn restored_fork_rejects_stale_projection_before_creating_child(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
+        let parent = store.create_timeline("projection-parent")?;
+        let events = store.append(
+            parent.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("projection.public"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )],
+        )?;
+        let head = events.last().map_or(Seq::ZERO, |event| event.seq);
+        let mut registry =
+            pos_runtime::PluginRegistry::new().with_erasure_gate(store.containment_gate());
+        registry.fold_events(parent.id(), &events);
+        registry.restore_driver_state(
+            &[pos_runtime::TimelineHistorySegment::new(parent.id(), head)],
+            &events,
+        )?;
+
+        let unrelated = store.create_timeline("new-generation")?;
+        assert!(matches!(
+            registry.fork_restored_timeline(&mut store, parent.id(), head, "stale-child"),
+            Err(pos_runtime::RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::SourceUnavailable
+            ))
+        ));
+        let timelines = store.list_timelines()?;
+        assert_eq!(timelines.len(), 2);
+        assert!(timelines
+            .iter()
+            .any(|timeline| timeline.id() == parent.id()));
+        assert!(timelines
+            .iter()
+            .any(|timeline| timeline.id() == unrelated.id()));
+        Ok(())
+    }
+
+    #[test]
     fn poisoned_host_and_host_errors_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         let store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
         drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
