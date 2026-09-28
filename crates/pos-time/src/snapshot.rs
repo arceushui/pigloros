@@ -437,7 +437,7 @@ mod tests {
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
-        store::EventStore,
+        store::{EventReadBounds, EventStore},
         ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
         ArtifactTransitionRuleV1, ErasureArtifactClassV1, ErasureContainmentGateV1,
         ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, Reducer,
@@ -871,8 +871,21 @@ mod tests {
     #[test]
     fn snapshot_read_effect_rejects_an_unknown_timeline_after_admission() {
         let mut host = crate::test_support::open_exact_host();
+        let anchor = {
+            let mut commands = host.command_sender().test_ok();
+            commands.create_timeline("snapshot-generation-anchor").test_ok().id()
+        };
+        let (_, generation) = host
+            .read_sender()
+            .test_ok()
+            .read_bounded_at_generation(
+                anchor,
+                SeqRange::all(),
+                EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                None,
+            )
+            .test_ok();
         let timeline = TimelineId::new();
-        let generation = host.containment_gate().inventory_generation().test_ok();
         let closure = WorldReplayClosureV1::test_fixture_for_timeline_consumer(
             timeline,
             pos_core::Hash::from_bytes(generation.digest()),
