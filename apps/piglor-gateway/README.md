@@ -74,8 +74,13 @@ non-loopback listener is spectator-only.
 - **Public listener:** on a non-loopback bind, only the four public Ledger routes
   above are registered. All Timeline and prediction-registration routes return `404`.
 
-Rust callers should use public `Gateway::read_events_page` and follow
-`EventPage::next_from_seq`. The deprecated `read_events_from` compatibility
+Rust callers should start with `Gateway::read_events_page` (or
+`Gateway::read_events_page_authorized`) and pass `EventPage::next_cursor` to
+`Gateway::read_events_page_after` (or the authorized counterpart). The opaque
+cursor binds its Timeline and, on a host-owned Gateway, its inventory generation;
+continuation after a generation change returns `StaleEventCursor`.
+`next_from_seq` is a sequence position for a separate fresh read, not a
+generation-bound continuation. The deprecated `read_events_from` compatibility
 method succeeds only when the result fits in one bounded page and returns an
 explicit error instead of silently truncating a longer Timeline.
 
