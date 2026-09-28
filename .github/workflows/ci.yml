@@ -139,10 +139,9 @@ jobs:
   fmt:
     name: fmt
     needs: [ci_change_scope, preflight-gate]
-    # preflight-gate intentionally accepts the push-only skip of trunk-pr.
-    # always() prevents that optional ancestor from propagating a skip here;
-    # the explicit result check still stops the stage after a failed preflight.
-    if: ${{ always() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    # Temporary #208 diagnostic: print the pinned formatter's exact diff
+    # while Trunk preflight reports only the affected filename.
+    if: ${{ always() && needs.ci_change_scope.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
