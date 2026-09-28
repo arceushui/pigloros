@@ -254,6 +254,11 @@ pub struct LocalOciPublisherV1 {
     owner: u32,
 }
 
+struct RecoveryInventory {
+    staging: Vec<String>,
+    unindexed: Vec<String>,
+}
+
 impl LocalOciPublisherV1 {
     /// Open and durably initialize a trusted `0700` local store root.
     ///
@@ -364,7 +369,7 @@ impl LocalOciPublisherV1 {
 
     fn recover_locked(&self) -> Result<RecoveryReportV1, LocalOciPublicationErrorV1> {
         let quarantine = open_directory(&self.root, QUARANTINE_NAME)?;
-        if directory_entries(&quarantine)?.next().is_some() {
+        if directory_names(&quarantine)?.next().transpose()?.is_some() {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
         let releases = open_directory(&self.root, RELEASES_NAME)?;
@@ -372,7 +377,8 @@ impl LocalOciPublisherV1 {
             .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
         let indexed =
             parse_root_index(&index).map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)?;
-        let removed_staging = self.recover_staging(&releases, &indexed)?;
+        let inventory = self.recovery_inventory(&releases, &indexed)?;
+        let removed_staging = self.recover_staging(&releases, &indexed, &inventory.staging)?;
         faulted_sync!(
             None,
             &releases,
@@ -384,32 +390,6 @@ impl LocalOciPublisherV1 {
             &self.root,
             LocalOciPublicationErrorV1::RecoveryRequired
         )?;
-        let finals = directory_entries(&releases)?
-            .filter(|name| !name.starts_with('.'))
-            .collect::<Vec<_>>();
-        if finals.len() > 256 {
-            return Err(LocalOciPublicationErrorV1::BoundsExceeded);
-        }
-        let unindexed = finals
-            .into_iter()
-            .map(|name| {
-                if !lowercase_hex(&name, 64) {
-                    self.quarantine_entry(&releases, &name, "final")?;
-                    return Err(LocalOciPublicationErrorV1::RecoveryRequired);
-                }
-                Ok(name)
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|name| {
-                !indexed
-                    .iter()
-                    .any(|address| address.digest() == format!("sha256:{name}"))
-            })
-            .collect::<Vec<_>>();
-        if unindexed.len() > 1 || (unindexed.len() == 1 && indexed.len() >= 256) {
-            return Err(LocalOciPublicationErrorV1::BoundsExceeded);
-        }
         for address in &indexed {
             let name = &address.digest()[7..];
             let valid = open_directory(&releases, name).and_then(|directory| {
@@ -422,7 +402,7 @@ impl LocalOciPublisherV1 {
             }
         }
         let mut committed = Vec::new();
-        if let Some(name) = unindexed.first() {
+        if let Some(name) = inventory.unindexed.first() {
             let recovered = (|| {
                 let final_directory = open_directory(&releases, name)?;
                 let ready = read_limited(open_private_file(&final_directory, "READY")?, 256)
@@ -465,17 +445,47 @@ impl LocalOciPublisherV1 {
         })
     }
 
+    fn recovery_inventory(
+        &self,
+        releases: &File,
+        indexed: &[BundleAddressV1],
+    ) -> Result<RecoveryInventory, LocalOciPublicationErrorV1> {
+        let (staging, finals): (Vec<_>, Vec<_>) = bounded_directory_entries(releases, 258)?
+            .into_iter()
+            .partition(|name| name.starts_with('.'));
+        let unindexed = finals
+            .iter()
+            .filter(|name| {
+                !indexed
+                    .iter()
+                    .any(|address| &address.digest()[7..] == name.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        // Establish all capacity preconditions before deleting or adopting
+        // any candidate, including a valid owned staging directory.
+        if staging.len() > 1
+            || finals.len() > 256
+            || unindexed.len() > 1
+            || (!unindexed.is_empty() && indexed.len() >= 256)
+        {
+            return Err(LocalOciPublicationErrorV1::BoundsExceeded);
+        }
+        for name in finals {
+            if !lowercase_hex(&name, 64) {
+                self.quarantine_entry(releases, &name, "final")?;
+                return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+            }
+        }
+        Ok(RecoveryInventory { staging, unindexed })
+    }
+
     fn recover_staging(
         &self,
         releases: &File,
         indexed: &[BundleAddressV1],
+        staging: &[String],
     ) -> Result<u8, LocalOciPublicationErrorV1> {
-        let staging = directory_entries(releases)?
-            .filter(|name| name.starts_with('.'))
-            .collect::<Vec<_>>();
-        if staging.len() > 1 {
-            return Err(LocalOciPublicationErrorV1::BoundsExceeded);
-        }
         if let Some(name) = staging.first() {
             let Some((digest, nonce)) = staging_name_parts(name) else {
                 self.quarantine_entry(releases, name, "staging")?;
@@ -514,7 +524,16 @@ impl LocalOciPublisherV1 {
     }
 
     fn recover_next_index(&self) -> Result<bool, LocalOciPublicationErrorV1> {
-        let next = directory_entries(&self.root)?
+        let root_entries = bounded_directory_entries(&self.root, 5)
+            .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        if root_entries.iter().any(|name| {
+            ![LOCK_NAME, INDEX_NAME, RELEASES_NAME, QUARANTINE_NAME].contains(&name.as_str())
+                && !name.starts_with(".published.")
+        }) {
+            return Err(LocalOciPublicationErrorV1::RecoveryRequired);
+        }
+        let next = root_entries
+            .into_iter()
             .filter(|name| name.starts_with(".published."))
             .collect::<Vec<_>>();
         if next.len() > 1 {
@@ -658,7 +677,7 @@ impl LocalOciPublisherV1 {
     ) -> Result<(), LocalOciPublicationErrorV1> {
         let quarantine = open_directory(&self.root, QUARANTINE_NAME)
             .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
-        if directory_entries(&quarantine)?.next().is_some() {
+        if directory_names(&quarantine)?.next().transpose()?.is_some() {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
         let destination = format!(
@@ -743,7 +762,7 @@ impl LocalOciPublisherV1 {
 
 fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPublicationErrorV1> {
     let staging = open_directory(releases, name)?;
-    let mut entries = directory_entries(&staging)?.collect::<Vec<_>>();
+    let mut entries = bounded_directory_entries(&staging, 5)?;
     entries.sort();
     if !entries.iter().any(|entry| entry == "OWNER")
         || entries.len() > 5
@@ -764,7 +783,7 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
         None
     };
     let sha256 = if let Some(blobs) = &blobs {
-        let children = directory_entries(blobs)?.collect::<Vec<_>>();
+        let children = bounded_directory_entries(blobs, 1)?;
         if children.len() > 1 || children.iter().any(|name| name != "sha256") {
             return Err(LocalOciPublicationErrorV1::RecoveryRequired);
         }
@@ -777,10 +796,7 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
         None
     };
     let members = if let Some(sha256) = &sha256 {
-        let names = directory_entries(sha256)?.collect::<Vec<_>>();
-        if names.len() > 359 {
-            return Err(LocalOciPublicationErrorV1::BoundsExceeded);
-        }
+        let names = bounded_directory_entries(sha256, 359)?;
         for member in &names {
             if !lowercase_hex(member, 64) {
                 return Err(LocalOciPublicationErrorV1::RecoveryRequired);
@@ -791,20 +807,14 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
     } else {
         Vec::new()
     };
-    if let Some(sha256) = &sha256 {
+    if let (Some(sha256), Some(blobs)) = (&sha256, &blobs) {
         for member in members {
             faulted_io!(fs::unlinkat(sha256, member, AtFlags::empty()))
                 .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
         }
         faulted_sync!(None, sha256, LocalOciPublicationErrorV1::Sync)?;
-        faulted_io!(fs::unlinkat(
-            blobs
-                .as_ref()
-                .ok_or(LocalOciPublicationErrorV1::RecoveryRequired)?,
-            "sha256",
-            AtFlags::REMOVEDIR,
-        ))
-        .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
+        faulted_io!(fs::unlinkat(blobs, "sha256", AtFlags::REMOVEDIR,))
+            .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)?;
     }
     if let Some(blobs) = &blobs {
         faulted_sync!(None, blobs, LocalOciPublicationErrorV1::Sync)?;
@@ -822,28 +832,48 @@ fn remove_owned_staging(releases: &File, name: &str) -> Result<(), LocalOciPubli
         .map_err(|_| LocalOciPublicationErrorV1::RecoveryRequired)
 }
 
-fn directory_entries(
+fn directory_names(
     directory: &File,
-) -> Result<impl Iterator<Item = String> + use<>, LocalOciPublicationErrorV1> {
+) -> Result<
+    impl Iterator<Item = Result<String, LocalOciPublicationErrorV1>> + use<>,
+    LocalOciPublicationErrorV1,
+> {
     let entries = faulted_io!(
         fault_selected(PublicationFaultPointV1::DirectoryRead),
         rustix::io::Errno::IO,
         Dir::read_from(directory)
     )
     .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-    let entries = faulted_io!(entries.collect::<Result<Vec<_>, _>>())
-        .map_err(|_| LocalOciPublicationErrorV1::Io)?;
-    let names = entries
-        .into_iter()
-        .map(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .map(str::to_owned)
-                .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout)
-        })
+    Ok(entries.filter_map(|entry| {
+        let entry = match faulted_io!(entry) {
+            Ok(entry) => entry,
+            Err(_) => return Some(Err(LocalOciPublicationErrorV1::Io)),
+        };
+        let name = entry.file_name();
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            None
+        } else {
+            Some(
+                name.to_str()
+                    .map(str::to_owned)
+                    .map_err(|_| LocalOciPublicationErrorV1::InvalidLayout),
+            )
+        }
+    }))
+}
+
+fn bounded_directory_entries(
+    directory: &File,
+    limit: usize,
+) -> Result<Vec<String>, LocalOciPublicationErrorV1> {
+    let entries = directory_names(directory)?
+        .take(limit + 1)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(names.into_iter().filter(|name| name != "." && name != ".."))
+    if entries.len() > limit {
+        Err(LocalOciPublicationErrorV1::BoundsExceeded)
+    } else {
+        Ok(entries)
+    }
 }
 
 impl ReleaseSourceV1 for LocalOciPublisherV1 {
@@ -870,9 +900,11 @@ impl LocalOciPublisherV1 {
     fn reader_recovery_floor(&self) -> Result<(), ReleaseSourceErrorV1> {
         let quarantine = open_directory(&self.root, QUARANTINE_NAME)
             .map_err(|error| map_publication_to_source(&error))?;
-        if directory_entries(&quarantine)
+        if directory_names(&quarantine)
             .map_err(|error| map_publication_to_source(&error))?
             .next()
+            .transpose()
+            .map_err(|error| map_publication_to_source(&error))?
             .is_some()
         {
             Err(ReleaseSourceErrorV1::RecoveryRequired)
@@ -915,9 +947,8 @@ impl LocalOciPublisherV1 {
         release: &File,
         address: &BundleAddressV1,
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
-        let mut entries = directory_entries(release)
-            .map_err(|error| map_publication_to_source(&error))?
-            .collect::<Vec<_>>();
+        let mut entries = bounded_directory_entries(release, 5)
+            .map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
         entries.sort();
         if !entries.iter().map(String::as_str).eq([
             "OWNER",
@@ -980,9 +1011,8 @@ impl LocalOciPublisherV1 {
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
         let blobs =
             open_directory(release, "blobs").map_err(|error| map_publication_to_source(&error))?;
-        let blob_directories = directory_entries(&blobs)
-            .map_err(|error| map_publication_to_source(&error))?
-            .collect::<Vec<_>>();
+        let blob_directories = bounded_directory_entries(&blobs, 1)
+            .map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?;
         if !blob_directories.iter().map(String::as_str).eq(["sha256"]) {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
         }
@@ -1040,8 +1070,9 @@ impl LocalOciPublisherV1 {
                     .map(|blob| blob.digest()[7..].to_owned()),
             )
             .collect::<BTreeSet<_>>();
-        let actual_blobs = directory_entries(&sha256)
-            .map_err(|error| map_publication_to_source(&error))?
+        let actual_blobs = bounded_directory_entries(&sha256, 359)
+            .map_err(|_| ReleaseSourceErrorV1::InvalidLayout)?
+            .into_iter()
             .collect::<BTreeSet<_>>();
         if actual_blobs != expected_blobs {
             return Err(ReleaseSourceErrorV1::InvalidLayout);
@@ -1116,20 +1147,17 @@ fn parse_root_index(bytes: &[u8]) -> Result<Vec<BundleAddressV1>, ReleaseSourceE
 }
 
 fn read_limited(file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceErrorV1> {
-    let length = usize::try_from(
-        faulted_io!(
-            fault_selected(PublicationFaultPointV1::ReadMetadata),
-            std::io::Error::other("injected local OCI metadata fault"),
-            file.metadata()
-        )
-        .map_err(|_| ReleaseSourceErrorV1::Io)?
-        .len(),
+    let length = faulted_io!(
+        fault_selected(PublicationFaultPointV1::ReadMetadata),
+        std::io::Error::other("injected local OCI metadata fault"),
+        file.metadata()
     )
-    .map_err(|_| ReleaseSourceErrorV1::BoundsExceeded)?;
-    if length > limit {
-        return Err(ReleaseSourceErrorV1::BoundsExceeded);
-    }
-    let mut bytes = Vec::with_capacity(length);
+    .map_err(|_| ReleaseSourceErrorV1::Io)?
+    .len();
+    // Metadata is only an allocation hint: the bounded read enforces the
+    // actual limit even if a file grows or shrinks between the two calls.
+    let capacity = usize::try_from(length).unwrap_or(limit).min(limit);
+    let mut bytes = Vec::with_capacity(capacity);
     faulted_io!(
         fault_selected(PublicationFaultPointV1::ReadBytes),
         std::io::Error::other("injected local OCI read fault"),
@@ -1138,10 +1166,8 @@ fn read_limited(file: File, limit: usize) -> Result<Vec<u8>, ReleaseSourceErrorV
     .map_err(|_| ReleaseSourceErrorV1::Io)?;
     if bytes.len() > limit {
         Err(ReleaseSourceErrorV1::BoundsExceeded)
-    } else if bytes.len() == length {
-        Ok(bytes)
     } else {
-        Err(ReleaseSourceErrorV1::Io)
+        Ok(bytes)
     }
 }
 

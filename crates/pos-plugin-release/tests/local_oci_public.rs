@@ -752,6 +752,70 @@ fn recovery_enforces_bounded_inventory_before_adopting_any_final(
 }
 
 #[test]
+fn oversized_inventory_preserves_owned_staging_and_root_index(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for final_count in [257_u16, 258] {
+        let root = PrivateRoot::new()?;
+        let publisher = LocalOciPublisherV1::open(&root.0)?;
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let staging = root
+            .0
+            .join("releases")
+            .join(format!(".{}.staging.{nonce}", "f".repeat(64)));
+        create_private_dir(&staging)?;
+        write_private_file(
+            &staging.join("OWNER"),
+            format!("pigloros-local-oci-staging-v1\n{nonce}\n").as_bytes(),
+        )?;
+        for index in 0..final_count {
+            create_private_dir(&root.0.join("releases").join(format!("{index:064x}")))?;
+        }
+        let index_before = fs::read(root.0.join("published.json"))?;
+        assert_eq!(
+            publisher.recover_all(),
+            Err(LocalOciPublicationErrorV1::BoundsExceeded)
+        );
+        assert!(staging.join("OWNER").is_file());
+        assert_eq!(
+            fs::read_dir(root.0.join("releases"))?.count(),
+            usize::from(final_count) + 1
+        );
+        assert_eq!(fs::read(root.0.join("published.json"))?, index_before);
+        assert_eq!(fs::read_dir(root.0.join("quarantine"))?.count(), 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn unrelated_root_entry_requires_operator_recovery_without_deleting_it(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = PrivateRoot::new()?;
+    let publisher = LocalOciPublisherV1::open(&root.0)?;
+    let release = bundle()?;
+    write_private_file(&root.0.join("unrelated"), b"operator-owned")?;
+    assert_eq!(
+        publisher.recover_all(),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_eq!(
+        publisher.recover(release.address()),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_eq!(
+        publisher.publish(&release),
+        Err(LocalOciPublicationErrorV1::RecoveryRequired)
+    );
+    assert_eq!(fs::read(root.0.join("unrelated"))?, b"operator-owned");
+    assert_eq!(fs::read_dir(root.0.join("releases"))?.count(), 0);
+    fs::remove_file(root.0.join("unrelated"))?;
+    assert_eq!(
+        publisher.publish(&release)?,
+        PublishOutcomeV1::Published(release.address().clone())
+    );
+    Ok(())
+}
+
+#[test]
 fn enforces_reachable_layer_and_manifest_byte_limits() -> Result<(), Box<dyn std::error::Error>> {
     // The accepted 241-layer profile is five required non-licence roles,
     // 27 licences, 204 schemas, and five migration fixtures. The root
