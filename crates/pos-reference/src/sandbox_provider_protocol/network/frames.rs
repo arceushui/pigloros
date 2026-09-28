@@ -37,20 +37,24 @@ impl NetworkExchangeRequest {
         plan: &NetworkExchangePlan,
         request: &[u8],
     ) -> Result<Self, SandboxProviderProtocolError> {
+        Self::validate_plan(plan).and_then(|()| {
+            if request.len() as u64 != plan.request_length
+                || content_digest(REQUEST_DOMAIN, request) != plan.request_digest
+            {
+                return Err(SandboxProviderProtocolError::DigestMismatch);
+            }
+            Ok(Self {
+                plan: plan.clone(),
+                bytes: request.to_vec(),
+            })
+        })
+    }
+
+    pub(in crate::sandbox_provider_protocol) fn validate_plan(
+        plan: &NetworkExchangePlan,
+    ) -> Result<(), SandboxProviderProtocolError> {
         validate_plan(plan).and_then(|()| {
-            check_encoded_size(plan.occurrence, plan.request_length, PayloadFrame::Query).and_then(
-                |()| {
-                    if request.len() as u64 != plan.request_length
-                        || content_digest(REQUEST_DOMAIN, request) != plan.request_digest
-                    {
-                        return Err(SandboxProviderProtocolError::DigestMismatch);
-                    }
-                    Ok(Self {
-                        plan: plan.clone(),
-                        bytes: request.to_vec(),
-                    })
-                },
-            )
+            check_encoded_size(plan.occurrence, plan.request_length, PayloadFrame::Query)
         })
     }
 

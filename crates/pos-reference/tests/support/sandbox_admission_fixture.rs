@@ -2887,3 +2887,7 @@ fn audit_record_rejects_every_malformed_wire_field() -> TestResult {
     Ok(())
 }
 }
+
+public_admission_tests! {
+include!("network_admission_cases.rs");
+}
