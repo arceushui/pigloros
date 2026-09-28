@@ -8,9 +8,12 @@ use pos_core::{
         ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
         ManifestOwnerLinkErrorV1,
     },
+    world_consumer_set::{
+        WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
+    },
     Hash, Plugin,
 };
-use pos_plugin_society::{SocietyPlugin, SocietyReducer};
+use pos_plugin_society::{SocietyPlugin, SocietyReducer, SocietySignalProjectionPlugin};
 use pos_runtime::{
     installed_plugin_role_v1, DomainImplementationKindV1, Driver, InstalledOutputPolicySourceV1,
     ManifestRegistrationErrorV1, ObservationView, OutputPolicyBindingV1, PluginAvailabilityV1,
@@ -51,6 +54,48 @@ fn fixture(slot: &str, configuration: &[u8]) -> Result<InstalledFixture, Box<dyn
         closure_hash,
     };
     Ok(InstalledFixture {
+        plugin,
+        binding,
+        registration,
+        row,
+    })
+}
+
+struct InstalledProjectionFixture {
+    plugin: Box<SocietySignalProjectionPlugin>,
+    binding: OutputPolicyBindingV1,
+    registration: PluginRegistrationV1,
+    row: ManifestAdmissionCatalogRowV1,
+}
+
+fn projection_fixture(slot: &str) -> Result<InstalledProjectionFixture, Box<dyn Error>> {
+    let plugin = Box::new(SocietySignalProjectionPlugin::new());
+    let binding = OutputPolicyBindingV1::from_installed_source(
+        plugin.as_ref(),
+        InstalledOutputPolicySourceV1::Society,
+        b"read-only-projection",
+        "deterministic-local-v1",
+    )?;
+    assert!(plugin.capability().owned_event_types.is_empty());
+    assert!(plugin.capability().has_reducer);
+    assert!(binding.policy().fields().output_declarations.is_empty());
+    let pin = PluginPinV1::try_new(
+        DomainImplementationKindV1::Plugin,
+        PluginIsolationV1::OperatorTrustedNative,
+        binding.policy().digest(),
+        vec![installed_plugin_role_v1(plugin.as_ref())],
+    )?;
+    let registration = PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available);
+    let row = ManifestAdmissionCatalogRowV1 {
+        stable_slot: slot.to_owned(),
+        plugin_id: plugin.id(),
+        plugin_name: plugin.name().to_owned(),
+        plugin_version: plugin.version().to_owned(),
+        implementation_hash: binding.policy().fields().implementation_hash,
+        eop1_native_digest: binding.policy().digest(),
+        closure_hash: binding.manifest_closure_hash()?,
+    };
+    Ok(InstalledProjectionFixture {
         plugin,
         binding,
         registration,
@@ -126,6 +171,65 @@ fn same_name_plugin_ids_need_both_preassigned_slots() -> Result<(), Box<dyn Erro
         registry.revalidate_manifest_registration(ManifestAdmissionCatalogV1::new(next)?)?;
     assert!(registry.is_admitted_composition_current(&renewed));
     assert_eq!(renewed.catalog().as_input().configuration_generation, 2);
+    Ok(())
+}
+
+#[test]
+fn zero_output_reducer_is_in_complete_batch_but_not_wcs1_producers(
+) -> Result<(), Box<dyn Error>> {
+    let producer = fixture("producer", b"producer-policy")?;
+    let projection = projection_fixture("projection")?;
+    let producer_id = producer.plugin.id();
+    let projection_id = projection.plugin.id();
+    let batch = catalog(vec![producer.row.clone(), projection.row.clone()])?;
+
+    // This WCS1 is structural only. The native owner checks its scoped leaf
+    // addresses and the full MCA1/MSB1 link in later tickets.
+    let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+        scope: Hash::from_bytes([0x51; 32]),
+        consumers: vec![WorldConsumerV1::new(
+            "society-projection".to_owned(),
+            Hash::from_bytes([0x52; 32]),
+            Hash::from_bytes([0x53; 32]),
+            Hash::from_bytes([0x54; 32]),
+        )?],
+        producers: vec![WorldProducerV1::new(
+            producer_id,
+            Hash::from_bytes([0x55; 32]),
+        )?],
+        optional_view_roots: Vec::new(),
+    })?;
+    assert_eq!(wcs1.producers().len(), 1);
+    assert_eq!(wcs1.producers()[0].plugin_id(), producer_id);
+    assert!(!wcs1
+        .producers()
+        .iter()
+        .any(|row| row.plugin_id() == projection_id));
+
+    let mut registry = PluginRegistry::new();
+    registry.prepare_manifest_registration(batch.clone())?;
+    register(&mut registry, producer)?;
+    assert!(matches!(
+        registry.admit_complete_manifest_registration(),
+        Err(ManifestRegistrationErrorV1::IncompleteBatch)
+    ));
+    registry.register_installed_output_in_manifest_slot(
+        projection.plugin.as_ref(),
+        projection.binding,
+        projection.registration,
+        Some(Box::new(SocietyReducer)),
+        &projection.row.stable_slot,
+    )?;
+    let admitted = registry.admit_complete_manifest_registration()?;
+    assert_eq!(admitted.catalog(), &batch);
+    assert_eq!(admitted.catalog().as_input().rows.len(), 2);
+    assert!(admitted
+        .catalog()
+        .as_input()
+        .rows
+        .iter()
+        .any(|row| row.plugin_id == projection_id));
+    assert!(registry.is_admitted_composition_current(&admitted));
     Ok(())
 }
 
