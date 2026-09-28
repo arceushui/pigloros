@@ -3,7 +3,7 @@
 //! These codecs establish neither Fork admission nor append authority. A
 //! trusted host must use them with the admitted-Fork append transaction.
 
-use crate::{EventId, Hash, TimelineId};
+use crate::{CorrelationId, EntityId, EventId, Hash, TimelineId, WallTime};
 
 /// Maximum accepted `EOR1` bytes.
 pub const MAX_EVENT_ORIGIN_RECORD_BYTES_V1: usize = 384;
@@ -11,9 +11,28 @@ pub const MAX_EVENT_ORIGIN_RECORD_BYTES_V1: usize = 384;
 pub const MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1: usize = 512;
 /// Maximum UTF-8 bytes in one trusted source route.
 pub const MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1: usize = 128;
+/// Maximum UTF-8 bytes in one stable host registrar identifier.
+pub const MAX_FORK_EVENT_REGISTRAR_BYTES_V1: usize = 64;
+/// Maximum external routes retained by one immutable classifier table.
+pub const MAX_FORK_EVENT_CLASSIFIER_ROUTES_V1: usize = 1024;
+/// Maximum accepted `FCS1` or `FCT1` bytes.
+pub const MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1: usize = 196_608;
+/// Maximum accepted `FCR1` bytes.
+pub const MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1: usize = 192;
+/// Maximum accepted `FOP1` bytes.
+pub const MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1: usize = 768;
+/// Maximum exact payload bytes in a `FEQ1` append request.
+pub const MAX_FORK_EVENT_APPEND_PAYLOAD_BYTES_V1: usize = 16_777_216;
+/// Maximum UTF-8 bytes in one Event type in a `FEQ1` request.
+pub const MAX_FORK_EVENT_TYPE_BYTES_V1: usize = 256;
 
 const EVENT_ORIGIN_DOMAIN: &[u8] = b"pigloros/event-origin/v1";
 const INTERVENTION_ADMISSION_DOMAIN: &[u8] = b"pigloros/fork-intervention-admission/v1";
+const CLASSIFIER_SOURCE_DOMAIN: &[u8] = b"pigloros/fork-classifier-source/v1";
+const CLASSIFIER_TABLE_DOMAIN: &[u8] = b"pigloros/fork-classifier-table/v1";
+const CLASSIFIER_REGISTRATION_DOMAIN: &[u8] = b"pigloros/fork-classifier-registration/v1";
+const APPEND_REQUEST_DOMAIN: &[u8] = b"pigloros/fork-event-append-request/v1";
+const APPEND_OPERATION_DOMAIN: &[u8] = b"pigloros/fork-append-operation/v1";
 
 /// Closed errors for local Fork Event-provenance codecs and classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -138,6 +157,388 @@ pub enum ForkEventSourceV1 {
 pub struct ForkExternalInputRouteV1 {
     source: ForkEventSourceDescriptorV1,
     intervention: bool,
+}
+
+/// Durable source custody (`FCS1`) selected only by a trusted host registrar.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkClassifierSourceInputV1 {
+    pub room_revision_descriptor_hash: Hash,
+    pub registrar_identifier: String,
+    pub routes: Vec<ForkExternalInputRouteV1>,
+}
+
+/// Strict canonical `FCS1` bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkClassifierSourceV1(ForkClassifierSourceInputV1);
+
+impl ForkClassifierSourceV1 {
+    /// Construct complete immutable source custody.
+    pub fn new(mut input: ForkClassifierSourceInputV1) -> Result<Self, ForkEventProvenanceErrorV1> {
+        validate_classifier_fields(
+            input.room_revision_descriptor_hash,
+            &input.registrar_identifier,
+            &mut input.routes,
+        )?;
+        Ok(Self(input))
+    }
+
+    #[must_use]
+    pub const fn input(&self) -> &ForkClassifierSourceInputV1 {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let value = &self.0;
+        let mut out = Vec::with_capacity(160 + value.routes.len() * 80);
+        array(&mut out, 5);
+        text(&mut out, "FCS1");
+        uint(&mut out, 1);
+        hash(&mut out, value.room_revision_descriptor_hash);
+        text(&mut out, &value.registrar_identifier);
+        encode_routes(&mut out, &value.routes);
+        out
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        domain_digest(CLASSIFIER_SOURCE_DOMAIN, &self.to_canonical_cbor())
+    }
+
+    /// Decode exact canonical source-custody bytes.
+    pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
+        let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1)?;
+        wire.array(5)?;
+        wire.magic(*b"FCS1")?;
+        wire.version()?;
+        let room_revision_descriptor_hash = wire.hash()?;
+        let registrar_identifier = wire.text(MAX_FORK_EVENT_REGISTRAR_BYTES_V1)?;
+        let routes = wire.routes()?;
+        wire.finish()?;
+        let record = Self::new(ForkClassifierSourceInputV1 {
+            room_revision_descriptor_hash,
+            registrar_identifier,
+            routes,
+        })?;
+        canonical(bytes_in, &record.to_canonical_cbor())?;
+        Ok(record)
+    }
+}
+
+/// Construction fields for a per-Fork classifier (`FCT1`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkClassifierTableInputV1 {
+    pub child_timeline_id: TimelineId,
+    pub fork_admission_digest: Hash,
+    pub room_revision_descriptor_hash: Hash,
+    pub registrar_identifier: String,
+    pub source_configuration_revision_digest: Hash,
+    pub routes: Vec<ForkExternalInputRouteV1>,
+}
+
+/// Strict canonical admitted per-Fork classifier table (`FCT1`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkClassifierTableV1(ForkClassifierTableInputV1);
+
+impl ForkClassifierTableV1 {
+    /// Construct one immutable classifier table.
+    pub fn new(mut input: ForkClassifierTableInputV1) -> Result<Self, ForkEventProvenanceErrorV1> {
+        if input.fork_admission_digest == Hash::zero()
+            || input.source_configuration_revision_digest == Hash::zero()
+        {
+            return Err(ForkEventProvenanceErrorV1::FieldOutOfBounds);
+        }
+        validate_classifier_fields(
+            input.room_revision_descriptor_hash,
+            &input.registrar_identifier,
+            &mut input.routes,
+        )?;
+        Ok(Self(input))
+    }
+
+    #[must_use]
+    pub const fn input(&self) -> &ForkClassifierTableInputV1 {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let value = &self.0;
+        let mut out = Vec::with_capacity(224 + value.routes.len() * 80);
+        array(&mut out, 8);
+        text(&mut out, "FCT1");
+        uint(&mut out, 1);
+        timeline(&mut out, value.child_timeline_id);
+        hash(&mut out, value.fork_admission_digest);
+        hash(&mut out, value.room_revision_descriptor_hash);
+        text(&mut out, &value.registrar_identifier);
+        hash(&mut out, value.source_configuration_revision_digest);
+        encode_routes(&mut out, &value.routes);
+        out
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        domain_digest(CLASSIFIER_TABLE_DOMAIN, &self.to_canonical_cbor())
+    }
+
+    /// Decode exact canonical table bytes.
+    pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
+        let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1)?;
+        wire.array(8)?;
+        wire.magic(*b"FCT1")?;
+        wire.version()?;
+        let child_timeline_id = wire.timeline()?;
+        let fork_admission_digest = wire.hash()?;
+        let room_revision_descriptor_hash = wire.hash()?;
+        let registrar_identifier = wire.text(MAX_FORK_EVENT_REGISTRAR_BYTES_V1)?;
+        let source_configuration_revision_digest = wire.hash()?;
+        let routes = wire.routes()?;
+        wire.finish()?;
+        let record = Self::new(ForkClassifierTableInputV1 {
+            child_timeline_id,
+            fork_admission_digest,
+            room_revision_descriptor_hash,
+            registrar_identifier,
+            source_configuration_revision_digest,
+            routes,
+        })?;
+        canonical(bytes_in, &record.to_canonical_cbor())?;
+        Ok(record)
+    }
+}
+
+/// Construction fields for one classifier-registration evidence record (`FCR1`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkClassifierRegistrationInputV1 {
+    pub operation_id: Hash,
+    pub child_timeline_id: TimelineId,
+    pub fork_admission_digest: Hash,
+    pub room_revision_descriptor_hash: Hash,
+    pub classifier_revision_digest: Hash,
+}
+
+/// Strict canonical immutable classifier-registration evidence (`FCR1`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkClassifierRegistrationV1(ForkClassifierRegistrationInputV1);
+
+impl ForkClassifierRegistrationV1 {
+    /// Construct one registration record.
+    pub fn new(
+        input: ForkClassifierRegistrationInputV1,
+    ) -> Result<Self, ForkEventProvenanceErrorV1> {
+        if input.operation_id == Hash::zero()
+            || input.fork_admission_digest == Hash::zero()
+            || input.room_revision_descriptor_hash == Hash::zero()
+            || input.classifier_revision_digest == Hash::zero()
+        {
+            return Err(ForkEventProvenanceErrorV1::FieldOutOfBounds);
+        }
+        Ok(Self(input))
+    }
+
+    #[must_use]
+    pub const fn input(&self) -> &ForkClassifierRegistrationInputV1 {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let value = &self.0;
+        let mut out = Vec::with_capacity(192);
+        array(&mut out, 7);
+        text(&mut out, "FCR1");
+        uint(&mut out, 1);
+        hash(&mut out, value.operation_id);
+        timeline(&mut out, value.child_timeline_id);
+        hash(&mut out, value.fork_admission_digest);
+        hash(&mut out, value.room_revision_descriptor_hash);
+        hash(&mut out, value.classifier_revision_digest);
+        out
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        domain_digest(CLASSIFIER_REGISTRATION_DOMAIN, &self.to_canonical_cbor())
+    }
+
+    /// Decode exact canonical registration evidence bytes.
+    pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkEventProvenanceErrorV1> {
+        let mut wire = Reader::new(bytes_in, MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1)?;
+        wire.array(7)?;
+        wire.magic(*b"FCR1")?;
+        wire.version()?;
+        let operation_id = wire.hash()?;
+        let child_timeline_id = wire.timeline()?;
+        let fork_admission_digest = wire.hash()?;
+        let room_revision_descriptor_hash = wire.hash()?;
+        let classifier_revision_digest = wire.hash()?;
+        wire.finish()?;
+        let record = Self::new(ForkClassifierRegistrationInputV1 {
+            operation_id,
+            child_timeline_id,
+            fork_admission_digest,
+            room_revision_descriptor_hash,
+            classifier_revision_digest,
+        })?;
+        canonical(bytes_in, &record.to_canonical_cbor())?;
+        Ok(record)
+    }
+}
+
+/// Host-owned source identity retained by `FEQ1` and `FOP1`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ForkAppendSourceIdentityV1 {
+    /// The trusted host produced the Event internally.
+    HostInternal,
+    /// A trusted registered adapter supplied an exact admitted external route.
+    ExternalInput {
+        adapter_identifier: String,
+        source: ForkEventSourceDescriptorV1,
+    },
+}
+
+impl ForkAppendSourceIdentityV1 {
+    fn validate(&self) -> Result<(), ForkEventProvenanceErrorV1> {
+        match self {
+            Self::HostInternal => Ok(()),
+            Self::ExternalInput {
+                adapter_identifier, ..
+            } if !adapter_identifier.is_empty()
+                && adapter_identifier.len() <= MAX_FORK_EVENT_REGISTRAR_BYTES_V1 =>
+            {
+                Ok(())
+            }
+            Self::ExternalInput { .. } => Err(ForkEventProvenanceErrorV1::FieldOutOfBounds),
+        }
+    }
+}
+
+/// Exact deterministic-CBOR hash preimage (`FEQ1`) for one classified append.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkEventAppendRequestV1 {
+    pub operation_id: Hash,
+    pub child_timeline_id: TimelineId,
+    pub source: ForkAppendSourceIdentityV1,
+    pub entity_id: EntityId,
+    pub event_type: String,
+    pub payload: Vec<u8>,
+    pub causation_id: Option<EventId>,
+    pub correlation_id: Option<CorrelationId>,
+    pub wall_time_override: Option<WallTime>,
+}
+
+impl ForkEventAppendRequestV1 {
+    /// Validate and construct an exact append request preimage.
+    pub fn new(input: Self) -> Result<Self, ForkEventProvenanceErrorV1> {
+        if input.operation_id == Hash::zero()
+            || input.event_type.is_empty()
+            || input.event_type.len() > MAX_FORK_EVENT_TYPE_BYTES_V1
+            || input.payload.len() > MAX_FORK_EVENT_APPEND_PAYLOAD_BYTES_V1
+        {
+            return Err(ForkEventProvenanceErrorV1::FieldOutOfBounds);
+        }
+        input.source.validate()?;
+        Ok(input)
+    }
+
+    /// Encode the exact `FEQ1` canonical bytes.
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(256 + self.event_type.len() + self.payload.len());
+        array(&mut out, 12);
+        text(&mut out, "FEQ1");
+        uint(&mut out, 1);
+        hash(&mut out, self.operation_id);
+        timeline(&mut out, self.child_timeline_id);
+        encode_source(&mut out, &self.source);
+        entity(&mut out, self.entity_id);
+        text(&mut out, &self.event_type);
+        bytes(&mut out, &self.payload);
+        optional_event(&mut out, self.causation_id);
+        optional_correlation(&mut out, self.correlation_id);
+        uint(&mut out, 1);
+        optional_wall_time(&mut out, self.wall_time_override);
+        out
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        domain_digest(APPEND_REQUEST_DOMAIN, &self.to_canonical_cbor())
+    }
+}
+
+/// Construction fields for immutable append-operation evidence (`FOP1`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkAppendOperationInputV1 {
+    pub operation_id: Hash,
+    pub child_timeline_id: TimelineId,
+    pub logical_seq: u64,
+    pub event_id: EventId,
+    pub request_digest: Hash,
+    pub source: ForkAppendSourceIdentityV1,
+    pub wall_time: WallTime,
+    pub payload_hash: Hash,
+    pub classifier_revision_digest: Hash,
+    pub fork_admission_digest: Hash,
+    pub event_origin_digest: Hash,
+    pub intervention_admission_digest: Option<Hash>,
+}
+
+/// Strict canonical append-operation evidence (`FOP1`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkAppendOperationV1(ForkAppendOperationInputV1);
+
+impl ForkAppendOperationV1 {
+    /// Construct one committed append-operation record.
+    pub fn new(input: ForkAppendOperationInputV1) -> Result<Self, ForkEventProvenanceErrorV1> {
+        if input.operation_id == Hash::zero()
+            || input.logical_seq == 0
+            || input.request_digest == Hash::zero()
+            || input.payload_hash == Hash::zero()
+            || input.classifier_revision_digest == Hash::zero()
+            || input.fork_admission_digest == Hash::zero()
+            || input.event_origin_digest == Hash::zero()
+            || input.intervention_admission_digest == Some(Hash::zero())
+        {
+            return Err(ForkEventProvenanceErrorV1::FieldOutOfBounds);
+        }
+        input.source.validate()?;
+        Ok(Self(input))
+    }
+
+    #[must_use]
+    pub const fn input(&self) -> &ForkAppendOperationInputV1 {
+        &self.0
+    }
+
+    /// Encode exact `FOP1` canonical bytes.
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let value = &self.0;
+        let mut out = Vec::with_capacity(384);
+        array(&mut out, 14);
+        text(&mut out, "FOP1");
+        uint(&mut out, 1);
+        hash(&mut out, value.operation_id);
+        timeline(&mut out, value.child_timeline_id);
+        uint(&mut out, value.logical_seq);
+        event(&mut out, value.event_id);
+        hash(&mut out, value.request_digest);
+        encode_source(&mut out, &value.source);
+        uint(&mut out, value.wall_time.as_micros());
+        hash(&mut out, value.payload_hash);
+        hash(&mut out, value.classifier_revision_digest);
+        hash(&mut out, value.fork_admission_digest);
+        hash(&mut out, value.event_origin_digest);
+        optional_hash(&mut out, value.intervention_admission_digest);
+        out
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        domain_digest(APPEND_OPERATION_DOMAIN, &self.to_canonical_cbor())
+    }
 }
 
 impl ForkExternalInputRouteV1 {
@@ -471,6 +872,88 @@ fn canonical(actual: &[u8], expected: &[u8]) -> Result<(), ForkEventProvenanceEr
     }
 }
 
+fn validate_classifier_fields(
+    descriptor_hash: Hash,
+    registrar_identifier: &str,
+    routes: &mut Vec<ForkExternalInputRouteV1>,
+) -> Result<(), ForkEventProvenanceErrorV1> {
+    if descriptor_hash == Hash::zero()
+        || registrar_identifier.is_empty()
+        || registrar_identifier.len() > MAX_FORK_EVENT_REGISTRAR_BYTES_V1
+        || routes.len() > MAX_FORK_EVENT_CLASSIFIER_ROUTES_V1
+    {
+        return Err(ForkEventProvenanceErrorV1::FieldOutOfBounds);
+    }
+    routes.sort_unstable_by(|left, right| left.source.cmp(&right.source));
+    if routes
+        .windows(2)
+        .any(|pair| pair[0].source == pair[1].source)
+    {
+        return Err(ForkEventProvenanceErrorV1::DuplicateSourceRoute);
+    }
+    Ok(())
+}
+
+fn encode_routes(out: &mut Vec<u8>, routes: &[ForkExternalInputRouteV1]) {
+    array(out, routes.len() as u64);
+    for route in routes {
+        array(out, 3);
+        text(out, route.source.route());
+        hash(out, route.source.schema_digest());
+        uint(out, u64::from(route.intervention));
+    }
+}
+
+fn encode_source(out: &mut Vec<u8>, source: &ForkAppendSourceIdentityV1) {
+    match source {
+        ForkAppendSourceIdentityV1::HostInternal => array(out, 1),
+        ForkAppendSourceIdentityV1::ExternalInput {
+            adapter_identifier,
+            source,
+        } => {
+            array(out, 4);
+            uint(out, 1);
+            text(out, adapter_identifier);
+            text(out, source.route());
+            hash(out, source.schema_digest());
+            return;
+        }
+    }
+    uint(out, 0);
+}
+
+fn entity(out: &mut Vec<u8>, value: EntityId) {
+    bytes(out, &value.inner().to_bytes());
+}
+fn optional_event(out: &mut Vec<u8>, value: Option<EventId>) {
+    if let Some(value) = value {
+        event(out, value);
+    } else {
+        out.push(0xf6);
+    }
+}
+fn optional_correlation(out: &mut Vec<u8>, value: Option<CorrelationId>) {
+    if let Some(value) = value {
+        bytes(out, &value.inner().to_bytes());
+    } else {
+        out.push(0xf6);
+    }
+}
+fn optional_wall_time(out: &mut Vec<u8>, value: Option<WallTime>) {
+    if let Some(value) = value {
+        uint(out, value.as_micros());
+    } else {
+        out.push(0xf6);
+    }
+}
+fn optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
+    if let Some(value) = value {
+        hash(out, value);
+    } else {
+        out.push(0xf6);
+    }
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -523,6 +1006,33 @@ impl<'a> Reader<'a> {
     }
     fn uint(&mut self) -> Result<u64, ForkEventProvenanceErrorV1> {
         self.head(0)
+    }
+    fn text(&mut self, maximum: usize) -> Result<String, ForkEventProvenanceErrorV1> {
+        let length = usize::try_from(self.head(3)?)
+            .map_err(|_| ForkEventProvenanceErrorV1::FieldOutOfBounds)?;
+        if length == 0 || length > maximum {
+            return Err(ForkEventProvenanceErrorV1::FieldOutOfBounds);
+        }
+        std::str::from_utf8(self.take(length)?)
+            .map(str::to_owned)
+            .map_err(|_| ForkEventProvenanceErrorV1::InvalidEncoding)
+    }
+    fn routes(&mut self) -> Result<Vec<ForkExternalInputRouteV1>, ForkEventProvenanceErrorV1> {
+        let count = usize::try_from(self.head(4)?)
+            .map_err(|_| ForkEventProvenanceErrorV1::FieldOutOfBounds)?;
+        if count > MAX_FORK_EVENT_CLASSIFIER_ROUTES_V1 {
+            return Err(ForkEventProvenanceErrorV1::FieldOutOfBounds);
+        }
+        let mut routes = Vec::with_capacity(count);
+        for _ in 0..count {
+            self.array(3)?;
+            let source = ForkEventSourceDescriptorV1::new(
+                self.text(MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1)?,
+                self.hash()?,
+            )?;
+            routes.push(ForkExternalInputRouteV1::new(source, self.bool()?));
+        }
+        Ok(routes)
     }
     fn fixed<const N: usize>(&mut self) -> Result<[u8; N], ForkEventProvenanceErrorV1> {
         if self.head(2)? != N as u64 {
