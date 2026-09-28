@@ -26,7 +26,7 @@ fn storage_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Storage(error.to_string())
 }
 
-fn recipient_rng_error(error: std::io::Error) -> CoreError {
+fn recipient_rng_error(error: &std::io::Error) -> CoreError {
     CoreError::Storage(format!("recipient key RNG failed: {error}"))
 }
 
@@ -451,7 +451,7 @@ impl SqliteStore {
             let identity =
                 KeyIdentityV1::from_parts(owner_id, KeyRoleV1::ExportRecipientEncryption, epoch);
             let mut ikm = Zeroizing::new([0_u8; 32]);
-            recipient_random_bytes(&mut *ikm).map_err(recipient_rng_error)?;
+            recipient_random_bytes(&mut *ikm).map_err(|error| recipient_rng_error(&error))?;
             let (private_key, public_key) =
                 pos_crypto::recipient_key::derive_recipient_keypair_v1(&ikm);
             let private_key = Zeroizing::new(private_key);
@@ -493,8 +493,16 @@ impl SqliteStore {
             .and_then(|()| claim_recipient_custody_directory(&self.conn, owner))
             .and_then(|()| recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error))
             .and_then(|owner_id| {
-                self.load_key_registry().and_then(|registry| match registry {
-                    Some(registry) => {
+                self.load_key_registry().and_then(|registry| {
+                    registry.map_or_else(
+                        || {
+                            quarantine_unregistered_owned_staged_material(owner).and_then(|()| {
+                                Err(CoreError::Storage(
+                                    "recipient registry is unavailable".to_owned(),
+                                ))
+                            })
+                        },
+                        |registry| {
                         self.conn
                             .prepare("SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 ORDER BY epoch")
                             .map_err(storage_error)
@@ -522,12 +530,8 @@ impl SqliteStore {
                                         .map(|()| descriptors)
                                 })
                             })
-                    }
-                    None => quarantine_unregistered_owned_staged_material(owner).and_then(|()| {
-                        Err(CoreError::Storage(
-                            "recipient registry is unavailable".to_owned(),
-                        ))
-                    }),
+                        },
+                    )
                 })
             });
         finish_immediate_transaction(&self.conn, result)
