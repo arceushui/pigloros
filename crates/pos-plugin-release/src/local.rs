@@ -1415,7 +1415,7 @@ mod tests {
         target: usize,
     ) -> Result<(bool, usize), Box<dyn std::error::Error>> {
         let root = private_root("public-io")?;
-        if let PublicIoScenario::Initialize = scenario {
+        if matches!(scenario, PublicIoScenario::Initialize) {
             let (result, calls) = with_io_fault(target, || LocalOciPublisherV1::open(&root));
             let succeeded = result.is_ok();
             drop(result);
