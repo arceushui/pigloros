@@ -145,7 +145,10 @@ fn opc1_hash_matches_independent_six_member_oracle() -> Result<(), Box<dyn Error
         b"read-only-projection",
         "deterministic-local-v1",
     )?;
-    assert_eq!(binding.manifest_closure_hash()?, independent_opc1_hash(&binding));
+    assert_eq!(
+        binding.manifest_closure_hash()?,
+        independent_opc1_hash(&binding)
+    );
     Ok(())
 }
 
