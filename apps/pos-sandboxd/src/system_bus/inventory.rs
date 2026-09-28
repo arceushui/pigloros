@@ -179,7 +179,10 @@ fn parse_name(name: &str) -> InventoryResult<(TransientServiceUnitName, [u8; 16]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
     use zbus::{
         connection::{socket::channel::Channel, Builder},
         fdo, Guid,
@@ -199,12 +202,15 @@ mod tests {
     struct RecordingManager {
         rows: Vec<UnitRow>,
         calls: Calls,
+        subscribed: Arc<AtomicBool>,
         fault: Fault,
     }
 
     #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
     impl RecordingManager {
-        fn subscribe(&self) {}
+        fn subscribe(&self) {
+            self.subscribed.store(true, Ordering::SeqCst);
+        }
 
         fn list_units_by_patterns(
             &self,
@@ -242,6 +248,7 @@ mod tests {
         fault: Fault,
     ) -> TestResult<(SystemdTransientUnitTransport, zbus::Connection, Calls)> {
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let subscribed = Arc::new(AtomicBool::new(false));
         let guid = Guid::generate();
         let (server_socket, client_socket) = Channel::pair();
         let server = Builder::authenticated_socket(server_socket, guid.clone())?
@@ -251,6 +258,7 @@ mod tests {
                 RecordingManager {
                     rows,
                     calls: Arc::clone(&calls),
+                    subscribed: Arc::clone(&subscribed),
                     fault,
                 },
             )?
@@ -261,6 +269,7 @@ mod tests {
         let (server, client) = tokio::join!(server, client);
         let server = server?;
         let transport = SystemdTransientUnitTransport::from_connection(client?).await?;
+        assert!(subscribed.load(Ordering::SeqCst));
         Ok((transport, server, calls))
     }
 
