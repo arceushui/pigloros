@@ -105,12 +105,15 @@ pub enum SnapshotError {
 /// Verify that `snapshot` + tail events produces the same state as a full replay.
 ///
 /// Steps:
-/// 1. Read events after `snapshot.at_seq` (the "tail") and all events.
+/// 1. Read events after `snapshot.at_seq` (the "tail") and all events at the
+///    snapshot's inventory generation.
 /// 2. Restore `registry` to `snap.registry` state, then fold the tail to build
 ///    the incremental projection.
 /// 3. Reset `registry` to empty and fold all events to build the full-replay
 ///    reference projection.
-/// 4. Compare both state maps; return `Err(Inconsistent)` on any mismatch.
+/// 4. Compare both state maps; return [`SnapshotError::Inconsistent`] for an
+///    entity mismatch or [`SnapshotError::InconsistentState`] when one map
+///    contains additional state.
 ///
 /// `registry` must be pre-populated with the same reducers used when the
 /// snapshot was originally taken. Its accumulated state is managed internally
@@ -118,8 +121,10 @@ pub enum SnapshotError {
 ///
 /// # Errors
 /// Returns [`SnapshotError::ArtifactUnavailable`] when the registered snapshot
-/// may no longer be used authoritatively, [`SnapshotError::Store`] on I/O
-/// failure, or [`SnapshotError::Inconsistent`] if the states differ.
+/// may no longer be used authoritatively, [`SnapshotError::StaleGeneration`]
+/// when the inventory changed, [`SnapshotError::Store`] on I/O failure,
+/// [`SnapshotError::Inconsistent`] when an entity differs, or
+/// [`SnapshotError::InconsistentState`] when the state maps otherwise differ.
 pub fn verify_snapshot_consistency(
     sender: &mut ErasureReadSenderV1<'_>,
     snap: &Snapshot,
