@@ -825,6 +825,10 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         "create parent timeline",
         commands.create_timeline("host-coordinator-freeze"),
     )?;
+    let unaffected = test_stage(
+        "create unaffected timeline",
+        commands.create_timeline("host-coordinator-unaffected"),
+    )?;
     test_stage(
         "publish authority topology",
         authority.set_timeline(timeline.id()),
@@ -887,6 +891,16 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
     assert_frozen_fork_retries(&mut commands, &authority, timeline.id(), child.id())?;
     let mut reader = test_stage("open read sender", host.read_sender())?;
     assert_eq!(reader.key_registry(), Ok(None));
+    let visible = test_stage("list after durable freeze", reader.timelines())?;
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id(), unaffected.id());
+    assert_eq!(
+        test_stage(
+            "count visible roots after durable freeze",
+            reader.root_timeline_count_bounded(2),
+        )?,
+        1
+    );
     Ok(())
 }
 
