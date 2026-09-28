@@ -384,7 +384,7 @@ fn decode_payload(bytes: &[u8]) -> Result<TimelineExport, RecipientExportErrorV1
     }
     preflight_cbor(
         bytes,
-        MAX_EVENTS.saturating_mul(13),
+        MAX_EVENTS.saturating_mul(13).saturating_add(12),
         MAX_EVENTS,
         MAX_EVENT_PAYLOAD_BYTES,
     )?;
