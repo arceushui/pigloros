@@ -109,8 +109,7 @@ fn independent_opc1_hash(binding: &OutputPolicyBindingV1) -> Hash {
 }
 
 #[test]
-fn generated_opc1_bytes_match_independent_oracle_without_installing_a_plugin(
-) -> Result<(), Box<dyn Error>> {
+fn generated_opc1_matches_independent_oracle() -> Result<(), Box<dyn Error>> {
     let projection = SocietySignalProjectionPlugin::new();
     let binding = generated_binding(&projection, b"read-only-projection")?;
     assert_eq!(
@@ -121,8 +120,7 @@ fn generated_opc1_bytes_match_independent_oracle_without_installing_a_plugin(
 }
 
 #[test]
-fn same_name_distinct_ids_and_policies_cannot_install_from_generated_bytes(
-) -> Result<(), Box<dyn Error>> {
+fn generated_same_name_batch_cannot_admit() -> Result<(), Box<dyn Error>> {
     let first = SocietyPlugin::new();
     let second = SocietyPlugin::new();
     assert_eq!(first.name(), second.name());
