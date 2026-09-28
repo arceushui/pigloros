@@ -4321,6 +4321,57 @@ mod tests {
             .test_ok();
         assert_eq!(second.events[0].seq.as_u64(), 2);
         assert!(second.next_cursor.is_none());
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized_after("not-a-timeline", cursor, 1, actor)
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized_after(
+                    &TimelineId::new().to_string(),
+                    cursor,
+                    1,
+                    actor,
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized_after(&id, cursor, 1, EntityId::new())
+                .await,
+            Err(GatewayError::AuthorizationDenied)
+        ));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn cursor_without_inventory_generation_cannot_continue_host_read() {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let timeline = gateway
+            .create_timeline("generationless-cursor")
+            .await
+            .test_ok();
+        // A cursor issued by an unhosted Gateway cannot continue under a host.
+        let cursor = EventPageCursor {
+            timeline_id: timeline.id(),
+            from_seq: Seq::from_u64(1),
+            inventory_generation: None,
+        };
+        assert!(matches!(
+            gateway
+                .read_events_page_after(&timeline.id().to_string(), cursor, 1)
+                .await,
+            Err(GatewayError::StaleEventCursor)
+        ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
     }
