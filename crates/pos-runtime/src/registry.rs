@@ -5781,13 +5781,27 @@ mod tests {
         }
     }
 
-    fn catalogue_fixture_details(_: &()) -> Vec<u8> {
-        Vec::new()
+    struct CatalogueFixtureConfiguration {
+        plugin_id: PluginId,
+        details: Vec<u8>,
     }
 
-    fn build_catalogue_fixture(_: &()) -> (TestPlugin, MockActionApprover) {
+    fn catalogue_fixture_details(configuration: &CatalogueFixtureConfiguration) -> Vec<u8> {
+        configuration.details.clone()
+    }
+
+    fn build_catalogue_fixture(
+        configuration: &CatalogueFixtureConfiguration,
+    ) -> (TestPlugin, MockActionApprover) {
         (
-            plugin_with_caps("catalogue-fixture", &["world.action.v1"], false, false),
+            TestPlugin {
+                id: configuration.plugin_id,
+                name: "catalogue-fixture",
+                cap: Capability {
+                    owned_event_types: vec![Kind::new("world.action.v1")],
+                    ..Capability::default()
+                },
+            },
             MockActionApprover,
         )
     }
@@ -5802,7 +5816,10 @@ mod tests {
         registry
             .register_from_host_catalogue_entry_inner(
                 &selected,
-                (),
+                CatalogueFixtureConfiguration {
+                    plugin_id: PluginId::new(),
+                    details: Vec::new(),
+                },
                 CatalogueRegistrationModeV1::NonproductionFixture,
             )
             .test_ok();
@@ -5818,6 +5835,40 @@ mod tests {
             registry.submit_action(TimelineId::new(), &proposal),
             Err(ActionSubmissionError::ErasureOperationUnavailable)
         ));
+    }
+
+    #[test]
+    fn frozen_catalogue_configuration_changes_policy_identity() {
+        let selected = HostCatalogueEntryV1::gateway(
+            catalogue_fixture_details,
+            build_catalogue_fixture,
+        );
+        let plugin_id = PluginId::new();
+        let mut first = PluginRegistry::new().without_erasure_gate();
+        first
+            .register_from_host_catalogue_entry_inner(
+                &selected,
+                CatalogueFixtureConfiguration {
+                    plugin_id,
+                    details: b"first".to_vec(),
+                },
+                CatalogueRegistrationModeV1::NonproductionFixture,
+            )
+            .test_ok();
+        let mut second = PluginRegistry::new().without_erasure_gate();
+        second
+            .register_from_host_catalogue_entry_inner(
+                &selected,
+                CatalogueFixtureConfiguration {
+                    plugin_id,
+                    details: b"second".to_vec(),
+                },
+                CatalogueRegistrationModeV1::NonproductionFixture,
+            )
+            .test_ok();
+        let first_digest = first.output_policy_digests().next().test_ok().1;
+        let second_digest = second.output_policy_digests().next().test_ok().1;
+        assert_ne!(first_digest, second_digest);
     }
 
     struct CountReducer;
