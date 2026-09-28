@@ -745,6 +745,30 @@ mod tests {
             &Sha256::digest(&bytes)[..],
             &hex_bytes::<32>("658d17498b51bb0b6c218077737daab5648df1d48c435e6c0cf9335fd6fa1fb3")
         );
+        let mut extra_adapter = policy.adapters().to_vec();
+        let mut seventeenth = extra_adapter[15].clone();
+        seventeenth.adapter_id = "b".to_owned();
+        extra_adapter.push(seventeenth);
+        assert_eq!(
+            ForkAuthenticationPolicyV1::new(extra_adapter),
+            Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+        );
+
+        let mut extra_binding = policy.adapters().to_vec();
+        extra_binding[0]
+            .registry_bindings
+            .push(Hash::from_bytes([0xff; 32]));
+        assert_eq!(
+            ForkAuthenticationPolicyV1::new(extra_binding),
+            Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+        );
+
+        let mut extra_text_byte = policy.adapters()[0].clone();
+        extra_text_byte.adapter_id.push('a');
+        assert_eq!(
+            ForkAuthenticationPolicyV1::new(vec![extra_text_byte]),
+            Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+        );
         assert_eq!(
             ForkAuthenticationPolicyV1::from_canonical_cbor(&bytes),
             Ok(policy)
