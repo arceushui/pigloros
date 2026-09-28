@@ -12,7 +12,6 @@
 use std::{
     fs::{self, OpenOptions},
     io::{Cursor, Read},
-    ops::{Deref, DerefMut},
     os::{
         fd::AsFd,
         unix::fs::{MetadataExt as _, OpenOptionsExt as _},
@@ -73,8 +72,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         credential_names(directory)?;
         let auth_bytes = Zeroizing::new(read_credential(directory, AUTH_CREDENTIAL_NAME)?);
         let host_bytes = Zeroizing::new(read_credential(directory, HOST_CREDENTIAL_NAME)?);
-        let parsed = parse_credentials(&auth_bytes, &host_bytes, service_uid);
-        parsed
+        parse_credentials(&auth_bytes, &host_bytes, service_uid)
     }
 
     #[must_use]
@@ -278,8 +276,9 @@ fn parse_facr1(
     ),
     LocalForkAuthenticationErrorV1,
 > {
-    let mut fields = canonical_array(bytes, MAX_FORK_AUTH_CREDENTIAL_BYTES_V1, "FACR1", 7)?;
-    let seed = take_fixed_nonzero(&mut fields[2])?;
+    let mut values = canonical_array(bytes, MAX_FORK_AUTH_CREDENTIAL_BYTES_V1, "FACR1", 7)?;
+    let seed = take_fixed_nonzero(&mut values.as_mut_slice()[2])?;
+    let fields = values.as_slice();
     let policy_bytes = bounded_bytes(&fields[3], 37_528)?;
     let policy = ForkAuthenticationPolicyV1::from_canonical_cbor(policy_bytes)
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
@@ -299,8 +298,8 @@ fn parse_fahk1(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, LocalForkAuthenticat
     if bytes.len() != FAHK1_BYTES {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let mut fields = canonical_array(bytes, FAHK1_BYTES, "FAHK1", 3)?;
-    take_fixed_nonzero(&mut fields[2])
+    let mut values = canonical_array(bytes, FAHK1_BYTES, "FAHK1", 3)?;
+    take_fixed_nonzero(&mut values.as_mut_slice()[2])
 }
 
 fn parse_binding(value: &Value) -> Result<LocalAccountBindingV1, LocalForkAuthenticationErrorV1> {
@@ -404,64 +403,50 @@ fn canonical_array(
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
     let mut cursor = Cursor::new(bytes);
-    let mut value: Value = ciborium::from_reader(&mut cursor)
+    let value: Value = ciborium::from_reader(&mut cursor)
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-    let expected_position = match u64::try_from(bytes.len()) {
-        Ok(position) => position,
-        Err(_) => {
-            zeroize_value(&mut value);
-            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-        }
-    };
-    if cursor.position() != expected_position {
-        zeroize_value(&mut value);
+    let value = SensitiveValues::new(value)?;
+    if cursor.position() != bytes.len() as u64 {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let Value::Array(fields) = &value else {
-        zeroize_value(&mut value);
-        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-    };
+    let fields = value.as_slice();
     if fields.len() != expected_fields {
-        zeroize_value(&mut value);
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
     if !matches!(fields.first(), Some(Value::Text(text)) if text == marker)
         || !matches!(fields.get(1), Some(Value::Integer(version)) if *version == 1.into())
     {
-        zeroize_value(&mut value);
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
     let mut encoded = Zeroizing::new(Vec::new());
-    if ciborium::into_writer(&value, &mut *encoded).is_err() {
-        zeroize_value(&mut value);
-        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-    }
+    let result = ciborium::into_writer(value.as_slice(), &mut *encoded);
+    assert!(
+        result.is_ok(),
+        "writing canonical CBOR to a Vec cannot fail"
+    );
     if encoded.as_slice() != bytes {
-        zeroize_value(&mut value);
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
-    let fields = match value {
-        Value::Array(fields) => fields,
-        mut value => {
-            zeroize_value(&mut value);
-            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-        }
-    };
-    Ok(SensitiveValues(fields))
+    Ok(value)
 }
 
 struct SensitiveValues(Vec<Value>);
 
-impl Deref for SensitiveValues {
-    type Target = [Value];
+impl SensitiveValues {
+    fn new(value: Value) -> Result<Self, LocalForkAuthenticationErrorV1> {
+        let Value::Array(values) = value else {
+            let mut value = value;
+            zeroize_value(&mut value);
+            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+        };
+        Ok(Self(values))
+    }
 
-    fn deref(&self) -> &Self::Target {
+    fn as_slice(&self) -> &[Value] {
         &self.0
     }
-}
 
-impl DerefMut for SensitiveValues {
-    fn deref_mut(&mut self) -> &mut Self::Target {
+    fn as_mut_slice(&mut self) -> &mut [Value] {
         &mut self.0
     }
 }
@@ -572,13 +557,13 @@ fn production_wall_time() -> Result<u64, LocalForkAuthenticationErrorV1> {
 fn wall_time_from_duration(
     duration: Result<std::time::Duration, ()>,
 ) -> Result<u64, LocalForkAuthenticationErrorV1> {
-    let duration = duration.map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
+    let duration = duration.map_err(|()| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
     u64::try_from(duration.as_micros())
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
 }
 
 fn operation_nonce() -> Result<[u8; 32], LocalForkAuthenticationErrorV1> {
-    operation_nonce_with(|remaining| random_fill(remaining))
+    operation_nonce_with(random_fill)
 }
 
 fn random_fill(remaining: &mut [u8]) -> Result<usize, LocalForkAuthenticationErrorV1> {
@@ -807,6 +792,26 @@ mod tests {
     }
 
     #[test]
+    fn loader_accepts_separate_valid_credentials() {
+        let uid = current_uid().max(1);
+        let (auth, host) = credential_bytes(uid, [8; 32]);
+        let directory = credentials_directory(&auth, &host);
+        let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid.saturating_add(1),
+        ));
+
+        assert_eq!(
+            credentials
+                .policy()
+                .adapter("local-unix")
+                .map(|adapter| adapter.minimum_assurance),
+            Some(2)
+        );
+        assert_ne!(credentials.adapter_public_key(), [0; 32]);
+    }
+
+    #[test]
     fn peer_without_a_registry_mapping_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
         let uid = current_uid();
         let mapped_uid = uid.saturating_add(1).max(1);
@@ -856,6 +861,18 @@ mod tests {
         test_ok(fs::set_permissions(
             directory.path(),
             fs::Permissions::from_mode(0o700),
+        ));
+        test_ok(fs::set_permissions(
+            directory.path().join(AUTH_CREDENTIAL_NAME),
+            fs::Permissions::from_mode(0o400),
+        ));
+        test_ok(fs::set_permissions(
+            directory.path().join(HOST_CREDENTIAL_NAME),
+            fs::Permissions::from_mode(0o620),
+        ));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid,
         ));
 
         test_ok(fs::set_permissions(
@@ -921,6 +938,7 @@ mod tests {
             operation_nonce_with(|_| Ok(0)),
             Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
         );
+        assert_ne!(test_ok(operation_nonce()), [0; 32]);
         let mut fills = 0_u8;
         assert_eq!(
             operation_nonce_with(|bytes| {
@@ -1012,5 +1030,13 @@ mod tests {
         let mut fields = facr1_fields(&auth);
         fields[2] = Value::Bytes(vec![0; 32]);
         expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
+
+        let tagged_auth = encode(&Value::Tag(0, Box::new(Value::Bytes(vec![1]))));
+        expect_load_invalid(&tagged_auth, &host, service_uid);
+        let mapped_auth = encode(&Value::Map(vec![(
+            Value::Tag(0, Box::new(Value::Bytes(vec![2]))),
+            Value::Bytes(vec![3]),
+        )]));
+        expect_load_invalid(&mapped_auth, &host, service_uid);
     }
 }
