@@ -57,12 +57,12 @@ use pos_core::{
     ForkClassifierRegistrationReceiptV1, ForkClassifierRegistrationRequestV1,
     ForkClassifierRegistrationV1, ForkClassifierSourceV1, ForkClassifierTableInputV1,
     ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventAuthorityBindingV1,
-    ForkEventAuthorityErrorV1, ForkEventClassificationV1, ForkEventOriginKindV1,
-    ForkEventProvenanceAuthorityPortV1, ForkEventSourceV1, ForkInterventionAdmissionInputV1,
-    ForkInterventionAdmissionV1, KeyRegistryStateV1, LocalPrincipalOwnerBindingPermitV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingV1, StoredErasureManifestV1,
-    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ForkEventAuthorityErrorV1, ForkEventOriginKindV1, ForkEventProvenanceAuthorityPortV1,
+    ForkEventSourceV1, ForkInterventionAdmissionInputV1, ForkInterventionAdmissionV1,
+    KeyRegistryStateV1, LocalPrincipalOwnerBindingPermitV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
+    PrincipalOwnerBindingV1, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
+    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
