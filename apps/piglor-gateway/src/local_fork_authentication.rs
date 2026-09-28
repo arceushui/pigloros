@@ -1,8 +1,8 @@
 //! Host-private Linux credential and peer-identity boundary for ADR-107.
 //!
-//! This module deliberately stops before producing authentication evidence.
-//! The evidence marker amendment remains pending; #450 owns all listener,
-//! FAH1, session, command, and durable-authority orchestration.
+//! It produces FAE1 only from a kernel-authenticated Unix peer and resolves
+//! the Owner only through the same protected FACR1 registry. #450 owns all
+//! listener, FAH1, session, command, and durable-authority orchestration.
 
 use std::{
     fs::{self, OpenOptions},
