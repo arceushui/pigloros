@@ -190,6 +190,49 @@ impl Plugin for SocietyPlugin {
     }
 }
 
+/// Installed read-only projection of Society Signals owned by another Plugin.
+///
+/// This Plugin has a Reducer but no Driver, ActionApprover, or owned Event
+/// types. Its empty output policy is still part of the admitted Plugin roster.
+pub struct SocietySignalProjectionPlugin {
+    id: PluginId,
+}
+
+impl Default for SocietySignalProjectionPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SocietySignalProjectionPlugin {
+    /// Create an independently identified Society Signal projection.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            id: PluginId::new(),
+        }
+    }
+}
+
+impl Plugin for SocietySignalProjectionPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "society-signal-projection"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: Vec::new(),
+            owned_entity_kinds: Vec::new(),
+            has_driver: false,
+            has_reducer: true,
+        }
+    }
+}
+
 /// Build a [`EVENT_TYPE_SIGNAL`] draft.
 ///
 /// # Panics

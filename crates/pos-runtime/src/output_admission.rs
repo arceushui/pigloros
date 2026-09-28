@@ -152,7 +152,7 @@ impl InstalledOutputPolicySourceV1 {
             Self::RuleAgent => plugin.name() == "rule-agent",
             Self::Agent => plugin.name() == "agent",
             Self::SyntheticObservation => plugin.name() == "synthetic-obs",
-            Self::Society => plugin.name() == "society",
+            Self::Society => matches!(plugin.name(), "society" | "society-signal-projection"),
             Self::Experiment => matches!(
                 plugin.name(),
                 "proof-agent"
@@ -184,7 +184,10 @@ impl InstalledOutputPolicySourceV1 {
             Self::RuleAgent => &["pos_plugin_rule_agent::RuleAgentPlugin"],
             Self::Agent => &["pos_plugin_agent::AgentPlugin"],
             Self::SyntheticObservation => &["pos_plugin_synthetic_obs::SyntheticObsPlugin"],
-            Self::Society => &["pos_plugin_society::SocietyPlugin"],
+            Self::Society => &[
+                "pos_plugin_society::SocietyPlugin",
+                "pos_plugin_society::SocietySignalProjectionPlugin",
+            ],
             Self::Experiment => &[
                 "pos_experiment::moat_proof::SiblingProbePlugin",
                 "pos_experiment::moat_proof::FailureProbePlugin",
@@ -352,7 +355,13 @@ impl InstalledOutputPolicySourceV1 {
                 "runtime.recorded_output".to_owned(),
             ],
             Self::SyntheticObservation => vec!["obs.synthetic".to_owned()],
-            Self::Society => vec!["society.signal".to_owned()],
+            Self::Society => {
+                if plugin.name() == "society-signal-projection" {
+                    Vec::new()
+                } else {
+                    vec!["society.signal".to_owned()]
+                }
+            }
             Self::Experiment => match plugin.name() {
                 "proof-agent" => vec!["proof.agent.reaction.v1".to_owned()],
                 "proof-society" | "society" => vec!["society.signal".to_owned()],
@@ -1864,7 +1873,10 @@ mod tests {
                 InstalledOutputPolicySourceV1::SyntheticObservation => {
                     &["pos_plugin_synthetic_obs::SyntheticObsPlugin"]
                 }
-                InstalledOutputPolicySourceV1::Society => &["pos_plugin_society::SocietyPlugin"],
+                InstalledOutputPolicySourceV1::Society => &[
+                    "pos_plugin_society::SocietyPlugin",
+                    "pos_plugin_society::SocietySignalProjectionPlugin",
+                ],
                 InstalledOutputPolicySourceV1::Experiment => &[
                     "pos_experiment::moat_proof::SiblingProbePlugin",
                     "pos_experiment::moat_proof::FailureProbePlugin",
