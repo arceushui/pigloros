@@ -20,7 +20,7 @@ scan_package() {
     --manifest-path "$manifest" \
     --output-format Json \
     --color never \
-    >"$report"
+    >"$report" || return
 
   jq -e --arg package "$package" '
     [
@@ -43,9 +43,9 @@ scan_package() {
 
 export -f scan_package
 
-# Each package manifest is a valid cargo-geiger root. Scan independent roots
-# concurrently because the workspace itself is virtual and cargo-geiger cannot
-# accept the workspace manifest directly.
+# Each package manifest is a valid cargo-geiger root. Keep scans sequential:
+# geiger cleans the shared Cargo target directory before collecting dep-info,
+# so concurrent scans can delete files that another scan is still reading.
 cargo metadata --locked --no-deps --format-version 1 \
   | jq -j '.packages[] | .name, "\u0000", .manifest_path, "\u0000"' \
-  | xargs -0 -r -n 2 -P "${GEIGER_JOBS:-4}" bash -c 'scan_package "$1" "$2"' _
+  | xargs -0 -r -n 2 bash -c 'scan_package "$1" "$2"' _
