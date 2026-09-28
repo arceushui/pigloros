@@ -23,12 +23,12 @@ fn wait_for_worker(started_rx: &mpsc::Receiver<()>, release_tx: &mpsc::Sender<()
 fn deny(
     store: &mut impl KeyRegistryHistoricalDecryptionPortV1,
     identity: KeyIdentityV1,
-    material: Hash,
+    private_material_digest: Hash,
     expected: KeyRegistryErrorV1,
 ) {
     let called = Cell::new(false);
     assert_eq!(
-        store.with_decryption_authorization(identity, material, || {
+        store.with_decryption_authorization(identity, private_material_digest, || {
             called.set(true);
         }),
         Err(expected)
@@ -121,7 +121,7 @@ fn sqlite_historical_decryption_uses_persisted_registry() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn sqlite_historical_decryption_serializes_rotation_and_destruction(
+fn sqlite_historical_decryption_holds_writer_reservation_before_registry_mutations(
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Clone, Copy)]
     enum CompetingMutation {
@@ -204,6 +204,85 @@ fn sqlite_historical_decryption_serializes_rotation_and_destruction(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_read_only_historical_decryption_uses_the_registry_writer_lock(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("database path is not UTF-8")?;
+    let identity = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(identity, digest(1), None))?;
+    let mut writer = SqliteStore::open(path)?;
+    writer.save_key_registry(&registry)?;
+
+    let mut reader = SqliteStore::open_read_only(path)?;
+    assert_eq!(
+        reader.with_decryption_authorization(identity, digest(1), || {
+            let contender = rusqlite::Connection::open(path).expect("open contender");
+            contender
+                .busy_timeout(Duration::ZERO)
+                .expect("set contender timeout");
+            assert!(contender
+                .execute_batch("BEGIN IMMEDIATE")
+                .is_err_and(|error| error.to_string().contains("database is locked")));
+            "plaintext"
+        })?,
+        "plaintext"
+    );
+
+    let request = KeyDestructionRequestV1::new(identity, digest(1), digest(3));
+    writer.begin_key_registry_destruction(request)?;
+    deny(
+        &mut reader,
+        identity,
+        digest(1),
+        KeyRegistryErrorV1::DestructionPending,
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_historical_decryption_releases_writer_lock_after_callback_panic(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let identity = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
+    let rotated_identity = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 2);
+    for read_only in [false, true] {
+        let database = tempfile::NamedTempFile::new()?;
+        let path = database
+            .path()
+            .to_str()
+            .ok_or("database path is not UTF-8")?;
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(identity, digest(1), None))?;
+        let mut writer = SqliteStore::open(path)?;
+        writer.save_key_registry(&registry)?;
+        let mut decrypting_store = if read_only {
+            SqliteStore::open_read_only(path)?
+        } else {
+            SqliteStore::open(path)?
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _authorization =
+                decrypting_store.with_decryption_authorization(identity, digest(1), || {
+                    panic!("intentional decryption callback panic");
+                });
+        }));
+        assert!(result.is_err());
+
+        let mut rotated = registry;
+        rotated.register_key(KeyRegistrationV1::new(rotated_identity, digest(2), None))?;
+        writer.save_key_registry(&rotated)?;
+        assert_eq!(
+            decrypting_store.with_decryption_authorization(identity, digest(1), || "recovered")?,
+            "recovered"
+        );
     }
     Ok(())
 }

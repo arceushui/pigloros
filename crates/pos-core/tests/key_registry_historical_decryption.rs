@@ -13,12 +13,12 @@ const fn digest(byte: u8) -> Hash {
 fn denied(
     registry: &mut impl KeyRegistryHistoricalDecryptionPortV1,
     identity: KeyIdentityV1,
-    material: Hash,
+    private_material_digest: Hash,
     expected: pos_core::KeyRegistryErrorV1,
 ) {
     let called = Cell::new(false);
     assert_eq!(
-        registry.with_decryption_authorization(identity, material, || {
+        registry.with_decryption_authorization(identity, private_material_digest, || {
             called.set(true);
         }),
         Err(expected)

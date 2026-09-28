@@ -4758,18 +4758,22 @@ impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
     where
         F: FnOnce() -> T,
     {
-        // A read-only decryption still takes the writer lock: rotation and
-        // destruction must serialize before or after the held callback.
+        // A read-only store uses its writable lock connection so rotation and
+        // destruction serialize with the held callback.
+        let connection = self
+            .erasure_effect_lock_connection
+            .as_ref()
+            .unwrap_or(&self.conn);
         identity
             .validate_historical_subject_decryption()
             .and_then(|()| {
-                self.conn
+                connection
                     .execute_batch(begin_immediate_sql())
                     .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
             })
             .and_then(|()| {
-                let result = self
-                    .load_key_registry()
+                let _rollback_on_drop = SqliteRollbackOnDrop(connection);
+                let result = sqlite_load_key_registry(connection)
                     .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
                     .and_then(|registry| registry.ok_or(KeyRegistryErrorV1::RegistryUnavailable))
                     .and_then(|mut registry| {
@@ -4780,7 +4784,7 @@ impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
                         )
                     });
                 finish_transaction(
-                    &self.conn,
+                    connection,
                     result,
                     |_, _| KeyRegistryErrorV1::RegistryUnavailable,
                     |_, _| KeyRegistryErrorV1::RegistryUnavailable,
@@ -4856,24 +4860,7 @@ impl EventStore for SqliteStore {
     }
 
     fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
-        let state_cbor = match self.conn.query_row(
-            "SELECT state_cbor FROM key_registry WHERE singleton = 1",
-            [],
-            |row| row.get::<_, Vec<u8>>(0),
-        ) {
-            Ok(bytes) => bytes,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-            Err(error) => return Err(CoreError::Storage(error.to_string())),
-        };
-        ciborium::from_reader(state_cbor.as_slice())
-            .map_err(|error| CoreError::Serialization(error.to_string()))
-            .and_then(|registry: KeyRegistryStateV1| {
-                registry
-                    .validate()
-                    .map(|()| registry)
-                    .map_err(|error| CoreError::Serialization(error.to_string()))
-            })
-            .map(Some)
+        sqlite_load_key_registry(&self.conn)
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
@@ -9865,6 +9852,37 @@ impl AuthorityPersistencePortV1 for SqliteStore {
         leaf_grant_id: Hash,
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         read_authority_state(&self.conn).and_then(|state| state.resolve(leaf_grant_id))
+    }
+}
+
+fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+    let state_cbor = match conn.query_row(
+        "SELECT state_cbor FROM key_registry WHERE singleton = 1",
+        [],
+        |row| row.get::<_, Vec<u8>>(0),
+    ) {
+        Ok(bytes) => bytes,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(error) => return Err(CoreError::Storage(error.to_string())),
+    };
+    ciborium::from_reader(state_cbor.as_slice())
+        .map_err(|error| CoreError::Serialization(error.to_string()))
+        .and_then(|registry: KeyRegistryStateV1| {
+            registry
+                .validate()
+                .map(|()| registry)
+                .map_err(|error| CoreError::Serialization(error.to_string()))
+        })
+        .map(Some)
+}
+
+struct SqliteRollbackOnDrop<'a>(&'a Connection);
+
+impl Drop for SqliteRollbackOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.0.is_autocommit() {
+            drop(self.0.execute_batch("ROLLBACK"));
+        }
     }
 }
 
