@@ -221,10 +221,7 @@ pub fn encrypt_timeline_export_v1(
         enc: [0; 32],
         ciphertext_chunks: Vec::new(),
     };
-    envelope.validate_shape().or_else(|_| {
-        // A newly constructed envelope has no chunks; validate the public header separately.
-        validate_header(&envelope.header)
-    })?;
+    validate_header(&envelope.header)?;
     let header_digest = digest(HEADER_DOMAIN, &encode_header_bytes(&envelope.header));
     let public_key = <X25519HkdfSha256 as Kem>::PublicKey::from_bytes(&recipient.public_key())
         .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
