@@ -1205,19 +1205,17 @@ mod tests {
         }
         for index in [0, 1, 2, 4, 5, 6, 7, 8, 9] {
             let rewritten = rewrite_envelope(&encoded, |fields| {
-                let Value::Array(header) = &mut fields[5] else {
-                    unreachable!();
-                };
-                header[index] = Value::Null;
+                if let Value::Array(header) = &mut fields[5] {
+                    header[index] = Value::Null;
+                }
             })?;
             assert!(RecipientTimelineExportV1::decode(&rewritten).is_err());
         }
         for index in [0, 6, 8, 9] {
             let rewritten = rewrite_envelope(&encoded, |fields| {
-                let Value::Array(header) = &mut fields[5] else {
-                    unreachable!();
-                };
-                header[index] = Value::Integer(0_u64.into());
+                if let Value::Array(header) = &mut fields[5] {
+                    header[index] = Value::Integer(0_u64.into());
+                }
             })?;
             assert!(RecipientTimelineExportV1::decode(&rewritten).is_err());
         }
@@ -1243,10 +1241,9 @@ mod tests {
             assert!(RecipientTimelineExportV1::decode(&rewritten).is_err());
         }
         let rewritten = rewrite_envelope(&encoded, |fields| {
-            let Value::Array(header) = &mut fields[5] else {
-                unreachable!();
-            };
-            header[3] = Value::Bytes(vec![7; 31]);
+            if let Value::Array(header) = &mut fields[5] {
+                header[3] = Value::Bytes(vec![7; 31]);
+            }
         })?;
         assert!(RecipientTimelineExportV1::decode(&rewritten).is_err());
         Ok(())
