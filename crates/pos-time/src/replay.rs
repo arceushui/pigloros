@@ -296,8 +296,8 @@ mod tests {
             &evaluation,
         )
         .test_ok();
-        assert_eq!(count_for(&complete, &entity), 3);
-        assert_eq!(count_for(&partial, &entity), 3);
+        assert_eq!(count_for(&complete, timeline, &entity), 3);
+        assert_eq!(count_for(&partial, timeline, &entity), 3);
     }
 
     fn committed_world_step() -> (
@@ -696,8 +696,8 @@ mod tests {
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
     }
 
-    fn count_for(reg: &ProjectionRegistry, entity: &EntityId) -> u64 {
-        reg.state_for(TimelineId::new(), entity)
+    fn count_for(reg: &ProjectionRegistry, timeline: TimelineId, entity: &EntityId) -> u64 {
+        reg.state_for(timeline, entity)
             .test_ok()
             .and_then(|s| s.get("n").and_then(serde_json::Value::as_u64))
             .unwrap_or(0)
@@ -717,7 +717,7 @@ mod tests {
 
         // No entities seen — state_for returns None (count is zero).
         let entity = EntityId::new();
-        assert_eq!(count_for(&reg, &entity), 0);
+        assert_eq!(count_for(&reg, tl.id(), &entity), 0);
     }
 
     #[test]
@@ -734,7 +734,7 @@ mod tests {
         reg.register("count", Box::new(CountReducer));
         replay(store.as_ref(), tl.id(), &mut reg).test_ok();
 
-        assert_eq!(count_for(&reg, &entity), 5);
+        assert_eq!(count_for(&reg, tl.id(), &entity), 5);
     }
 
     #[test]
@@ -754,7 +754,7 @@ mod tests {
         reg.register("count", Box::new(CountReducer));
         replay_at(store.as_ref(), tl.id(), third_seq, &mut reg).test_ok();
 
-        assert_eq!(count_for(&reg, &entity), 3);
+        assert_eq!(count_for(&reg, tl.id(), &entity), 3);
     }
 
     #[test]
@@ -764,10 +764,11 @@ mod tests {
         let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
         let entity = EntityId::new();
+        let timeline = TimelineId::new();
         reg.apply_event(&make_event(entity, 1));
-        let err = replay(&store, TimelineId::new(), &mut reg).test_err();
+        let err = replay(&store, timeline, &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
-        assert_eq!(count_for(&reg, &entity), 1);
+        assert_eq!(count_for(&reg, timeline, &entity), 1);
     }
 
     #[test]
@@ -802,8 +803,8 @@ mod tests {
             reg2.register("count", Box::new(CountReducer));
             reg2.fold_events(&events);
 
-            let c1 = count_for(&reg1, &entity);
-            let c2 = count_for(&reg2, &entity);
+            let c1 = count_for(&reg1, tl.id(), &entity);
+            let c2 = count_for(&reg2, tl.id(), &entity);
             prop_assert_eq!(c1, c2);
             prop_assert_eq!(c1, event_count as u64);
 
@@ -815,7 +816,7 @@ mod tests {
             let mut reg3 = test_projection_registry();
             reg3.register("count", Box::new(CountReducer));
             replay(store.as_ref(), tl.id(), &mut reg3).test_ok();
-            prop_assert_eq!(count_for(&reg3, &entity), event_count as u64);
+            prop_assert_eq!(count_for(&reg3, tl.id(), &entity), event_count as u64);
         }
     }
 }
