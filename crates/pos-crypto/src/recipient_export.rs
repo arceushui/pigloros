@@ -1725,7 +1725,8 @@ mod tests {
         let source = export(None, b"source".to_vec());
         let mut rng = StdRng::from_seed([20; 32]);
         let encoded = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?.encode();
-        let edits: [(fn(&mut Vec<Value>), RecipientExportErrorV1); 3] = [
+        type EnvelopeEdit = fn(&mut Vec<Value>);
+        let edits: [(EnvelopeEdit, RecipientExportErrorV1); 3] = [
             (
                 |fields| fields[0] = Value::Bytes(b"TRX0".to_vec()),
                 RecipientExportErrorV1::InvalidEncoding,
