@@ -87,6 +87,43 @@ fn complete_transport_closure_preserves_members_and_bytes() -> Result<(), Box<dy
 }
 
 #[test]
+fn supplied_closure_requires_the_exact_descriptor_key_set() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (manifest, blobs) = fixture()?;
+    let manifest = serde_json::to_vec(&manifest)?;
+    let address = BundleAddressV1::new(digest(&manifest)?, u64::try_from(manifest.len())?)?;
+    let component_digest = digest(b"component")?;
+
+    let mut missing = blobs.clone();
+    missing
+        .remove(&component_digest)
+        .ok_or("fixture component")?;
+    assert_eq!(
+        verify_oci_closure_v1(address.clone(), manifest.clone(), missing),
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
+    );
+
+    let mut extra = blobs.clone();
+    extra.insert(digest(b"extra")?, b"extra".to_vec());
+    assert_eq!(
+        verify_oci_closure_v1(address.clone(), manifest.clone(), extra),
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
+    );
+
+    let mut replaced = blobs.clone();
+    let component = replaced
+        .remove(&component_digest)
+        .ok_or("fixture component")?;
+    replaced.insert(digest(b"replacement")?, component);
+    assert_eq!(replaced.len(), blobs.len());
+    assert_eq!(
+        verify_oci_closure_v1(address, manifest, replaced),
+        Err(ReleaseSourceErrorV1::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
 fn declared_closure_budget_includes_manifest_and_accepts_exact_limit(
 ) -> Result<(), Box<dyn std::error::Error>> {
     const MAX_BYTES: u64 = 64 * 1024 * 1024;
