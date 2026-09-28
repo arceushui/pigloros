@@ -511,6 +511,7 @@ fn parse_utc_seconds(value: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
@@ -555,6 +556,148 @@ mod tests {
             signing_key_id: &snapshot.trust_roots[0].key_id,
             signing_root_version: snapshot.trust_roots[0].root_version,
         }
+    }
+
+    #[test]
+    fn registry_errors_have_stable_public_messages() {
+        for (error, message) in [
+            (TrustPolicyRegistryErrorV1::InvalidSnapshot, "invalid deployment TPS1 snapshot"),
+            (
+                TrustPolicyRegistryErrorV1::InvalidOperatorSignature,
+                "TPS1 operator signature is not trusted",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::InvalidGenesis,
+                "TPS1 genesis does not match the operator release",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::MissingState,
+                "deployment trust state is not provisioned",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::CorruptState,
+                "deployment trust state is corrupt",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::StaleSnapshot,
+                "TPS1 epoch or predecessor is stale",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::UnsupportedPosition,
+                "global Gateway requires TPS1 position zero",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::Expired,
+                "TPS1 offline validity has expired or is invalid",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::Revoked,
+                "EPF1 artifact or signing root is revoked",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::UnsupportedRoot,
+                "EPF1 signing root is not current",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::UnsupportedVersion,
+                "EPF1 version is below the TPS1 minimum",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::InvalidEpf1,
+                "EPF1 exact canonical artifact is invalid",
+            ),
+            (
+                TrustPolicyRegistryErrorV1::StorageUnavailable,
+                "deployment trust storage is unavailable",
+            ),
+        ] {
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[test]
+    fn public_admission_uses_current_time_and_authenticated_state(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("trust.db");
+        let mut snapshot = fixture_snapshot()?;
+        snapshot.offline_valid_through = "9999-12-31T23:59:59Z".to_owned();
+        let genesis = signed(snapshot.clone())?;
+        let anchor = release(&snapshot, &genesis);
+        DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)?;
+        let mut registry = DeploymentTrustPolicyRegistryV1::open_current(&path, anchor)?;
+        let profile = fixture_profile()?;
+        let epoch = registry.with_admitted_epf1(&genesis, request(&snapshot, &profile), |proof| {
+            Ok(proof.epoch())
+        })?;
+        assert_eq!(epoch, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn genesis_rejects_wrong_anchor_shape_and_nonzero_position(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("trust.db");
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        let anchor = release(&snapshot, &genesis);
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, b"not TPS1"),
+            Err(TrustPolicyRegistryErrorV1::InvalidSnapshot)
+        );
+        let wrong_policy = OperatorReleaseTrustV1::new(
+            "another-policy".to_owned(),
+            signer().verifying_key().to_bytes(),
+            raw_digest(&genesis),
+        );
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &wrong_policy, &genesis),
+            Err(TrustPolicyRegistryErrorV1::InvalidSnapshot)
+        );
+        let wrong_genesis = OperatorReleaseTrustV1::new(
+            snapshot.policy_id.clone(),
+            signer().verifying_key().to_bytes(),
+            [7; 32],
+        );
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &wrong_genesis, &genesis),
+            Err(TrustPolicyRegistryErrorV1::InvalidGenesis)
+        );
+        let mut epoch_two = snapshot.clone();
+        epoch_two.epoch = 2;
+        let epoch_two_bytes = signed(epoch_two.clone())?;
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(
+                &path,
+                &release(&epoch_two, &epoch_two_bytes),
+                &epoch_two_bytes
+            ),
+            Err(TrustPolicyRegistryErrorV1::InvalidGenesis)
+        );
+        let mut predecessor = snapshot.clone();
+        predecessor.previous_snapshot_digest = Some([8; 32]);
+        let predecessor_bytes = signed(predecessor.clone())?;
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(
+                &path,
+                &release(&predecessor, &predecessor_bytes),
+                &predecessor_bytes
+            ),
+            Err(TrustPolicyRegistryErrorV1::InvalidGenesis)
+        );
+        let mut nonzero = snapshot;
+        nonzero.effective_timeline_position = 1;
+        let nonzero_bytes = signed(nonzero.clone())?;
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(
+                &path,
+                &release(&nonzero, &nonzero_bytes),
+                &nonzero_bytes
+            ),
+            Err(TrustPolicyRegistryErrorV1::UnsupportedPosition)
+        );
+        Ok(())
     }
 
     #[test]

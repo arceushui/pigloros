@@ -607,6 +607,7 @@ fn strings(values: &[String]) -> Value {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod minimum_version_tests {
     use super::ExecutionProfileV1;
 

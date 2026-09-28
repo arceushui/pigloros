@@ -530,6 +530,7 @@ fn optional_digest_value(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod operator_authentication_tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
@@ -542,6 +543,30 @@ mod operator_authentication_tests {
         let message = snapshot.operator_signature_message_v1()?;
         snapshot.operator_signature = signer.sign(&message).to_bytes();
         Ok((snapshot, signer))
+    }
+
+    #[test]
+    fn authentication_errors_keep_distinct_public_messages() {
+        for (error, message) in [
+            (
+                TrustPolicySnapshotAuthenticationErrorV1::InvalidSnapshot,
+                "invalid canonical TPS1 snapshot",
+            ),
+            (
+                TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorRole,
+                "invalid TPS1 operator role",
+            ),
+            (
+                TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorKey,
+                "invalid TPS1 operator verification key",
+            ),
+            (
+                TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorSignature,
+                "invalid TPS1 operator signature",
+            ),
+        ] {
+            assert_eq!(error.to_string(), message);
+        }
     }
 
     #[test]
