@@ -74,13 +74,20 @@ fn snapshot_verification_requires_installed_world_verifier() {
         .create_timeline("artifact-snapshot")
         .test_ok();
     let mut capture_registry = registry(&gate);
-    let generation = gate.inventory_generation().test_ok();
+    let mut reads = host.read_sender().test_ok();
+    let (_, generation) = reads
+        .read_bounded_at_generation(
+            timeline.id(),
+            pos_core::store::SeqRange::all(),
+            pos_core::store::EventReadBounds::new(8, 32, 4, 4),
+            None,
+        )
+        .test_ok();
     let closure = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
         timeline.id(),
         Hash::from_bytes(generation.digest()),
     )
     .test_ok();
-    let mut reads = host.read_sender().test_ok();
     let result = snapshot(&mut reads, timeline.id(), &mut capture_registry, &closure);
     assert!(matches!(
         result,
@@ -134,7 +141,16 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         .create_timeline("known-snapshot-control")
         .test_ok();
     let unknown_timeline = TimelineId::new();
-    let generation = Hash::from_bytes(gate.inventory_generation().test_ok().digest());
+    let mut reads = host.read_sender().test_ok();
+    let (_, inventory_generation) = reads
+        .read_bounded_at_generation(
+            known_timeline.id(),
+            pos_core::store::SeqRange::all(),
+            pos_core::store::EventReadBounds::new(8, 32, 4, 4),
+            None,
+        )
+        .test_ok();
+    let generation = Hash::from_bytes(inventory_generation.digest());
     let known_closure = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
         known_timeline.id(),
         generation,
@@ -145,8 +161,6 @@ fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
         generation,
     )
     .test_ok();
-    let mut reads = host.read_sender().test_ok();
-
     let mut known_registry = registry(&gate);
     let known_snapshot = snapshot(
         &mut reads,
