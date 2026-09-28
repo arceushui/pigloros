@@ -472,6 +472,14 @@ fn validate_export(export: &TimelineExport) -> Result<(), RecipientExportErrorV1
         {
             return Err(RecipientExportErrorV1::FieldOutOfBounds);
         }
+        if *blake3::hash(event.payload.as_slice()).as_bytes() != *event.payload_hash.as_bytes() {
+            return Err(RecipientExportErrorV1::SourceMismatch);
+        }
+        if event.signature_identity.is_some_and(|identity| {
+            identity.role != KeyRoleV1::TimelineIntegritySigning || identity.epoch == 0
+        }) {
+            return Err(RecipientExportErrorV1::IdentityMismatch);
+        }
     }
     if export.timeline.head.as_u64()
         != u64::try_from(export.events.len())
@@ -927,6 +935,21 @@ mod tests {
     use crate::recipient_key::derive_recipient_keypair_v1;
     use rand::{rngs::StdRng, SeedableRng};
 
+    fn from_hex(value: &str) -> Result<Vec<u8>, RecipientExportErrorV1> {
+        if !value.len().is_multiple_of(2) {
+            return Err(RecipientExportErrorV1::InvalidEncoding);
+        }
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair)
+                    .map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
+                u8::from_str_radix(pair, 16).map_err(|_| RecipientExportErrorV1::InvalidEncoding)
+            })
+            .collect()
+    }
+
     fn id(value: u128) -> Ulid {
         Ulid::from(value)
     }
@@ -1013,13 +1036,101 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rfc9180_a2_base_receiver_vector() -> Result<(), RecipientExportErrorV1> {
+        // RFC 9180 Appendix A.2.1, sequence numbers 0 and 1 for our fixed suite.
+        let private = <X25519HkdfSha256 as Kem>::PrivateKey::from_bytes(&from_hex(
+            "8057991eef8f1f1af18f4a9491d16a1ce333f695d4db8e38da75975c4478e0fb",
+        )?)
+        .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
+        let enc = <X25519HkdfSha256 as Kem>::EncappedKey::from_bytes(&from_hex(
+            "1afa08d3dec047a643885163f1180476fa7ddb54c6a8029ea33f95796bf2ac4a",
+        )?)
+        .map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
+        let mut receiver = setup_receiver::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
+            &OpModeR::Base,
+            &private,
+            &enc,
+            &from_hex("4f6465206f6e2061204772656369616e2055726e")?,
+        )
+        .map_err(|_| RecipientExportErrorV1::AuthenticationFailed)?;
+        let expected = from_hex("4265617574792069732074727574682c20747275746820626561757479")?;
+        for (aad, ciphertext) in [
+            (
+                "436f756e742d30",
+                concat!(
+                    "1c5250d8034ec2b784ba2cfd69dbdb8af406cfe3ff938e131f0def8c8b60b4db",
+                    "21993c62ce81883d2dd1b51a28"
+                ),
+            ),
+            (
+                "436f756e742d31",
+                concat!(
+                    "6b53c051e4199c518de79594e1c4ab18b96f081549d45ce015be002090bb119e",
+                    "85285337cc95ba5f59992dc98c"
+                ),
+            ),
+        ] {
+            let plaintext = receiver
+                .open(&from_hex(ciphertext)?, &from_hex(aad)?)
+                .map_err(|_| RecipientExportErrorV1::AuthenticationFailed)?;
+            assert_eq!(plaintext, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn pins_tep1_and_trx1_canonical_wire_bytes() -> Result<(), RecipientExportErrorV1> {
+        let source = export(None, Vec::new());
+        let tep1 = from_hex(
+            "8b4454455031015000000000000000000000000000000003016963616e6469646174655000000000000000000000000000000004f6f600f680",
+        )?;
+        assert_eq!(encode_payload(&source)?, tep1);
+        let decoded = decode_payload(&tep1)?;
+        assert_eq!(decoded.timeline.meta, source.timeline.meta);
+        assert_eq!(decoded.timeline.head, source.timeline.head);
+        assert!(decoded.events.is_empty());
+
+        let recipient =
+            RecipientKeyDescriptorV1::for_grantee(EntityId::from_ulid(id(1)), 1, [7; 32])
+                .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
+        let envelope = RecipientTimelineExportV1 {
+            header: RecipientExportHeaderV1 {
+                export_id: [5; 16],
+                timeline_id: TimelineId::from_ulid(id(3)),
+                local_head: Seq::from_u64(0),
+                parent_fork_hash: None,
+                recipient,
+                payload_length: 1,
+                chunk_count: 1,
+            },
+            enc: [8; 32],
+            ciphertext_chunks: vec![vec![9; 17]],
+        };
+        let trx1 = from_hex(concat!(
+            "88445452583101182001038a5005050505050505050505050505050505",
+            "500000000000000000000000000000000300f6782a726563697069656e743a",
+            "3030303030303030303030303030303030303030303030303030303030303031",
+            "040158200707070707070707070707070707070707070707070707070707070707070707",
+            "010158200808080808080808080808080808080808080808080808080808080808080808",
+            "81510909090909090909090909090909090909"
+        ))?;
+        assert_eq!(envelope.encode(), trx1);
+        assert_eq!(RecipientTimelineExportV1::decode(&trx1)?, envelope);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn uses_ordered_chunks_and_releases_no_plaintext_on_failure(
     ) -> Result<(), RecipientExportErrorV1> {
         let (recipient, private) = recipient()?;
-        let source = export(None, vec![3; CHUNK_BYTES * 2]);
+        let overhead = encode_payload(&export(None, vec![3; CHUNK_BYTES]))?.len() - CHUNK_BYTES;
+        let source = export(None, vec![3; CHUNK_BYTES * 2 - overhead]);
         let mut rng = StdRng::from_seed([7; 32]);
         let mut envelope = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?;
         assert_eq!(envelope.ciphertext_chunks.len(), 2);
+        assert_eq!(envelope.header.payload_length, CHUNK_BYTES_U64 * 2);
         envelope.ciphertext_chunks.swap(0, 1);
         assert!(matches!(
             decrypt_timeline_export_v1(&envelope.encode(), [5; 16], recipient, &private),
@@ -1052,6 +1163,43 @@ mod tests {
             RecipientTimelineExportV1::decode(&noncanonical),
             Err(RecipientExportErrorV1::NonCanonical)
         );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_inconsistent_source_before_encryption() -> Result<(), RecipientExportErrorV1> {
+        let (recipient, _) = recipient()?;
+        let mut rng = StdRng::from_seed([9; 32]);
+        let mut source = export(None, b"source".to_vec());
+        source.events[0].payload_hash = Hash::from_bytes([0; 32]);
+        assert!(matches!(
+            encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng),
+            Err(RecipientExportErrorV1::SourceMismatch)
+        ));
+
+        source.events[0].payload_hash = Hash::from_bytes(*blake3::hash(b"source").as_bytes());
+        source.events[0].signature = Some(Signature::from_bytes([1; 64]));
+        source.events[0].signature_identity = Some(KeyIdentityV1::from_parts(
+            pos_core::OwnerIdV1::new("source")
+                .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?,
+            KeyRoleV1::ExportRecipientEncryption,
+            1,
+        ));
+        assert!(matches!(
+            encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng),
+            Err(RecipientExportErrorV1::IdentityMismatch)
+        ));
+        source.events[0].signature_identity = Some(KeyIdentityV1::from_parts(
+            pos_core::OwnerIdV1::new("source")
+                .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?,
+            KeyRoleV1::TimelineIntegritySigning,
+            0,
+        ));
+        assert!(matches!(
+            encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng),
+            Err(RecipientExportErrorV1::IdentityMismatch)
+        ));
         Ok(())
     }
 }
