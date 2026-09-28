@@ -7450,7 +7450,7 @@ mod tests {
                     });
                 (frozen.id(), visible.id(), child.id())
             };
-            host.containment_gate().freeze_timeline_for_test(frozen);
+            host.freeze_timeline_for_test(frozen);
             let mut reader = host
                 .read_sender()
                 .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
