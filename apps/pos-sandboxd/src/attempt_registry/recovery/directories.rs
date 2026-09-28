@@ -92,7 +92,7 @@ impl SystemdAttemptRecovery {
 }
 
 impl UnmountedDirectoryInventory<'_> {
-    /// Existing directories in canonical AttemptId component order.
+    /// Existing directories in canonical `AttemptId` component order.
     #[must_use]
     pub fn directories(&self) -> &[RecoveredUnmountedDirectory] {
         &self.directories
