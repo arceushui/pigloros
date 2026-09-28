@@ -94,7 +94,7 @@ impl AuthorizationCacheEntryV1 {
 /// expiry and logical-position expiry. Parent and consent indexes make revocation
 /// invalidation independent of which chain member was the leaf.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct AuthorizationCacheV1 {
+pub(super) struct AuthorizationCacheV1 {
     entries: HashMap<AuthorizationCacheKeyV1, AuthorizationCacheEntryV1>,
 }
 
