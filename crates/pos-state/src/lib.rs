@@ -656,7 +656,11 @@ impl ProjectionRegistry {
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T, E>,
     ) -> Result<T, E> {
-        let mut before = self.snapshot_unfenced();
+        let mut before: HashMap<(String, Option<PluginId>), StateRegistry> = self
+            .slots
+            .iter()
+            .map(|(name, slot)| ((name.clone(), slot.plugin_id), slot.registry.clone()))
+            .collect();
         let before_source = (
             self.source_timeline,
             self.source_generation,
@@ -678,7 +682,9 @@ impl ProjectionRegistry {
                 let revoked_subjects =
                     self.transaction_revocations[revocation_checkpoint..].to_vec();
                 for (name, slot) in &mut self.slots {
-                    slot.registry = before.remove(name).unwrap_or_default();
+                    slot.registry = before
+                        .remove(&(name.clone(), slot.plugin_id))
+                        .unwrap_or_default();
                 }
                 (
                     self.source_timeline,
@@ -2448,6 +2454,36 @@ mod wave3_tests {
         assert_eq!(denied, Err("denied"));
         assert_eq!(count(&registry, first), Some(1));
         assert_eq!(count(&registry, second), None);
+    }
+
+    #[test]
+    fn failed_state_transaction_restores_by_slot_after_registration_reorders_slots() {
+        let entity = EntityId::new();
+        let mut registry = ProjectionRegistry::new();
+        registry.register("first", Box::new(EntityStateProjection));
+        registry.apply_event(&ev(entity));
+        registry.register("second", Box::new(EntityStateProjection));
+        registry.apply_event(&ev(entity));
+        let count = |registry: &ProjectionRegistry, name| {
+            registry
+                .state_for_reducer(name, &entity)
+                .and_then(|state| state.get("event_count"))
+                .and_then(serde_json::Value::as_u64)
+        };
+        assert_eq!(count(&registry, "first"), Some(2));
+        assert_eq!(count(&registry, "second"), Some(1));
+
+        let denied: Result<(), &str> = registry.try_with_state_transaction(|candidate| {
+            candidate.register("first", Box::new(EntityStateProjection));
+            candidate.register("third", Box::new(EntityStateProjection));
+            candidate.apply_event(&ev(entity));
+            Err("denied")
+        });
+
+        assert_eq!(denied, Err("denied"));
+        assert_eq!(count(&registry, "first"), Some(2));
+        assert_eq!(count(&registry, "second"), Some(1));
+        assert_eq!(count(&registry, "third"), None);
     }
 
     #[test]

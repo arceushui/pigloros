@@ -24,11 +24,8 @@
 //! use pos_plugin_society::{
 //!     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 //! };
-//! use pos_runtime::{
-//!     registry::PluginRegistry, InstalledOutputPolicySourceV1, OutputPolicyBindingV1,
-//! };
+//! use pos_runtime::{InstalledOutputPolicySourceV1, OutputPolicyBindingV1};
 //!
-//! let mut registry = PluginRegistry::new();
 //! let plugin = SocietyPlugin::new();
 //! let binding = OutputPolicyBindingV1::from_installed_source(
 //!     &plugin,
@@ -36,21 +33,11 @@
 //!     &[],
 //!     "deterministic-local-v1",
 //! );
-//! match binding {
-//!     Ok(binding) => assert!(registry
-//!         .register_with_verified_output_policy(
-//!             &plugin,
-//!             binding,
-//!             Some(Box::new(SocietyReducer)),
-//!             None,
-//!         )
-//!         .is_ok()),
-//!     Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }) => {
-//!         // No installed Society profile: registration remains closed.
-//!         assert!(registry.is_empty());
-//!     }
-//!     Err(error) => panic!("unexpected Society policy binding failure: {error}"),
-//! }
+//! // Wave 8 has no installed Society EPF1, so production binding stays closed.
+//! assert!(matches!(
+//!     binding,
+//!     Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+//! ));
 //!
 //! let draft = draft_signal(
 //!     EntityId::new(),
