@@ -2,14 +2,17 @@
 
 use std::{cell::RefCell, sync::Arc};
 
+use crate::authorization_cache::{AuthorizationCacheKeyV1, AuthorizationCacheV1};
+
 use pos_core::{
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     store::{
         AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
         PurgeOutcome, SeqRange,
     },
-    ConsentAppendPermit, CoreError, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
-    ErasureAdministrativeResolutionV1, ErasureAtomicFreezeResultV1,
+    AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1,
+    AuthorizationRequestV1, ConsentAppendPermit, CoreError, ErasureAcknowledgementProvenanceV1,
+    ErasureAcknowledgementV1, ErasureAdministrativeResolutionV1, ErasureAtomicFreezeResultV1,
     ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1, ErasureCasEffectV1,
     ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureCoordinatorPortV1,
     ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1,
@@ -27,9 +30,9 @@ use pos_core::{
     ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
     ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
     KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyRegistryStateV1, OwnTracksIngressInputV1, PreparedErasureCasV1,
+    KeyRegistryStateV1, OwnTracksIngressInputV1, PersistedAuthorityV1, PreparedErasureCasV1,
     PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
-    Timeline, TimelineId, TimelineMeta, TimelineMode,
+    Timeline, TimelineId, TimelineMeta, TimelineMode, WallTime,
 };
 use pos_store::StoreConfig;
 use std::num::NonZeroUsize;
@@ -1107,6 +1110,7 @@ fn open_gateway_host_store(
 pub struct ErasureExecutionHostV1 {
     store: OwnedErasureStoreV1,
     gate: Arc<ErasureContainmentGateV1>,
+    authorization_cache: AuthorizationCacheV1,
     authority: Option<Arc<dyn ErasureCoordinatorAuthorityV1>>,
     coordinator: Option<ErasureReferenceV1>,
     inventory: Option<Arc<ErasureVerifiedInventoryV1>>,
@@ -1131,6 +1135,7 @@ impl ErasureExecutionHostV1 {
 
     fn poison(&mut self) {
         self.gate.poison();
+        self.authorization_cache = AuthorizationCacheV1::new();
         self.state = HostStateV1::Poisoned;
         self.inventory = None;
     }
@@ -1175,6 +1180,7 @@ impl ErasureExecutionHostV1 {
         Ok(Self {
             store,
             gate,
+            authorization_cache: AuthorizationCacheV1::new(),
             authority: None,
             coordinator: None,
             inventory: None,
@@ -1577,6 +1583,7 @@ impl ErasureExecutionHostV1 {
             }
         };
         self.inventory = Some(retained_inventory);
+        self.authorization_cache = AuthorizationCacheV1::new();
         self.recovery_limits = limits;
         self.state = HostStateV1::Ready {
             generation,
@@ -2431,6 +2438,117 @@ pub struct ErasureCommandSenderV1<'host> {
 }
 
 impl ErasureCommandSenderV1<'_> {
+    fn with_authorization_fence<T>(
+        &mut self,
+        request: &AuthorizationRequestV1,
+        mut effect: impl FnMut(&mut Self) -> T,
+    ) -> Result<T, ErasureHostErrorV1> {
+        let mut result = None;
+        let mut consent_result = Ok(());
+        self.with_protected_effect_fence(
+            request.authority_timeline(),
+            ErasureProtectedOperationV1::Read,
+            &mut |sender| {
+                if let Some(consent_timeline) = request.consent_timeline() {
+                    consent_result = sender.with_protected_effect_fence(
+                        consent_timeline,
+                        ErasureProtectedOperationV1::Read,
+                        &mut |sender| result = Some(effect(sender)),
+                    );
+                } else {
+                    result = Some(effect(sender));
+                }
+            },
+        )?;
+        consent_result?;
+        result.ok_or(ErasureHostErrorV1::RecoveryUnavailable)
+    }
+
+    /// Cache one freshly evaluated active decision under the installed host
+    /// generation and the authority and consent Timeline fences.
+    ///
+    /// The key is an opaque lookup handle. Callers cannot choose its generation
+    /// or insert a decision made outside this protected host command.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error when either Timeline is unavailable.
+    pub fn cache_authorization(
+        &mut self,
+        request: &AuthorizationRequestV1,
+        authority: &PersistedAuthorityV1,
+        registry: &AuthorityRegistrySnapshotV1,
+    ) -> Result<Option<AuthorizationCacheKeyV1>, ErasureHostErrorV1> {
+        self.with_authorization_fence(request, |sender| {
+            let decision = AuthorityEvaluatorV1::authorize(request, authority.chain(), registry);
+            sender.host.authorization_cache.insert_active(
+                decision,
+                request,
+                authority,
+                registry,
+                sender.generation,
+            )
+        })
+    }
+
+    /// Return a cached decision only after a fresh evaluation inside the
+    /// current host fence. A stale or denied entry is evicted before exposure.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error when either Timeline is unavailable.
+    pub fn cached_authorization(
+        &mut self,
+        key: &AuthorizationCacheKeyV1,
+        at_time: WallTime,
+        at_position: Seq,
+        request: &AuthorizationRequestV1,
+        authority: &PersistedAuthorityV1,
+        registry: &AuthorityRegistrySnapshotV1,
+    ) -> Result<Option<AuthorizationDecisionV1>, ErasureHostErrorV1> {
+        let result = self.with_authorization_fence(request, |sender| {
+            sender
+                .host
+                .authorization_cache
+                .get(
+                    key,
+                    at_time,
+                    at_position,
+                    request,
+                    authority,
+                    registry,
+                    sender.generation,
+                )
+                .cloned()
+        });
+        if result.is_err() {
+            self.host.authorization_cache.evict(key);
+        }
+        result
+    }
+
+    /// Evict all cached decisions derived from a revoked grant, including
+    /// decisions reached through descendant delegations.
+    pub fn invalidate_cached_grant(&mut self, grant_id: Hash) -> usize {
+        self.host.authorization_cache.invalidate_grant(grant_id)
+    }
+
+    /// Evict all cached decisions derived from a revoked consent reference.
+    pub fn invalidate_cached_consent(&mut self, consent_reference: Hash) -> usize {
+        self.host
+            .authorization_cache
+            .invalidate_consent(consent_reference)
+    }
+
+    /// Evict stale revocation epochs for one authority Timeline.
+    pub fn retain_cached_revocation_epoch(
+        &mut self,
+        authority_timeline: TimelineId,
+        current_epoch: u64,
+    ) -> usize {
+        self.host
+            .authorization_cache
+            .retain_revocation_epoch(authority_timeline, current_epoch)
+    }
+
     fn apply_state_command(
         &mut self,
         command: &HostedCoordinatorCommandV1,
