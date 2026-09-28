@@ -5009,7 +5009,8 @@ mod tests {
         let timeline = TimelineId::new();
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let state = Arc::new(Mutex::new(OutputTransactionState::default()));
-        let mut registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        let registry_gate: Arc<dyn ErasureGate> = gate.clone();
+        let mut registry = PluginRegistry::new().with_erasure_gate(registry_gate);
         register_output_driver(
             &mut registry,
             &["probe.event"],
