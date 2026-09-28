@@ -1707,4 +1707,59 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_scalar_and_empty_structural_forms_at_public_boundaries(
+    ) -> Result<(), RecipientExportErrorV1> {
+        assert_eq!(
+            RecipientTimelineExportV1::decode(&[0]),
+            Err(RecipientExportErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            RecipientTimelineExportV1::decode(&[0x80]),
+            Err(RecipientExportErrorV1::InvalidEncoding)
+        );
+
+        let (recipient, private) = recipient()?;
+        let source = export(None, b"source".to_vec());
+        let mut rng = StdRng::from_seed([20; 32]);
+        let encoded = encrypt_timeline_export_v1(&source, recipient, [5; 16], &mut rng)?.encode();
+        let edits: [(fn(&mut Vec<Value>), RecipientExportErrorV1); 3] = [
+            (
+                |fields| fields[0] = Value::Bytes(b"TRX0".to_vec()),
+                RecipientExportErrorV1::InvalidEncoding,
+            ),
+            (
+                |fields| fields[7] = Value::Array(vec![Value::Null]),
+                RecipientExportErrorV1::InvalidEncoding,
+            ),
+            (
+                |fields| {
+                    if let Value::Array(header) = &mut fields[5] {
+                        header[0] = Value::Bytes(vec![0; 16]);
+                    }
+                },
+                RecipientExportErrorV1::FieldOutOfBounds,
+            ),
+        ];
+        for (edit, expected) in edits {
+            let malformed = rewrite_envelope(&encoded, edit)?;
+            assert_eq!(RecipientTimelineExportV1::decode(&malformed), Err(expected));
+        }
+
+        assert_eq!(
+            encrypt_timeline_export_v1(&source, recipient, [0; 16], &mut rng),
+            Err(RecipientExportErrorV1::FieldOutOfBounds)
+        );
+
+        for payload in [vec![0], vec![0x80]] {
+            let encoded = encrypt_payload(&payload, recipient, [5; 16], &mut rng)?;
+            assert!(matches!(
+                decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private),
+                Err(RecipientExportErrorV1::InvalidEncoding)
+            ));
+        }
+        Ok(())
+    }
 }
