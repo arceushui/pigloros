@@ -880,8 +880,7 @@ mod tests {
             &fixture.registry,
         ))
         .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
-        host.containment_gate()
-            .freeze_timeline_for_test(resource.id());
+        host.freeze_timeline_for_test(resource.id());
         assert!(test_ok(host.command_sender())
             .cached_authorization(
                 &key,
@@ -933,7 +932,7 @@ mod tests {
             } else {
                 authority.id()
             };
-            host.containment_gate().freeze_timeline_for_test(blocked);
+            host.freeze_timeline_for_test(blocked);
             assert!(matches!(
                 test_ok(host.command_sender()).cache_authorization(
                     resource.id(),

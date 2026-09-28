@@ -1325,6 +1325,11 @@ impl ErasureExecutionHostV1 {
         self.gate.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn freeze_timeline_for_test(&self, timeline: TimelineId) {
+        self.gate.freeze_timeline_for_test(timeline);
+    }
+
     /// Bind the independently owned consent authority before Gateway commands
     /// enter the host command stream.
     ///
