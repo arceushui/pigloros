@@ -143,9 +143,12 @@ fn parse_credentials(
     let adapter = policy
         .adapter(registry.adapter_id())
         .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let registry_binding = registry
+        .digest()
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
     if adapter.verifying_key != adapter_signer.public_key()
         || registry.assurance() < adapter.minimum_assurance
-        || !adapter.registry_bindings.contains(&registry.digest())
+        || !adapter.registry_bindings.contains(&registry_binding)
     {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
@@ -418,7 +421,7 @@ mod tests {
                 adapter_id: "local-unix".to_owned(),
                 verifying_key: adapter.public_key(),
                 minimum_assurance: 2,
-                registry_bindings: vec![registry.digest()],
+                registry_bindings: vec![test_ok(registry.digest())],
             },
         ]));
         let principal = test_ok(binding(uid).principal.encode());
@@ -426,7 +429,7 @@ mod tests {
             Value::Text("FACR1".to_owned()),
             Value::Integer(1.into()),
             Value::Bytes(adapter_seed.to_vec()),
-            Value::Bytes(policy.to_canonical_cbor()),
+            Value::Bytes(test_ok(policy.to_canonical_cbor())),
             Value::Text("local-unix".to_owned()),
             Value::Integer(2.into()),
             Value::Array(vec![Value::Array(vec![
