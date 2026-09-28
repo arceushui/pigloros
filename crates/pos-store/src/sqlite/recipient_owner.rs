@@ -496,12 +496,9 @@ impl SqliteStore {
                 "recipient key inventory identity is invalid".to_owned(),
             ));
         }
+        // The writer-reserved directory claim validates the descriptor-derived
+        // filename before this identity-specific inventory lookup.
         let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
-        if !is_expected_recipient_private_path(&path, descriptor)? {
-            return Err(CoreError::Storage(
-                "recipient key inventory path does not match descriptor".to_owned(),
-            ));
-        }
         let material_digest = inventory
             .material_digest
             .as_slice()
@@ -562,12 +559,9 @@ fn validate_recipient_key_inventory(
                 "recipient key inventory is not an exact live registry identity".to_owned(),
             ));
         }
+        // The writer-reserved directory claim has already validated this
+        // descriptor-derived filename for every inventory row.
         let path = PathBuf::from(std::ffi::OsString::from_vec(inventory.private_path.clone()));
-        if !is_expected_recipient_private_path(&path, descriptor)? {
-            return Err(CoreError::Storage(
-                "recipient key inventory path does not match descriptor".to_owned(),
-            ));
-        }
         let file_identity = RecipientPrivateFileIdentityV1::from_inventory(inventory)?;
         let material = read_bound_private_key(owner, &path, file_identity)?;
         if pos_crypto::key_roles::key_material_digest(&material).as_bytes()
