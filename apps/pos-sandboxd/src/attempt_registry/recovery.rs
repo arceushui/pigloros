@@ -1,13 +1,14 @@
 //! Read-only, exclusively owned inventory for unfinished registry transitions.
 
 use std::fs::File;
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 
 use rustix::fs::{openat2, Dir, Mode, OFlags, ResolveFlags};
 
 use super::{
-    validate_directory, PlannedAttemptIntent, RegistryDirectory, SystemdAttemptRegistryError,
-    TransientServiceUnitName,
+    registry_io, validate_directory, PlannedAttemptIntent, RegistryDirectory,
+    SystemdAttemptRegistryError, TransientServiceUnitName,
 };
 
 type RegistryResult<T> = Result<T, SystemdAttemptRegistryError>;
@@ -163,8 +164,8 @@ fn inventory(directory: &RegistryDirectory) -> RegistryResult<Vec<RegistryRecove
     validate_directory(&directory.runtime, directory.owner, true)?;
     validate_directory(&directory.file, directory.owner, true)?;
     let mut entries = Vec::new();
-    for item in Dir::read_from(&directory.file).map_err(std::io::Error::from)? {
-        let item = item.map_err(std::io::Error::from)?;
+    for item in registry_io(|| Dir::read_from(&directory.file).map_err(std::io::Error::from))? {
+        let item = registry_io(|| item.map_err(std::io::Error::from))?;
         let name = item
             .file_name()
             .to_str()
@@ -179,7 +180,7 @@ fn inventory(directory: &RegistryDirectory) -> RegistryResult<Vec<RegistryRecove
 
 fn read_entry(directory: &RegistryDirectory, name: &str) -> RegistryResult<RegistryRecoveryEntry> {
     let (attempt_id, temporary) = parse_name(name)?;
-    let file = File::from(
+    let file = File::from(registry_io(|| {
         openat2(
             &directory.file,
             name,
@@ -187,9 +188,9 @@ fn read_entry(directory: &RegistryDirectory, name: &str) -> RegistryResult<Regis
             Mode::empty(),
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
         )
-        .map_err(std::io::Error::from)?,
-    );
-    let metadata = file.metadata()?;
+        .map_err(std::io::Error::from)
+    })?);
+    let metadata = registry_io(|| file.metadata())?;
     if !metadata.is_file()
         || metadata.uid() != directory.owner
         || metadata.nlink() != 1
@@ -198,16 +199,8 @@ fn read_entry(directory: &RegistryDirectory, name: &str) -> RegistryResult<Regis
     {
         return Err(SystemdAttemptRegistryError::UnsafeRegistry);
     }
-    let mut buffer = [0; MAX_RECORD_SIZE];
-    let length =
-        usize::try_from(metadata.len()).map_err(|_| SystemdAttemptRegistryError::InvalidIntent)?;
-    file.read_exact_at(&mut buffer[..length], 0)?;
-    let mut trailing = [0];
-    if file.read_at(&mut trailing, metadata.len())? != 0 {
-        return Err(SystemdAttemptRegistryError::ReconciliationRequired);
-    }
-    let bytes = &buffer[..length];
-    let intent = parse_content(bytes, attempt_id, temporary)?;
+    let bytes = read_record_content(&file, metadata.len())?;
+    let intent = parse_content(&bytes, attempt_id, temporary)?;
     Ok(RegistryRecoveryEntry {
         _file: file,
         observation: RegistryEntryObservation {
@@ -217,27 +210,35 @@ fn read_entry(directory: &RegistryDirectory, name: &str) -> RegistryResult<Regis
             intent,
             device: metadata.dev(),
             inode: metadata.ino(),
-            bytes: bytes.to_vec(),
+            bytes,
         },
     })
 }
 
+// Each inventory entry was independently opened at offset zero. Read at most
+// one byte beyond the format bound and compare with its metadata snapshot, so
+// growth or truncation between metadata and read cannot produce an observation.
+fn read_record_content(file: &File, expected_length: u64) -> RegistryResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    registry_io(|| {
+        file.take(MAX_RECORD_SIZE as u64 + 1)
+            .read_to_end(&mut bytes)
+    })?;
+    if bytes.len() as u64 != expected_length {
+        return Err(SystemdAttemptRegistryError::ReconciliationRequired);
+    }
+    Ok(bytes)
+}
+
 fn parse_name(name: &str) -> RegistryResult<([u8; 16], bool)> {
     let (component, temporary) = if let Some(rest) = name.strip_prefix(".planned-") {
-        let mut parts = rest.split('-');
-        let component = parts
-            .next()
+        let (component, suffix) = rest
+            .split_once('-')
             .ok_or(SystemdAttemptRegistryError::InvalidIntent)?;
-        let process = parts
-            .next()
+        let (process, sequence) = suffix
+            .split_once('-')
             .ok_or(SystemdAttemptRegistryError::InvalidIntent)?;
-        let sequence = parts
-            .next()
-            .ok_or(SystemdAttemptRegistryError::InvalidIntent)?;
-        if parts.next().is_some()
-            || !canonical_positive::<u32>(process)
-            || !canonical_positive::<u64>(sequence)
-        {
+        if !canonical_positive::<u32>(process) || !canonical_positive::<u64>(sequence) {
             return Err(SystemdAttemptRegistryError::InvalidIntent);
         }
         (component, true)
@@ -308,6 +309,7 @@ fn validate_record_prefix(bytes: &[u8], attempt_id: [u8; 16]) -> RegistryResult<
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use super::super::tests::with_io_fault;
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
 
@@ -342,6 +344,34 @@ mod tests {
         let path = root.join("registry").join(name);
         fs::write(&path, bytes)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    #[test]
+    fn record_read_rejects_growth_and_truncation_since_metadata_snapshot() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("record");
+        let original = planned()?;
+        fs::write(&path, &original)?;
+        let expected_length = fs::metadata(&path)?.len();
+        for contents in [original[..51].to_vec(), vec![0; MAX_RECORD_SIZE + 2]] {
+            fs::write(&path, contents)?;
+            let file = File::open(&path)?;
+            assert!(matches!(
+                read_record_content(&file, expected_length),
+                Err(SystemdAttemptRegistryError::ReconciliationRequired)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_record_decoder_independently_rejects_invalid_planned_identity() -> TestResult {
+        for range in [4..20, 20..52] {
+            let mut bytes = planned()?;
+            bytes[range].fill(0);
+            assert!(RecoveredAttemptIntent::decode(&bytes).is_err());
+        }
         Ok(())
     }
 
@@ -382,6 +412,15 @@ mod tests {
         );
         assert!(SystemdAttemptRecovery::open().is_err());
         drop(registry);
+        let (opened, operation_count) = with_io_fault(None, SystemdAttemptRecovery::open);
+        drop(opened?);
+        assert!(operation_count > 0);
+        for fail_at in 0..operation_count {
+            let (result, observed) = with_io_fault(Some(fail_at), SystemdAttemptRecovery::open);
+            assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
+            assert_eq!(observed, fail_at + 1);
+            assert_eq!(fs::read_dir("/run/pigloros/sandbox/registry")?.count(), 2);
+        }
         let recovery = SystemdAttemptRecovery::open()?;
         assert_eq!(recovery.entries().len(), 2);
         assert_eq!(recovery.entries()[0].attempt_id(), [1; 16]);
@@ -421,6 +460,34 @@ mod tests {
                 assert_eq!(entry.intent().is_some(), length == bytes.len());
                 recovery.verify_unchanged()?;
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_readback_io_boundary_failures_preserve_locked_inventory() -> TestResult {
+        let (directory, held) = fixture()?;
+        let before = planned()?;
+        write_record(directory.path(), KEY, &before)?;
+        let recovery = SystemdAttemptRecovery::from_directory(held)?;
+        let (result, count) = with_io_fault(None, || recovery.verify_unchanged());
+        result?;
+        assert!(count > 0);
+        for fail_at in 0..count {
+            let (result, observed) = with_io_fault(Some(fail_at), || recovery.verify_unchanged());
+            assert!(matches!(result, Err(SystemdAttemptRegistryError::Io(_))));
+            assert_eq!(observed, fail_at + 1);
+            assert_eq!(recovery.entries().len(), 1);
+            assert_eq!(recovery.entries()[0].component(), KEY);
+            assert_eq!(
+                fs::read(directory.path().join("registry").join(KEY))?,
+                before
+            );
+            let runtime = File::open(directory.path())?;
+            assert!(
+                RegistryDirectory::from_runtime_directory(&runtime, runtime.metadata()?.uid())
+                    .is_err()
+            );
         }
         Ok(())
     }
