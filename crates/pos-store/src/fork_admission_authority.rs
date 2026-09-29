@@ -247,88 +247,104 @@ pub(crate) fn verify_command(
     if verify_fork_admission_host_command_v1(host.host_verifying_key(), command).is_err() {
         return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
     }
-    let evidence_bytes = command.evidence_bytes();
-    let evidence = AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&evidence_bytes)
-        .ok()
-        .ok_or(pos_core::ForkAdmissionErrorV1::Unauthenticated)?;
-    let verified = verify_authenticated_principal_evidence_v1(policy, evidence)
-        .ok()
-        .ok_or(pos_core::ForkAdmissionErrorV1::Unauthenticated)?;
-    let evidence_digest = verified
-        .evidence()
-        .digest()
-        .ok()
-        .ok_or(pos_core::ForkAdmissionErrorV1::Unauthenticated)?;
-    let principal_digest = principal_digest_v1(&verified.evidence().record().principal)
-        .ok()
-        .ok_or(pos_core::ForkAdmissionErrorV1::Unauthenticated)?;
+    // FAC1 decoding already validated FAE1, and its digests only re-encode
+    // that record, so every evidence failure collapses into one fail-closed
+    // `Unauthenticated` result.
+    let (verified, evidence_digest, principal_digest) =
+        AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&command.evidence_bytes())
+            .ok()
+            .and_then(|evidence| verify_authenticated_principal_evidence_v1(policy, evidence).ok())
+            .and_then(|verified| {
+                let evidence_digest = verified.evidence().digest().ok();
+                let principal_digest =
+                    principal_digest_v1(&verified.evidence().record().principal).ok();
+                evidence_digest
+                    .zip(principal_digest)
+                    .map(|(evidence_digest, principal_digest)| {
+                        (verified, evidence_digest, principal_digest)
+                    })
+            })
+            .ok_or(pos_core::ForkAdmissionErrorV1::Unauthenticated)?;
     let issued_at = verified.evidence().record().issued_at;
     let expires_at = verified.evidence().record().expires_at;
     let facts = command.validated_command_facts();
+    let (ForkAdmissionCommandFactsV1::PrincipalOwner {
+        store_id,
+        session_identity,
+        evidence_digest: command_evidence_digest,
+        principal_digest: command_principal_digest,
+        ..
+    }
+    | ForkAdmissionCommandFactsV1::Fork {
+        store_id,
+        session_identity,
+        evidence_digest: command_evidence_digest,
+        principal_digest: command_principal_digest,
+        ..
+    }) = facts;
+    if !session.matches(host, *store_id, *session_identity) {
+        return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
+    }
+    // The host signs FAC1 only over bound evidence; the digest re-check is
+    // defense in depth against a host that signs unbound command facts.
+    (*command_evidence_digest == evidence_digest && *command_principal_digest == principal_digest)
+        .then(|| {
+            verified_command(
+                facts,
+                evidence_digest,
+                principal_digest,
+                issued_at,
+                expires_at,
+            )
+        })
+        .ok_or(pos_core::ForkAdmissionErrorV1::Unauthenticated)
+}
+
+fn verified_command(
+    facts: &ForkAdmissionCommandFactsV1,
+    evidence_digest: Hash,
+    principal_digest: Hash,
+    issued_at: u64,
+    expires_at: u64,
+) -> VerifiedForkAdmissionCommandV1 {
     let commitment = facts.commitment();
     match facts {
         ForkAdmissionCommandFactsV1::PrincipalOwner {
-            store_id,
-            session_identity,
             operation_id,
-            evidence_digest: command_evidence_digest,
-            principal_digest: command_principal_digest,
             owner,
-        } => {
-            if !session.matches(host, *store_id, *session_identity) {
-                return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
-            }
-            if *command_evidence_digest != evidence_digest
-                || *command_principal_digest != principal_digest
-            {
-                return Err(pos_core::ForkAdmissionErrorV1::Unauthenticated);
-            }
-            Ok(VerifiedForkAdmissionCommandV1::PrincipalOwner {
-                operation_id: *operation_id,
-                evidence_digest,
-                principal_digest,
-                owner: *owner,
-                commitment,
-                issued_at,
-                expires_at,
-            })
-        }
+            ..
+        } => VerifiedForkAdmissionCommandV1::PrincipalOwner {
+            operation_id: *operation_id,
+            evidence_digest,
+            principal_digest,
+            owner: *owner,
+            commitment,
+            issued_at,
+            expires_at,
+        },
         ForkAdmissionCommandFactsV1::Fork {
-            store_id,
-            session_identity,
             operation_id,
-            evidence_digest: command_evidence_digest,
-            principal_digest: command_principal_digest,
             parent_id,
             cut,
             descriptor_hash,
             composition_hash,
             attribution_required,
             child_name,
-        } => {
-            if !session.matches(host, *store_id, *session_identity) {
-                return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
-            }
-            if *command_evidence_digest != evidence_digest
-                || *command_principal_digest != principal_digest
-            {
-                return Err(pos_core::ForkAdmissionErrorV1::Unauthenticated);
-            }
-            Ok(VerifiedForkAdmissionCommandV1::Fork {
-                operation_id: *operation_id,
-                evidence_digest,
-                principal_digest,
-                parent_id: *parent_id,
-                cut: *cut,
-                descriptor_hash: *descriptor_hash,
-                composition_hash: *composition_hash,
-                attribution_required: *attribution_required,
-                child_name: child_name.clone(),
-                commitment,
-                issued_at,
-                expires_at,
-            })
-        }
+            ..
+        } => VerifiedForkAdmissionCommandV1::Fork {
+            operation_id: *operation_id,
+            evidence_digest,
+            principal_digest,
+            parent_id: *parent_id,
+            cut: *cut,
+            descriptor_hash: *descriptor_hash,
+            composition_hash: *composition_hash,
+            attribution_required: *attribution_required,
+            child_name: child_name.clone(),
+            commitment,
+            issued_at,
+            expires_at,
+        },
     }
 }
 

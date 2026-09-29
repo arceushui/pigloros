@@ -1630,31 +1630,35 @@ impl MemoryStore {
                 .then(|| ForkAdmissionOperationResultV1::PrincipalOwner(existing.clone()))
                 .ok_or(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
         }
-        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+        // Verified POC1 facts carry nonzero operation and Principal digests,
+        // so construction cannot fail; any failure still fails closed.
+        PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
             operation_id,
             principal_digest,
             owner,
             origin: ForkAuthorityOriginV1::Local,
         })
         .ok()
-        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-        let result_digest = binding.digest();
-        self.fork_principal_owner_bindings
-            .insert(principal_digest, binding.clone());
-        self.fork_principal_owner_binding_digests
-            .insert(result_digest, principal_digest);
-        self.fork_admission_operations.insert(
-            key,
-            ForkAdmissionOperationRowV1 {
-                kind: ForkAdmissionOperationKindV1::PrincipalOwner,
-                operation_id,
-                evidence_digest,
-                commitment,
-                result_digest,
-                child_id: None,
-            },
-        );
-        Ok(ForkAdmissionOperationResultV1::PrincipalOwner(binding))
+        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        .map(|binding| {
+            let result_digest = binding.digest();
+            self.fork_principal_owner_bindings
+                .insert(principal_digest, binding.clone());
+            self.fork_principal_owner_binding_digests
+                .insert(result_digest, principal_digest);
+            self.fork_admission_operations.insert(
+                key,
+                ForkAdmissionOperationRowV1 {
+                    kind: ForkAdmissionOperationKindV1::PrincipalOwner,
+                    operation_id,
+                    evidence_digest,
+                    commitment,
+                    result_digest,
+                    child_id: None,
+                },
+            );
+            ForkAdmissionOperationResultV1::PrincipalOwner(binding)
+        })
     }
 
     fn execute_fork_admission_fork_command(
@@ -1690,7 +1694,9 @@ impl MemoryStore {
         let chain_head = self
             .compute_chain_hash_at_unchecked(parent_id, Seq::from_u64(cut))
             .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)?;
-        let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+        // Verified FCC1 facts and the fresh child ID satisfy every FAR1
+        // invariant; any construction failure still fails closed.
+        ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
             operation_id,
             principal_owner_binding_digest: binding.digest(),
             creator: binding.input().owner,
@@ -1706,26 +1712,28 @@ impl MemoryStore {
             origin: ForkAttributionOriginV1::Local,
         })
         .ok()
-        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-        let receipt = ForkAdmissionReceiptV1 {
-            child_id: child.id(),
-            admission_digest: admission.digest(),
-        };
-        self.timelines
-            .insert(child.id(), TimelineState::new(child, chain_head));
-        self.fork_admissions.insert(receipt.child_id, admission);
-        self.fork_admission_operations.insert(
-            key,
-            ForkAdmissionOperationRowV1 {
-                kind: ForkAdmissionOperationKindV1::Fork,
-                operation_id,
-                evidence_digest,
-                commitment,
-                result_digest: receipt.admission_digest,
-                child_id: Some(receipt.child_id),
-            },
-        );
-        Ok(ForkAdmissionOperationResultV1::Fork(receipt))
+        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        .map(|admission| {
+            let receipt = ForkAdmissionReceiptV1 {
+                child_id: child.id(),
+                admission_digest: admission.digest(),
+            };
+            self.timelines
+                .insert(child.id(), TimelineState::new(child, chain_head));
+            self.fork_admissions.insert(receipt.child_id, admission);
+            self.fork_admission_operations.insert(
+                key,
+                ForkAdmissionOperationRowV1 {
+                    kind: ForkAdmissionOperationKindV1::Fork,
+                    operation_id,
+                    evidence_digest,
+                    commitment,
+                    result_digest: receipt.admission_digest,
+                    child_id: Some(receipt.child_id),
+                },
+            );
+            ForkAdmissionOperationResultV1::Fork(receipt)
+        })
     }
 
     fn exact_fork_admission_result(

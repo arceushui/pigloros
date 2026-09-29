@@ -676,3 +676,70 @@ fn host_command_propagates_enclosed_evidence_errors() -> Result<(), Box<dyn std:
     }
     Ok(())
 }
+
+fn small_fcc1() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    encode(&Value::Array(vec![
+        Value::Text("FCC1".to_owned()),
+        Value::Integer(1.into()),
+        bytes(1, 32),
+        bytes(2, 32),
+        bytes(3, 32),
+        bytes(4, 32),
+        bytes(5, 32),
+        bytes(6, 16),
+        Value::Integer(7.into()),
+        Value::Integer(7.into()),
+        bytes(9, 32),
+        bytes(10, 32),
+        Value::Integer(1.into()),
+        Value::Text("child".to_owned()),
+    ]))
+}
+
+#[test]
+fn command_codecs_reject_each_malformed_payload_field() -> Result<(), Box<dyn std::error::Error>> {
+    let out_of_bounds = Some(ForkAdmissionCommandCodecErrorV1::FieldOutOfBounds);
+    let poc1 = small_poc1()?;
+    assert!(PrincipalOwnerCommandV1::from_canonical_cbor(&poc1).is_ok());
+    for replacement in [Value::Null, Value::Text(String::new())] {
+        assert_eq!(
+            PrincipalOwnerCommandV1::from_canonical_cbor(&with_field(&poc1, 7, replacement)?).err(),
+            out_of_bounds
+        );
+    }
+
+    let fcc1 = small_fcc1()?;
+    assert!(ForkCreateCommandV1::from_canonical_cbor(&fcc1).is_ok());
+    let mut fork_fields = (2..=6)
+        .chain([10, 11])
+        .map(|index| (index, bytes(0, 32)))
+        .collect::<Vec<_>>();
+    fork_fields.extend([
+        (7, bytes(6, 15)),
+        (8, Value::Null),
+        (9, Value::Null),
+        (12, Value::Null),
+        (12, Value::Integer(2.into())),
+        (13, Value::Null),
+        (13, Value::Text(String::new())),
+    ]);
+    for (index, replacement) in fork_fields {
+        assert_eq!(
+            ForkCreateCommandV1::from_canonical_cbor(&with_field(&fcc1, index, replacement)?).err(),
+            out_of_bounds,
+            "FCC1 field {index}"
+        );
+    }
+
+    // Null keeps the exact-size FRC1 within bounds while failing the kind.
+    assert_eq!(
+        ForkAdmissionRecoveryCommandV1::from_canonical_cbor(&with_field(
+            &maximum_frc1()?,
+            4,
+            Value::Null
+        )?)
+        .err(),
+        out_of_bounds
+    );
+    Ok(())
+}

@@ -583,6 +583,11 @@ where
     let ForkAdmissionOperationResultV1::Fork(receipt) = result else {
         return Err("FCC1 did not return a FAR1 receipt".into());
     };
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &command)?,
+        ForkAdmissionOperationResultV1::Fork(receipt),
+        "an exact FCC1 retry resolves to the committed FAR1 receipt"
+    );
     let recovery = recovery_proof(store, &host, &session, 2, [24; 32])?;
     assert!(matches!(
         store.recover_fork_admission_command(&session, &recovery)?,
