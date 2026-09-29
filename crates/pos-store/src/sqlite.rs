@@ -6850,8 +6850,8 @@ fn read_fork_admission_authority_state(
     .optional()
     .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate)
     .and_then(|record| {
-        record.map_or(
-            Ok(ForkAdmissionAuthorityStateV1::default()),
+        record.map_or_else(
+            || Ok(ForkAdmissionAuthorityStateV1::default()),
             decode_fork_admission_authority_row,
         )
     })
