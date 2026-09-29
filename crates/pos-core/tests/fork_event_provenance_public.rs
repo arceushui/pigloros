@@ -1474,3 +1474,59 @@ fn classified_provenance_derivation_rejects_incomplete_inputs(
     );
     Ok(())
 }
+
+#[test]
+fn origin_and_intervention_decoders_reject_oversize_and_impossible_forms(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let origin = origin_record()?;
+    let intervention = intervention_record(&origin)?;
+    assert_oversized(
+        origin.to_canonical_cbor(),
+        EventOriginRecordV1::from_canonical_cbor,
+    );
+    assert_oversized(
+        intervention.to_canonical_cbor(),
+        ForkInterventionAdmissionV1::from_canonical_cbor,
+    );
+    let host_internal_intervention = mutate_record(&origin.to_canonical_cbor(), |fields| {
+        fields[5] = Value::Integer(0.into());
+        fields[6] = Value::Integer(1.into());
+    })?;
+    assert_eq!(
+        EventOriginRecordV1::from_canonical_cbor(&host_internal_intervention),
+        Err(ForkEventProvenanceErrorV1::ImpossibleClassification)
+    );
+    Ok(())
+}
+
+#[test]
+fn append_and_table_seams_reject_malformed_source_and_registrar(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_, table, _, request, _) = durable_append_records()?;
+    let host_source_text_tag = mutate_record(&request.to_canonical_cbor(), |fields| {
+        fields[4] = Value::Array(vec![Value::Text("host".to_owned())]);
+    })?;
+    assert_eq!(
+        ForkEventAppendRequestV1::from_canonical_cbor(&host_source_text_tag),
+        Err(ForkEventProvenanceErrorV1::InvalidEncoding)
+    );
+    let external_source_zero_schema = mutate_record(&request.to_canonical_cbor(), |fields| {
+        fields[4] = Value::Array(vec![
+            Value::Integer(1.into()),
+            Value::Text("adapter.v1".to_owned()),
+            Value::Text("gateway.action.v1".to_owned()),
+            Value::Bytes(vec![0; 32]),
+        ]);
+    })?;
+    assert_eq!(
+        ForkEventAppendRequestV1::from_canonical_cbor(&external_source_zero_schema),
+        Err(ForkEventProvenanceErrorV1::FieldOutOfBounds)
+    );
+    let mut empty_registrar = table.input().clone();
+    empty_registrar.registrar_identifier = String::new();
+    assert_eq!(
+        ForkClassifierTableV1::new(empty_registrar),
+        Err(ForkEventProvenanceErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}

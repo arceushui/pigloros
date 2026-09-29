@@ -1022,8 +1022,7 @@ impl ForkInterventionAdmissionV1 {
             classifier_revision_digest,
             fork_admission_digest,
         })?;
-        canonical(bytes_in, &record.to_canonical_cbor())?;
-        Ok(record)
+        canonical(bytes_in, &record.to_canonical_cbor()).map(|()| record)
     }
 }
 
@@ -1481,17 +1480,17 @@ impl<'a> Reader<'a> {
                 if self.uint()? != 1 {
                     return Err(ForkEventProvenanceErrorV1::InvalidEncoding);
                 }
+                // `text` already enforces the nonempty, registrar-bounded
+                // adapter identifier that `ForkAppendSourceIdentityV1` requires.
                 let adapter_identifier = self.text(MAX_FORK_EVENT_REGISTRAR_BYTES_V1)?;
-                let source = ForkEventSourceDescriptorV1::new(
+                ForkEventSourceDescriptorV1::new(
                     self.text(MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1)?,
                     self.hash()?,
-                )?;
-                let source = ForkAppendSourceIdentityV1::ExternalInput {
+                )
+                .map(|source| ForkAppendSourceIdentityV1::ExternalInput {
                     adapter_identifier,
                     source,
-                };
-                source.validate()?;
-                Ok(source)
+                })
             }
             _ => Err(ForkEventProvenanceErrorV1::InvalidEncoding),
         }

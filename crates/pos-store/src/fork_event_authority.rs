@@ -1039,6 +1039,178 @@ mod tests {
         Ok(())
     }
 
+    /// Admit one more local child Fork under the fixture's live session.
+    fn admit_fork<S>(
+        store: &mut S,
+        fixture: &LifecycleFixtureV1,
+        operation_id: [u8; 32],
+        parent_name: &str,
+    ) -> Result<ForkAdmissionReceiptV1, Box<dyn Error>>
+    where
+        S: EventStore + ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+    {
+        let host = ForkHostSigningKeyV1::from_seed([41; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([42; 32])?;
+        let policy = policy(&adapter)?;
+        let verified = evidence(&adapter, &policy)?;
+        let parent = store.create_timeline(parent_name)?;
+        let command = command(
+            store,
+            &host,
+            &verified,
+            &fixture.session,
+            operation_id,
+            "FCC1",
+            Some(parent.id()),
+        )?;
+        match store.execute_fork_admission_command(&fixture.session, &policy, &command)? {
+            ForkAdmissionOperationResultV1::Fork(fork) => Ok(fork),
+            ForkAdmissionOperationResultV1::PrincipalOwner(_) => {
+                Err("FCC1 did not return a Fork receipt".into())
+            }
+        }
+    }
+
+    /// One FCS1 is shared by every Fork that selects it; a different FCS1
+    /// under the same descriptor and registrar is a conflict.
+    fn assert_classifier_source_is_shared_across_forks<S>(
+        store: &mut S,
+    ) -> Result<(), Box<dyn Error>>
+    where
+        S: EventStore
+            + ForkAdmissionAuthorityBootstrapPortV1
+            + ForkAdmissionAuthorityPortV1
+            + ForkEventProvenanceAuthorityPortV1,
+    {
+        let fixture = create_lifecycle(store)?;
+        let shared = admit_fork(store, &fixture, [73; 32], "shared-source-parent")?;
+        let receipt = store.register_classifier(
+            &fixture.session,
+            &registrar_permit(fixture.store_id, fixture.source.clone()),
+            Hash::from_bytes([74; 32]),
+            shared.child_id,
+        )?;
+        assert_eq!(receipt.child_timeline_id, shared.child_id);
+        let conflicting = admit_fork(store, &fixture, [75; 32], "conflicting-source-parent")?;
+        let conflicting_source = ForkClassifierSourceV1::new(ForkClassifierSourceInputV1 {
+            room_revision_descriptor_hash: fixture.source.input().room_revision_descriptor_hash,
+            registrar_identifier: fixture.source.input().registrar_identifier.clone(),
+            routes: vec![ForkExternalInputRouteV1::new(
+                fixture.external.clone(),
+                false,
+            )],
+        })?;
+        assert_eq!(
+            store.register_classifier(
+                &fixture.session,
+                &registrar_permit(fixture.store_id, conflicting_source),
+                Hash::from_bytes([76; 32]),
+                conflicting.child_id,
+            ),
+            Err(ForkEventAuthorityErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    /// Invalid requests, unadmitted children, and stale sessions fail closed.
+    fn assert_port_request_rejections<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+    where
+        S: EventStore
+            + ForkAdmissionAuthorityBootstrapPortV1
+            + ForkAdmissionAuthorityPortV1
+            + ForkEventProvenanceAuthorityPortV1,
+    {
+        let fixture = create_lifecycle(store)?;
+        let permit_for = |source| {
+            append_permit(
+                fixture.store_id,
+                fixture.fork.child_id,
+                fixture.fork.admission_digest,
+                fixture.registration.classifier_revision_digest,
+                fixture.source.input().registrar_identifier.as_str(),
+                source,
+            )
+        };
+        let host_permit = permit_for(ForkAppendSourceIdentityV1::HostInternal);
+        assert_eq!(
+            store.append_classified(
+                &fixture.session,
+                &host_permit,
+                Hash::zero(),
+                draft(b"zero-operation"),
+            ),
+            Err(ForkEventAuthorityErrorV1::InvalidRequest)
+        );
+        assert_eq!(
+            store.register_classifier(
+                &fixture.session,
+                &registrar_permit(fixture.store_id, fixture.source.clone()),
+                Hash::from_bytes([70; 32]),
+                TimelineId::new(),
+            ),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        let host_draft = draft(b"host-request");
+        store.append_classified(
+            &fixture.session,
+            &host_permit,
+            Hash::from_bytes([71; 32]),
+            host_draft.clone(),
+        )?;
+        let invalid_source = permit_for(ForkAppendSourceIdentityV1::ExternalInput {
+            adapter_identifier: String::new(),
+            source: fixture.external.clone(),
+        });
+        assert_eq!(
+            store.recover_classified_append(
+                &fixture.session,
+                &invalid_source,
+                Hash::from_bytes([71; 32]),
+                &host_draft,
+            ),
+            Err(ForkEventAuthorityErrorV1::InvalidRequest)
+        );
+        assert_eq!(
+            store.read_fork_event_suffix(TimelineId::new(), 1),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        let host = ForkHostSigningKeyV1::from_seed([41; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([42; 32])?;
+        reopen_session(store, &host, &policy(&adapter)?)?;
+        assert_eq!(
+            store.append_classified(
+                &fixture.session,
+                &host_permit,
+                Hash::from_bytes([72; 32]),
+                draft(b"stale-session"),
+            ),
+            Err(ForkEventAuthorityErrorV1::Unauthenticated)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn memory_classifier_source_is_shared_across_forks() -> Result<(), Box<dyn Error>> {
+        assert_classifier_source_is_shared_across_forks(&mut MemoryStore::new())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_classifier_source_is_shared_across_forks() -> Result<(), Box<dyn Error>> {
+        assert_classifier_source_is_shared_across_forks(&mut SqliteStore::open_in_memory()?)
+    }
+
+    #[test]
+    fn memory_port_rejects_invalid_requests_and_stale_sessions() -> Result<(), Box<dyn Error>> {
+        assert_port_request_rejections(&mut MemoryStore::new())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_port_rejects_invalid_requests_and_stale_sessions() -> Result<(), Box<dyn Error>> {
+        assert_port_request_rejections(&mut SqliteStore::open_in_memory()?)
+    }
+
     #[test]
     fn memory_classified_append_port_preserves_provenance_and_authority(
     ) -> Result<(), Box<dyn Error>> {

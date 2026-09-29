@@ -1747,27 +1747,31 @@ impl MemoryStore {
     ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1>
     {
         let input = operation.input();
-        let origin = self
-            .fork_event_origins
-            .get(&event.id)
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
         let intervention = self.fork_intervention_admissions.get(&event.id);
-        let classification = ForkEventClassifierV1::from_table(table)
-            .classify_identity(&input.source)
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        let (expected_origin, expected_intervention) =
-            operation.expected_provenance(table, classification);
-        (event.id == input.event_id
-            && event.seq.as_u64() == input.logical_seq
-            && event.wall_time == input.wall_time
-            && event.payload_hash == input.payload_hash
-            && event.signature.is_none()
-            && *origin == expected_origin
-            && origin.digest() == input.event_origin_digest
-            && intervention == expected_intervention.as_ref()
-            && intervention.map(ForkInterventionAdmissionV1::digest)
-                == input.intervention_admission_digest)
-            .then(|| (origin.clone(), intervention.cloned()))
+        // A missing EOR1 and an unclassifiable FOP1 source are both corrupt
+        // authority, exactly like any field mismatch below.
+        self.fork_event_origins
+            .get(&event.id)
+            .zip(
+                ForkEventClassifierV1::from_table(table)
+                    .classify_identity(&input.source)
+                    .ok(),
+            )
+            .filter(|(origin, classification)| {
+                let (expected_origin, expected_intervention) =
+                    operation.expected_provenance(table, *classification);
+                event.id == input.event_id
+                    && event.seq.as_u64() == input.logical_seq
+                    && event.wall_time == input.wall_time
+                    && event.payload_hash == input.payload_hash
+                    && event.signature.is_none()
+                    && **origin == expected_origin
+                    && origin.digest() == input.event_origin_digest
+                    && intervention == expected_intervention.as_ref()
+                    && intervention.map(ForkInterventionAdmissionV1::digest)
+                        == input.intervention_admission_digest
+            })
+            .map(|(origin, _)| (origin.clone(), intervention.cloned()))
             .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
     }
 
@@ -1775,35 +1779,29 @@ impl MemoryStore {
         &self,
         child_timeline_id: TimelineId,
     ) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
-        let admission = self
-            .fork_admissions
+        // Every missing, foreign, or mismatched FAR1/FCC1 row is corrupt
+        // authority; the committed Fork receipt must name exactly this FAR1.
+        self.fork_admissions
             .get(&child_timeline_id)
-            .cloned()
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        if admission.input().child_timeline_id != child_timeline_id
-            || admission.input().origin != ForkAttributionOriginV1::Local
-        {
-            return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-        }
-        let row = self
-            .fork_admission_operations
-            .get(&(
-                ForkAdmissionOperationKindV1::Fork,
-                admission.input().operation_id,
-            ))
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        match self
-            .stored_fork_admission_result(row)
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-        {
-            ForkAdmissionOperationResultV1::Fork(receipt)
-                if receipt.child_id == child_timeline_id
-                    && receipt.admission_digest == admission.digest() =>
-            {
-                Ok(admission)
-            }
-            _ => Err(ForkEventAuthorityErrorV1::CorruptAuthority),
-        }
+            .filter(|admission| {
+                admission.input().child_timeline_id == child_timeline_id
+                    && admission.input().origin == ForkAttributionOriginV1::Local
+            })
+            .and_then(|admission| {
+                let expected = ForkAdmissionOperationResultV1::Fork(ForkAdmissionReceiptV1 {
+                    child_id: child_timeline_id,
+                    admission_digest: admission.digest(),
+                });
+                self.fork_admission_operations
+                    .get(&(
+                        ForkAdmissionOperationKindV1::Fork,
+                        admission.input().operation_id,
+                    ))
+                    .and_then(|row| self.stored_fork_admission_result(row).ok())
+                    .filter(|result| *result == expected)
+                    .map(|_| admission.clone())
+            })
+            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
     }
 }
 
@@ -1901,43 +1899,54 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
             if operation.input().request_digest != request.digest() {
                 return Err(ForkEventAuthorityErrorV1::Conflict);
             }
-            self.validate_classified_provenance(operation, event)?;
-            return Ok(ForkClassifiedAppendReceiptV1 {
-                event: event.clone(),
-                operation: operation.clone(),
-            });
+            return self
+                .validate_classified_provenance(operation, event)
+                .map(|()| ForkClassifiedAppendReceiptV1 {
+                    event: event.clone(),
+                    operation: operation.clone(),
+                });
         }
         let classification = ForkEventClassifierV1::from_table(&table)
             .classify_identity(source)
             .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
-        let prefix = self
-            .logical_prefix(child_timeline_id)
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        let hasher: &dyn Hasher = self.hasher.as_ref();
         // Every fallible step precedes the first mutation, matching SQLite's
         // all-or-nothing transaction.
-        let (local_event, chain_head) = Self::prepare_one_for_state(
-            self.state(child_timeline_id),
-            &draft,
-            self.hasher.as_ref(),
-        )
-        .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-        let event = Self::logical_event(prefix, local_event.clone())
-            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-        let provenance = ForkClassifiedProvenanceV1::derive(
-            &request,
-            &table,
-            classification,
-            ForkClassifiedEventV1 {
-                event_id: event.id,
-                logical_seq: event.seq.as_u64(),
-                wall_time: event.wall_time,
-                payload_hash: event.payload_hash,
-            },
-        )
-        .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)?;
-        if let Some(state) = self.timelines.get_mut(&child_timeline_id) {
-            Self::commit_prepared_to_state(state, local_event, chain_head);
-        }
+        let (event, provenance) = self
+            .timelines
+            .get_mut(&child_timeline_id)
+            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+            .and_then(|state| {
+                let prefix = state
+                    .timeline
+                    .meta
+                    .fork_point
+                    .map_or(0, |(_, fork)| fork.as_u64());
+                Self::prepare_one_for_state(state, &draft, hasher)
+                    .and_then(|(local_event, chain_head)| {
+                        Self::logical_event(prefix, local_event.clone())
+                            .map(|event| (local_event, chain_head, event))
+                    })
+                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+                    .and_then(|(local_event, chain_head, event)| {
+                        ForkClassifiedProvenanceV1::derive(
+                            &request,
+                            &table,
+                            classification,
+                            ForkClassifiedEventV1 {
+                                event_id: event.id,
+                                logical_seq: event.seq.as_u64(),
+                                wall_time: event.wall_time,
+                                payload_hash: event.payload_hash,
+                            },
+                        )
+                        .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
+                        .map(|provenance| {
+                            Self::commit_prepared_to_state(state, local_event, chain_head);
+                            (event, provenance)
+                        })
+                    })
+            })?;
         self.event_ids.insert(event.id);
         self.fork_event_origins.insert(event.id, provenance.origin);
         if let Some(intervention) = provenance.intervention {
@@ -1975,11 +1984,13 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
         if operation.input().request_digest != request.digest() {
             return Err(ForkEventAuthorityErrorV1::Conflict);
         }
-        self.validate_classified_provenance(operation, event)?;
-        Ok(Some(ForkClassifiedAppendReceiptV1 {
-            event: event.clone(),
-            operation: operation.clone(),
-        }))
+        self.validate_classified_provenance(operation, event)
+            .map(|()| {
+                Some(ForkClassifiedAppendReceiptV1 {
+                    event: event.clone(),
+                    operation: operation.clone(),
+                })
+            })
     }
 
     fn read_fork_event_suffix(
@@ -2040,8 +2051,10 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
         events
             .iter()
             .filter_map(|event| {
-                let logical_seq = prefix.checked_add(event.seq.as_u64())?;
-                (logical_seq >= from_logical_seq).then_some((event, logical_seq))
+                prefix
+                    .checked_add(event.seq.as_u64())
+                    .filter(|logical_seq| *logical_seq >= from_logical_seq)
+                    .map(|logical_seq| (event, logical_seq))
             })
             .map(|(event, logical_seq)| {
                 let (operation, stored_event) = operations

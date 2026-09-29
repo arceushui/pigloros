@@ -915,24 +915,26 @@ impl SqliteStore {
         )? {
             return Ok(receipt);
         }
-        let events: bool = self
-            .conn
+        self.conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM events WHERE timeline_id = ?1)",
                 params![child_id.to_string()],
-                |row| row.get(0),
+                |row| row.get::<_, bool>(0),
             )
-            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-        if events {
-            return Err(ForkEventAuthorityErrorV1::Conflict);
-        }
-        self.persist_fork_classifier_registration(
-            source,
-            child_id,
-            &table,
-            operation_id,
-            &registration,
-        )
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            .and_then(|events| {
+                if events {
+                    Err(ForkEventAuthorityErrorV1::Conflict)
+                } else {
+                    self.persist_fork_classifier_registration(
+                        source,
+                        child_id,
+                        &table,
+                        operation_id,
+                        &registration,
+                    )
+                }
+            })
     }
 
     fn existing_fork_classifier_registration(
@@ -943,28 +945,28 @@ impl SqliteStore {
         table: &ForkClassifierTableV1,
         registration: &ForkClassifierRegistrationV1,
     ) -> Result<Option<ForkClassifierRegistrationReceiptV1>, ForkEventAuthorityErrorV1> {
-        let Some(existing) = sqlite_fork_classifier_registration(&self.conn, operation_id)
-            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?
-        else {
-            return Ok(None);
-        };
-        if existing != *registration {
-            return Err(ForkEventAuthorityErrorV1::Conflict);
-        }
-        sqlite_validate_classified_authority_graph(
-            &self.conn,
-            self.hasher.as_ref(),
-            child_id,
-            admission.digest(),
-            table.digest(),
-        )
-        .map(|_| {
-            Some(ForkClassifierRegistrationReceiptV1 {
-                child_timeline_id: child_id,
-                classifier_revision_digest: table.digest(),
-                registration_digest: registration.digest(),
+        sqlite_fork_classifier_registration(&self.conn, operation_id)
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            .and_then(|existing| match existing {
+                None => Ok(None),
+                Some(existing) if existing != *registration => {
+                    Err(ForkEventAuthorityErrorV1::Conflict)
+                }
+                Some(_) => sqlite_validate_classified_authority_graph(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    child_id,
+                    admission.digest(),
+                    table.digest(),
+                )
+                .map(|_| {
+                    Some(ForkClassifierRegistrationReceiptV1 {
+                        child_timeline_id: child_id,
+                        classifier_revision_digest: table.digest(),
+                        registration_digest: registration.digest(),
+                    })
+                }),
             })
-        })
     }
 
     fn append_classified_in_transaction(
@@ -983,35 +985,43 @@ impl SqliteStore {
         let classification = ForkEventClassifierV1::from_table(&table)
             .classify_identity(source)
             .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
-        let prefix = read_origin_prefix(&self.conn, child_timeline_id)
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        let local_event = Self::append_one_in_transaction(
-            &self.conn,
-            self.hasher.as_ref(),
-            child_timeline_id,
-            draft,
-        )
-        .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-        let local_seq = local_event.seq;
-        let event = Self::logical_event(prefix, local_event)
-            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-        let provenance = ForkClassifiedProvenanceV1::derive(
-            &request,
-            &table,
-            classification,
-            ForkClassifiedEventV1 {
-                event_id: event.id,
-                logical_seq: event.seq.as_u64(),
-                wall_time: event.wall_time,
-                payload_hash: event.payload_hash,
-            },
-        )
-        .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)?;
-        persist_classified_append(&self.conn, local_seq, &provenance)?;
-        Ok(ForkClassifiedAppendReceiptV1 {
-            event,
-            operation: provenance.operation,
-        })
+        read_origin_prefix(&self.conn, child_timeline_id)
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+            .and_then(|prefix| {
+                Self::append_one_in_transaction(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    child_timeline_id,
+                    draft,
+                )
+                .and_then(|local_event| {
+                    let local_seq = local_event.seq;
+                    Self::logical_event(prefix, local_event).map(|event| (local_seq, event))
+                })
+                .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            })
+            .and_then(|(local_seq, event)| {
+                ForkClassifiedProvenanceV1::derive(
+                    &request,
+                    &table,
+                    classification,
+                    ForkClassifiedEventV1 {
+                        event_id: event.id,
+                        logical_seq: event.seq.as_u64(),
+                        wall_time: event.wall_time,
+                        payload_hash: event.payload_hash,
+                    },
+                )
+                .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
+                .and_then(|provenance| {
+                    persist_classified_append(&self.conn, local_seq, &provenance).map(|()| {
+                        ForkClassifiedAppendReceiptV1 {
+                            event,
+                            operation: provenance.operation,
+                        }
+                    })
+                })
+            })
     }
 
     fn existing_classified_append(
@@ -1019,17 +1029,23 @@ impl SqliteStore {
         operation_id: Hash,
         request_digest: Hash,
     ) -> Result<Option<ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1> {
-        let Some(operation) = sqlite_fork_append_operation(&self.conn, operation_id)
-            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?
-        else {
-            return Ok(None);
-        };
-        if operation.input().request_digest != request_digest {
-            return Err(ForkEventAuthorityErrorV1::Conflict);
-        }
-        let event = sqlite_classified_event(&self.conn, &operation)?;
-        sqlite_validate_classified_provenance(&self.conn, self.hasher.as_ref(), &operation)?;
-        Ok(Some(ForkClassifiedAppendReceiptV1 { event, operation }))
+        sqlite_fork_append_operation(&self.conn, operation_id)
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            .and_then(|operation| {
+                operation
+                    .map(|operation| {
+                        if operation.input().request_digest != request_digest {
+                            return Err(ForkEventAuthorityErrorV1::Conflict);
+                        }
+                        sqlite_validated_classified_event(
+                            &self.conn,
+                            self.hasher.as_ref(),
+                            &operation,
+                        )
+                        .map(|event| ForkClassifiedAppendReceiptV1 { event, operation })
+                    })
+                    .transpose()
+            })
     }
 
     /// Read one child suffix inside the caller's snapshot transaction.
@@ -1040,63 +1056,15 @@ impl SqliteStore {
     ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
         let prefix = read_origin_prefix(&self.conn, child_timeline_id)
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        let orphan_operation: bool = self
-            .conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM fork_append_operations
-                 LEFT JOIN events ON events.timeline_id = fork_append_operations.child_id
-                    AND events.event_id = fork_append_operations.event_id
-                 WHERE fork_append_operations.child_id = ?1 AND events.event_id IS NULL)",
-                params![child_timeline_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        if orphan_operation || sqlite_has_orphaned_fork_provenance(&self.conn, child_timeline_id)? {
-            return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-        }
+        let rows = sqlite_fork_suffix_rows(&self.conn, child_timeline_id)?;
         // The immutable authority graph is validated once; its error is
         // surfaced only when the child actually has classified Events.
         let graph =
             sqlite_classified_authority_graph(&self.conn, self.hasher.as_ref(), child_timeline_id);
-        let mut statement = self
-            .conn
-            .prepare(
-                "SELECT events.event_id, events.seq, fork_append_operations.fop1_cbor
-                 FROM events LEFT JOIN fork_append_operations
-                   ON fork_append_operations.child_id = events.timeline_id
-                   AND fork_append_operations.event_id = events.event_id
-                 WHERE events.timeline_id = ?1 ORDER BY events.seq",
-            )
-            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-        let mut rows = statement
-            .query(params![child_timeline_id.to_string()])
-            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
         let mut result = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?
-        {
-            let event_id = row
-                .get::<_, String>(0)
-                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-                .parse::<ulid::Ulid>()
-                .map(EventId::from_ulid)
-                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-            let local_seq = row
-                .get::<_, i64>(1)
-                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-            let logical_seq = prefix
-                .checked_add(
-                    u64::try_from(local_seq)
-                        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?,
-                )
+        for row in rows {
+            let (event_id, logical_seq, operation) = sqlite_decode_fork_suffix_row(prefix, row)
                 .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-            let operation = ForkAppendOperationV1::from_canonical_cbor(
-                &row.get::<_, Option<Vec<u8>>>(2)
-                    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-                    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?,
-            )
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
             let (admission, table) = graph.as_ref().map_err(|error| *error)?;
             if operation.input().child_timeline_id != child_timeline_id
                 || operation.input().fork_admission_digest != admission.digest()
@@ -1124,59 +1092,60 @@ impl SqliteStore {
         operation_id: Hash,
         registration: &ForkClassifierRegistrationV1,
     ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
-        match sqlite_fork_classifier_source(
+        sqlite_fork_classifier_source(
             &self.conn,
             source.input().room_revision_descriptor_hash,
             &source.input().registrar_identifier,
         )
-        .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?
-        {
-            Some(existing) if existing != *source => {
-                return Err(ForkEventAuthorityErrorV1::Conflict)
-            }
-            Some(_) => {}
-            None => {
-                self.conn
-                    .execute(
-                        "INSERT INTO fork_classifier_sources
-                         (descriptor_hash, registrar_identifier, fcs1_cbor)
+        .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+        .and_then(|existing| match existing {
+            Some(existing) if existing != *source => Err(ForkEventAuthorityErrorV1::Conflict),
+            Some(_) => Ok(()),
+            None => self
+                .conn
+                .execute(
+                    "INSERT INTO fork_classifier_sources
+                     (descriptor_hash, registrar_identifier, fcs1_cbor)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        source
+                            .input()
+                            .room_revision_descriptor_hash
+                            .as_bytes()
+                            .as_slice(),
+                        source.input().registrar_identifier,
+                        source.to_canonical_cbor()
+                    ],
+                )
+                .map(|_| ())
+                .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate),
+        })
+        .and_then(|()| {
+            self.conn
+                .execute(
+                    "INSERT INTO fork_classifier_tables (child_id, fct1_digest, fct1_cbor)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        child_id.to_string(),
+                        table.digest().as_bytes().as_slice(),
+                        table.to_canonical_cbor()
+                    ],
+                )
+                .and_then(|_| {
+                    self.conn.execute(
+                        "INSERT INTO fork_classifier_registrations
+                         (operation_id, child_id, fcr1_cbor)
                          VALUES (?1, ?2, ?3)",
                         params![
-                            source
-                                .input()
-                                .room_revision_descriptor_hash
-                                .as_bytes()
-                                .as_slice(),
-                            source.input().registrar_identifier,
-                            source.to_canonical_cbor()
+                            operation_id.as_bytes().as_slice(),
+                            child_id.to_string(),
+                            registration.to_canonical_cbor()
                         ],
                     )
-                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-            }
-        }
-        self.conn
-            .execute(
-                "INSERT INTO fork_classifier_tables (child_id, fct1_digest, fct1_cbor)
-                 VALUES (?1, ?2, ?3)",
-                params![
-                    child_id.to_string(),
-                    table.digest().as_bytes().as_slice(),
-                    table.to_canonical_cbor()
-                ],
-            )
-            .map_err(|error| fork_event_insert_error(&error))?;
-        self.conn
-            .execute(
-                "INSERT INTO fork_classifier_registrations (operation_id, child_id, fcr1_cbor)
-                 VALUES (?1, ?2, ?3)",
-                params![
-                    operation_id.as_bytes().as_slice(),
-                    child_id.to_string(),
-                    registration.to_canonical_cbor()
-                ],
-            )
-            .map_err(|error| fork_event_insert_error(&error))?;
-        Ok(ForkClassifierRegistrationReceiptV1 {
+                })
+                .map_err(|error| fork_event_insert_error(&error))
+        })
+        .map(|_| ForkClassifierRegistrationReceiptV1 {
             child_timeline_id: child_id,
             classifier_revision_digest: table.digest(),
             registration_digest: registration.digest(),
@@ -5803,20 +5772,22 @@ impl SqliteStore {
         &self,
         timeline: TimelineId,
     ) -> Result<(), CoreError> {
-        let admitted: bool = self
-            .conn
+        self.conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM fork_admissions WHERE child_id = ?1)",
                 params![timeline.to_string()],
-                |row| row.get(0),
+                |row| row.get::<_, bool>(0),
             )
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        if admitted {
-            return Err(CoreError::Storage(
-                "admitted Fork Events require classified append authority".to_owned(),
-            ));
-        }
-        Ok(())
+            .map_err(Self::into_storage_error)
+            .and_then(|admitted| {
+                if admitted {
+                    Err(CoreError::Storage(
+                        "admitted Fork Events require classified append authority".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
     }
 }
 
@@ -7775,12 +7746,16 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
         if permit.store_id() != session.store_id() {
             return Err(ForkEventAuthorityErrorV1::Unauthenticated);
         }
-        self.require_live_fork_event_session(session)?;
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-        let result = self.append_classified_in_transaction(permit, operation_id, draft);
-        finish_fork_event_transaction(&self.conn, result)
+        self.require_live_fork_event_session(session)
+            .and_then(|()| {
+                self.conn
+                    .execute_batch(begin_immediate_sql())
+                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            })
+            .and_then(|()| {
+                let result = self.append_classified_in_transaction(permit, operation_id, draft);
+                finish_fork_event_transaction(&self.conn, result)
+            })
     }
 
     fn recover_classified_append(
@@ -7806,21 +7781,24 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
         if operation.input().request_digest != request.digest() {
             return Err(ForkEventAuthorityErrorV1::Conflict);
         }
-        let event = sqlite_classified_event(&self.conn, &operation)?;
-        sqlite_validate_classified_provenance(&self.conn, self.hasher.as_ref(), &operation)?;
-        if event.entity != draft.entity
-            || event.event_type != draft.event_type
-            || event.payload != draft.payload
-            || event.causation_id != draft.causation_id
-            || event.correlation_id != draft.correlation_id
-            || event.schema_version != draft.schema_version
-            || event.signature.is_some()
-            || event.payload_hash != operation.input().payload_hash
-            || event.wall_time != operation.input().wall_time
-        {
-            return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-        }
-        Ok(Some(ForkClassifiedAppendReceiptV1 { event, operation }))
+        sqlite_validated_classified_event(&self.conn, self.hasher.as_ref(), &operation).and_then(
+            |event| {
+                if event.entity != draft.entity
+                    || event.event_type != draft.event_type
+                    || event.payload != draft.payload
+                    || event.causation_id != draft.causation_id
+                    || event.correlation_id != draft.correlation_id
+                    || event.schema_version != draft.schema_version
+                    || event.signature.is_some()
+                    || event.payload_hash != operation.input().payload_hash
+                    || event.wall_time != operation.input().wall_time
+                {
+                    Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+                } else {
+                    Ok(Some(ForkClassifiedAppendReceiptV1 { event, operation }))
+                }
+            },
+        )
     }
 
     fn read_fork_event_suffix(
@@ -8222,6 +8200,82 @@ pub(crate) fn sqlite_intervention_admission(
     })
 }
 
+/// One child Event row joined to its optional committed `FOP1` bytes.
+type SqliteForkSuffixRowV1 = (String, i64, Option<Vec<u8>>);
+
+/// Read every child Event row with its optional `FOP1` after rejecting any
+/// orphaned `FOP1`, `EOR1`, or `FIA1`.
+///
+/// Every query failure inside the snapshot is corrupt authority, as is any
+/// row whose columns cannot be read.
+fn sqlite_fork_suffix_rows(
+    conn: &Connection,
+    child_timeline_id: TimelineId,
+) -> Result<Vec<SqliteForkSuffixRowV1>, ForkEventAuthorityErrorV1> {
+    let child = child_timeline_id.to_string();
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM fork_append_operations
+         LEFT JOIN events ON events.timeline_id = fork_append_operations.child_id
+            AND events.event_id = fork_append_operations.event_id
+         WHERE fork_append_operations.child_id = ?1 AND events.event_id IS NULL)",
+        params![child],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+    .and_then(|orphan_operation| {
+        sqlite_has_orphaned_fork_provenance(conn, child_timeline_id)
+            .map(|orphan_provenance| orphan_operation || orphan_provenance)
+    })
+    .and_then(|orphaned| {
+        if orphaned {
+            return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
+        }
+        conn.prepare(
+            "SELECT events.event_id, events.seq, fork_append_operations.fop1_cbor
+             FROM events LEFT JOIN fork_append_operations
+               ON fork_append_operations.child_id = events.timeline_id
+               AND fork_append_operations.event_id = events.event_id
+             WHERE events.timeline_id = ?1 ORDER BY events.seq",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![child], |row| {
+                    row.get::<_, String>(0).and_then(|event_id| {
+                        row.get::<_, i64>(1).and_then(|local_seq| {
+                            row.get::<_, Option<Vec<u8>>>(2)
+                                .map(|fop1| (event_id, local_seq, fop1))
+                        })
+                    })
+                })
+                .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
+        })
+        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+    })
+}
+
+/// Decode one joined suffix row into its Event ID, logical sequence, and `FOP1`.
+///
+/// A malformed Event ID, an out-of-range sequence, or an absent or
+/// noncanonical `FOP1` yields `None`, which the caller reports as corrupt.
+fn sqlite_decode_fork_suffix_row(
+    prefix: u64,
+    row: SqliteForkSuffixRowV1,
+) -> Option<(EventId, u64, ForkAppendOperationV1)> {
+    let (event_id, local_seq, fop1) = row;
+    event_id
+        .parse::<ulid::Ulid>()
+        .ok()
+        .zip(
+            u64::try_from(local_seq)
+                .ok()
+                .and_then(|local_seq| prefix.checked_add(local_seq)),
+        )
+        .zip(fop1.and_then(|bytes| ForkAppendOperationV1::from_canonical_cbor(&bytes).ok()))
+        .map(|((event_id, logical_seq), operation)| {
+            (EventId::from_ulid(event_id), logical_seq, operation)
+        })
+}
+
 /// Detect EOR1/FIA1 rows claiming this child whose Event is absent from it.
 ///
 /// The child is read from each record's fixed canonical offset, so rows that
@@ -8277,24 +8331,23 @@ fn sqlite_local_fork_admission(
             .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
     })
     .and_then(|admission| {
-        let row = sqlite_fork_admission_operation(
+        // A missing or unreadable FCC1 row and a receipt naming another FAR1
+        // are all corrupt authority.
+        let expected = ForkAdmissionOperationResultV1::Fork(ForkAdmissionReceiptV1 {
+            child_id: child_timeline_id,
+            admission_digest: admission.digest(),
+        });
+        sqlite_fork_admission_operation(
             conn,
             ForkAdmissionOperationKindV1::Fork,
             admission.input().operation_id,
         )
-        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        match sqlite_fork_admission_result(conn, hasher, &row)
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-        {
-            ForkAdmissionOperationResultV1::Fork(receipt)
-                if receipt.child_id == child_timeline_id
-                    && receipt.admission_digest == admission.digest() =>
-            {
-                Ok(admission)
-            }
-            _ => Err(ForkEventAuthorityErrorV1::CorruptAuthority),
-        }
+        .ok()
+        .flatten()
+        .and_then(|row| sqlite_fork_admission_result(conn, hasher, &row).ok())
+        .filter(|result| *result == expected)
+        .map(|_| admission)
+        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
     })
 }
 
@@ -8303,37 +8356,47 @@ fn sqlite_classified_event(
     operation: &ForkAppendOperationV1,
 ) -> Result<Event, ForkEventAuthorityErrorV1> {
     let child_timeline_id = operation.input().child_timeline_id;
-    let prefix = read_origin_prefix(conn, child_timeline_id)
-        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let local_seq = operation
-        .input()
-        .logical_seq
-        .checked_sub(prefix)
-        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let event = SqliteStore::read_own_events_limited_on(
-        conn,
-        child_timeline_id,
-        Seq::from_u64(local_seq),
-        Some(Seq::from_u64(local_seq)),
-        Some(1),
-        None,
-        u64::MAX,
-    )
-    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-    .pop()
-    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
-    .and_then(|event| {
-        SqliteStore::logical_event(prefix, event)
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
-    })?;
-    (event.id == operation.input().event_id
-        && event.seq.as_u64() == operation.input().logical_seq
-        && event.origin.is_some_and(|origin| {
-            origin.origin_timeline_id == child_timeline_id
-                && origin.origin_logical_seq.as_u64() == operation.input().logical_seq
-        }))
-    .then_some(event)
-    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+    let logical_seq = operation.input().logical_seq;
+    // Any unreadable prefix or Event row, and any Event not exactly bound to
+    // this FOP1, is corrupt authority.
+    read_origin_prefix(conn, child_timeline_id)
+        .ok()
+        .and_then(|prefix| {
+            logical_seq.checked_sub(prefix).and_then(|local_seq| {
+                SqliteStore::read_own_events_limited_on(
+                    conn,
+                    child_timeline_id,
+                    Seq::from_u64(local_seq),
+                    Some(Seq::from_u64(local_seq)),
+                    Some(1),
+                    None,
+                    u64::MAX,
+                )
+                .ok()
+                .and_then(|mut events| events.pop())
+                .and_then(|event| SqliteStore::logical_event(prefix, event).ok())
+            })
+        })
+        .filter(|event| {
+            event.id == operation.input().event_id
+                && event.seq.as_u64() == logical_seq
+                && event.origin.is_some_and(|origin| {
+                    origin.origin_timeline_id == child_timeline_id
+                        && origin.origin_logical_seq.as_u64() == logical_seq
+                })
+        })
+        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+}
+
+/// Read the committed Event for one FOP1 and revalidate its full provenance.
+fn sqlite_validated_classified_event(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    operation: &ForkAppendOperationV1,
+) -> Result<Event, ForkEventAuthorityErrorV1> {
+    sqlite_classified_event(conn, operation).and_then(|event| {
+        sqlite_validate_classified_provenance(conn, hasher, operation).map(|()| event)
+    })
 }
 
 fn sqlite_validate_classified_permit(
@@ -8364,29 +8427,35 @@ fn persist_classified_append(
          VALUES (?1, ?2)",
         params![event_id, provenance.origin.to_canonical_cbor()],
     )
-    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-    if let Some(intervention) = &provenance.intervention {
+    .and_then(|_| {
+        provenance
+            .intervention
+            .as_ref()
+            .map_or(Ok(0), |intervention| {
+                conn.execute(
+                    "INSERT INTO fork_intervention_admissions (event_id, fia1_cbor)
+                     VALUES (?1, ?2)",
+                    params![event_id, intervention.to_canonical_cbor()],
+                )
+            })
+    })
+    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+    .and_then(|_| {
         conn.execute(
-            "INSERT INTO fork_intervention_admissions (event_id, fia1_cbor)
-             VALUES (?1, ?2)",
-            params![event_id, intervention.to_canonical_cbor()],
+            "INSERT INTO fork_append_operations
+             (operation_id, child_id, local_seq, event_id, fop1_cbor)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                operation.operation_id.as_bytes().as_slice(),
+                operation.child_timeline_id.to_string(),
+                seq_as_i64(local_seq),
+                event_id,
+                provenance.operation.to_canonical_cbor(),
+            ],
         )
-        .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
-    }
-    conn.execute(
-        "INSERT INTO fork_append_operations
-         (operation_id, child_id, local_seq, event_id, fop1_cbor)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            operation.operation_id.as_bytes().as_slice(),
-            operation.child_timeline_id.to_string(),
-            seq_as_i64(local_seq),
-            event_id,
-            provenance.operation.to_canonical_cbor(),
-        ],
-    )
-    .map(|_| ())
-    .map_err(|error| fork_event_insert_error(&error))
+        .map(|_| ())
+        .map_err(|error| fork_event_insert_error(&error))
+    })
 }
 
 /// Map an INSERT failure: only a `SQLite` constraint rejection is a `Conflict`.
@@ -8422,26 +8491,36 @@ fn sqlite_validate_classified_records(
     table: &ForkClassifierTableV1,
 ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1> {
     let input = operation.input();
-    let event = sqlite_classified_event(conn, operation)?;
-    let origin = sqlite_event_origin(conn, input.event_id)
-        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let intervention = sqlite_intervention_admission(conn, input.event_id)
-        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let classification = ForkEventClassifierV1::from_table(table)
-        .classify_identity(&input.source)
-        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let (expected_origin, expected_intervention) =
-        operation.expected_provenance(table, classification);
-    (event.payload_hash == input.payload_hash
-        && origin == expected_origin
-        && origin.digest() == input.event_origin_digest
-        && intervention == expected_intervention
-        && intervention
-            .as_ref()
-            .map(ForkInterventionAdmissionV1::digest)
-            == input.intervention_admission_digest)
-        .then_some((origin, intervention))
-        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+    sqlite_classified_event(conn, operation)
+        .and_then(|event| {
+            sqlite_event_origin(conn, input.event_id)
+                .and_then(|origin| {
+                    sqlite_intervention_admission(conn, input.event_id)
+                        .map(|intervention| (event, origin, intervention))
+                })
+                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+        })
+        .and_then(|(event, origin, intervention)| {
+            // An unclassifiable FOP1 source is corrupt authority, exactly like
+            // any record that differs from its expected provenance.
+            ForkEventClassifierV1::from_table(table)
+                .classify_identity(&input.source)
+                .ok()
+                .filter(|classification| {
+                    let (expected_origin, expected_intervention) =
+                        operation.expected_provenance(table, *classification);
+                    event.payload_hash == input.payload_hash
+                        && origin == expected_origin
+                        && origin.digest() == input.event_origin_digest
+                        && intervention == expected_intervention
+                        && intervention
+                            .as_ref()
+                            .map(ForkInterventionAdmissionV1::digest)
+                            == input.intervention_admission_digest
+                })
+                .map(|_| (origin, intervention))
+                .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+        })
 }
 
 /// Rebuild the complete immutable ADR-099 authority graph for one child.
@@ -8464,7 +8543,8 @@ fn sqlite_classified_authority_graph(
             |row| row.get::<_, Vec<u8>>(0),
         )
         .optional()
-        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
+        .ok()
+        .flatten()
         .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
     let registration = ForkClassifierRegistrationV1::from_canonical_cbor(&registration_bytes)
         .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
@@ -9724,6 +9804,35 @@ mod tests {
                 .conn
                 .query_row("SELECT COUNT(*) FROM fork_classifier_tables", [], |row| row
                     .get::<_, i64>(0),)?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classified_registration_maps_table_constraint_failure_to_conflict(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, session, fork, source) = classified_registration_fixture()?;
+        store.conn.execute(
+            "INSERT INTO fork_classifier_tables (child_id, fct1_digest, fct1_cbor)
+             VALUES (?1, ?2, ?3)",
+            params![fork.child_id.to_string(), vec![85_u8; 32], vec![1_u8]],
+        )?;
+        assert_eq!(
+            store.register_fork_classifier_in_transaction(
+                &session,
+                Hash::from_bytes([86; 32]),
+                fork.child_id,
+                &source,
+            ),
+            Err(ForkEventAuthorityErrorV1::Conflict)
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM fork_classifier_sources", [], |row| {
+                    row.get::<_, i64>(0)
+                },)?,
             0
         );
         Ok(())
