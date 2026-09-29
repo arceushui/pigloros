@@ -63,6 +63,13 @@ fn mutate(
     Ok(result)
 }
 
+fn domain_digest(domain: &str, content: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(content);
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
 fn fields(value: &mut Value) -> std::io::Result<&mut Vec<Value>> {
     value
         .as_array_mut()
@@ -81,8 +88,17 @@ fn public_codecs_round_trip_commitments_and_registry_lookups(
     assert_eq!(policy.adapter("local"), Some(&adapter()));
     assert_eq!(policy.adapter("other"), None);
     assert_eq!(policy.adapters(), [adapter()]);
-    assert_ne!(policy.digest()?, Hash::zero());
-    assert_ne!(principal_digest_v1(&principal(1)?)?, Hash::zero());
+    assert_eq!(
+        policy.digest()?,
+        domain_digest("pigloros/fork-admission-auth-policy/v1", &policy_bytes)
+    );
+    assert_eq!(
+        principal_digest_v1(&principal(1)?)?,
+        domain_digest(
+            "pigloros/principal-ref/v1",
+            principal(1)?.encode()?.as_slice()
+        )
+    );
 
     let registry = registry()?;
     let registry_bytes = registry.to_canonical_cbor()?;
@@ -103,7 +119,10 @@ fn public_codecs_round_trip_commitments_and_registry_lookups(
     assert_eq!(registry.adapter_id(), "local");
     assert_eq!(registry.assurance(), 2);
     assert_eq!(registry.bindings().len(), 1);
-    assert_ne!(registry.digest()?, Hash::zero());
+    assert_eq!(
+        registry.digest()?,
+        domain_digest("pigloros/local-account-auth-registry/v1", &registry_bytes)
+    );
 
     let record = record()?;
     let record_bytes = record.to_canonical_cbor()?;
@@ -119,7 +138,13 @@ fn public_codecs_round_trip_commitments_and_registry_lookups(
     );
     assert_eq!(evidence.record(), &record);
     assert_eq!(evidence.signature(), &[9; 64]);
-    assert_ne!(evidence.digest()?, Hash::zero());
+    assert_eq!(
+        evidence.digest()?,
+        domain_digest(
+            "pigloros/authenticated-principal-evidence/v1",
+            &evidence_bytes
+        )
+    );
     Ok(())
 }
 
@@ -323,6 +348,15 @@ fn public_decoders_reject_reachable_nested_validation_errors(
     assert_eq!(
         LocalAccountRegistryV1::from_canonical_cbor(&invalid_owner, 1000),
         Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+    let non_text_owner = mutate(&lar, |value| {
+        let rows = fields(&mut fields(value)?[4])?;
+        fields(&mut rows[0])?[2] = Value::Integer(0_u8.into());
+        Ok(())
+    })?;
+    assert_eq!(
+        LocalAccountRegistryV1::from_canonical_cbor(&non_text_owner, 1000),
+        Err(ForkAuthenticationCodecErrorV1::InvalidEncoding)
     );
 
     let apr = record()?.to_canonical_cbor()?;
@@ -673,6 +707,29 @@ fn public_constructors_and_decoders_reject_post_parse_policy_invariants(
     assert_eq!(
         ForkAuthenticationPolicyV1::from_canonical_cbor(&duplicate_adapter),
         Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_registry_round_trips_every_valid_owner_id() -> Result<(), Box<dyn std::error::Error>> {
+    let owner = OwnerIdV1::new("owner\0with-nul")?;
+    let registry = LocalAccountRegistryV1::new(
+        "local".to_owned(),
+        2,
+        vec![LocalAccountBindingV1 {
+            uid: 1001,
+            principal: principal(1)?,
+            owner,
+        }],
+        1000,
+    )?;
+    let decoded =
+        LocalAccountRegistryV1::from_canonical_cbor(&registry.to_canonical_cbor()?, 1000)?;
+    assert_eq!(decoded, registry);
+    assert_eq!(
+        decoded.lookup_uid(1001).map(|binding| binding.owner),
+        Some(owner)
     );
     Ok(())
 }
