@@ -8593,8 +8593,9 @@ mod tests {
                         child_id: None,
                     },
                 )
+                .map(|_| ())
             } else {
-                sqlite_principal_owner_binding(&conn, principal_digest)
+                sqlite_principal_owner_binding(&conn, principal_digest).map(|_| ())
             };
             assert_eq!(
                 observed,
