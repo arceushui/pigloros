@@ -7,8 +7,9 @@ use pos_core::{
     ArtifactTransitionRuleV1, CanonicalBytes, CoreError, EntityId, ErasureArtifactClassV1,
     ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft,
     EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
-    KeyRegistryStateV1, KeyRoleV1, Kind, RegisteredArtifactV1, Seq, SeqRange, Signature,
-    TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeV1, TimelineEventVerificationV1,
+    KeyRegistryStateV1, KeyRoleV1, Kind, PreparedSubjectAppendAuthorizationV1,
+    RegisteredArtifactV1, Seq, SeqRange, Signature, TimelineEventEnvelopeErrorV1,
+    TimelineEventEnvelopeV1, TimelineEventVerificationV1,
 };
 use pos_crypto::{
     key_roles::{sign_timeline_event_for_registered_role, SigningKeyMaterial},
@@ -63,6 +64,57 @@ fn append_signed(
         material.public_verification_key(),
         &mut sign,
     )
+}
+
+fn exercise_prepared_append(store: &mut dyn EventStore) -> Result<(), Box<dyn std::error::Error>> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let (material, signing_identity, mut registry) = signing_fixture()?;
+    let encryption_identity =
+        KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
+    let encryption_digest = Hash::from_bytes([91; 32]);
+    registry.register_key(KeyRegistrationV1::new(
+        encryption_identity,
+        encryption_digest,
+        None,
+    ))?;
+    store.save_key_registry(&registry)?;
+    let timeline = store.create_timeline("prepared")?;
+    let request = PreparedSubjectAppendAuthorizationV1 {
+        encryption_identity,
+        encryption_material_digest: encryption_digest,
+        signing_identity,
+        signing_material_digest: material.material_digest(),
+        signing_public_key: material.public_verification_key(),
+    };
+    let mut payload = |input: &pos_core::TimelineEventEnvelopeInputV1| {
+        if input.origin_timeline_id != timeline.id() {
+            return Err(CoreError::Storage("wrong prepared context".to_owned()));
+        }
+        Ok(CanonicalBytes::from_static(b"prepared"))
+    };
+    let mut sign = |authorized: &mut KeyRegistryStateV1,
+                    envelope: &TimelineEventEnvelopeV1,
+                    bytes: &CanonicalBytes| {
+        sign_timeline_event_for_registered_role(authorized, &material, envelope, bytes)
+            .map_err(|error| CoreError::Storage(error.to_string()))
+    };
+    let event = store.append_prepared_subject_encrypted_timeline_signed(
+        timeline.id(),
+        &registry,
+        draft(b"placeholder"),
+        request,
+        &mut payload,
+        &mut sign,
+    )?;
+    assert_eq!(event.payload, CanonicalBytes::from_static(b"prepared"));
+    Ok(())
+}
+
+#[test]
+fn prepared_append_authorizes_both_identities_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    exercise_prepared_append(&mut MemoryStore::new())?;
+    exercise_prepared_append(&mut SqliteStore::open_in_memory()?)
 }
 
 const fn timeline_artifact(
