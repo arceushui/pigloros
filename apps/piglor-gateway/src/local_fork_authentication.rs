@@ -5,7 +5,7 @@
 //! listener, FAH1, session, command, and durable-authority orchestration.
 
 use std::{
-    fs::{self, OpenOptions},
+    fs::{File, OpenOptions},
     io::{Cursor, Read, Write},
     os::{
         fd::AsFd,
@@ -29,6 +29,7 @@ use pos_crypto::fork_authentication::{
     ForkAuthenticationSignatureErrorV1, ForkHostSigningKeyV1,
     VerifiedAuthenticatedPrincipalEvidenceV1,
 };
+use rustix::fs::{openat, Dir, Mode, OFlags};
 use rustix::net::sockopt::socket_peercred;
 use rustix::rand::{getrandom, GetRandomFlags};
 use thiserror::Error;
@@ -60,19 +61,23 @@ pub(super) struct LocalForkAuthenticationCredentialsV1 {
 
 impl LocalForkAuthenticationCredentialsV1 {
     /// Load exactly the two systemd credential names from one protected directory.
+    ///
+    /// The directory is opened once without following symlinks. Its names and
+    /// children are read relative to that descriptor, and children are opened
+    /// non-blocking so a FIFO fails the regular-file check instead of blocking.
     pub(super) fn load(
         directory: &Path,
         service_uid: u32,
     ) -> Result<Self, LocalForkAuthenticationErrorV1> {
-        validate_credential_directory(directory, service_uid)?;
-        credential_names(directory)?;
+        let directory = open_credential_directory(directory, service_uid)?;
+        credential_names(&directory)?;
         let auth_bytes = Zeroizing::new(read_credential(
-            directory,
+            &directory,
             AUTH_CREDENTIAL_NAME,
             service_uid,
         )?);
         let host_bytes = Zeroizing::new(read_credential(
-            directory,
+            &directory,
             HOST_CREDENTIAL_NAME,
             service_uid,
         )?);
@@ -124,7 +129,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         let issued_at = wall_time()?;
         let expires_at = issued_at
             .checked_add(AUTHENTICATION_LIFETIME_MICROS)
-            .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+            .ok_or(LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
         self.resolver
             .registry()
             .digest()
@@ -481,88 +486,104 @@ fn parse_binding(value: &Value) -> Result<LocalAccountBindingV1, LocalForkAuthen
     })
 }
 
-fn validate_credential_directory(
+/// Open the credential directory itself (never a symlink) and validate it by descriptor.
+fn open_credential_directory(
     directory: &Path,
     service_uid: u32,
-) -> Result<(), LocalForkAuthenticationErrorV1> {
+) -> Result<File, LocalForkAuthenticationErrorV1> {
     if !directory.is_absolute() {
         return Err(LocalForkAuthenticationErrorV1::CredentialUnavailable);
     }
-    let metadata = fs::symlink_metadata(directory)
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
-    if !metadata.is_dir()
-        || metadata.uid() != service_uid
-        || metadata.mode() & 0o777 != PRIVATE_CREDENTIAL_DIRECTORY_MODE
-    {
-        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-    }
-    Ok(())
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(directory)
+        .and_then(|directory| directory.metadata().map(|metadata| (directory, metadata)))
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        .and_then(|(directory, metadata)| {
+            if !metadata.is_dir()
+                || metadata.uid() != service_uid
+                || metadata.mode() & 0o777 != PRIVATE_CREDENTIAL_DIRECTORY_MODE
+            {
+                return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+            }
+            Ok(directory)
+        })
 }
 
-fn credential_names(directory: &Path) -> Result<(), LocalForkAuthenticationErrorV1> {
-    fs::read_dir(directory)
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        .and_then(|entries| {
-            entries
-                .map(|entry| {
-                    entry.map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
+fn credential_names(directory: &File) -> Result<(), LocalForkAuthenticationErrorV1> {
+    openat(
+        directory,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .and_then(Dir::new)
+    .map_err(errno_unavailable)
+    .and_then(|entries| {
+        entries
+            .map(|entry| {
+                entry.map_err(errno_unavailable).and_then(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .map(str::to_owned)
+                        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
                 })
-                .map(|entry| {
-                    entry.and_then(|entry| {
-                        entry
-                            .file_name()
-                            .into_string()
-                            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .and_then(|mut names| {
-            names.sort_unstable();
-            match names.as_slice() {
-                [] => Err(LocalForkAuthenticationErrorV1::CredentialUnavailable),
-                [name] if name == AUTH_CREDENTIAL_NAME || name == HOST_CREDENTIAL_NAME => {
-                    Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-                }
-                [auth, host] if auth == AUTH_CREDENTIAL_NAME && host == HOST_CREDENTIAL_NAME => {
-                    Ok(())
-                }
-                _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
+            })
+            .filter(|name| !matches!(name.as_deref(), Ok("." | "..")))
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .and_then(|mut names| {
+        names.sort_unstable();
+        match names.as_slice() {
+            [] => Err(LocalForkAuthenticationErrorV1::CredentialUnavailable),
+            [name] if name == AUTH_CREDENTIAL_NAME || name == HOST_CREDENTIAL_NAME => {
+                Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
             }
-        })
+            [auth, host] if auth == AUTH_CREDENTIAL_NAME && host == HOST_CREDENTIAL_NAME => Ok(()),
+            _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
+        }
+    })
 }
 
 fn read_credential(
-    directory: &Path,
+    directory: &File,
     name: &str,
     service_uid: u32,
 ) -> Result<Vec<u8>, LocalForkAuthenticationErrorV1> {
-    let path = directory.join(name);
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)
-        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        .and_then(|mut file| {
-            file.metadata()
-                .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
-                .and_then(|metadata| {
-                    if !metadata.is_file()
-                        || metadata.uid() != service_uid
-                        || metadata.mode() & 0o777 != PRIVATE_CREDENTIAL_FILE_MODE
-                    {
-                        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-                    }
-                    usize::try_from(metadata.len())
-                        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
-                        .and_then(|size| {
-                            if size > MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 {
-                                return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-                            }
-                            finish_credential_read(&mut file, size)
-                        })
-                })
-        })
+    openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(errno_unavailable)
+    .and_then(|mut file| {
+        file.metadata()
+            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
+            .and_then(|metadata| {
+                if !metadata.is_file()
+                    || metadata.uid() != service_uid
+                    || metadata.mode() & 0o777 != PRIVATE_CREDENTIAL_FILE_MODE
+                {
+                    return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+                }
+                usize::try_from(metadata.len())
+                    .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+                    .and_then(|size| {
+                        if size > MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 {
+                            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+                        }
+                        finish_credential_read(&mut file, size)
+                    })
+            })
+    })
+}
+
+const fn errno_unavailable(_: rustix::io::Errno) -> LocalForkAuthenticationErrorV1 {
+    LocalForkAuthenticationErrorV1::CredentialUnavailable
 }
 
 fn finish_credential_read(
@@ -900,6 +921,11 @@ mod tests {
             result.err(),
             Some(LocalForkAuthenticationErrorV1::CredentialUnavailable)
         );
+    }
+
+    fn open_directory(path: &Path) -> File {
+        test_ok(fs::set_permissions(path, fs::Permissions::from_mode(0o700)));
+        test_ok(open_credential_directory(path, current_uid()))
     }
 
     fn expect_load_invalid(auth: &[u8], host: &[u8], service_uid: u32) {
@@ -1297,7 +1323,7 @@ mod tests {
             || Err(LocalForkAuthenticationErrorV1::CredentialUnavailable),
             operation_nonce,
         ));
-        expect_invalid(credentials.produce_with(
+        expect_unavailable(credentials.produce_with(
             AuthenticatedUnixPeerV1 {
                 principal: binding(uid).principal,
             },
@@ -1334,12 +1360,9 @@ mod tests {
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
 
-        expect_invalid(validate_credential_directory(
-            directory.path(),
-            owner_uid ^ 1,
-        ));
+        expect_invalid(open_credential_directory(directory.path(), owner_uid ^ 1));
         expect_invalid(read_credential(
-            directory.path(),
+            &open_directory(directory.path()),
             AUTH_CREDENTIAL_NAME,
             owner_uid ^ 1,
         ));
@@ -1349,7 +1372,7 @@ mod tests {
             owner_uid,
         ));
         expect_unavailable(LocalForkAuthenticationCredentialsV1::load(
-            Path::new("/tmp/pigloros-missing-credential-directory"),
+            directory.path().join("missing").as_path(),
             owner_uid,
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
@@ -1448,28 +1471,54 @@ mod tests {
     #[test]
     fn credential_directory_and_file_name_faults_fail_closed() {
         let directory = test_ok(tempfile::tempdir());
-        expect_unavailable(credential_names(directory.path()));
+        let opened = open_directory(directory.path());
+        expect_unavailable(credential_names(&opened));
         expect_unavailable(read_credential(
-            directory.path(),
+            &opened,
             AUTH_CREDENTIAL_NAME,
             current_uid(),
         ));
 
         let auth_path = directory.path().join(AUTH_CREDENTIAL_NAME);
         test_ok(fs::write(&auth_path, []));
-        expect_unavailable(credential_names(directory.path()));
+        expect_unavailable(credential_names(&opened));
         test_ok(fs::remove_file(auth_path));
 
         let host_path = directory.path().join(HOST_CREDENTIAL_NAME);
         test_ok(fs::write(&host_path, []));
-        expect_unavailable(credential_names(directory.path()));
+        expect_unavailable(credential_names(&opened));
         test_ok(fs::remove_file(host_path));
 
         test_ok(fs::write(
             directory.path().join(OsString::from_vec(vec![0xff])),
             [],
         ));
-        expect_invalid(credential_names(directory.path()));
+        expect_invalid(credential_names(&opened));
+    }
+
+    #[test]
+    fn fifo_credential_fails_closed_without_blocking() {
+        let (auth, host) = credential_bytes(mapped_uid(), [8; 32]);
+        let directory = credentials_directory(&auth, &host);
+        let auth_path = directory.path().join(AUTH_CREDENTIAL_NAME);
+        test_ok(fs::remove_file(&auth_path));
+        test_ok(rustix::fs::mknodat(
+            rustix::fs::CWD,
+            auth_path.as_path(),
+            rustix::fs::FileType::Fifo,
+            Mode::from_raw_mode(0o400),
+            0,
+        ));
+        let path = directory.path().to_path_buf();
+        let service_uid = current_uid();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _loader = std::thread::spawn(move || {
+            sender.send(LocalForkAuthenticationCredentialsV1::load(&path, service_uid).err())
+        });
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(Some(LocalForkAuthenticationErrorV1::CredentialInvalid))
+        );
     }
 
     #[test]
