@@ -1013,6 +1013,37 @@ pub trait EventStore: Send {
         ))
     }
 
+    /// Atomically authorize active subject encryption and Timeline signing,
+    /// finalize Event context, prepare its protected payload, then sign and append.
+    ///
+    /// The callback is synchronous and non-escaping. It receives the immutable
+    /// first-commit context before the payload exists; adapters retain the same
+    /// registry serialization boundary through commit or rollback.
+    fn append_prepared_subject_encrypted_timeline_signed(
+        &mut self,
+        _timeline: TimelineId,
+        _expected_registry: &crate::KeyRegistryStateV1,
+        _draft: EventDraft,
+        _encryption_identity: crate::KeyIdentityV1,
+        _encryption_material_digest: Hash,
+        _signing_identity: crate::KeyIdentityV1,
+        _signing_material_digest: Hash,
+        _signing_public_key: crate::PublicKey,
+        _prepare_payload: &mut dyn FnMut(
+            &crate::TimelineEventEnvelopeInputV1,
+        ) -> Result<CanonicalBytes, CoreError>,
+        _sign: &mut dyn FnMut(
+            &mut crate::KeyRegistryStateV1,
+            &crate::TimelineEventEnvelopeV1,
+            &CanonicalBytes,
+        ) -> Result<crate::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        Err(CoreError::Storage(
+            "prepared subject-encryption Timeline append is unavailable for this EventStore"
+                .to_owned(),
+        ))
+    }
+
     /// Persist the `DestructionPending` state and return the resulting snapshot.
     ///
     /// This is intentionally separate from [`Self::complete_key_registry_destruction`].
