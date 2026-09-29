@@ -4,6 +4,12 @@ use pos_core::{
     KeyRoleV1, SignedForkReproManifestV1, TimelineId,
 };
 
+/// Bytes from the `FRM1` intervention array head to the end of the fixture
+/// manifest: the intervention array `[5, 7]` (3 bytes), the final Fork logical
+/// head `7` (1 byte), and the final chain hash as `bstr .size 32` (2-byte head
+/// plus 32 bytes).
+const FRM1_SUFFIX_FROM_INTERVENTIONS_BYTES: usize = 3 + 1 + 2 + 32;
+
 const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
@@ -41,12 +47,18 @@ fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() -> Result<(), Box<dyn st
     assert_eq!(&far1[..6], &[0x8f, 0x64, b'F', b'A', b'R', b'1']);
     let mut binary_far1_marker = far1.clone();
     binary_far1_marker[1] = 0x44;
-    assert!(ForkAdmissionRecordV1::from_canonical_cbor(&binary_far1_marker).is_err());
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&binary_far1_marker),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
     let manifest_wire = manifest.to_canonical_cbor();
     assert_eq!(&manifest_wire[..6], &[0x8d, 0x64, b'F', b'R', b'M', b'1']);
     let mut binary_manifest_marker = manifest_wire.clone();
     binary_manifest_marker[1] = 0x44;
-    assert!(ForkReproManifestV1::from_canonical_cbor(&binary_manifest_marker).is_err());
+    assert_eq!(
+        ForkReproManifestV1::from_canonical_cbor(&binary_manifest_marker),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
     assert_eq!(
         ForkAdmissionRecordV1::from_canonical_cbor(&far1),
         Ok(admission)
@@ -64,7 +76,10 @@ fn local_far1_frm1_and_fsm1_round_trip_at_public_seam() -> Result<(), Box<dyn st
     assert_eq!(&signed_wire[..6], &[0x87, 0x64, b'F', b'S', b'M', b'1']);
     let mut binary_signed_marker = signed_wire.clone();
     binary_signed_marker[1] = 0x44;
-    assert!(SignedForkReproManifestV1::from_canonical_cbor(&binary_signed_marker).is_err());
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&binary_signed_marker),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
     assert_eq!(outer.manifest().to_canonical_cbor(), outer.manifest_bytes());
     assert_ne!(outer.record_id(), Hash::zero());
     assert_eq!(
@@ -493,14 +508,24 @@ fn every_truncated_attribution_record_fails_closed() -> Result<(), Box<dyn std::
     let admission_bytes = admission.to_canonical_cbor();
     let manifest_bytes = manifest.to_canonical_cbor();
     let signed_bytes = signed.to_canonical_cbor();
+    let truncated = ForkAttributionCodecErrorV1::InvalidEncoding;
     for length in 0..admission_bytes.len() {
-        assert!(ForkAdmissionRecordV1::from_canonical_cbor(&admission_bytes[..length]).is_err());
+        assert_eq!(
+            ForkAdmissionRecordV1::from_canonical_cbor(&admission_bytes[..length]),
+            Err(truncated)
+        );
     }
     for length in 0..manifest_bytes.len() {
-        assert!(ForkReproManifestV1::from_canonical_cbor(&manifest_bytes[..length]).is_err());
+        assert_eq!(
+            ForkReproManifestV1::from_canonical_cbor(&manifest_bytes[..length]),
+            Err(truncated)
+        );
     }
     for length in 0..signed_bytes.len() {
-        assert!(SignedForkReproManifestV1::from_canonical_cbor(&signed_bytes[..length]).is_err());
+        assert_eq!(
+            SignedForkReproManifestV1::from_canonical_cbor(&signed_bytes[..length]),
+            Err(truncated)
+        );
     }
     Ok(())
 }
@@ -526,18 +551,34 @@ fn public_attribution_decoders_reject_forbidden_cbor_shapes(
         &[0x8f, 0x44, b'F', b'A', b'R', b'1', 0x18, 1],
         &[0x8f, 0x44, b'F', b'A', b'R', b'1', 0x01, 0x78, 0x80],
     ];
+    let invalid = ForkAttributionCodecErrorV1::InvalidEncoding;
     for bytes in invalid_prefixes {
-        assert!(ForkAdmissionRecordV1::from_canonical_cbor(bytes).is_err());
-        assert!(ForkReproManifestV1::from_canonical_cbor(bytes).is_err());
-        assert!(SignedForkReproManifestV1::from_canonical_cbor(bytes).is_err());
+        assert_eq!(
+            ForkAdmissionRecordV1::from_canonical_cbor(bytes),
+            Err(invalid)
+        );
+        assert_eq!(
+            ForkReproManifestV1::from_canonical_cbor(bytes),
+            Err(invalid)
+        );
+        assert_eq!(
+            SignedForkReproManifestV1::from_canonical_cbor(bytes),
+            Err(invalid)
+        );
     }
     let mut bad_bool = admission.to_canonical_cbor();
     let bool_at = bad_bool.len() - 3;
     bad_bool[bool_at] = 2;
-    assert!(ForkAdmissionRecordV1::from_canonical_cbor(&bad_bool).is_err());
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&bad_bool),
+        Err(invalid)
+    );
     let mut bad_signature = signed.to_canonical_cbor();
     bad_signature.pop();
-    assert!(SignedForkReproManifestV1::from_canonical_cbor(&bad_signature).is_err());
+    assert_eq!(
+        SignedForkReproManifestV1::from_canonical_cbor(&bad_signature),
+        Err(invalid)
+    );
     Ok(())
 }
 
@@ -548,7 +589,7 @@ fn manifest_decoder_rejects_count_coordinates_and_noncanonical_sequence(
     let canonical = manifest(&admission)?.to_canonical_cbor();
     let sequences_at = canonical
         .len()
-        .checked_sub(38)
+        .checked_sub(FRM1_SUFFIX_FROM_INTERVENTIONS_BYTES)
         .ok_or("manifest is shorter than its sequence suffix")?;
     assert_eq!(
         &canonical[sequences_at..sequences_at + 3],
