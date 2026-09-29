@@ -5030,61 +5030,88 @@ impl EventStore for SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = (|| {
-            let mut registry = self.load_key_registry()?.ok_or_else(|| {
-                CoreError::Storage("durable key registry is unavailable".to_owned())
-            })?;
-            if registry != *expected_registry {
-                return Err(CoreError::Storage(
-                    "durable key registry changed during prepared append".to_owned(),
-                ));
-            }
-            registry
-                .with_encryption_authorization(
-                    encryption_identity,
-                    encryption_material_digest,
-                    || (),
-                )
-                .map_err(|error| {
-                    CoreError::Storage(format!("subject encryption authorization: {error}"))
-                })?;
-            registry
-                .with_signing_authorization(
-                    signing_identity,
-                    signing_material_digest,
-                    signing_public_key,
-                    || (),
-                )
-                .map_err(|error| {
-                    CoreError::Storage(format!("Timeline signing authorization: {error}"))
-                })?;
-            let owning = self
-                .get_timeline(timeline)?
-                .ok_or(CoreError::TimelineNotFound(timeline))?;
-            let prefix = owning.meta.fork_point.map_or(0, |(_, at)| at.as_u64());
-            let (seq, input) = crate::prepare_timeline_signing_input(
-                timeline,
-                owning.head,
-                prefix,
-                &draft,
-                signing_identity,
-            )?;
-            let payload = prepare_payload(&input)?;
-            let (mut event, envelope) =
-                crate::finalize_timeline_signing_event(seq, input, payload, self.hasher.as_ref())?;
-            let signature = sign(&mut registry, &envelope, &event.payload)?;
-            crate::verify_new_timeline_signature(
-                signing_public_key,
-                signing_identity,
-                &envelope,
-                &event.payload,
-                &signature,
-            )?;
-            event.signature = Some(signature);
-            event.signature_identity = Some(signing_identity);
-            self.append_committed(timeline, std::slice::from_ref(&event))?;
-            Ok(event)
-        })();
+        let result = self
+            .load_key_registry()
+            .and_then(|registry| {
+                registry.ok_or_else(|| {
+                    CoreError::Storage("durable key registry is unavailable".to_owned())
+                })
+            })
+            .and_then(|mut registry| {
+                if registry != *expected_registry {
+                    return Err(CoreError::Storage(
+                        "durable key registry changed during prepared append".to_owned(),
+                    ));
+                }
+                registry
+                    .with_encryption_authorization(
+                        encryption_identity,
+                        encryption_material_digest,
+                        || (),
+                    )
+                    .map_err(|error| {
+                        CoreError::Storage(format!("subject encryption authorization: {error}"))
+                    })
+                    .and_then(|()| {
+                        registry
+                            .with_signing_authorization(
+                                signing_identity,
+                                signing_material_digest,
+                                signing_public_key,
+                                || (),
+                            )
+                            .map_err(|error| {
+                                CoreError::Storage(format!(
+                                    "Timeline signing authorization: {error}"
+                                ))
+                            })
+                    })
+                    .and_then(|()| self.get_timeline(timeline))
+                    .and_then(|owning| owning.ok_or(CoreError::TimelineNotFound(timeline)))
+                    .and_then(|owning| {
+                        let prefix = owning.meta.fork_point.map_or(0, |(_, at)| at.as_u64());
+                        crate::prepare_timeline_signing_input(
+                            timeline,
+                            owning.head,
+                            prefix,
+                            &draft,
+                            signing_identity,
+                        )
+                    })
+                    .and_then(|(seq, input)| {
+                        prepare_payload(&input).map(|payload| (seq, input, payload))
+                    })
+                    .and_then(|(seq, input, payload)| {
+                        crate::finalize_timeline_signing_event(
+                            seq,
+                            input,
+                            payload,
+                            self.hasher.as_ref(),
+                        )
+                    })
+                    .and_then(|(event, envelope)| {
+                        sign(&mut registry, &envelope, &event.payload)
+                            .map(|signature| (event, envelope, signature))
+                    })
+                    .and_then(|(mut event, envelope, signature)| {
+                        crate::verify_new_timeline_signature(
+                            signing_public_key,
+                            signing_identity,
+                            &envelope,
+                            &event.payload,
+                            &signature,
+                        )
+                        .map(|()| {
+                            event.signature = Some(signature);
+                            event.signature_identity = Some(signing_identity);
+                            event
+                        })
+                    })
+                    .and_then(|event| {
+                        self.append_committed(timeline, std::slice::from_ref(&event))
+                            .map(|()| event)
+                    })
+            });
         finish_immediate_transaction(&self.conn, result)
     }
 

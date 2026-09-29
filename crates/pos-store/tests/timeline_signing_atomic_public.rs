@@ -295,6 +295,60 @@ fn prepared_append_rejects_missing_timeline_before_callbacks_in_both_adapters(
     reject_prepared_missing_timeline(&mut SqliteStore::open_in_memory()?)
 }
 
+fn reject_prepared_missing_registry(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let (material, signing_identity, mut registry) = signing_fixture()?;
+    let encryption_identity =
+        KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
+    let encryption_material_digest = Hash::from_bytes([91; 32]);
+    registry.register_key(KeyRegistrationV1::new(
+        encryption_identity,
+        encryption_material_digest,
+        None,
+    ))?;
+    let timeline = store.create_timeline("prepared-missing-registry")?.id();
+    let authorization = PreparedSubjectAppendAuthorizationV1 {
+        encryption_identity,
+        encryption_material_digest,
+        signing_identity,
+        signing_material_digest: material.material_digest(),
+        signing_public_key: material.public_verification_key(),
+    };
+    let payload_calls = std::cell::Cell::new(0);
+    let sign_calls = std::cell::Cell::new(0);
+    let mut payload = |_: &pos_core::TimelineEventEnvelopeInputV1| {
+        payload_calls.set(payload_calls.get() + 1);
+        Ok(CanonicalBytes::from_static(b"must not prepare"))
+    };
+    let mut sign = |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+        sign_calls.set(sign_calls.get() + 1);
+        Ok(Signature::from_bytes([0; 64]))
+    };
+    assert!(store
+        .append_prepared_subject_encrypted_timeline_signed(
+            timeline,
+            &registry,
+            draft(b"placeholder"),
+            authorization,
+            &mut payload,
+            &mut sign,
+        )
+        .is_err());
+    assert_eq!(payload_calls.get(), 0);
+    assert_eq!(sign_calls.get(), 0);
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn prepared_append_rejects_missing_registry_before_callbacks_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    reject_prepared_missing_registry(&mut MemoryStore::new())?;
+    reject_prepared_missing_registry(&mut SqliteStore::open_in_memory()?)
+}
+
 fn reject_prepared_pending_destruction(
     store: &mut dyn EventStore,
     encryption_role: bool,
