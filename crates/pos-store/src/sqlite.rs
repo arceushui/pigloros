@@ -5069,7 +5069,7 @@ impl EventStore for SqliteStore {
         } = authorization;
         self.conn
             .execute_batch(begin_immediate_sql())
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            .map_err(Self::into_storage_error)?;
         let result = self
             .load_key_registry()
             .and_then(|registry| {
