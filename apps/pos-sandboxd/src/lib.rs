@@ -5,6 +5,8 @@
 //! and architecture before these requested-state components are used.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[cfg(target_os = "linux")]
+mod attempt_registry;
 mod hardening;
 mod kernel_cgroup;
 mod system_bus;
@@ -12,6 +14,12 @@ mod transient_unit;
 
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
+
+#[cfg(target_os = "linux")]
+pub use attempt_registry::{
+    CommittedPlannedAttempt, PlannedAttemptIntent, SystemdAttemptRegistry,
+    SystemdAttemptRegistryError,
+};
 
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
