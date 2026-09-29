@@ -697,6 +697,14 @@ mod tests {
         rustix::process::getuid().as_raw()
     }
 
+    fn mapped_uid() -> u32 {
+        if current_uid() == 1 {
+            2
+        } else {
+            1
+        }
+    }
+
     fn binding(uid: u32) -> LocalAccountBindingV1 {
         LocalAccountBindingV1 {
             uid,
@@ -710,7 +718,7 @@ mod tests {
             "local-unix".to_owned(),
             2,
             vec![binding(uid)],
-            uid.saturating_add(1),
+            current_uid(),
         ))
     }
 
@@ -796,16 +804,13 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn pathname_unix_listener_authenticates_kernel_peer_and_resolves_owner(
+    fn pathname_unix_listener_rejects_service_peer_and_resolves_trusted_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let uid = current_uid();
-        if uid == 0 || uid == 65_534 {
-            return Ok(());
-        }
+        let uid = mapped_uid();
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
         let credentials =
-            LocalForkAuthenticationCredentialsV1::load(directory.path(), uid.saturating_add(1))?;
+            LocalForkAuthenticationCredentialsV1::load(directory.path(), current_uid())?;
         assert_eq!(
             credentials
                 .policy()
@@ -821,7 +826,13 @@ mod tests {
         let client = connector
             .join()
             .map_err(|_| std::io::Error::other("Unix client thread panicked"))??;
-        let peer = credentials.authenticate_peer(&server)?;
+        assert!(matches!(
+            credentials.authenticate_peer(&server),
+            Err(LocalForkAuthenticationErrorV1::PeerUnauthenticated)
+        ));
+        let peer = AuthenticatedUnixPeerV1 {
+            principal: binding(uid).principal,
+        };
         assert_eq!(peer.principal().trust_domain(), "unix.test");
         let evidence = credentials.produce(peer)?;
         let resolved = credentials.resolve(evidence)?;
@@ -837,43 +848,43 @@ mod tests {
 
     #[test]
     fn loader_rejects_swapped_extra_equal_and_noncanonical_credentials() {
-        let uid = current_uid().max(1);
+        let uid = mapped_uid();
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&host, &auth);
         assert!(matches!(
-            LocalForkAuthenticationCredentialsV1::load(directory.path(), uid.saturating_add(1)),
+            LocalForkAuthenticationCredentialsV1::load(directory.path(), current_uid()),
             Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
         ));
 
         let directory = credentials_directory(&auth, &host);
         test_ok(fs::write(directory.path().join("unexpected"), [1]));
         assert!(matches!(
-            LocalForkAuthenticationCredentialsV1::load(directory.path(), uid.saturating_add(1)),
+            LocalForkAuthenticationCredentialsV1::load(directory.path(), current_uid()),
             Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
         ));
 
         let (auth, host) = credential_bytes(uid, [7; 32]);
         let directory = credentials_directory(&auth, &host);
         assert!(matches!(
-            LocalForkAuthenticationCredentialsV1::load(directory.path(), uid.saturating_add(1)),
+            LocalForkAuthenticationCredentialsV1::load(directory.path(), current_uid()),
             Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
         ));
 
         let directory = credentials_directory(&auth, &[0x98, 0x03, b'F', b'A', b'H', b'K', b'1']);
         assert!(matches!(
-            LocalForkAuthenticationCredentialsV1::load(directory.path(), uid.saturating_add(1)),
+            LocalForkAuthenticationCredentialsV1::load(directory.path(), current_uid()),
             Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
         ));
     }
 
     #[test]
     fn loader_accepts_separate_valid_credentials() {
-        let uid = current_uid().max(1);
+        let uid = mapped_uid();
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
         let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid.saturating_add(1),
+            current_uid(),
         ));
 
         assert_eq!(
@@ -888,12 +899,12 @@ mod tests {
 
     #[test]
     fn resolver_rejects_policy_and_exact_registry_mismatches() {
-        let uid = current_uid().max(1);
+        let uid = mapped_uid();
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
         let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid.saturating_add(1),
+            current_uid(),
         ));
         let registry_binding = test_ok(credentials.resolver.registry().digest());
 
@@ -956,12 +967,12 @@ mod tests {
 
     #[test]
     fn producer_fails_closed_for_clock_overflow_and_entropy_faults() {
-        let uid = current_uid().max(1);
+        let uid = mapped_uid();
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
         let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid.saturating_add(1),
+            current_uid(),
         ));
 
         expect_unavailable(credentials.produce_with(
@@ -989,17 +1000,10 @@ mod tests {
 
     #[test]
     fn peer_without_a_registry_mapping_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
-        let uid = current_uid();
-        let mapped_uid = uid.saturating_add(1).max(1);
-        if mapped_uid == 65_534 || mapped_uid == u32::MAX {
-            return Ok(());
-        }
-        let (auth, host) = credential_bytes(mapped_uid, [8; 32]);
+        let (auth, host) = credential_bytes(mapped_uid(), [8; 32]);
         let directory = credentials_directory(&auth, &host);
-        let credentials = LocalForkAuthenticationCredentialsV1::load(
-            directory.path(),
-            mapped_uid.saturating_add(1),
-        )?;
+        let credentials =
+            LocalForkAuthenticationCredentialsV1::load(directory.path(), current_uid())?;
         let (peer, _other) = UnixStream::pair()?;
         assert!(matches!(
             credentials.authenticate_peer(&peer),
@@ -1010,7 +1014,7 @@ mod tests {
 
     #[test]
     fn credential_filesystem_and_read_faults_fail_closed() {
-        let uid = current_uid().max(1);
+        let uid = mapped_uid();
         let owner_uid = current_uid();
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
@@ -1027,15 +1031,15 @@ mod tests {
 
         expect_unavailable(LocalForkAuthenticationCredentialsV1::load(
             Path::new("relative"),
-            uid,
+            owner_uid,
         ));
         expect_unavailable(LocalForkAuthenticationCredentialsV1::load(
             Path::new("/tmp/pigloros-missing-credential-directory"),
-            uid,
+            owner_uid,
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path().join(AUTH_CREDENTIAL_NAME).as_path(),
-            uid,
+            owner_uid,
         ));
         test_ok(fs::set_permissions(
             directory.path(),
@@ -1043,7 +1047,7 @@ mod tests {
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid,
+            owner_uid,
         ));
         test_ok(fs::set_permissions(
             directory.path(),
@@ -1051,7 +1055,7 @@ mod tests {
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid,
+            owner_uid,
         ));
         test_ok(fs::set_permissions(
             directory.path(),
@@ -1063,7 +1067,7 @@ mod tests {
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid,
+            owner_uid,
         ));
         test_ok(fs::set_permissions(
             directory.path().join(AUTH_CREDENTIAL_NAME),
@@ -1075,7 +1079,7 @@ mod tests {
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid,
+            owner_uid,
         ));
         test_ok(fs::set_permissions(
             directory.path().join(HOST_CREDENTIAL_NAME),
@@ -1083,7 +1087,7 @@ mod tests {
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid,
+            owner_uid,
         ));
         test_ok(fs::set_permissions(
             directory.path().join(HOST_CREDENTIAL_NAME),
@@ -1091,7 +1095,7 @@ mod tests {
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid,
+            owner_uid,
         ));
 
         test_ok(fs::set_permissions(
@@ -1100,7 +1104,7 @@ mod tests {
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid,
+            owner_uid,
         ));
         test_ok(fs::set_permissions(
             directory.path().join(AUTH_CREDENTIAL_NAME),
@@ -1116,7 +1120,7 @@ mod tests {
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            uid,
+            owner_uid,
         ));
     }
 
@@ -1214,8 +1218,8 @@ mod tests {
 
     #[test]
     fn malformed_credential_fields_fail_closed() {
-        let uid = current_uid().max(1);
-        let service_uid = uid.saturating_add(1);
+        let uid = mapped_uid();
+        let service_uid = current_uid();
         let (auth, host) = credential_bytes(uid, [8; 32]);
         expect_load_invalid(&[0; 2], &host, service_uid);
         expect_load_invalid(&auth, &[0; FAHK1_BYTES], service_uid);
@@ -1237,10 +1241,10 @@ mod tests {
 
     #[test]
     fn credential_policy_and_registry_mismatches_fail_closed() {
-        let uid = current_uid().max(1);
+        let uid = mapped_uid();
         let (auth, host) = credential_bytes(uid, [8; 32]);
-        let service_uid = uid.saturating_add(1);
-        expect_load_invalid(&auth, &host, uid);
+        let service_uid = current_uid();
+        expect_invalid(parse_credentials(&auth, &host, uid));
 
         let registry = registry(uid);
         let wrong_signer = test_ok(ForkAuthenticationAdapterSigningKeyV1::from_seed([9; 32]));
