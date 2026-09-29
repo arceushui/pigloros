@@ -1375,7 +1375,7 @@ fn classified_provenance_derivation_binds_table_request_and_event(
         derived
             .operation
             .expected_provenance(&table, classification),
-        (derived.origin.clone(), derived.intervention.clone())
+        (derived.origin, derived.intervention)
     );
 
     let host_source = ForkAppendSourceIdentityV1::HostInternal;
@@ -1435,7 +1435,7 @@ fn classified_provenance_derivation_rejects_incomplete_inputs(
                     adapter_identifier: String::new(),
                     source: ForkEventSourceDescriptorV1::new("gateway.action.v1", hash(2))?,
                 },
-                ..request.clone()
+                ..request
             },
             event,
         ),
