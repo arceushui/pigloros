@@ -1693,6 +1693,37 @@ pub mod tests {
         Ok(())
     }
 
+    // Fixture-only index faults exercise missing or mislabelled installed
+    // artifacts without changing the machine's fixed installation directory.
+    pub(crate) fn omit_artifact(state: &mut InstalledSelectorState, kind: InstallationObjectKind) {
+        state.artifacts.retain(|(role, _), _| *role != kind);
+        state.manifest.objects.retain(|object| object.kind != kind);
+    }
+
+    pub(crate) fn reindex_artifact(
+        state: &mut InstalledSelectorState,
+        kind: InstallationObjectKind,
+        previous: [u8; 32],
+        replacement: [u8; 32],
+    ) -> TestResult {
+        let mut artifact = state
+            .artifacts
+            .remove(&(kind, previous))
+            .ok_or("fixture artifact missing")?;
+        artifact.object.identity = replacement;
+        for object in &mut state.manifest.objects {
+            if object.kind == kind && object.identity == previous {
+                object.identity = replacement;
+            }
+        }
+        state
+            .manifest
+            .objects
+            .sort_by_key(|object| (object.kind, object.identity));
+        state.artifacts.insert((kind, replacement), artifact);
+        Ok(())
+    }
+
     #[test]
     fn decodes_closed_canonical_manifest() -> TestResult {
         let manifest = InstallationManifest::from_canonical_cbor(&encode_manifest(unsigned(

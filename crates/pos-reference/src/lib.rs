@@ -32,6 +32,8 @@ pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
 pub mod profile;
+#[cfg(unix)]
+pub mod provider_admission;
 // Public module reachability keeps crate-only sibling access compatible with
 // both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
 #[cfg(unix)]

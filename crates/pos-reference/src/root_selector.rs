@@ -3313,6 +3313,19 @@ mod tests {
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
             let spx1 = read_frame(&mut stream)?;
+            // The provider independently opens SIC1; no selector proof or FD is
+            // transferred by SPX1. This is image evidence, not activation.
+            let image = crate::provider_admission::ProviderImageSnapshot::open(&spx1)?;
+            assert_eq!(image.request().to_canonical_cbor()?, spx1);
+            assert_eq!(
+                image.image().manifest().manifest_digest,
+                image.request().authority.sim1_digest
+            );
+            assert_eq!(
+                image.launch_policy().policy_digest,
+                image.request().authority.lps1_digest
+            );
+            image.recheck_held_image()?;
             let mut input_frames = Vec::new();
             stream.read_to_end(&mut input_frames)?;
             if input_frames.is_empty() {
