@@ -18,7 +18,9 @@ use rustix::fs::{
 use crate::TransientServiceUnitName;
 
 mod directory;
+mod recovery;
 pub use directory::PreparedAttemptDirectory;
+pub use recovery::{RecoveredAttemptIntent, RegistryRecoveryEntry, SystemdAttemptRecovery};
 
 const RECORD_SIZE: usize = 52;
 const REGISTRY_NAME: &str = "registry";
@@ -117,6 +119,37 @@ struct RegistryDirectory {
     owner: u32,
 }
 
+impl RegistryDirectory {
+    fn open() -> Result<Self, SystemdAttemptRegistryError> {
+        let root = registry_io(|| File::open("/"))?;
+        validate_directory(&root, 0, false)?;
+        let mut parent = open_directory(&root, "run", ResolveFlags::empty())?;
+        validate_directory(&parent, 0, false)?;
+        for component in ["pigloros", "sandbox"] {
+            parent = open_directory(&parent, component, ResolveFlags::NO_XDEV)?;
+            validate_directory(&parent, 0, component == "sandbox")?;
+        }
+        Self::from_runtime_directory(&parent, 0)
+    }
+
+    fn from_runtime_directory(
+        parent: &File,
+        owner: u32,
+    ) -> Result<Self, SystemdAttemptRegistryError> {
+        validate_directory(parent, owner, true)?;
+        let registry = open_directory(parent, REGISTRY_NAME, ResolveFlags::NO_XDEV)?;
+        validate_directory(&registry, owner, true)?;
+        registry_io(|| {
+            flock(&registry, FlockOperation::NonBlockingLockExclusive).map_err(io::Error::from)
+        })?;
+        Ok(Self {
+            runtime: registry_io(|| parent.try_clone())?,
+            file: registry,
+            owner,
+        })
+    }
+}
+
 /// The fixed root-owned registry at `/run/pigloros/sandbox/registry`.
 ///
 /// Startup provisions the directory with mode 0700. This component records
@@ -142,34 +175,22 @@ impl SystemdAttemptRegistry {
     /// mount crossing beneath `/run`, permissions other than 0700, another
     /// live owner, or any unreconciled record left by a previous owner.
     pub fn open() -> Result<Self, SystemdAttemptRegistryError> {
-        let root = registry_io(|| File::open("/"))?;
-        validate_directory(&root, 0, false)?;
-        let mut parent = open_directory(&root, "run", ResolveFlags::empty())?;
-        validate_directory(&parent, 0, false)?;
-        for component in ["pigloros", "sandbox"] {
-            parent = open_directory(&parent, component, ResolveFlags::NO_XDEV)?;
-            validate_directory(&parent, 0, component == "sandbox")?;
-        }
-        Self::from_runtime_directory(&parent, 0)
+        Self::from_directory(RegistryDirectory::open()?)
     }
 
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn from_runtime_directory(
         parent: &File,
         owner: u32,
     ) -> Result<Self, SystemdAttemptRegistryError> {
-        validate_directory(parent, owner, true)?;
-        let registry = open_directory(parent, REGISTRY_NAME, ResolveFlags::NO_XDEV)?;
-        validate_directory(&registry, owner, true)?;
-        registry_io(|| {
-            flock(&registry, FlockOperation::NonBlockingLockExclusive).map_err(io::Error::from)
-        })?;
-        require_empty(&registry)?;
+        Self::from_directory(RegistryDirectory::from_runtime_directory(parent, owner)?)
+    }
+
+    fn from_directory(directory: RegistryDirectory) -> Result<Self, SystemdAttemptRegistryError> {
+        require_empty(&directory.file)?;
         Ok(Self {
-            directory: Arc::new(RegistryDirectory {
-                runtime: registry_io(|| parent.try_clone())?,
-                file: registry,
-                owner,
-            }),
+            directory: Arc::new(directory),
             state: Arc::new(Mutex::new(RegistryState::default())),
         })
     }
