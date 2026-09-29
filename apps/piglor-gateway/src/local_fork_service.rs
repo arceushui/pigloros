@@ -582,10 +582,11 @@ mod tests {
         trailing_byte_request(&socket, &bind_payload(4))?;
         let after_trailing = request(&socket, &bind_payload(4), false)?;
         // The first Bind already owns this Principal; a later distinct Bind
-        // conflicts, but the listener must still answer after a bad frame.
+        // resolves to that binding, and the listener still answers after a
+        // bad frame.
         assert_eq!(
-            after_trailing.as_slice(),
-            &[0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 2, 0xf6]
+            &after_trailing[..10],
+            &[0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
         );
         listener.stop()?;
         assert!(!socket.exists());
@@ -657,9 +658,10 @@ mod tests {
             &socket,
         )?;
 
+        // An unbound Principal is a semantic rejection (#465 InvalidRequest).
         assert_eq!(
             request(&socket, &fork_payload(parent.id())?, false)?,
-            vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 2, 0xf6]
+            vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 7, 0xf6]
         );
         listener.stop()?;
         assert!(!socket.exists());

@@ -1030,14 +1030,16 @@ mod tests {
             [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
         );
 
-        let conflict = coordinator.handle(CompletedLocalForkAdmissionV1 {
+        // ADR-099: a new Bind for the already-bound Principal resolves to the
+        // one immutable committed binding rather than a conflict.
+        let rebind = coordinator.handle(CompletedLocalForkAdmissionV1 {
             peer: current_peer(&coordinator.credentials)?,
             request: bind_request(21),
             host_request_id: Hash::from_bytes([22; 32]),
         });
         assert_eq!(
-            conflict.response.to_canonical_cbor(),
-            vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 2, 0xf6]
+            rebind.response.to_canonical_cbor()[..10],
+            [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
         );
         Ok(())
     }
