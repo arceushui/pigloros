@@ -20,7 +20,7 @@ use pos_core::{
     fork_authentication::{
         AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
         ForkAuthenticationPolicyV1, LocalAccountBindingV1, LocalAccountRegistryV1,
-        MAX_FORK_AUTH_CREDENTIAL_BYTES_V1,
+        MAX_FORK_AUTH_CREDENTIAL_BYTES_V1, MAX_FORK_AUTH_POLICY_BYTES_V1,
     },
     CanonicalBytes, OwnerIdV1, PrincipalRefV1,
 };
@@ -41,6 +41,10 @@ const FAHK1_BYTES: usize = 42;
 const PRIVATE_CREDENTIAL_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_CREDENTIAL_FILE_MODE: u32 = 0o400;
 const AUTHENTICATION_LIFETIME_MICROS: u64 = 30_000_000;
+/// ADR-107 FACR1 field bounds that pos-core does not export.
+const MAX_FACR1_BINDINGS_V1: usize = 64;
+const MAX_FACR1_TEXT_BYTES_V1: usize = 128;
+const MAX_FACR1_PRINCIPAL_BYTES_V1: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(super) enum LocalForkAuthenticationErrorV1 {
@@ -162,7 +166,7 @@ impl LocalForkAuthenticationCredentialsV1 {
     }
 
     /// Sign one canonical ADR-106 FAI1 challenge through protected host custody.
-    pub(crate) fn sign_initialize(
+    pub(super) fn sign_initialize(
         &self,
         challenge: &CanonicalBytes,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
@@ -170,7 +174,7 @@ impl LocalForkAuthenticationCredentialsV1 {
     }
 
     /// Sign one canonical ADR-106 FAO1 challenge through protected host custody.
-    pub(crate) fn sign_open(
+    pub(super) fn sign_open(
         &self,
         challenge: &CanonicalBytes,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
@@ -178,7 +182,7 @@ impl LocalForkAuthenticationCredentialsV1 {
     }
 
     /// Sign one owner-bound canonical ADR-106 POC1 command through protected custody.
-    pub(crate) fn sign_principal_owner_command(
+    pub(super) fn sign_principal_owner_command(
         &self,
         command: &CanonicalBytes,
         authentication: &ResolvedLocalAuthenticationV1,
@@ -188,7 +192,7 @@ impl LocalForkAuthenticationCredentialsV1 {
     }
 
     /// Sign one canonical ADR-106 FCC1 command through protected host custody.
-    pub(crate) fn sign_fork_command(
+    pub(super) fn sign_fork_command(
         &self,
         command: &CanonicalBytes,
         authentication: &ResolvedLocalAuthenticationV1,
@@ -197,7 +201,7 @@ impl LocalForkAuthenticationCredentialsV1 {
     }
 
     /// Sign one canonical ADR-106 FRC1 recovery command through protected custody.
-    pub(crate) fn sign_recovery(
+    pub(super) fn sign_recovery(
         &self,
         command: &CanonicalBytes,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
@@ -361,6 +365,7 @@ impl ResolvedLocalAuthenticationV1 {
         self.owner
     }
 
+    #[must_use]
     pub(super) const fn verified_evidence(&self) -> &VerifiedAuthenticatedPrincipalEvidenceV1 {
         &self.verified
     }
@@ -373,47 +378,40 @@ fn parse_credentials(
 ) -> Result<LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1> {
     let (adapter_seed, policy, registry) = parse_facr1(auth_bytes, service_uid)?;
     let host_seed = parse_fahk1(host_bytes)?;
-    if adapter_seed[..] == host_seed[..] {
-        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-    }
     // `from_seed` zeroizes its by-value seed copy. These guards retain the
     // extracted credential bytes across every fallible validation step.
     ForkAuthenticationAdapterSigningKeyV1::from_seed(*adapter_seed)
-        .map_err(signature_invalid)
         .and_then(|adapter_signer| {
+            ForkHostSigningKeyV1::from_seed(*host_seed)
+                .map(|host_signer| (adapter_signer, host_signer))
+        })
+        .map_err(signature_invalid)
+        .and_then(|signers| {
             registry
                 .digest()
+                .map(|registry_binding| (signers, registry_binding))
                 .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
-                .and_then(|registry_binding| {
-                    let adapter_valid =
-                        policy
-                            .adapter(registry.adapter_id())
-                            .is_some_and(|adapter| {
-                                adapter.verifying_key == adapter_signer.public_key()
-                                    && registry.assurance() >= adapter.minimum_assurance
-                                    && adapter.registry_bindings.contains(&registry_binding)
-                            });
-                    if !adapter_valid {
-                        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-                    }
-                    ForkHostSigningKeyV1::from_seed(*host_seed)
-                        .map_err(signature_invalid)
-                        .and_then(|host_signer| {
-                            ensure_distinct_signing_keys(
-                                adapter_signer.public_key(),
-                                host_signer.public_key(),
-                            )
-                            .map(|()| {
-                                LocalForkAuthenticationCredentialsV1 {
-                                    resolver: PrincipalOwnerResolverV1::new(policy, registry),
-                                    adapter_signer,
-                                    host_signer: LocalForkHostSignerV1 {
-                                        signer: host_signer,
-                                    },
-                                }
-                            })
-                        })
-                })
+        })
+        .and_then(|((adapter_signer, host_signer), registry_binding)| {
+            let adapter_valid = policy
+                .adapter(registry.adapter_id())
+                .is_some_and(|adapter| {
+                    adapter.verifying_key == adapter_signer.public_key()
+                        && registry.assurance() >= adapter.minimum_assurance
+                        && adapter.registry_bindings.contains(&registry_binding)
+                });
+            if !adapter_valid {
+                return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+            }
+            // Equal seeds derive equal keys, so this also rejects seed reuse.
+            ensure_distinct_signing_keys(adapter_signer.public_key(), host_signer.public_key())?;
+            Ok(LocalForkAuthenticationCredentialsV1 {
+                resolver: PrincipalOwnerResolverV1::new(policy, registry),
+                adapter_signer,
+                host_signer: LocalForkHostSignerV1 {
+                    signer: host_signer,
+                },
+            })
         })
 }
 
@@ -441,12 +439,12 @@ fn parse_facr1(
     let mut values = canonical_array(bytes, "FACR1", 7)?;
     let seed = take_fixed_nonzero(&mut values.as_mut_slice()[2])?;
     let fields = values.as_slice();
-    let policy_bytes = bounded_bytes(&fields[3], 37_528)?;
+    let policy_bytes = bounded_bytes(&fields[3], MAX_FORK_AUTH_POLICY_BYTES_V1)?;
     let policy = ForkAuthenticationPolicyV1::from_canonical_cbor(policy_bytes)
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
     let adapter_id = bounded_text(&fields[4])?;
     let assurance = positive_u8(&fields[5])?;
-    let entries = nonempty_array(&fields[6], 64)?;
+    let entries = nonempty_array(&fields[6], MAX_FACR1_BINDINGS_V1)?;
     let bindings = entries
         .iter()
         .map(parse_binding)
@@ -465,25 +463,19 @@ fn parse_fahk1(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, LocalForkAuthenticat
 }
 
 fn parse_binding(value: &Value) -> Result<LocalAccountBindingV1, LocalForkAuthenticationErrorV1> {
-    array(value, 3).and_then(|fields| {
-        positive_u32(&fields[0]).and_then(|uid| {
-            bounded_bytes(&fields[1], 256).and_then(|principal_bytes| {
-                PrincipalRefV1::decode(&CanonicalBytes::from_vec(principal_bytes.to_vec()))
-                    .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
-                    .and_then(|principal| {
-                        bounded_text(&fields[2]).and_then(|owner| {
-                            OwnerIdV1::new(owner)
-                                .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
-                                .map(|owner| LocalAccountBindingV1 {
-                                    uid,
-                                    principal,
-                                    owner,
-                                })
-                        })
-                    })
-            })
+    let fields = array(value, 3)?;
+    let uid = positive_u32(&fields[0])?;
+    let principal_bytes = bounded_bytes(&fields[1], MAX_FACR1_PRINCIPAL_BYTES_V1)?;
+    let principal = PrincipalRefV1::decode(&CanonicalBytes::from_vec(principal_bytes.to_vec()))
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let owner = bounded_text(&fields[2])?;
+    OwnerIdV1::new(owner)
+        .map(|owner| LocalAccountBindingV1 {
+            uid,
+            principal,
+            owner,
         })
-    })
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
 }
 
 /// Open the credential directory itself (never a symlink) and validate it by descriptor.
@@ -727,7 +719,11 @@ fn bounded_bytes(value: &Value, maximum: usize) -> Result<&[u8], LocalForkAuthen
 
 fn bounded_text(value: &Value) -> Result<String, LocalForkAuthenticationErrorV1> {
     match value {
-        Value::Text(text) if !text.is_empty() && text.len() <= 128 && !text.contains('\0') => {
+        Value::Text(text)
+            if !text.is_empty()
+                && text.len() <= MAX_FACR1_TEXT_BYTES_V1
+                && !text.contains('\0') =>
+        {
             Ok(text.clone())
         }
         _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
@@ -810,11 +806,12 @@ mod tests {
     use std::{
         ffi::OsString,
         fs,
-        os::unix::{ffi::OsStringExt as _, fs::PermissionsExt as _, net::UnixStream},
+        os::unix::{
+            ffi::OsStringExt as _,
+            fs::PermissionsExt as _,
+            net::{UnixListener, UnixStream},
+        },
     };
-
-    #[cfg(target_os = "linux")]
-    use std::os::unix::net::UnixListener;
 
     use super::*;
     use ciborium::value::Value;
@@ -926,6 +923,37 @@ mod tests {
     fn open_directory(path: &Path) -> File {
         test_ok(fs::set_permissions(path, fs::Permissions::from_mode(0o700)));
         test_ok(open_credential_directory(path, current_uid()))
+    }
+
+    fn load_error(
+        auth: &[u8],
+        host: &[u8],
+        service_uid: u32,
+    ) -> Option<LocalForkAuthenticationErrorV1> {
+        let directory = credentials_directory(auth, host);
+        LocalForkAuthenticationCredentialsV1::load(directory.path(), service_uid).err()
+    }
+
+    fn text(value: &str) -> Value {
+        Value::Text(value.to_owned())
+    }
+
+    /// Replace one FACR1 field per labelled case and require a fail-closed load.
+    fn expect_field_cases_invalid(
+        auth: &[u8],
+        host: &[u8],
+        service_uid: u32,
+        cases: impl IntoIterator<Item = (&'static str, usize, Value)>,
+    ) {
+        for (label, index, value) in cases {
+            let mut fields = test_ok(facr1_fields(auth));
+            fields[index] = value;
+            assert_eq!(
+                load_error(&encode(&Value::Array(fields)), host, service_uid),
+                Some(LocalForkAuthenticationErrorV1::CredentialInvalid),
+                "{label}"
+            );
+        }
     }
 
     fn expect_load_invalid(auth: &[u8], host: &[u8], service_uid: u32) {
@@ -1076,7 +1104,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn pathname_unix_listener_rejects_service_peer_and_resolves_trusted_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let uid = mapped_uid();
@@ -1626,10 +1653,6 @@ mod tests {
                 registry_bindings: vec![test_ok(registry.digest())],
             },
         ]));
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[3] = Value::Bytes(test_ok(wrong_policy.to_canonical_cbor()));
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
         let adapter = test_ok(ForkAuthenticationAdapterSigningKeyV1::from_seed([7; 32]));
         let strict_policy = test_ok(ForkAuthenticationPolicyV1::new(vec![
             ForkAuthenticationAdapterPolicyV1 {
@@ -1639,90 +1662,109 @@ mod tests {
                 registry_bindings: vec![test_ok(registry.digest())],
             },
         ]));
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[3] = Value::Bytes(test_ok(strict_policy.to_canonical_cbor()));
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
+        expect_field_cases_invalid(
+            &auth,
+            &host,
+            service_uid,
+            [
+                ("zero seed", 2, Value::Bytes(vec![0; 32])),
+                ("text seed", 2, text("not-a-seed")),
+                (
+                    "foreign adapter key",
+                    3,
+                    Value::Bytes(test_ok(wrong_policy.to_canonical_cbor())),
+                ),
+                (
+                    "assurance below policy",
+                    3,
+                    Value::Bytes(test_ok(strict_policy.to_canonical_cbor())),
+                ),
+                ("undecodable policy", 3, Value::Bytes(vec![1])),
+                ("text policy", 3, text("not-policy-bytes")),
+                ("adapter absent from policy", 4, text("missing-adapter")),
+                ("integer adapter id", 4, Value::Integer(1.into())),
+                ("text assurance", 5, text("not-an-assurance")),
+                ("integer registry", 6, Value::Integer(1.into())),
+            ],
+        );
+    }
 
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[6] = Value::Array(vec![Value::Array(vec![
-            Value::Integer(uid.into()),
-            Value::Bytes(test_ok(binding(uid).principal.encode()).as_slice().to_vec()),
-            Value::Text("another-owner".to_owned()),
-        ])]);
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
+    #[test]
+    fn malformed_registry_rows_fail_closed() {
+        let uid = mapped_uid();
+        let (auth, host) = credential_bytes(uid, [8; 32]);
+        let principal = Value::Bytes(test_ok(binding(uid).principal.encode()).as_slice().to_vec());
+        let row = |uid_field: Value, principal_field: Value, owner_field: Value| {
+            Value::Array(vec![Value::Array(vec![
+                uid_field,
+                principal_field,
+                owner_field,
+            ])])
+        };
+        let mapped = || Value::Integer(uid.into());
+        expect_field_cases_invalid(
+            &auth,
+            &host,
+            current_uid(),
+            [
+                (
+                    "non-array binding",
+                    6,
+                    Value::Array(vec![Value::Integer(1.into())]),
+                ),
+                (
+                    "unbound owner",
+                    6,
+                    row(mapped(), principal.clone(), text("another-owner")),
+                ),
+                (
+                    "text uid",
+                    6,
+                    row(text("not-a-uid"), principal.clone(), text("owner")),
+                ),
+                (
+                    "text principal",
+                    6,
+                    row(mapped(), text("not-a-principal"), text("owner")),
+                ),
+                (
+                    "undecodable principal",
+                    6,
+                    row(mapped(), Value::Bytes(vec![1]), text("owner")),
+                ),
+                (
+                    "integer owner",
+                    6,
+                    row(mapped(), principal, Value::Integer(1.into())),
+                ),
+            ],
+        );
+    }
 
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[3] = Value::Bytes(vec![1]);
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[4] = Value::Text("missing-adapter".to_owned());
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[6] = Value::Array(vec![Value::Integer(1.into())]);
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[2] = Value::Bytes(vec![0; 32]);
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut trailing = auth.clone();
-        trailing.push(0);
-        expect_load_invalid(&trailing, &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[2] = Value::Text("not-a-seed".to_owned());
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[3] = Value::Text("not-policy-bytes".to_owned());
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[4] = Value::Integer(1.into());
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[5] = Value::Text("not-an-assurance".to_owned());
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[6] = Value::Integer(1.into());
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[6] = Value::Array(vec![Value::Array(vec![
-            Value::Text("not-a-uid".to_owned()),
-            Value::Bytes(test_ok(binding(uid).principal.encode()).as_slice().to_vec()),
-            Value::Text("owner".to_owned()),
-        ])]);
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[6] = Value::Array(vec![Value::Array(vec![
-            Value::Text("not-principal-bytes".to_owned()),
-            Value::Text("not-a-principal".to_owned()),
-            Value::Text("owner".to_owned()),
-        ])]);
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        let mut fields = test_ok(facr1_fields(&auth));
-        fields[6] = Value::Array(vec![Value::Array(vec![
-            Value::Integer(uid.into()),
-            Value::Bytes(vec![1]),
-            Value::Text("owner".to_owned()),
-        ])]);
-        expect_load_invalid(&encode(&Value::Array(fields)), &host, service_uid);
-
-        expect_load_invalid(&[0xff], &host, service_uid);
-
-        let tagged_auth = encode(&Value::Tag(0, Box::new(Value::Bytes(vec![1]))));
-        expect_load_invalid(&tagged_auth, &host, service_uid);
-        let mapped_auth = encode(&Value::Map(vec![(
-            Value::Tag(0, Box::new(Value::Bytes(vec![2]))),
-            Value::Bytes(vec![3]),
-        )]));
-        expect_load_invalid(&mapped_auth, &host, service_uid);
+    #[test]
+    fn malformed_credential_encodings_fail_closed() {
+        let (auth, host) = credential_bytes(mapped_uid(), [8; 32]);
+        let encoding_cases = [
+            ("trailing byte", [auth.as_slice(), &[0]].concat()),
+            ("truncated CBOR", vec![0xff]),
+            (
+                "tagged top-level value",
+                encode(&Value::Tag(0, Box::new(Value::Bytes(vec![1])))),
+            ),
+            (
+                "map with tagged key",
+                encode(&Value::Map(vec![(
+                    Value::Tag(0, Box::new(Value::Bytes(vec![2]))),
+                    Value::Bytes(vec![3]),
+                )])),
+            ),
+        ];
+        for (label, bytes) in encoding_cases {
+            assert_eq!(
+                load_error(&bytes, &host, current_uid()),
+                Some(LocalForkAuthenticationErrorV1::CredentialInvalid),
+                "{label}"
+            );
+        }
     }
 }

@@ -19,7 +19,7 @@ pub mod ledger_config;
         reason = "#450 connects the private Fork authority producer"
     )
 )]
-pub mod local_fork_authentication;
+mod local_fork_authentication;
 pub mod owntracks;
 pub mod owntracks_http;
 
