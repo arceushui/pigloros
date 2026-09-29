@@ -7,7 +7,7 @@
 use std::io::Cursor;
 
 use ciborium::value::Value;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use pos_core::{
     fork_authentication::{
         principal_digest_v1, AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
@@ -66,8 +66,9 @@ impl VerifiedAuthenticatedPrincipalEvidenceV1 {
 /// does not resolve an Owner, check expiry, or grant durable authority.
 ///
 /// # Errors
-/// Rejects missing or insufficient adapter policy, malformed verification key,
-/// and a signature that does not cover the exact canonical APR1 bytes.
+/// Rejects missing or insufficient adapter policy, a malformed or small-order
+/// (weak) verification key, and any signature that is not a strict Ed25519
+/// signature over the exact canonical APR1 bytes.
 pub fn verify_authenticated_principal_evidence_v1(
     policy: &ForkAuthenticationPolicyV1,
     evidence: AuthenticatedPrincipalEvidenceV1,
@@ -268,11 +269,16 @@ fn verify_signature(
     payload: &[u8],
     signature: &[u8; 64],
 ) -> Result<(), ForkAuthenticationSignatureErrorV1> {
+    // A small-order key admits signatures over arbitrary messages, so it can
+    // never be a pinned Fork-authentication identity.
+    if verifying_key.is_weak() {
+        return Err(ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey);
+    }
     let mut preimage = Vec::with_capacity(domain.len() + payload.len());
     preimage.extend_from_slice(domain);
     preimage.extend_from_slice(payload);
     verifying_key
-        .verify(&preimage, &ed25519_dalek::Signature::from_bytes(signature))
+        .verify_strict(&preimage, &ed25519_dalek::Signature::from_bytes(signature))
         .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidSignature)
 }
 
