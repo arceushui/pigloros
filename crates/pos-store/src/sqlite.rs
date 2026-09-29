@@ -76,6 +76,11 @@ use crate::fork_admission_authority::{
     ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityStateV1,
     ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
+use crate::fork_delivery_journal::{
+    fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
+    ForkDeliveryClaimV1, ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryRowV1,
+    ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
+};
 use crate::fork_event_authority::fork_append_request;
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
@@ -520,6 +525,69 @@ const ERASURE_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
 ];
 
 const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
+    SqliteSchemaTable {
+        name: "fork_delivery_fence_counter",
+        columns_query: "PRAGMA table_info(fork_delivery_fence_counter)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "id",
+                kind: "INTEGER",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "last_fence",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["CHECK (id = 1)", "CHECK (last_fence >= 0)"],
+    },
+    SqliteSchemaTable {
+        name: "fork_delivery_journal",
+        columns_query: "PRAGMA table_info(fork_delivery_journal)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "host_request_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "kind",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "operation_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "state",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "owner_fence",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(host_request_id) = 32)",
+            "CHECK (kind IN (1, 2))",
+            "CHECK (length(operation_id) = 32)",
+            "CHECK (state IN (1, 2, 3))",
+            "CHECK (owner_fence > 0)",
+            "UNIQUE (kind, operation_id)",
+        ],
+    },
     SqliteSchemaTable {
         name: "fork_principal_owner_bindings",
         columns_query: "PRAGMA table_info(fork_principal_owner_bindings)",
@@ -1414,7 +1482,10 @@ impl SqliteStore {
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
-        store.finish_open(initialize_schema)?;
+        store.finish_open(
+            initialize_schema,
+            flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY),
+        )?;
         Ok(store)
     }
 
@@ -1435,8 +1506,8 @@ impl SqliteStore {
         }
     }
 
-    fn finish_open(&mut self, initialize_schema: bool) -> Result<(), CoreError> {
-        self.prepare_schema(initialize_schema)?;
+    fn finish_open(&mut self, initialize_schema: bool, read_only: bool) -> Result<(), CoreError> {
+        self.prepare_schema(initialize_schema, read_only)?;
         self.validate_event_signature_schema()?;
         self.validate_event_sequence_invariant()?;
         // WAL initialization may advance this connection's data_version. The
@@ -1446,7 +1517,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    fn prepare_schema(&self, initialize: bool) -> Result<(), CoreError> {
+    fn prepare_schema(&self, initialize: bool, read_only: bool) -> Result<(), CoreError> {
         self.should_initialize_schema(initialize)
             .and_then(|should_initialize| {
                 if should_initialize {
@@ -1455,8 +1526,15 @@ impl SqliteStore {
                     self.validate_erasure_schema()
                 }
             })
-            .and_then(|()| self.prepare_authority_schema())
-            .and_then(|()| self.prepare_fork_admission_authority_schema())
+            .and_then(|()| {
+                if read_only {
+                    self.validate_authority_schema_and_state()
+                        .and_then(|()| self.validate_fork_admission_authority_schema())
+                } else {
+                    self.prepare_authority_schema()
+                        .and_then(|()| self.prepare_fork_admission_authority_schema())
+                }
+            })
     }
 
     fn should_initialize_schema(&self, initialize: bool) -> Result<bool, CoreError> {
@@ -1714,12 +1792,15 @@ impl SqliteStore {
                  COMMIT;",
             )
             .map_err(Self::into_storage_error)
-            .and_then(|()| self.validate_authority_schema())
-            .and_then(|()| {
-                read_authority_state(&self.conn)
-                    .map(|_| ())
-                    .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
-            })
+            .and_then(|()| self.validate_authority_schema_and_state())
+    }
+
+    fn validate_authority_schema_and_state(&self) -> Result<(), CoreError> {
+        self.validate_authority_schema().and_then(|()| {
+            read_authority_state(&self.conn)
+                .map(|_| ())
+                .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
+        })
     }
 
     fn prepare_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
@@ -1732,6 +1813,7 @@ impl SqliteStore {
                      last_authority_wall_time INTEGER NOT NULL DEFAULT 0
                  );
                  {}
+                 INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);
                  COMMIT;",
                 sqlite_schema_ddl(FORK_ADMISSION_SCHEMA_TABLES)
             ))
@@ -7714,6 +7796,325 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
     }
 }
 
+impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
+    fn claim_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+    ) -> Result<ForkDeliveryClaimOutcomeV1, ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        let tuple = tuple.revalidate()?;
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let result = (|| {
+            if let Some(row) = sqlite_fork_delivery_row(&self.conn, tuple.host_request_id)? {
+                if row.tuple != tuple {
+                    return Err(ForkDeliveryJournalErrorV1::Conflict);
+                }
+                let claim = ForkDeliveryClaimV1 {
+                    tuple,
+                    owner_fence: row.owner_fence,
+                };
+                return Ok(match row.state {
+                    ForkDeliveryStateV1::Pending => ForkDeliveryClaimOutcomeV1::Busy,
+                    state => ForkDeliveryClaimOutcomeV1::Reconcile(claim, state),
+                });
+            }
+            // The guarded UPDATE refuses a missing, exhausted, negative, or
+            // lagging counter, so no separate pre-read is needed.
+            let updated = self
+                .conn
+                .execute(FORK_DELIVERY_ALLOCATE_FENCE_SQL, [])
+                .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+            if updated != 1 {
+                return Err(ForkDeliveryJournalErrorV1::StorageIndeterminate);
+            }
+            let owner_fence = sqlite_fork_delivery_fence_counter(&self.conn)?;
+            sqlite_insert_pending_fork_delivery(&self.conn, tuple, owner_fence)?;
+            Ok(ForkDeliveryClaimOutcomeV1::Owner(ForkDeliveryClaimV1 {
+                tuple,
+                // The guarded UPDATE keeps the counter in 1..=i64::MAX.
+                owner_fence: owner_fence.unsigned_abs(),
+            }))
+        })();
+        finish_fork_delivery_transaction(&self.conn, result)
+    }
+
+    fn cancel_pending_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        let affected = sqlite_delete_pending_fork_delivery(
+            &self.conn,
+            claim.tuple,
+            sqlite_owner_fence(claim.owner_fence)?,
+        )?;
+        if affected == 1 {
+            Ok(())
+        } else {
+            Err(ForkDeliveryJournalErrorV1::Fenced)
+        }
+    }
+
+    fn execute_claimed_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::ForkAuthenticationPolicyV1,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+        let host = self
+            .fork_admission_host_record()
+            .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        let command = verify_command(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            policy,
+            command,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if command.kind() != claim.tuple.kind || command.operation_id() != claim.tuple.operation_id
+        {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        let owner_fence = sqlite_owner_fence(claim.owner_fence)?;
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let result = (|| {
+            sqlite_fork_delivery_row(&self.conn, claim.tuple.host_request_id)?
+                .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Pending))
+                .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
+            let execution = fork_delivery_execution(
+                self.execute_fork_admission_in_transaction(session, command),
+            );
+            match &execution {
+                ForkDeliveryExecutionV1::Committed(_) => sqlite_set_fork_delivery_state(
+                    &self.conn,
+                    claim.tuple,
+                    owner_fence,
+                    ForkDeliveryStateV1::Uncertain,
+                    ForkDeliveryStateV1::Pending,
+                )?,
+                ForkDeliveryExecutionV1::Rejected(_) => {
+                    sqlite_delete_pending_fork_delivery(&self.conn, claim.tuple, owner_fence)?;
+                }
+                // Never commit a transaction whose authority write failed.
+                // Uncertain is recorded in a fresh transaction only after
+                // this complete transaction has rolled back.
+                ForkDeliveryExecutionV1::Uncertain => {
+                    return Err(ForkDeliveryJournalErrorV1::StorageIndeterminate);
+                }
+            }
+            Ok(execution)
+        })();
+        match result {
+            Err(ForkDeliveryJournalErrorV1::StorageIndeterminate) => {
+                sqlite_record_uncertain_after_rollback(&self.conn, claim.tuple, owner_fence)
+            }
+            result => finish_fork_delivery_transaction(&self.conn, result),
+        }
+    }
+
+    fn recover_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+        current_principal_digest: Hash,
+    ) -> Result<ForkAdmissionOperationResultV1, ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        if current_principal_digest == Hash::zero() {
+            return Err(ForkDeliveryJournalErrorV1::InvalidTuple);
+        }
+        let row = sqlite_fork_delivery_row(&self.conn, tuple.host_request_id)?
+            .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+        if row.tuple != tuple {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        if row.state == ForkDeliveryStateV1::Pending {
+            return Err(ForkDeliveryJournalErrorV1::Fenced);
+        }
+        let host = self
+            .fork_admission_host_record()
+            .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        let query = verify_recovery_proof(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            proof,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if query.kind != tuple.kind || query.operation_id != tuple.operation_id {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        let result = self
+            .recover_fork_admission_command(session, proof)
+            .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        sqlite_delivery_result_matches_principal(
+            &self.conn,
+            self.hasher.as_ref(),
+            &result,
+            current_principal_digest,
+        )
+        .then_some(result)
+        .ok_or(ForkDeliveryJournalErrorV1::Corrupt)
+    }
+
+    fn mark_fork_delivery_uncertain(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        sqlite_set_fork_delivery_state(
+            &self.conn,
+            claim.tuple,
+            sqlite_owner_fence(claim.owner_fence)?,
+            ForkDeliveryStateV1::Uncertain,
+            ForkDeliveryStateV1::Uncertain,
+        )
+    }
+
+    fn mark_fork_delivery_delivered(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        sqlite_set_fork_delivery_state(
+            &self.conn,
+            claim.tuple,
+            sqlite_owner_fence(claim.owner_fence)?,
+            ForkDeliveryStateV1::Delivered,
+            ForkDeliveryStateV1::Uncertain,
+        )
+    }
+
+    fn reconcile_fork_delivery_journal(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<Vec<ForkDeliveryTupleV1>, ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT host_request_id, kind, operation_id, state, owner_fence FROM fork_delivery_journal",
+            )
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let mut retained = Vec::new();
+        for row in rows {
+            let (request, kind, operation, state, owner_fence) =
+                row.map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+            let decoded =
+                sqlite_decode_fork_delivery_row(request, kind, operation, state, owner_fence)?;
+            if decoded.state != ForkDeliveryStateV1::Delivered {
+                retained.push(decoded.tuple);
+            }
+        }
+        Ok(retained)
+    }
+
+    fn reconcile_fork_delivery_startup(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+    ) -> Result<ForkDeliveryStartupOutcomeV1, ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        let host = self
+            .fork_admission_host_record()
+            .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        let query = verify_recovery_proof(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            proof,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if query.kind != tuple.kind || query.operation_id != tuple.operation_id {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let result = (|| {
+            let row = sqlite_fork_delivery_row(&self.conn, tuple.host_request_id)?
+                .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+            if row.tuple != tuple || row.state == ForkDeliveryStateV1::Delivered {
+                return Err(ForkDeliveryJournalErrorV1::Fenced);
+            }
+            // Decoded from a positive SQLite INTEGER, so this is lossless.
+            let owner_fence = row.owner_fence.cast_signed();
+            let operation =
+                sqlite_fork_admission_operation(&self.conn, tuple.kind, tuple.operation_id)
+                    .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+            match operation {
+                Some(operation) => {
+                    sqlite_fork_admission_result(&self.conn, self.hasher.as_ref(), &operation)
+                        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+                    sqlite_set_fork_delivery_state(
+                        &self.conn,
+                        tuple,
+                        owner_fence,
+                        ForkDeliveryStateV1::Uncertain,
+                        ForkDeliveryStateV1::Pending,
+                    )?;
+                    Ok(ForkDeliveryStartupOutcomeV1::RetainedUncertain)
+                }
+                None if row.state == ForkDeliveryStateV1::Pending => {
+                    if sqlite_delete_pending_fork_delivery(&self.conn, tuple, owner_fence)? != 1 {
+                        return Err(ForkDeliveryJournalErrorV1::Fenced);
+                    }
+                    Ok(ForkDeliveryStartupOutcomeV1::ReleasedPending)
+                }
+                None => Err(ForkDeliveryJournalErrorV1::Corrupt),
+            }
+        })();
+        finish_fork_delivery_transaction(&self.conn, result)
+    }
+
+    fn purge_expired_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        let affected = self
+            .conn
+            .execute(
+                FORK_DELIVERY_DELETE_DELIVERED_SQL,
+                params![
+                    tuple.host_request_id.as_bytes().as_slice(),
+                    i64::from(tuple.kind.wire()),
+                    tuple.operation_id.as_bytes().as_slice(),
+                    i64::from(ForkDeliveryStateV1::Delivered.to_wire()),
+                ],
+            )
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        if affected == 1 {
+            Ok(())
+        } else {
+            Err(ForkDeliveryJournalErrorV1::Fenced)
+        }
+    }
+}
+
 impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
     fn register_classifier(
         &mut self,
@@ -8601,6 +9002,260 @@ fn finish_fork_event_transaction<T>(
             .execute_batch("ROLLBACK")
             .map(|()| error)
             .map_or(Err(ForkEventAuthorityErrorV1::StorageIndeterminate), Err),
+    }
+}
+
+/// Allocates the next never-reused owner fence, refusing a missing,
+/// exhausted, negative, or lagging counter.
+const FORK_DELIVERY_ALLOCATE_FENCE_SQL: &str = "UPDATE fork_delivery_fence_counter SET last_fence = last_fence + 1 WHERE id = 1 AND last_fence < 9223372036854775807 AND last_fence >= COALESCE((SELECT MAX(owner_fence) FROM fork_delivery_journal), 0)";
+const FORK_DELIVERY_READ_FENCE_SQL: &str =
+    "SELECT last_fence FROM fork_delivery_fence_counter WHERE id = 1";
+const FORK_DELIVERY_INSERT_SQL: &str = "INSERT INTO fork_delivery_journal (host_request_id, kind, operation_id, state, owner_fence) VALUES (?1, ?2, ?3, ?4, ?5)";
+/// Deletes one exact fenced row in state `?5`.
+const FORK_DELIVERY_DELETE_OWNED_SQL: &str = "DELETE FROM fork_delivery_journal WHERE host_request_id = ?1 AND kind = ?2 AND operation_id = ?3 AND owner_fence = ?4 AND state = ?5";
+/// Deletes one exact row in state `?4` regardless of owner.
+const FORK_DELIVERY_DELETE_DELIVERED_SQL: &str = "DELETE FROM fork_delivery_journal WHERE host_request_id = ?1 AND kind = ?2 AND operation_id = ?3 AND state = ?4";
+/// Moves one exact fenced row from state `?6` or `?7` to state `?1`.
+const FORK_DELIVERY_SET_STATE_SQL: &str = "UPDATE fork_delivery_journal SET state = ?1 WHERE host_request_id = ?2 AND kind = ?3 AND operation_id = ?4 AND owner_fence = ?5 AND state IN (?6, ?7)";
+
+fn sqlite_validate_delivery_session(
+    store: &SqliteStore,
+    session: &ForkAdmissionAuthoritySessionV1,
+) -> Result<(), ForkDeliveryJournalErrorV1> {
+    let mut state = read_fork_admission_authority_state(&store.conn)
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+    state.session_identity = store.fork_admission_authority_runtime.session_identity;
+    validate_live_session(&state, session)
+        .then_some(())
+        .ok_or(ForkDeliveryJournalErrorV1::Corrupt)
+}
+
+fn finish_fork_delivery_transaction<T>(
+    conn: &Connection,
+    result: Result<T, ForkDeliveryJournalErrorV1>,
+) -> Result<T, ForkDeliveryJournalErrorV1> {
+    match result {
+        Ok(value) => conn
+            .execute_batch("COMMIT")
+            .map(|()| value)
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate),
+        Err(error) => Err(conn
+            .execute_batch("ROLLBACK")
+            .map_or(ForkDeliveryJournalErrorV1::StorageIndeterminate, |()| error)),
+    }
+}
+
+/// Rolls back a failed FAC1 transaction, then records Uncertain in a fresh one.
+fn sqlite_record_uncertain_after_rollback(
+    conn: &Connection,
+    tuple: ForkDeliveryTupleV1,
+    owner_fence: i64,
+) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+    conn.execute_batch("ROLLBACK")
+        .and_then(|()| conn.execute_batch("BEGIN IMMEDIATE"))
+        .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)
+        .and_then(|()| {
+            let state = sqlite_set_fork_delivery_state(
+                conn,
+                tuple,
+                owner_fence,
+                ForkDeliveryStateV1::Uncertain,
+                ForkDeliveryStateV1::Pending,
+            );
+            finish_fork_delivery_transaction(conn, state)
+        })
+        .map(|()| ForkDeliveryExecutionV1::Uncertain)
+}
+
+fn sqlite_fork_delivery_tuple(
+    host_request_id: Vec<u8>,
+    kind: i64,
+    operation_id: Vec<u8>,
+) -> Result<ForkDeliveryTupleV1, ForkDeliveryJournalErrorV1> {
+    let kind = [
+        ForkAdmissionOperationKindV1::PrincipalOwner,
+        ForkAdmissionOperationKindV1::Fork,
+    ]
+    .into_iter()
+    .find(|candidate| i64::from(candidate.wire()) == kind)
+    .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+    let host_request_id =
+        sqlite_hash(host_request_id).map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+    let operation_id =
+        sqlite_hash(operation_id).map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+    ForkDeliveryTupleV1::new(host_request_id, kind, operation_id)
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)
+}
+
+fn sqlite_decode_fork_delivery_row(
+    host_request_id: Vec<u8>,
+    kind: i64,
+    operation_id: Vec<u8>,
+    state: i64,
+    owner_fence: i64,
+) -> Result<ForkDeliveryRowV1, ForkDeliveryJournalErrorV1> {
+    let tuple = sqlite_fork_delivery_tuple(host_request_id, kind, operation_id)?;
+    let state = u8::try_from(state)
+        .ok()
+        .and_then(ForkDeliveryStateV1::from_wire)
+        .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+    let owner_fence =
+        u64::try_from(owner_fence).map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+    if owner_fence == 0 {
+        return Err(ForkDeliveryJournalErrorV1::Corrupt);
+    }
+    Ok(ForkDeliveryRowV1 {
+        tuple,
+        state,
+        owner_fence,
+    })
+}
+
+fn sqlite_fork_delivery_row(
+    conn: &Connection,
+    host_request_id: Hash,
+) -> Result<Option<ForkDeliveryRowV1>, ForkDeliveryJournalErrorV1> {
+    conn.query_row(
+        "SELECT kind, operation_id, state, owner_fence FROM fork_delivery_journal WHERE host_request_id = ?1",
+        params![host_request_id.as_bytes().as_slice()],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    .and_then(|row| {
+        row.map_or(Ok(None), |(kind, operation_id, state, owner_fence)| {
+            sqlite_decode_fork_delivery_row(
+                host_request_id.as_bytes().to_vec(),
+                kind,
+                operation_id,
+                state,
+                owner_fence,
+            )
+            .map(Some)
+        })
+    })
+}
+
+fn sqlite_fork_delivery_fence_counter(
+    conn: &Connection,
+) -> Result<i64, ForkDeliveryJournalErrorV1> {
+    conn.query_row(FORK_DELIVERY_READ_FENCE_SQL, [], |row| row.get::<_, i64>(0))
+        .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)
+}
+
+/// Inserts a fresh Pending row. Only a UNIQUE/PRIMARY KEY violation is a
+/// tuple conflict; every other failure is an indeterminate write.
+fn sqlite_insert_pending_fork_delivery(
+    conn: &Connection,
+    tuple: ForkDeliveryTupleV1,
+    owner_fence: i64,
+) -> Result<(), ForkDeliveryJournalErrorV1> {
+    conn.execute(
+        FORK_DELIVERY_INSERT_SQL,
+        params![
+            tuple.host_request_id.as_bytes().as_slice(),
+            i64::from(tuple.kind.wire()),
+            tuple.operation_id.as_bytes().as_slice(),
+            i64::from(ForkDeliveryStateV1::Pending.to_wire()),
+            owner_fence,
+        ],
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        if matches!(
+            error.sqlite_error().map(|failure| failure.extended_code),
+            Some(
+                rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                    | rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+            )
+        ) {
+            ForkDeliveryJournalErrorV1::Conflict
+        } else {
+            ForkDeliveryJournalErrorV1::StorageIndeterminate
+        }
+    })
+}
+
+fn sqlite_delete_pending_fork_delivery(
+    conn: &Connection,
+    tuple: ForkDeliveryTupleV1,
+    owner_fence: i64,
+) -> Result<usize, ForkDeliveryJournalErrorV1> {
+    conn.execute(
+        FORK_DELIVERY_DELETE_OWNED_SQL,
+        params![
+            tuple.host_request_id.as_bytes().as_slice(),
+            i64::from(tuple.kind.wire()),
+            tuple.operation_id.as_bytes().as_slice(),
+            owner_fence,
+            i64::from(ForkDeliveryStateV1::Pending.to_wire()),
+        ],
+    )
+    .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)
+}
+
+fn sqlite_owner_fence(owner_fence: u64) -> Result<i64, ForkDeliveryJournalErrorV1> {
+    i64::try_from(owner_fence).map_err(|_| ForkDeliveryJournalErrorV1::Fenced)
+}
+
+/// Moves an exact fenced row to `state` from Uncertain or `also_from`.
+fn sqlite_set_fork_delivery_state(
+    conn: &Connection,
+    tuple: ForkDeliveryTupleV1,
+    owner_fence: i64,
+    state: ForkDeliveryStateV1,
+    also_from: ForkDeliveryStateV1,
+) -> Result<(), ForkDeliveryJournalErrorV1> {
+    let affected = conn
+        .execute(
+            FORK_DELIVERY_SET_STATE_SQL,
+            params![
+                i64::from(state.to_wire()),
+                tuple.host_request_id.as_bytes().as_slice(),
+                i64::from(tuple.kind.wire()),
+                tuple.operation_id.as_bytes().as_slice(),
+                owner_fence,
+                i64::from(ForkDeliveryStateV1::Uncertain.to_wire()),
+                i64::from(also_from.to_wire()),
+            ],
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+    if affected == 1 {
+        Ok(())
+    } else {
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    }
+}
+
+fn sqlite_delivery_result_matches_principal(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    result: &ForkAdmissionOperationResultV1,
+    principal_digest: Hash,
+) -> bool {
+    match result {
+        ForkAdmissionOperationResultV1::PrincipalOwner(binding) => {
+            binding.input().principal_digest == principal_digest
+        }
+        ForkAdmissionOperationResultV1::Fork(receipt) => {
+            sqlite_local_fork_admission(conn, hasher, receipt.child_id)
+                .ok()
+                .and_then(|admission| {
+                    sqlite_fork_principal_owner_binding(
+                        conn,
+                        admission.input().principal_owner_binding_digest,
+                    )
+                    .ok()
+                })
+                .is_some_and(|binding| binding.input().principal_digest == principal_digest)
+        }
     }
 }
 
@@ -11064,20 +11719,6 @@ mod tests {
                 Err(error) => error,
             }
         }
-    }
-
-    #[cfg(unix)]
-    fn running_as_root() -> bool {
-        std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|status| {
-                status
-                    .lines()
-                    .find_map(|line| line.strip_prefix("Uid:\t"))
-                    .and_then(|uids| uids.split_whitespace().next())
-                    .and_then(|uid| uid.parse::<u32>().ok())
-            })
-            == Some(0)
     }
 
     fn read_bounds(max_payload_bytes: usize) -> EventReadBounds {
@@ -15606,12 +16247,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_fails_on_readonly_database_file() {
-        use std::os::unix::fs::PermissionsExt;
-        if running_as_root() {
-            return;
-        }
-
+    fn append_fails_on_readonly_connection() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_owned();
         let tl_id = {
@@ -15619,15 +16255,11 @@ mod tests {
             let tl = store.create_timeline("main").test_ok();
             tl.id()
         };
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).test_ok();
-        let mut store = open_store_at(path.to_str().test_ok());
+        let mut store =
+            fixture_store(SqliteStore::open_read_only(path.to_str().test_ok()).test_ok());
         let entity = EntityId::new();
         let result = store.append(tl_id, &[make_draft(entity, b"x")]);
         assert_storage_err(result.map(|_| ()));
-        drop(std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(0o644),
-        ));
     }
 
     #[test]
@@ -16033,12 +16665,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn fork_fails_on_readonly_database_file() {
-        use std::os::unix::fs::PermissionsExt;
-        if running_as_root() {
-            return;
-        }
-
+    fn fork_fails_on_readonly_connection() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_owned();
         let tl_id = {
@@ -16048,13 +16675,9 @@ mod tests {
             store.append(tl.id(), &[make_draft(entity, b"x")]).test_ok();
             tl.id()
         };
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).test_ok();
-        let mut store = open_store_at(path.to_str().test_ok());
+        let mut store =
+            fixture_store(SqliteStore::open_read_only(path.to_str().test_ok()).test_ok());
         assert_storage_err(store.fork(tl_id, Seq::from_u64(1), "branch").map(|_| ()));
-        drop(std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(0o644),
-        ));
     }
 
     #[test]
@@ -16117,12 +16740,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_update_head_fails_on_readonly_database_file() {
-        use std::os::unix::fs::PermissionsExt;
-        if running_as_root() {
-            return;
-        }
-
+    fn append_update_head_fails_on_readonly_connection() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_owned();
         let (tl_id, entity) = {
@@ -16130,13 +16748,9 @@ mod tests {
             let tl = store.create_timeline("main").test_ok();
             (tl.id(), EntityId::new())
         };
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).test_ok();
-        let mut store = open_store_at(path.to_str().test_ok());
+        let mut store =
+            fixture_store(SqliteStore::open_read_only(path.to_str().test_ok()).test_ok());
         assert_storage_err(store.append(tl_id, &[make_draft(entity, b"x")]).map(|_| ()));
-        drop(std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(0o644),
-        ));
     }
 
     #[test]
@@ -17270,10 +17884,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn create_timeline_with_meta_insert_fails_on_readonly() {
-        if running_as_root() {
-            return;
-        }
+    fn create_timeline_with_meta_insert_fails_on_readonly_connection() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("db.sqlite");
         let path_s = path.to_str().test_ok();
@@ -17281,10 +17892,7 @@ mod tests {
             let mut store = open_store_at(path_s);
             let _ = store.create_timeline("seed").test_ok();
         }
-        let mut perms = std::fs::metadata(&path).test_ok().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&path, perms).test_ok();
-        let mut store = open_store_at(path_s);
+        let mut store = fixture_store(SqliteStore::open_read_only(path_s).test_ok());
         let err = store
             .create_timeline_with_meta(TimelineMeta::root("x"))
             .test_err();
