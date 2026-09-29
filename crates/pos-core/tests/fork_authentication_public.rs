@@ -743,3 +743,41 @@ fn public_registry_round_trips_every_valid_owner_id() -> Result<(), Box<dyn std:
     );
     Ok(())
 }
+
+#[test]
+fn public_decoders_map_every_other_version_to_unsupported() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fap = policy()?.to_canonical_cbor()?;
+    let lar = registry()?.to_canonical_cbor()?;
+    let apr = record()?.to_canonical_cbor()?;
+    let evidence = AuthenticatedPrincipalEvidenceV1::new(record()?, [9; 64])?;
+    let fae = evidence.to_canonical_cbor()?;
+    for version in [
+        Value::Integer(256_u16.into()),
+        Value::Integer(u64::MAX.into()),
+    ] {
+        let with_version = |bytes: &[u8]| {
+            mutate(bytes, |value| {
+                fields(value)?[1] = version.clone();
+                Ok(())
+            })
+        };
+        assert_eq!(
+            ForkAuthenticationPolicyV1::from_canonical_cbor(&with_version(&fap)?),
+            Err(ForkAuthenticationCodecErrorV1::UnsupportedVersion)
+        );
+        assert_eq!(
+            LocalAccountRegistryV1::from_canonical_cbor(&with_version(&lar)?, 1000),
+            Err(ForkAuthenticationCodecErrorV1::UnsupportedVersion)
+        );
+        assert_eq!(
+            AuthenticatedPrincipalRecordV1::from_canonical_cbor(&with_version(&apr)?),
+            Err(ForkAuthenticationCodecErrorV1::UnsupportedVersion)
+        );
+        assert_eq!(
+            AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&with_version(&fae)?),
+            Err(ForkAuthenticationCodecErrorV1::UnsupportedVersion)
+        );
+    }
+    Ok(())
+}

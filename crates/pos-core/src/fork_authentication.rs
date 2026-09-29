@@ -610,7 +610,7 @@ fn header(fields: &[Value], magic: &str) -> Result<(), ForkAuthenticationCodecEr
     if fields[0] != text(magic) {
         return Err(ForkAuthenticationCodecErrorV1::InvalidEncoding);
     }
-    match number::<u8>(&fields[1])? {
+    match number::<u64>(&fields[1])? {
         1 => Ok(()),
         _ => Err(ForkAuthenticationCodecErrorV1::UnsupportedVersion),
     }
