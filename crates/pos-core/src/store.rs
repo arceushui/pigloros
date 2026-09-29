@@ -1972,6 +1972,37 @@ mod tests {
             .to_string()
             .contains("atomic Timeline signing is unavailable"));
 
+        let mut prepare = |_: &crate::TimelineEventEnvelopeInputV1| {
+            Err::<CanonicalBytes, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_prepared_subject_encrypted_timeline_signed(
+                TimelineId::new(),
+                &crate::KeyRegistryStateV1::new(),
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("test.prepared"),
+                    CanonicalBytes::from_static(b"test"),
+                ),
+                PreparedSubjectAppendAuthorizationV1 {
+                    encryption_identity: crate::KeyIdentityV1::new(
+                        "test-owner",
+                        crate::KeyRoleV1::SubjectDataEncryption,
+                        1,
+                    ),
+                    encryption_material_digest: Hash::from_bytes([3; 32]),
+                    signing_identity: identity,
+                    signing_material_digest: Hash::from_bytes([1; 32]),
+                    signing_public_key: crate::PublicKey::from_bytes([2; 32]),
+                },
+                &mut prepare,
+                &mut sign,
+            )
+            .test_err()?;
+        assert!(error
+            .to_string()
+            .contains("prepared subject-encryption Timeline append is unavailable"));
+
         let error = store
             .begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(
                 crate::KeyIdentityV1::new(
