@@ -7866,9 +7866,7 @@ impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
         claim: ForkDeliveryClaimV1,
         command: &ForkAdmissionHostCommandV1,
     ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
-        let host = self
-            .fork_admission_host_record()
-            .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        let host = sqlite_validate_delivery_session(self, session)?;
         let command = verify_command(
             session,
             self.fork_admission_authority_runtime.session_identity,
@@ -7927,7 +7925,7 @@ impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
         proof: &ForkAdmissionRecoveryProofV1,
         current_principal_digest: Hash,
     ) -> Result<ForkAdmissionOperationResultV1, ForkDeliveryJournalErrorV1> {
-        sqlite_validate_delivery_session(self, session)?;
+        let host = sqlite_validate_delivery_session(self, session)?;
         if current_principal_digest == Hash::zero() {
             return Err(ForkDeliveryJournalErrorV1::InvalidTuple);
         }
@@ -7939,9 +7937,6 @@ impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
         if row.state == ForkDeliveryStateV1::Pending {
             return Err(ForkDeliveryJournalErrorV1::Fenced);
         }
-        let host = self
-            .fork_admission_host_record()
-            .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
         let query = verify_recovery_proof(
             session,
             self.fork_admission_authority_runtime.session_identity,
@@ -8000,27 +7995,10 @@ impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
         session: &ForkAdmissionAuthoritySessionV1,
     ) -> Result<Vec<ForkDeliveryTupleV1>, ForkDeliveryJournalErrorV1> {
         sqlite_validate_delivery_session(self, session)?;
-        let mut statement = self
-            .conn
-            .prepare(
-                "SELECT host_request_id, kind, operation_id, state, owner_fence FROM fork_delivery_journal",
-            )
-            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })
+        let rows = sqlite_fork_delivery_scan(&self.conn)
             .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
         let mut retained = Vec::new();
-        for row in rows {
-            let (request, kind, operation, state, owner_fence) =
-                row.map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        for (request, kind, operation, state, owner_fence) in rows {
             let decoded =
                 sqlite_decode_fork_delivery_row(request, kind, operation, state, owner_fence)?;
             if decoded.state != ForkDeliveryStateV1::Delivered {
@@ -8036,10 +8014,7 @@ impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
         tuple: ForkDeliveryTupleV1,
         proof: &ForkAdmissionRecoveryProofV1,
     ) -> Result<ForkDeliveryStartupOutcomeV1, ForkDeliveryJournalErrorV1> {
-        sqlite_validate_delivery_session(self, session)?;
-        let host = self
-            .fork_admission_host_record()
-            .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        let host = sqlite_validate_delivery_session(self, session)?;
         let query = verify_recovery_proof(
             session,
             self.fork_admission_authority_runtime.session_identity,
@@ -9018,16 +8993,40 @@ const FORK_DELIVERY_DELETE_DELIVERED_SQL: &str = "DELETE FROM fork_delivery_jour
 /// Moves one exact fenced row from state `?6` or `?7` to state `?1`.
 const FORK_DELIVERY_SET_STATE_SQL: &str = "UPDATE fork_delivery_journal SET state = ?1 WHERE host_request_id = ?2 AND kind = ?3 AND operation_id = ?4 AND owner_fence = ?5 AND state IN (?6, ?7)";
 
+/// Validates the live session against durable FAH1 and returns that host.
+/// An unreadable authority state and a stale session are both `Corrupt`.
 fn sqlite_validate_delivery_session(
     store: &SqliteStore,
     session: &ForkAdmissionAuthoritySessionV1,
-) -> Result<(), ForkDeliveryJournalErrorV1> {
-    let mut state = read_fork_admission_authority_state(&store.conn)
-        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
-    state.session_identity = store.fork_admission_authority_runtime.session_identity;
-    validate_live_session(&state, session)
-        .then_some(())
+) -> Result<ForkAdmissionHostRecordV1, ForkDeliveryJournalErrorV1> {
+    read_fork_admission_authority_state(&store.conn)
+        .ok()
+        .and_then(|mut state| {
+            state.session_identity = store.fork_admission_authority_runtime.session_identity;
+            state
+                .host
+                .filter(|_| validate_live_session(&state, session))
+        })
         .ok_or(ForkDeliveryJournalErrorV1::Corrupt)
+}
+
+/// One retained journal row as stored: request, kind, operation, state, fence.
+type SqliteForkDeliveryScanRowV1 = (Vec<u8>, i64, Vec<u8>, i64, i64);
+
+/// Reads every journal row with typed columns; any prepare, step, or column
+/// type failure is one `rusqlite` error for the caller to map.
+fn sqlite_fork_delivery_scan(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<SqliteForkDeliveryScanRowV1>> {
+    conn.prepare(
+        "SELECT host_request_id, kind, operation_id, state, owner_fence FROM fork_delivery_journal",
+    )
+    .and_then(|mut statement| {
+        let rows = statement
+            .query_map([], |row| SqliteForkDeliveryScanRowV1::try_from(row))
+            .and_then(Iterator::collect);
+        rows
+    })
 }
 
 fn finish_fork_delivery_transaction<T>(
@@ -9118,14 +9117,7 @@ fn sqlite_fork_delivery_row(
     conn.query_row(
         "SELECT kind, operation_id, state, owner_fence FROM fork_delivery_journal WHERE host_request_id = ?1",
         params![host_request_id.as_bytes().as_slice()],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        },
+        |row| <(i64, Vec<u8>, i64, i64)>::try_from(row),
     )
     .optional()
     .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)

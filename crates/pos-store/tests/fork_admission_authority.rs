@@ -799,6 +799,16 @@ where
         store.recover_fork_delivery(&session, tuple, &proof, Hash::from_bytes([56; 32])),
         Err(ForkDeliveryJournalErrorV1::Corrupt)
     );
+    let foreign_host = ForkHostSigningKeyV1::from_seed([57; 32])?;
+    let foreign_proof = recovery_proof(store, &foreign_host, &session, 2, operation)?;
+    assert_eq!(
+        store.recover_fork_delivery(&session, tuple, &foreign_proof, current_principal),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, tuple, &foreign_proof),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
     Ok(())
 }
 

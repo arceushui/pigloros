@@ -1781,9 +1781,7 @@ impl ForkAdmissionDeliveryJournalPortV1 for MemoryStore {
         proof: &ForkAdmissionRecoveryProofV1,
         current_principal_digest: Hash,
     ) -> Result<ForkAdmissionOperationResultV1, ForkDeliveryJournalErrorV1> {
-        if !validate_live_session(&self.fork_admission_authority, session) {
-            return Err(ForkDeliveryJournalErrorV1::Corrupt);
-        }
+        let host = self.live_fork_delivery_host(session)?;
         if current_principal_digest == Hash::zero() {
             return Err(ForkDeliveryJournalErrorV1::InvalidTuple);
         }
@@ -1798,10 +1796,6 @@ impl ForkAdmissionDeliveryJournalPortV1 for MemoryStore {
         if row.state == ForkDeliveryStateV1::Pending {
             return Err(ForkDeliveryJournalErrorV1::Fenced);
         }
-        let host = self
-            .fork_admission_authority
-            .host
-            .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
         let query = verify_recovery_proof(
             session,
             self.fork_admission_authority.session_identity,
@@ -1874,14 +1868,8 @@ impl ForkAdmissionDeliveryJournalPortV1 for MemoryStore {
         tuple: ForkDeliveryTupleV1,
         proof: &ForkAdmissionRecoveryProofV1,
     ) -> Result<ForkDeliveryStartupOutcomeV1, ForkDeliveryJournalErrorV1> {
-        if !validate_live_session(&self.fork_admission_authority, session) {
-            return Err(ForkDeliveryJournalErrorV1::Corrupt);
-        }
         // Same order as the SQLite adapter: verify FRP1 before the row.
-        let host = self
-            .fork_admission_authority
-            .host
-            .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+        let host = self.live_fork_delivery_host(session)?;
         let query = verify_recovery_proof(
             session,
             self.fork_admission_authority.session_identity,
@@ -1941,6 +1929,17 @@ impl ForkAdmissionDeliveryJournalPortV1 for MemoryStore {
 }
 
 impl MemoryStore {
+    /// Returns the live FAH1 host, or `Corrupt` for a stale session.
+    fn live_fork_delivery_host(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<ForkAdmissionHostRecordV1, ForkDeliveryJournalErrorV1> {
+        self.fork_admission_authority
+            .host
+            .filter(|_| validate_live_session(&self.fork_admission_authority, session))
+            .ok_or(ForkDeliveryJournalErrorV1::Corrupt)
+    }
+
     fn delivery_result_matches_principal(
         &self,
         result: &ForkAdmissionOperationResultV1,
