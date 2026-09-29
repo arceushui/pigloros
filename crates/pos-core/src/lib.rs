@@ -23,6 +23,7 @@ pub mod error;
 pub mod event;
 pub mod executable_budget;
 pub mod fork_admission_authority;
+pub mod fork_admission_command;
 pub mod fork_attribution;
 pub mod fork_authentication;
 pub mod geo_access;
@@ -191,6 +192,13 @@ pub use fork_admission_authority::{
     ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
     MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1, MAX_FORK_ADMISSION_INITIALIZE_CHALLENGE_BYTES_V1,
     MAX_FORK_ADMISSION_OPEN_CHALLENGE_BYTES_V1,
+};
+pub use fork_admission_command::{
+    ForkAdmissionCommandCodecErrorV1, ForkAdmissionHostCommandV1, ForkAdmissionRecoveryCommandV1,
+    ForkAdmissionRecoveryProofV1, ForkCreateCommandV1, PrincipalOwnerCommandV1,
+    MAX_FORK_ADMISSION_HOST_COMMAND_BYTES_V1, MAX_FORK_ADMISSION_RECOVERY_COMMAND_BYTES_V1,
+    MAX_FORK_ADMISSION_RECOVERY_PROOF_BYTES_V1, MAX_FORK_CREATE_COMMAND_BYTES_V1,
+    MAX_PRINCIPAL_OWNER_COMMAND_BYTES_V1,
 };
 pub use fork_attribution::{
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,

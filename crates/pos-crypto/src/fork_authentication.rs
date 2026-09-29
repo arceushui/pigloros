@@ -16,7 +16,12 @@ use pos_core::{
         principal_digest_v1, AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
         ForkAuthenticationPolicyV1,
     },
-    OwnerIdV1, Signature,
+    ForkAdmissionHostCommandV1, ForkAdmissionRecoveryProofV1, OwnerIdV1, PublicKey, Signature,
+    MAX_FORK_ADMISSION_INITIALIZE_CHALLENGE_BYTES_V1 as FAI1_BYTES,
+    MAX_FORK_ADMISSION_OPEN_CHALLENGE_BYTES_V1 as FAO1_BYTES,
+    MAX_FORK_ADMISSION_RECOVERY_COMMAND_BYTES_V1 as FRC1_BYTES,
+    MAX_FORK_CREATE_COMMAND_BYTES_V1 as MAX_FCC1_BYTES,
+    MAX_PRINCIPAL_OWNER_COMMAND_BYTES_V1 as MAX_POC1_BYTES,
 };
 use thiserror::Error;
 use zeroize::Zeroize;
@@ -26,12 +31,6 @@ const INITIALIZE_DOMAIN: &[u8] = b"pigloros/fork-admission-host-bootstrap/v1";
 const OPEN_DOMAIN: &[u8] = b"pigloros/fork-admission-host-open/v1";
 const COMMAND_DOMAIN: &[u8] = b"pigloros/fork-admission-host-command/v1";
 const RECOVERY_DOMAIN: &[u8] = b"pigloros/fork-admission-recovery/v1";
-
-const MAX_POC1_BYTES: usize = 307;
-const MAX_FCC1_BYTES: usize = 411;
-const FAI1_BYTES: usize = 143;
-const FAO1_BYTES: usize = 109;
-const FRC1_BYTES: usize = 110;
 
 // ADR-106 field positions. Every record starts with marker (0) and version (1).
 const FIRST_PAYLOAD_FIELD: usize = 2;
@@ -179,6 +178,55 @@ pub fn verify_fork_admission_open_v1(
             signature.as_bytes(),
         )
     })
+}
+
+/// Verify FAC1 under the durable Fork-admission host key.
+///
+/// This checks only the exact command-purpose signature preimage. The store
+/// still owns session, policy, evidence provenance, expiry, and durable-state
+/// checks.
+///
+/// # Errors
+/// Rejects an invalid host key or a signature that was produced for another
+/// purpose, command, or authentication evidence.
+pub fn verify_fork_admission_host_command_v1(
+    host_key: PublicKey,
+    command: &ForkAdmissionHostCommandV1,
+) -> Result<(), ForkAuthenticationSignatureErrorV1> {
+    VerifyingKey::from_bytes(host_key.as_bytes())
+        .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)
+        .and_then(|key| {
+            verify_signature(
+                &key,
+                COMMAND_DOMAIN,
+                &[command.command_bytes(), command.evidence_bytes()].concat(),
+                command.signature().as_bytes(),
+            )
+        })
+}
+
+/// Verify FRP1 under the durable Fork-admission host key.
+///
+/// This is purpose-limited to lookup-only recovery and cannot validate FAC1.
+/// Store code must still bind the proof to its current authority session.
+///
+/// # Errors
+/// Rejects an invalid host key or a signature made for another domain or
+/// recovery command.
+pub fn verify_fork_admission_recovery_proof_v1(
+    host_key: PublicKey,
+    proof: &ForkAdmissionRecoveryProofV1,
+) -> Result<(), ForkAuthenticationSignatureErrorV1> {
+    VerifyingKey::from_bytes(host_key.as_bytes())
+        .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)
+        .and_then(|key| {
+            verify_signature(
+                &key,
+                RECOVERY_DOMAIN,
+                &proof.command_bytes(),
+                proof.signature().as_bytes(),
+            )
+        })
 }
 
 /// Non-cloneable nonzero-seed Ed25519 material shared by the purpose-limited
