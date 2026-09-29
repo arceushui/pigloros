@@ -356,6 +356,42 @@ fn reject_prepared_callback_failures(
 
     let mut prepared_payload =
         |_: &pos_core::TimelineEventEnvelopeInputV1| Ok(CanonicalBytes::from_static(b"ciphertext"));
+    let mut rejected_sign =
+        |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+            Err(CoreError::Storage("signer failed".to_owned()))
+        };
+    assert!(store
+        .append_prepared_subject_encrypted_timeline_signed(
+            timeline,
+            &registry,
+            draft(b"placeholder"),
+            authorization,
+            &mut prepared_payload,
+            &mut rejected_sign,
+        )
+        .is_err());
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+
+    let mut oversized_payload = |_: &pos_core::TimelineEventEnvelopeInputV1| {
+        Ok(CanonicalBytes::from_vec(vec![
+            7;
+            pos_core::MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1
+                + 1
+        ]))
+    };
+    assert!(store
+        .append_prepared_subject_encrypted_timeline_signed(
+            timeline,
+            &registry,
+            draft(b"placeholder"),
+            authorization,
+            &mut oversized_payload,
+            &mut sign,
+        )
+        .is_err());
+    assert_eq!(sign_calls.get(), 0);
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+
     assert!(store
         .append_prepared_subject_encrypted_timeline_signed(
             timeline,
