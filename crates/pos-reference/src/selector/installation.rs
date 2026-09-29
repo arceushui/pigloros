@@ -10,7 +10,7 @@ mod cases;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Component, Path};
 
 use ciborium::value::Value;
@@ -376,6 +376,7 @@ impl HeldInstallationArtifact {
     }
 
     /// Reads one bounded control artifact from its retained descriptor.
+    /// Positional reads preserve the descriptor cursor across concurrent users.
     ///
     /// # Errors
     /// Returns an error if the caller's bound does not cover the indexed file
@@ -387,11 +388,11 @@ impl HeldInstallationArtifact {
         usize::try_from(self.object.byte_length)
             .map_err(|_| SelectorBoundaryError::ArtifactInvalid)
             .and_then(|capacity| {
-                self.file
-                    .try_clone()
-                    .map_err(|_| SelectorBoundaryError::Io)
-                    .and_then(rewind)
-                    .and_then(|file| read_exact_file(file, self.object.byte_length + 1, capacity))
+                read_exact_file(
+                    PositionalReader::new(&self.file),
+                    self.object.byte_length + 1,
+                    capacity,
+                )
             })
     }
 }
@@ -716,27 +717,57 @@ fn read_complete_file(file: &File, maximum: u64) -> Result<Vec<u8>, SelectorBoun
         .and_then(|metadata| {
             usize::try_from(metadata.len()).map_err(|_| SelectorBoundaryError::ArtifactInvalid)
         })
-        .and_then(|capacity| {
-            file.try_clone()
-                .map_err(|_| SelectorBoundaryError::Io)
-                .and_then(rewind)
-                .and_then(|file| read_exact_file(file, maximum + 1, capacity))
-        })
+        .and_then(|capacity| read_exact_file(PositionalReader::new(file), maximum + 1, capacity))
 }
 
-fn rewind(mut file: File) -> Result<File, SelectorBoundaryError> {
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| SelectorBoundaryError::Io)
-        .map(|_| file)
+// Cloning a File shares its kernel cursor. Keep each bounded read/hash cursor
+// here instead, without reopening the verified inode or serializing callers.
+struct PositionalReader<'a> {
+    file: &'a File,
+    offset: u64,
+}
+
+impl<'a> PositionalReader<'a> {
+    const fn new(file: &'a File) -> Self {
+        Self { file, offset: 0 }
+    }
+}
+
+impl Read for PositionalReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read_at(bytes, self.offset).inspect(|&read| {
+            self.offset += read as u64;
+        })
+    }
+}
+
+impl Seek for PositionalReader<'_> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let offset = match position {
+            SeekFrom::Start(offset) => Ok(offset),
+            SeekFrom::Current(delta) => seek_offset(self.offset, delta),
+            SeekFrom::End(delta) => self
+                .file
+                .metadata()
+                .and_then(|metadata| seek_offset(metadata.len(), delta)),
+        };
+        offset.inspect(|offset| self.offset = *offset)
+    }
+}
+
+fn seek_offset(base: u64, delta: i64) -> std::io::Result<u64> {
+    base.checked_add_signed(delta)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))
 }
 
 fn read_exact_file(
-    file: File,
+    reader: impl Read,
     maximum: u64,
     capacity: usize,
 ) -> Result<Vec<u8>, SelectorBoundaryError> {
     let mut bytes = Vec::with_capacity(capacity);
-    file.take(maximum)
+    reader
+        .take(maximum)
         .read_to_end(&mut bytes)
         .map_err(|_| SelectorBoundaryError::Io)
         .and({
@@ -752,14 +783,11 @@ fn digest_complete_file(
     file: &File,
     expected_length: u64,
 ) -> Result<[u8; 32], SelectorBoundaryError> {
-    file.try_clone()
-        .map_err(|_| SelectorBoundaryError::Io)
-        .and_then(rewind)
-        .and_then(|file| digest_reader(file, expected_length))
+    digest_reader(PositionalReader::new(file), expected_length)
 }
 
 fn digest_reader(
-    mut reader: File,
+    mut reader: impl Read,
     expected_length: u64,
 ) -> Result<[u8; 32], SelectorBoundaryError> {
     let mut remaining = expected_length;
@@ -802,7 +830,7 @@ pub mod tests {
 
     use std::collections::BTreeMap;
     use std::fs;
-    use std::io::{Seek, Write};
+    use std::io::{Seek, SeekFrom, Write};
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use ciborium::value::Value;
@@ -2158,6 +2186,100 @@ pub mod tests {
     }
 
     #[test]
+    fn held_control_reads_preserve_the_shared_descriptor_cursor() -> TestResult {
+        let artifact = held_artifact(0, [9; 32], b"immutable control record")?;
+        let mut cursor = artifact.file();
+        for offset in [1, 7, 99] {
+            cursor.seek(SeekFrom::Start(offset))?;
+            assert_eq!(artifact.read_control(24)?, b"immutable control record");
+            assert_eq!(cursor.stream_position()?, offset);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_held_control_reads_return_complete_independent_records() -> TestResult {
+        let bytes: Vec<_> = (0_u8..=255).cycle().take(8192).collect();
+        let artifact = held_artifact(0, [9; 32], &bytes)?;
+        let mut cursor = artifact.file();
+        cursor.seek(SeekFrom::Start(17))?;
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| -> TestResult {
+            let readers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| -> Result<(), SelectorBoundaryError> {
+                        barrier.wait();
+                        for _ in 0..64 {
+                            assert_eq!(artifact.read_control(8192)?, bytes);
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            for reader in readers {
+                reader.join().map_err(|_| "control reader panicked")??;
+            }
+            Ok(())
+        })?;
+        assert_eq!(cursor.stream_position()?, 17);
+        Ok(())
+    }
+
+    #[test]
+    fn held_control_reads_reject_changed_length_and_unreadable_descriptors() -> TestResult {
+        let artifact = held_artifact(0, [9; 32], b"abc")?;
+        artifact.file().set_len(2)?;
+        assert_eq!(
+            artifact.read_control(3),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+        artifact.file().set_len(4)?;
+        assert_eq!(
+            artifact.read_control(3),
+            Err(SelectorBoundaryError::ArtifactInvalid)
+        );
+
+        // The retained production file is read-only. A write-only replacement
+        // injects an I/O failure without closing/reusing a raw descriptor.
+        let temporary = tempfile::NamedTempFile::new()?;
+        let unreadable = HeldInstallationArtifact {
+            file: fs::OpenOptions::new().write(true).open(temporary.path())?,
+            object: artifact.object,
+        };
+        assert_eq!(unreadable.read_control(3), Err(SelectorBoundaryError::Io));
+        Ok(())
+    }
+
+    #[test]
+    fn positional_seek_keeps_its_own_offset_and_rejects_invalid_positions() -> TestResult {
+        let artifact = held_artifact(0, [9; 32], b"abcdef")?;
+        let mut shared = artifact.file();
+        shared.seek(SeekFrom::Start(2))?;
+        let mut reader = PositionalReader::new(artifact.file());
+        let mut bytes = [0; 2];
+        reader.read_exact(&mut bytes)?;
+        assert_eq!(bytes, *b"ab");
+        assert_eq!(reader.seek(SeekFrom::End(-2))?, 4);
+        reader.read_exact(&mut bytes)?;
+        assert_eq!(bytes, *b"ef");
+        assert_eq!(reader.seek(SeekFrom::Current(-3))?, 3);
+        reader.read_exact(&mut bytes)?;
+        assert_eq!(bytes, *b"de");
+        assert!(reader.seek(SeekFrom::End(-7)).is_err());
+        assert_eq!(reader.stream_position()?, 5);
+        assert!(reader.seek(SeekFrom::Current(-6)).is_err());
+        assert_eq!(reader.stream_position()?, 5);
+        assert_eq!(reader.seek(SeekFrom::Start(u64::MAX))?, u64::MAX);
+        assert!(reader.seek(SeekFrom::Current(1)).is_err());
+        assert_eq!(reader.stream_position()?, u64::MAX);
+        assert_eq!(reader.seek(SeekFrom::Start(0))?, 0);
+        reader.read_exact(&mut bytes)?;
+        assert_eq!(bytes, *b"ab");
+        assert_eq!(shared.stream_position()?, 2);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_mutable_or_linked_installed_state() -> TestResult {
         let temporary = tempfile::tempdir()?;
         write_state(temporary.path())?;
@@ -2379,12 +2501,50 @@ pub mod tests {
     fn retained_sic1_descriptors_reconstruct_the_evr1_selected_case() -> TestResult {
         let corpus = crate::selector_test_support::corpus()?;
         let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        let mut archive = bootstrap
+            .installed()
+            .artifact(InstallationObjectKind(14), request.fixture_bundle_digest)?
+            .file();
+        archive.seek(SeekFrom::Start(17))?;
         let resolved = bootstrap.resolve_installed_case(&request, 0)?;
         assert_eq!(resolved.bundle_digest(), request.fixture_bundle_digest);
         assert_eq!(resolved.profile_digest(), request.profile_digest);
         assert_ne!(resolved.fixture_contract_digest(), [0; 32]);
         assert_eq!(resolved.attempt().case_id, "case-0");
         assert_eq!(resolved.attempt().mode, 0);
+        assert_eq!(archive.stream_position()?, 17);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_case_reconstruction_keeps_the_retained_archive_cursor() -> TestResult {
+        let corpus = crate::selector_test_support::corpus()?;
+        let (request, bootstrap) = installed_case_bootstrap(&corpus)?;
+        let expected = bootstrap.resolve_installed_case(&request, 0)?;
+        let mut archive = bootstrap
+            .installed()
+            .artifact(InstallationObjectKind(14), request.fixture_bundle_digest)?
+            .file();
+        archive.seek(SeekFrom::Start(23))?;
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| -> TestResult {
+            let readers: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| -> Result<(), SelectorBoundaryError> {
+                        barrier.wait();
+                        for _ in 0..2 {
+                            assert_eq!(bootstrap.resolve_installed_case(&request, 0)?, expected);
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            for reader in readers {
+                reader.join().map_err(|_| "case reader panicked")??;
+            }
+            Ok(())
+        })?;
+        assert_eq!(archive.stream_position()?, 23);
         Ok(())
     }
 
