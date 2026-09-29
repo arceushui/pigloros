@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use ciborium::value::Value;
 use pos_core::{
     fork_authentication::{
@@ -9,6 +11,7 @@ use pos_core::{
     },
     Hash, OwnerIdV1, PrincipalRefV1,
 };
+use sha2::{Digest as _, Sha256};
 
 fn principal(value: u8) -> Result<PrincipalRefV1, pos_core::AuthorityErrorV1> {
     PrincipalRefV1::try_new([value; 16], "local.test")
@@ -740,6 +743,83 @@ fn public_registry_round_trips_every_valid_owner_id() -> Result<(), Box<dyn std:
     assert_eq!(
         decoded.lookup_uid(1001).map(|binding| binding.owner),
         Some(owner)
+    );
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> Result<String, std::fmt::Error> {
+    let mut digest = String::new();
+    for byte in Sha256::digest(bytes) {
+        write!(digest, "{byte:02x}")?;
+    }
+    Ok(digest)
+}
+
+fn maximum_registry_bindings(
+    count: u8,
+) -> Result<Vec<LocalAccountBindingV1>, Box<dyn std::error::Error>> {
+    (0..count)
+        .map(|index| -> Result<_, Box<dyn std::error::Error>> {
+            Ok(LocalAccountBindingV1 {
+                uid: 0x0001_0000 + u32::from(index),
+                principal: PrincipalRefV1::try_new([index + 1; 16], "p".repeat(128))?,
+                owner: OwnerIdV1::new("o".repeat(128))?,
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn lar1_maximum_registry_round_trips_and_one_over_rejects() -> Result<(), Box<dyn std::error::Error>>
+{
+    let registry =
+        LocalAccountRegistryV1::new("a".repeat(128), 255, maximum_registry_bindings(64)?, 1000)?;
+    let bytes = registry.to_canonical_cbor()?;
+    // Independently derived: 1 (array) + 5 ("LAR1") + 1 (version) + 130 (adapter ID)
+    // + 2 (assurance) + 2 (row array) + 64 * (1 + 5 UID + 156 PRN1 + 130 Owner).
+    assert_eq!(
+        bytes.len(),
+        1 + 5 + 1 + 130 + 2 + 2 + 64 * (1 + 5 + 156 + 130)
+    );
+    assert_eq!(bytes.len(), 18_829);
+    assert_eq!(
+        &bytes[..8],
+        &[0x85, 0x64, b'L', b'A', b'R', b'1', 0x01, 0x78]
+    );
+    assert_eq!(
+        sha256_hex(&bytes)?,
+        "4860415ec90113b6c6730629f76dcb55d442e88574dc1199f3ac78202a062ce8"
+    );
+    assert_eq!(
+        LocalAccountRegistryV1::from_canonical_cbor(&bytes, 1000)?,
+        registry
+    );
+
+    assert_eq!(
+        LocalAccountRegistryV1::new("a".repeat(128), 255, maximum_registry_bindings(65)?, 1000),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        LocalAccountRegistryV1::new("a".repeat(129), 255, maximum_registry_bindings(64)?, 1000),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+    let extra_row = mutate(&bytes, |value| {
+        let rows = fields(&mut fields(value)?[4])?;
+        let duplicate = rows[63].clone();
+        rows.push(duplicate);
+        Ok(())
+    })?;
+    assert_eq!(
+        LocalAccountRegistryV1::from_canonical_cbor(&extra_row, 1000),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
+    );
+    let long_adapter = mutate(&bytes, |value| {
+        fields(value)?[2] = Value::Text("a".repeat(129));
+        Ok(())
+    })?;
+    assert_eq!(
+        LocalAccountRegistryV1::from_canonical_cbor(&long_adapter, 1000),
+        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
     );
     Ok(())
 }
