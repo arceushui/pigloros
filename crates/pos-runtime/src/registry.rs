@@ -3094,7 +3094,8 @@ impl PluginRegistry {
             .into());
         }
         Self::validate_required_installed_approver(binding)?;
-        self.validate_registration_roles(registration)
+        self.validate_registration_roles(registration)?;
+        Ok(())
     }
 
     fn register_with_verified_output_policy_inner(
