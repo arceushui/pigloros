@@ -265,13 +265,11 @@ impl LocalAccountRegistryV1 {
                 let fields = array(entry, 3)?;
                 let uid = number::<u32>(&fields[0])?;
                 let principal = principal(&fields[1])?;
-                OwnerIdV1::new(string(&fields[2])?)
-                    .map_err(|_| ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
-                    .map(|owner| LocalAccountBindingV1 {
-                        uid,
-                        principal,
-                        owner,
-                    })
+                owner(&fields[2]).map(|owner| LocalAccountBindingV1 {
+                    uid,
+                    principal,
+                    owner,
+                })
             })
             .collect::<Result<_, ForkAuthenticationCodecErrorV1>>()?;
         let registry = Self::new(
@@ -628,6 +626,14 @@ fn string(value: &Value) -> Result<String, ForkAuthenticationCodecErrorV1> {
             valid_text(content)?;
             Ok(content.clone())
         }
+        _ => Err(ForkAuthenticationCodecErrorV1::InvalidEncoding),
+    }
+}
+
+fn owner(value: &Value) -> Result<OwnerIdV1, ForkAuthenticationCodecErrorV1> {
+    match value {
+        Value::Text(content) => OwnerIdV1::new(content.as_str())
+            .map_err(|_| ForkAuthenticationCodecErrorV1::FieldOutOfBounds),
         _ => Err(ForkAuthenticationCodecErrorV1::InvalidEncoding),
     }
 }
