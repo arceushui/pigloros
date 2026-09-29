@@ -143,6 +143,19 @@ fn prepare_timeline_signing_event(
     identity: pos_core::KeyIdentityV1,
     hasher: &dyn pos_core::hasher::Hasher,
 ) -> Result<(Event, pos_core::TimelineEventEnvelopeV1), CoreError> {
+    let (local_seq, input) =
+        prepare_timeline_signing_input(timeline, local_head, inherited_prefix, &draft, identity)?;
+    finalize_timeline_signing_event(local_seq, input, draft.payload, hasher)
+}
+
+/// Finalize immutable first-commit context before a protected payload exists.
+pub(crate) fn prepare_timeline_signing_input(
+    timeline: TimelineId,
+    local_head: pos_core::Seq,
+    inherited_prefix: u64,
+    draft: &EventDraft,
+    identity: pos_core::KeyIdentityV1,
+) -> Result<(pos_core::Seq, pos_core::TimelineEventEnvelopeInputV1), CoreError> {
     let local_seq = local_head
         .as_u64()
         .checked_add(1)
@@ -152,7 +165,8 @@ fn prepare_timeline_signing_event(
         .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
     let event_id = EventId::new();
     let wall_time = draft.wall_time.unwrap_or_else(WallTime::now);
-    let envelope = pos_core::TimelineEventEnvelopeV1::new(
+    Ok((
+        pos_core::Seq::from_u64(local_seq),
         pos_core::TimelineEventEnvelopeInputV1 {
             identity,
             origin_timeline_id: timeline,
@@ -165,30 +179,39 @@ fn prepare_timeline_signing_event(
             causation_id: draft.causation_id,
             correlation_id: draft.correlation_id,
         },
-        &draft.payload,
-    )
-    .map_err(|error| CoreError::Storage(format!("Timeline envelope validation: {error}")))?;
+    ))
+}
+
+/// Bind a prepared payload to finalized first-commit context.
+pub(crate) fn finalize_timeline_signing_event(
+    local_seq: pos_core::Seq,
+    input: pos_core::TimelineEventEnvelopeInputV1,
+    payload: CanonicalBytes,
+    hasher: &dyn pos_core::hasher::Hasher,
+) -> Result<(Event, pos_core::TimelineEventEnvelopeV1), CoreError> {
+    let envelope = pos_core::TimelineEventEnvelopeV1::new(input.clone(), &payload)
+        .map_err(|error| CoreError::Storage(format!("Timeline envelope validation: {error}")))?;
     let payload_hash = envelope.payload_hash();
-    if hasher.hash_payload(&draft.payload) != payload_hash {
+    if hasher.hash_payload(&payload) != payload_hash {
         return Err(CoreError::Storage(
             "store payload hash differs from Timeline envelope BLAKE3 digest".to_owned(),
         ));
     }
     let event = Event {
-        id: event_id,
-        entity: draft.entity,
-        event_type: draft.event_type,
-        payload: draft.payload,
-        wall_time,
-        seq: pos_core::Seq::from_u64(local_seq),
-        causation_id: draft.causation_id,
-        correlation_id: draft.correlation_id,
-        schema_version: draft.schema_version,
+        id: input.event_id,
+        entity: input.entity_id,
+        event_type: input.event_type,
+        payload,
+        wall_time: input.wall_time,
+        seq: local_seq,
+        causation_id: input.causation_id,
+        correlation_id: input.correlation_id,
+        schema_version: pos_core::SchemaVersion::V1,
         signature: None,
         signature_identity: None,
         origin: Some(pos_core::EventOriginV1 {
-            origin_timeline_id: timeline,
-            origin_logical_seq: pos_core::Seq::from_u64(origin_seq),
+            origin_timeline_id: input.origin_timeline_id,
+            origin_logical_seq: input.origin_logical_seq,
         }),
         payload_hash,
     };
