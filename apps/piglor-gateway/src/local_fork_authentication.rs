@@ -37,7 +37,8 @@ use zeroize::{Zeroize, Zeroizing};
 const AUTH_CREDENTIAL_NAME: &str = "pigloros.fork-admission-auth";
 const HOST_CREDENTIAL_NAME: &str = "pigloros.fork-admission-host-signer";
 const FAHK1_BYTES: usize = 42;
-const CREDENTIAL_FORBIDDEN_PERMISSION_MASK: u32 = 0o022;
+const PRIVATE_CREDENTIAL_DIRECTORY_MODE: u32 = 0o700;
+const PRIVATE_CREDENTIAL_FILE_MODE: u32 = 0o400;
 const AUTHENTICATION_LIFETIME_MICROS: u64 = 30_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -63,10 +64,18 @@ impl LocalForkAuthenticationCredentialsV1 {
         directory: &Path,
         service_uid: u32,
     ) -> Result<Self, LocalForkAuthenticationErrorV1> {
-        validate_credential_directory(directory)?;
+        validate_credential_directory(directory, service_uid)?;
         credential_names(directory)?;
-        let auth_bytes = Zeroizing::new(read_credential(directory, AUTH_CREDENTIAL_NAME)?);
-        let host_bytes = Zeroizing::new(read_credential(directory, HOST_CREDENTIAL_NAME)?);
+        let auth_bytes = Zeroizing::new(read_credential(
+            directory,
+            AUTH_CREDENTIAL_NAME,
+            service_uid,
+        )?);
+        let host_bytes = Zeroizing::new(read_credential(
+            directory,
+            HOST_CREDENTIAL_NAME,
+            service_uid,
+        )?);
         parse_credentials(&auth_bytes, &host_bytes, service_uid)
     }
 
@@ -356,13 +365,19 @@ fn parse_binding(value: &Value) -> Result<LocalAccountBindingV1, LocalForkAuthen
     })
 }
 
-fn validate_credential_directory(directory: &Path) -> Result<(), LocalForkAuthenticationErrorV1> {
+fn validate_credential_directory(
+    directory: &Path,
+    service_uid: u32,
+) -> Result<(), LocalForkAuthenticationErrorV1> {
     if !directory.is_absolute() {
         return Err(LocalForkAuthenticationErrorV1::CredentialUnavailable);
     }
     let metadata = fs::symlink_metadata(directory)
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
-    if !metadata.is_dir() || metadata.mode() & CREDENTIAL_FORBIDDEN_PERMISSION_MASK != 0 {
+    if !metadata.is_dir()
+        || metadata.uid() != service_uid
+        || metadata.mode() & 0o777 != PRIVATE_CREDENTIAL_DIRECTORY_MODE
+    {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
     Ok(())
@@ -404,6 +419,7 @@ fn credential_names(directory: &Path) -> Result<(), LocalForkAuthenticationError
 fn read_credential(
     directory: &Path,
     name: &str,
+    service_uid: u32,
 ) -> Result<Vec<u8>, LocalForkAuthenticationErrorV1> {
     let path = directory.join(name);
     OpenOptions::new()
@@ -416,7 +432,8 @@ fn read_credential(
                 .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
                 .and_then(|metadata| {
                     if !metadata.is_file()
-                        || metadata.mode() & CREDENTIAL_FORBIDDEN_PERMISSION_MASK != 0
+                        || metadata.uid() != service_uid
+                        || metadata.mode() & 0o777 != PRIVATE_CREDENTIAL_FILE_MODE
                     {
                         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
                     }
@@ -994,8 +1011,19 @@ mod tests {
     #[test]
     fn credential_filesystem_and_read_faults_fail_closed() {
         let uid = current_uid().max(1);
+        let owner_uid = current_uid();
         let (auth, host) = credential_bytes(uid, [8; 32]);
         let directory = credentials_directory(&auth, &host);
+
+        expect_invalid(validate_credential_directory(
+            directory.path(),
+            owner_uid ^ 1,
+        ));
+        expect_invalid(read_credential(
+            directory.path(),
+            AUTH_CREDENTIAL_NAME,
+            owner_uid ^ 1,
+        ));
 
         expect_unavailable(LocalForkAuthenticationCredentialsV1::load(
             Path::new("relative"),
@@ -1019,11 +1047,43 @@ mod tests {
         ));
         test_ok(fs::set_permissions(
             directory.path(),
+            fs::Permissions::from_mode(0o755),
+        ));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid,
+        ));
+        test_ok(fs::set_permissions(
+            directory.path(),
             fs::Permissions::from_mode(0o700),
         ));
         test_ok(fs::set_permissions(
             directory.path().join(AUTH_CREDENTIAL_NAME),
+            fs::Permissions::from_mode(0o444),
+        ));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid,
+        ));
+        test_ok(fs::set_permissions(
+            directory.path().join(AUTH_CREDENTIAL_NAME),
             fs::Permissions::from_mode(0o400),
+        ));
+        test_ok(fs::set_permissions(
+            directory.path().join(HOST_CREDENTIAL_NAME),
+            fs::Permissions::from_mode(0o644),
+        ));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid,
+        ));
+        test_ok(fs::set_permissions(
+            directory.path().join(HOST_CREDENTIAL_NAME),
+            fs::Permissions::from_mode(0o600),
+        ));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            uid,
         ));
         test_ok(fs::set_permissions(
             directory.path().join(HOST_CREDENTIAL_NAME),
@@ -1064,7 +1124,11 @@ mod tests {
     fn credential_directory_and_file_name_faults_fail_closed() {
         let directory = test_ok(tempfile::tempdir());
         expect_unavailable(credential_names(directory.path()));
-        expect_unavailable(read_credential(directory.path(), AUTH_CREDENTIAL_NAME));
+        expect_unavailable(read_credential(
+            directory.path(),
+            AUTH_CREDENTIAL_NAME,
+            current_uid(),
+        ));
 
         let auth_path = directory.path().join(AUTH_CREDENTIAL_NAME);
         test_ok(fs::write(&auth_path, []));
