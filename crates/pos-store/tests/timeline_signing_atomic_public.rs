@@ -274,17 +274,15 @@ fn reject_prepared_missing_timeline(
         sign_calls.set(sign_calls.get() + 1);
         Ok(Signature::from_bytes([0; 64]))
     };
-    let error = store
-        .append_prepared_subject_encrypted_timeline_signed(
-            missing,
-            &registry,
-            draft(b"placeholder"),
-            authorization,
-            &mut payload,
-            &mut sign,
-        )
-        .expect_err("a missing Timeline must reject prepared append");
-    assert!(matches!(error, CoreError::TimelineNotFound(id) if id == missing));
+    let result = store.append_prepared_subject_encrypted_timeline_signed(
+        missing,
+        &registry,
+        draft(b"placeholder"),
+        authorization,
+        &mut payload,
+        &mut sign,
+    );
+    assert!(matches!(result, Err(CoreError::TimelineNotFound(id)) if id == missing));
     assert_eq!(payload_calls.get(), 0);
     assert_eq!(sign_calls.get(), 0);
     Ok(())
