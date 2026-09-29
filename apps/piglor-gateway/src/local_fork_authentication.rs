@@ -4,14 +4,9 @@
 //! the Owner only through the same protected FACR1 registry. #450 owns all
 //! listener, FAH1, session, command, and durable-authority orchestration.
 
-#![expect(
-    clippy::redundant_pub_crate,
-    reason = "these types must be reachable by the crate-private #450 host, while the credential module remains private to this crate"
-)]
-
 use std::{
     fs::{self, OpenOptions},
-    io::{Cursor, Read},
+    io::{Cursor, Read, Write},
     os::{
         fd::AsFd,
         unix::fs::{MetadataExt as _, OpenOptionsExt as _},
@@ -42,11 +37,11 @@ use zeroize::{Zeroize, Zeroizing};
 const AUTH_CREDENTIAL_NAME: &str = "pigloros.fork-admission-auth";
 const HOST_CREDENTIAL_NAME: &str = "pigloros.fork-admission-host-signer";
 const FAHK1_BYTES: usize = 42;
-const CREDENTIAL_DIRECTORY_MODE: u32 = 0o022;
+const CREDENTIAL_FORBIDDEN_PERMISSION_MASK: u32 = 0o022;
 const AUTHENTICATION_LIFETIME_MICROS: u64 = 30_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub(crate) enum LocalForkAuthenticationErrorV1 {
+pub(super) enum LocalForkAuthenticationErrorV1 {
     #[error("fork admission credential unavailable")]
     CredentialUnavailable,
     #[error("fork admission credential invalid")]
@@ -56,7 +51,7 @@ pub(crate) enum LocalForkAuthenticationErrorV1 {
 }
 
 /// Loaded, purpose-separated authority inputs retained only by the host.
-pub(crate) struct LocalForkAuthenticationCredentialsV1 {
+pub(super) struct LocalForkAuthenticationCredentialsV1 {
     resolver: PrincipalOwnerResolverV1,
     adapter_signer: ForkAuthenticationAdapterSigningKeyV1,
     _host_signer: LocalForkHostSignerV1,
@@ -64,7 +59,7 @@ pub(crate) struct LocalForkAuthenticationCredentialsV1 {
 
 impl LocalForkAuthenticationCredentialsV1 {
     /// Load exactly the two systemd credential names from one protected directory.
-    pub(crate) fn load(
+    pub(super) fn load(
         directory: &Path,
         service_uid: u32,
     ) -> Result<Self, LocalForkAuthenticationErrorV1> {
@@ -76,17 +71,17 @@ impl LocalForkAuthenticationCredentialsV1 {
     }
 
     #[must_use]
-    pub(crate) const fn policy(&self) -> &ForkAuthenticationPolicyV1 {
+    pub(super) const fn policy(&self) -> &ForkAuthenticationPolicyV1 {
         self.resolver.policy()
     }
 
     #[must_use]
-    pub(crate) const fn adapter_public_key(&self) -> [u8; 32] {
+    pub(super) const fn adapter_public_key(&self) -> [u8; 32] {
         self.adapter_signer.public_key()
     }
 
     /// Authenticate a connected pathname Unix peer by its kernel UID only.
-    pub(crate) fn authenticate_peer(
+    pub(super) fn authenticate_peer(
         &self,
         stream: &UnixStream,
     ) -> Result<AuthenticatedUnixPeerV1, LocalForkAuthenticationErrorV1> {
@@ -104,7 +99,7 @@ impl LocalForkAuthenticationCredentialsV1 {
     }
 
     /// Produce one opaque FAE1 from an internally authenticated Unix peer.
-    pub(crate) fn produce(
+    pub(super) fn produce(
         &self,
         peer: AuthenticatedUnixPeerV1,
     ) -> Result<ProducedLocalAuthenticationEvidenceV1, LocalForkAuthenticationErrorV1> {
@@ -145,7 +140,7 @@ impl LocalForkAuthenticationCredentialsV1 {
     }
 
     /// Verify locally produced FAE1 and resolve its Owner from FACR1 only.
-    pub(crate) fn resolve(
+    pub(super) fn resolve(
         &self,
         evidence: ProducedLocalAuthenticationEvidenceV1,
     ) -> Result<ResolvedLocalAuthenticationV1, LocalForkAuthenticationErrorV1> {
@@ -154,7 +149,7 @@ impl LocalForkAuthenticationCredentialsV1 {
 }
 
 /// Host-private Principal-to-Owner resolver over the protected FACR1 registry.
-pub(crate) struct PrincipalOwnerResolverV1 {
+pub(super) struct PrincipalOwnerResolverV1 {
     policy: ForkAuthenticationPolicyV1,
     registry: LocalAccountRegistryV1,
 }
@@ -205,38 +200,38 @@ impl PrincipalOwnerResolverV1 {
 ///
 /// #450 adds the crate-private methods that accept its typed host-derived
 /// commands. The raw purpose-limited signer never crosses this boundary.
-pub(crate) struct LocalForkHostSignerV1 {
+pub(super) struct LocalForkHostSignerV1 {
     _signer: ForkHostSigningKeyV1,
 }
 
 /// Non-cloneable result of one kernel-authenticated Unix connection.
-pub(crate) struct AuthenticatedUnixPeerV1 {
+pub(super) struct AuthenticatedUnixPeerV1 {
     principal: PrincipalRefV1,
 }
 
 impl AuthenticatedUnixPeerV1 {
     #[must_use]
-    pub(crate) const fn principal(&self) -> &PrincipalRefV1 {
+    pub(super) const fn principal(&self) -> &PrincipalRefV1 {
         &self.principal
     }
 }
 
 /// Opaque evidence created only from a kernel-authenticated Unix peer.
-pub(crate) struct ProducedLocalAuthenticationEvidenceV1(AuthenticatedPrincipalEvidenceV1);
+pub(super) struct ProducedLocalAuthenticationEvidenceV1(AuthenticatedPrincipalEvidenceV1);
 
 /// Verified local FAE1 together with the Owner resolved from the same FACR1 row.
-pub(crate) struct ResolvedLocalAuthenticationV1 {
+pub(super) struct ResolvedLocalAuthenticationV1 {
     verified: VerifiedAuthenticatedPrincipalEvidenceV1,
     owner: OwnerIdV1,
 }
 
 impl ResolvedLocalAuthenticationV1 {
     #[must_use]
-    pub(crate) const fn owner(&self) -> OwnerIdV1 {
+    pub(super) const fn owner(&self) -> OwnerIdV1 {
         self.owner
     }
 
-    pub(crate) const fn verified_evidence(&self) -> &VerifiedAuthenticatedPrincipalEvidenceV1 {
+    pub(super) const fn verified_evidence(&self) -> &VerifiedAuthenticatedPrincipalEvidenceV1 {
         &self.verified
     }
 }
@@ -367,7 +362,7 @@ fn validate_credential_directory(directory: &Path) -> Result<(), LocalForkAuthen
     }
     let metadata = fs::symlink_metadata(directory)
         .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
-    if !metadata.is_dir() || metadata.mode() & CREDENTIAL_DIRECTORY_MODE != 0 {
+    if !metadata.is_dir() || metadata.mode() & CREDENTIAL_FORBIDDEN_PERMISSION_MASK != 0 {
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
     Ok(())
@@ -420,7 +415,9 @@ fn read_credential(
             file.metadata()
                 .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)
                 .and_then(|metadata| {
-                    if !metadata.is_file() || metadata.mode() & CREDENTIAL_DIRECTORY_MODE != 0 {
+                    if !metadata.is_file()
+                        || metadata.mode() & CREDENTIAL_FORBIDDEN_PERMISSION_MASK != 0
+                    {
                         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
                     }
                     usize::try_from(metadata.len())
@@ -477,15 +474,20 @@ fn canonical_array(
         return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
     }
     let mut encoded = Zeroizing::new(Vec::new());
-    let result = ciborium::into_writer(value.as_slice(), &mut *encoded);
-    assert!(
-        result.is_ok(),
-        "writing canonical CBOR to a Vec cannot fail"
-    );
-    if encoded.as_slice() != bytes {
-        return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-    }
-    Ok(value)
+    write_canonical_array(value.as_slice(), &mut *encoded).and_then(|()| {
+        if encoded.as_slice() != bytes {
+            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+        }
+        Ok(value)
+    })
+}
+
+fn write_canonical_array(
+    fields: &[Value],
+    writer: &mut impl Write,
+) -> Result<(), LocalForkAuthenticationErrorV1> {
+    ciborium::into_writer(fields, writer)
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
 }
 
 struct SensitiveValues(Vec<Value>);
@@ -1085,9 +1087,21 @@ mod tests {
     fn deterministic_credential_io_and_randomness_faults_fail_closed() {
         struct FailingReader;
 
+        struct FailingWriter;
+
         impl Read for FailingReader {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
                 Err(std::io::Error::other("read fault"))
+            }
+        }
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("write fault"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
             }
         }
 
@@ -1102,6 +1116,10 @@ mod tests {
             finish_credential_read(&mut failing, 1),
             Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
         );
+        expect_invalid(write_canonical_array(
+            &[Value::Integer(1.into())],
+            &mut FailingWriter,
+        ));
         assert_eq!(
             wall_time_from_duration(Err(())),
             Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
