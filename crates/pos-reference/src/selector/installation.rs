@@ -1064,6 +1064,10 @@ pub mod tests {
         ])
     }
 
+    pub(crate) const IMAGE_PROOF: &[u8] =
+        include_bytes!("../../tests/vectors/sim1-pkcs7/proof.der");
+    const IMAGE_CERTIFICATE: &[u8] = include_bytes!("../../tests/vectors/sim1-pkcs7/signer.der");
+
     fn provider_trust(authority: &ProviderAuthority) -> TestResult<Vec<u8>> {
         let keys = ordered(vec![
             trust_key("policy", 1, &authority.policy),
@@ -1080,7 +1084,7 @@ pub mod tests {
                 integer(2),
                 Value::Array(keys),
                 Value::Array(vec![Value::Array(vec![
-                    digest([9; 32]),
+                    digest(Sha256::digest(IMAGE_CERTIFICATE).into()),
                     integer(77),
                     integer(2),
                 ])]),
@@ -1282,6 +1286,7 @@ pub mod tests {
         root_image: &[u8],
         executable: &[u8],
         descriptors: &[PartitionDescriptor; 3],
+        der: &[u8],
     ) -> TestResult<Vec<u8>> {
         let partitions = descriptors
             .iter()
@@ -1297,7 +1302,6 @@ pub mod tests {
                 ]))
             })
             .collect::<TestResult<Vec<_>>>()?;
-        let der = b"pkcs7";
         sign_record(
             "SIM1",
             Value::Array(vec![
@@ -1308,7 +1312,7 @@ pub mod tests {
                 integer(u64::try_from(root_image.len())?),
                 digest(*blake3::hash(root_image).as_bytes()),
                 Value::Array(partitions),
-                digest([22; 32]),
+                Value::Bytes((0_u8..32).collect()),
                 integer(4096),
                 integer(4096),
                 integer(1),
@@ -1318,7 +1322,7 @@ pub mod tests {
                     Value::Bytes(Sha256::digest(der).to_vec()),
                     Value::Bytes(der.to_vec()),
                 ]),
-                digest([9; 32]),
+                digest(Sha256::digest(IMAGE_CERTIFICATE).into()),
                 integer(77),
                 Value::Text("/adapter".to_owned()),
                 digest(*blake3::hash(executable).as_bytes()),
@@ -1444,6 +1448,15 @@ pub mod tests {
         executable: &[u8],
         partitions: &[PartitionDescriptor; 3],
     ) -> TestResult<InstalledSelectorState> {
+        admitted_state_with_proof(root_image, executable, partitions, IMAGE_PROOF)
+    }
+
+    pub(crate) fn admitted_state_with_proof(
+        root_image: &[u8],
+        executable: &[u8],
+        partitions: &[PartitionDescriptor; 3],
+        proof: &[u8],
+    ) -> TestResult<InstalledSelectorState> {
         let authority = provider_authority();
         let trust = provider_trust(&authority)?;
         let trust_digest = signed_record_digest(&trust)?;
@@ -1470,7 +1483,7 @@ pub mod tests {
             host_digest,
         )?;
         let report_digest = signed_record_digest(&report)?;
-        let image = image_manifest(&authority, root_image, executable, partitions)?;
+        let image = image_manifest(&authority, root_image, executable, partitions, proof)?;
         let image_digest = signed_record_digest(&image)?;
         let launch = launch_policy(image_digest)?;
         let launch_digest = signed_record_digest(&launch)?;

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -657,6 +657,7 @@ impl RootSelectorComposition {
                 .and_then(|admitted| {
                     connect_fixed_provider(&admitted).map(|(transport, runtime)| Self {
                         service: RootSelectorService {
+                            admission_time: SystemTime::now,
                             admission: SelectorAdmission::new(admitted, runtime),
                             transport,
                             peer_uid: ROOT_UID,
@@ -993,6 +994,7 @@ impl ProviderExecutor for ProviderTransport {
 }
 
 struct RootSelectorService<T = ProviderTransport> {
+    admission_time: fn() -> SystemTime,
     admission: SelectorAdmission,
     transport: T,
     peer_uid: u32,
@@ -1578,7 +1580,11 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         let io_timeout = Some(Duration::from_millis(resolved.attempt().watchdog_ms));
         stream.set_read_timeout(io_timeout).map_err(io_error)?;
         stream.set_write_timeout(io_timeout).map_err(io_error)?;
-        let Ok((image, launch)) = selected_image_and_launch(admitted, requirement) else {
+        let selected = (self.admission_time)()
+            .duration_since(UNIX_EPOCH)
+            .map_err(artifact_invalid)
+            .and_then(|time| selected_image_and_launch(admitted, requirement, time.as_secs()));
+        let Ok((image, launch)) = selected else {
             return write_policy_error(stream, decoded);
         };
         let Ok(commitment) = admitted.provider().derive_selector_grant_commitment(
@@ -1720,6 +1726,7 @@ fn write_namespace_conflict_terminal(
 fn selected_image_and_launch(
     admitted: &AdmittedSelectorProvider,
     requirement: &crate::evaluator_protocol::SandboxRequirement,
+    admission_time: u64,
 ) -> Result<(AdmittedSandboxImage, LaunchPolicy), SelectorBoundaryError> {
     let installed = admitted.bootstrap().installed();
     read_installed(
@@ -1750,6 +1757,13 @@ fn selected_image_and_launch(
                 executable.file(),
                 executable.object().byte_length(),
             )
+            .map_err(artifact_invalid)
+    })
+    .and_then(|image| {
+        admitted
+            .provider()
+            .verify_image_proof(&image, admission_time)
+            .map(|_| image)
             .map_err(artifact_invalid)
     })
     .and_then(|image| {
@@ -2118,6 +2132,7 @@ mod tests {
             admitted: AdmittedSelectorProvider,
         ) -> TestResult<RootSelectorService<FixedProviderExecutor>> {
             Ok(RootSelectorService {
+                admission_time: fixture_admission_time,
                 admission: SelectorAdmission::for_test(admitted)?,
                 transport: FixedProviderExecutor(RefCell::new(Some(Err(
                     ProviderTransportError::BeforeAdmission,
@@ -2127,6 +2142,58 @@ mod tests {
                 recovery_directory: test_recovery_directory()?,
                 recovery_owner: fs::metadata(".")?.uid(),
             })
+        }
+
+        #[test]
+        fn selector_rejects_invalid_image_proofs_before_provider_execution() -> TestResult {
+            use crate::selector::installation::tests::{admitted_state_with_proof, IMAGE_PROOF};
+
+            let image = gpt_fixture("512-128")?;
+            let partitions = gpt_partitions("512-128", &image)?;
+            let mut bad_signature = IMAGE_PROOF.to_vec();
+            *bad_signature.last_mut().ok_or("proof is empty")? ^= 1;
+            let foreign_signer =
+                include_bytes!("../tests/vectors/sim1-pkcs7/optional-usage-proof.der");
+            for proof in [
+                b"pkcs7".as_slice(),
+                &bad_signature,
+                foreign_signer.as_slice(),
+            ] {
+                let state = admitted_state_with_proof(&image, b"adapter", &partitions, proof)?;
+                let (request, admitted, resolved) = root_selector_fixture_from_state(state)?;
+                let service = service(admitted)?;
+                assert_service_error(
+                    &service,
+                    &request,
+                    resolved.attempt(),
+                    SandboxLocalErrorCode::PolicyUnavailable,
+                )?;
+                assert!(service.transport.0.borrow().is_some());
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn selector_uses_host_time_for_image_certificate_admission() -> TestResult {
+            let clocks: [fn() -> SystemTime; 3] = [
+                || UNIX_EPOCH - Duration::from_secs(1),
+                || UNIX_EPOCH,
+                || UNIX_EPOCH + Duration::from_secs(2_200_000_000),
+            ];
+            for clock in clocks {
+                let (request, admitted, resolved) =
+                    crate::selector::installation::tests::root_selector_fixture()?;
+                let mut service = service(admitted)?;
+                service.admission_time = clock;
+                assert_service_error(
+                    &service,
+                    &request,
+                    resolved.attempt(),
+                    SandboxLocalErrorCode::PolicyUnavailable,
+                )?;
+                assert!(service.transport.0.borrow().is_some());
+            }
+            Ok(())
         }
 
         #[test]
@@ -2525,6 +2592,12 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    const FIXTURE_ADMISSION_TIME: u64 = 1_800_000_000;
+
+    fn fixture_admission_time() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(FIXTURE_ADMISSION_TIME)
+    }
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
     const PRIVILEGED_COMPOSITION_TEST: &str = "PIGLOROS_PRIVILEGED_COMPOSITION_TEST";
@@ -3349,7 +3422,8 @@ mod tests {
             .sandbox_requirement
             .as_ref()
             .ok_or("sandbox requirement missing")?;
-        let (image, launch) = selected_image_and_launch(&admitted, requirement)?;
+        let (image, launch) =
+            selected_image_and_launch(&admitted, requirement, FIXTURE_ADMISSION_TIME)?;
         let commitment = admitted.provider().derive_selector_grant_commitment(
             &image,
             &launch,
@@ -3860,6 +3934,7 @@ mod tests {
         let owner = fs::metadata(".")?.uid();
         let composition = Arc::new(RootSelectorComposition {
             service: RootSelectorService {
+                admission_time: fixture_admission_time,
                 admission: SelectorAdmission::for_test(admitted)?,
                 transport: ProviderTransport::from_path_for_test(&provider_path)?,
                 peer_uid: owner,
@@ -4406,7 +4481,7 @@ mod tests {
         );
         assert_eq!(execute.capability_ids, resolved.attempt().capability_ids);
         assert_eq!(execute.adapter_input, decoded.input_descriptor());
-        let selected = selected_image_and_launch(&admitted, requirement)?;
+        let selected = selected_image_and_launch(&admitted, requirement, FIXTURE_ADMISSION_TIME)?;
         assert_eq!(
             selected.0.manifest().manifest_digest,
             requirement.sim1_digest
@@ -4415,10 +4490,14 @@ mod tests {
 
         let mut missing_image = requirement.clone();
         missing_image.sim1_digest = [0; 32];
-        assert!(selected_image_and_launch(&admitted, &missing_image).is_err());
+        assert!(
+            selected_image_and_launch(&admitted, &missing_image, FIXTURE_ADMISSION_TIME).is_err()
+        );
         let mut missing_policy = requirement.clone();
         missing_policy.lps1_digest = [0; 32];
-        assert!(selected_image_and_launch(&admitted, &missing_policy).is_err());
+        assert!(
+            selected_image_and_launch(&admitted, &missing_policy, FIXTURE_ADMISSION_TIME).is_err()
+        );
         Ok(())
     }
 
@@ -4431,6 +4510,7 @@ mod tests {
         let provider_listener = UnixListener::bind(&provider_path)?;
         let transport = ProviderTransport::from_path_for_test(&provider_path)?;
         let service = RootSelectorService {
+            admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
             transport,
             peer_uid: fs::metadata(".")?.uid(),
@@ -4534,6 +4614,7 @@ mod tests {
             let (request, admitted, resolved) =
                 crate::selector::installation::tests::root_selector_fixture()?;
             let service = RootSelectorService {
+                admission_time: fixture_admission_time,
                 admission: SelectorAdmission::for_test(admitted)?,
                 transport: FixedProviderExecutor(RefCell::new(Some(result))),
                 peer_uid: fs::metadata(".")?.uid(),
@@ -4561,6 +4642,7 @@ mod tests {
             }),
         ])));
         let service = RootSelectorService {
+            admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
             transport,
             peer_uid: fs::metadata(".")?.uid(),
@@ -4593,6 +4675,7 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let release_first = std::sync::Arc::new((Mutex::new(false), Condvar::new()));
         let service = std::sync::Arc::new(RootSelectorService {
+            admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
             transport: OrderedProviderExecutor {
                 first_digest: request.request_digest,
@@ -4668,6 +4751,7 @@ mod tests {
         conflicting.implementation.organization_id = Some("conflicting-owner".to_owned());
         refresh_request_digest(&mut conflicting)?;
         let service = RootSelectorService {
+            admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
             transport: FixedProviderExecutor(RefCell::new(Some(Err(
                 ProviderTransportError::AfterAdmission {
@@ -4702,6 +4786,7 @@ mod tests {
             None,
         );
         let service = RootSelectorService {
+            admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Execution(execution),
@@ -4726,6 +4811,7 @@ mod tests {
             crate::selector::installation::tests::root_selector_fixture()?;
         let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
         let service = RootSelectorService {
+            admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
             transport: FixedProviderExecutor(RefCell::new(Some(Ok(
                 AuthenticatedProviderTerminal::Error(fixture.spe1),
@@ -4758,6 +4844,7 @@ mod tests {
         let _provider_listener = UnixListener::bind(&provider_path)?;
         let owner = fs::metadata(".")?.uid();
         let mut service = RootSelectorService {
+            admission_time: fixture_admission_time,
             admission: SelectorAdmission::for_test(admitted)?,
             transport: ProviderTransport::from_path_for_test(&provider_path)?,
             peer_uid: owner ^ 1,
