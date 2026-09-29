@@ -4639,6 +4639,69 @@ impl EventStore for MemoryStore {
             })?
     }
 
+    fn append_prepared_subject_encrypted_timeline_signed(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        encryption_identity: pos_core::KeyIdentityV1,
+        encryption_material_digest: Hash,
+        signing_identity: pos_core::KeyIdentityV1,
+        signing_material_digest: Hash,
+        signing_public_key: pos_core::PublicKey,
+        prepare_payload: &mut dyn FnMut(
+            &pos_core::TimelineEventEnvelopeInputV1,
+        ) -> Result<pos_core::CanonicalBytes, CoreError>,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &pos_core::CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        let mut registry = self.checked_signing_registry(expected_registry)?;
+        registry
+            .with_encryption_authorization(encryption_identity, encryption_material_digest, || ())
+            .map_err(|error| {
+                CoreError::Storage(format!("subject encryption authorization: {error}"))
+            })?;
+        registry
+            .with_signing_authorization(
+                signing_identity,
+                signing_material_digest,
+                signing_public_key,
+                || (),
+            )
+            .map_err(|error| {
+                CoreError::Storage(format!("Timeline signing authorization: {error}"))
+            })?;
+        let owning = self
+            .get_timeline(timeline)?
+            .ok_or(CoreError::TimelineNotFound(timeline))?;
+        let prefix = owning.meta.fork_point.map_or(0, |(_, at)| at.as_u64());
+        let (seq, input) = crate::prepare_timeline_signing_input(
+            timeline,
+            owning.head,
+            prefix,
+            &draft,
+            signing_identity,
+        )?;
+        let payload = prepare_payload(&input)?;
+        let (mut event, envelope) =
+            crate::finalize_timeline_signing_event(seq, input, payload, self.hasher.as_ref())?;
+        let signature = sign(&mut registry, &envelope, &event.payload)?;
+        crate::verify_new_timeline_signature(
+            signing_public_key,
+            signing_identity,
+            &envelope,
+            &event.payload,
+            &signature,
+        )?;
+        event.signature = Some(signature);
+        event.signature_identity = Some(signing_identity);
+        self.append_committed(timeline, std::slice::from_ref(&event))
+            .map(|()| event)
+    }
+
     fn begin_key_registry_destruction(
         &mut self,
         request: pos_core::KeyDestructionRequestV1,
