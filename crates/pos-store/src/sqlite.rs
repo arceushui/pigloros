@@ -641,12 +641,7 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
                 primary_key: false,
             },
         ],
-        constraints: &[
-            "descriptor_hash blob not null check (length(descriptor_hash) = 32)",
-            "registrar_identifier text not null",
-            "fcs1_cbor blob not null unique",
-            "primary key (descriptor_hash, registrar_identifier)",
-        ],
+        constraints: &["CHECK (length(descriptor_hash) = 32)", "UNIQUE (fcs1_cbor)"],
     },
     SqliteSchemaTable {
         name: "fork_classifier_tables",
@@ -672,9 +667,9 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             },
         ],
         constraints: &[
-            "child_id text primary key",
-            "fct1_digest blob not null unique check (length(fct1_digest) = 32)",
-            "fct1_cbor blob not null unique",
+            "CHECK (length(fct1_digest) = 32)",
+            "UNIQUE (fct1_digest)",
+            "UNIQUE (fct1_cbor)",
         ],
     },
     SqliteSchemaTable {
@@ -701,9 +696,9 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             },
         ],
         constraints: &[
-            "operation_id blob primary key check (length(operation_id) = 32)",
-            "child_id text not null unique",
-            "fcr1_cbor blob not null unique",
+            "CHECK (length(operation_id) = 32)",
+            "UNIQUE (child_id)",
+            "UNIQUE (fcr1_cbor)",
         ],
     },
     SqliteSchemaTable {
@@ -723,10 +718,7 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
                 primary_key: false,
             },
         ],
-        constraints: &[
-            "event_id text primary key",
-            "eor1_cbor blob not null unique",
-        ],
+        constraints: &["UNIQUE (eor1_cbor)"],
     },
     SqliteSchemaTable {
         name: "fork_intervention_admissions",
@@ -745,10 +737,7 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
                 primary_key: false,
             },
         ],
-        constraints: &[
-            "event_id text primary key",
-            "fia1_cbor blob not null unique",
-        ],
+        constraints: &["UNIQUE (fia1_cbor)"],
     },
     SqliteSchemaTable {
         name: "fork_append_operations",
@@ -786,12 +775,10 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             },
         ],
         constraints: &[
-            "operation_id blob primary key check (length(operation_id) = 32)",
-            "child_id text not null",
-            "local_seq integer not null",
-            "event_id text not null unique",
-            "fop1_cbor blob not null unique",
-            "unique(child_id, local_seq)",
+            "CHECK (length(operation_id) = 32)",
+            "UNIQUE (event_id)",
+            "UNIQUE (fop1_cbor)",
+            "UNIQUE (child_id, local_seq)",
         ],
     },
 ];
