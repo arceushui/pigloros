@@ -873,7 +873,7 @@ impl EventOriginRecordV1 {
         encode_timeline(&mut out, value.fork_timeline_id);
         encode_uint(&mut out, value.logical_seq);
         encode_event(&mut out, value.event_id);
-        uint(
+        encode_uint(
             &mut out,
             u64::from(value.classification.origin() == ForkEventOriginKindV1::ExternalInput),
         );
