@@ -22,6 +22,7 @@ pub mod erasure;
 pub mod error;
 pub mod event;
 pub mod executable_budget;
+pub mod fork_admission;
 pub mod fork_admission_authority;
 pub mod fork_admission_command;
 pub mod fork_attribution;
@@ -187,6 +188,11 @@ pub use executable_budget::{
     FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1, MAX_PLUGIN_CPU_RESERVATIONS_V1,
 };
+pub use fork_admission::{
+    ForkAdmissionErrorV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
+    ForkAdmissionReceiptV1, ForkAuthorityOriginV1, PrincipalOwnerBindingInputV1,
+    PrincipalOwnerBindingV1, MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1,
+};
 pub use fork_admission_authority::{
     ForkAdmissionAuthorityCodecErrorV1, ForkAdmissionHostRecordV1,
     ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
@@ -194,8 +200,10 @@ pub use fork_admission_authority::{
     MAX_FORK_ADMISSION_OPEN_CHALLENGE_BYTES_V1,
 };
 pub use fork_admission_command::{
-    ForkAdmissionCommandCodecErrorV1, ForkAdmissionHostCommandV1, ForkAdmissionRecoveryCommandV1,
-    ForkAdmissionRecoveryProofV1, ForkCreateCommandV1, PrincipalOwnerCommandV1,
+    ForkAdmissionCommandCodecErrorV1, ForkAdmissionCommandFactsV1, ForkAdmissionHostCommandV1,
+    ForkAdmissionRecoveryCommandFactsV1, ForkAdmissionRecoveryCommandV1,
+    ForkAdmissionRecoveryProofV1, ForkCreateCommandV1, ForkCreateCommitmentInputV1,
+    PrincipalOwnerCommandV1, PrincipalOwnerCommitmentInputV1,
     MAX_FORK_ADMISSION_HOST_COMMAND_BYTES_V1, MAX_FORK_ADMISSION_RECOVERY_COMMAND_BYTES_V1,
     MAX_FORK_ADMISSION_RECOVERY_PROOF_BYTES_V1, MAX_FORK_CREATE_COMMAND_BYTES_V1,
     MAX_PRINCIPAL_OWNER_COMMAND_BYTES_V1,

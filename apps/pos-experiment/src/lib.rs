@@ -9929,10 +9929,7 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn experiment_branch_fork_fails_on_readonly_database() {
-        if running_as_root() {
-            return;
-        }
+    fn experiment_branch_propagates_sqlite_fork_write_error() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("exp-branch.db");
         let entity = EntityId::new();
@@ -9957,7 +9954,6 @@ mod fault_injection_tests {
         )
         .test_ok();
         let _ = exp.run().test_ok();
-        set_readonly(&path);
         let exp2 = Experiment::new(ExperimentConfig {
             name: "exp-branch-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
@@ -9969,9 +9965,16 @@ mod fault_injection_tests {
             path: path.to_str().test_ok().to_owned(),
         })
         .test_ok();
+        let conn = Connection::open(&path).test_ok();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_fork_insert BEFORE INSERT ON timelines
+             WHEN NEW.parent_id IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'forced fork failure'); END;",
+        )
+        .test_ok();
+        drop(conn);
         let err = exp2.branch("child", store.as_mut());
-        set_writable(&path);
-        assert!(err.is_err());
+        assert!(matches!(err, Err(ExperimentError::Store(_))));
     }
 
     #[test]

@@ -508,6 +508,37 @@ fn command_codecs_reject_noninteger_versions_and_invalid_cbor(
 }
 
 #[test]
+fn opaque_command_equality_uses_the_canonical_envelope() -> Result<(), Box<dyn std::error::Error>> {
+    let principal = PrincipalOwnerCommandV1::from_canonical_cbor(&maximum_poc1()?)?;
+    assert_eq!(principal, principal.clone());
+
+    let fork = ForkCreateCommandV1::from_canonical_cbor(&maximum_fcc1()?)?;
+    assert_eq!(fork, fork.clone());
+
+    let recovery_command = ForkAdmissionRecoveryCommandV1::from_canonical_cbor(&maximum_frc1()?)?;
+    assert_eq!(recovery_command, recovery_command.clone());
+
+    let host = ForkAdmissionHostCommandV1::from_canonical_cbor(&encode(&Value::Array(vec![
+        Value::Text("FAC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(maximum_fcc1()?),
+        Value::Bytes(maximum_fae1()?),
+        bytes(0xaa, 64),
+    ]))?)?;
+    assert_eq!(host, host.clone());
+
+    let recovery_proof =
+        ForkAdmissionRecoveryProofV1::from_canonical_cbor(&encode(&Value::Array(vec![
+            Value::Text("FRP1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(maximum_frc1()?),
+            bytes(0xaa, 64),
+        ]))?)?;
+    assert_eq!(recovery_proof, recovery_proof.clone());
+    Ok(())
+}
+
+#[test]
 fn command_codecs_reject_noncanonical_version_encodings() -> Result<(), Box<dyn std::error::Error>>
 {
     assert_eq!(
