@@ -33,9 +33,9 @@ pub use kernel_cgroup::{
     AttemptLimitEventSource, BoundAttemptCgroup,
 };
 pub use system_bus::{
-    SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted, SystemdTransientUnitTransport,
-    SystemdTransientUnitTransportError, SystemdVerifiedStart, TransientServiceUnitName,
-    TransientServiceUnitNameError,
+    SystemdAttemptUnitObservation, SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted,
+    SystemdTransientUnitTransport, SystemdTransientUnitTransportError, SystemdVerifiedStart,
+    TransientServiceUnitName, TransientServiceUnitNameError,
 };
 pub use transient_unit::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,
