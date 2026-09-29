@@ -129,7 +129,7 @@ fn signatures_cover_literal_adr106_domain_preimages() -> Result<(), Box<dyn std:
         verify_authenticated_principal_evidence_v1(&policy(adapter.public_key())?, evidence)?;
 
     let host = ForkHostSigningKeyV1::from_seed(HOST_SEED)?;
-    let fai1 = encode(&Value::Array(vec![
+    let initialize_bytes = encode(&Value::Array(vec![
         Value::Text("FAI1".to_owned()),
         Value::Integer(1.into()),
         bytes(1, 32),
@@ -140,11 +140,11 @@ fn signatures_cover_literal_adr106_domain_preimages() -> Result<(), Box<dyn std:
     verify_literal_preimage(
         host.public_key(),
         b"pigloros/fork-admission-host-bootstrap/v1",
-        &[&fai1],
-        host.sign_initialize(&fai1)?.as_bytes(),
+        &[&initialize_bytes],
+        host.sign_initialize(&initialize_bytes)?.as_bytes(),
     )?;
 
-    let fao1 = encode(&Value::Array(vec![
+    let open_bytes = encode(&Value::Array(vec![
         Value::Text("FAO1".to_owned()),
         Value::Integer(1.into()),
         bytes(1, 32),
@@ -154,8 +154,8 @@ fn signatures_cover_literal_adr106_domain_preimages() -> Result<(), Box<dyn std:
     verify_literal_preimage(
         host.public_key(),
         b"pigloros/fork-admission-host-open/v1",
-        &[&fao1],
-        host.sign_open(&fao1)?.as_bytes(),
+        &[&open_bytes],
+        host.sign_open(&open_bytes)?.as_bytes(),
     )?;
 
     let evidence_digest = evidence.evidence().digest()?;
@@ -170,11 +170,11 @@ fn signatures_cover_literal_adr106_domain_preimages() -> Result<(), Box<dyn std:
         Value::Bytes(principal_digest.as_bytes().to_vec()),
         Value::Text("owner".to_owned()),
     ]))?;
-    let fae1 = evidence.evidence().to_canonical_cbor()?;
+    let evidence_bytes = evidence.evidence().to_canonical_cbor()?;
     verify_literal_preimage(
         host.public_key(),
         b"pigloros/fork-admission-host-command/v1",
-        &[&poc1, &fae1],
+        &[&poc1, &evidence_bytes],
         host.sign_command(&poc1, &evidence)?.as_bytes(),
     )?;
 
