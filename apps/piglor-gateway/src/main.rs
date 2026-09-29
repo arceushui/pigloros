@@ -446,8 +446,9 @@ async fn serve_with_owntracks_and_fork_admission(
     drop(gateway);
     // The Fork listener always stops; a serve error still takes precedence.
     #[cfg(target_os = "linux")]
-    let serve_result =
-        serve_result.and(fork_listener.map_or(Ok(()), LocalForkAdmissionListenerV1::stop));
+    let fork_stop_result = fork_listener.map_or(Ok(()), LocalForkAdmissionListenerV1::stop);
+    #[cfg(target_os = "linux")]
+    let serve_result = serve_result.and(fork_stop_result);
     finish_run(serve_result, shutdown_result)
 }
 
