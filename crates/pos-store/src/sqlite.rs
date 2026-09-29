@@ -882,7 +882,7 @@ impl SqliteStore {
             })
     }
 
-    /// Register one classifier while holding the SQLite writer lock.
+    /// Register one classifier while holding the `SQLite` writer lock.
     fn register_fork_classifier_locked(
         &self,
         session: &ForkAdmissionAuthoritySessionV1,
@@ -8389,7 +8389,7 @@ fn persist_classified_append(
     .map_err(|error| fork_event_insert_error(&error))
 }
 
-/// Map an INSERT failure: only a SQLite constraint rejection is a `Conflict`.
+/// Map an INSERT failure: only a `SQLite` constraint rejection is a `Conflict`.
 fn fork_event_insert_error(error: &rusqlite::Error) -> ForkEventAuthorityErrorV1 {
     if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
         ForkEventAuthorityErrorV1::Conflict
@@ -9692,7 +9692,7 @@ mod tests {
         Ok(())
     }
 
-    /// Make every INSERT into `table` fail with a non-constraint SQLite error.
+    /// Make every INSERT into `table` fail with a non-constraint `SQLite` error.
     fn inject_non_constraint_insert_failure(
         conn: &Connection,
         table: &str,
