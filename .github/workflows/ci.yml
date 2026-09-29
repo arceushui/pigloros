@@ -474,6 +474,14 @@ jobs:
           cargo llvm-cov report --json --summary-only --show-missing-lines
           --fail-under-lines 99
           --fail-under-regions 99
+      - name: Preserve failed coverage diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-diagnostics-${{ github.sha }}
+          path: ${{ runner.temp }}/coverage.json
+          retention-days: 1
+          if-no-files-found: ignore
       - name: Export LCOV for cargo-crap
         run: cargo llvm-cov report --lcov
           --output-path "${{ runner.temp }}/coverage.lcov"
