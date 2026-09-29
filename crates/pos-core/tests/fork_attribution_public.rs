@@ -136,12 +136,39 @@ fn local_far1_rejects_reserved_import_origin_and_noncanonical_bytes(
         ForkAdmissionRecordV1::from_canonical_cbor(&binary_creator),
         Err(ForkAttributionCodecErrorV1::InvalidEncoding)
     );
-    let mut imported = admission.to_canonical_cbor();
-    let last = imported.len() - 1;
-    imported[last] = 2;
+    let local = admission.to_canonical_cbor();
+    let origin_at = local.len() - 2;
+    assert_eq!(local[origin_at..], [0x81, 0x01]);
+    let mut bare_code_2 = local.clone();
+    bare_code_2[origin_at + 1] = 2;
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&bare_code_2),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    // ADR-099 authority-origin-v1 code 2: [2, bstr .size 32].
+    let mut imported = local[..origin_at].to_vec();
+    imported.extend_from_slice(&[0x82, 0x02, 0x58, 0x20]);
+    imported.extend_from_slice(&[0xab; 32]);
     assert_eq!(
         ForkAdmissionRecordV1::from_canonical_cbor(&imported),
         Err(ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable)
+    );
+    let mut imported_trailing = imported.clone();
+    imported_trailing.push(0);
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&imported_trailing),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    let short_imported = &imported[..imported.len() - 1];
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(short_imported),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    let mut local_with_payload = imported;
+    local_with_payload[origin_at + 1] = 1;
+    assert_eq!(
+        ForkAdmissionRecordV1::from_canonical_cbor(&local_with_payload),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
     );
     let mut noncanonical = admission.to_canonical_cbor();
     noncanonical[6] = 0x18;

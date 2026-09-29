@@ -113,8 +113,12 @@ impl ForkAdmissionRecordV1 {
         uint(&mut out, value.post_fold_tick_boundary);
         hash(&mut out, value.plugin_composition_hash);
         uint(&mut out, u64::from(value.attribution_required));
-        array(&mut out, 1);
-        uint(&mut out, 1);
+        match value.origin {
+            ForkAttributionOriginV1::Local => {
+                array(&mut out, 1);
+                uint(&mut out, 1);
+            }
+        }
         out
     }
 
@@ -146,10 +150,14 @@ impl ForkAdmissionRecordV1 {
         let post_fold_tick_boundary = wire.uint()?;
         let plugin_composition_hash = wire.hash()?;
         let attribution_required = wire.bool()?;
-        wire.array(1)?;
-        let origin = match wire.uint()? {
-            1 => ForkAttributionOriginV1::Local,
-            2 => return Err(ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable),
+        // ADR-099: authority-origin-v1 = [1] / [2, bstr .size 32].
+        let origin = match (wire.head(4)?, wire.uint()?) {
+            (1, 1) => ForkAttributionOriginV1::Local,
+            (2, 2) => {
+                return wire.fixed::<32>().and_then(|_| wire.finish()).and(Err(
+                    ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable,
+                ));
+            }
             _ => return Err(ForkAttributionCodecErrorV1::InvalidEncoding),
         };
         wire.finish()?;
