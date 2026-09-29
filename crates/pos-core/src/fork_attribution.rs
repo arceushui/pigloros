@@ -65,6 +65,36 @@ pub struct ForkAdmissionRecordInputV1 {
     pub origin: ForkAttributionOriginV1,
 }
 
+impl ForkAdmissionRecordInputV1 {
+    const fn cut_coordinates(&self) -> CutCoordinatesV1 {
+        CutCoordinatesV1 {
+            parent_timeline_id: self.parent_timeline_id,
+            fork_timeline_id: self.child_timeline_id,
+            room_revision_descriptor_hash: self.room_revision_descriptor_hash,
+            parent_logical_head: self.parent_logical_head,
+            parent_chain_head_hash: self.parent_chain_head_hash,
+            post_fold_tick_boundary: self.post_fold_tick_boundary,
+            plugin_composition_hash: self.plugin_composition_hash,
+        }
+    }
+}
+
+/// Fork cut coordinates duplicated from `FAR1` into `FRM1`.
+///
+/// This private projection keeps the copy in `from_admission` and the
+/// comparison in `validate_against_admission` over one field list. It is not a
+/// wire type; both records keep their own ADR-099 field order.
+#[derive(Eq, PartialEq)]
+struct CutCoordinatesV1 {
+    parent_timeline_id: TimelineId,
+    fork_timeline_id: TimelineId,
+    room_revision_descriptor_hash: Hash,
+    parent_logical_head: u64,
+    parent_chain_head_hash: Hash,
+    post_fold_tick_boundary: u64,
+    plugin_composition_hash: Hash,
+}
+
 /// Strict portable `FAR1` bytes. This value does not prove host admission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForkAdmissionRecordV1(ForkAdmissionRecordInputV1);
@@ -197,6 +227,20 @@ pub struct ForkReproManifestInputV1 {
     pub final_fork_chain_head_hash: Hash,
 }
 
+impl ForkReproManifestInputV1 {
+    const fn cut_coordinates(&self) -> CutCoordinatesV1 {
+        CutCoordinatesV1 {
+            parent_timeline_id: self.parent_timeline_id,
+            fork_timeline_id: self.fork_timeline_id,
+            room_revision_descriptor_hash: self.room_revision_descriptor_hash,
+            parent_logical_head: self.parent_logical_head,
+            parent_chain_head_hash: self.parent_chain_head_hash,
+            post_fold_tick_boundary: self.post_fold_tick_boundary,
+            plugin_composition_hash: self.plugin_composition_hash,
+        }
+    }
+}
+
 /// Strict portable `FRM1` bytes, without publication authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForkReproManifestV1(ForkReproManifestInputV1);
@@ -217,16 +261,24 @@ impl ForkReproManifestV1 {
         final_fork_logical_head: u64,
         final_fork_chain_head_hash: Hash,
     ) -> Result<Self, ForkAttributionCodecErrorV1> {
-        let record = admission.input();
+        let CutCoordinatesV1 {
+            parent_timeline_id,
+            fork_timeline_id,
+            room_revision_descriptor_hash,
+            parent_logical_head,
+            parent_chain_head_hash,
+            post_fold_tick_boundary,
+            plugin_composition_hash,
+        } = admission.input().cut_coordinates();
         Self::new(ForkReproManifestInputV1 {
-            parent_timeline_id: record.parent_timeline_id,
-            fork_timeline_id: record.child_timeline_id,
+            parent_timeline_id,
+            fork_timeline_id,
             admission_digest: admission.digest(),
-            room_revision_descriptor_hash: record.room_revision_descriptor_hash,
-            parent_logical_head: record.parent_logical_head,
-            parent_chain_head_hash: record.parent_chain_head_hash,
-            post_fold_tick_boundary: record.post_fold_tick_boundary,
-            plugin_composition_hash: record.plugin_composition_hash,
+            room_revision_descriptor_hash,
+            parent_logical_head,
+            parent_chain_head_hash,
+            post_fold_tick_boundary,
+            plugin_composition_hash,
             intervention_sequences,
             final_fork_logical_head,
             final_fork_chain_head_hash,
@@ -236,9 +288,11 @@ impl ForkReproManifestV1 {
     /// Validate exact structural coordinate bounds.
     ///
     /// # Errors
-    /// Rejects invalid coordinates or intervention ordering and bounds.
+    /// Rejects invalid coordinates, a post-fold Tick Boundary unequal to the
+    /// parent cut, or intervention ordering and bounds.
     pub fn new(input: ForkReproManifestInputV1) -> Result<Self, ForkAttributionCodecErrorV1> {
         if input.parent_timeline_id == input.fork_timeline_id
+            || input.post_fold_tick_boundary != input.parent_logical_head
             || input.admission_digest == Hash::zero()
             || input.room_revision_descriptor_hash == Hash::zero()
             || input.plugin_composition_hash == Hash::zero()
@@ -275,16 +329,8 @@ impl ForkReproManifestV1 {
         &self,
         admission: &ForkAdmissionRecordV1,
     ) -> Result<(), ForkAttributionCodecErrorV1> {
-        let manifest = &self.0;
-        let record = admission.input();
-        if manifest.admission_digest != admission.digest()
-            || manifest.parent_timeline_id != record.parent_timeline_id
-            || manifest.fork_timeline_id != record.child_timeline_id
-            || manifest.room_revision_descriptor_hash != record.room_revision_descriptor_hash
-            || manifest.parent_logical_head != record.parent_logical_head
-            || manifest.parent_chain_head_hash != record.parent_chain_head_hash
-            || manifest.post_fold_tick_boundary != record.post_fold_tick_boundary
-            || manifest.plugin_composition_hash != record.plugin_composition_hash
+        if self.0.admission_digest != admission.digest()
+            || self.0.cut_coordinates() != admission.input().cut_coordinates()
         {
             return Err(ForkAttributionCodecErrorV1::FieldMismatch);
         }
@@ -447,8 +493,9 @@ impl SignedForkReproManifestV1 {
     pub const fn signature(&self) -> Signature {
         self.signature
     }
-    /// Replace the mathematical signature after the admission-bound fields
-    /// have been validated. This does not grant publication authority.
+    /// Replace only the mathematical signature, keeping the identity and inner
+    /// manifest unchanged. The new signature is not verified here, and this
+    /// grants neither admission nor publication authority.
     #[must_use]
     pub const fn with_signature(mut self, signature: Signature) -> Self {
         self.signature = signature;

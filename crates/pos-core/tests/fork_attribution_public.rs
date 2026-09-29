@@ -366,6 +366,13 @@ fn manifest_constructor_and_decoder_enforce_bounds() -> Result<(), Box<dyn std::
         ForkReproManifestV1::new(upper_bound),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
     );
+    // ADR-099: post-fold Tick Boundary must equal the parent cut.
+    let mut tick = valid.clone();
+    tick.post_fold_tick_boundary += 1;
+    assert_eq!(
+        ForkReproManifestV1::new(tick),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
     let mut too_many = valid;
     too_many.parent_logical_head = 0;
     too_many.post_fold_tick_boundary = 0;
