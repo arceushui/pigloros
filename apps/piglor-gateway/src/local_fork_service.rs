@@ -97,14 +97,14 @@ fn start_with_credentials(
     socket_path: &Path,
 ) -> io::Result<LocalForkAdmissionListenerV1> {
     let store = SqliteStore::open(sqlite_path).map_err(io::Error::other)?;
-    let mut coordinator =
-        LocalForkAdmissionCoordinatorV1::open(store, credentials).map_err(io::Error::other)?;
-    coordinator.reconcile_startup().map_err(io::Error::other)?;
-    let listener = bind_pathname_listener(socket_path)?;
-    listener.set_nonblocking(true)?;
+    let mut coordinator = LocalForkAdmissionCoordinatorV1::open(store, credentials)
+        .and_then(|mut coordinator| coordinator.reconcile_startup().map(|()| coordinator))
+        .map_err(io::Error::other)?;
+    let listener = bind_pathname_listener(socket_path)
+        .and_then(|listener| listener.set_nonblocking(true).map(|()| listener))?;
     let stopping = Arc::new(AtomicBool::new(false));
     let worker_stopping = Arc::clone(&stopping);
-    let worker = thread::Builder::new()
+    thread::Builder::new()
         .name("piglor-fork-admission".to_owned())
         .spawn(move || {
             while !worker_stopping.load(Ordering::Acquire) {
@@ -115,12 +115,12 @@ fn start_with_credentials(
                 }
             }
         })
-        .map_err(io::Error::other)?;
-    Ok(LocalForkAdmissionListenerV1 {
-        stopping,
-        worker: Some(worker),
-        socket_path: Some(socket_path.to_path_buf()),
-    })
+        .map_err(io::Error::other)
+        .map(|worker| LocalForkAdmissionListenerV1 {
+            stopping,
+            worker: Some(worker),
+            socket_path: Some(socket_path.to_path_buf()),
+        })
 }
 
 fn credentials(directory: &Path) -> io::Result<LocalForkAuthenticationCredentialsV1> {

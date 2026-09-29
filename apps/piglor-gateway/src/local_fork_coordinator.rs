@@ -459,6 +459,16 @@ mod tests {
         MarkUncertain,
         ReconcileList,
         ReconcileTuple,
+        ZeroOperation,
+    }
+
+    /// A journal row whose zero operation identity no FRC1 can carry.
+    const fn zero_operation_tuple() -> ForkDeliveryTupleV1 {
+        ForkDeliveryTupleV1 {
+            host_request_id: Hash::from_bytes([1; 32]),
+            kind: ForkAdmissionOperationKindV1::PrincipalOwner,
+            operation_id: Hash::zero(),
+        }
     }
 
     struct FaultingStore {
@@ -533,10 +543,19 @@ mod tests {
             session: &ForkAdmissionAuthoritySessionV1,
             tuple: ForkDeliveryTupleV1,
         ) -> Result<ForkDeliveryClaimOutcomeV1, pos_store::ForkDeliveryJournalErrorV1> {
-            if self.fault == StoreFault::Claim {
-                return Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate);
+            match self.fault {
+                StoreFault::Claim => {
+                    Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate)
+                }
+                StoreFault::ZeroOperation => Ok(ForkDeliveryClaimOutcomeV1::Reconcile(
+                    ForkDeliveryClaimV1 {
+                        tuple: zero_operation_tuple(),
+                        owner_fence: 1,
+                    },
+                    ForkDeliveryStateV1::Uncertain,
+                )),
+                _ => self.inner.claim_fork_delivery(session, tuple),
             }
-            self.inner.claim_fork_delivery(session, tuple)
         }
 
         fn cancel_pending_fork_delivery(
@@ -612,10 +631,13 @@ mod tests {
             &mut self,
             session: &ForkAdmissionAuthoritySessionV1,
         ) -> Result<Vec<ForkDeliveryTupleV1>, pos_store::ForkDeliveryJournalErrorV1> {
-            if self.fault == StoreFault::ReconcileList {
-                return Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate);
+            match self.fault {
+                StoreFault::ReconcileList => {
+                    Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate)
+                }
+                StoreFault::ZeroOperation => Ok(vec![zero_operation_tuple()]),
+                _ => self.inner.reconcile_fork_delivery_journal(session),
             }
-            self.inner.reconcile_fork_delivery_journal(session)
         }
 
         fn reconcile_fork_delivery_startup(
@@ -1150,6 +1172,22 @@ mod tests {
         );
         let (mut writer, _reader) = UnixStream::pair()?;
         restarted.write_prepared(&mut writer, &retry)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn coordinator_withholds_results_when_no_frp1_can_be_signed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut coordinator = fault_coordinator(StoreFault::ZeroOperation)?;
+        assert_eq!(
+            coordinator.reconcile_startup().err(),
+            Some(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        let completed = completed_bind(&coordinator.credentials, 53, 54)?;
+        let prepared = coordinator.handle(completed);
+        assert_eq!(response_code(&prepared), 5);
+        assert!(prepared.claim.is_none());
         Ok(())
     }
 

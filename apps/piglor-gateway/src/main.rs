@@ -180,8 +180,8 @@ fn run_with_args_and_shutdown_with_environment_and_credentials(
                         credential_directory,
                         PROVISION_CREDENTIAL_DIRECTORY,
                     )?,
-                )?;
-                Ok(())
+                )
+                .map_err(Into::into)
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -1475,6 +1475,30 @@ mod erasure_gate_coverage_tests {
         assert!(error
             .to_string()
             .contains("requires SQLite, socket, and credential"));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn fork_admission_startup_fails_before_binding_without_credentials(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("gateway.db");
+        let socket = directory.path().join("fork.sock");
+        let sqlite_path = database.to_string_lossy();
+        let started = serve_with_owntracks_and_fork_admission(
+            "127.0.0.1:0".parse()?,
+            Some(sqlite_path.as_ref()),
+            None,
+            Some(&socket),
+            Some(&directory.path().join("missing-credentials")),
+            async {},
+            LedgerView::default(),
+            LedgerWriteMode::Disabled,
+        )
+        .await;
+        assert!(started.is_err());
+        assert!(!socket.exists());
         Ok(())
     }
 

@@ -215,9 +215,9 @@ pub(super) fn bind_pathname_listener(path: &Path) -> io::Result<UnixListener> {
         rustix::process::geteuid().as_raw(),
         rustix::process::getegid().as_raw(),
     )?;
-    let listener = UnixListener::bind(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
-    Ok(listener)
+    UnixListener::bind(path).and_then(|listener| {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o660)).map(|()| listener)
+    })
 }
 
 /// The pre-existing parent grants only the admission-client group pathname
@@ -651,6 +651,11 @@ mod tests {
                 Value::Text("FAL1".to_owned()),
                 Value::Integer(1.into()),
                 Value::Array(vec![Value::Integer(3.into())]),
+            ]),
+            Value::Array(vec![
+                Value::Text("FAL1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Array(vec![Value::Integer(1.into()), Value::Bytes(vec![1; 31])]),
             ]),
         ];
         for value in malformed {

@@ -417,19 +417,20 @@ impl LocalForkHostSignerV1 {
         command: &ForkAdmissionRecoveryCommandV1,
     ) -> Result<ForkAdmissionRecoveryProofV1, LocalForkAuthenticationErrorV1> {
         let command = command.to_canonical_cbor();
-        let signature = self
-            .signer
+        self.signer
             .sign_recovery(&command)
-            .map_err(signature_invalid)?;
-        decode_record(
-            vec![
-                Value::Text("FRP1".to_owned()),
-                Value::Integer(1.into()),
-                Value::Bytes(command),
-                Value::Bytes(signature.as_bytes().to_vec()),
-            ],
-            ForkAdmissionRecoveryProofV1::from_canonical_cbor,
-        )
+            .map_err(signature_invalid)
+            .and_then(|signature| {
+                decode_record(
+                    vec![
+                        Value::Text("FRP1".to_owned()),
+                        Value::Integer(1.into()),
+                        Value::Bytes(command),
+                        Value::Bytes(signature.as_bytes().to_vec()),
+                    ],
+                    ForkAdmissionRecoveryProofV1::from_canonical_cbor,
+                )
+            })
     }
 
     fn command(
@@ -437,25 +438,26 @@ impl LocalForkHostSignerV1 {
         command: Vec<u8>,
         authentication: &ResolvedLocalAuthenticationV1,
     ) -> Result<ForkAdmissionHostCommandV1, LocalForkAuthenticationErrorV1> {
-        let signature = self
-            .signer
-            .sign_command(&command, authentication.verified_evidence())
-            .map_err(signature_invalid)?;
-        let evidence = authentication
-            .verified_evidence()
-            .evidence()
-            .to_canonical_cbor()
-            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
-        decode_record(
-            vec![
-                Value::Text("FAC1".to_owned()),
-                Value::Integer(1.into()),
-                Value::Bytes(command),
-                Value::Bytes(evidence),
-                Value::Bytes(signature.as_bytes().to_vec()),
-            ],
-            ForkAdmissionHostCommandV1::from_canonical_cbor,
-        )
+        // Both FAC1 inputs fail closed with the same credential code, so one
+        // mapped arm covers the signature and the FAE1 encoding.
+        let verified = authentication.verified_evidence();
+        self.signer
+            .sign_command(&command, verified)
+            .ok()
+            .zip(verified.evidence().to_canonical_cbor().ok())
+            .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
+            .and_then(|(signature, evidence)| {
+                decode_record(
+                    vec![
+                        Value::Text("FAC1".to_owned()),
+                        Value::Integer(1.into()),
+                        Value::Bytes(command),
+                        Value::Bytes(evidence),
+                        Value::Bytes(signature.as_bytes().to_vec()),
+                    ],
+                    ForkAdmissionHostCommandV1::from_canonical_cbor,
+                )
+            })
     }
 }
 
