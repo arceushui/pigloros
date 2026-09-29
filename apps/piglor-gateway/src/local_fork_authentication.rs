@@ -155,6 +155,49 @@ impl LocalForkAuthenticationCredentialsV1 {
     ) -> Result<ResolvedLocalAuthenticationV1, LocalForkAuthenticationErrorV1> {
         self.resolver.resolve(evidence.0)
     }
+
+    /// Sign one canonical ADR-106 FAI1 challenge through protected host custody.
+    pub(crate) fn sign_initialize(
+        &self,
+        challenge: &CanonicalBytes,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        self._host_signer.sign_initialize(challenge)
+    }
+
+    /// Sign one canonical ADR-106 FAO1 challenge through protected host custody.
+    pub(crate) fn sign_open(
+        &self,
+        challenge: &CanonicalBytes,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        self._host_signer.sign_open(challenge)
+    }
+
+    /// Sign one owner-bound canonical ADR-106 POC1 command through protected custody.
+    pub(crate) fn sign_principal_owner_command(
+        &self,
+        command: &CanonicalBytes,
+        authentication: &ResolvedLocalAuthenticationV1,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        self._host_signer
+            .sign_principal_owner_command(command, authentication)
+    }
+
+    /// Sign one canonical ADR-106 FCC1 command through protected host custody.
+    pub(crate) fn sign_fork_command(
+        &self,
+        command: &CanonicalBytes,
+        authentication: &ResolvedLocalAuthenticationV1,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        self._host_signer.sign_fork_command(command, authentication)
+    }
+
+    /// Sign one canonical ADR-106 FRC1 recovery command through protected custody.
+    pub(crate) fn sign_recovery(
+        &self,
+        command: &CanonicalBytes,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        self._host_signer.sign_recovery(command)
+    }
 }
 
 /// Host-private Principal-to-Owner resolver over the protected FACR1 registry.
@@ -206,11 +249,71 @@ impl PrincipalOwnerResolverV1 {
 }
 
 /// Opaque host-signing custody.
-///
-/// #450 adds the crate-private methods that accept its typed host-derived
-/// commands. The raw purpose-limited signer never crosses this boundary.
 pub(super) struct LocalForkHostSignerV1 {
     _signer: ForkHostSigningKeyV1,
+}
+
+impl LocalForkHostSignerV1 {
+    fn sign_initialize(
+        &self,
+        challenge: &CanonicalBytes,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        self._signer
+            .sign_initialize(challenge.as_slice())
+            .map_err(signature_invalid)
+    }
+
+    fn sign_open(
+        &self,
+        challenge: &CanonicalBytes,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        self._signer
+            .sign_open(challenge.as_slice())
+            .map_err(signature_invalid)
+    }
+
+    fn sign_principal_owner_command(
+        &self,
+        command: &CanonicalBytes,
+        authentication: &ResolvedLocalAuthenticationV1,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        if !principal_owner_matches(command, authentication.owner()) {
+            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+        }
+        self._signer
+            .sign_command(command.as_slice(), authentication.verified_evidence())
+            .map_err(signature_invalid)
+    }
+
+    fn sign_fork_command(
+        &self,
+        command: &CanonicalBytes,
+        authentication: &ResolvedLocalAuthenticationV1,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        self._signer
+            .sign_command(command.as_slice(), authentication.verified_evidence())
+            .map_err(signature_invalid)
+    }
+
+    fn sign_recovery(
+        &self,
+        command: &CanonicalBytes,
+    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        self._signer
+            .sign_recovery(command.as_slice())
+            .map_err(signature_invalid)
+    }
+}
+
+fn principal_owner_matches(command: &CanonicalBytes, owner: OwnerIdV1) -> bool {
+    let mut cursor = Cursor::new(command.as_slice());
+    let value = ciborium::from_reader(&mut cursor);
+    matches!(
+        value,
+        Ok(Value::Array(fields))
+            if cursor.position() == u64::try_from(command.len()).unwrap_or(u64::MAX)
+                && matches!(fields.get(7), Some(Value::Text(candidate)) if candidate == owner.as_str())
+    )
 }
 
 /// Non-cloneable result of one kernel-authenticated Unix connection.
@@ -681,7 +784,7 @@ mod tests {
 
     use super::*;
     use ciborium::value::Value;
-    use pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1;
+    use pos_core::fork_authentication::{principal_digest_v1, ForkAuthenticationAdapterPolicyV1};
 
     fn test_ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
         value.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
@@ -800,6 +903,135 @@ mod tests {
             return Err("credential fixture must be an array");
         };
         Ok(fields)
+    }
+
+    fn loaded_credentials() -> LocalForkAuthenticationCredentialsV1 {
+        let (auth, host) = credential_bytes(mapped_uid(), [8; 32]);
+        let directory = credentials_directory(&auth, &host);
+        test_ok(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            current_uid(),
+        ))
+    }
+
+    fn resolved_authentication(
+        credentials: &LocalForkAuthenticationCredentialsV1,
+    ) -> ResolvedLocalAuthenticationV1 {
+        let peer = AuthenticatedUnixPeerV1 {
+            principal: binding(mapped_uid()).principal,
+        };
+        let evidence = test_ok(credentials.produce_with(peer, || Ok(1), || Ok([1; 32])));
+        test_ok(credentials.resolve(evidence))
+    }
+
+    fn host_signer() -> ForkHostSigningKeyV1 {
+        test_ok(ForkHostSigningKeyV1::from_seed([8; 32]))
+    }
+
+    #[test]
+    fn protected_host_signer_accepts_only_typed_adr106_proofs() {
+        let credentials = loaded_credentials();
+        let signer = host_signer();
+        let initialize = CanonicalBytes::from_vec(encode(&Value::Array(vec![
+            Value::Text("FAI1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Bytes(signer.public_key().to_vec()),
+            Value::Bytes(vec![4; 32]),
+        ])));
+        assert_eq!(
+            test_ok(credentials.sign_initialize(&initialize)),
+            test_ok(signer.sign_initialize(initialize.as_slice()))
+        );
+
+        let open = CanonicalBytes::from_vec(encode(&Value::Array(vec![
+            Value::Text("FAO1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Bytes(vec![3; 32]),
+        ])));
+        assert_eq!(
+            test_ok(credentials.sign_open(&open)),
+            test_ok(signer.sign_open(open.as_slice()))
+        );
+
+        let recovery = CanonicalBytes::from_vec(encode(&Value::Array(vec![
+            Value::Text("FRC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![3; 32]),
+        ])));
+        assert_eq!(
+            test_ok(credentials.sign_recovery(&recovery)),
+            test_ok(signer.sign_recovery(recovery.as_slice()))
+        );
+
+        expect_invalid(credentials.sign_initialize(&CanonicalBytes::from_static(b"FAI1")));
+        expect_invalid(credentials.sign_open(&CanonicalBytes::from_static(b"FAO1")));
+        expect_invalid(credentials.sign_recovery(&CanonicalBytes::from_static(b"FRC1")));
+    }
+
+    #[test]
+    fn protected_host_signer_binds_commands_to_resolved_authentication() {
+        let credentials = loaded_credentials();
+        let signer = host_signer();
+        let authentication = resolved_authentication(&credentials);
+        let evidence = authentication.verified_evidence();
+        let evidence_digest = test_ok(evidence.evidence().digest());
+        let principal_digest =
+            test_ok(principal_digest_v1(&evidence.evidence().record().principal));
+        let owner = authentication.owner();
+        let principal_owner = CanonicalBytes::from_vec(encode(&Value::Array(vec![
+            Value::Text("POC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Bytes(vec![3; 32]),
+            Value::Bytes(evidence_digest.as_bytes().to_vec()),
+            Value::Bytes(principal_digest.as_bytes().to_vec()),
+            Value::Text(owner.as_str().to_owned()),
+        ])));
+        assert_eq!(
+            test_ok(credentials.sign_principal_owner_command(&principal_owner, &authentication)),
+            test_ok(signer.sign_command(principal_owner.as_slice(), evidence))
+        );
+
+        let fork = CanonicalBytes::from_vec(encode(&Value::Array(vec![
+            Value::Text("FCC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Bytes(vec![3; 32]),
+            Value::Bytes(evidence_digest.as_bytes().to_vec()),
+            Value::Bytes(principal_digest.as_bytes().to_vec()),
+            Value::Bytes(vec![4; 16]),
+            Value::Integer(5.into()),
+            Value::Integer(5.into()),
+            Value::Bytes(vec![6; 32]),
+            Value::Bytes(vec![7; 32]),
+            Value::Integer(1.into()),
+            Value::Text("child".to_owned()),
+        ])));
+        assert_eq!(
+            test_ok(credentials.sign_fork_command(&fork, &authentication)),
+            test_ok(signer.sign_command(fork.as_slice(), evidence))
+        );
+
+        let wrong_owner = CanonicalBytes::from_vec(encode(&Value::Array(vec![
+            Value::Text("POC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Bytes(vec![3; 32]),
+            Value::Bytes(evidence_digest.as_bytes().to_vec()),
+            Value::Bytes(principal_digest.as_bytes().to_vec()),
+            Value::Text("other-owner".to_owned()),
+        ])));
+        expect_invalid(credentials.sign_principal_owner_command(&wrong_owner, &authentication));
     }
 
     #[test]
