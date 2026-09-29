@@ -20,6 +20,20 @@ macro_rules! output_stderr {
     }};
 }
 
+#[cfg(target_os = "linux")]
+pub mod local_fork_authentication;
+#[cfg(target_os = "linux")]
+pub mod local_fork_coordinator;
+#[cfg(target_os = "linux")]
+pub mod local_fork_listener;
+#[cfg(target_os = "linux")]
+pub mod local_fork_service;
+
+#[cfg(target_os = "linux")]
+use local_fork_service::{
+    provision_local_fork_admission_authority, start_local_fork_admission_listener,
+    LocalForkAdmissionListenerV1,
+};
 use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
@@ -27,9 +41,20 @@ use piglor_ledger::LedgerView;
 use pos_core::ErasureHostErrorV1;
 use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
 use pos_store::StoreConfig;
-use std::{ffi::OsString, future::Future, net::SocketAddr, path::PathBuf, pin::Pin};
+use std::{
+    ffi::OsString,
+    future::Future,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    pin::Pin,
+};
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+const GATEWAY_CREDENTIAL_DIRECTORY: &str = "/run/credentials/piglor-gateway.service";
+const PROVISION_CREDENTIAL_DIRECTORY: &str =
+    "/run/credentials/piglor-gateway-fork-admission-provision.service";
+const FORK_ADMISSION_SOCKET: &str = "/run/pigloros/fork-admission.sock";
 
 fn handle_run_error(e: &dyn std::error::Error) {
     output_stderr!("Error: {e}");
@@ -87,6 +112,20 @@ fn run_with_args_and_shutdown_with_environment(
     shutdown: ShutdownFuture,
     environment: LedgerEnvironment,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_with_args_and_shutdown_with_environment_and_credentials(
+        args,
+        shutdown,
+        environment,
+        std::env::var_os("CREDENTIALS_DIRECTORY"),
+    )
+}
+
+fn run_with_args_and_shutdown_with_environment_and_credentials(
+    args: &[String],
+    shutdown: ShutdownFuture,
+    environment: LedgerEnvironment,
+    credential_directory: Option<OsString>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match args.get(1).map(String::as_str) {
         Some("owntracks") => {
             let output = owntracks::execute(&args[2..])?;
@@ -102,27 +141,72 @@ fn run_with_args_and_shutdown_with_environment(
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(serve_with_owntracks(
+            rt.block_on(serve_with_owntracks_and_fork_admission(
                 serve_args.addr,
                 serve_args.sqlite_path.as_deref(),
                 serve_args.owntracks_owner_key.as_deref(),
+                serve_args
+                    .require_local_fork_authority
+                    .then_some(Path::new(FORK_ADMISSION_SOCKET)),
+                serve_args
+                    .require_local_fork_authority
+                    .then(|| {
+                        credential_directory_from(
+                            credential_directory.clone(),
+                            GATEWAY_CREDENTIAL_DIRECTORY,
+                        )
+                    })
+                    .transpose()?
+                    .as_deref(),
                 shutdown,
                 ledger_view,
                 ledger_write,
             ))
         }
+        Some("provision-local-fork-authority") => {
+            #[cfg(target_os = "linux")]
+            {
+                let Some(sqlite_path) = args.get(2) else {
+                    return Err("provision-local-fork-authority requires an SQLite path".into());
+                };
+                if args.len() != 3 {
+                    return Err(
+                        "provision-local-fork-authority accepts exactly an SQLite path".into(),
+                    );
+                }
+                provision_local_fork_admission_authority(
+                    sqlite_path,
+                    &credential_directory_from(
+                        credential_directory,
+                        PROVISION_CREDENTIAL_DIRECTORY,
+                    )?,
+                )?;
+                Ok(())
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err("fork admission requires Linux Unix peer credentials".into())
+            }
+        }
+        Some("fork-admission-provision") => Err(
+            "fork-admission-provision was replaced by the systemd-only provision-local-fork-authority entry point"
+                .into(),
+        ),
         Some("version") => {
             output_stdout!("piglor-gateway {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         _ => {
-            output_stderr!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path] [--owntracks-owner-key <path>]|version>");
+            output_stderr!("Usage: piglor-gateway <owntracks|serve [addr] [sqlite-path] [--owntracks-owner-key <path>] [--require-local-fork-authority]|provision-local-fork-authority <sqlite-path>|version>");
             output_stderr!("  owntracks pair <sqlite-path> <owner-key-path> --consent-policy <path> <timeline-id> <entity-id>");
             output_stderr!("  owntracks status <sqlite-path>");
             output_stderr!("  owntracks rotate <sqlite-path> <owner-key-path>");
             output_stderr!("  owntracks revoke <sqlite-path>");
             output_stderr!("  serve 127.0.0.1:8080           # Memory store");
             output_stderr!("  serve 127.0.0.1:8080 /tmp/g.db # SQLite store");
+            output_stderr!(
+                "  provision-local-fork-authority is available only to its installed systemd unit"
+            );
             Ok(())
         }
     }
@@ -133,6 +217,7 @@ struct ServeArgs {
     addr: SocketAddr,
     sqlite_path: Option<String>,
     owntracks_owner_key: Option<PathBuf>,
+    require_local_fork_authority: bool,
 }
 
 fn parse_serve_args(
@@ -140,6 +225,7 @@ fn parse_serve_args(
 ) -> Result<ServeArgs, Box<dyn std::error::Error + Send + Sync>> {
     let mut positional = Vec::new();
     let mut owner_key = None;
+    let mut require_local_fork_authority = false;
     let mut index = 0;
     while index < args.len() {
         if args[index] == "--owntracks-owner-key" {
@@ -151,6 +237,12 @@ fn parse_serve_args(
             };
             owner_key = Some(PathBuf::from(path));
             index += 2;
+        } else if args[index] == "--require-local-fork-authority" {
+            if require_local_fork_authority {
+                return Err("Local Fork authority option may be specified once".into());
+            }
+            require_local_fork_authority = true;
+            index += 1;
         } else {
             positional.push(args[index].clone());
             index += 1;
@@ -166,11 +258,33 @@ fn parse_serve_args(
     if owner_key.is_some() && sqlite_path.is_none() {
         return Err("OwnTracks ingress requires an SQLite path".into());
     }
+    if require_local_fork_authority && sqlite_path.is_none() {
+        return Err("Fork admission requires an SQLite path".into());
+    }
     Ok(ServeArgs {
         addr,
         sqlite_path,
         owntracks_owner_key: owner_key,
+        require_local_fork_authority,
     })
+}
+
+fn credential_directory_from(
+    directory: Option<OsString>,
+    expected: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let directory = directory.ok_or("managed Fork authority requires CREDENTIALS_DIRECTORY")?;
+    let directory = PathBuf::from(directory);
+    validate_credential_directory(directory, expected)
+}
+
+fn validate_credential_directory(
+    directory: PathBuf,
+    expected: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    (directory == *expected)
+        .then_some(directory)
+        .ok_or_else(|| "Fork authority credential directory does not match its systemd unit".into())
 }
 
 const fn is_spectator_deployment(addr: SocketAddr) -> bool {
@@ -257,6 +371,29 @@ async fn serve_with_owntracks(
     ledger_view: LedgerView,
     ledger_write: LedgerWriteMode,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_with_owntracks_and_fork_admission(
+        addr,
+        sqlite_path,
+        owntracks_owner_key_path,
+        None,
+        None,
+        shutdown,
+        ledger_view,
+        ledger_write,
+    )
+    .await
+}
+
+async fn serve_with_owntracks_and_fork_admission(
+    addr: SocketAddr,
+    sqlite_path: Option<&str>,
+    owntracks_owner_key_path: Option<&Path>,
+    fork_admission_socket: Option<&Path>,
+    fork_admission_credentials: Option<&Path>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ledger_view: LedgerView,
+    ledger_write: LedgerWriteMode,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = sqlite_path.map_or(StoreConfig::Memory, |path| StoreConfig::Sqlite {
         path: path.to_owned(),
     });
@@ -267,6 +404,24 @@ async fn serve_with_owntracks(
             .map(OwnTracksOwnerKey::load)
             .transpose()?
     };
+    #[cfg(target_os = "linux")]
+    let fork_listener = match (
+        sqlite_path,
+        fork_admission_socket,
+        fork_admission_credentials,
+    ) {
+        (Some(path), Some(socket), Some(credentials)) => Some(start_local_fork_admission_listener(
+            path,
+            credentials,
+            socket,
+        )?),
+        (_, None, None) => None,
+        _ => return Err("Fork admission requires SQLite, socket, and credential directory".into()),
+    };
+    #[cfg(not(target_os = "linux"))]
+    if fork_admission_socket.is_some() || fork_admission_credentials.is_some() {
+        return Err("fork admission requires Linux Unix peer credentials".into());
+    }
     let gateway = gateway_for_startup(sqlite_path, config, owntracks_owner_key.as_ref())?;
     let app = router_for_addr(
         addr,
@@ -289,6 +444,10 @@ async fn serve_with_owntracks(
         .await;
     let shutdown_result = gateway.shutdown().await;
     drop(gateway);
+    // The Fork listener always stops; a serve error still takes precedence.
+    #[cfg(target_os = "linux")]
+    let serve_result =
+        serve_result.and(fork_listener.map_or(Ok(()), LocalForkAdmissionListenerV1::stop));
     finish_run(serve_result, shutdown_result)
 }
 
@@ -379,6 +538,13 @@ mod coverage_tests {
         ])
         .test_err()?;
         assert!(!parse_error.to_string().is_empty());
+
+        let legacy_provision = super::run_with_args(&[
+            "piglor-gateway".to_owned(),
+            "fork-admission-provision".to_owned(),
+        ])
+        .test_err()?;
+        assert!(legacy_provision.to_string().contains("systemd-only"));
 
         let ledger_error = super::run_with_args_and_shutdown_with_environment(
             &[
@@ -480,6 +646,143 @@ mod tests {
         .test_err()?;
         assert!(repeated.to_string().contains("once"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn fork_admission_arguments_require_the_complete_private_configuration(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let missing_sqlite =
+            parse_serve_args(&["--require-local-fork-authority".to_owned()]).test_err()?;
+        assert!(missing_sqlite.to_string().contains("SQLite"));
+
+        let parsed = parse_serve_args(&[
+            "127.0.0.1:0".to_owned(),
+            "/private/store.db".to_owned(),
+            "--require-local-fork-authority".to_owned(),
+        ])
+        .test_ok()?;
+        assert!(parsed.require_local_fork_authority);
+
+        let repeated = parse_serve_args(&[
+            "127.0.0.1:0".to_owned(),
+            "/private/store.db".to_owned(),
+            "--require-local-fork-authority".to_owned(),
+            "--require-local-fork-authority".to_owned(),
+        ])
+        .test_err()?;
+        assert!(repeated.to_string().contains("once"));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_authority_accepts_only_its_fixed_credential_directory() {
+        assert!(validate_credential_directory(
+            PathBuf::from(GATEWAY_CREDENTIAL_DIRECTORY),
+            GATEWAY_CREDENTIAL_DIRECTORY,
+        )
+        .is_ok());
+        assert!(validate_credential_directory(
+            PathBuf::from(PROVISION_CREDENTIAL_DIRECTORY),
+            GATEWAY_CREDENTIAL_DIRECTORY,
+        )
+        .is_err());
+        assert!(validate_credential_directory(
+            PathBuf::from("relative/credentials"),
+            GATEWAY_CREDENTIAL_DIRECTORY,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn provision_command_rejects_direct_or_wrong_unit_credentials_before_database_open(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir().test_ok()?;
+        let database = directory.path().join("gateway.db");
+        let missing_path = run_with_args_and_shutdown_with_environment_and_credentials(
+            &[
+                "piglor-gateway".to_owned(),
+                "provision-local-fork-authority".to_owned(),
+            ],
+            Box::pin(async {}),
+            LedgerEnvironment::default(),
+            None,
+        )
+        .test_err()?;
+        assert!(missing_path.to_string().contains("requires an SQLite path"));
+
+        let args = vec![
+            "piglor-gateway".to_owned(),
+            "provision-local-fork-authority".to_owned(),
+            database.display().to_string(),
+        ];
+        let direct = run_with_args_and_shutdown_with_environment_and_credentials(
+            &args,
+            Box::pin(async {}),
+            LedgerEnvironment::default(),
+            None,
+        )
+        .test_err()?;
+        assert!(direct.to_string().contains("CREDENTIALS_DIRECTORY"));
+        assert!(!database.exists());
+
+        let wrong_unit = run_with_args_and_shutdown_with_environment_and_credentials(
+            &args,
+            Box::pin(async {}),
+            LedgerEnvironment::default(),
+            Some(OsString::from("/run/credentials/not-piglor-gateway")),
+        )
+        .test_err()?;
+        assert!(wrong_unit.to_string().contains("does not match"));
+        assert!(!database.exists());
+
+        let managed_but_unavailable = run_with_args_and_shutdown_with_environment_and_credentials(
+            &args,
+            Box::pin(async {}),
+            LedgerEnvironment::default(),
+            Some(OsString::from(PROVISION_CREDENTIAL_DIRECTORY)),
+        )
+        .test_err()?;
+        assert!(!managed_but_unavailable.to_string().is_empty());
+        assert!(!database.exists());
+
+        let with_path = vec![
+            "piglor-gateway".to_owned(),
+            "provision-local-fork-authority".to_owned(),
+            database.display().to_string(),
+            "/run/credentials/piglor-gateway-fork-admission-provision.service".to_owned(),
+        ];
+        assert!(run_with_args_and_shutdown_with_environment_and_credentials(
+            &with_path,
+            Box::pin(async {}),
+            LedgerEnvironment::default(),
+            None,
+        )
+        .is_err());
+        assert!(!database.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_serve_requires_the_gateway_credential_directory(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir().test_ok()?;
+        let database = directory.path().join("gateway.db");
+        let error = run_with_args_and_shutdown_with_environment_and_credentials(
+            &[
+                "piglor-gateway".to_owned(),
+                "serve".to_owned(),
+                "127.0.0.1:0".to_owned(),
+                database.display().to_string(),
+                "--require-local-fork-authority".to_owned(),
+            ],
+            Box::pin(async {}),
+            LedgerEnvironment::default(),
+            None,
+        )
+        .test_err()?;
+        assert!(error.to_string().contains("CREDENTIALS_DIRECTORY"));
+        assert!(!database.exists());
         Ok(())
     }
 
@@ -1150,6 +1453,81 @@ mod coverage_entrypoints {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod erasure_gate_coverage_tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn fork_admission_startup_rejects_incomplete_private_configuration(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let error = serve_with_owntracks_and_fork_admission(
+            "127.0.0.1:0".parse()?,
+            Some("/private/gateway.db"),
+            None,
+            Some(std::path::Path::new("/private/fork.sock")),
+            None,
+            async {},
+            LedgerView::default(),
+            LedgerWriteMode::Disabled,
+        )
+        .await
+        .err()
+        .ok_or_else(|| std::io::Error::other("incomplete configuration was accepted"))?;
+        assert!(error
+            .to_string()
+            .contains("requires SQLite, socket, and credential"));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn managed_fork_listener_and_gateway_open_one_provisioned_database(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir()?;
+        let runtime_directory = tempfile::tempdir()?;
+        std::fs::set_permissions(
+            runtime_directory.path(),
+            std::fs::Permissions::from_mode(0o750),
+        )?;
+        let database = directory.path().join("gateway.db");
+        let socket = runtime_directory.path().join("fork.sock");
+        let credentials = directory.path().join("credentials");
+        std::fs::create_dir(&credentials)?;
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700))?;
+        let service_uid = rustix::process::geteuid().as_raw();
+        let (auth, host) = local_fork_authentication::test_credential_bytes_for_service(
+            service_uid,
+            [7; 32],
+            [8; 32],
+        )?;
+        for (name, bytes) in [
+            ("pigloros.fork-admission-auth", auth),
+            ("pigloros.fork-admission-host-signer", host),
+        ] {
+            let path = credentials.join(name);
+            std::fs::write(&path, bytes)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
+        }
+        let sqlite_path = database
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("temporary database path is not UTF-8"))?;
+        provision_local_fork_admission_authority(sqlite_path, &credentials)?;
+
+        let socket_at_shutdown = socket.clone();
+        serve_with_owntracks_and_fork_admission(
+            "127.0.0.1:0".parse()?,
+            Some(sqlite_path),
+            None,
+            Some(&socket),
+            Some(&credentials),
+            async move { assert!(socket_at_shutdown.exists()) },
+            LedgerView::default(),
+            LedgerWriteMode::Disabled,
+        )
+        .await?;
+        assert!(!socket.exists());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn startup_gateway_constructors_cover_memory_and_sqlite_paths(

@@ -52,6 +52,7 @@ pos-state = { path = "../../crates/pos-state" }
 pos-plugin-agent = { path = "../../plugins/agent" }
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true
