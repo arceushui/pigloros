@@ -7315,7 +7315,7 @@ impl SqliteStore {
         // without writing; only an unequal Owner is a rebinding conflict.
         if let Some(existing) = sqlite_principal_owner_binding(&self.conn, principal_digest)? {
             return (existing.input().owner == owner)
-                .then(|| ForkAdmissionOperationResultV1::PrincipalOwner(existing))
+                .then_some(ForkAdmissionOperationResultV1::PrincipalOwner(existing))
                 .ok_or(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
         }
         let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
