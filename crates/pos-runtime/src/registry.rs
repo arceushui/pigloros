@@ -3049,6 +3049,31 @@ impl PluginRegistry {
         if !binding.has_installed_profile_provenance() {
             return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
         }
+        self.validate_installed_registration_details(plugin, &binding, &registration)?;
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = binding.take_callbacks();
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+            Some(registration),
+        )
+    }
+
+    // Pure validation is also exercised by nonproduction structural fixtures.
+    // It never installs a profile, registers a Plugin, or mints a pin.
+    fn validate_installed_registration_details<P: Plugin>(
+        &self,
+        plugin: &P,
+        binding: &OutputPolicyBindingV1,
+        registration: &PluginRegistrationV1,
+    ) -> Result<(), RuntimeError> {
         if !binding.verifies_owner_instance(plugin) {
             return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
         }
@@ -3068,22 +3093,8 @@ impl PluginRegistry {
             }
             .into());
         }
-        Self::validate_required_installed_approver(&binding)?;
-        self.validate_registration_roles(&registration)?;
-        let InstalledCallbacksV1 {
-            driver,
-            approver,
-            approver_event_types,
-        } = binding.take_callbacks();
-        self.register_with_verified_output_policy_inner(
-            plugin,
-            binding,
-            reducer,
-            driver,
-            approver,
-            approver_event_types,
-            Some(registration),
-        )
+        Self::validate_required_installed_approver(binding)?;
+        self.validate_registration_roles(registration)
     }
 
     fn register_with_verified_output_policy_inner(
@@ -4595,6 +4606,103 @@ mod tests {
             Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
             ))
+        ));
+        assert!(!registry.contains(&plugin.id()));
+    }
+
+    #[test]
+    fn installed_registration_details_validate_without_granting_fixture_authority() {
+        let plugin = simple_plugin("fixture-profile", &["fixture.output"]);
+        let binding = OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let registry = gated_registry();
+        let role = crate::reviewed_policy::installed_plugin_role_v1(&plugin);
+        let digest = binding.policy().digest();
+        let registration = |kind, isolation, digest, roles: Vec<String>, availability| {
+            PluginRegistrationV1::new(
+                crate::composition::PluginPinV1::try_new(kind, isolation, digest, roles).test_ok(),
+                availability,
+            )
+        };
+        let valid = registration(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            digest,
+            vec![role.clone()],
+            PluginAvailabilityV1::Available,
+        );
+        assert!(registry
+            .validate_installed_registration_details(&plugin, &binding, &valid)
+            .is_ok());
+        let foreign = simple_plugin("fixture-profile", &["fixture.output"]);
+        assert!(matches!(
+            registry.validate_installed_registration_details(&foreign, &binding, &valid),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::PluginMismatch
+            ))
+        ));
+
+        for (kind, isolation, hash, roles, expected) in [
+            (
+                DomainImplementationKindV1::PublicAdapter,
+                PluginIsolationV1::OperatorTrustedNative,
+                digest,
+                vec![role.clone()],
+                PluginPinFieldV1::ImplementationKind,
+            ),
+            (
+                DomainImplementationKindV1::Plugin,
+                PluginIsolationV1::GovernedCommunity,
+                digest,
+                vec![role.clone()],
+                PluginPinFieldV1::Isolation,
+            ),
+            (
+                DomainImplementationKindV1::Plugin,
+                PluginIsolationV1::OperatorTrustedNative,
+                Hash::from_bytes([7; 32]),
+                vec![role.clone()],
+                PluginPinFieldV1::ConfigurationDigest,
+            ),
+            (
+                DomainImplementationKindV1::Plugin,
+                PluginIsolationV1::OperatorTrustedNative,
+                digest,
+                vec!["foreign-role".to_owned()],
+                PluginPinFieldV1::Roles,
+            ),
+        ] {
+            let candidate = registration(
+                kind,
+                isolation,
+                hash,
+                roles,
+                PluginAvailabilityV1::Available,
+            );
+            assert!(matches!(
+                registry.validate_installed_registration_details(&plugin, &binding, &candidate),
+                Err(RuntimeError::Composition(
+                    PluginCompositionErrorV1::IncompatibleImplementation { plugin_id, field }
+                )) if plugin_id == plugin.id() && field == expected
+            ));
+        }
+        let disabled = registration(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            digest,
+            vec![role],
+            PluginAvailabilityV1::Disabled,
+        );
+        assert!(matches!(
+            registry.validate_installed_registration_details(&plugin, &binding, &disabled),
+            Err(RuntimeError::Composition(
+                PluginCompositionErrorV1::ImplementationUnavailable { plugin_id, availability }
+            )) if plugin_id == plugin.id() && availability == PluginAvailabilityV1::Disabled
         ));
         assert!(!registry.contains(&plugin.id()));
     }

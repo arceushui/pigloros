@@ -33,25 +33,28 @@ use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
-    ids::{EntityId, EventId, PluginId, TimelineId},
+    ids::{EntityId, EventId, TimelineId},
     store::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
+    ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
     ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1,
-    Plugin, ProposedAction,
+    ProposedAction,
 };
 #[cfg(test)]
-use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
+use pos_core::{
+    geo_admission::GeoLocationAdmissionStore, store::EventStore, Capability, Plugin, PluginId,
+};
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{
-    encode_actuator_pair_v1, ActionKindV1, WorldActionV1, WorldPlugin,
+    encode_actuator_pair_v1, ActionKindV1, WorldActionV1,
     EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
 };
+#[cfg(test)]
+use pos_plugin_world::WorldPlugin;
 use pos_runtime::{
-    ActionSubmissionError, DomainImplementationKindV1, ErasureExecutionHostV1, ErasureHostStatusV1,
-    PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
+    ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -80,6 +83,7 @@ fn gateway_binding_error(
     }
 }
 
+#[cfg(test)]
 fn gateway_output_binding<P: Plugin>(
     plugin: &P,
     configuration_details: &[u8],
@@ -849,10 +853,12 @@ impl ActionPrincipal {
     }
 }
 
+#[cfg(test)]
 struct GatewayActionPlugin {
     id: PluginId,
 }
 
+#[cfg(test)]
 impl Plugin for GatewayActionPlugin {
     fn id(&self) -> PluginId {
         self.id
@@ -870,8 +876,10 @@ impl Plugin for GatewayActionPlugin {
     }
 }
 
+#[cfg(test)]
 struct GatewayWorldActionApprover(WorldPlugin);
 
+#[cfg(test)]
 impl pos_core::ActionApprover for GatewayWorldActionApprover {
     fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
         pos_core::ActionApprover::approve(&self.0, proposal)
@@ -898,6 +906,7 @@ fn gateway_action_registry_with_authority(
     Arc::new(gateway_action_registry_builder_for_test(bodies, authority))
 }
 
+#[cfg(test)]
 fn gateway_configuration_details(bodies: &[EntityId]) -> Vec<u8> {
     let mut configuration_details = Vec::with_capacity(bodies.len() * 16);
     for body in bodies {
@@ -908,14 +917,14 @@ fn gateway_configuration_details(bodies: &[EntityId]) -> Vec<u8> {
 
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
-    authority: Option<ConsentAuthority>,
+    _authority: Option<ConsentAuthority>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    prepared_gateway_action_registry(bodies).map(|mut registry| {
-        if let Some(authority) = authority {
-            registry = registry.with_consent_authority(authority);
-        }
-        registry
-    })
+    let _ = canonical_gateway_bodies(bodies)?;
+    // Wave 8 has no installed Gateway EPF1; #461 owns positive activation.
+    Err(gateway_binding_error(
+        "gateway-world-actions",
+        pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" },
+    ))
 }
 
 // Unit-test behavior fixtures have no installed profile, session pin, or
@@ -993,15 +1002,6 @@ pub mod gateway_test_fixtures {
     }
 }
 
-fn prepared_gateway_action_registry(
-    bodies: impl IntoIterator<Item = EntityId>,
-) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    let bodies = canonical_gateway_bodies(bodies)?;
-    let mut registry = PluginRegistry::new().without_erasure_gate();
-    register_gateway_world_action(&mut registry, bodies)?;
-    Ok(registry)
-}
-
 fn canonical_gateway_bodies(
     bodies: impl IntoIterator<Item = EntityId>,
 ) -> Result<Vec<EntityId>, pos_runtime::RuntimeError> {
@@ -1016,46 +1016,6 @@ fn canonical_gateway_bodies(
     bodies.sort_unstable();
     bodies.dedup();
     Ok(bodies)
-}
-
-fn register_gateway_world_action(
-    registry: &mut PluginRegistry,
-    bodies: Vec<EntityId>,
-) -> Result<(), pos_runtime::RuntimeError> {
-    let descriptor = GatewayActionPlugin {
-        id: PluginId::new(),
-    };
-    let configuration_details = gateway_configuration_details(&bodies);
-    let world_plugin = WorldPlugin::new().with_bodies(bodies);
-    let binding = gateway_output_binding(&descriptor, &configuration_details)?;
-    let role = pos_runtime::installed_plugin_role_v1(&descriptor);
-    register_bound_gateway_world_action(registry, &descriptor, world_plugin, binding, vec![role])
-}
-
-fn register_bound_gateway_world_action(
-    registry: &mut PluginRegistry,
-    descriptor: &GatewayActionPlugin,
-    world_plugin: WorldPlugin,
-    binding: pos_runtime::OutputPolicyBindingV1,
-    roles: Vec<String>,
-) -> Result<(), pos_runtime::RuntimeError> {
-    let closure = binding.with_installed_action_approver(
-        GatewayWorldActionApprover(world_plugin),
-        [Kind::new(EVENT_TYPE_ACTION)],
-    )?;
-    let pin = PluginPinV1::try_new(
-        DomainImplementationKindV1::Plugin,
-        PluginIsolationV1::OperatorTrustedNative,
-        closure.policy().digest(),
-        roles,
-    )?;
-    registry.register_installed_output(
-        descriptor,
-        closure,
-        PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
-        None,
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]
