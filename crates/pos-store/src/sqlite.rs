@@ -7699,9 +7699,9 @@ fn with_fork_admission_recovery_transaction<T>(
     conn: &Connection,
     operation: impl FnOnce() -> Result<T, pos_core::ForkAdmissionErrorV1>,
 ) -> Result<T, pos_core::ForkAdmissionErrorV1> {
-    // Lookup-only recovery never writes, so a deferred read transaction gives
-    // it one consistent snapshot without taking the single writer lock.
-    conn.execute_batch("BEGIN DEFERRED")
+    // Recovery takes the writer reservation so its multi-row graph read cannot
+    // interleave with a concurrent admission commit on another handle.
+    conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?;
     match operation() {
         Ok(value) => conn
