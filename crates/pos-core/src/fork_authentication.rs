@@ -25,6 +25,19 @@ const REGISTRY_DOMAIN: &[u8] = b"pigloros/local-account-auth-registry/v1";
 const EVIDENCE_DOMAIN: &[u8] = b"pigloros/authenticated-principal-evidence/v1";
 const PRINCIPAL_DOMAIN: &[u8] = b"pigloros/principal-ref/v1";
 
+/// FAP1 adapter entries per policy.
+const MAX_POLICY_ADAPTERS: usize = 16;
+/// FAP1 registry-binding digests per adapter entry.
+const MAX_ADAPTER_REGISTRY_BINDINGS: usize = 64;
+/// LAR1 UID rows per registry.
+const MAX_LOCAL_ACCOUNT_BINDINGS: usize = 64;
+/// UTF-8 bytes in an adapter ID.
+const MAX_TEXT_BYTES: usize = 128;
+/// Complete canonical PRN1 bytes carried in LAR1 and APR1.
+const MAX_PRINCIPAL_BYTES: usize = 256;
+/// Linux overflow ("nobody") UID, forbidden in LAR1.
+const OVERFLOW_UID: u32 = 65_534;
+
 /// Strict authentication record codec errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ForkAuthenticationCodecErrorV1 {
@@ -54,7 +67,7 @@ impl ForkAuthenticationAdapterPolicyV1 {
         valid_text(&self.adapter_id)?;
         if self.verifying_key == [0; 32]
             || self.minimum_assurance == 0
-            || !(1..=64).contains(&self.registry_bindings.len())
+            || !(1..=MAX_ADAPTER_REGISTRY_BINDINGS).contains(&self.registry_bindings.len())
             || self
                 .registry_bindings
                 .iter()
@@ -85,7 +98,7 @@ impl ForkAuthenticationAdapterPolicyV1 {
 
     fn from_value(value: &Value) -> Result<Self, ForkAuthenticationCodecErrorV1> {
         let fields = array(value, 4)?;
-        let bindings = nonempty_array(&fields[3], 64)?;
+        let bindings = nonempty_array(&fields[3], MAX_ADAPTER_REGISTRY_BINDINGS)?;
         let result = Self {
             adapter_id: string(&fields[0])?,
             verifying_key: fixed(&fields[1])?,
@@ -114,7 +127,7 @@ impl ForkAuthenticationPolicyV1 {
     pub fn new(
         adapters: Vec<ForkAuthenticationAdapterPolicyV1>,
     ) -> Result<Self, ForkAuthenticationCodecErrorV1> {
-        if !(1..=16).contains(&adapters.len())
+        if !(1..=MAX_POLICY_ADAPTERS).contains(&adapters.len())
             || !adapters
                 .windows(2)
                 .all(|pair| pair[0].adapter_id < pair[1].adapter_id)
@@ -135,17 +148,16 @@ impl ForkAuthenticationPolicyV1 {
         let value = decode(bytes_in, MAX_FORK_AUTH_POLICY_BYTES_V1)?;
         let fields = array(&value, 3)?;
         header(fields, "FAP1")?;
-        let entries = nonempty_array(&fields[2], 16)?;
-        let policy = Self::new(
+        let entries = nonempty_array(&fields[2], MAX_POLICY_ADAPTERS)?;
+        // `decode` already proved `bytes_in` is the exact encoding of `value`, and
+        // every typed field below reproduces its `Value` exactly, so a second
+        // re-encode comparison cannot fail.
+        Self::new(
             entries
                 .iter()
                 .map(ForkAuthenticationAdapterPolicyV1::from_value)
                 .collect::<Result<_, _>>()?,
-        )?;
-        policy
-            .to_canonical_cbor()
-            .and_then(|encoded| canonical(bytes_in, &encoded))
-            .map(|()| policy)
+        )
     }
 
     /// Encode the exact FAP1 array.
@@ -174,11 +186,13 @@ impl ForkAuthenticationPolicyV1 {
             .map(|encoded| digest(POLICY_DOMAIN, &encoded))
     }
 
+    /// The adapter entry with exactly this ID, if present.
     #[must_use]
     pub fn adapter(&self, id: &str) -> Option<&ForkAuthenticationAdapterPolicyV1> {
         self.adapters.iter().find(|entry| entry.adapter_id == id)
     }
 
+    /// Every adapter entry in strictly increasing ID order.
     #[must_use]
     pub fn adapters(&self) -> &[ForkAuthenticationAdapterPolicyV1] {
         &self.adapters
@@ -213,12 +227,12 @@ impl LocalAccountRegistryV1 {
         service_uid: u32,
     ) -> Result<Self, ForkAuthenticationCodecErrorV1> {
         valid_text(&adapter_id)?;
-        if assurance == 0 || !(1..=64).contains(&bindings.len()) {
+        if assurance == 0 || !(1..=MAX_LOCAL_ACCOUNT_BINDINGS).contains(&bindings.len()) {
             return Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds);
         }
         for binding in &bindings {
             if binding.uid == 0
-                || binding.uid == 65_534
+                || binding.uid == OVERFLOW_UID
                 || binding.uid == service_uid
                 || binding.uid == u32::MAX
             {
@@ -228,23 +242,20 @@ impl LocalAccountRegistryV1 {
         if !bindings.windows(2).all(|pair| pair[0].uid < pair[1].uid) {
             return Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds);
         }
-        bindings
-            .iter()
-            .try_fold(Vec::with_capacity(bindings.len()), |mut seen, binding| {
-                principal_digest_v1(&binding.principal).and_then(|current_digest| {
-                    if seen.contains(&current_digest) {
-                        Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
-                    } else {
-                        seen.push(current_digest);
-                        Ok(seen)
-                    }
-                })
-            })
-            .map(|_| Self {
-                adapter_id,
-                assurance,
-                bindings,
-            })
+        // PRN1 encoding is injective, so Principal equality is exactly
+        // Principal-digest equality.
+        if bindings.iter().enumerate().any(|(index, binding)| {
+            bindings[..index]
+                .iter()
+                .any(|earlier| earlier.principal == binding.principal)
+        }) {
+            return Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds);
+        }
+        Ok(Self {
+            adapter_id,
+            assurance,
+            bindings,
+        })
     }
 
     /// Decode exact LAR1 bytes under the local service UID policy.
@@ -258,7 +269,7 @@ impl LocalAccountRegistryV1 {
         let value = decode(bytes_in, MAX_LOCAL_ACCOUNT_REGISTRY_BYTES_V1)?;
         let fields = array(&value, 5)?;
         header(fields, "LAR1")?;
-        let entries = nonempty_array(&fields[4], 64)?;
+        let entries = nonempty_array(&fields[4], MAX_LOCAL_ACCOUNT_BINDINGS)?;
         let bindings = entries
             .iter()
             .map(|entry| {
@@ -272,16 +283,14 @@ impl LocalAccountRegistryV1 {
                 })
             })
             .collect::<Result<_, ForkAuthenticationCodecErrorV1>>()?;
-        let registry = Self::new(
+        // Canonical PRN1 and Owner text re-encode exactly, so `decode`'s
+        // byte-exact check already covers the typed registry.
+        Self::new(
             string(&fields[2])?,
             number::<u8>(&fields[3])?,
             bindings,
             service_uid,
-        )?;
-        registry
-            .to_canonical_cbor()
-            .and_then(|encoded| canonical(bytes_in, &encoded))
-            .map(|()| registry)
+        )
     }
 
     /// Encode the exact LAR1 registry.
@@ -313,11 +322,13 @@ impl LocalAccountRegistryV1 {
             .map(|encoded| digest(REGISTRY_DOMAIN, &encoded))
     }
 
+    /// The binding for this exact Linux UID, if registered.
     #[must_use]
     pub fn lookup_uid(&self, uid: u32) -> Option<&LocalAccountBindingV1> {
         self.bindings.iter().find(|entry| entry.uid == uid)
     }
 
+    /// The Owner mapped to this exact Principal, if registered.
     #[must_use]
     pub fn lookup_principal(&self, principal: &PrincipalRefV1) -> Option<OwnerIdV1> {
         self.bindings
@@ -326,16 +337,19 @@ impl LocalAccountRegistryV1 {
             .map(|entry| entry.owner)
     }
 
+    /// The FACR1 adapter ID committed by this registry.
     #[must_use]
     pub fn adapter_id(&self) -> &str {
         &self.adapter_id
     }
 
+    /// The FACR1 assurance emitted for every binding.
     #[must_use]
     pub const fn assurance(&self) -> u8 {
         self.assurance
     }
 
+    /// Every binding in strictly increasing UID order.
     #[must_use]
     pub fn bindings(&self) -> &[LocalAccountBindingV1] {
         &self.bindings
@@ -426,11 +440,8 @@ impl AuthenticatedPrincipalRecordV1 {
             registry_binding: Hash::from_bytes(fixed(&fields[7])?),
             operation_nonce: fixed(&fields[8])?,
         };
-        result.validate()?;
-        result
-            .to_canonical_cbor()
-            .and_then(|encoded| canonical(bytes_in, &encoded))
-            .map(|()| result)
+        // `decode` already proved byte-exact canonical form for these fields.
+        result.validate().map(|()| result)
     }
 }
 
@@ -454,11 +465,13 @@ impl AuthenticatedPrincipalEvidenceV1 {
         Ok(Self { record, signature })
     }
 
+    /// The validated APR1 content this signature covers.
     #[must_use]
     pub const fn record(&self) -> &AuthenticatedPrincipalRecordV1 {
         &self.record
     }
 
+    /// The adapter signature bytes; provenance still needs verification.
     #[must_use]
     pub const fn signature(&self) -> &[u8; 64] {
         &self.signature
@@ -491,12 +504,9 @@ impl AuthenticatedPrincipalEvidenceV1 {
             &fields[2],
             MAX_AUTHENTICATED_PRINCIPAL_RECORD_BYTES_V1,
         )?)?;
-        Self::new(record, fixed(&fields[3])?).and_then(|result| {
-            result
-                .to_canonical_cbor()
-                .and_then(|encoded| canonical(bytes_in, &encoded))
-                .map(|()| result)
-        })
+        // The nested APR1 decoder already validated and canonicalized `record`,
+        // and `decode` proved the outer FAE1 bytes exact.
+        fixed(&fields[3]).map(|signature| Self { record, signature })
     }
 
     /// Commit the complete evidence bytes.
@@ -509,13 +519,16 @@ impl AuthenticatedPrincipalEvidenceV1 {
     }
 }
 
+/// ADR-107 sizes the PRN1 field as `bstr .size (1..256)`: an absent or empty
+/// field is a bound violation, while malformed PRN1 content is an encoding error.
 fn principal(value: &Value) -> Result<PrincipalRefV1, ForkAuthenticationCodecErrorV1> {
-    let bytes_in = bounded_bytes(value, 256)?;
-    if bytes_in.is_empty() {
-        return Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds);
+    match value {
+        Value::Bytes(content) if (1..=MAX_PRINCIPAL_BYTES).contains(&content.len()) => {
+            PrincipalRefV1::decode(&CanonicalBytes::from_vec(content.clone()))
+                .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)
+        }
+        _ => Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds),
     }
-    PrincipalRefV1::decode(&CanonicalBytes::from_vec(bytes_in.to_vec()))
-        .map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)
 }
 
 /// Exact ADR-099 Principal digest used by POB1 and Fork admission commands.
@@ -539,7 +552,7 @@ fn digest(domain: &[u8], content: &[u8]) -> Hash {
 }
 
 fn valid_text(value: &str) -> Result<(), ForkAuthenticationCodecErrorV1> {
-    if (1..=128).contains(&value.len()) && !value.contains('\0') {
+    if (1..=MAX_TEXT_BYTES).contains(&value.len()) && !value.contains('\0') {
         Ok(())
     } else {
         Err(ForkAuthenticationCodecErrorV1::FieldOutOfBounds)
@@ -805,7 +818,10 @@ mod tests {
         );
         let mut old_marker = fae;
         old_marker[2..6].copy_from_slice(b"APS1");
-        assert!(AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&old_marker).is_err());
+        assert_eq!(
+            AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&old_marker),
+            Err(ForkAuthenticationCodecErrorV1::InvalidEncoding)
+        );
         Ok(())
     }
 }

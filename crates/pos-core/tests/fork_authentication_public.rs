@@ -27,22 +27,22 @@ fn policy() -> Result<ForkAuthenticationPolicyV1, ForkAuthenticationCodecErrorV1
     ForkAuthenticationPolicyV1::new(vec![adapter()])
 }
 
-fn registry() -> Result<LocalAccountRegistryV1, ForkAuthenticationCodecErrorV1> {
-    LocalAccountRegistryV1::new(
+fn registry() -> Result<LocalAccountRegistryV1, Box<dyn std::error::Error>> {
+    Ok(LocalAccountRegistryV1::new(
         "local".to_owned(),
         2,
         vec![LocalAccountBindingV1 {
             uid: 1001,
-            principal: principal(1).map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)?,
+            principal: principal(1)?,
             owner: OwnerIdV1::from_static("alice"),
         }],
         1000,
-    )
+    )?)
 }
 
-fn record() -> Result<AuthenticatedPrincipalRecordV1, ForkAuthenticationCodecErrorV1> {
+fn record() -> Result<AuthenticatedPrincipalRecordV1, Box<dyn std::error::Error>> {
     Ok(AuthenticatedPrincipalRecordV1 {
-        principal: principal(1).map_err(|_| ForkAuthenticationCodecErrorV1::InvalidEncoding)?,
+        principal: principal(1)?,
         adapter_id: "local".to_owned(),
         assurance: 2,
         issued_at: 100,
@@ -527,6 +527,16 @@ fn lar1_public_decoder_rejects_row_types_principals_and_registry_bounds(
         (
             1,
             Value::Bytes(Vec::new()),
+            ForkAuthenticationCodecErrorV1::FieldOutOfBounds,
+        ),
+        (
+            1,
+            Value::Bytes(vec![0xff]),
+            ForkAuthenticationCodecErrorV1::InvalidEncoding,
+        ),
+        (
+            1,
+            Value::Bytes(vec![0x80; 257]),
             ForkAuthenticationCodecErrorV1::FieldOutOfBounds,
         ),
         (
