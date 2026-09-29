@@ -290,6 +290,9 @@ impl LocalForkHostSignerV1 {
         command: &CanonicalBytes,
         authentication: &ResolvedLocalAuthenticationV1,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        if command_fields(command, "FCC1").is_none() {
+            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
+        }
         self.signer
             .sign_command(command.as_slice(), authentication.verified_evidence())
             .map_err(signature_invalid)
@@ -306,14 +309,24 @@ impl LocalForkHostSignerV1 {
 }
 
 fn principal_owner_matches(command: &CanonicalBytes, owner: OwnerIdV1) -> bool {
+    command_fields(command, "POC1").is_some_and(|fields| {
+        matches!(fields.get(7), Some(Value::Text(candidate)) if candidate == owner.as_str())
+    })
+}
+
+/// Decode one complete command array whose first field is the exact marker.
+fn command_fields(command: &CanonicalBytes, marker: &str) -> Option<Vec<Value>> {
     let mut cursor = Cursor::new(command.as_slice());
     let value = ciborium::from_reader(&mut cursor);
-    matches!(
-        value,
+    match value {
         Ok(Value::Array(fields))
             if cursor.position() == u64::try_from(command.len()).unwrap_or(u64::MAX)
-                && matches!(fields.get(7), Some(Value::Text(candidate)) if candidate == owner.as_str())
-    )
+                && matches!(fields.first(), Some(Value::Text(candidate)) if candidate == marker) =>
+        {
+            Some(fields)
+        }
+        _ => None,
+    }
 }
 
 /// Non-cloneable result of one kernel-authenticated Unix connection.
@@ -1032,6 +1045,8 @@ mod tests {
             Value::Text("other-owner".to_owned()),
         ])));
         expect_invalid(credentials.sign_principal_owner_command(&wrong_owner, &authentication));
+        expect_invalid(credentials.sign_fork_command(&principal_owner, &authentication));
+        expect_invalid(credentials.sign_principal_owner_command(&fork, &authentication));
     }
 
     #[test]
@@ -1102,11 +1117,46 @@ mod tests {
             Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
         ));
 
-        let directory = credentials_directory(&auth, &[0x98, 0x03, b'F', b'A', b'H', b'K', b'1']);
-        assert!(matches!(
-            LocalForkAuthenticationCredentialsV1::load(directory.path(), current_uid()),
-            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        // Exactly 42 bytes, so it passes the length gate: the version uses a
+        // non-shortest `0x18 0x01` uint, compensated by a 31-byte seed.
+        let mut noncanonical = vec![
+            0x83, 0x65, b'F', b'A', b'H', b'K', b'1', 0x18, 0x01, 0x58, 0x1f,
+        ];
+        noncanonical.extend_from_slice(&[8; 31]);
+        assert_eq!(noncanonical.len(), FAHK1_BYTES);
+        expect_load_invalid(&auth, &noncanonical, current_uid());
+    }
+
+    #[test]
+    fn loader_accepts_literal_fahk1_vector_and_rejects_adjacent_lengths() {
+        // ADR-107: array(3) header, text(5) "FAHK1", uint 1, bstr(32) seed.
+        let mut literal = vec![0x83, 0x65, b'F', b'A', b'H', b'K', b'1', 0x01, 0x58, 0x20];
+        literal.extend_from_slice(&[8; 32]);
+        assert_eq!(literal.len(), 42);
+        let (auth, encoded) = credential_bytes(mapped_uid(), [8; 32]);
+        assert_eq!(literal, encoded);
+        let directory = credentials_directory(&auth, &literal);
+        let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            current_uid(),
         ));
+        let initialize = CanonicalBytes::from_vec(encode(&Value::Array(vec![
+            Value::Text("FAI1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Bytes(host_signer().public_key().to_vec()),
+            Value::Bytes(vec![4; 32]),
+        ])));
+        assert_eq!(
+            test_ok(credentials.sign_initialize(&initialize)),
+            test_ok(host_signer().sign_initialize(initialize.as_slice()))
+        );
+
+        expect_load_invalid(&auth, &literal[..41], current_uid());
+        let mut extended = literal;
+        extended.push(0);
+        expect_load_invalid(&auth, &extended, current_uid());
     }
 
     #[test]
@@ -1190,6 +1240,39 @@ mod tests {
                 .sign_authenticated_principal(registry_mismatch),
         );
         expect_invalid(credentials.resolve(ProducedLocalAuthenticationEvidenceV1(evidence)));
+    }
+
+    #[test]
+    fn resolver_rejects_foreign_adapter_key_and_altered_signature() {
+        let uid = mapped_uid();
+        let credentials = loaded_credentials();
+        let record = AuthenticatedPrincipalRecordV1 {
+            principal: binding(uid).principal,
+            adapter_id: "local-unix".to_owned(),
+            assurance: 2,
+            issued_at: 1,
+            expires_at: 2,
+            registry_binding: test_ok(credentials.resolver.registry().digest()),
+            operation_nonce: [1; 32],
+        };
+
+        let foreign_adapter = test_ok(ForkAuthenticationAdapterSigningKeyV1::from_seed([9; 32]));
+        let foreign = test_ok(foreign_adapter.sign_authenticated_principal(record.clone()));
+        expect_invalid(credentials.resolve(ProducedLocalAuthenticationEvidenceV1(foreign)));
+
+        let genuine = test_ok(
+            credentials
+                .adapter_signer
+                .sign_authenticated_principal(record.clone()),
+        );
+        let mut signature = *genuine.signature();
+        signature[0] ^= 0x01;
+        let altered = test_ok(AuthenticatedPrincipalEvidenceV1::new(record, signature));
+        assert_eq!(
+            test_ok(credentials.resolve(ProducedLocalAuthenticationEvidenceV1(genuine))).owner(),
+            OwnerIdV1::from_static("owner")
+        );
+        expect_invalid(credentials.resolve(ProducedLocalAuthenticationEvidenceV1(altered)));
     }
 
     #[test]
