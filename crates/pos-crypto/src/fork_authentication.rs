@@ -9,6 +9,9 @@ use std::{io::Cursor, ops::RangeInclusive};
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use pos_core::{
+    fork_admission_authority::{
+        ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
+    },
     fork_authentication::{
         principal_digest_v1, AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
         ForkAuthenticationPolicyV1,
@@ -121,6 +124,61 @@ pub fn verify_authenticated_principal_evidence_v1(
                 })
         })
         .map(|()| VerifiedAuthenticatedPrincipalEvidenceV1(evidence))
+}
+
+/// Verify the one-use FAI1 proof under the host key named by its challenge.
+///
+/// This verifies the signature only. The store must still consume its own
+/// outstanding challenge and atomically decide whether FAH1 may be inserted.
+///
+/// # Errors
+/// Rejects invalid canonical encoding, host key, or signature.
+pub fn verify_fork_admission_initialize_v1(
+    challenge: &ForkAdmissionInitializeChallengeV1,
+    signature: &Signature,
+) -> Result<(), ForkAuthenticationSignatureErrorV1> {
+    VerifyingKey::from_bytes(challenge.host_verifying_key().as_bytes())
+        .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)
+        .and_then(|key| {
+            verify_signature(
+                &key,
+                INITIALIZE_DOMAIN,
+                &challenge.canonical_bytes(),
+                signature.as_bytes(),
+            )
+        })
+}
+
+/// Verify a fresh FAO1 proof against the exact persisted FAH1 identity.
+///
+/// This does not grant a session: the store must compare and consume its own
+/// outstanding open challenge after loading the unique durable FAH1 row.
+///
+/// # Errors
+/// Rejects unequal store or policy binding, invalid canonical encoding, host
+/// key, or signature.
+pub fn verify_fork_admission_open_v1(
+    host: &ForkAdmissionHostRecordV1,
+    challenge: &ForkAdmissionOpenChallengeV1,
+    signature: &Signature,
+) -> Result<(), ForkAuthenticationSignatureErrorV1> {
+    require(
+        host.store_id() == challenge.store_id()
+            && host.authentication_policy_digest() == challenge.authentication_policy_digest(),
+    )
+    .map_err(|_| ForkAuthenticationSignatureErrorV1::PolicyMismatch)
+    .and_then(|()| {
+        VerifyingKey::from_bytes(host.host_verifying_key().as_bytes())
+            .map_err(|_| ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)
+    })
+    .and_then(|key| {
+        verify_signature(
+            &key,
+            OPEN_DOMAIN,
+            &challenge.canonical_bytes(),
+            signature.as_bytes(),
+        )
+    })
 }
 
 /// Non-cloneable nonzero-seed Ed25519 material shared by the purpose-limited

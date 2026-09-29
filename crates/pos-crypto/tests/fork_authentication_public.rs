@@ -3,14 +3,18 @@ use std::error::Error;
 use ciborium::value::Value;
 use ed25519_dalek::{Signature as DalekSignature, VerifyingKey};
 use pos_core::{
+    fork_admission_authority::{
+        ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
+    },
     fork_authentication::{
         principal_digest_v1, AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
         ForkAuthenticationAdapterPolicyV1, ForkAuthenticationPolicyV1,
     },
-    Hash, PrincipalRefV1,
+    Hash, PrincipalRefV1, PublicKey, Signature,
 };
 use pos_crypto::fork_authentication::{
-    verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
+    verify_authenticated_principal_evidence_v1, verify_fork_admission_initialize_v1,
+    verify_fork_admission_open_v1, ForkAuthenticationAdapterSigningKeyV1,
     ForkAuthenticationSignatureErrorV1, ForkHostSigningKeyV1,
     VerifiedAuthenticatedPrincipalEvidenceV1,
 };
@@ -521,5 +525,81 @@ fn host_proof_decoders_reject_full_length_wrong_marker_records() -> TestResult {
     let recovery = array(recovery_fields("BAD1", 1))?;
     assert_eq!(recovery.len(), 110);
     assert_eq!(host.sign_recovery(&recovery), Err(INVALID_RECORD));
+    Ok(())
+}
+
+#[test]
+fn bootstrap_proofs_bind_host_key_store_and_policy() -> TestResult {
+    let signer = ForkHostSigningKeyV1::from_seed(HOST_SEED)?;
+    let store_id = Hash::from_bytes([1; 32]);
+    let policy_digest = Hash::from_bytes([2; 32]);
+    let host_key = PublicKey::from_bytes(signer.public_key());
+    let initialize = ForkAdmissionInitializeChallengeV1::new(
+        store_id,
+        Hash::from_bytes([3; 32]),
+        host_key,
+        policy_digest,
+    )?;
+    let initialize_signature = signer.sign_initialize(&initialize.to_canonical_cbor()?)?;
+    assert_eq!(
+        verify_fork_admission_initialize_v1(&initialize, &initialize_signature),
+        Ok(())
+    );
+    let altered_initialize = ForkAdmissionInitializeChallengeV1::new(
+        store_id,
+        Hash::from_bytes([9; 32]),
+        host_key,
+        policy_digest,
+    )?;
+    assert_eq!(
+        verify_fork_admission_initialize_v1(&altered_initialize, &initialize_signature),
+        Err(ForkAuthenticationSignatureErrorV1::InvalidSignature)
+    );
+
+    let host = ForkAdmissionHostRecordV1::new(store_id, host_key, policy_digest)?;
+    let open =
+        ForkAdmissionOpenChallengeV1::new(store_id, Hash::from_bytes([4; 32]), policy_digest)?;
+    let open_signature = signer.sign_open(&open.to_canonical_cbor()?)?;
+    assert_eq!(
+        verify_fork_admission_open_v1(&host, &open, &open_signature),
+        Ok(())
+    );
+    let foreign_store =
+        ForkAdmissionHostRecordV1::new(Hash::from_bytes([5; 32]), host_key, policy_digest)?;
+    assert_eq!(
+        verify_fork_admission_open_v1(&foreign_store, &open, &open_signature),
+        Err(ForkAuthenticationSignatureErrorV1::PolicyMismatch)
+    );
+    let foreign_policy =
+        ForkAdmissionHostRecordV1::new(store_id, host_key, Hash::from_bytes([6; 32]))?;
+    assert_eq!(
+        verify_fork_admission_open_v1(&foreign_policy, &open, &open_signature),
+        Err(ForkAuthenticationSignatureErrorV1::PolicyMismatch)
+    );
+    assert_eq!(
+        verify_fork_admission_open_v1(&host, &open, &Signature::from_bytes([0; 64])),
+        Err(ForkAuthenticationSignatureErrorV1::InvalidSignature)
+    );
+
+    let malformed_key = (1..=u8::MAX)
+        .map(|byte| [byte; 32])
+        .find(|bytes| VerifyingKey::from_bytes(bytes).is_err())
+        .ok_or_else(|| std::io::Error::other("no malformed Ed25519 key fixture found"))?;
+    let invalid_key = PublicKey::from_bytes(malformed_key);
+    let invalid_initialize = ForkAdmissionInitializeChallengeV1::new(
+        store_id,
+        Hash::from_bytes([3; 32]),
+        invalid_key,
+        policy_digest,
+    )?;
+    assert_eq!(
+        verify_fork_admission_initialize_v1(&invalid_initialize, &initialize_signature),
+        Err(ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)
+    );
+    let invalid_host = ForkAdmissionHostRecordV1::new(store_id, invalid_key, policy_digest)?;
+    assert_eq!(
+        verify_fork_admission_open_v1(&invalid_host, &open, &open_signature),
+        Err(ForkAuthenticationSignatureErrorV1::InvalidVerifyingKey)
+    );
     Ok(())
 }
