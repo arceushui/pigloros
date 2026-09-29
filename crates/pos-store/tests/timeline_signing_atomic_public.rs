@@ -117,6 +117,53 @@ fn prepared_append_authorizes_both_identities_in_both_adapters(
     exercise_prepared_append(&mut SqliteStore::open_in_memory()?)
 }
 
+fn exercise_prepared_append_on_fork(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (material, registry, parent, authorization) = prepared_fixture(store)?;
+    append_signed(
+        store,
+        parent,
+        &registry,
+        authorization.signing_identity,
+        &material,
+        b"parent",
+    )?;
+    let child = store.fork(parent, Seq::from_u64(1), "prepared-child")?;
+    let mut payload = |input: &pos_core::TimelineEventEnvelopeInputV1| {
+        assert_eq!(input.origin_timeline_id, child.id());
+        assert_eq!(input.origin_logical_seq, Seq::from_u64(2));
+        Ok(CanonicalBytes::from_static(b"prepared-child"))
+    };
+    let mut sign = |authorized: &mut KeyRegistryStateV1,
+                    envelope: &TimelineEventEnvelopeV1,
+                    bytes: &CanonicalBytes| {
+        sign_timeline_event_for_registered_role(authorized, &material, envelope, bytes)
+            .map_err(|error| CoreError::Storage(error.to_string()))
+    };
+    let event = store.append_prepared_subject_encrypted_timeline_signed(
+        child.id(),
+        &registry,
+        draft(b"placeholder"),
+        authorization,
+        &mut payload,
+        &mut sign,
+    )?;
+    assert_eq!(event.seq, Seq::from_u64(1));
+    assert_eq!(
+        event.origin.map(|origin| origin.origin_logical_seq),
+        Some(Seq::from_u64(2))
+    );
+    Ok(())
+}
+
+#[test]
+fn prepared_append_finalizes_fork_context_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    exercise_prepared_append_on_fork(&mut MemoryStore::new())?;
+    exercise_prepared_append_on_fork(&mut SqliteStore::open_in_memory()?)
+}
+
 fn prepared_fixture(
     store: &mut dyn EventStore,
 ) -> Result<
@@ -210,6 +257,44 @@ fn prepared_append_rejects_wrong_roles_before_crypto_in_both_adapters(
 ) -> Result<(), Box<dyn std::error::Error>> {
     reject_prepared_authorization(&mut MemoryStore::new())?;
     reject_prepared_authorization(&mut SqliteStore::open_in_memory()?)
+}
+
+fn reject_prepared_missing_timeline(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_material, registry, _timeline, authorization) = prepared_fixture(store)?;
+    let missing = pos_core::TimelineId::new();
+    let payload_calls = std::cell::Cell::new(0);
+    let sign_calls = std::cell::Cell::new(0);
+    let mut payload = |_: &pos_core::TimelineEventEnvelopeInputV1| {
+        payload_calls.set(payload_calls.get() + 1);
+        Ok(CanonicalBytes::from_static(b"must not prepare"))
+    };
+    let mut sign = |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+        sign_calls.set(sign_calls.get() + 1);
+        Ok(Signature::from_bytes([0; 64]))
+    };
+    let error = store
+        .append_prepared_subject_encrypted_timeline_signed(
+            missing,
+            &registry,
+            draft(b"placeholder"),
+            authorization,
+            &mut payload,
+            &mut sign,
+        )
+        .expect_err("a missing Timeline must reject prepared append");
+    assert!(matches!(error, CoreError::TimelineNotFound(id) if id == missing));
+    assert_eq!(payload_calls.get(), 0);
+    assert_eq!(sign_calls.get(), 0);
+    Ok(())
+}
+
+#[test]
+fn prepared_append_rejects_missing_timeline_before_callbacks_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    reject_prepared_missing_timeline(&mut MemoryStore::new())?;
+    reject_prepared_missing_timeline(&mut SqliteStore::open_in_memory()?)
 }
 
 fn reject_prepared_pending_destruction(
