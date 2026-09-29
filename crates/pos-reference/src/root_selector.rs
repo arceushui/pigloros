@@ -33,6 +33,7 @@ use crate::sandbox_provider_protocol::{
     AdmittedSandboxImage, ExecuteAuthority, LaunchPolicy, RequestAuthority, SandboxExecuteRequest,
     SandboxLocalError, SandboxLocalErrorCode, SandboxLocalErrorPhase, SandboxProviderError,
     SandboxProviderErrorCode, SandboxProviderOperation, SignedImageManifest,
+    VerifiedSandboxImageProof,
 };
 #[cfg(test)]
 use crate::selector::installation::authority::ProviderRuntimeSlot;
@@ -1039,7 +1040,14 @@ struct SelectorProviderRequestAdmission<'a> {
     owner: &'a SelectorAdmission,
     admitted: Arc<AdmittedSelectorProvider>,
     attempt_id: [u8; 16],
-    entry_active: bool,
+    selected_image: SelectedSandboxImage,
+    admission_time: fn() -> SystemTime,
+    entry_proof: Option<VerifiedSandboxImageProof>,
+}
+
+struct SelectedSandboxImage {
+    sim1: Vec<u8>,
+    image: AdmittedSandboxImage,
 }
 
 struct ClosedSelectorAdmission {
@@ -1324,40 +1332,64 @@ impl SelectorAdmissionLease<'_> {
 }
 
 impl<'a> SelectorProviderRequestAdmission<'a> {
-    fn new(admission: &SelectorAdmissionLease<'a>) -> Self {
+    fn new(
+        admission: &SelectorAdmissionLease<'a>,
+        selected_image: SelectedSandboxImage,
+        admission_time: fn() -> SystemTime,
+    ) -> Self {
         Self {
             owner: admission.owner,
             admitted: Arc::clone(&admission.admitted),
             attempt_id: admission.attempt_id,
-            entry_active: false,
+            selected_image,
+            admission_time,
+            entry_proof: None,
         }
+    }
+
+    fn recheck_held_image(&self) -> Result<VerifiedSandboxImageProof, SelectorBoundaryError> {
+        // The retained generation owns the actual installation descriptors. The
+        // immutable artifact map resolves these same FDs on every entry/retry.
+        admit_held_image(&self.admitted, &self.selected_image.sim1).and_then(|image| {
+            (self.admission_time)()
+                .duration_since(UNIX_EPOCH)
+                .map_err(artifact_invalid)
+                .and_then(|time| {
+                    self.admitted
+                        .provider()
+                        .verify_image_proof(&image, time.as_secs())
+                        .map_err(artifact_invalid)
+                })
+        })
     }
 }
 
 impl ProviderRequestAdmission for SelectorProviderRequestAdmission<'_> {
     fn begin(&mut self) -> Result<(), ProviderTransportError> {
-        if self.entry_active {
+        if self.entry_proof.is_some() {
             return Err(ProviderTransportError::BeforeAdmission);
         }
+        let proof = self
+            .recheck_held_image()
+            .map_err(|_| ProviderTransportError::BeforeAdmission)?;
+        // Snapshot identity, including APT1/TRS1/RVS1 and their epochs, is
+        // immutable within this Arc. Reserve entry only if it is still current.
         self.owner
-            .start_provider_entry(self.attempt_id, &self.admitted)?;
-        self.entry_active = true;
-        Ok(())
+            .start_provider_entry(self.attempt_id, &self.admitted)
+            .map(|()| self.entry_proof = Some(proof))
     }
 
     fn entered(&mut self) {
-        if self.entry_active {
+        if self.entry_proof.take().is_some() {
             self.owner.finish_provider_entry(self.attempt_id, true);
-            self.entry_active = false;
         }
     }
 }
 
 impl Drop for SelectorProviderRequestAdmission<'_> {
     fn drop(&mut self) {
-        if self.entry_active {
+        if self.entry_proof.take().is_some() {
             self.owner.finish_provider_entry(self.attempt_id, false);
-            self.entry_active = false;
         }
     }
 }
@@ -1588,7 +1620,7 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
             return write_policy_error(stream, decoded);
         };
         let Ok(commitment) = admitted.provider().derive_selector_grant_commitment(
-            &image,
+            &image.image,
             &launch,
             &decoded.request,
             resolved.attempt(),
@@ -1605,7 +1637,8 @@ impl<T: ProviderExecutor> RootSelectorService<T> {
         let namespace_execution = self
             .evaluation_namespaces
             .execute_ordered(&decoded.request, || {
-                let mut provider_requests = SelectorProviderRequestAdmission::new(&admission);
+                let mut provider_requests =
+                    SelectorProviderRequestAdmission::new(&admission, image, self.admission_time);
                 let result = self.transport.execute(
                     admitted.provider(),
                     &commitment,
@@ -1727,7 +1760,7 @@ fn selected_image_and_launch(
     admitted: &AdmittedSelectorProvider,
     requirement: &crate::evaluator_protocol::SandboxRequirement,
     admission_time: u64,
-) -> Result<(AdmittedSandboxImage, LaunchPolicy), SelectorBoundaryError> {
+) -> Result<(SelectedSandboxImage, LaunchPolicy), SelectorBoundaryError> {
     let installed = admitted.bootstrap().installed();
     read_installed(
         installed,
@@ -1736,52 +1769,59 @@ fn selected_image_and_launch(
         CONTROL_ARTIFACT_LIMIT,
     )
     .and_then(|sim1| {
-        SignedImageManifest::from_canonical_cbor(&sim1)
-            .map_err(artifact_invalid)
-            .map(|manifest| (sim1, manifest))
+        admit_held_image(admitted, &sim1).map(|image| SelectedSandboxImage { sim1, image })
     })
-    .and_then(|(sim1, manifest)| {
-        let root_image = installed.artifact(
-            InstallationObjectKind::ROOT_IMAGE,
-            manifest.root_image_blake3_digest,
-        )?;
-        let executable = installed.artifact(
-            InstallationObjectKind::SUBJECT_EXECUTABLE,
-            manifest.executable_blake3_digest,
-        )?;
+    .and_then(|selected| {
         admitted
             .provider()
-            .admit_image_files(
-                &sim1,
-                root_image.file(),
-                executable.file(),
-                executable.object().byte_length(),
-            )
+            .verify_image_proof(&selected.image, admission_time)
+            .map(|_| selected)
             .map_err(artifact_invalid)
     })
-    .and_then(|image| {
-        admitted
-            .provider()
-            .verify_image_proof(&image, admission_time)
-            .map(|_| image)
-            .map_err(artifact_invalid)
-    })
-    .and_then(|image| {
+    .and_then(|selected| {
         read_installed(
             installed,
             InstallationObjectKind::LAUNCH_POLICY,
             requirement.lps1_digest,
             CONTROL_ARTIFACT_LIMIT,
         )
-        .map(|lps1| (image, lps1))
+        .map(|lps1| (selected, lps1))
     })
-    .and_then(|(image, lps1)| {
+    .and_then(|(selected, lps1)| {
         admitted
             .provider()
-            .admit_launch_policy(&lps1, &image)
-            .map(|launch| (image, launch))
+            .admit_launch_policy(&lps1, &selected.image)
+            .map(|launch| (selected, launch))
             .map_err(artifact_invalid)
     })
+}
+
+fn admit_held_image(
+    admitted: &AdmittedSelectorProvider,
+    sim1: &[u8],
+) -> Result<AdmittedSandboxImage, SelectorBoundaryError> {
+    SignedImageManifest::from_canonical_cbor(sim1)
+        .map_err(artifact_invalid)
+        .and_then(|manifest| {
+            let installed = admitted.bootstrap().installed();
+            let root_image = installed.artifact(
+                InstallationObjectKind::ROOT_IMAGE,
+                manifest.root_image_blake3_digest,
+            )?;
+            let executable = installed.artifact(
+                InstallationObjectKind::SUBJECT_EXECUTABLE,
+                manifest.executable_blake3_digest,
+            )?;
+            admitted
+                .provider()
+                .admit_image_files(
+                    sim1,
+                    root_image.file(),
+                    executable.file(),
+                    executable.object().byte_length(),
+                )
+                .map_err(artifact_invalid)
+        })
 }
 
 fn read_installed(
@@ -2597,6 +2637,19 @@ mod tests {
 
     fn fixture_admission_time() -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(FIXTURE_ADMISSION_TIME)
+    }
+
+    fn test_provider_request_admission<'a>(
+        lease: &SelectorAdmissionLease<'a>,
+        requirement: &crate::evaluator_protocol::SandboxRequirement,
+    ) -> TestResult<SelectorProviderRequestAdmission<'a>> {
+        let (selected, _) =
+            selected_image_and_launch(&lease.admitted, requirement, FIXTURE_ADMISSION_TIME)?;
+        Ok(SelectorProviderRequestAdmission::new(
+            lease,
+            selected,
+            fixture_admission_time,
+        ))
     }
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -3425,7 +3478,7 @@ mod tests {
         let (image, launch) =
             selected_image_and_launch(&admitted, requirement, FIXTURE_ADMISSION_TIME)?;
         let commitment = admitted.provider().derive_selector_grant_commitment(
-            &image,
+            &image.image,
             &launch,
             &request,
             resolved.attempt(),
@@ -3724,6 +3777,171 @@ mod tests {
         assert_transport_generation_fence(true)
     }
 
+    #[test]
+    fn transport_rechecks_held_image_and_executable_before_first_entry() -> TestResult {
+        for kind in [
+            InstallationObjectKind::ROOT_IMAGE,
+            InstallationObjectKind::SUBJECT_EXECUTABLE,
+        ] {
+            assert_transport_image_recheck(kind, false)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn transport_rechecks_held_image_and_executable_before_retry() -> TestResult {
+        for kind in [
+            InstallationObjectKind::ROOT_IMAGE,
+            InstallationObjectKind::SUBJECT_EXECUTABLE,
+        ] {
+            assert_transport_image_recheck(kind, true)?;
+        }
+        Ok(())
+    }
+
+    fn assert_transport_image_recheck(
+        kind: InstallationObjectKind,
+        mutate_before_retry: bool,
+    ) -> TestResult {
+        use std::os::unix::fs::FileExt as _;
+
+        let fixture = crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("provider.sock");
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
+        let transport = ProviderTransport::from_path_for_test(&path)?;
+        let (request, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let admission = SelectorAdmission::for_test(admitted)?;
+        let lease = admission.acquire([1; 16])?;
+        let requirement = request
+            .sandbox_requirement
+            .as_ref()
+            .ok_or("requirement missing")?;
+        let mut request_admission = test_provider_request_admission(&lease, requirement)?;
+        let manifest = request_admission.selected_image.image.manifest();
+        let identity = if kind == InstallationObjectKind::ROOT_IMAGE {
+            manifest.root_image_blake3_digest
+        } else {
+            manifest.executable_blake3_digest
+        };
+        let held = lease
+            .admitted
+            .bootstrap()
+            .installed()
+            .artifact(kind, identity)?
+            .file();
+        // The test installation retains writable temporary files solely for
+        // corruption injection; production installation descriptors are read-only.
+        let execute = |request_admission: &mut SelectorProviderRequestAdmission<'_>| {
+            transport.execute_staged(
+                &fixture.provider,
+                &fixture.commitment,
+                &fixture.spx1,
+                &mut std::io::Cursor::new(b"input"),
+                Duration::from_secs(1),
+                request_admission,
+            )
+        };
+        if mutate_before_retry {
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (result_tx, result_rx) = std::sync::mpsc::channel();
+            thread::scope(|scope| -> TestResult {
+                let listener = &listener;
+                let provider = scope.spawn(move || {
+                    (|| -> TestResult {
+                        let (mut stream, _) = listener.accept()?;
+                        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                        let _spx1 = read_frame(&mut stream)?;
+                        let mut input = Vec::new();
+                        stream.read_to_end(&mut input)?;
+                        entered_tx.send(())?;
+                        release_rx.recv_timeout(Duration::from_secs(1))?;
+                        Ok(())
+                    })()
+                    .map_err(|error| error.to_string())
+                });
+                scope.spawn(|| {
+                    let result = execute(&mut request_admission).map(|_| ());
+                    assert!(result_tx.send(result).is_ok());
+                });
+                entered_rx.recv_timeout(Duration::from_secs(1))?;
+                held.write_all_at(&[0xba], 0)?;
+                release_tx.send(())?;
+                assert!(matches!(
+                    result_rx.recv_timeout(Duration::from_secs(1))?,
+                    Err(ProviderTransportError::BeforeAdmission)
+                ));
+                provider.join().map_err(|_| "provider thread panicked")??;
+                Ok(())
+            })?;
+        } else {
+            held.write_all_at(&[0xba], 0)?;
+            assert!(matches!(
+                execute(&mut request_admission),
+                Err(ProviderTransportError::BeforeAdmission)
+            ));
+        }
+        assert!(request_admission.entry_proof.is_none());
+        listener.set_nonblocking(true)?;
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        // A failed recheck reserves no entry and cannot stall live-update closure.
+        let closed = admission.close_and_snapshot()?;
+        // Only the retry case has already entered a provider-owned attempt.
+        let expected: Vec<_> = mutate_before_retry.then_some([1; 16]).into_iter().collect();
+        assert_eq!(closed.live_attempt_ids, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn transport_rechecks_host_time_before_connecting() -> TestResult {
+        let clocks: [fn() -> SystemTime; 2] = [
+            || UNIX_EPOCH - Duration::from_secs(1),
+            || UNIX_EPOCH + Duration::from_secs(2_200_000_000),
+        ];
+        for clock in clocks {
+            let fixture =
+                crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("provider.sock");
+            let listener = UnixListener::bind(&path)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
+            let transport = ProviderTransport::from_path_for_test(&path)?;
+            let (request, admitted, _) =
+                crate::selector::installation::tests::root_selector_fixture()?;
+            let admission = SelectorAdmission::for_test(admitted)?;
+            let lease = admission.acquire([1; 16])?;
+            let requirement = request
+                .sandbox_requirement
+                .as_ref()
+                .ok_or("requirement missing")?;
+            let mut request_admission = test_provider_request_admission(&lease, requirement)?;
+            request_admission.admission_time = clock;
+            assert!(matches!(
+                transport.execute_staged(
+                    &fixture.provider,
+                    &fixture.commitment,
+                    &fixture.spx1,
+                    &mut std::io::Cursor::new(b"input"),
+                    Duration::from_secs(1),
+                    &mut request_admission,
+                ),
+                Err(ProviderTransportError::BeforeAdmission)
+            ));
+            listener.set_nonblocking(true)?;
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+            assert!(request_admission.entry_proof.is_none());
+        }
+        Ok(())
+    }
+
     fn assert_transport_generation_fence(reopen_with_successor: bool) -> TestResult {
         let transport_fixture =
             crate::selector_transport_test_fixture::authenticated_transport_fixture()?;
@@ -3732,9 +3950,14 @@ mod tests {
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(SOCKET_MODE))?;
         let transport = ProviderTransport::from_path_for_test(&path)?;
-        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let (request, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let admission = Arc::new(SelectorAdmission::for_test(admitted)?);
         let lease = admission.acquire([1; 16])?;
+        let requirement = request
+            .sandbox_requirement
+            .as_ref()
+            .ok_or("requirement missing")?;
+        let mut request_admission = test_provider_request_admission(&lease, requirement)?;
         let (request_entered_tx, request_entered_rx) = std::sync::mpsc::channel();
         let (release_provider_tx, release_provider_rx) = std::sync::mpsc::channel();
         let (execution_tx, execution_rx) = std::sync::mpsc::channel();
@@ -3757,7 +3980,6 @@ mod tests {
                 .map_err(|error| error.to_string())
             });
             scope.spawn(|| {
-                let mut request_admission = SelectorProviderRequestAdmission::new(&lease);
                 let result = transport
                     .execute_staged(
                         &transport_fixture.provider,
@@ -3795,7 +4017,7 @@ mod tests {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
         ));
         if let Some(current) = successor_lease {
-            let mut stale_request = SelectorProviderRequestAdmission::new(&lease);
+            let mut stale_request = test_provider_request_admission(&lease, requirement)?;
             assert!(matches!(
                 transport.execute_staged(
                     &transport_fixture.provider,
@@ -3814,7 +4036,7 @@ mod tests {
             drop(stale_request);
             drop(lease);
             // A stale request's drop must not release the successor's slot.
-            let mut current_request = SelectorProviderRequestAdmission::new(&current);
+            let mut current_request = test_provider_request_admission(&current, requirement)?;
             assert!(current_request.begin().is_ok());
             current_request.entered();
         }
@@ -3851,17 +4073,23 @@ mod tests {
             PrepareLiveUpdateError::RecoveryPending(SelectorBoundaryError::Io)
         ));
 
-        let (_, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
+        let (request, admitted, _) = crate::selector::installation::tests::root_selector_fixture()?;
         let admission = SelectorAdmission::for_test(admitted)?;
         assert!(admission
             .begin_provider_execution([1; 16], &admission.current()?)
             .is_err());
         admission.finish_provider_entry([1; 16], false);
         let lease = admission.acquire([1; 16])?;
-        let mut provider_requests = SelectorProviderRequestAdmission::new(&lease);
+        let requirement = request
+            .sandbox_requirement
+            .as_ref()
+            .ok_or("requirement missing")?;
+        let mut provider_requests = test_provider_request_admission(&lease, requirement)?;
         assert!(provider_requests.begin().is_ok());
+        assert!(provider_requests.entry_proof.is_some());
         assert!(provider_requests.begin().is_err());
         provider_requests.entered();
+        assert!(provider_requests.entry_proof.is_none());
         provider_requests.entered();
         assert!(provider_requests.begin().is_ok());
         drop(provider_requests);
@@ -4483,7 +4711,7 @@ mod tests {
         assert_eq!(execute.adapter_input, decoded.input_descriptor());
         let selected = selected_image_and_launch(&admitted, requirement, FIXTURE_ADMISSION_TIME)?;
         assert_eq!(
-            selected.0.manifest().manifest_digest,
+            selected.0.image.manifest().manifest_digest,
             requirement.sim1_digest
         );
         assert_ne!(fresh_selector_id()?, [0; 16]);
