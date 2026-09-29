@@ -20,7 +20,10 @@ use crate::TransientServiceUnitName;
 mod directory;
 mod recovery;
 pub use directory::PreparedAttemptDirectory;
-pub use recovery::{RecoveredAttemptIntent, RegistryRecoveryEntry, SystemdAttemptRecovery};
+pub use recovery::{
+    RecoveredAttemptIntent, RecoveredUnmountedDirectory, RegistryRecoveryEntry,
+    SystemdAttemptRecovery, UnmountedDirectoryInventory,
+};
 
 const RECORD_SIZE: usize = 52;
 const REGISTRY_NAME: &str = "registry";

@@ -14,6 +14,9 @@ use super::{
 type RegistryResult<T> = Result<T, SystemdAttemptRegistryError>;
 const MAX_RECORD_SIZE: usize = 84;
 
+mod directories;
+pub use directories::{RecoveredUnmountedDirectory, UnmountedDirectoryInventory};
+
 /// A complete recorded intent observed during recovery, not activation authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveredAttemptIntent {
