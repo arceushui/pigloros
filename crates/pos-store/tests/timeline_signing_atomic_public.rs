@@ -271,6 +271,64 @@ fn prepared_append_rejects_pending_destruction_for_either_role(
     Ok(())
 }
 
+fn reject_prepared_rotated_role(
+    store: &mut dyn EventStore,
+    encryption_role: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_material, mut registry, timeline, authorization) = prepared_fixture(store)?;
+    let registration = if encryption_role {
+        KeyRegistrationV1::new(
+            KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 2),
+            Hash::from_bytes([94; 32]),
+            None,
+        )
+    } else {
+        let (key, _) = generate_keypair();
+        let replacement = SigningKeyMaterial::new(key);
+        KeyRegistrationV1::new(
+            KeyIdentityV1::new("timeline-owner", KeyRoleV1::TimelineIntegritySigning, 2),
+            replacement.material_digest(),
+            Some(replacement.public_verification_key()),
+        )
+    };
+    registry.register_key(registration)?;
+    store.save_key_registry(&registry)?;
+    let payload_calls = std::cell::Cell::new(0);
+    let sign_calls = std::cell::Cell::new(0);
+    let mut payload = |_: &pos_core::TimelineEventEnvelopeInputV1| {
+        payload_calls.set(payload_calls.get() + 1);
+        Ok(CanonicalBytes::from_static(b"ciphertext"))
+    };
+    let mut sign = |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+        sign_calls.set(sign_calls.get() + 1);
+        Err(CoreError::Storage("signer must not run".to_owned()))
+    };
+    assert!(store
+        .append_prepared_subject_encrypted_timeline_signed(
+            timeline,
+            &registry,
+            draft(b"placeholder"),
+            authorization,
+            &mut payload,
+            &mut sign,
+        )
+        .is_err());
+    assert_eq!(payload_calls.get(), 0);
+    assert_eq!(sign_calls.get(), 0);
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn prepared_append_rejects_rotated_epoch_for_either_role() -> Result<(), Box<dyn std::error::Error>>
+{
+    for encryption_role in [true, false] {
+        reject_prepared_rotated_role(&mut MemoryStore::new(), encryption_role)?;
+        reject_prepared_rotated_role(&mut SqliteStore::open_in_memory()?, encryption_role)?;
+    }
+    Ok(())
+}
+
 fn reject_prepared_callback_failures(
     store: &mut dyn EventStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
