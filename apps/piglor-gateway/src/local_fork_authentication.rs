@@ -55,7 +55,7 @@ pub(super) enum LocalForkAuthenticationErrorV1 {
 pub(super) struct LocalForkAuthenticationCredentialsV1 {
     resolver: PrincipalOwnerResolverV1,
     adapter_signer: ForkAuthenticationAdapterSigningKeyV1,
-    _host_signer: LocalForkHostSignerV1,
+    host_signer: LocalForkHostSignerV1,
 }
 
 impl LocalForkAuthenticationCredentialsV1 {
@@ -161,7 +161,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         &self,
         challenge: &CanonicalBytes,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self._host_signer.sign_initialize(challenge)
+        self.host_signer.sign_initialize(challenge)
     }
 
     /// Sign one canonical ADR-106 FAO1 challenge through protected host custody.
@@ -169,7 +169,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         &self,
         challenge: &CanonicalBytes,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self._host_signer.sign_open(challenge)
+        self.host_signer.sign_open(challenge)
     }
 
     /// Sign one owner-bound canonical ADR-106 POC1 command through protected custody.
@@ -178,7 +178,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         command: &CanonicalBytes,
         authentication: &ResolvedLocalAuthenticationV1,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self._host_signer
+        self.host_signer
             .sign_principal_owner_command(command, authentication)
     }
 
@@ -188,7 +188,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         command: &CanonicalBytes,
         authentication: &ResolvedLocalAuthenticationV1,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self._host_signer.sign_fork_command(command, authentication)
+        self.host_signer.sign_fork_command(command, authentication)
     }
 
     /// Sign one canonical ADR-106 FRC1 recovery command through protected custody.
@@ -196,7 +196,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         &self,
         command: &CanonicalBytes,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self._host_signer.sign_recovery(command)
+        self.host_signer.sign_recovery(command)
     }
 }
 
@@ -250,7 +250,7 @@ impl PrincipalOwnerResolverV1 {
 
 /// Opaque host-signing custody.
 pub(super) struct LocalForkHostSignerV1 {
-    _signer: ForkHostSigningKeyV1,
+    signer: ForkHostSigningKeyV1,
 }
 
 impl LocalForkHostSignerV1 {
@@ -258,7 +258,7 @@ impl LocalForkHostSignerV1 {
         &self,
         challenge: &CanonicalBytes,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self._signer
+        self.signer
             .sign_initialize(challenge.as_slice())
             .map_err(signature_invalid)
     }
@@ -267,7 +267,7 @@ impl LocalForkHostSignerV1 {
         &self,
         challenge: &CanonicalBytes,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self._signer
+        self.signer
             .sign_open(challenge.as_slice())
             .map_err(signature_invalid)
     }
@@ -280,7 +280,7 @@ impl LocalForkHostSignerV1 {
         if !principal_owner_matches(command, authentication.owner()) {
             return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
         }
-        self._signer
+        self.signer
             .sign_command(command.as_slice(), authentication.verified_evidence())
             .map_err(signature_invalid)
     }
@@ -290,7 +290,7 @@ impl LocalForkHostSignerV1 {
         command: &CanonicalBytes,
         authentication: &ResolvedLocalAuthenticationV1,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self._signer
+        self.signer
             .sign_command(command.as_slice(), authentication.verified_evidence())
             .map_err(signature_invalid)
     }
@@ -299,7 +299,7 @@ impl LocalForkHostSignerV1 {
         &self,
         command: &CanonicalBytes,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self._signer
+        self.signer
             .sign_recovery(command.as_slice())
             .map_err(signature_invalid)
     }
@@ -389,8 +389,8 @@ fn parse_credentials(
                                 LocalForkAuthenticationCredentialsV1 {
                                     resolver: PrincipalOwnerResolverV1::new(policy, registry),
                                     adapter_signer,
-                                    _host_signer: LocalForkHostSignerV1 {
-                                        _signer: host_signer,
+                                    host_signer: LocalForkHostSignerV1 {
+                                        signer: host_signer,
                                     },
                                 }
                             })
