@@ -33,6 +33,16 @@ use crate::{
 };
 use std::sync::Arc;
 
+/// Exact identities and public signing material for one prepared protected append.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedSubjectAppendAuthorizationV1 {
+    pub encryption_identity: crate::KeyIdentityV1,
+    pub encryption_material_digest: Hash,
+    pub signing_identity: crate::KeyIdentityV1,
+    pub signing_material_digest: Hash,
+    pub signing_public_key: crate::PublicKey,
+}
+
 /// Opaque, fixed-size identity for a retried external append.
 ///
 /// An application derives this from its external identity using a keyed hash.
@@ -1019,16 +1029,15 @@ pub trait EventStore: Send {
     /// The callback is synchronous and non-escaping. It receives the immutable
     /// first-commit context before the payload exists; adapters retain the same
     /// registry serialization boundary through commit or rollback.
+    /// # Errors
+    /// Returns a closed error when either identity is unavailable or the
+    /// callback, signature verification, insertion, or commit fails.
     fn append_prepared_subject_encrypted_timeline_signed(
         &mut self,
         _timeline: TimelineId,
         _expected_registry: &crate::KeyRegistryStateV1,
         _draft: EventDraft,
-        _encryption_identity: crate::KeyIdentityV1,
-        _encryption_material_digest: Hash,
-        _signing_identity: crate::KeyIdentityV1,
-        _signing_material_digest: Hash,
-        _signing_public_key: crate::PublicKey,
+        _authorization: PreparedSubjectAppendAuthorizationV1,
         _prepare_payload: &mut dyn FnMut(
             &crate::TimelineEventEnvelopeInputV1,
         ) -> Result<CanonicalBytes, CoreError>,
