@@ -4644,11 +4644,7 @@ impl EventStore for MemoryStore {
         timeline: TimelineId,
         expected_registry: &KeyRegistryStateV1,
         draft: EventDraft,
-        encryption_identity: pos_core::KeyIdentityV1,
-        encryption_material_digest: Hash,
-        signing_identity: pos_core::KeyIdentityV1,
-        signing_material_digest: Hash,
-        signing_public_key: pos_core::PublicKey,
+        authorization: pos_core::PreparedSubjectAppendAuthorizationV1,
         prepare_payload: &mut dyn FnMut(
             &pos_core::TimelineEventEnvelopeInputV1,
         ) -> Result<pos_core::CanonicalBytes, CoreError>,
@@ -4658,6 +4654,13 @@ impl EventStore for MemoryStore {
             &pos_core::CanonicalBytes,
         ) -> Result<pos_core::Signature, CoreError>,
     ) -> Result<Event, CoreError> {
+        let pos_core::PreparedSubjectAppendAuthorizationV1 {
+            encryption_identity,
+            encryption_material_digest,
+            signing_identity,
+            signing_material_digest,
+            signing_public_key,
+        } = authorization;
         let mut registry = self.checked_signing_registry(expected_registry)?;
         registry
             .with_encryption_authorization(encryption_identity, encryption_material_digest, || ())
