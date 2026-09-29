@@ -1106,6 +1106,12 @@ mod tests {
             directory.path(),
             owner_uid,
         ));
+    }
+
+    #[test]
+    fn oversized_credential_file_fails_closed() {
+        let (auth, host) = credential_bytes(mapped_uid(), [8; 32]);
+        let directory = credentials_directory(&auth, &host);
         test_ok(fs::set_permissions(
             directory.path().join(AUTH_CREDENTIAL_NAME),
             fs::Permissions::from_mode(0o600),
@@ -1120,7 +1126,7 @@ mod tests {
         ));
         expect_invalid(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
-            owner_uid,
+            current_uid(),
         ));
     }
 
