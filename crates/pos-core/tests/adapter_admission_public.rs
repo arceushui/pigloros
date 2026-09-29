@@ -235,7 +235,7 @@ fn invalid_adapter_profile_and_configuration_length_reject() -> TestResult<()> {
         },
         AdapterAdmissionEntryV1 {
             configuration_digest: Hash::zero(),
-            ..good.clone()
+            ..good
         },
     ] {
         assert_eq!(
