@@ -1160,18 +1160,20 @@ fn provenance_records(
         classifier_revision_digest,
         fork_admission_digest,
     });
-    let intervention = classification.intervention().then(|| {
-        ForkInterventionAdmissionV1(ForkInterventionAdmissionInputV1 {
-            operation_id,
-            fork_timeline_id: child_timeline_id,
-            logical_seq: event.logical_seq,
-            event_id: event.event_id,
-            payload_hash: event.payload_hash,
-            room_revision_descriptor_hash,
-            classifier_revision_digest,
-            fork_admission_digest,
-        })
-    });
+    let intervention = classification
+        .intervention()
+        .then_some(ForkInterventionAdmissionV1(
+            ForkInterventionAdmissionInputV1 {
+                operation_id,
+                fork_timeline_id: child_timeline_id,
+                logical_seq: event.logical_seq,
+                event_id: event.event_id,
+                payload_hash: event.payload_hash,
+                room_revision_descriptor_hash,
+                classifier_revision_digest,
+                fork_admission_digest,
+            },
+        ));
     (origin, intervention)
 }
 
