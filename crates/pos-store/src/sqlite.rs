@@ -7890,7 +7890,7 @@ impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
                 .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Pending))
                 .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
             let execution = fork_delivery_execution(
-                self.execute_fork_admission_in_transaction(session, command),
+                self.execute_fork_admission_in_transaction(session, host, command),
             );
             match &execution {
                 ForkDeliveryExecutionV1::Committed(_) => sqlite_set_fork_delivery_state(
