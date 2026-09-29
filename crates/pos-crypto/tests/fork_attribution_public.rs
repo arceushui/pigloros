@@ -205,25 +205,34 @@ fn signature_only_rejects_non_attribution_roles_and_absent_registry_identity(
     let (private, _) = generate_keypair();
     let private = SigningKeyMaterial::new(private);
     let mut registry = KeyRegistryStateV1::new();
-    assert!(
-        sign_local_fork_manifest_for_identity_from_admission_signature_only(
-            &mut registry,
-            &private,
-            KeyIdentityV1::new("creator-a", KeyRoleV1::TimelineIntegritySigning, 1),
-            &admission,
-            manifest.clone(),
-        )
-        .is_err()
+    let Err(wrong_role) = sign_local_fork_manifest_for_identity_from_admission_signature_only(
+        &mut registry,
+        &private,
+        KeyIdentityV1::new("creator-a", KeyRoleV1::TimelineIntegritySigning, 1),
+        &admission,
+        manifest.clone(),
+    ) else {
+        return Err("non-attribution role unexpectedly signed".into());
+    };
+    let ForkAttributionSigningErrorV1::Codec(wrong_role) = wrong_role else {
+        return Err("non-attribution role unexpectedly reached the registry".into());
+    };
+    assert_eq!(
+        wrong_role,
+        pos_core::ForkAttributionCodecErrorV1::FieldMismatch
     );
-    assert!(
-        sign_local_fork_manifest_for_identity_from_admission_signature_only(
-            &mut registry,
-            &private,
-            KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
-            &admission,
-            manifest,
-        )
-        .is_err()
-    );
+    let Err(absent) = sign_local_fork_manifest_for_identity_from_admission_signature_only(
+        &mut registry,
+        &private,
+        KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1),
+        &admission,
+        manifest,
+    ) else {
+        return Err("absent registry identity unexpectedly signed".into());
+    };
+    let ForkAttributionSigningErrorV1::Registry(absent) = absent else {
+        return Err("absent registry identity failed before the registry".into());
+    };
+    assert_eq!(absent, pos_core::KeyRegistryErrorV1::NotFound);
     Ok(())
 }
