@@ -203,11 +203,46 @@ pub fn verify_oci_closure_v1(
     manifest: Vec<u8>,
     supplied_blobs: BTreeMap<String, Vec<u8>>,
 ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
+    let ManifestPlan { expected, members } = verify_manifest(&address, &manifest)?;
+    if supplied_blobs.len() != expected.len() {
+        return Err(ReleaseSourceErrorV1::BoundsExceeded);
+    }
+    let mut blobs = Vec::with_capacity(expected.len());
+    for ((digest, size), (supplied_digest, bytes)) in expected.into_iter().zip(supplied_blobs) {
+        if digest != supplied_digest {
+            return Err(ReleaseSourceErrorV1::BoundsExceeded);
+        }
+        if bytes.len() > MAX_BLOB_BYTES {
+            return Err(ReleaseSourceErrorV1::BoundsExceeded);
+        }
+        verify_descriptor_bytes(&digest, size, &bytes)?;
+        blobs.push(BlobV1 { digest, bytes });
+    }
+    Ok(VerifiedReleaseBundleV1 {
+        manifest: BlobV1 {
+            digest: address.digest.clone(),
+            bytes: manifest,
+        },
+        address,
+        blobs,
+        members,
+    })
+}
+
+struct ManifestPlan {
+    expected: BTreeMap<String, u64>,
+    members: Vec<BundleMemberV1>,
+}
+
+fn verify_manifest(
+    address: &BundleAddressV1,
+    manifest: &[u8],
+) -> Result<ManifestPlan, ReleaseSourceErrorV1> {
     if manifest.len() > MAX_MANIFEST_BYTES {
         return Err(ReleaseSourceErrorV1::BoundsExceeded);
     }
-    verify_descriptor_bytes(&address.digest, address.size, &manifest)?;
-    let value = crate::parse_jcs_object(&manifest)?;
+    verify_descriptor_bytes(&address.digest, address.size, manifest)?;
+    let value = crate::parse_jcs_object(manifest)?;
     let object = value
         .as_object()
         .ok_or(ReleaseSourceErrorV1::InvalidDescriptor)?;
@@ -252,37 +287,14 @@ pub fn verify_oci_closure_v1(
         .and_then(serde_json::Value::as_array)
         .ok_or(ReleaseSourceErrorV1::InvalidDescriptor)?;
     let members = parse_layers(layers, &mut expected)?;
-    // The manifest byte limit permits at most 241 layers, below the inherited
-    // 359-object ceiling. Check the exact key set before pairing sorted maps.
-    if supplied_blobs.len() != expected.len()
-        || supplied_blobs
-            .keys()
-            .any(|digest| !expected.contains_key(digest))
-    {
+    // The 64 KiB manifest bounds the descriptor count; each size is at most
+    // 32 MiB, so the declared sum fits in u64.
+    // Include the already bounded manifest in the complete closure budget.
+    let declared_bytes = expected.values().sum::<u64>() + manifest.len() as u64;
+    if declared_bytes > crate::MAX_TOTAL_BYTES as u64 {
         return Err(ReleaseSourceErrorV1::BoundsExceeded);
     }
-    let mut blobs = Vec::with_capacity(expected.len());
-    for ((digest, size), bytes) in expected.into_iter().zip(supplied_blobs.into_values()) {
-        if bytes.len() > MAX_BLOB_BYTES {
-            return Err(ReleaseSourceErrorV1::BoundsExceeded);
-        }
-        verify_descriptor_bytes(&digest, size, &bytes)?;
-        blobs.push(BlobV1 { digest, bytes });
-    }
-    if blobs.iter().map(|blob| blob.bytes.len()).sum::<usize>() + manifest.len()
-        > crate::MAX_TOTAL_BYTES
-    {
-        return Err(ReleaseSourceErrorV1::BoundsExceeded);
-    }
-    Ok(VerifiedReleaseBundleV1 {
-        manifest: BlobV1 {
-            digest: address.digest.clone(),
-            bytes: manifest,
-        },
-        address,
-        blobs,
-        members,
-    })
+    Ok(ManifestPlan { expected, members })
 }
 
 fn parse_layers(
@@ -802,8 +814,21 @@ mod tests {
             verify_oci_closure_v1(address.clone(), manifest.clone(), extra),
             Err(ReleaseSourceErrorV1::BoundsExceeded)
         );
-        let mut wrong_size = blobs.clone();
         let member = digest(b"component");
+        let mut wrong_key = blobs.clone();
+        let component = wrong_key.remove(&member).ok_or("fixture component")?;
+        wrong_key.insert(digest(b"replacement"), component);
+        assert_eq!(
+            verify_oci_closure_v1(address.clone(), manifest.clone(), wrong_key),
+            Err(ReleaseSourceErrorV1::BoundsExceeded)
+        );
+        let mut oversized_blob = blobs.clone();
+        oversized_blob.insert(member.clone(), vec![0; MAX_BLOB_BYTES + 1]);
+        assert_eq!(
+            verify_oci_closure_v1(address.clone(), manifest.clone(), oversized_blob),
+            Err(ReleaseSourceErrorV1::BoundsExceeded)
+        );
+        let mut wrong_size = blobs.clone();
         wrong_size.insert(member.clone(), b"short".to_vec());
         assert_eq!(
             verify_oci_closure_v1(address.clone(), manifest.clone(), wrong_size),
