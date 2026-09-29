@@ -1538,6 +1538,36 @@ fn sqlite_open_rejects_incompatible_fork_admission_graph_schemas() -> Result<(),
             "DROP TABLE fork_admission_operations;
              CREATE TABLE fork_admission_operations (kind INTEGER, operation_id BLOB);",
         ),
+        (
+            "classifier-sources",
+            "DROP TABLE fork_classifier_sources;
+             CREATE TABLE fork_classifier_sources (descriptor_hash BLOB PRIMARY KEY);",
+        ),
+        (
+            "classifier-tables",
+            "DROP TABLE fork_classifier_tables;
+             CREATE TABLE fork_classifier_tables (child_id TEXT PRIMARY KEY);",
+        ),
+        (
+            "classifier-registrations",
+            "DROP TABLE fork_classifier_registrations;
+             CREATE TABLE fork_classifier_registrations (operation_id BLOB PRIMARY KEY);",
+        ),
+        (
+            "event-origins",
+            "DROP TABLE fork_event_origins;
+             CREATE TABLE fork_event_origins (event_id TEXT PRIMARY KEY);",
+        ),
+        (
+            "intervention-admissions",
+            "DROP TABLE fork_intervention_admissions;
+             CREATE TABLE fork_intervention_admissions (event_id TEXT PRIMARY KEY);",
+        ),
+        (
+            "append-operations",
+            "DROP TABLE fork_append_operations;
+             CREATE TABLE fork_append_operations (operation_id BLOB PRIMARY KEY);",
+        ),
     ] {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join(format!("{name}.db"));
