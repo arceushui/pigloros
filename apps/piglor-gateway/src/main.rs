@@ -220,52 +220,69 @@ struct ServeArgs {
     require_local_fork_authority: bool,
 }
 
-fn parse_serve_args(
+/// Raw `serve` flags before address and storage validation.
+struct ServeFlags {
+    positional: Vec<String>,
+    owner_key: Option<PathBuf>,
+    require_local_fork_authority: bool,
+}
+
+fn parse_serve_flags(
     args: &[String],
-) -> Result<ServeArgs, Box<dyn std::error::Error + Send + Sync>> {
-    let mut positional = Vec::new();
-    let mut owner_key = None;
-    let mut require_local_fork_authority = false;
+) -> Result<ServeFlags, Box<dyn std::error::Error + Send + Sync>> {
+    let mut flags = ServeFlags {
+        positional: Vec::new(),
+        owner_key: None,
+        require_local_fork_authority: false,
+    };
     let mut index = 0;
     while index < args.len() {
         if args[index] == "--owntracks-owner-key" {
-            if owner_key.is_some() {
+            if flags.owner_key.is_some() {
                 return Err("OwnTracks owner key option may be specified once".into());
             }
             let Some(path) = args.get(index + 1) else {
                 return Err("OwnTracks owner key path is required".into());
             };
-            owner_key = Some(PathBuf::from(path));
+            flags.owner_key = Some(PathBuf::from(path));
             index += 2;
         } else if args[index] == "--require-local-fork-authority" {
-            if require_local_fork_authority {
+            if flags.require_local_fork_authority {
                 return Err("Local Fork authority option may be specified once".into());
             }
-            require_local_fork_authority = true;
+            flags.require_local_fork_authority = true;
             index += 1;
         } else {
-            positional.push(args[index].clone());
+            flags.positional.push(args[index].clone());
             index += 1;
         }
     }
-    if positional.len() > 2 {
+    Ok(flags)
+}
+
+fn parse_serve_args(
+    args: &[String],
+) -> Result<ServeArgs, Box<dyn std::error::Error + Send + Sync>> {
+    let flags = parse_serve_flags(args)?;
+    if flags.positional.len() > 2 {
         return Err("serve accepts at most an address and SQLite path".into());
     }
-    let addr = positional
+    let addr = flags
+        .positional
         .first()
         .map_or(Ok("127.0.0.1:8080".parse()?), |value| value.parse())?;
-    let sqlite_path = positional.get(1).cloned();
-    if owner_key.is_some() && sqlite_path.is_none() {
+    let sqlite_path = flags.positional.get(1).cloned();
+    if flags.owner_key.is_some() && sqlite_path.is_none() {
         return Err("OwnTracks ingress requires an SQLite path".into());
     }
-    if require_local_fork_authority && sqlite_path.is_none() {
+    if flags.require_local_fork_authority && sqlite_path.is_none() {
         return Err("Fork admission requires an SQLite path".into());
     }
     Ok(ServeArgs {
         addr,
         sqlite_path,
-        owntracks_owner_key: owner_key,
-        require_local_fork_authority,
+        owntracks_owner_key: flags.owner_key,
+        require_local_fork_authority: flags.require_local_fork_authority,
     })
 }
 
