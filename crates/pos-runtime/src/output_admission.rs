@@ -1930,14 +1930,8 @@ mod tests {
         artifact
     }
 
-    #[test]
-    fn installed_sources_exercise_names_artifacts_and_policy_builders() {
-        let plugin = FixturePlugin {
-            id: PluginId::new(),
-            name: "fixture",
-            events: vec![Kind::new("fixture.output")],
-        };
-        let sources = [
+    const fn installed_sources() -> [InstalledOutputPolicySourceV1; 8] {
+        [
             InstalledOutputPolicySourceV1::Generated,
             InstalledOutputPolicySourceV1::Gateway,
             InstalledOutputPolicySourceV1::World,
@@ -1946,8 +1940,17 @@ mod tests {
             InstalledOutputPolicySourceV1::SyntheticObservation,
             InstalledOutputPolicySourceV1::Society,
             InstalledOutputPolicySourceV1::Experiment,
-        ];
-        for source in sources {
+        ]
+    }
+
+    #[test]
+    fn installed_source_descriptors_bind_native_types_and_event_types() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            name: "fixture",
+            events: vec![Kind::new("fixture.output")],
+        };
+        for source in installed_sources() {
             let expected_native_types: &[&str] = match source {
                 InstalledOutputPolicySourceV1::Generated => &[],
                 InstalledOutputPolicySourceV1::Gateway => &["piglor_gateway::GatewayActionPlugin"],
@@ -2008,6 +2011,17 @@ mod tests {
                 events: vec![Kind::new("fixture.output")],
             };
             assert_eq!(source.event_types(&named), expected_event_types);
+        }
+    }
+
+    #[test]
+    fn installed_sources_exercise_names_artifacts_and_policy_builders() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            name: "fixture",
+            events: vec![Kind::new("fixture.output")],
+        };
+        for source in installed_sources() {
             let expected_profile = match source {
                 InstalledOutputPolicySourceV1::Generated
                 | InstalledOutputPolicySourceV1::Gateway
