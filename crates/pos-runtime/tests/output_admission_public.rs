@@ -366,7 +366,7 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     assert!(!source.executable_budget_bytes.is_empty());
     assert!(!source.implementation_artifact.is_empty());
     assert!(source.configuration_artifact.starts_with(b"CFG1"));
-    assert!(!source.profile_artifact.is_empty());
+    assert!(source.profile_artifact.is_empty());
     assert!(!source.retention_artifact.is_empty());
     assert_artifact_shape_rejections(&source);
     assert_artifact_size_rejections(&source);
@@ -440,7 +440,7 @@ fn verified_binding_rejects_a_foreign_plugin_instance() -> TestResult {
 }
 
 #[test]
-fn unknown_or_changed_execution_profile_fails_before_registry_mutation() -> TestResult {
+fn local_execution_profile_absence_does_not_create_installed_authority() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -448,19 +448,7 @@ fn unknown_or_changed_execution_profile_fails_before_registry_mutation() -> Test
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
 
-    // An unknown profile resolves no EPF1 bytes, so no binding can exist.
-    assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            b"fixture-configuration",
-            "unknown-profile-v1",
-        ),
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    ));
-
-    // A binding resolved under another draft profile carries changed EPF1
-    // bytes and still cannot enter installed registration.
+    // Generated local admission has no EPF1 profile member.
     let local = verified_binding(&plugin)?;
     let changed = pos_runtime::OutputPolicyBindingV1::from_installed_source(
         &plugin,
@@ -468,10 +456,8 @@ fn unknown_or_changed_execution_profile_fails_before_registry_mutation() -> Test
         b"fixture-configuration",
         "deterministic-air-gapped-v1",
     )?;
-    assert_ne!(
-        changed.execution_profile_artifact(),
-        local.profile_artifact.as_slice()
-    );
+    assert!(changed.execution_profile_artifact().is_empty());
+    assert!(local.profile_artifact.is_empty());
     let pin = PluginPinV1::try_new(
         DomainImplementationKindV1::Plugin,
         PluginIsolationV1::OperatorTrustedNative,

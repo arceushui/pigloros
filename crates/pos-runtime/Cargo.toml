@@ -14,13 +14,15 @@ test-support = []
 
 [dependencies]
 blake3 = { workspace = true }
-pos-conformance = { path = "../pos-conformance" }
 pos-core = { path = "../pos-core" }
 pos-store = { path = "../pos-store" }
 pos-state = { path = "../pos-state" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pos-conformance = { path = "../pos-conformance" }
 
 [dev-dependencies]
 ciborium = { workspace = true }
