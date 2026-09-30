@@ -431,12 +431,6 @@ impl<'a> Reader<'a> {
             .map_err(|_| ArtifactRegistrationErrorV1::InvalidEncoding)
     }
 
-    fn unsigned_bytes(&mut self, length: usize) -> Result<u64, ArtifactRegistrationErrorV1> {
-        self.cursor
-            .unsigned_bytes(length)
-            .map_err(|_| ArtifactRegistrationErrorV1::InvalidEncoding)
-    }
-
     fn head(&mut self, major: u8) -> Result<u64, ArtifactRegistrationErrorV1> {
         self.cursor
             .head(major)
