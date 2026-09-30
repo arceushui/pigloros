@@ -553,7 +553,7 @@ impl WorldReplayClosureV1 {
         })
     }
 
-    fn ensure_retained(&self, now: WallTime) -> Result<(), WorldReplayClosureErrorV1> {
+    const fn ensure_retained(&self, now: WallTime) -> Result<(), WorldReplayClosureErrorV1> {
         if now.as_micros() >= self.retention_lease.as_input().retention_deadline_micros {
             Err(WorldReplayClosureErrorV1::RetentionExpired)
         } else {
@@ -629,6 +629,12 @@ fn artifact_claim(
     })
 }
 
+/// One structural leaf predicate and the error reported when it matches.
+type LeafRuleV1<'a> = (
+    &'a dyn Fn(&WorldArtifactLeafInputV1) -> bool,
+    WorldReplayClosureErrorV1,
+);
+
 /// Per-leaf structural rules, checked in this order across every leaf.
 fn validate_leaf_rules(
     artifacts: &[WorldArtifactLeafV1],
@@ -644,10 +650,7 @@ fn validate_leaf_rules(
         leaf.kind != WorldArtifactKindV1::OptionalView
             && leaf.optionality != crate::ArtifactOptionalityV1::Required
     };
-    let rules: [(
-        &dyn Fn(&WorldArtifactLeafInputV1) -> bool,
-        WorldReplayClosureErrorV1,
-    ); 3] = [
+    let rules: [LeafRuleV1<'_>; 3] = [
         (&out_of_scope, WorldReplayClosureErrorV1::ScopeMismatch),
         (&unowned, WorldReplayClosureErrorV1::UnownedArtifact),
         (
