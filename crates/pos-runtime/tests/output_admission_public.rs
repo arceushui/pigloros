@@ -1073,6 +1073,74 @@ fn verified_step_rejects_output_one_byte_over_the_event_limit_before_append() ->
     assert_rejected_output_is_not_persisted(&mut registry, store.as_mut(), timeline, &draft)
 }
 
+/// Emits one valid draft followed by one draft over the event byte limit on
+/// its first step, then only the valid draft on every later step.
+struct MixedBatchDriver {
+    over_limit_bytes: usize,
+    stepped: bool,
+}
+
+impl Driver for MixedBatchDriver {
+    fn step(
+        &mut self,
+        _timeline: pos_core::TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let mut drafts = vec![sized_draft("plugin.output", 1)];
+        if !std::mem::replace(&mut self.stepped, true) {
+            drafts.push(sized_draft("plugin.output", self.over_limit_bytes));
+        }
+        Ok(StepOutput::new(drafts))
+    }
+
+    fn name(&self) -> &'static str {
+        "output-admission-mixed-batch-driver"
+    }
+}
+
+#[test]
+fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let source = verified_binding(&plugin)?;
+    let limit = declared_event_limit(&source, "plugin.output")?;
+    let over_limit_bytes = usize::try_from(limit)? + 1;
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    registry.register_with_verified_output_policy(
+        &plugin,
+        source.binding,
+        None,
+        Some(Box::new(MixedBatchDriver {
+            over_limit_bytes,
+            stepped: false,
+        })),
+    )?;
+    let mut store = gated_store()?;
+    let timeline = store.create_timeline("output-admission-mixed-batch")?.id();
+
+    let rejected = registry.step_all_anchored(timeline, pos_core::Seq::ZERO);
+    assert!(matches!(
+        rejected,
+        Err(RuntimeError::OutputAdmission(OutputAdmissionErrorV1::EventBytesExceeded {
+            ref event_type,
+            requested,
+            limit: recorded,
+        })) if event_type == "plugin.output" && requested == over_limit_bytes && recorded == limit
+    ));
+    assert_eq!(store.logical_head(timeline)?, pos_core::Seq::ZERO);
+
+    let drafts = registry.step_all_anchored(timeline, pos_core::Seq::ZERO)?;
+    assert_eq!(drafts.len(), 1);
+    let events =
+        registry.append_and_commit_step_at(store.as_mut(), pos_core::Seq::ZERO, 0, &drafts)?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(store.logical_head(timeline)?, events[0].seq);
+    Ok(())
+}
+
 #[test]
 fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult {
     let plugin = FixturePlugin {
