@@ -49,29 +49,29 @@ use pos_core::{
     validate_artifact_registration_catalog_graph_v1, validate_closed_adapter_recording_v1,
     AdapterAdmissionV1, AdapterCallReservationOutcomeV1, AdapterCallReservationV1,
     AdapterInvocationV1, AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1,
-    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1,
-    ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
-    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
-    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
-    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError,
-    ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
-    ErasureForkPersistencePortV1, ErasureForkRecoveryMutationV1, ErasureForkRecoveryProofV1,
-    ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
-    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1,
-    ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1,
-    ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
-    ErasureVerifiedInventoryV1, EventOriginRecordV1, ForkAdmissionHostCommandV1,
-    ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
-    ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1, ForkAdmissionReceiptV1,
-    ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAdmissionRecoveryProofV1,
-    ForkAppendOperationV1, ForkAttributionOriginV1, ForkAuthorityOriginV1, ForkClassifiedEventV1,
-    ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
-    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1,
-    ForkInterventionAdmissionV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1,
-    KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PluginId, PreparedArtifactRegistrationBatchV1,
+    AdapterRecordingStoreV1, AdapterTranscriptV1, ArtifactRegistrationCatalogRowV1,
+    ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1,
+    ArtifactRegistrationPersistencePortV1, AuthorityCommitOutcomeV1, AuthorityMutationPermitV1,
+    AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
+    AuthorityPersistenceStateV1, CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit,
+    CoreError, ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1,
+    ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryMutationV1,
+    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
+    ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
+    ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
+    ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
+    ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
+    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, EventOriginRecordV1,
+    ForkAdmissionHostCommandV1, ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1,
+    ForkAdmissionOpenChallengeV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
+    ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
+    ForkAdmissionRecoveryProofV1, ForkAppendOperationV1, ForkAttributionOriginV1,
+    ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
+    ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
+    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryErrorV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    PersistedAuthorityV1, PluginId, PreparedArtifactRegistrationBatchV1,
     PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
     PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1, WorldReplayHandleV1,
@@ -4881,6 +4881,79 @@ impl EventStore for SqliteStore {
         )
     }
 
+    fn adapter_recording_open_session(
+        &mut self,
+        session: AdapterRecordingSessionV1,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::open_adapter_recording_session(self, session)
+    }
+
+    fn adapter_recording_reserve_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: AdapterCallReservationV1,
+    ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::reserve_adapter_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            reservation,
+        )
+    }
+
+    fn adapter_recording_complete_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::complete_adapter_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            global_call_index,
+            output_bytes,
+        )
+    }
+
+    fn adapter_recording_close_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::close_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
+    fn adapter_recording_read_closed_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::read_closed_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
+    fn adapter_recording_abort_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::abort_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         self.bind_erasure_gate_impl(gate)
     }
@@ -7028,6 +7101,67 @@ fn sqlite_validate_artifact_registration_closure(
         if stored_root != Some(root) {
             return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
         }
+        let transcript_bytes = find_sqlite_root_transcript_bytes(&catalog_rows, &root_record)?;
+        sqlite_validate_root_adapter_recording(connection, &root_record, transcript_bytes)?;
+    }
+    Ok(())
+}
+
+fn find_sqlite_root_transcript_bytes<'a>(
+    rows: &'a [ArtifactRegistrationCatalogRowV1],
+    root: &ReproManifestRootV1,
+) -> Result<&'a [u8], ArtifactRegistrationPersistenceErrorV1> {
+    let mut transcript_bytes = None;
+    for row in rows {
+        if row.artifact_class() != ErasureArtifactClassV1::ReproManifest {
+            continue;
+        }
+        let Ok(transcript) = AdapterTranscriptV1::from_canonical_cbor(row.artifact_bytes()) else {
+            continue;
+        };
+        if transcript.digest() == root.as_input().adapter_transcript_digest
+            && transcript_bytes.replace(row.artifact_bytes()).is_some()
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+    }
+    transcript_bytes.ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+}
+
+fn sqlite_validate_root_adapter_recording(
+    connection: &Connection,
+    root: &ReproManifestRootV1,
+    transcript_bytes: &[u8],
+) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    let root_input = root.as_input();
+    let (session, state, stored_transcript) = sqlite_load_adapter_recording_session(
+        connection,
+        root_input.owner_reference,
+        root_input.run_operation_id,
+    )
+    .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?
+    .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+    if state != 1
+        || session.world_handle() != root_input.world_handle
+        || session.admission().as_input().scope_digest != root_input.plugin_roster_digest
+        || stored_transcript.as_deref() != Some(transcript_bytes)
+    {
+        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+    }
+    let derived = sqlite_adapter_recording_transcript(
+        connection,
+        root_input.owner_reference,
+        root_input.run_operation_id,
+        &session,
+    )
+    .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+    if derived != transcript_bytes {
+        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+    }
+    let transcript = validate_closed_adapter_recording_v1(&session, transcript_bytes)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+    if transcript.digest() != root_input.adapter_transcript_digest {
+        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
     }
     Ok(())
 }

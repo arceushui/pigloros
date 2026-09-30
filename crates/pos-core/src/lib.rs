@@ -137,10 +137,7 @@ impl<'a> CborCursor<'a> {
         self.bytes
             .get(self.offset..)
             .and_then(|remaining| remaining.get(..length))
-            .map(|value| {
-                self.offset += length;
-                value
-            })
+            .inspect(|_| self.offset += length)
             .ok_or(CborReadError::InvalidEncoding)
     }
 

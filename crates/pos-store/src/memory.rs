@@ -4492,6 +4492,79 @@ impl EventStore for MemoryStore {
         )
     }
 
+    fn adapter_recording_open_session(
+        &mut self,
+        session: AdapterRecordingSessionV1,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::open_adapter_recording_session(self, session)
+    }
+
+    fn adapter_recording_reserve_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: AdapterCallReservationV1,
+    ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::reserve_adapter_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            reservation,
+        )
+    }
+
+    fn adapter_recording_complete_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::complete_adapter_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            global_call_index,
+            output_bytes,
+        )
+    }
+
+    fn adapter_recording_close_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::close_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
+    fn adapter_recording_read_closed_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::read_closed_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
+    fn adapter_recording_abort_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::abort_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         self.bind_erasure_gate_impl(gate)
     }
@@ -10316,6 +10389,9 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         {
             return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
         }
+        let transcript_bytes =
+            find_memory_root_transcript_bytes(rows.iter().map(|(_, _, row)| row), &root)?;
+        self.validate_root_adapter_recording(&root, transcript_bytes)?;
 
         self.check_artifact_registration_operation(
             operation_key,
@@ -10588,6 +10664,37 @@ fn same_memory_adapter_reservation(
 }
 
 impl MemoryStore {
+    fn validate_root_adapter_recording(
+        &self,
+        root: &ReproManifestRootV1,
+        transcript_bytes: &[u8],
+    ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+        let root_input = root.as_input();
+        let session = self
+            .adapter_recording_sessions
+            .get(&(root_input.owner_reference, root_input.run_operation_id))
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if session.status != MemoryAdapterRecordingStatusV1::Closed
+            || session.session.world_handle() != root_input.world_handle
+            || session.session.admission().as_input().scope_digest
+                != root_input.plugin_roster_digest
+            || session.transcript_bytes.as_deref() != Some(transcript_bytes)
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        let derived = memory_adapter_recording_transcript(session)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if derived != transcript_bytes {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        let transcript = validate_closed_adapter_recording_v1(&session.session, transcript_bytes)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if transcript.digest() != root_input.adapter_transcript_digest {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        Ok(())
+    }
+
     fn check_artifact_registration_operation(
         &self,
         operation_key: (OwnerIdV1, Hash),
@@ -10677,9 +10784,33 @@ impl MemoryStore {
             {
                 return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
             }
+            let transcript_bytes =
+                find_memory_root_transcript_bytes(catalog_rows.iter(), &root_record)?;
+            self.validate_root_adapter_recording(&root_record, transcript_bytes)?;
         }
         Ok(())
     }
+}
+
+fn find_memory_root_transcript_bytes<'a>(
+    rows: impl Iterator<Item = &'a ArtifactRegistrationCatalogRowV1>,
+    root: &ReproManifestRootV1,
+) -> Result<&'a [u8], ArtifactRegistrationPersistenceErrorV1> {
+    let mut transcript_bytes = None;
+    for row in rows {
+        if row.artifact_class() != ErasureArtifactClassV1::ReproManifest {
+            continue;
+        }
+        let Ok(transcript) = AdapterTranscriptV1::from_canonical_cbor(row.artifact_bytes()) else {
+            continue;
+        };
+        if transcript.digest() == root.as_input().adapter_transcript_digest
+            && transcript_bytes.replace(row.artifact_bytes()).is_some()
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+    }
+    transcript_bytes.ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
 }
 
 #[cfg(test)]
