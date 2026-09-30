@@ -9,7 +9,7 @@ use pos_runtime::{
     OutputAdmissionErrorV1, PluginRegistry, RuntimeError, StepOutput, TickScheduler,
 };
 use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -934,4 +934,250 @@ fn generated_registration_rejects_duplicate_owned_event_types() {
         registry.register_generated(&plugin, None, None),
         Err(RuntimeError::CapabilityMismatch { .. })
     ));
+}
+
+fn sized_draft(event_type: &str, payload_bytes: usize) -> EventDraft {
+    EventDraft::new(
+        pos_core::EntityId::new(),
+        Kind::new(event_type),
+        CanonicalBytes::from_vec(vec![0x5a; payload_bytes]),
+    )
+}
+
+struct SizedPayloadDriver {
+    event_type: &'static str,
+    payload_bytes: usize,
+}
+
+impl Driver for SizedPayloadDriver {
+    fn step(
+        &mut self,
+        _timeline: pos_core::TimelineId,
+        _observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![sized_draft(
+            self.event_type,
+            self.payload_bytes,
+        )]))
+    }
+
+    fn name(&self) -> &'static str {
+        "output-admission-sized-payload-driver"
+    }
+}
+
+fn declared_event_limit(source: &FixtureBinding, event_type: &str) -> Result<u32, Box<dyn Error>> {
+    let declared = source
+        .binding
+        .policy()
+        .fields()
+        .output_declarations
+        .iter()
+        .find(|declaration| declaration.event_type() == event_type)
+        .map(pos_core::output_policy::OutputDeclarationV1::max_bytes)
+        .ok_or_else(|| std::io::Error::other("fixture output declaration missing"))?;
+    Ok(declared.min(source.binding.budget().fields().max_event_bytes))
+}
+
+/// Register the fixture through the installed-source seam with a Driver that
+/// emits one draft of `event_type` sized at the recorded limit plus `extra`.
+fn registered_with_sized_output(
+    plugin: &FixturePlugin,
+    event_type: &'static str,
+    extra: usize,
+) -> Result<(PluginRegistry, u32), Box<dyn Error>> {
+    let source = verified_binding(plugin)?;
+    let limit = declared_event_limit(&source, "plugin.output")?;
+    let payload_bytes = usize::try_from(limit)? + extra;
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+    registry.register_with_verified_output_policy(
+        plugin,
+        source.binding,
+        None,
+        Some(Box::new(SizedPayloadDriver {
+            event_type,
+            payload_bytes,
+        })),
+    )?;
+    Ok((registry, limit))
+}
+
+fn gated_store() -> Result<Box<dyn pos_core::store::EventStore>, Box<dyn Error>> {
+    let mut store = pos_store::open_store(pos_store::StoreConfig::Memory)?;
+    store.bind_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ))?;
+    Ok(store)
+}
+
+/// A rejected step leaves nothing staged: forcing the rejected draft through
+/// the append seam fails and the Timeline stays empty.
+fn assert_rejected_output_is_not_persisted(
+    registry: &mut PluginRegistry,
+    store: &mut dyn pos_core::store::EventStore,
+    timeline: pos_core::TimelineId,
+    rejected: &EventDraft,
+) -> TestResult {
+    assert!(registry
+        .append_and_commit_step_at(
+            store,
+            pos_core::Seq::ZERO,
+            0,
+            std::slice::from_ref(rejected)
+        )
+        .is_err());
+    assert_eq!(store.logical_head(timeline)?, pos_core::Seq::ZERO);
+    Ok(())
+}
+
+#[test]
+fn verified_step_appends_output_at_the_exact_event_byte_limit() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let (mut registry, limit) = registered_with_sized_output(&plugin, "plugin.output", 0)?;
+    let mut store = gated_store()?;
+    let timeline = store.create_timeline("output-admission-exact-limit")?.id();
+
+    let drafts = registry.step_all_anchored(timeline, pos_core::Seq::ZERO)?;
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].payload.len(), usize::try_from(limit)?);
+    let events =
+        registry.append_and_commit_step_at(store.as_mut(), pos_core::Seq::ZERO, 0, &drafts)?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(store.logical_head(timeline)?, events[0].seq);
+    Ok(())
+}
+
+#[test]
+fn verified_step_rejects_output_one_byte_over_the_event_limit_before_append() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let (mut registry, limit) = registered_with_sized_output(&plugin, "plugin.output", 1)?;
+    let requested_bytes = usize::try_from(limit)? + 1;
+    let mut store = gated_store()?;
+    let timeline = store.create_timeline("output-admission-overflow")?.id();
+
+    assert!(matches!(
+        registry.step_all_anchored(timeline, pos_core::Seq::ZERO),
+        Err(RuntimeError::OutputAdmission(OutputAdmissionErrorV1::EventBytesExceeded {
+            ref event_type,
+            requested,
+            limit: recorded,
+        })) if event_type == "plugin.output" && requested == requested_bytes && recorded == limit
+    ));
+    assert_rejected_output_is_not_persisted(
+        &mut registry,
+        store.as_mut(),
+        timeline,
+        &sized_draft("plugin.output", requested_bytes),
+    )
+}
+
+#[test]
+fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let (mut registry, _) = registered_with_sized_output(&plugin, "plugin.undeclared", 0)?;
+    let mut store = gated_store()?;
+    let timeline = store.create_timeline("output-admission-undeclared")?.id();
+
+    assert!(matches!(
+        registry.step_all_anchored(timeline, pos_core::Seq::ZERO),
+        Err(RuntimeError::OutputAdmission(OutputAdmissionErrorV1::MissingDeclaration {
+            ref event_type,
+        })) if event_type == "plugin.undeclared"
+    ));
+    assert_rejected_output_is_not_persisted(
+        &mut registry,
+        store.as_mut(),
+        timeline,
+        &sized_draft("plugin.undeclared", 1),
+    )
+}
+
+#[test]
+fn verified_binding_rejects_an_undeclared_execution_profile() {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    assert!(matches!(
+        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            b"fixture-configuration",
+            "undeclared-profile-v1",
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    ));
+}
+
+struct UpgradingPlugin {
+    id: PluginId,
+    upgraded: AtomicBool,
+}
+
+impl Plugin for UpgradingPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "upgrading-output-admission-fixture"
+    }
+
+    fn version(&self) -> &'static str {
+        if self.upgraded.load(Ordering::Relaxed) {
+            "2.0.0"
+        } else {
+            "1.0.0"
+        }
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("plugin.output")],
+            has_driver: true,
+            ..Capability::default()
+        }
+    }
+}
+
+#[test]
+fn verified_registration_rejects_a_policy_recorded_for_another_plugin_identity() -> TestResult {
+    let plugin = UpgradingPlugin {
+        id: PluginId::new(),
+        upgraded: AtomicBool::new(false),
+    };
+    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        &plugin,
+        InstalledOutputPolicySourceV1::Generated,
+        b"fixture-configuration",
+        "deterministic-local-v1",
+    )?;
+    assert_eq!(binding.policy().fields().plugin_version, "1.0.0");
+    plugin.upgraded.store(true, Ordering::Relaxed);
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+
+    assert!(matches!(
+        registry.register_with_verified_output_policy(
+            &plugin,
+            binding,
+            None,
+            Some(Box::new(FixtureDriver)),
+        ),
+        Err(RuntimeError::OutputAdmission(
+            OutputAdmissionErrorV1::PluginVersionMismatch
+        ))
+    ));
+    assert!(registry.is_empty());
+    assert!(registry.output_policy_digests().next().is_none());
+    assert!(registry.replay_policy_closures().next().is_none());
+    Ok(())
 }
