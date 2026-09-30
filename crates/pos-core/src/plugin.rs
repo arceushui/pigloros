@@ -42,6 +42,16 @@ pub trait Plugin: PluginInstanceIdentity + Send + Sync {
 /// the derivation (for example, to replay a token captured from another
 /// instance). Calls through `&dyn Plugin` dispatch to the blanket
 /// implementation of the concrete type.
+///
+/// # Warning
+///
+/// The blanket implementation also covers wrappers such as `Box<dyn Plugin>`,
+/// `Arc<dyn Plugin>` and `&T`. Method-call syntax on a wrapper
+/// (`boxed.installed_owner_token()`) resolves to the wrapper's own
+/// implementation and derives a token from the wrapper's type and address,
+/// not from the Plugin. Always take the token with the fully qualified form
+/// `PluginInstanceIdentity::installed_owner_token(plugin)` where `plugin` is
+/// the Plugin itself (`&P` or `&dyn Plugin`), never a smart-pointer wrapper.
 pub trait PluginInstanceIdentity {
     /// Return the host-derived owner token for this concrete instance.
     fn installed_owner_token(&self) -> PluginOwnerTokenV1;
@@ -61,7 +71,7 @@ impl<T> PluginInstanceIdentity for T {
 /// Plugin values may share one address, and an address may be reused by a new
 /// instance of the same type after the original is dropped. It is therefore
 /// not an authenticated owner proof; authenticated owner proof is deferred to
-/// Redmine #396 and #395.
+/// Redmine #396 (authenticated owner link) and #412 (callback impersonation).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PluginOwnerTokenV1 {
     type_name: &'static str,
@@ -251,6 +261,20 @@ mod tests {
         assert_eq!(p.capability().owned_entity_kinds[0], "test.entity");
         assert!(p.capability().has_driver);
         assert_eq!(p.version(), "0.1.0");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn boxed_plugin_method_call_token_is_not_the_plugin_token() {
+        let boxed = Box::new(TestPlugin {
+            id: PluginId::new(),
+        });
+        let plugin: &TestPlugin = &boxed;
+        let plugin_token = PluginInstanceIdentity::installed_owner_token(plugin);
+        let wrapper_token = boxed.installed_owner_token();
+        assert_ne!(wrapper_token, plugin_token);
+        assert!(plugin_token.verifies_instance(plugin, type_name::<TestPlugin>()));
+        assert!(!wrapper_token.verifies_instance(plugin, type_name::<TestPlugin>()));
     }
 
     #[test]
