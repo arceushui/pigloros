@@ -67,7 +67,8 @@ pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{
     AuthorizedDriverTargetV1, ClosedAdapterTranscriptV1, HostCatalogueEntryV1,
     InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
-    LocalAdapterProviderV1, LocalAdapterSessionV1, OperationContext, PluginRegistry,
+    LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1, LocalAdapterProviderV1,
+    LocalAdapterSessionV1, OperationContext, PluginRegistry,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
