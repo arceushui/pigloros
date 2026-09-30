@@ -1,6 +1,9 @@
+use ciborium::value::Value;
 use pos_core::{
-    ForkAdmissionAuthorityCodecErrorV1, ForkAdmissionHostRecordV1,
-    ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1, Hash, PublicKey,
+    ForkAdmissionAuthorityCodecErrorV1, ForkAdmissionErrorV1, ForkAdmissionHostRecordV1,
+    ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1, ForkAuthorityOriginV1, Hash,
+    OwnerIdV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PublicKey,
+    MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1,
 };
 
 const fn hash(value: u8) -> Hash {
@@ -145,5 +148,125 @@ fn public_authority_codecs_round_trip_valid_records() -> Result<(), Box<dyn std:
         ForkAdmissionOpenChallengeV1::from_canonical_cbor(&open.canonical_bytes())?,
         open
     );
+    Ok(())
+}
+
+#[test]
+fn public_pob1_codec_is_canonical_bounded_and_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+        operation_id: hash(1),
+        principal_digest: hash(2),
+        owner: OwnerIdV1::new("o".repeat(128))?,
+        origin: ForkAuthorityOriginV1::Local,
+    })?;
+    let canonical = binding.to_canonical_cbor();
+    assert_eq!(canonical.len(), MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1);
+    assert_eq!(
+        PrincipalOwnerBindingV1::from_canonical_cbor(&canonical)?,
+        binding
+    );
+
+    let mut wrong_marker = canonical.clone();
+    wrong_marker[2] = b'X';
+    assert_eq!(
+        PrincipalOwnerBindingV1::from_canonical_cbor(&wrong_marker),
+        Err(ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    let mut trailing = canonical.clone();
+    trailing.push(0);
+    assert_eq!(
+        PrincipalOwnerBindingV1::from_canonical_cbor(&trailing),
+        Err(ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    assert_eq!(
+        PrincipalOwnerBindingV1::from_canonical_cbor(
+            &[0; MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1 + 1],
+        ),
+        Err(ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    let mut zero_operation_id = canonical.clone();
+    zero_operation_id[9..41].fill(0);
+    assert_eq!(
+        PrincipalOwnerBindingV1::from_canonical_cbor(&zero_operation_id),
+        Err(ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    let mut zero_principal_digest = canonical;
+    zero_principal_digest[43..75].fill(0);
+    assert_eq!(
+        PrincipalOwnerBindingV1::from_canonical_cbor(&zero_principal_digest),
+        Err(ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    assert_eq!(
+        PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+            operation_id: Hash::zero(),
+            principal_digest: hash(2),
+            owner: OwnerIdV1::new("owner")?,
+            origin: ForkAuthorityOriginV1::Local,
+        }),
+        Err(ForkAdmissionErrorV1::InvalidRequest)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_pob1_decoder_rejects_each_untrusted_record_shape(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+        operation_id: hash(1),
+        principal_digest: hash(2),
+        owner: OwnerIdV1::new("owner")?,
+        origin: ForkAuthorityOriginV1::Local,
+    })?;
+    let canonical = binding.to_canonical_cbor();
+
+    let mut trailing = canonical;
+    trailing.push(0);
+    assert_eq!(
+        PrincipalOwnerBindingV1::from_canonical_cbor(&trailing),
+        Err(ForkAdmissionErrorV1::CorruptAuthority)
+    );
+
+    for record in [
+        Value::Null,
+        Value::Array(vec![
+            Value::Bytes(b"POB1".to_vec()),
+            Value::Integer(1.into()),
+            Value::Bytes(hash(1).as_bytes().to_vec()),
+            Value::Bytes(hash(2).as_bytes().to_vec()),
+            Value::Integer(1.into()),
+            Value::Array(vec![Value::Integer(1.into())]),
+        ]),
+        Value::Array(vec![
+            Value::Bytes(b"POB1".to_vec()),
+            Value::Integer(1.into()),
+            Value::Integer(1.into()),
+            Value::Bytes(hash(2).as_bytes().to_vec()),
+            Value::Text("owner".to_owned()),
+            Value::Array(vec![Value::Integer(1.into())]),
+        ]),
+        Value::Array(vec![
+            Value::Bytes(b"POB1".to_vec()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 31]),
+            Value::Bytes(hash(2).as_bytes().to_vec()),
+            Value::Text("owner".to_owned()),
+            Value::Array(vec![Value::Integer(1.into())]),
+        ]),
+        Value::Array(vec![
+            Value::Bytes(b"POB1".to_vec()),
+            Value::Integer(1.into()),
+            Value::Bytes(hash(1).as_bytes().to_vec()),
+            Value::Bytes(hash(2).as_bytes().to_vec()),
+            Value::Text(String::new()),
+            Value::Array(vec![Value::Integer(1.into())]),
+        ]),
+    ] {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&record, &mut bytes)?;
+        assert_eq!(
+            PrincipalOwnerBindingV1::from_canonical_cbor(&bytes),
+            Err(ForkAdmissionErrorV1::CorruptAuthority)
+        );
+    }
     Ok(())
 }

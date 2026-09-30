@@ -1,12 +1,30 @@
-use std::error::Error;
+use std::{
+    error::Error,
+    sync::{Arc, Barrier},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use pos_core::{clock::FixedAdmissionClock, Hash, PublicKey, Signature, WallTime};
-use pos_crypto::fork_authentication::ForkHostSigningKeyV1;
+use ciborium::value::Value;
+use pos_core::{
+    clock::FixedAdmissionClock,
+    fork_authentication::{
+        principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
+        ForkAuthenticationPolicyV1,
+    },
+    CanonicalBytes, EntityId, ErasureContainmentGateV1, EventDraft, EventStore,
+    ForkAdmissionCommandCodecErrorV1, ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1,
+    ForkAdmissionRecoveryProofV1, Hash, Kind, PrincipalRefV1, PublicKey, Signature, TimelineId,
+    WallTime,
+};
+use pos_crypto::fork_authentication::{
+    verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
+    ForkHostSigningKeyV1,
+};
 use pos_store::{
     memory::MemoryStore, sqlite::SqliteStore, ForkAdmissionAuthorityBootstrapPortV1,
-    ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthoritySessionV1,
+    ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
 };
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 const HOST_SEED: [u8; 32] = [7; 32];
 const POLICY_DIGEST: Hash = Hash::from_bytes([9; 32]);
@@ -87,23 +105,6 @@ fn public_custom_clock_cannot_bootstrap_authority() -> Result<(), Box<dyn Error>
             POLICY_DIGEST
         ),
         Err(ForkAdmissionAuthorityErrorV1::AuthorityClockUnavailable)
-    );
-    Ok(())
-}
-
-#[test]
-fn public_authority_record_is_unavailable_before_bootstrap() -> Result<(), Box<dyn Error>> {
-    let store = MemoryStore::new();
-    assert_eq!(
-        store.fork_admission_host_record(),
-        Err(ForkAdmissionAuthorityErrorV1::AuthorityUninitialized)
-    );
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("fork-admission.db");
-    let store = SqliteStore::open(&path.to_string_lossy())?;
-    assert_eq!(
-        store.fork_admission_host_record(),
-        Err(ForkAdmissionAuthorityErrorV1::AuthorityUninitialized)
     );
     Ok(())
 }
@@ -200,6 +201,628 @@ fn sqlite_handle_cannot_consume_another_handles_challenge() -> Result<(), Box<dy
         Err(ForkAdmissionAuthorityErrorV1::HostAuthorityMismatch)
     );
     issuer.finalize_fork_admission_initialize(&challenge, &signature)?;
+    Ok(())
+}
+
+fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)?;
+    Ok(bytes)
+}
+
+fn authority_policy(
+    adapter: &ForkAuthenticationAdapterSigningKeyV1,
+) -> Result<ForkAuthenticationPolicyV1, Box<dyn Error>> {
+    Ok(ForkAuthenticationPolicyV1::new(vec![
+        ForkAuthenticationAdapterPolicyV1 {
+            adapter_id: "test-adapter".to_owned(),
+            verifying_key: adapter.public_key(),
+            minimum_assurance: 1,
+            registry_bindings: vec![Hash::from_bytes([3; 32])],
+        },
+    ])?)
+}
+
+fn open_session<S: ForkAdmissionAuthorityBootstrapPortV1>(
+    store: &mut S,
+    host: &ForkHostSigningKeyV1,
+    policy: &ForkAuthenticationPolicyV1,
+) -> Result<pos_store::ForkAdmissionAuthoritySessionV1, Box<dyn Error>> {
+    let key = PublicKey::from_bytes(host.public_key());
+    let initialize = store.begin_fork_admission_initialize(key, policy.digest()?)?;
+    store.finalize_fork_admission_initialize(
+        &initialize,
+        &host.sign_initialize(&initialize.to_canonical_cbor()?)?,
+    )?;
+    let open = store.begin_fork_admission_open(key, policy.digest()?)?;
+    Ok(store.finalize_fork_admission_open(&open, &host.sign_open(&open.to_canonical_cbor()?)?)?)
+}
+
+fn reopen_session<S: ForkAdmissionAuthorityBootstrapPortV1>(
+    store: &mut S,
+    host: &ForkHostSigningKeyV1,
+    policy: &ForkAuthenticationPolicyV1,
+) -> Result<pos_store::ForkAdmissionAuthoritySessionV1, Box<dyn Error>> {
+    let open = store
+        .begin_fork_admission_open(PublicKey::from_bytes(host.public_key()), policy.digest()?)?;
+    Ok(store.finalize_fork_admission_open(&open, &host.sign_open(&open.to_canonical_cbor()?)?)?)
+}
+
+fn principal_command<S: ForkAdmissionAuthorityBootstrapPortV1>(
+    store: &S,
+    host: &ForkHostSigningKeyV1,
+    adapter: &ForkAuthenticationAdapterSigningKeyV1,
+    policy: &ForkAuthenticationPolicyV1,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+    operation_id: [u8; 32],
+    expires_at: u64,
+    owner: &str,
+) -> Result<ForkAdmissionHostCommandV1, Box<dyn Error>> {
+    let record = AuthenticatedPrincipalRecordV1 {
+        principal: PrincipalRefV1::try_new([4; 16], "test.local")?,
+        adapter_id: "test-adapter".to_owned(),
+        assurance: 1,
+        issued_at: 0,
+        expires_at,
+        registry_binding: Hash::from_bytes([3; 32]),
+        operation_nonce: [5; 32],
+    };
+    let evidence = adapter.sign_authenticated_principal(record)?;
+    let verified = verify_authenticated_principal_evidence_v1(policy, evidence)?;
+    let principal = principal_digest_v1(&verified.evidence().record().principal)?;
+    let inner = encode(&Value::Array(vec![
+        Value::Text("POC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(
+            store
+                .fork_admission_host_record()?
+                .store_id()
+                .as_bytes()
+                .to_vec(),
+        ),
+        Value::Bytes(session.identity().as_bytes().to_vec()),
+        Value::Bytes(operation_id.to_vec()),
+        Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+        Value::Bytes(principal.as_bytes().to_vec()),
+        Value::Text(owner.to_owned()),
+    ]))?;
+    let signature = host.sign_command(&inner, &verified)?;
+    let fac1 = encode(&Value::Array(vec![
+        Value::Text("FAC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(inner),
+        Value::Bytes(verified.evidence().to_canonical_cbor()?),
+        Value::Bytes(signature.as_bytes().to_vec()),
+    ]))?;
+    Ok(ForkAdmissionHostCommandV1::from_canonical_cbor(&fac1)?)
+}
+
+fn recovery_proof<S: ForkAdmissionAuthorityBootstrapPortV1>(
+    store: &S,
+    host: &ForkHostSigningKeyV1,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+    kind: u8,
+    operation_id: [u8; 32],
+) -> Result<ForkAdmissionRecoveryProofV1, Box<dyn Error>> {
+    let recovery = encode(&Value::Array(vec![
+        Value::Text("FRC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(
+            store
+                .fork_admission_host_record()?
+                .store_id()
+                .as_bytes()
+                .to_vec(),
+        ),
+        Value::Bytes(session.identity().as_bytes().to_vec()),
+        Value::Integer(kind.into()),
+        Value::Bytes(operation_id.to_vec()),
+    ]))?;
+    let proof = encode(&Value::Array(vec![
+        Value::Text("FRP1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(recovery.clone()),
+        Value::Bytes(host.sign_recovery(&recovery)?.as_bytes().to_vec()),
+    ]))?;
+    Ok(ForkAdmissionRecoveryProofV1::from_canonical_cbor(&proof)?)
+}
+
+fn opaque_command(
+    adapter: &ForkAuthenticationAdapterSigningKeyV1,
+    policy: &ForkAuthenticationPolicyV1,
+    command_bytes: Vec<u8>,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let evidence = adapter.sign_authenticated_principal(AuthenticatedPrincipalRecordV1 {
+        principal: PrincipalRefV1::try_new([4; 16], "test.local")?,
+        adapter_id: "test-adapter".to_owned(),
+        assurance: 1,
+        issued_at: 0,
+        expires_at: u64::MAX,
+        registry_binding: Hash::from_bytes([3; 32]),
+        operation_nonce: [5; 32],
+    })?;
+    let verified = verify_authenticated_principal_evidence_v1(policy, evidence)?;
+    let fac1 = encode(&Value::Array(vec![
+        Value::Text("FAC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(command_bytes),
+        Value::Bytes(verified.evidence().to_canonical_cbor()?),
+        Value::Bytes(vec![0; 64]),
+    ]))?;
+    Ok(fac1)
+}
+
+fn opaque_recovery(recovery_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
+    let proof = encode(&Value::Array(vec![
+        Value::Text("FRP1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(recovery_bytes.to_vec()),
+        Value::Bytes(vec![0; 64]),
+    ]))?;
+    Ok(proof)
+}
+
+fn sqlite_principal_recovery_fixture(
+    path: &str,
+    operation_id: [u8; 32],
+) -> Result<
+    (
+        SqliteStore,
+        ForkHostSigningKeyV1,
+        pos_store::ForkAdmissionAuthoritySessionV1,
+    ),
+    Box<dyn Error>,
+> {
+    let host = ForkHostSigningKeyV1::from_seed([111; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([112; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        operation_id,
+        u64::MAX,
+        "owner",
+    )?;
+    assert!(matches!(
+        store.execute_fork_admission_command(&session, &policy, &command)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    Ok((store, host, session))
+}
+
+fn fork_command<S: ForkAdmissionAuthorityBootstrapPortV1>(
+    store: &S,
+    host: &ForkHostSigningKeyV1,
+    adapter: &ForkAuthenticationAdapterSigningKeyV1,
+    policy: &ForkAuthenticationPolicyV1,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+    operation_id: [u8; 32],
+    parent: TimelineId,
+    child_name: &str,
+) -> Result<ForkAdmissionHostCommandV1, Box<dyn Error>> {
+    let record = AuthenticatedPrincipalRecordV1 {
+        principal: PrincipalRefV1::try_new([4; 16], "test.local")?,
+        adapter_id: "test-adapter".to_owned(),
+        assurance: 1,
+        issued_at: 0,
+        expires_at: u64::MAX,
+        registry_binding: Hash::from_bytes([3; 32]),
+        operation_nonce: [5; 32],
+    };
+    let evidence = adapter.sign_authenticated_principal(record)?;
+    let verified = verify_authenticated_principal_evidence_v1(policy, evidence)?;
+    let principal = principal_digest_v1(&verified.evidence().record().principal)?;
+    let inner = encode(&Value::Array(vec![
+        Value::Text("FCC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(
+            store
+                .fork_admission_host_record()?
+                .store_id()
+                .as_bytes()
+                .to_vec(),
+        ),
+        Value::Bytes(session.identity().as_bytes().to_vec()),
+        Value::Bytes(operation_id.to_vec()),
+        Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+        Value::Bytes(principal.as_bytes().to_vec()),
+        Value::Bytes(parent.inner().to_bytes().to_vec()),
+        Value::Integer(0.into()),
+        Value::Integer(0.into()),
+        Value::Bytes(vec![8; 32]),
+        Value::Bytes(vec![9; 32]),
+        Value::Integer(1.into()),
+        Value::Text(child_name.to_owned()),
+    ]))?;
+    let signature = host.sign_command(&inner, &verified)?;
+    let fac1 = encode(&Value::Array(vec![
+        Value::Text("FAC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(inner),
+        Value::Bytes(verified.evidence().to_canonical_cbor()?),
+        Value::Bytes(signature.as_bytes().to_vec()),
+    ]))?;
+    Ok(ForkAdmissionHostCommandV1::from_canonical_cbor(&fac1)?)
+}
+
+type SqliteForkRecoveryFixture = (
+    SqliteStore,
+    ForkHostSigningKeyV1,
+    ForkAuthenticationPolicyV1,
+    pos_store::ForkAdmissionAuthoritySessionV1,
+    TimelineId,
+);
+
+fn sqlite_fork_recovery_fixture(
+    path: &str,
+    parent_name: &str,
+    child_name: &str,
+) -> Result<SqliteForkRecoveryFixture, Box<dyn Error>> {
+    let host = ForkHostSigningKeyV1::from_seed([51; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([52; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let principal = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [53; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    store.execute_fork_admission_command(&session, &policy, &principal)?;
+    let parent = store.create_timeline(parent_name)?;
+    let command = fork_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [54; 32],
+        parent.id(),
+        child_name,
+    )?;
+    let ForkAdmissionOperationResultV1::Fork(receipt) =
+        store.execute_fork_admission_command(&session, &policy, &command)?
+    else {
+        return Err("FCC1 did not return a FAR1 receipt".into());
+    };
+    Ok((store, host, policy, session, receipt.child_id))
+}
+
+fn assert_fac1_and_recovery<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([11; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([12; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let current_session = {
+        let key = PublicKey::from_bytes(host.public_key());
+        let open = store.begin_fork_admission_open(key, policy.digest()?)?;
+        store.finalize_fork_admission_open(&open, &host.sign_open(&open.to_canonical_cbor()?)?)?
+    };
+    let command = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &current_session,
+        [6; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    assert!(matches!(
+        store.execute_fork_admission_command(&current_session, &policy, &command)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    assert!(matches!(
+        store.execute_fork_admission_command(&current_session, &policy, &command)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    let proof = recovery_proof(store, &host, &current_session, 1, [6; 32])?;
+    assert!(matches!(
+        store.recover_fork_admission_command(&current_session, &proof,)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    let wrong_kind = recovery_proof(store, &host, &current_session, 2, [6; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&current_session, &wrong_kind),
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    Ok(())
+}
+
+fn assert_fcc1_and_atomic_recovery<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1 + EventStore,
+{
+    let host = ForkHostSigningKeyV1::from_seed([21; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([22; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let principal = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [23; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    assert!(matches!(
+        store.execute_fork_admission_command(&session, &policy, &principal)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    let parent = store.create_timeline("fac1-parent")?;
+    let command = fork_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [24; 32],
+        parent.id(),
+        "fac1-child",
+    )?;
+    let result = store.execute_fork_admission_command(&session, &policy, &command)?;
+    let ForkAdmissionOperationResultV1::Fork(receipt) = result else {
+        return Err("FCC1 did not return a FAR1 receipt".into());
+    };
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &command)?,
+        ForkAdmissionOperationResultV1::Fork(receipt),
+        "an exact FCC1 retry resolves to the committed FAR1 receipt"
+    );
+    let recovery = recovery_proof(store, &host, &session, 2, [24; 32])?;
+    assert!(matches!(
+        store.recover_fork_admission_command(&session, &recovery)?,
+        ForkAdmissionOperationResultV1::Fork(recovered)
+            if recovered == receipt
+    ));
+    let conflict = fork_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [24; 32],
+        parent.id(),
+        "different-child",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &conflict),
+        Err(pos_core::ForkAdmissionErrorV1::Conflict)
+    );
+    let missing_parent = fork_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [25; 32],
+        TimelineId::new(),
+        "missing-parent",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &missing_parent),
+        Err(pos_core::ForkAdmissionErrorV1::ParentChanged)
+    );
+    let missing_recovery = recovery_proof(store, &host, &session, 2, [25; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &missing_recovery),
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    Ok(())
+}
+
+fn assert_expired_fac1_leaves_no_operation<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([31; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([32; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let expired = principal_command(
+        store, &host, &adapter, &policy, &session, [33; 32], 1, "owner",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &expired),
+        Err(pos_core::ForkAdmissionErrorV1::Unauthenticated)
+    );
+    let recovery = recovery_proof(store, &host, &session, 1, [33; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &recovery),
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    let valid = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [33; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    assert!(matches!(
+        store.execute_fork_admission_command(&session, &policy, &valid)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    Ok(())
+}
+
+fn assert_tampered_fac1_is_rejected<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([34; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([35; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let command = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [36; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let mut bytes = command.to_canonical_cbor();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    let tampered = ForkAdmissionHostCommandV1::from_canonical_cbor(&bytes)?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &tampered),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    let recovery = recovery_proof(store, &host, &session, 1, [36; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &recovery),
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    Ok(())
+}
+
+fn assert_principal_owner_binding_is_unique<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([35; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([36; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let first = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [37; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    assert!(matches!(
+        store.execute_fork_admission_command(&session, &policy, &first)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    let duplicate_principal = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [38; 32],
+        u64::MAX,
+        "other-owner",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &duplicate_principal),
+        Err(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict)
+    );
+    Ok(())
+}
+
+fn assert_pinned_policy_is_required<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([39; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([40; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let command = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [41; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let substituted_policy =
+        ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
+            adapter_id: "test-adapter".to_owned(),
+            verifying_key: adapter.public_key(),
+            minimum_assurance: 1,
+            registry_bindings: vec![Hash::from_bytes([4; 32])],
+        }])?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &substituted_policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    Ok(())
+}
+
+fn assert_stale_fold_boundary_is_rejected<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1 + EventStore,
+{
+    let host = ForkHostSigningKeyV1::from_seed([43; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([44; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let principal = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [45; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    store.execute_fork_admission_command(&session, &policy, &principal)?;
+    let parent = store.create_timeline("stale-fold-parent")?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let entity = EntityId::new();
+    store.append(
+        parent.id(),
+        &[
+            EventDraft::new(
+                entity,
+                Kind::new("fork.admission.coverage"),
+                CanonicalBytes::from_vec(b"first".to_vec()),
+            ),
+            EventDraft::new(
+                entity,
+                Kind::new("fork.admission.coverage"),
+                CanonicalBytes::from_vec(b"second".to_vec()),
+            ),
+        ],
+    )?;
+    let command = fork_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [46; 32],
+        parent.id(),
+        "stale-fold-child",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::StaleFoldBoundary)
+    );
     Ok(())
 }
 
@@ -577,7 +1200,1849 @@ fn sqlite_authority_fails_closed_for_malformed_rows_and_lock_contention(
     Ok(())
 }
 
-fn open_session<S: ForkAdmissionAuthorityBootstrapPortV1>(
+#[test]
+fn memory_fac1_commits_pob1_and_rejects_a_copied_identity_without_its_session(
+) -> Result<(), Box<dyn Error>> {
+    assert_fac1_and_recovery(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_fac1_and_frp1_match_the_public_memory_contract() -> Result<(), Box<dyn Error>> {
+    assert_fac1_and_recovery(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn memory_fcc1_commits_far1_and_rolls_back_rejected_operations() -> Result<(), Box<dyn Error>> {
+    assert_fcc1_and_atomic_recovery(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_fcc1_commits_far1_and_rolls_back_rejected_operations() -> Result<(), Box<dyn Error>> {
+    assert_fcc1_and_atomic_recovery(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn sqlite_file_backed_concurrent_first_use_commits_one_principal_binding(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("concurrent-fork-admission.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([61; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([62; 32])?;
+    let policy = authority_policy(&adapter)?;
+    {
+        let mut store = SqliteStore::open(&path)?;
+        open_session(&mut store, &host, &policy)?;
+    }
+
+    let mut first_store = SqliteStore::open(&path)?;
+    let first_session = reopen_session(&mut first_store, &host, &policy)?;
+    let first_command = principal_command(
+        &first_store,
+        &host,
+        &adapter,
+        &policy,
+        &first_session,
+        [63; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let mut second_store = SqliteStore::open(&path)?;
+    let second_session = reopen_session(&mut second_store, &host, &policy)?;
+    let second_command = principal_command(
+        &second_store,
+        &host,
+        &adapter,
+        &policy,
+        &second_session,
+        [64; 32],
+        u64::MAX,
+        "other-owner",
+    )?;
+
+    let barrier = Arc::new(Barrier::new(2));
+    let execute = |mut store: SqliteStore,
+                   session,
+                   policy: ForkAuthenticationPolicyV1,
+                   command,
+                   barrier: Arc<Barrier>| {
+        std::thread::spawn(move || {
+            barrier.wait();
+            match store.execute_fork_admission_command(&session, &policy, &command) {
+                Ok(ForkAdmissionOperationResultV1::PrincipalOwner(_)) => Ok(true),
+                Err(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict) => Ok(false),
+                result => Err(format!(
+                    "unexpected concurrent first-use result: {result:?}"
+                )),
+            }
+        })
+    };
+    let first_thread = execute(
+        first_store,
+        first_session,
+        policy.clone(),
+        first_command,
+        Arc::clone(&barrier),
+    );
+    let second_thread = execute(
+        second_store,
+        second_session,
+        policy,
+        second_command,
+        barrier,
+    );
+    let first = first_thread
+        .join()
+        .map_err(|_| std::io::Error::other("first concurrent command thread failed"))?
+        .map_err(std::io::Error::other)?;
+    let second = second_thread
+        .join()
+        .map_err(|_| std::io::Error::other("second concurrent command thread failed"))?
+        .map_err(std::io::Error::other)?;
+    assert_ne!(first, second);
+
+    let connection = Connection::open(&path)?;
+    assert_eq!(
+        connection.query_row(
+            "SELECT COUNT(*) FROM fork_principal_owner_bindings",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        1
+    );
+    assert_eq!(
+        connection.query_row(
+            "SELECT COUNT(*) FROM fork_admission_operations WHERE kind = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_file_backed_failed_fork_transaction_leaves_zero_partial_graph(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("atomic-fork-admission.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([71; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([72; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let principal = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [73; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    store.execute_fork_admission_command(&session, &policy, &principal)?;
+    let parent = store.create_timeline("atomic-parent")?;
+    let command = fork_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [74; 32],
+        parent.id(),
+        "atomic-child",
+    )?;
+    let connection = Connection::open(&path)?;
+    connection.execute_batch(
+        "CREATE TRIGGER reject_fork_operation
+         BEFORE INSERT ON fork_admission_operations
+         WHEN NEW.kind = 2
+         BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+    )?;
+    drop(connection);
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    drop(store);
+
+    let connection = Connection::open(&path)?;
+    for query in [
+        "SELECT COUNT(*) FROM fork_admissions",
+        "SELECT COUNT(*) FROM fork_admission_operations WHERE kind = 2",
+        "SELECT COUNT(*) FROM timelines WHERE name = 'atomic-child'",
+    ] {
+        assert_eq!(
+            connection.query_row(query, [], |row| row.get::<_, i64>(0))?,
+            0
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_fac1_maps_durable_authority_and_write_faults() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-authority-fault.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([141; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([142; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [143; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let recovery = recovery_proof(&store, &host, &session, 1, [143; 32])?;
+    let connection = Connection::open(&path)?;
+    connection.execute(
+        "UPDATE fork_admission_authority SET fah1_cbor = X'00' WHERE singleton = 1",
+        [],
+    )?;
+    drop(connection);
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &recovery),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    drop(store);
+
+    for (name, fault) in [
+        ("operation-read", "DROP TABLE fork_admission_operations;"),
+        ("binding-read", "DROP TABLE fork_principal_owner_bindings;"),
+        (
+            "binding-write",
+            "CREATE TRIGGER reject_principal_binding
+             BEFORE INSERT ON fork_principal_owner_bindings
+             BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(format!("fork-admission-{name}.db"));
+        let path = path.to_string_lossy().into_owned();
+        let host = ForkHostSigningKeyV1::from_seed([144; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([145; 32])?;
+        let policy = authority_policy(&adapter)?;
+        let mut store = SqliteStore::open(&path)?;
+        let session = open_session(&mut store, &host, &policy)?;
+        let command = principal_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [146; 32],
+            u64::MAX,
+            "owner",
+        )?;
+        let connection = Connection::open(&path)?;
+        connection.execute_batch(fault)?;
+        drop(connection);
+        assert_eq!(
+            store.execute_fork_admission_command(&session, &policy, &command),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_fcc1_maps_child_and_admission_write_faults() -> Result<(), Box<dyn Error>> {
+    for (name, fault) in [
+        (
+            "child",
+            "CREATE TRIGGER reject_fork_child
+             BEFORE INSERT ON timelines
+             WHEN NEW.parent_id IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+        ),
+        (
+            "admission",
+            "CREATE TRIGGER reject_fork_admission
+             BEFORE INSERT ON fork_admissions
+             BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join(format!("fork-admission-{name}-write.db"));
+        let path = path.to_string_lossy().into_owned();
+        let host = ForkHostSigningKeyV1::from_seed([151; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([152; 32])?;
+        let policy = authority_policy(&adapter)?;
+        let mut store = SqliteStore::open(&path)?;
+        let session = open_session(&mut store, &host, &policy)?;
+        let principal = principal_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [153; 32],
+            u64::MAX,
+            "owner",
+        )?;
+        store.execute_fork_admission_command(&session, &policy, &principal)?;
+        let parent = store.create_timeline("fault-parent")?;
+        let command = fork_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [154; 32],
+            parent.id(),
+            "fault-child",
+        )?;
+        let connection = Connection::open(&path)?;
+        connection.execute_batch(fault)?;
+        drop(connection);
+        assert_eq!(
+            store.execute_fork_admission_command(&session, &policy, &command),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_open_rejects_incompatible_fork_admission_graph_schemas() -> Result<(), Box<dyn Error>> {
+    for (name, schema) in [
+        (
+            "bindings",
+            "DROP TABLE fork_principal_owner_bindings;
+             CREATE TABLE fork_principal_owner_bindings (operation_id BLOB PRIMARY KEY);",
+        ),
+        (
+            "admissions",
+            "DROP TABLE fork_admissions;
+             CREATE TABLE fork_admissions (child_id TEXT PRIMARY KEY);",
+        ),
+        (
+            "operations",
+            "DROP TABLE fork_admission_operations;
+             CREATE TABLE fork_admission_operations (kind INTEGER, operation_id BLOB);",
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(format!("{name}.db"));
+        SqliteStore::open(&path.to_string_lossy())?;
+        Connection::open(&path)?.execute_batch(schema)?;
+        assert!(SqliteStore::open(&path.to_string_lossy()).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn memory_expired_fac1_is_not_recoverable() -> Result<(), Box<dyn Error>> {
+    assert_expired_fac1_leaves_no_operation(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_expired_fac1_is_not_recoverable() -> Result<(), Box<dyn Error>> {
+    assert_expired_fac1_leaves_no_operation(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn memory_rejects_a_tampered_fac1_without_persisting_an_operation() -> Result<(), Box<dyn Error>> {
+    assert_tampered_fac1_is_rejected(&mut MemoryStore::new())
+}
+
+fn assert_opaque_command_decoder_boundaries(
+    store: &mut SqliteStore,
+    host: &ForkHostSigningKeyV1,
+    adapter: &ForkAuthenticationAdapterSigningKeyV1,
+    policy: &ForkAuthenticationPolicyV1,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+) -> Result<(), Box<dyn Error>> {
+    let command = opaque_command(adapter, policy, vec![0xff])?;
+    assert_eq!(
+        ForkAdmissionHostCommandV1::from_canonical_cbor(&command),
+        Err(ForkAdmissionCommandCodecErrorV1::InvalidEncoding)
+    );
+
+    let evidence = adapter.sign_authenticated_principal(AuthenticatedPrincipalRecordV1 {
+        principal: PrincipalRefV1::try_new([4; 16], "test.local")?,
+        adapter_id: "test-adapter".to_owned(),
+        assurance: 1,
+        issued_at: 0,
+        expires_at: u64::MAX,
+        registry_binding: Hash::from_bytes([3; 32]),
+        operation_nonce: [5; 32],
+    })?;
+    let verified = verify_authenticated_principal_evidence_v1(policy, evidence)?;
+    let principal = principal_digest_v1(&verified.evidence().record().principal)?;
+    let fields = vec![
+        Value::Text("POC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(
+            store
+                .fork_admission_host_record()?
+                .store_id()
+                .as_bytes()
+                .to_vec(),
+        ),
+        Value::Bytes(session.identity().as_bytes().to_vec()),
+        Value::Bytes(vec![119; 32]),
+        Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+        Value::Bytes(principal.as_bytes().to_vec()),
+        Value::Text("owner".to_owned()),
+    ];
+    for (index, value) in [
+        (2, Value::Text("not-a-store".to_owned())),
+        (3, Value::Text("not-an-identity".to_owned())),
+        (4, Value::Text("not-an-operation".to_owned())),
+        (5, Value::Text("not-an-evidence".to_owned())),
+        (6, Value::Text("not-a-principal".to_owned())),
+    ] {
+        let mut malformed = fields.clone();
+        malformed[index] = value;
+        let command = opaque_command(adapter, policy, encode(&Value::Array(malformed))?)?;
+        assert_eq!(
+            ForkAdmissionHostCommandV1::from_canonical_cbor(&command),
+            Err(ForkAdmissionCommandCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+    let command = principal_command(store, host, adapter, policy, session, [120; 32], 1, "owner")?;
+    assert_eq!(
+        store.execute_fork_admission_command(session, policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::Unauthenticated)
+    );
+    Ok(())
+}
+
+fn assert_opaque_recovery_decoder_boundaries(
+    store: &mut SqliteStore,
+    host: &ForkHostSigningKeyV1,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+) -> Result<(), Box<dyn Error>> {
+    let recovery = opaque_recovery(&[0xff])?;
+    assert_eq!(
+        ForkAdmissionRecoveryProofV1::from_canonical_cbor(&recovery),
+        Err(ForkAdmissionCommandCodecErrorV1::InvalidEncoding)
+    );
+
+    let host_record = store.fork_admission_host_record()?;
+    let fields = vec![
+        Value::Text("FRC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(host_record.store_id().as_bytes().to_vec()),
+        Value::Bytes(session.identity().as_bytes().to_vec()),
+        Value::Integer(1.into()),
+        Value::Bytes(vec![118; 32]),
+    ];
+    for (index, value) in [
+        (2, Value::Text("not-a-store".to_owned())),
+        (3, Value::Text("not-an-identity".to_owned())),
+        (4, Value::Text("not-a-kind".to_owned())),
+        (5, Value::Text("not-an-operation".to_owned())),
+    ] {
+        let mut malformed = fields.clone();
+        malformed[index] = value;
+        let recovery = opaque_recovery(&encode(&Value::Array(malformed))?)?;
+        assert_eq!(
+            ForkAdmissionRecoveryProofV1::from_canonical_cbor(&recovery),
+            Err(ForkAdmissionCommandCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+    for kind in [1_u8, 2] {
+        let recovery = recovery_proof(store, host, session, kind, [118; 32])?;
+        assert_eq!(
+            store.recover_fork_admission_command(session, &recovery),
+            Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_public_authority_rejects_opaque_decoder_payloads_and_checks_signed_paths(
+) -> Result<(), Box<dyn Error>> {
+    let host = ForkHostSigningKeyV1::from_seed([116; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([117; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open_in_memory()?;
+    let session = open_session(&mut store, &host, &policy)?;
+    assert_opaque_command_decoder_boundaries(&mut store, &host, &adapter, &policy, &session)?;
+    assert_opaque_recovery_decoder_boundaries(&mut store, &host, &session)
+}
+
+#[test]
+fn memory_rejects_fac1_and_frp1_before_authority_initialization() -> Result<(), Box<dyn Error>> {
+    let host = ForkHostSigningKeyV1::from_seed([37; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([38; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut source = MemoryStore::new();
+    let session = open_session(&mut source, &host, &policy)?;
+    let command = principal_command(
+        &source,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [39; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let proof = recovery_proof(&source, &host, &session, 1, [39; 32])?;
+    let mut uninitialized = MemoryStore::new();
+    assert_eq!(
+        uninitialized.execute_fork_admission_command(&session, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::AuthorityUninitialized)
+    );
+    assert_eq!(
+        uninitialized.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::AuthorityUninitialized)
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_rejects_stale_fac1_and_tampered_frp1_before_any_lookup() -> Result<(), Box<dyn Error>> {
+    let host = ForkHostSigningKeyV1::from_seed([40; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([41; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = MemoryStore::new();
+    let stale_session = open_session(&mut store, &host, &policy)?;
+    let stale_command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &stale_session,
+        [42; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let _current_session = reopen_session(&mut store, &host, &policy)?;
+    assert_eq!(
+        store.execute_fork_admission_command(&stale_session, &policy, &stale_command),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+
+    let proof = recovery_proof(&store, &host, &stale_session, 1, [42; 32])?;
+    let mut bytes = proof.to_canonical_cbor();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    let tampered = ForkAdmissionRecoveryProofV1::from_canonical_cbor(&bytes)?;
+    assert_eq!(
+        store.recover_fork_admission_command(&stale_session, &tampered),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_rejects_a_tampered_fac1_without_persisting_an_operation() -> Result<(), Box<dyn Error>> {
+    assert_tampered_fac1_is_rejected(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn memory_rejects_a_second_owner_for_one_authenticated_principal() -> Result<(), Box<dyn Error>> {
+    assert_principal_owner_binding_is_unique(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_rejects_a_second_owner_for_one_authenticated_principal() -> Result<(), Box<dyn Error>> {
+    assert_principal_owner_binding_is_unique(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn memory_rejects_a_policy_other_than_its_pinned_policy() -> Result<(), Box<dyn Error>> {
+    assert_pinned_policy_is_required(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_rejects_a_policy_other_than_its_pinned_policy() -> Result<(), Box<dyn Error>> {
+    assert_pinned_policy_is_required(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn memory_rejects_a_fork_command_after_its_completed_fold_boundary() -> Result<(), Box<dyn Error>> {
+    assert_stale_fold_boundary_is_rejected(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_rejects_a_fork_command_after_its_completed_fold_boundary() -> Result<(), Box<dyn Error>> {
+    assert_stale_fold_boundary_is_rejected(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn sqlite_frp1_rejects_missing_and_malformed_operation_rows() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-operation-row.db");
+    let path = path.to_string_lossy().into_owned();
+    let operation_id = [113; 32];
+    let (mut store, host, session) = sqlite_principal_recovery_fixture(&path, operation_id)?;
+    let proof = recovery_proof(&store, &host, &session, 1, operation_id)?;
+    let connection = Connection::open(&path)?;
+    let row = connection.query_row(
+        "SELECT evidence_digest, commitment, result_digest, child_id
+         FROM fork_admission_operations WHERE kind = 1 AND operation_id = ?1",
+        params![operation_id.to_vec()],
+        |record| {
+            Ok((
+                record.get::<_, Vec<u8>>(0)?,
+                record.get::<_, Vec<u8>>(1)?,
+                record.get::<_, Vec<u8>>(2)?,
+                record.get::<_, Option<String>>(3)?,
+            ))
+        },
+    )?;
+    connection.execute(
+        "DELETE FROM fork_admission_operations WHERE kind = 1 AND operation_id = ?1",
+        params![operation_id.to_vec()],
+    )?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    connection.execute(
+        "INSERT INTO fork_admission_operations
+         (kind, operation_id, evidence_digest, commitment, result_digest, child_id)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+        params![operation_id.to_vec(), row.0, row.1, row.2, row.3],
+    )?;
+    connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+    connection.execute(
+        "UPDATE fork_admission_operations SET evidence_digest = ?1
+         WHERE kind = 1 AND operation_id = ?2",
+        params![vec![0_u8; 31], operation_id.to_vec()],
+    )?;
+    drop(connection);
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_an_operation_row_with_an_invalid_child_id() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-invalid-child.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([121; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([122; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let principal = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [123; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    store.execute_fork_admission_command(&session, &policy, &principal)?;
+    let parent = store.create_timeline("invalid-operation-child-parent")?;
+    let operation_id = [124; 32];
+    let command = fork_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        operation_id,
+        parent.id(),
+        "invalid-operation-child",
+    )?;
+    assert!(matches!(
+        store.execute_fork_admission_command(&session, &policy, &command)?,
+        ForkAdmissionOperationResultV1::Fork(_)
+    ));
+    let connection = Connection::open(&path)?;
+    connection.execute(
+        "UPDATE fork_admission_operations SET child_id = 'not-a-timeline'
+         WHERE kind = 2 AND operation_id = ?1",
+        params![operation_id.to_vec()],
+    )?;
+    drop(connection);
+    let proof = recovery_proof(&store, &host, &session, 2, operation_id)?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_maps_a_recovery_transaction_lock_to_storage_indeterminate(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-recovery-lock.db");
+    let path = path.to_string_lossy().into_owned();
+    let operation_id = [131; 32];
+    let (mut store, host, session) = sqlite_principal_recovery_fixture(&path, operation_id)?;
+    let proof = recovery_proof(&store, &host, &session, 1, operation_id)?;
+    let lock = Connection::open(&path)?;
+    lock.execute_batch("BEGIN EXCLUSIVE")?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    lock.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_recovers_pob1_after_restart_and_rejects_corruption() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-recovery.db");
+    let host = ForkHostSigningKeyV1::from_seed([41; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([42; 32])?;
+    let policy = authority_policy(&adapter)?;
+    {
+        let mut store = SqliteStore::open(&path.to_string_lossy())?;
+        let session = open_session(&mut store, &host, &policy)?;
+        let command = principal_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [43; 32],
+            u64::MAX,
+            "owner",
+        )?;
+        assert!(matches!(
+            store.execute_fork_admission_command(&session, &policy, &command)?,
+            ForkAdmissionOperationResultV1::PrincipalOwner(_)
+        ));
+    }
+    {
+        let mut store = SqliteStore::open(&path.to_string_lossy())?;
+        let session = reopen_session(&mut store, &host, &policy)?;
+        let proof = recovery_proof(&store, &host, &session, 1, [43; 32])?;
+        assert!(matches!(
+            store.recover_fork_admission_command(&session, &proof)?,
+            ForkAdmissionOperationResultV1::PrincipalOwner(_)
+        ));
+    }
+    let connection = rusqlite::Connection::open(&path)?;
+    let pob1_cbor = connection.query_row(
+        "SELECT pob1_cbor FROM fork_principal_owner_bindings WHERE operation_id = ?1",
+        params![vec![43_u8; 32]],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    connection.execute(
+        "UPDATE fork_principal_owner_bindings SET pob1_cbor = ?1 WHERE operation_id = ?2",
+        params![vec![0xff_u8], vec![43_u8; 32]],
+    )?;
+    drop(connection);
+    let mut store = SqliteStore::open(&path.to_string_lossy())?;
+    let session = reopen_session(&mut store, &host, &policy)?;
+    let proof = recovery_proof(&store, &host, &session, 1, [43; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "UPDATE fork_principal_owner_bindings SET principal_digest = ?1, pob1_cbor = ?2 WHERE operation_id = ?3",
+        params![vec![0_u8; 32], pob1_cbor, vec![43_u8; 32]],
+    )?;
+    drop(connection);
+    let mut store = SqliteStore::open(&path.to_string_lossy())?;
+    let session = reopen_session(&mut store, &host, &policy)?;
+    let proof = recovery_proof(&store, &host, &session, 1, [43; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_missing_or_uncommitted_pob1_results() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-pob1-result.db");
+    let path = path.to_string_lossy().into_owned();
+    let operation_id = [45; 32];
+    let (mut store, host, session) = sqlite_principal_recovery_fixture(&path, operation_id)?;
+    let proof = recovery_proof(&store, &host, &session, 1, operation_id)?;
+    let connection = Connection::open(&path)?;
+    let binding = connection.query_row(
+        "SELECT principal_digest, pob1_cbor FROM fork_principal_owner_bindings WHERE operation_id = ?1",
+        params![operation_id.to_vec()],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+    )?;
+    let result_digest = connection.query_row(
+        "SELECT result_digest FROM fork_admission_operations WHERE kind = 1 AND operation_id = ?1",
+        params![operation_id.to_vec()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    connection.execute(
+        "DELETE FROM fork_principal_owner_bindings WHERE operation_id = ?1",
+        params![operation_id.to_vec()],
+    )?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    connection.execute(
+        "INSERT INTO fork_principal_owner_bindings (operation_id, principal_digest, pob1_cbor)
+         VALUES (?1, ?2, ?3)",
+        params![operation_id.to_vec(), binding.0, binding.1],
+    )?;
+    connection.execute(
+        "UPDATE fork_admission_operations SET result_digest = ?1
+         WHERE kind = 1 AND operation_id = ?2",
+        params![vec![0_u8; 32], operation_id.to_vec()],
+    )?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    connection.execute(
+        "UPDATE fork_admission_operations SET result_digest = ?1, commitment = ?2
+         WHERE kind = 1 AND operation_id = ?3",
+        params![result_digest, vec![0_u8; 32], operation_id.to_vec()],
+    )?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_an_incoherent_principal_operation_row() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("fork-admission-principal-row-shape.db");
+    let path = path.to_string_lossy().into_owned();
+    let operation_id = [46; 32];
+    let (mut store, host, session) = sqlite_principal_recovery_fixture(&path, operation_id)?;
+    let proof = recovery_proof(&store, &host, &session, 1, operation_id)?;
+    let connection = Connection::open(&path)?;
+    connection.execute(
+        "UPDATE fork_admission_operations SET child_id = ?1
+         WHERE kind = 1 AND operation_id = ?2",
+        params![TimelineId::new().to_string(), operation_id.to_vec()],
+    )?;
+    drop(connection);
+
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_maps_result_table_faults_to_storage_indeterminate() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-pob1-table-fault.db");
+    let path = path.to_string_lossy().into_owned();
+    let operation_id = [47; 32];
+    let (mut store, host, session) = sqlite_principal_recovery_fixture(&path, operation_id)?;
+    let proof = recovery_proof(&store, &host, &session, 1, operation_id)?;
+    let connection = Connection::open(&path)?;
+    connection.execute_batch("DROP TABLE fork_principal_owner_bindings;")?;
+    drop(connection);
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    drop(store);
+
+    for (name, fault) in [
+        ("far1", "DROP TABLE fork_admissions;"),
+        ("pob1", "DROP TABLE fork_principal_owner_bindings;"),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join(format!("fork-admission-{name}-result.db"));
+        let path = path.to_string_lossy().into_owned();
+        let (mut store, host, _, session, _) =
+            sqlite_fork_recovery_fixture(&path, "result-parent", "result-child")?;
+        let proof = recovery_proof(&store, &host, &session, 2, [54; 32])?;
+        let connection = Connection::open(&path)?;
+        connection.execute_batch(fault)?;
+        drop(connection);
+        assert_eq!(
+            store.recover_fork_admission_command(&session, &proof),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            "{name}"
+        );
+        drop(store);
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_far1_when_the_child_graph_is_corrupt() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-far1.db");
+    let path = path.to_string_lossy().into_owned();
+    let (store, host, policy, _, child_id) =
+        sqlite_fork_recovery_fixture(&path, "far1-parent", "far1-child")?;
+    drop(store);
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "UPDATE timelines SET fork_seq = 1 WHERE id = ?1",
+        params![child_id.to_string()],
+    )?;
+    drop(connection);
+    let mut store = SqliteStore::open(&path)?;
+    let session = reopen_session(&mut store, &host, &policy)?;
+    let proof = recovery_proof(&store, &host, &session, 2, [54; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_missing_or_malformed_far1() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-far1-bytes.db");
+    let path = path.to_string_lossy().into_owned();
+    let (mut store, host, _policy, session, child_id) =
+        sqlite_fork_recovery_fixture(&path, "far1-bytes-parent", "far1-bytes-child")?;
+    let proof = recovery_proof(&store, &host, &session, 2, [54; 32])?;
+    let connection = Connection::open(&path)?;
+    let far1_cbor = connection.query_row(
+        "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+        params![child_id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    connection.execute(
+        "DELETE FROM fork_admissions WHERE child_id = ?1",
+        params![child_id.to_string()],
+    )?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    connection.execute(
+        "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, ?2)",
+        params![child_id.to_string(), far1_cbor],
+    )?;
+    connection.execute(
+        "UPDATE fork_admissions SET far1_cbor = ?1 WHERE child_id = ?2",
+        params![vec![0xff_u8], child_id.to_string()],
+    )?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_tampered_fork_commitment_child_name_and_pob1_edge(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-commitment.db");
+    let host = ForkHostSigningKeyV1::from_seed([81; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([82; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let child_id;
+    {
+        let mut store = SqliteStore::open(&path.to_string_lossy())?;
+        let session = open_session(&mut store, &host, &policy)?;
+        let principal = principal_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [83; 32],
+            u64::MAX,
+            "owner",
+        )?;
+        store.execute_fork_admission_command(&session, &policy, &principal)?;
+        let parent = store.create_timeline("commitment-parent")?;
+        let command = fork_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [84; 32],
+            parent.id(),
+            "commitment-child",
+        )?;
+        let ForkAdmissionOperationResultV1::Fork(receipt) =
+            store.execute_fork_admission_command(&session, &policy, &command)?
+        else {
+            return Err("FCC1 did not return a FAR1 receipt".into());
+        };
+        child_id = receipt.child_id;
+    }
+
+    let connection = rusqlite::Connection::open(&path)?;
+    let commitment = connection.query_row(
+        "SELECT commitment FROM fork_admission_operations WHERE kind = 2 AND operation_id = ?1",
+        params![vec![84_u8; 32]],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    connection.execute(
+        "UPDATE fork_admission_operations SET commitment = ?1 WHERE kind = 2 AND operation_id = ?2",
+        params![vec![0_u8; 32], vec![84_u8; 32]],
+    )?;
+    drop(connection);
+    let mut store = SqliteStore::open(&path.to_string_lossy())?;
+    let session = reopen_session(&mut store, &host, &policy)?;
+    let proof = recovery_proof(&store, &host, &session, 2, [84; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "UPDATE fork_admission_operations SET commitment = ?1 WHERE kind = 2 AND operation_id = ?2",
+        params![commitment, vec![84_u8; 32]],
+    )?;
+    connection.execute(
+        "UPDATE timelines SET name = 'tampered-child' WHERE id = ?1",
+        params![child_id.to_string()],
+    )?;
+    drop(connection);
+    let mut store = SqliteStore::open(&path.to_string_lossy())?;
+    let session = reopen_session(&mut store, &host, &policy)?;
+    let proof = recovery_proof(&store, &host, &session, 2, [84; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "UPDATE timelines SET name = 'commitment-child' WHERE id = ?1",
+        params![child_id.to_string()],
+    )?;
+    connection.execute(
+        "UPDATE fork_principal_owner_bindings SET principal_digest = ?1 WHERE operation_id = ?2",
+        params![vec![0_u8; 32], vec![83_u8; 32]],
+    )?;
+    drop(connection);
+    let mut store = SqliteStore::open(&path.to_string_lossy())?;
+    let session = reopen_session(&mut store, &host, &policy)?;
+    let proof = recovery_proof(&store, &host, &session, 2, [84; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_file_backed_recovery_serializes_with_a_concurrent_fork_commit(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("concurrent-fork-admission-recovery.db");
+    let host = ForkHostSigningKeyV1::from_seed([91; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([92; 32])?;
+    let policy = authority_policy(&adapter)?;
+    {
+        let mut store = SqliteStore::open(&path.to_string_lossy())?;
+        let session = open_session(&mut store, &host, &policy)?;
+        let principal = principal_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [93; 32],
+            u64::MAX,
+            "owner",
+        )?;
+        store.execute_fork_admission_command(&session, &policy, &principal)?;
+    }
+
+    let mut recovery_store = SqliteStore::open(&path.to_string_lossy())?;
+    let recovery_session = reopen_session(&mut recovery_store, &host, &policy)?;
+    let recovery = recovery_proof(&recovery_store, &host, &recovery_session, 1, [93; 32])?;
+    let mut writer_store = SqliteStore::open(&path.to_string_lossy())?;
+    let writer_session = reopen_session(&mut writer_store, &host, &policy)?;
+    let parent = writer_store.create_timeline("concurrent-recovery-fork-parent")?;
+    let command = fork_command(
+        &writer_store,
+        &host,
+        &adapter,
+        &policy,
+        &writer_session,
+        [94; 32],
+        parent.id(),
+        "concurrent-recovery-child",
+    )?;
+
+    let barrier = Arc::new(Barrier::new(2));
+    let recovery_barrier = Arc::clone(&barrier);
+    let recovery_thread = std::thread::spawn(move || {
+        recovery_barrier.wait();
+        recovery_store.recover_fork_admission_command(&recovery_session, &recovery)
+    });
+    let writer_thread = std::thread::spawn(move || {
+        barrier.wait();
+        writer_store.execute_fork_admission_command(&writer_session, &policy, &command)
+    });
+    assert!(matches!(
+        recovery_thread
+            .join()
+            .map_err(|_| std::io::Error::other("recovery thread panicked"))??,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    assert!(matches!(
+        writer_thread
+            .join()
+            .map_err(|_| std::io::Error::other("writer thread panicked"))??,
+        ForkAdmissionOperationResultV1::Fork(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_maps_principal_result_column_type_faults_to_storage_indeterminate(
+) -> Result<(), Box<dyn Error>> {
+    for (name, column) in [
+        ("principal-digest", "principal_digest"),
+        ("pob1", "pob1_cbor"),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join(format!("fork-admission-{name}-type.db"));
+        let path = path.to_string_lossy().into_owned();
+        let operation_id = [151; 32];
+        let (mut store, host, session) = sqlite_principal_recovery_fixture(&path, operation_id)?;
+        let proof = recovery_proof(&store, &host, &session, 1, operation_id)?;
+        let connection = Connection::open(&path)?;
+        connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        connection.execute(
+            &format!(
+                "UPDATE fork_principal_owner_bindings SET {column} = 'wrong SQLite type' \
+                 WHERE operation_id = ?1"
+            ),
+            params![operation_id.to_vec()],
+        )?;
+        drop(connection);
+        assert_eq!(
+            store.recover_fork_admission_command(&session, &proof),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_a_mismatched_fork_result_row() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("fork-admission-mismatched-fork-result.db");
+    let path = path.to_string_lossy().into_owned();
+    let (mut store, host, _, session, _) =
+        sqlite_fork_recovery_fixture(&path, "mismatch-parent", "mismatch-child")?;
+    let proof = recovery_proof(&store, &host, &session, 2, [54; 32])?;
+    let connection = Connection::open(&path)?;
+    connection.execute(
+        "UPDATE fork_admission_operations SET result_digest = ?1 \
+         WHERE kind = 2 AND operation_id = ?2",
+        params![vec![0_u8; 32], vec![54_u8; 32]],
+    )?;
+    drop(connection);
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_a_fork_result_without_its_child_timeline() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("fork-admission-missing-fork-child.db");
+    let path = path.to_string_lossy().into_owned();
+    let (mut store, host, _, session, child_id) =
+        sqlite_fork_recovery_fixture(&path, "missing-child-parent", "missing-child")?;
+    let proof = recovery_proof(&store, &host, &session, 2, [54; 32])?;
+    let connection = Connection::open(&path)?;
+    connection.execute_batch("PRAGMA foreign_keys = OFF")?;
+    connection.execute(
+        "DELETE FROM timelines WHERE id = ?1",
+        params![child_id.to_string()],
+    )?;
+    drop(connection);
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_a_fork_result_with_a_missing_parent_timeline() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-missing-parent.db");
+    let path = path.to_string_lossy().into_owned();
+    let (mut store, host, _, session, child_id) =
+        sqlite_fork_recovery_fixture(&path, "missing-parent", "orphan-child")?;
+    let proof = recovery_proof(&store, &host, &session, 2, [54; 32])?;
+    let connection = Connection::open(&path)?;
+    connection.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let parent_id: String = connection.query_row(
+        "SELECT parent_id FROM timelines WHERE id = ?1",
+        params![child_id.to_string()],
+        |row| row.get(0),
+    )?;
+    connection.execute("DELETE FROM timelines WHERE id = ?1", params![parent_id])?;
+    drop(connection);
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_fork_binding_hashes_with_wrong_lengths() -> Result<(), Box<dyn Error>> {
+    for (name, column) in [
+        ("operation-id", "operation_id"),
+        ("principal-digest", "principal_digest"),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join(format!("fork-admission-{name}-length.db"));
+        let path = path.to_string_lossy().into_owned();
+        let (mut store, host, _, session, _) =
+            sqlite_fork_recovery_fixture(&path, "bad-hash-parent", "bad-hash-child")?;
+        let proof = recovery_proof(&store, &host, &session, 2, [54; 32])?;
+        let connection = Connection::open(&path)?;
+        connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        connection.execute(
+            &format!(
+                "UPDATE fork_principal_owner_bindings SET {column} = ?1 \
+                 WHERE operation_id = ?2"
+            ),
+            params![vec![0_u8; 31], vec![53_u8; 32]],
+        )?;
+        drop(connection);
+        assert_eq!(
+            store.recover_fork_admission_command(&session, &proof),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_fac1_rejects_host_signed_evidence_outside_the_configured_policy(
+) -> Result<(), Box<dyn Error>> {
+    let host = ForkHostSigningKeyV1::from_seed([161; 32])?;
+    let accepted_adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([162; 32])?;
+    let accepted_policy = authority_policy(&accepted_adapter)?;
+    let rejected_adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([163; 32])?;
+    let rejected_policy = authority_policy(&rejected_adapter)?;
+    let mut store = SqliteStore::open_in_memory()?;
+    let session = open_session(&mut store, &host, &accepted_policy)?;
+    let command = principal_command(
+        &store,
+        &host,
+        &rejected_adapter,
+        &rejected_policy,
+        &session,
+        [164; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &accepted_policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::Unauthenticated)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_fac1_fails_closed_on_corrupt_principal_owner_lookup_rows() -> Result<(), Box<dyn Error>> {
+    for (name, update, expected) in [
+        (
+            "operation-id-type",
+            "operation_id = 'wrong SQLite type'",
+            pos_core::ForkAdmissionErrorV1::StorageIndeterminate,
+        ),
+        (
+            "pob1-type",
+            "pob1_cbor = 'wrong SQLite type'",
+            pos_core::ForkAdmissionErrorV1::StorageIndeterminate,
+        ),
+        (
+            "principal-missing",
+            "principal_digest = X'0000000000000000000000000000000000000000000000000000000000000000'",
+            pos_core::ForkAdmissionErrorV1::InvalidRequest,
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(format!("fork-admission-{name}.db"));
+        let host = ForkHostSigningKeyV1::from_seed([171; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([172; 32])?;
+        let policy = authority_policy(&adapter)?;
+        let mut store = SqliteStore::open(&path.to_string_lossy())?;
+        let session = open_session(&mut store, &host, &policy)?;
+        let principal = principal_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [173; 32],
+            u64::MAX,
+            "owner",
+        )?;
+        store.execute_fork_admission_command(&session, &policy, &principal)?;
+        let connection = Connection::open(&path)?;
+        connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        connection.execute(
+            &format!(
+                "UPDATE fork_principal_owner_bindings SET {update} WHERE operation_id = ?1"
+            ),
+            params![vec![173_u8; 32]],
+        )?;
+        drop(connection);
+        let parent = store.create_timeline("corrupt-principal-lookup-parent")?;
+        let command = fork_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [174; 32],
+            parent.id(),
+            "corrupt-principal-lookup-child",
+        )?;
+        assert_eq!(
+            store.execute_fork_admission_command(&session, &policy, &command),
+            Err(expected),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_bootstrap_errors_keep_their_closed_admission_meaning() {
+    for (bootstrap, admission) in [
+        (
+            ForkAdmissionAuthorityErrorV1::AuthorityUninitialized,
+            pos_core::ForkAdmissionErrorV1::AuthorityUninitialized,
+        ),
+        (
+            ForkAdmissionAuthorityErrorV1::AuthorityAlreadyInitialized,
+            pos_core::ForkAdmissionErrorV1::AuthorityAlreadyInitialized,
+        ),
+        (
+            ForkAdmissionAuthorityErrorV1::HostAuthorityMismatch,
+            pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch,
+        ),
+        (
+            ForkAdmissionAuthorityErrorV1::EntropyUnavailable,
+            pos_core::ForkAdmissionErrorV1::EntropyUnavailable,
+        ),
+        (
+            ForkAdmissionAuthorityErrorV1::AuthorityClockUnavailable,
+            pos_core::ForkAdmissionErrorV1::AuthorityClockUnavailable,
+        ),
+        (
+            ForkAdmissionAuthorityErrorV1::ClockRollback,
+            pos_core::ForkAdmissionErrorV1::ClockRollback,
+        ),
+        (
+            ForkAdmissionAuthorityErrorV1::CorruptAuthority,
+            pos_core::ForkAdmissionErrorV1::CorruptAuthority,
+        ),
+        (
+            ForkAdmissionAuthorityErrorV1::StorageIndeterminate,
+            pos_core::ForkAdmissionErrorV1::StorageIndeterminate,
+        ),
+    ] {
+        let mapped = pos_core::ForkAdmissionErrorV1::from(bootstrap);
+        assert_eq!(mapped, admission);
+        assert!(!mapped.to_string().is_empty());
+    }
+}
+
+/// A superseded session cannot retry an exact FAC1 or recover through FRP1,
+/// even for a committed operation, and it learns nothing about absent rows.
+fn assert_superseded_session_cannot_retry_or_recover<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([161; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([162; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let stale = open_session(store, &host, &policy)?;
+    let command = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &stale,
+        [163; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let committed = store.execute_fork_admission_command(&stale, &policy, &command)?;
+    let stale_recovery = recovery_proof(store, &host, &stale, 1, [163; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&stale, &stale_recovery)?,
+        committed
+    );
+    let stale_absent = recovery_proof(store, &host, &stale, 1, [164; 32])?;
+
+    let current = reopen_session(store, &host, &policy)?;
+    assert_eq!(
+        store.execute_fork_admission_command(&stale, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    assert_eq!(
+        store.recover_fork_admission_command(&stale, &stale_recovery),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    assert_eq!(
+        store.recover_fork_admission_command(&stale, &stale_absent),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+
+    let current_recovery = recovery_proof(store, &host, &current, 1, [163; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&current, &current_recovery)?,
+        committed
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_superseded_session_cannot_retry_or_recover() -> Result<(), Box<dyn Error>> {
+    assert_superseded_session_cannot_retry_or_recover(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_superseded_session_cannot_retry_or_recover() -> Result<(), Box<dyn Error>> {
+    assert_superseded_session_cannot_retry_or_recover(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn sqlite_session_from_another_adapter_instance_cannot_retry_or_recover(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-foreign-session.db");
+    let path = path.to_string_lossy().into_owned();
+    let (mut first, host, first_session) = sqlite_principal_recovery_fixture(&path, [171; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([112; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let command = principal_command(
+        &first,
+        &host,
+        &adapter,
+        &policy,
+        &first_session,
+        [171; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let recovery = recovery_proof(&first, &host, &first_session, 1, [171; 32])?;
+    let committed = first.recover_fork_admission_command(&first_session, &recovery)?;
+
+    let mut second = SqliteStore::open(&path)?;
+    let second_session = reopen_session(&mut second, &host, &policy)?;
+    assert_eq!(
+        second.execute_fork_admission_command(&first_session, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    assert_eq!(
+        second.recover_fork_admission_command(&first_session, &recovery),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    let second_recovery = recovery_proof(&second, &host, &second_session, 1, [171; 32])?;
+    assert_eq!(
+        second.recover_fork_admission_command(&second_session, &second_recovery)?,
+        committed
+    );
+    assert_eq!(
+        first.execute_fork_admission_command(&first_session, &policy, &command)?,
+        committed
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_unequal_fac1_reuse_reports_committed_corruption_before_conflict(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("fork-admission-corruption-before-conflict.db");
+    let path = path.to_string_lossy().into_owned();
+    let (mut store, host, session) = sqlite_principal_recovery_fixture(&path, [181; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([112; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let unequal = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [181; 32],
+        u64::MAX,
+        "other-owner",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &unequal),
+        Err(pos_core::ForkAdmissionErrorV1::Conflict)
+    );
+    let connection = Connection::open(&path)?;
+    connection.execute(
+        "UPDATE fork_principal_owner_bindings SET pob1_cbor = ?1 WHERE operation_id = ?2",
+        params![vec![0xff_u8], vec![181_u8; 32]],
+    )?;
+    drop(connection);
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &unequal),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+fn wall_micros() -> Result<u64, Box<dyn Error>> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
+    )?)
+}
+
+fn assert_equal_owner_reuses_the_committed_binding<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([181; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([182; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let first = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [183; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let committed = store.execute_fork_admission_command(&session, &policy, &first)?;
+    let second = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [184; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &second)?,
+        committed
+    );
+    let recovery = recovery_proof(store, &host, &session, 1, [184; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &recovery),
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_equal_owner_under_a_new_operation_reuses_the_committed_binding(
+) -> Result<(), Box<dyn Error>> {
+    assert_equal_owner_reuses_the_committed_binding(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_equal_owner_under_a_new_operation_reuses_the_committed_binding(
+) -> Result<(), Box<dyn Error>> {
+    assert_equal_owner_reuses_the_committed_binding(&mut SqliteStore::open_in_memory()?)
+}
+
+fn assert_fork_without_a_binding_is_invalid<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1 + EventStore,
+{
+    let host = ForkHostSigningKeyV1::from_seed([185; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([186; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let parent = store.create_timeline("unbound-parent")?;
+    let command = fork_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [187; 32],
+        parent.id(),
+        "unbound-child",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::InvalidRequest)
+    );
+    let recovery = recovery_proof(store, &host, &session, 2, [187; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &recovery),
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_fork_without_a_principal_owner_binding_is_an_invalid_request(
+) -> Result<(), Box<dyn Error>> {
+    assert_fork_without_a_binding_is_invalid(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_fork_without_a_principal_owner_binding_is_an_invalid_request(
+) -> Result<(), Box<dyn Error>> {
+    assert_fork_without_a_binding_is_invalid(&mut SqliteStore::open_in_memory()?)
+}
+
+fn assert_committed_retry_survives_expiry<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([191; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([192; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let expires_at = wall_micros()? + 2_000_000;
+    let command = principal_command(
+        store, &host, &adapter, &policy, &session, [193; 32], expires_at, "owner",
+    )?;
+    let committed = store.execute_fork_admission_command(&session, &policy, &command)?;
+    while wall_micros()? <= expires_at {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &command)?,
+        committed
+    );
+    let unequal = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [193; 32],
+        1,
+        "other-owner",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &unequal),
+        Err(pos_core::ForkAdmissionErrorV1::Conflict)
+    );
+    let recovery = recovery_proof(store, &host, &session, 1, [193; 32])?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &recovery)?,
+        committed
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_exact_committed_retry_survives_expiry_and_unequal_reuse_conflicts(
+) -> Result<(), Box<dyn Error>> {
+    assert_committed_retry_survives_expiry(&mut MemoryStore::new())
+}
+
+#[test]
+fn sqlite_exact_committed_retry_survives_expiry_and_unequal_reuse_conflicts(
+) -> Result<(), Box<dyn Error>> {
+    assert_committed_retry_survives_expiry(&mut SqliteStore::open_in_memory()?)
+}
+
+fn assert_commands_copied_to_another_store_are_rejected<S>(
+    first: &mut S,
+    second: &mut S,
+) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([201; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([202; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let first_session = open_session(first, &host, &policy)?;
+    let second_session = open_session(second, &host, &policy)?;
+    let command = principal_command(
+        first,
+        &host,
+        &adapter,
+        &policy,
+        &first_session,
+        [203; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    first.execute_fork_admission_command(&first_session, &policy, &command)?;
+    let proof = recovery_proof(first, &host, &first_session, 1, [203; 32])?;
+    assert_eq!(
+        second.execute_fork_admission_command(&second_session, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    assert_eq!(
+        second.recover_fork_admission_command(&second_session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    );
+    let local = recovery_proof(second, &host, &second_session, 1, [203; 32])?;
+    assert_eq!(
+        second.recover_fork_admission_command(&second_session, &local),
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_fac1_and_frp1_copied_to_another_store_write_nothing() -> Result<(), Box<dyn Error>> {
+    assert_commands_copied_to_another_store_are_rejected(
+        &mut MemoryStore::new(),
+        &mut MemoryStore::new(),
+    )
+}
+
+#[test]
+fn sqlite_fac1_and_frp1_copied_to_another_store_write_nothing() -> Result<(), Box<dyn Error>> {
+    assert_commands_copied_to_another_store_are_rejected(
+        &mut SqliteStore::open_in_memory()?,
+        &mut SqliteStore::open_in_memory()?,
+    )
+}
+
+#[test]
+fn sqlite_fac1_rejects_clock_rollback_without_writes() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-fac1-rollback.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([211; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([212; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    Connection::open(&path)?.execute(
+        "UPDATE fork_admission_authority SET last_authority_wall_time = ?1 WHERE singleton = 1",
+        [i64::MAX],
+    )?;
+    let command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [213; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &command),
+        Err(pos_core::ForkAdmissionErrorV1::ClockRollback)
+    );
+    let connection = Connection::open(&path)?;
+    let count = |table: &str| -> rusqlite::Result<i64> {
+        connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+    };
+    assert_eq!(count("fork_admission_operations")?, 0);
+    assert_eq!(count("fork_principal_owner_bindings")?, 0);
+    assert_eq!(
+        connection.query_row(
+            "SELECT last_authority_wall_time FROM fork_admission_authority",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        i64::MAX
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_corrupt_committed_graph_precedes_expired_authentication() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-corrupt-expired.db");
+    let path = path.to_string_lossy().into_owned();
+    let (mut store, host, session) = sqlite_principal_recovery_fixture(&path, [214; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([112; 32])?;
+    let policy = authority_policy(&adapter)?;
+    Connection::open(&path)?.execute(
+        "UPDATE fork_admission_operations SET commitment = ?1
+         WHERE kind = 1 AND operation_id = ?2",
+        params![vec![0_u8; 32], vec![214_u8; 32]],
+    )?;
+    let expired = principal_command(
+        &store, &host, &adapter, &policy, &session, [214; 32], 1, "owner",
+    )?;
+    assert_eq!(
+        store.execute_fork_admission_command(&session, &policy, &expired),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_frp1_rejects_a_fork_whose_principal_owner_binding_is_orphaned(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-admission-orphaned-pob1.db");
+    let path = path.to_string_lossy().into_owned();
+    let (mut store, host, _, session, _) =
+        sqlite_fork_recovery_fixture(&path, "orphan-pob1-parent", "orphan-pob1-child")?;
+    let proof = recovery_proof(&store, &host, &session, 2, [54; 32])?;
+    Connection::open(&path)?.execute(
+        "DELETE FROM fork_admission_operations WHERE kind = 1 AND operation_id = ?1",
+        params![vec![53_u8; 32]],
+    )?;
+    assert_eq!(
+        store.recover_fork_admission_command(&session, &proof),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    Ok(())
+}
+
+fn open_policy_session<S: ForkAdmissionAuthorityBootstrapPortV1>(
     store: &mut S,
     signer: &ForkHostSigningKeyV1,
 ) -> Result<ForkAdmissionAuthoritySessionV1, Box<dyn Error>> {
@@ -664,7 +3129,7 @@ fn sqlite_fence_advance_never_rewrites_fah1() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let (mut store, path) = bootstrapped_sqlite(&directory, &signer)?;
     let fah1 = store.fork_admission_host_record()?.canonical_bytes();
-    let session = open_session(&mut store, &signer)?;
+    let session = open_policy_session(&mut store, &signer)?;
     let connection = Connection::open(&path)?;
     connection.execute_batch(
         "CREATE TRIGGER immutable_fah1
@@ -735,7 +3200,7 @@ fn sqlite_reopen_rejects_a_different_host_key_and_prior_sessions() -> Result<(),
     let other_signer = ForkHostSigningKeyV1::from_seed([8; 32])?;
     let directory = tempfile::tempdir()?;
     let (mut store, path) = bootstrapped_sqlite(&directory, &signer)?;
-    let prior_session = open_session(&mut store, &signer)?;
+    let prior_session = open_policy_session(&mut store, &signer)?;
     store.advance_fork_admission_wall_fence(&prior_session)?;
     drop(store);
 
@@ -751,7 +3216,7 @@ fn sqlite_reopen_rejects_a_different_host_key_and_prior_sessions() -> Result<(),
         reopened.advance_fork_admission_wall_fence(&prior_session),
         Err(ForkAdmissionAuthorityErrorV1::HostAuthorityMismatch)
     );
-    let session = open_session(&mut reopened, &signer)?;
+    let session = open_policy_session(&mut reopened, &signer)?;
     reopened.advance_fork_admission_wall_fence(&session)?;
     Ok(())
 }

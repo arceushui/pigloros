@@ -5,11 +5,19 @@
 //! wrapper; this module never accepts a seed or a generic signing callback.
 
 use pos_core::{
-    ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
-    Hash, PublicKey, Signature,
+    fork_authentication::{
+        principal_digest_v1, AuthenticatedPrincipalEvidenceV1, ForkAuthenticationPolicyV1,
+    },
+    ForkAdmissionCommandFactsV1, ForkAdmissionHostCommandV1, ForkAdmissionHostRecordV1,
+    ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1, ForkAdmissionOperationKindV1,
+    ForkAdmissionOperationResultV1, ForkAdmissionRecordV1, ForkAdmissionRecoveryProofV1,
+    ForkCreateCommitmentInputV1, Hash, PrincipalOwnerBindingV1, PrincipalOwnerCommitmentInputV1,
+    PublicKey, Signature, TimelineId,
 };
 use pos_crypto::fork_authentication::{
+    verify_authenticated_principal_evidence_v1, verify_fork_admission_host_command_v1,
     verify_fork_admission_initialize_v1, verify_fork_admission_open_v1,
+    verify_fork_admission_recovery_proof_v1,
 };
 use rand::{rngs::SysRng, TryRng};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -64,6 +72,27 @@ pub enum ForkAdmissionAuthorityErrorV1 {
     StorageIndeterminate,
 }
 
+/// Carry every bootstrap-boundary failure into the closed ADR-106 host error
+/// table without collapsing distinct causes.
+impl From<ForkAdmissionAuthorityErrorV1> for pos_core::ForkAdmissionErrorV1 {
+    fn from(error: ForkAdmissionAuthorityErrorV1) -> Self {
+        match error {
+            ForkAdmissionAuthorityErrorV1::AuthorityUninitialized => Self::AuthorityUninitialized,
+            ForkAdmissionAuthorityErrorV1::AuthorityAlreadyInitialized => {
+                Self::AuthorityAlreadyInitialized
+            }
+            ForkAdmissionAuthorityErrorV1::HostAuthorityMismatch => Self::HostAuthorityMismatch,
+            ForkAdmissionAuthorityErrorV1::EntropyUnavailable => Self::EntropyUnavailable,
+            ForkAdmissionAuthorityErrorV1::AuthorityClockUnavailable => {
+                Self::AuthorityClockUnavailable
+            }
+            ForkAdmissionAuthorityErrorV1::ClockRollback => Self::ClockRollback,
+            ForkAdmissionAuthorityErrorV1::CorruptAuthority => Self::CorruptAuthority,
+            ForkAdmissionAuthorityErrorV1::StorageIndeterminate => Self::StorageIndeterminate,
+        }
+    }
+}
+
 /// Non-cloneable, non-serializable proof that one FAO1 challenge was consumed.
 ///
 /// It contains no host key, signature, or public constructor. Future FAC1 and
@@ -76,6 +105,293 @@ pub struct ForkAdmissionAuthoritySessionV1 {
     policy_digest: Hash,
 }
 
+/// The integrity-only private operation row used by both durable adapters.
+///
+/// It intentionally excludes transient evidence, commands, signatures, times,
+/// and session data. ADR-106 permits only their derived evidence digest,
+/// immutable command commitment, and result references to survive a commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ForkAdmissionOperationRowV1 {
+    pub(crate) kind: ForkAdmissionOperationKindV1,
+    pub(crate) operation_id: Hash,
+    pub(crate) evidence_digest: Hash,
+    pub(crate) commitment: Hash,
+    pub(crate) result_digest: Hash,
+    pub(crate) child_id: Option<TimelineId>,
+}
+
+/// Verified, transient FAC1 facts passed from the common command boundary to
+/// an adapter transaction.  None of these values are persisted directly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum VerifiedForkAdmissionCommandV1 {
+    PrincipalOwner {
+        operation_id: Hash,
+        evidence_digest: Hash,
+        principal_digest: Hash,
+        owner: pos_core::OwnerIdV1,
+        commitment: Hash,
+        issued_at: u64,
+        expires_at: u64,
+    },
+    Fork {
+        operation_id: Hash,
+        evidence_digest: Hash,
+        principal_digest: Hash,
+        parent_id: TimelineId,
+        cut: u64,
+        descriptor_hash: Hash,
+        composition_hash: Hash,
+        attribution_required: bool,
+        child_name: String,
+        commitment: Hash,
+        issued_at: u64,
+        expires_at: u64,
+    },
+}
+
+impl VerifiedForkAdmissionCommandV1 {
+    pub(crate) const fn kind(&self) -> ForkAdmissionOperationKindV1 {
+        match self {
+            Self::PrincipalOwner { .. } => ForkAdmissionOperationKindV1::PrincipalOwner,
+            Self::Fork { .. } => ForkAdmissionOperationKindV1::Fork,
+        }
+    }
+
+    pub(crate) const fn operation_id(&self) -> Hash {
+        match self {
+            Self::PrincipalOwner { operation_id, .. } | Self::Fork { operation_id, .. } => {
+                *operation_id
+            }
+        }
+    }
+
+    pub(crate) const fn commitment(&self) -> Hash {
+        match self {
+            Self::PrincipalOwner { commitment, .. } | Self::Fork { commitment, .. } => *commitment,
+        }
+    }
+
+    pub(crate) const fn evidence_digest(&self) -> Hash {
+        match self {
+            Self::PrincipalOwner {
+                evidence_digest, ..
+            }
+            | Self::Fork {
+                evidence_digest, ..
+            } => *evidence_digest,
+        }
+    }
+}
+
+/// A current-session, host-proven lookup key decoded from FRP1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ForkAdmissionRecoveryQueryV1 {
+    pub(crate) kind: ForkAdmissionOperationKindV1,
+    pub(crate) operation_id: Hash,
+}
+
+/// Require the presented session to be the adapter instance's current one.
+///
+/// ADR-106 binds a session to exactly one adapter instance and open proof. A
+/// superseded session, or one opened on another adapter instance of the same
+/// store, is rejected before any operation lookup or write.
+fn require_current_session(
+    session: &ForkAdmissionAuthoritySessionV1,
+    current_session: Option<Hash>,
+) -> Result<(), pos_core::ForkAdmissionErrorV1> {
+    if current_session == Some(session.identity()) {
+        Ok(())
+    } else {
+        Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+    }
+}
+
+/// Verify FRP1 and return only its lookup key. This never opens a mutation
+/// path and never exposes the command's store or session values.
+pub(crate) fn verify_recovery_proof(
+    session: &ForkAdmissionAuthoritySessionV1,
+    current_session: Option<Hash>,
+    host: ForkAdmissionHostRecordV1,
+    proof: &ForkAdmissionRecoveryProofV1,
+) -> Result<ForkAdmissionRecoveryQueryV1, pos_core::ForkAdmissionErrorV1> {
+    require_current_session(session, current_session)?;
+    if verify_fork_admission_recovery_proof_v1(host.host_verifying_key(), proof).is_err() {
+        return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
+    }
+    let facts = proof.validated_command_facts();
+    let store_id = facts.store_id;
+    let identity = facts.session_identity;
+    if !session.matches(host, store_id, identity) {
+        return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
+    }
+    Ok(ForkAdmissionRecoveryQueryV1 {
+        kind: facts.kind,
+        operation_id: facts.operation_id,
+    })
+}
+
+/// Verify all ephemeral FAC1 facts before an adapter takes its write boundary.
+///
+/// `host` is the FAH1 read before verification. The durable adapter must
+/// re-read FAH1 inside its write transaction and require it to equal `host`
+/// (which also pins the policy digest), then validate the graph before
+/// authorizing a first mutation.
+pub(crate) fn verify_command(
+    session: &ForkAdmissionAuthoritySessionV1,
+    current_session: Option<Hash>,
+    host: ForkAdmissionHostRecordV1,
+    policy: &ForkAuthenticationPolicyV1,
+    command: &ForkAdmissionHostCommandV1,
+) -> Result<VerifiedForkAdmissionCommandV1, pos_core::ForkAdmissionErrorV1> {
+    require_current_session(session, current_session)?;
+    if verify_fork_admission_host_command_v1(host.host_verifying_key(), command).is_err() {
+        return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
+    }
+    // FAC1 decoding already validated FAE1, and its digests only re-encode
+    // that record, so every evidence failure collapses into one fail-closed
+    // `Unauthenticated` result.
+    let (verified, evidence_digest, principal_digest) =
+        AuthenticatedPrincipalEvidenceV1::from_canonical_cbor(&command.evidence_bytes())
+            .ok()
+            .and_then(|evidence| verify_authenticated_principal_evidence_v1(policy, evidence).ok())
+            .and_then(|verified| {
+                let evidence_digest = verified.evidence().digest().ok();
+                let principal_digest =
+                    principal_digest_v1(&verified.evidence().record().principal).ok();
+                evidence_digest
+                    .zip(principal_digest)
+                    .map(|(evidence_digest, principal_digest)| {
+                        (verified, evidence_digest, principal_digest)
+                    })
+            })
+            .ok_or(pos_core::ForkAdmissionErrorV1::Unauthenticated)?;
+    let issued_at = verified.evidence().record().issued_at;
+    let expires_at = verified.evidence().record().expires_at;
+    let facts = command.validated_command_facts();
+    let (ForkAdmissionCommandFactsV1::PrincipalOwner {
+        store_id,
+        session_identity,
+        evidence_digest: command_evidence_digest,
+        principal_digest: command_principal_digest,
+        ..
+    }
+    | ForkAdmissionCommandFactsV1::Fork {
+        store_id,
+        session_identity,
+        evidence_digest: command_evidence_digest,
+        principal_digest: command_principal_digest,
+        ..
+    }) = facts;
+    if !session.matches(host, *store_id, *session_identity) {
+        return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
+    }
+    // The host signs FAC1 only over bound evidence; the digest re-check is
+    // defense in depth against a host that signs unbound command facts.
+    (*command_evidence_digest == evidence_digest && *command_principal_digest == principal_digest)
+        .then(|| {
+            verified_command(
+                facts,
+                evidence_digest,
+                principal_digest,
+                issued_at,
+                expires_at,
+            )
+        })
+        .ok_or(pos_core::ForkAdmissionErrorV1::Unauthenticated)
+}
+
+fn verified_command(
+    facts: &ForkAdmissionCommandFactsV1,
+    evidence_digest: Hash,
+    principal_digest: Hash,
+    issued_at: u64,
+    expires_at: u64,
+) -> VerifiedForkAdmissionCommandV1 {
+    let commitment = facts.commitment();
+    match facts {
+        ForkAdmissionCommandFactsV1::PrincipalOwner {
+            operation_id,
+            owner,
+            ..
+        } => VerifiedForkAdmissionCommandV1::PrincipalOwner {
+            operation_id: *operation_id,
+            evidence_digest,
+            principal_digest,
+            owner: *owner,
+            commitment,
+            issued_at,
+            expires_at,
+        },
+        ForkAdmissionCommandFactsV1::Fork {
+            operation_id,
+            parent_id,
+            cut,
+            descriptor_hash,
+            composition_hash,
+            attribution_required,
+            child_name,
+            ..
+        } => VerifiedForkAdmissionCommandV1::Fork {
+            operation_id: *operation_id,
+            evidence_digest,
+            principal_digest,
+            parent_id: *parent_id,
+            cut: *cut,
+            descriptor_hash: *descriptor_hash,
+            composition_hash: *composition_hash,
+            attribution_required: *attribution_required,
+            child_name: child_name.clone(),
+            commitment,
+            issued_at,
+            expires_at,
+        },
+    }
+}
+
+/// Reconstruct the immutable POC1 commitment from durable POB1 state.
+pub(crate) fn principal_owner_commitment(
+    store_id: Hash,
+    binding: &PrincipalOwnerBindingV1,
+    evidence_digest: Hash,
+) -> Hash {
+    let input = binding.input();
+    PrincipalOwnerCommitmentInputV1 {
+        store_id,
+        operation_id: input.operation_id,
+        evidence_digest,
+        principal_digest: input.principal_digest,
+        owner: input.owner,
+    }
+    .commitment()
+}
+
+/// Reconstruct the immutable FCC1 commitment from the durable FAR1 graph.
+///
+/// A valid FAR1 has equal parent head, completed Fold Cursor, and post-fold
+/// Tick Boundary, so its parent head is the command cut.
+pub(crate) fn fork_commitment(
+    store_id: Hash,
+    principal_digest: Hash,
+    evidence_digest: Hash,
+    admission: &ForkAdmissionRecordV1,
+    child_name: &str,
+) -> Hash {
+    let input = admission.input();
+    ForkCreateCommitmentInputV1 {
+        store_id,
+        operation_id: input.operation_id,
+        evidence_digest,
+        principal_digest,
+        parent_id: input.parent_timeline_id,
+        cut: input.parent_logical_head,
+        descriptor_hash: input.room_revision_descriptor_hash,
+        composition_hash: input.plugin_composition_hash,
+        attribution_required: input.attribution_required,
+        child_name,
+    }
+    .commitment()
+}
+
 impl ForkAdmissionAuthoritySessionV1 {
     /// Return the exact FAO1-plus-signature identity FAC1 and FRP1 must bind.
     #[must_use]
@@ -83,8 +399,16 @@ impl ForkAdmissionAuthoritySessionV1 {
         self.identity
     }
 
-    fn matches(&self, host: ForkAdmissionHostRecordV1, identity: Hash) -> bool {
-        self.store_id == host.store_id()
+    /// Confirm this session belongs to `host` and to the claimed store and
+    /// session identity of a decoded FAC1 or FRP1.
+    ///
+    /// The session cannot be constructed outside this crate; it is obtained
+    /// only by consuming the store's FAO1 challenge. Comparing the claimed
+    /// store identifier prevents one host key from authorizing commands for
+    /// another store instance that happens to use the same key.
+    fn matches(&self, host: ForkAdmissionHostRecordV1, store_id: Hash, identity: Hash) -> bool {
+        self.store_id == store_id
+            && self.store_id == host.store_id()
             && self.identity == identity
             && self.host_key == host.host_verifying_key()
             && self.policy_digest == host.authentication_policy_digest()
@@ -257,7 +581,7 @@ pub(crate) fn advance_wall_fence(
     let Some(identity) = state.session_identity else {
         return Err(ForkAdmissionAuthorityErrorV1::HostAuthorityMismatch);
     };
-    if !session.matches(host, identity) {
+    if !session.matches(host, host.store_id(), identity) {
         return Err(ForkAdmissionAuthorityErrorV1::HostAuthorityMismatch);
     }
     authority_wall_time().and_then(|commit_now| {
@@ -343,11 +667,43 @@ pub trait ForkAdmissionAuthorityBootstrapPortV1 {
     ) -> Result<(), ForkAdmissionAuthorityErrorV1>;
 }
 
+/// Store-owned ADR-106 command boundary.
+///
+/// The caller supplies only canonical opaque command envelopes and the policy
+/// whose digest is already pinned by FAH1. Implementations must verify the
+/// host proof before opening a write transaction, then own all exact-graph,
+/// expiry, rollback-fence, and atomic-persistence decisions.
+pub trait ForkAdmissionAuthorityPortV1 {
+    /// Execute one authenticated FAC1 operation.
+    ///
+    /// # Errors
+    /// Returns a closed authority error without exposing partial POB1, child,
+    /// FAR1, or operation-row state.
+    fn execute_fork_admission_command(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &ForkAuthenticationPolicyV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>;
+
+    /// Reconcile one lookup-only FRP1 operation.
+    ///
+    /// # Errors
+    /// Returns `OperationMissing` for an absent exact operation and never
+    /// creates, repairs, or falls back to an FAC1 mutation.
+    fn recover_fork_admission_command(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>;
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::memory::MemoryStore;
+    use ciborium::value::Value;
     use pos_crypto::fork_authentication::ForkHostSigningKeyV1;
 
     fn open_after_initialize(
@@ -362,6 +718,12 @@ mod tests {
         let open = store.begin_fork_admission_open(host_key, policy_digest)?;
         let signature = signer.sign_open(&open.canonical_bytes())?;
         Ok(store.finalize_fork_admission_open(&open, &signature)?)
+    }
+
+    fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes)?;
+        Ok(bytes)
     }
 
     #[test]
@@ -488,6 +850,91 @@ mod tests {
             Err(ForkAdmissionAuthorityErrorV1::EntropyUnavailable)
         );
         FAIL_AUTHORITY_ENTROPY.with(|flag| flag.set(false));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_proof_verification_rejects_signature_and_session_mismatch(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let signer = ForkHostSigningKeyV1::from_seed([61; 32])?;
+        let host = ForkAdmissionHostRecordV1::new(
+            Hash::from_bytes([62; 32]),
+            PublicKey::from_bytes(signer.public_key()),
+            Hash::from_bytes([63; 32]),
+        )?;
+        let session = ForkAdmissionAuthoritySessionV1 {
+            store_id: host.store_id(),
+            identity: Hash::from_bytes([65; 32]),
+            host_key: host.host_verifying_key(),
+            policy_digest: host.authentication_policy_digest(),
+        };
+        let command = encode(&Value::Array(vec![
+            Value::Text("FRC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(host.store_id().as_bytes().to_vec()),
+            Value::Bytes(session.identity().as_bytes().to_vec()),
+            Value::Integer(2.into()),
+            Value::Bytes(vec![66; 32]),
+        ]))?;
+        let proof = encode(&Value::Array(vec![
+            Value::Text("FRP1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(command.clone()),
+            Value::Bytes(signer.sign_recovery(&command)?.as_bytes().to_vec()),
+        ]))?;
+        let proof = ForkAdmissionRecoveryProofV1::from_canonical_cbor(&proof)?;
+        let current = Some(session.identity());
+        assert_eq!(
+            verify_recovery_proof(&session, current, host, &proof)?.kind,
+            ForkAdmissionOperationKindV1::Fork
+        );
+
+        let principal_command = encode(&Value::Array(vec![
+            Value::Text("FRC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(host.store_id().as_bytes().to_vec()),
+            Value::Bytes(session.identity().as_bytes().to_vec()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![68; 32]),
+        ]))?;
+        let principal_proof = encode(&Value::Array(vec![
+            Value::Text("FRP1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(principal_command.clone()),
+            Value::Bytes(
+                signer
+                    .sign_recovery(&principal_command)?
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        ]))?;
+        let principal_proof = ForkAdmissionRecoveryProofV1::from_canonical_cbor(&principal_proof)?;
+        assert_eq!(
+            verify_recovery_proof(&session, current, host, &principal_proof)?.kind,
+            ForkAdmissionOperationKindV1::PrincipalOwner
+        );
+
+        let mut invalid = proof.to_canonical_cbor();
+        let last = invalid.len() - 1;
+        invalid[last] ^= 1;
+        let invalid = ForkAdmissionRecoveryProofV1::from_canonical_cbor(&invalid)?;
+        assert_eq!(
+            verify_recovery_proof(&session, current, host, &invalid),
+            Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+        );
+
+        let wrong_session = ForkAdmissionAuthoritySessionV1 {
+            identity: Hash::from_bytes([67; 32]),
+            ..session
+        };
+        assert_eq!(
+            verify_recovery_proof(&wrong_session, current, host, &proof),
+            Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+        );
+        assert_eq!(
+            verify_recovery_proof(&wrong_session, Some(wrong_session.identity()), host, &proof),
+            Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+        );
         Ok(())
     }
 }

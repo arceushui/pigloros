@@ -508,6 +508,37 @@ fn command_codecs_reject_noninteger_versions_and_invalid_cbor(
 }
 
 #[test]
+fn opaque_command_equality_uses_the_canonical_envelope() -> Result<(), Box<dyn std::error::Error>> {
+    let principal = PrincipalOwnerCommandV1::from_canonical_cbor(&maximum_poc1()?)?;
+    assert_eq!(principal, principal.clone());
+
+    let fork = ForkCreateCommandV1::from_canonical_cbor(&maximum_fcc1()?)?;
+    assert_eq!(fork, fork.clone());
+
+    let recovery_command = ForkAdmissionRecoveryCommandV1::from_canonical_cbor(&maximum_frc1()?)?;
+    assert_eq!(recovery_command, recovery_command.clone());
+
+    let host = ForkAdmissionHostCommandV1::from_canonical_cbor(&encode(&Value::Array(vec![
+        Value::Text("FAC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(maximum_fcc1()?),
+        Value::Bytes(maximum_fae1()?),
+        bytes(0xaa, 64),
+    ]))?)?;
+    assert_eq!(host, host.clone());
+
+    let recovery_proof =
+        ForkAdmissionRecoveryProofV1::from_canonical_cbor(&encode(&Value::Array(vec![
+            Value::Text("FRP1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(maximum_frc1()?),
+            bytes(0xaa, 64),
+        ]))?)?;
+    assert_eq!(recovery_proof, recovery_proof.clone());
+    Ok(())
+}
+
+#[test]
 fn command_codecs_reject_noncanonical_version_encodings() -> Result<(), Box<dyn std::error::Error>>
 {
     assert_eq!(
@@ -643,5 +674,72 @@ fn host_command_propagates_enclosed_evidence_errors() -> Result<(), Box<dyn std:
             Some(expected)
         );
     }
+    Ok(())
+}
+
+fn small_fcc1() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    encode(&Value::Array(vec![
+        Value::Text("FCC1".to_owned()),
+        Value::Integer(1.into()),
+        bytes(1, 32),
+        bytes(2, 32),
+        bytes(3, 32),
+        bytes(4, 32),
+        bytes(5, 32),
+        bytes(6, 16),
+        Value::Integer(7.into()),
+        Value::Integer(7.into()),
+        bytes(9, 32),
+        bytes(10, 32),
+        Value::Integer(1.into()),
+        Value::Text("child".to_owned()),
+    ]))
+}
+
+#[test]
+fn command_codecs_reject_each_malformed_payload_field() -> Result<(), Box<dyn std::error::Error>> {
+    let out_of_bounds = Some(ForkAdmissionCommandCodecErrorV1::FieldOutOfBounds);
+    let poc1 = small_poc1()?;
+    assert!(PrincipalOwnerCommandV1::from_canonical_cbor(&poc1).is_ok());
+    for replacement in [Value::Null, Value::Text(String::new())] {
+        assert_eq!(
+            PrincipalOwnerCommandV1::from_canonical_cbor(&with_field(&poc1, 7, replacement)?).err(),
+            out_of_bounds
+        );
+    }
+
+    let fcc1 = small_fcc1()?;
+    assert!(ForkCreateCommandV1::from_canonical_cbor(&fcc1).is_ok());
+    let mut fork_fields = (2..=6)
+        .chain([10, 11])
+        .map(|index| (index, bytes(0, 32)))
+        .collect::<Vec<_>>();
+    fork_fields.extend([
+        (7, bytes(6, 15)),
+        (8, Value::Null),
+        (9, Value::Null),
+        (12, Value::Null),
+        (12, Value::Integer(2.into())),
+        (13, Value::Null),
+        (13, Value::Text(String::new())),
+    ]);
+    for (index, replacement) in fork_fields {
+        assert_eq!(
+            ForkCreateCommandV1::from_canonical_cbor(&with_field(&fcc1, index, replacement)?).err(),
+            out_of_bounds,
+            "FCC1 field {index}"
+        );
+    }
+
+    // Null keeps the exact-size FRC1 within bounds while failing the kind.
+    assert_eq!(
+        ForkAdmissionRecoveryCommandV1::from_canonical_cbor(&with_field(
+            &maximum_frc1()?,
+            4,
+            Value::Null
+        )?)
+        .err(),
+        out_of_bounds
+    );
     Ok(())
 }

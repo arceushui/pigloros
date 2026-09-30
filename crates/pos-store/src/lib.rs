@@ -42,7 +42,7 @@ mod timeline_range;
 
 pub use fork_admission_authority::{
     ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
-    ForkAdmissionAuthoritySessionV1,
+    ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
 };
 pub use timeline_range::{
     verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1, TimelineSignedRangeReportV1,

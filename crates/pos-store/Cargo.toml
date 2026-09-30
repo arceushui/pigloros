@@ -15,12 +15,12 @@ sqlite = ["dep:rusqlite"]
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
 ciborium = { workspace = true }
+blake3 = { workspace = true }
 ulid = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
-blake3 = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../pos-core", features = ["test-support"] }
