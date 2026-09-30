@@ -41,11 +41,331 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
     }
 }
 
+fn require_world_replay(
+    sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
+    closure: &pos_core::WorldReplayClosureV1,
+    requested_use: &pos_runtime::WorldReplayUseV1,
+) -> Result<pos_core::EventReadBounds, pos_core::CoreError> {
+    let verified = sender
+        .admit_world_replay(closure, requested_use)
+        .map_err(host_error_to_core)?;
+    verified
+        .require_authoritative_use()
+        .map_err(|_| pos_core::CoreError::ArtifactUnavailable)?;
+    Ok(verified.read_bounds())
+}
+
+/// Return `registry`'s canonical consumer selection before any host read.
+fn consumer_selection(
+    registry: &pos_state::ProjectionRegistry,
+) -> Result<Vec<String>, pos_core::CoreError> {
+    let mut consumer_ids: Vec<String> = registry
+        .reducer_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    consumer_ids.sort_unstable();
+    pos_core::world_consumer_set::validate_consumer_id_selection(&consumer_ids)
+        .map(|()| consumer_ids)
+        .map_err(|_| pos_core::CoreError::ArtifactUnavailable)
+}
+
+/// Bind one protected use to the Timeline's currently observed logical head.
+///
+/// The installed verifier must accept the closure only for this exact head,
+/// and [`read_complete_world_replay`] rejects any read that observes another.
+fn observed_world_replay_use(
+    sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
+    timeline: pos_core::TimelineId,
+    operation: pos_core::ErasureProtectedOperationV1,
+    range: pos_core::SeqRange,
+    consumer_ids: &[String],
+) -> Result<pos_runtime::WorldReplayUseV1, pos_core::CoreError> {
+    sender
+        .logical_head(timeline)
+        .map_err(host_error_to_core)
+        .and_then(|head| {
+            pos_runtime::WorldReplayUseV1::new(
+                timeline,
+                operation,
+                range,
+                head,
+                consumer_ids.to_vec(),
+                Vec::new(),
+            )
+            .map_err(|_| pos_core::CoreError::ArtifactUnavailable)
+        })
+}
+
+/// Read the complete range of a verified use at its bound logical head.
+///
+/// The read fails closed unless the Timeline's logical head still equals the
+/// head bound into the verified use. An Event appended after the head was
+/// observed makes an open-ended read return more Events than expected, which
+/// is rejected by the exact count and sequence check after the read.
+fn read_complete_world_replay(
+    sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
+    requested_use: &pos_runtime::WorldReplayUseV1,
+    bounds: pos_core::EventReadBounds,
+) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
+    use pos_core::CoreError;
+
+    let timeline = requested_use.timeline_id();
+    let range = requested_use.range();
+    let head = sender
+        .logical_head(timeline)
+        .map_err(host_error_to_core)?
+        .as_u64();
+    if head != requested_use.source_logical_head().as_u64() {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    let first = range.from.as_u64().max(1);
+    let last = range.to.map_or(head, pos_core::Seq::as_u64);
+    if first > head.saturating_add(1) {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    let expected = if first > last { 0 } else { last - first + 1 };
+    // An unrepresentable count cannot fit a verifier's finite max_events.
+    let expected = usize::try_from(expected).unwrap_or(usize::MAX);
+    if expected > bounds.max_events() {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+
+    let events = sender
+        .read_bounded(timeline, range, bounds)
+        .map_err(host_error_to_core)?;
+    if events.len() != expected
+        || events.iter().enumerate().any(|(index, event)| {
+            event.seq.as_u64() != first + u64::try_from(index).unwrap_or(u64::MAX)
+        })
+    {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    Ok(events)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod test_support {
+    use std::{fmt::Debug, sync::Arc};
+
+    use pos_core::{
+        ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
+        WorldReplayClosureV1,
+    };
+    use pos_runtime::{
+        ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
+        WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+    };
+    use pos_store::StoreConfig;
+
+    struct ExactWorldReplayVerifier;
+
+    impl WorldReplayVerifierV1 for ExactWorldReplayVerifier {
+        fn verify(
+            &self,
+            closure: &WorldReplayClosureV1,
+            requested_use: &WorldReplayUseV1,
+            inventory_generation: ErasureReferenceV1,
+        ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
+            Ok(pos_runtime::world_replay::test_verified_world_replay(
+                closure,
+                requested_use,
+                inventory_generation,
+                ErasureReplayClaimV1::Exact,
+            ))
+        }
+    }
+
+    pub(crate) fn open_exact_host() -> ErasureExecutionHostV1 {
+        let composition = ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(ExactWorldReplayVerifier));
+        test_ok(ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        ))
+    }
+
+    pub(crate) fn closure_for_host(
+        host: &mut ErasureExecutionHostV1,
+        timeline: pos_core::TimelineId,
+    ) -> WorldReplayClosureV1 {
+        closure_for_host_consumer(host, timeline, "count")
+    }
+
+    pub(crate) fn closure_for_host_consumer(
+        host: &mut ErasureExecutionHostV1,
+        timeline: pos_core::TimelineId,
+        consumer_id: &str,
+    ) -> WorldReplayClosureV1 {
+        let (_, generation) = test_ok(test_ok(host.read_sender()).read_bounded_at_generation(
+            timeline,
+            pos_core::store::SeqRange::all(),
+            pos_core::store::EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+            None,
+        ));
+        test_ok(WorldReplayClosureV1::test_fixture_for_timeline_consumer(
+            timeline,
+            Hash::from_bytes(generation.digest()),
+            consumer_id,
+        ))
+    }
+
+    pub(crate) fn test_ok<T, E: Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected test fixture error: {error:?}"
+            )))
+        })
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::host_error_to_core;
-    use pos_core::{CoreError, ErasureHostErrorV1};
+    use super::{host_error_to_core, observed_world_replay_use, read_complete_world_replay};
+    use pos_core::{
+        event::{CanonicalBytes, EventDraft, Kind},
+        store::{EventReadBounds, SeqRange},
+        CoreError, EntityId, ErasureHostErrorV1, ErasureProtectedOperationV1, Seq, TimelineId,
+    };
+    use pos_runtime::WorldReplayUseV1;
+
+    fn use_at(timeline: TimelineId, range: SeqRange, head: u64) -> WorldReplayUseV1 {
+        crate::test_support::test_ok(WorldReplayUseV1::new(
+            timeline,
+            ErasureProtectedOperationV1::Read,
+            range,
+            Seq::from_u64(head),
+            vec!["count".to_owned()],
+            Vec::new(),
+        ))
+    }
+
+    #[test]
+    fn complete_replay_rejects_moved_heads_and_insufficient_bounds() {
+        let mut host = crate::test_support::open_exact_host();
+        let timeline = {
+            let mut commands = crate::test_support::test_ok(host.command_sender());
+            let timeline = crate::test_support::test_ok(commands.create_timeline("bounded-replay"));
+            let draft = EventDraft::new(
+                EntityId::new(),
+                Kind::new("test.tick"),
+                CanonicalBytes::from_vec(Vec::new()),
+            );
+            crate::test_support::test_ok(commands.append(timeline.id(), &[draft.clone(), draft]));
+            timeline.id()
+        };
+        let mut sender = crate::test_support::test_ok(host.read_sender());
+        let sufficient = EventReadBounds::new(65_536, 128, 8, 2);
+        for stale_head in [1, 3] {
+            assert!(matches!(
+                read_complete_world_replay(
+                    &mut sender,
+                    &use_at(timeline, SeqRange::all(), stale_head),
+                    sufficient,
+                ),
+                Err(CoreError::ArtifactUnavailable)
+            ));
+        }
+        assert!(matches!(
+            read_complete_world_replay(
+                &mut sender,
+                &use_at(timeline, SeqRange::from_seq(Seq::from_u64(4)), 2),
+                sufficient,
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert!(matches!(
+            read_complete_world_replay(
+                &mut sender,
+                &use_at(timeline, SeqRange::all(), 2),
+                EventReadBounds::new(65_536, 128, 8, 1),
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert!(crate::test_support::test_ok(read_complete_world_replay(
+            &mut sender,
+            &use_at(timeline, SeqRange::from_seq(Seq::from_u64(3)), 2),
+            sufficient,
+        ))
+        .is_empty());
+        assert_eq!(
+            crate::test_support::test_ok(read_complete_world_replay(
+                &mut sender,
+                &use_at(timeline, SeqRange::bounded(Seq::ZERO, Seq::from_u64(1)), 2),
+                sufficient,
+            ))
+            .len(),
+            1
+        );
+        assert_eq!(
+            crate::test_support::test_ok(read_complete_world_replay(
+                &mut sender,
+                &use_at(timeline, SeqRange::all(), 2),
+                sufficient,
+            ))
+            .len(),
+            2
+        );
+        assert!(read_complete_world_replay(
+            &mut sender,
+            &use_at(TimelineId::new(), SeqRange::all(), 2),
+            sufficient,
+        )
+        .is_err());
+        assert!(read_complete_world_replay(
+            &mut sender,
+            &use_at(timeline, SeqRange::all(), 2),
+            EventReadBounds::new(65_536, 0, 8, 2),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn observed_use_binds_the_current_logical_head() {
+        let mut host = crate::test_support::open_exact_host();
+        let timeline = {
+            let mut commands = crate::test_support::test_ok(host.command_sender());
+            let timeline = crate::test_support::test_ok(commands.create_timeline("observed-head"));
+            let draft = EventDraft::new(
+                EntityId::new(),
+                Kind::new("test.tick"),
+                CanonicalBytes::from_vec(Vec::new()),
+            );
+            crate::test_support::test_ok(commands.append(timeline.id(), &[draft]));
+            timeline.id()
+        };
+        let mut sender = crate::test_support::test_ok(host.read_sender());
+        let consumers = ["count".to_owned()];
+        let observed = crate::test_support::test_ok(observed_world_replay_use(
+            &mut sender,
+            timeline,
+            ErasureProtectedOperationV1::Read,
+            SeqRange::all(),
+            &consumers,
+        ));
+        assert_eq!(observed.source_logical_head(), Seq::from_u64(1));
+        assert!(matches!(
+            observed_world_replay_use(
+                &mut sender,
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                SeqRange::bounded(Seq::ZERO, Seq::from_u64(2)),
+                &consumers,
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert!(observed_world_replay_use(
+            &mut sender,
+            TimelineId::new(),
+            ErasureProtectedOperationV1::Read,
+            SeqRange::all(),
+            &consumers,
+        )
+        .is_err());
+    }
 
     #[test]
     fn host_errors_map_to_stable_public_time_errors() {

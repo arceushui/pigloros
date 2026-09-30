@@ -14,7 +14,6 @@ path = "src/main.rs"
 pos-core = { path = "../../crates/pos-core" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 pos-store = { path = "../../crates/pos-store" }
-pos-state = { path = "../../crates/pos-state" }
 pos-time = { path = "../../crates/pos-time" }
 pos-experiment = { path = "../pos-experiment" }
 pos-plugin-rule-agent = { path = "../../plugins/entities/rule-agent" }
@@ -26,6 +25,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
+pos-experiment = { path = "../pos-experiment", features = ["test-support"] }
 tempfile = "3"
 rusqlite = { workspace = true }
 

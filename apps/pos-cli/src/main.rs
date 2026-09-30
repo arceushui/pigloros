@@ -6,7 +6,8 @@
 //!
 //! Subcommands:
 //!   pos store init|info `<path>`
-//!   pos timeline list|fork|replay|snapshot|compare|merge …
+//!   pos timeline list|fork|merge …
+//!   pos timeline replay|snapshot|compare … (currently unavailable)
 //!   pos events log …
 //!   pos experiment run|verify|reproduce …
 //!   pos version
@@ -21,13 +22,83 @@ macro_rules! output_stdout {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
 
+    struct InvalidVersionPlugin;
+
+    impl pos_core::Plugin for InvalidVersionPlugin {
+        fn id(&self) -> pos_core::ids::PluginId {
+            pos_core::ids::PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "invalid-cli-version"
+        }
+
+        fn capability(&self) -> pos_core::Capability {
+            pos_core::Capability::default()
+        }
+
+        fn version(&self) -> &'static str {
+            ""
+        }
+    }
+
     #[test]
-    fn builtin_reference_runner_registers_both_reference_plugins() {
-        assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
-        assert!(run_builtin_reference_experiment(StoreConfig::Memory, 1).is_ok());
+    fn builtin_reference_runner_rejects_uninstalled_profile() {
+        assert!(run_builtin_reference_experiment().is_err_and(|error| {
+            error.downcast_ref::<pos_runtime::OutputAdmissionErrorV1>()
+                == Some(&pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+        }));
+        assert!(installed_registration_closed()
+            .downcast_ref::<pos_runtime::OutputAdmissionErrorV1>()
+            .is_some_and(|error| {
+                *error == pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+            }));
+        assert!(run_builtin_reference_experiment_fixture(StoreConfig::Memory, 0).is_ok());
+        assert!(run_builtin_reference_experiment_fixture(StoreConfig::Memory, 1).is_ok());
+    }
+
+    #[test]
+    fn builtin_output_binding_rejects_uninstalled_source_and_profile() {
+        let plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
+        assert!(builtin_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            &[],
+            "unknown-profile",
+        )
+        .is_err());
+        assert!(builtin_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+            &[],
+            "deterministic-local-v1",
+        )
+        .is_err());
+
+        assert!(builtin_output_binding(
+            &InvalidVersionPlugin,
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            &[],
+            "deterministic-local-v1",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn installed_synthetic_binding_rejects_without_profile_authority() {
+        use pos_plugin_synthetic_obs::SyntheticObsPlugin;
+        let plugin = SyntheticObsPlugin::new();
+        assert!(builtin_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+            &1.0_f64.to_be_bytes(),
+            "deterministic-local-v1",
+        )
+        .is_err());
     }
 }
 
@@ -44,12 +115,14 @@ use pos_core::{
     crypto::Hash,
     ids::{PluginId, TimelineId},
     manifest::AdapterRecord,
+    plugin::Plugin,
     store::SeqRange,
 };
-use pos_experiment::{
-    Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
-    StopCondition,
-};
+use pos_experiment::{ReproductionManifest, ReproductionRecipe, RunResult};
+// Only the generated reference fixture composes an Experiment until installed
+// registration returns with Wave 9 (#467/#462).
+#[cfg(test)]
+use pos_experiment::{Experiment, ExperimentConfig, StopCondition};
 use pos_store::StoreConfig;
 use ulid::Ulid;
 
@@ -60,9 +133,26 @@ const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
 
-struct OpenedCliStore {
-    store: HostedCliStore,
-    erasure_gate: std::sync::Arc<dyn pos_core::ErasureGate>,
+fn builtin_output_binding<P: Plugin>(
+    plugin: &P,
+    source: pos_runtime::InstalledOutputPolicySourceV1,
+    configuration_details: &[u8],
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        source,
+        configuration_details,
+        profile_id,
+    )
+    .map_err(Into::into)
+}
+
+/// Wave 8 has no installed EPF1, so installed registration fails closed even
+/// if an installed binding were resolved. #467/#462 restore the installed
+/// reference runner together with a real installed EPF1.
+fn installed_registration_closed() -> Box<dyn std::error::Error> {
+    pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into()
 }
 
 /// Open a store through the CLI composition seam.
@@ -72,19 +162,8 @@ struct OpenedCliStore {
 fn open_store(
     config: StoreConfig,
 ) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
-    open_store_with_gate(config)
-        .map(|opened| Box::new(opened.store) as Box<dyn pos_core::store::EventStore>)
-}
-
-fn open_store_with_gate(config: StoreConfig) -> Result<OpenedCliStore, pos_core::CoreError> {
     HostedCliStore::open(config)
-        .map(|store| {
-            let erasure_gate = store.containment_gate();
-            OpenedCliStore {
-                store,
-                erasure_gate,
-            }
-        })
+        .map(|store| Box::new(store) as Box<dyn pos_core::store::EventStore>)
         .map_err(hosted_cli_store_error)
 }
 
@@ -118,6 +197,10 @@ struct StrictReproManifest {
     head_hash: Hash,
     created_at: WallTime,
     plugin_versions: std::collections::HashMap<String, String>,
+    output_policy_digests: std::collections::HashMap<String, Hash>,
+    replay_policy_identities: std::collections::HashMap<String, Hash>,
+    replay_policy_closures: std::collections::HashMap<String, Vec<u8>>,
+    replay_policy_closure_identities: std::collections::HashMap<String, Hash>,
     adapter_records: Vec<StrictAdapterRecord>,
     label: Option<String>,
 }
@@ -151,6 +234,10 @@ impl From<StrictReproManifest> for pos_core::ReproManifest {
             head_hash: manifest.head_hash,
             created_at: manifest.created_at,
             plugin_versions: manifest.plugin_versions,
+            output_policy_digests: manifest.output_policy_digests,
+            replay_policy_identities: manifest.replay_policy_identities,
+            replay_policy_closures: manifest.replay_policy_closures,
+            replay_policy_closure_identities: manifest.replay_policy_closure_identities,
             adapter_records: manifest
                 .adapter_records
                 .into_iter()
@@ -306,13 +393,13 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if args.len() < 3 {
                 return Err("Usage: pos timeline replay <path> <timeline-id>".into());
             }
-            cmd_timeline_replay(&args[1], &args[2])
+            Err(timeline_operation_unavailable("replay"))
         }
         Some("snapshot") => {
             if args.len() < 3 {
                 return Err("Usage: pos timeline snapshot <path> <timeline-id>".into());
             }
-            cmd_timeline_snapshot(&args[1], &args[2])
+            Err(timeline_operation_unavailable("snapshot"))
         }
         Some("compare") => {
             if args.len() < 5 {
@@ -320,7 +407,7 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     "Usage: pos timeline compare <path> <tl-a-id> <tl-b-id> <fork-seq>".into(),
                 );
             }
-            cmd_timeline_compare(&args[1], &args[2], &args[3], &args[4])
+            Err(timeline_operation_unavailable("compare"))
         }
         Some("merge") => {
             if args.len() < 6 {
@@ -334,6 +421,9 @@ fn handle_timeline(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             output_stderr!("Usage: pos timeline <list|fork|replay|snapshot|compare|merge> ...");
+            output_stderr!(
+                "replay, snapshot, and compare require a CLI owner-verified evidence path"
+            );
             Ok(())
         }
     }
@@ -370,203 +460,11 @@ fn cmd_timeline_fork(
     Ok(())
 }
 
-fn cmd_timeline_replay(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let tl_id = parse_timeline_id(tl_id_str)?;
-    let OpenedCliStore {
-        store,
-        erasure_gate,
-    } = open_store_with_gate(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
-    registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-    let events = replay_retained_timeline(&store, tl_id, &mut registry)?;
-    let entity_count = events
-        .iter()
-        .map(|e| e.entity)
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-
-    output_stdout!("events: {}", events.len());
-    output_stdout!("entity_count: {entity_count}");
-    Ok(())
-}
-
-fn cmd_timeline_snapshot(path: &str, tl_id_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let tl_id = parse_timeline_id(tl_id_str)?;
-    let OpenedCliStore {
-        store,
-        erasure_gate,
-    } = open_store_with_gate(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let mut registry = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
-    registry.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let snapshot = snapshot_retained_timeline(&store, tl_id, &mut registry)?;
-
-    let entity_count = count_snapshot_entities(&snapshot);
-
-    output_stdout!("at_seq: {}", snapshot.at_seq.as_u64());
-    output_stdout!("entity_count: {entity_count}");
-
-    Ok(())
-}
-
-fn retained_timeline_artifact(
-    timeline: pos_core::TimelineId,
-    artifact_class: pos_core::ErasureArtifactClassV1,
-    owner_domain: &[u8],
-) -> Result<
-    (
-        pos_core::ErasureReferenceV1,
-        pos_core::ReplayClaimEvaluationV1,
-    ),
-    pos_core::ErasureErrorV1,
-> {
-    let artifact_digest = pos_core::ErasureReferenceV1::from_digest(
-        *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
-    );
-    pos_core::ReplayClaimEvaluatorV1::evaluate(
-        pos_core::ErasureReplayClaimV1::Exact,
-        &[pos_core::ArtifactClaimInputV1 {
-            registration: pos_core::RegisteredArtifactV1::new(
-                artifact_class,
-                artifact_digest,
-                pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-                None,
-                pos_core::ErasureReferenceV1::from_digest(*blake3::hash(owner_domain).as_bytes()),
-                pos_core::ArtifactOptionalityV1::Required,
-                pos_core::ArtifactTransitionRuleV1::PreserveExact,
-            ),
-            current_claim: pos_core::ErasureReplayClaimV1::Exact,
-            state: pos_core::ArtifactStateV1::Retained,
-        }],
+fn timeline_operation_unavailable(operation: &str) -> Box<dyn std::error::Error> {
+    format!(
+        "timeline {operation} is unavailable: the CLI has no owner-verified evidence path for this operation"
     )
-    .map(|evaluation| (artifact_digest, evaluation))
-}
-
-fn replay_retained_timeline(
-    store: &HostedCliStore,
-    timeline: TimelineId,
-    registry: &mut pos_state::ProjectionRegistry,
-) -> Result<Vec<pos_core::Event>, Box<dyn std::error::Error>> {
-    let (artifact_digest, evaluation) = retained_timeline_artifact(
-        timeline,
-        pos_core::ErasureArtifactClassV1::TimelineReplay,
-        b"pos-cli/timeline-replay",
-    )?;
-    store
-        .with_read_sender(|sender| {
-            pos_time::replay(sender, timeline, registry, artifact_digest, &evaluation)
-        })
-        .map_err(Into::into)
-}
-
-fn snapshot_retained_timeline(
-    store: &HostedCliStore,
-    timeline: TimelineId,
-    registry: &mut pos_state::ProjectionRegistry,
-) -> Result<pos_time::Snapshot, Box<dyn std::error::Error>> {
-    let (artifact_digest, evaluation) = retained_timeline_artifact(
-        timeline,
-        pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-        b"pos-cli/timeline-snapshot",
-    )?;
-    store
-        .with_read_sender(|sender| {
-            pos_time::snapshot(sender, timeline, registry, artifact_digest, &evaluation)
-        })
-        .map_err(Into::into)
-}
-
-fn retained_comparison_artifacts(
-    timelines: [TimelineId; 2],
-) -> Result<
-    (
-        [pos_core::ErasureReferenceV1; 2],
-        pos_core::ReplayClaimEvaluationV1,
-    ),
-    pos_core::ErasureErrorV1,
-> {
-    let digests = timelines.map(|timeline| {
-        pos_core::ErasureReferenceV1::from_digest(
-            *blake3::hash(&timeline.inner().to_bytes()).as_bytes(),
-        )
-    });
-    let claims = digests.map(|digest| pos_core::ArtifactClaimInputV1 {
-        registration: pos_core::RegisteredArtifactV1::new(
-            pos_core::ErasureArtifactClassV1::ForkOrSnapshot,
-            digest,
-            pos_core::ArtifactDataClassV1::StructuralAuditMetadata,
-            None,
-            pos_core::ErasureReferenceV1::from_digest(
-                *blake3::hash(b"pos-cli/timeline-compare").as_bytes(),
-            ),
-            pos_core::ArtifactOptionalityV1::Required,
-            pos_core::ArtifactTransitionRuleV1::PreserveExact,
-        ),
-        current_claim: pos_core::ErasureReplayClaimV1::Exact,
-        state: pos_core::ArtifactStateV1::Retained,
-    });
-    pos_core::ReplayClaimEvaluatorV1::evaluate(pos_core::ErasureReplayClaimV1::Exact, &claims)
-        .map(|evaluation| (digests, evaluation))
-}
-
-fn cmd_timeline_compare(
-    path: &str,
-    first_timeline_str: &str,
-    second_timeline_str: &str,
-    fork_seq_str: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let diff = run_timeline_compare(path, first_timeline_str, second_timeline_str, fork_seq_str)?;
-
-    output_stdout!("only_in_a: {}", diff.only_in_a.len());
-    output_stdout!("only_in_b: {}", diff.only_in_b.len());
-    output_stdout!("diverged_entities: {}", diff.diverged_entities.len());
-
-    Ok(())
-}
-
-fn run_timeline_compare(
-    path: &str,
-    first_timeline_str: &str,
-    second_timeline_str: &str,
-    fork_seq_str: &str,
-) -> Result<pos_time::ForkDiff, Box<dyn std::error::Error>> {
-    let timeline_a = parse_timeline_id(first_timeline_str)?;
-    let timeline_b = parse_timeline_id(second_timeline_str)?;
-    let fork_seq = parse_seq(fork_seq_str)?;
-
-    let OpenedCliStore {
-        store,
-        erasure_gate,
-    } = open_store_with_gate(StoreConfig::Sqlite {
-        path: path.to_owned(),
-    })?;
-
-    let registry_gate = std::sync::Arc::clone(&erasure_gate);
-    let mut reg_a = pos_state::ProjectionRegistry::new().with_erasure_gate(registry_gate);
-    reg_a.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let mut reg_b = pos_state::ProjectionRegistry::new().with_erasure_gate(erasure_gate);
-    reg_b.register("entity_state", Box::new(pos_state::EntityStateProjection));
-
-    let (artifact_digests, evaluation) = retained_comparison_artifacts([timeline_a, timeline_b])?;
-    let diff = store.with_read_sender(|sender| {
-        pos_time::compare(
-            sender,
-            [timeline_a, timeline_b],
-            fork_seq,
-            [&mut reg_a, &mut reg_b],
-            artifact_digests,
-            &evaluation,
-        )
-    })?;
-
-    Ok(diff)
+    .into()
 }
 
 fn parse_merge_strategy_flag(
@@ -697,7 +595,46 @@ fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-fn run_builtin_reference_experiment(
+/// Resolve the reference Plugins' installed bindings.
+///
+/// Wave 8 has no installed EPF1, so the runner fails closed before any
+/// Experiment or registration exists.
+fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::Error>> {
+    let agent_plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
+    let obs_plugin = pos_plugin_synthetic_obs::SyntheticObsPlugin::new();
+    let obs_configuration = 1.0_f64.to_be_bytes();
+    // Report the first binding error, or the closed installed-registration
+    // error if both bindings resolve. This stays one combinator chain on
+    // purpose: in Wave 8 every installed binding fails, so `let ... ?;`
+    // bindings would leave the serialization error, the post-binding
+    // continuations and the final closed error as unreachable LLVM regions.
+    // `and` evaluates both bindings eagerly, so both are exercised either way.
+    let obs_binding = builtin_output_binding(
+        &obs_plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+        &obs_configuration,
+        "deterministic-local-v1",
+    );
+    Err(serde_json::to_vec(agent_plugin.actions())
+        .map_err(Into::into)
+        .and_then(|agent_configuration| {
+            builtin_output_binding(
+                &agent_plugin,
+                pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+                &agent_configuration,
+                "deterministic-local-v1",
+            )
+        })
+        .and(obs_binding)
+        .err()
+        .unwrap_or_else(installed_registration_closed))
+}
+
+// This fixture never enters the installed-registration seam or creates a
+// production Plugin pin. The real CLI command above stays fail-closed until
+// the host catalogue has an operator-approved profile.
+#[cfg(test)]
+fn run_builtin_reference_experiment_fixture(
     store_config: StoreConfig,
     ticks: u64,
 ) -> Result<RunResult, Box<dyn std::error::Error>> {
@@ -706,15 +643,13 @@ fn run_builtin_reference_experiment(
     use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
 
     let mut exp = Experiment::new(ExperimentConfig {
-        name: "cli-run".to_owned(),
+        name: "cli-fixture".to_owned(),
         stop: StopCondition::MaxTicks(ticks),
         store_config,
     });
-
-    // Register reference plugins
     let agent_entity = EntityId::new();
     let agent_plugin = RuleAgentPlugin::new();
-    exp.register(
+    exp.register_generated(
         &agent_plugin,
         Some(Box::new(RuleAgentReducer)),
         Some(Box::new(RuleAgentDriver::new(
@@ -722,23 +657,33 @@ fn run_builtin_reference_experiment(
             agent_plugin.actions().to_vec(),
         ))),
     )?;
-
-    let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
-    exp.register(
+    exp.register_generated(
         &obs_plugin,
         Some(Box::new(SyntheticReducer)),
-        Some(Box::new(SyntheticDriver::new(obs_entity))),
+        Some(Box::new(SyntheticDriver::new(EntityId::new()))),
     )?;
-
     exp.run().map_err(Into::into)
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_experiment_run_with(path, ticks, |_, _| run_builtin_reference_experiment())
+}
+
+#[cfg(test)]
+fn cmd_experiment_run_fixture(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_experiment_run_with(path, ticks, run_builtin_reference_experiment_fixture)
+}
+
+fn cmd_experiment_run_with(
+    path: &str,
+    ticks: u64,
+    run: impl FnOnce(StoreConfig, u64) -> Result<RunResult, Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     validate_experiment_ticks(ticks)
         .map_err(Into::into)
         .and_then(|()| {
-            run_builtin_reference_experiment(
+            run(
                 StoreConfig::Sqlite {
                     path: path.to_owned(),
                 },
@@ -783,17 +728,8 @@ fn cmd_experiment_reproduce(manifest_path: &str) -> Result<(), Box<dyn std::erro
 fn reproduce_manifest(
     reproduction: ReproductionManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let recipe = reproduce_cli_recipe(reproduction.recipe)?;
-    run_builtin_reference_experiment(StoreConfig::Memory, recipe.builtin_reference_v1.ticks)
-        .and_then(|reproduced| {
-            if reproduced.manifest.head_hash == reproduction.manifest.head_hash {
-                output_stdout!("OK");
-                Ok(())
-            } else {
-                output_stdout!("MISMATCH");
-                Err("reproduced chain_head does not match manifest".into())
-            }
-        })
+    let _ = reproduce_cli_recipe(reproduction.recipe)?;
+    Err("reproduction requires an owner-verified policy closure".into())
 }
 
 fn reproduce_cli_recipe(
@@ -817,10 +753,27 @@ fn validate_experiment_ticks(ticks: u64) -> Result<(), &'static str> {
         .ok_or(TICK_LIMIT_ERROR)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManifestHeadVerification {
+    TimelineHeadOnly,
+    Mismatch,
+}
+
+impl ManifestHeadVerification {
+    const fn output_message(self) -> &'static str {
+        match self {
+            Self::TimelineHeadOnly => {
+                "Timeline head verified; output-policy and Replay identity were not checked"
+            }
+            Self::Mismatch => "MISMATCH",
+        }
+    }
+}
+
 fn verify_manifest_against_store(
     manifest: &pos_core::manifest::ReproManifest,
     store: &dyn pos_core::store::EventStore,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<ManifestHeadVerification, Box<dyn std::error::Error>> {
     let timelines = store.list_timelines()?;
     let tl = timelines.iter().find(|t| t.id() == manifest.timeline_id);
 
@@ -841,11 +794,22 @@ fn verify_manifest_against_store(
     };
 
     if matched {
-        output_stdout!("OK");
-        Ok(())
+        Ok(ManifestHeadVerification::TimelineHeadOnly)
     } else {
-        output_stdout!("MISMATCH");
-        Err("hash mismatch".into())
+        Ok(ManifestHeadVerification::Mismatch)
+    }
+}
+
+fn report_manifest_head_verification(
+    manifest: &pos_core::manifest::ReproManifest,
+    store: &dyn pos_core::store::EventStore,
+    output: &mut impl std::io::Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let verification = verify_manifest_against_store(manifest, store)?;
+    writeln!(output, "{}", verification.output_message())?;
+    match verification {
+        ManifestHeadVerification::TimelineHeadOnly => Ok(()),
+        ManifestHeadVerification::Mismatch => Err("hash mismatch".into()),
     }
 }
 
@@ -865,7 +829,9 @@ fn cmd_experiment_verify(manifest_path: &str) -> Result<(), Box<dyn std::error::
     }
     let store = open_store(StoreConfig::Sqlite { path: store_path })?;
 
-    verify_manifest_against_store(&manifest, store.as_ref())
+    let stdout = std::io::stdout();
+    let mut stdout_lock = stdout.lock();
+    report_manifest_head_verification(&manifest, store.as_ref(), &mut stdout_lock)
 }
 
 // ---------------------------------------------------------------------------
@@ -897,44 +863,6 @@ fn parse_limit_flag(args: &[String]) -> Result<Option<usize>, Box<dyn std::error
         }
     }
     Ok(None)
-}
-
-#[cfg(test)]
-thread_local! {
-    static FAIL_STATE_REG_JSON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-fn state_registry_to_json(
-    state_reg: &pos_core::StateRegistry,
-) -> Result<serde_json::Value, serde_json::Error> {
-    #[cfg(test)]
-    if FAIL_STATE_REG_JSON.with(std::cell::Cell::get) {
-        return serde_json::from_str("{");
-    }
-    serde_json::to_value(state_reg)
-}
-
-/// Count unique entity IDs captured in a snapshot's projection state.
-fn count_snapshot_entities(snapshot: &pos_time::Snapshot) -> usize {
-    let mut entities = std::collections::HashSet::new();
-    for state_reg in snapshot.registry.values() {
-        // Soft-skip registries that cannot be JSON-encoded.
-        let Ok(value) = state_registry_to_json(state_reg) else {
-            continue;
-        };
-        accumulate_entities_from_registry_json(&value, &mut entities);
-    }
-    entities.len()
-}
-
-/// Pull entity id keys from a serialized [`pos_core::StateRegistry`]-shaped JSON value.
-fn accumulate_entities_from_registry_json(
-    value: &serde_json::Value,
-    entities: &mut std::collections::HashSet<String>,
-) {
-    if let Some(states) = value.get("states").and_then(serde_json::Value::as_object) {
-        entities.extend(states.keys().cloned());
-    }
 }
 
 /// Serialize and write the run manifest next to the store.
@@ -1032,56 +960,6 @@ mod tests {
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
     };
-
-    #[test]
-    fn accumulate_entities_skips_missing_or_non_object_states() {
-        let mut entities = std::collections::HashSet::new();
-        accumulate_entities_from_registry_json(&serde_json::Value::Null, &mut entities);
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(&serde_json::json!({"nope": 1}), &mut entities);
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(
-            &serde_json::json!({"states": "not-an-object"}),
-            &mut entities,
-        );
-        assert!(entities.is_empty());
-        accumulate_entities_from_registry_json(
-            &serde_json::json!({"states": {"e1": {}, "e2": {}}}),
-            &mut entities,
-        );
-        assert_eq!(entities.len(), 2);
-        assert!(entities.contains("e1"));
-        assert!(entities.contains("e2"));
-    }
-
-    #[test]
-    fn count_snapshot_entities_counts_unique_ids() {
-        let mut registry = std::collections::HashMap::new();
-        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
-        let snapshot = pos_time::Snapshot {
-            timeline: TimelineId::new(),
-            at_seq: Seq::ZERO,
-            registry,
-            inventory_generation: [0; 32],
-        };
-        assert_eq!(count_snapshot_entities(&snapshot), 0);
-    }
-
-    #[test]
-    fn count_snapshot_entities_soft_skips_json_errors() {
-        let mut registry = std::collections::HashMap::new();
-        registry.insert("entity_state".to_owned(), pos_core::StateRegistry::new());
-        let snapshot = pos_time::Snapshot {
-            timeline: TimelineId::new(),
-            at_seq: Seq::ZERO,
-            registry,
-            inventory_generation: [0; 32],
-        };
-        FAIL_STATE_REG_JSON.with(|f| f.set(true));
-        let n = count_snapshot_entities(&snapshot);
-        FAIL_STATE_REG_JSON.with(|f| f.set(false));
-        assert_eq!(n, 0);
-    }
 
     #[test]
     fn open_memory_store_ok() {
@@ -1216,18 +1094,18 @@ mod tests {
     }
 
     #[test]
-    fn handle_experiment_run_executes() {
+    fn handle_experiment_run_rejects_uninstalled_profile() {
         let (_dir, path) = tmp_db();
         let a = args(&["run", &path, "--ticks", "3"]);
-        handle_experiment(&a).test_ok();
+        assert!(handle_experiment(&a).is_err());
     }
 
     #[test]
-    fn cmd_experiment_run_wires_plugins_and_produces_events() {
-        // Directly call cmd_experiment_run to cover the plugin registration lines.
+    fn fixture_experiment_run_wires_plugins_and_produces_events() {
+        // Cover the nonproduction generated runner without claiming an installed profile.
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("run-test.db").to_str().test_ok().to_owned();
-        cmd_experiment_run(&path, 2).test_ok();
+        cmd_experiment_run_fixture(&path, 2).test_ok();
         // Verify manifest was written alongside store
         let manifest_path = path.replace(".db", "-manifest.json");
         assert!(std::path::Path::new(&manifest_path).exists());
@@ -1237,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_matches_builtin_recipe() {
+    fn cmd_experiment_reproduce_requires_owner_verified_policy() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir
             .path()
@@ -1245,9 +1123,10 @@ mod tests {
             .to_str()
             .test_ok()
             .to_owned();
-        cmd_experiment_run(&path, 3).test_ok();
+        cmd_experiment_run_fixture(&path, 3).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        cmd_experiment_reproduce(&manifest_path).test_ok();
+        let error = cmd_experiment_reproduce(&manifest_path).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
     }
 
     #[test]
@@ -1270,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_reports_chain_head_mismatch() {
+    fn cmd_experiment_reproduce_requires_owner_verified_manifest() {
         let manifest = ReproductionManifest {
             manifest: pos_core::ReproManifest::new(
                 TimelineId::new(),
@@ -1281,7 +1160,8 @@ mod tests {
         };
         let file = tempfile::NamedTempFile::new().test_ok();
         std::fs::write(file.path(), serde_json::to_string(&manifest).test_ok()).test_ok();
-        assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
+        let error = cmd_experiment_reproduce(file.path().to_str().test_ok()).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
     }
 
     #[test]
@@ -1401,9 +1281,10 @@ mod tests {
     fn handle_experiment_reproduce_dispatches_and_requires_manifest() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("dispatch.db").to_str().test_ok().to_owned();
-        cmd_experiment_run(&path, 1).test_ok();
+        cmd_experiment_run_fixture(&path, 1).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        assert!(handle_experiment(&args(&["reproduce", &manifest_path])).is_ok());
+        let error = handle_experiment(&args(&["reproduce", &manifest_path])).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
         assert!(handle_experiment(&args(&["reproduce"])).is_err());
     }
 
@@ -1435,10 +1316,10 @@ mod tests {
         std::fs::write(&manifest_path, &json).test_ok();
 
         // cmd_experiment_verify finds the companion .db (via -manifest.json → .db)
-        // The timeline exists with zero head_hash → matched = true → OK
+        // The timeline exists with the recorded zero head hash, so the
+        // timeline-head-only verification result is successful.
         let result = cmd_experiment_verify(&manifest_path);
-        // May be Ok or Err depending on store state — just check it runs
-        drop(result);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1598,55 +1479,6 @@ mod tests {
     }
 
     #[test]
-    fn handle_timeline_replay_executes() {
-        let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).test_ok();
-
-        // Add some events to replay
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let timelines = store.list_timelines().test_ok();
-        let tl_id = timelines[0].id();
-        let entity = EntityId::new();
-        let drafts = vec![EventDraft::new(
-            entity,
-            Kind::new("test.event"),
-            CanonicalBytes::from_vec(vec![]),
-        )];
-        store.append(tl_id, &drafts).test_ok();
-        drop(store);
-
-        let tl_id_str = tl_id.to_string();
-        let a = args(&["replay", &path, &tl_id_str]);
-        handle_timeline(&a).test_ok();
-    }
-
-    #[test]
-    fn handle_timeline_snapshot_executes() {
-        let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).test_ok();
-        let store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let timelines = store.list_timelines().test_ok();
-        let tl_id = timelines[0].id().to_string();
-        let a = args(&["snapshot", &path, &tl_id]);
-        handle_timeline(&a).test_ok();
-    }
-
-    #[test]
-    fn handle_timeline_compare_executes() {
-        let (_dir, path) = tmp_db();
-        handle_store(&args(&["init", &path])).test_ok();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let timelines = store.list_timelines().test_ok();
-        let tl_id = timelines[0].id().to_string();
-        let forked = store
-            .fork(timelines[0].id(), timelines[0].head, "fork-b")
-            .test_ok();
-        let fork_id = forked.id().to_string();
-        let a = args(&["compare", &path, &tl_id, &fork_id, "0"]);
-        handle_timeline(&a).test_ok();
-    }
-
-    #[test]
     fn handle_timeline_replay_missing_path_returns_err() {
         let a = args(&["replay"]);
         assert!(handle_timeline(&a).is_err());
@@ -1662,6 +1494,23 @@ mod tests {
     fn handle_timeline_compare_missing_args_returns_err() {
         let a = args(&["compare", "path", "tl1"]);
         assert!(handle_timeline(&a).is_err());
+    }
+
+    #[test]
+    fn timeline_protected_operations_fail_closed_without_owner_evidence() {
+        for (arguments, operation) in [
+            (args(&["replay", "unused.db", "timeline"]), "replay"),
+            (args(&["snapshot", "unused.db", "timeline"]), "snapshot"),
+            (args(&["compare", "unused.db", "a", "b", "0"]), "compare"),
+        ] {
+            let error = handle_timeline(&arguments).test_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "timeline {operation} is unavailable: the CLI has no owner-verified evidence path for this operation"
+                )
+            );
+        }
     }
 
     #[test]
@@ -2005,19 +1854,8 @@ mod main_coverage {
 
     #[test]
     fn verify_ok_path_when_manifest_matches_empty_store() {
-        // Cover the `if matched { output_stdout!("OK"); Ok(()) }` path.
-        // A fresh Memory store has no timelines, so `tl = None` → `matched = false`.
-        // To hit the OK path we need a matching manifest. Use a zero timeline_id
-        // and zero hash — the `else { false }` branch gives matched=false, which
-        // means we need to approach differently: create a real store with events.
-        //
-        // Strategy: init a store, run a 1-tick experiment, export the manifest,
-        // verify it (should return Ok since the hash matches an empty timeline).
-        //
-        // Actually the verify checks payload_hash of last event vs manifest.head_hash.
-        // For an empty store (no events), head_hash = Hash::zero() from map_or.
-        // So if manifest.head_hash = Hash::zero() and the store has the same timeline
-        // with no events after it, matched = (zero == zero) = true.
+        // Cover the scoped timeline-head-only verification message.
+        // An empty Timeline matches a manifest with the zero head hash.
         use pos_core::clock::WallTime;
         use pos_store::StoreConfig;
         use tempfile::NamedTempFile;
@@ -2053,15 +1891,13 @@ mod main_coverage {
             let mut mem = open_store(StoreConfig::Memory).test_ok();
             pos_core::store::import_timeline(mem.as_mut(), export).test_ok();
 
-            // For the OK path, just verify the manifest json round-trips correctly.
+            // Verify the success message remains explicitly scoped to the Timeline head.
             // The actual verify calls open_store(Memory) so it won't find the timeline,
-            // making matched=false. We test the OK branch differently:
-            // call the inner logic directly.
-            let matched = true; // simulate the OK case
-            if matched {
-                // This is the "OK" branch — just verify it's reachable
-                let _ = "OK";
-            }
+            // making matched=false. The direct matching-store test covers the successful result.
+            assert_eq!(
+                ManifestHeadVerification::TimelineHeadOnly.output_message(),
+                "Timeline head verified; output-policy and Replay identity were not checked"
+            );
 
             // The real test: cmd_experiment_verify with non-matching timeline returns Err
             let result = cmd_experiment_verify(f.path().to_str().test_ok());
@@ -2097,7 +1933,7 @@ mod final_coverage {
 
     #[test]
     fn verify_manifest_ok_path_when_hash_matches() {
-        // Cover the `if matched { output_stdout!("OK"); Ok(()) }` branch.
+        // Verify both the scoped result and the exact CLI success message.
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("match-test").test_ok();
 
@@ -2108,13 +1944,18 @@ mod final_coverage {
             pos_core::clock::WallTime::from_micros(0),
         );
 
-        let result = verify_manifest_against_store(&manifest, store.as_ref());
-        assert!(result.is_ok(), "expected OK for matching hash");
+        let mut output = Vec::new();
+        let result = report_manifest_head_verification(&manifest, store.as_ref(), &mut output);
+        assert!(result.is_ok());
+        assert_eq!(
+            output,
+            b"Timeline head verified; output-policy and Replay identity were not checked\n"
+        );
     }
 
     #[test]
     fn verify_manifest_mismatch_when_hash_differs() {
-        // Cover the `else { false }` branch (timeline exists but hash differs).
+        // Cover the mismatch result (timeline exists but hash differs).
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("mismatch-test").test_ok();
 
@@ -2125,8 +1966,10 @@ mod final_coverage {
             pos_core::clock::WallTime::from_micros(0),
         );
 
-        let result = verify_manifest_against_store(&manifest, store.as_ref());
-        assert!(result.is_err(), "expected MISMATCH for differing hash");
+        let mut output = Vec::new();
+        let result = report_manifest_head_verification(&manifest, store.as_ref(), &mut output);
+        assert!(result.is_err());
+        assert_eq!(output, b"MISMATCH\n");
     }
 
     #[test]
@@ -2163,15 +2006,12 @@ mod final_coverage {
             pos_core::clock::WallTime::from_micros(0),
         );
         let result = verify_manifest_against_store(&manifest, store.as_ref());
-        assert!(
-            result.is_err(),
-            "expected MISMATCH when timeline not in store"
-        );
+        assert_eq!(result.test_ok(), ManifestHeadVerification::Mismatch);
     }
 
     #[test]
     fn cmd_experiment_verify_falls_back_to_memory_when_no_db() {
-        // Cover the Memory fallback branch: store_path doesn't exist → use Memory.
+        // A missing companion store fails before verification.
         use pos_core::ids::TimelineId;
 
         let dir = tempfile::tempdir().test_ok();
@@ -2186,9 +2026,12 @@ mod final_coverage {
         std::fs::write(&manifest_path, &json).test_ok();
 
         // The companion .db would be "no-companion.db" — it doesn't exist.
-        // verify falls back to Memory store → timeline not found → MISMATCH.
+        // The command rejects the absent companion store before checking a head.
         let result = cmd_experiment_verify(manifest_path.to_str().test_ok());
-        assert!(result.is_err(), "Memory fallback should give MISMATCH");
+        assert!(
+            result.is_err(),
+            "missing companion store should be rejected"
+        );
     }
 
     #[test]
@@ -2223,17 +2066,14 @@ mod final_coverage {
         }
         let chain_head = pos_core::crypto::Hash::from_bytes(*hasher.finalize().as_bytes());
 
-        // Manifest with the correct chain_head → should match (OK)
+        // Manifest with the correct chain_head → timeline-head-only verification.
         let manifest = pos_core::ReproManifest::new(
             tl.id(),
             chain_head,
             pos_core::clock::WallTime::from_micros(0),
         );
         let result = verify_manifest_against_store(&manifest, store.as_ref());
-        assert!(
-            result.is_ok(),
-            "chain_head from non-empty timeline should match"
-        );
+        assert_eq!(result.test_ok(), ManifestHeadVerification::TimelineHeadOnly);
 
         // Manifest with wrong hash → should MISMATCH
         let bad_manifest = pos_core::ReproManifest::new(
@@ -2242,7 +2082,7 @@ mod final_coverage {
             pos_core::clock::WallTime::from_micros(0),
         );
         let bad_result = verify_manifest_against_store(&bad_manifest, store.as_ref());
-        assert!(bad_result.is_err(), "wrong hash should give MISMATCH");
+        assert_eq!(bad_result.test_ok(), ManifestHeadVerification::Mismatch);
     }
 }
 
@@ -2380,118 +2220,6 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_replay_bad_timeline_id_returns_err() {
-        let (_dir, path, _) = seeded_db();
-        assert!(cmd_timeline_replay(&path, "not-a-ulid").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_replay_fails_when_events_corrupt() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let tl = store.list_timelines().test_ok()[0].id();
-        let entity = EntityId::new();
-        store
-            .append(
-                tl,
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("replay.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        drop(store);
-        corrupt_event_ids(&path);
-        assert!(cmd_timeline_replay(&path, &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_bad_timeline_id_returns_err() {
-        let (_dir, path, _) = seeded_db();
-        assert!(cmd_timeline_snapshot(&path, "not-a-ulid").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_fails_when_events_corrupt() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let tl = store.list_timelines().test_ok()[0].id();
-        let entity = EntityId::new();
-        store
-            .append(
-                tl,
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("snapshot.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        drop(store);
-        corrupt_event_ids(&path);
-        assert!(cmd_timeline_snapshot(&path, &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_counts_entities_from_projection_state() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let tl = store.list_timelines().test_ok()[0].id();
-        let entity = EntityId::new();
-        store
-            .append(
-                tl,
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("snapshot.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        drop(store);
-        cmd_timeline_snapshot(&path, &tl_id).test_ok();
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_compare_bad_timeline_id_returns_err() {
-        let (_dir, path, tl_id) = seeded_db();
-        assert!(cmd_timeline_compare(&path, "not-a-ulid", &tl_id, "0").is_err());
-        assert!(cmd_timeline_compare(&path, &tl_id, "not-a-ulid", "0").is_err());
-        assert!(cmd_timeline_compare(&path, &tl_id, &tl_id, "not-a-seq").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_compare_fails_when_events_corrupt() {
-        let (_dir, path, tl_id) = seeded_db();
-        let mut store = open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok();
-        let base = store.list_timelines().test_ok()[0].clone();
-        let entity = EntityId::new();
-        store
-            .append(
-                base.id(),
-                &[EventDraft::new(
-                    entity,
-                    Kind::new("cmp.event"),
-                    CanonicalBytes::from_vec(vec![]),
-                )],
-            )
-            .test_ok();
-        let forked = store.fork(base.id(), base.head, "cmp-fork").test_ok();
-        let fork_id = forked.id().to_string();
-        drop(store);
-        corrupt_event_ids(&path);
-        assert!(cmd_timeline_compare(&path, &tl_id, &fork_id, "0").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn handle_timeline_merge_invalid_strategy_returns_err() {
         let (_dir, path, tl_id) = seeded_db();
         let missing_b = TimelineId::new().to_string();
@@ -2616,11 +2344,11 @@ mod fault_injection_tests {
     fn cmd_experiment_run_manifest_write_fails_when_path_is_directory() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("run.db").to_str().test_ok().to_owned();
-        cmd_experiment_run(&path, 1).test_ok();
+        cmd_experiment_run_fixture(&path, 1).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
         std::fs::remove_file(&manifest_path).test_ok();
         std::fs::create_dir_all(&manifest_path).test_ok();
-        assert!(cmd_experiment_run(&path, 1).is_err());
+        assert!(cmd_experiment_run_fixture(&path, 1).is_err());
     }
 
     #[test]
@@ -2697,31 +2425,6 @@ mod fault_injection_tests {
         let dir = tempfile::tempdir().test_ok();
         let tl_id = TimelineId::new().to_string();
         assert!(cmd_timeline_fork(dir.path().to_str().test_ok(), &tl_id, "0", "child").is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_replay_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().test_ok();
-        let tl_id = TimelineId::new().to_string();
-        assert!(cmd_timeline_replay(dir.path().to_str().test_ok(), &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_snapshot_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().test_ok();
-        let tl_id = TimelineId::new().to_string();
-        assert!(cmd_timeline_snapshot(dir.path().to_str().test_ok(), &tl_id).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cmd_timeline_compare_open_store_fails_on_directory_path() {
-        let dir = tempfile::tempdir().test_ok();
-        let tl_a = TimelineId::new().to_string();
-        let tl_b = TimelineId::new().to_string();
-        assert!(cmd_timeline_compare(dir.path().to_str().test_ok(), &tl_a, &tl_b, "0").is_err());
     }
 
     #[test]

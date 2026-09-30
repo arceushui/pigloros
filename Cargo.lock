@@ -4418,7 +4418,6 @@ dependencies = [
  "pos-plugin-rule-agent",
  "pos-plugin-synthetic-obs",
  "pos-runtime",
- "pos-state",
  "pos-store",
  "pos-time",
  "rusqlite",
@@ -4604,6 +4603,7 @@ dependencies = [
 name = "pos-plugin-society"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "ciborium",
  "pos-core",
  "pos-runtime",
@@ -4689,6 +4689,7 @@ dependencies = [
  "blake3",
  "ciborium",
  "indexmap",
+ "pos-conformance",
  "pos-core",
  "pos-crypto",
  "pos-state",

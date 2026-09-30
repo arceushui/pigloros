@@ -1245,6 +1245,13 @@ impl WorldDriver {
         ))
     }
 
+    /// Return the immutable configuration sealed into this Driver and emitted
+    /// with its first World step.
+    #[must_use]
+    pub const fn configuration(&self) -> &WorldConfigV1 {
+        &self.config
+    }
+
     #[cfg(test)]
     fn new(entities: Vec<Body>, backend: Box<dyn WorldBackend>, config: WorldConfigV1) -> Self {
         Self::with_backend(entities, WorldDriverBackend::Fixture(backend), config)
@@ -3429,7 +3436,7 @@ mod tests {
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(
@@ -3468,7 +3475,8 @@ mod tests {
         let mut reduced = WorldReducer.initial();
         WorldReducer.apply(&mut reduced, &events[2]);
         assert_eq!(reduced.get("pos_x"), Some(&serde_json::json!(1.0)));
-        registry.commit_step_at(Seq::ZERO, 0).test_ok();
+        // This fixture has synthetic history, not a durable store for the new drafts.
+        registry.abort_step();
     }
 
     #[test]
@@ -3531,7 +3539,7 @@ mod tests {
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(WorldDriver::new(
@@ -3573,7 +3581,7 @@ mod tests {
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(WorldDriver::new(
@@ -3777,7 +3785,7 @@ mod tests {
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
-            .register(
+            .register_generated(
                 &WorldPlugin::new().with_bodies([body_id]),
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(driver)),
@@ -3876,7 +3884,7 @@ mod tests {
         let mut fixture_registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         fixture_registry
-            .register(
+            .register_generated(
                 &WorldPlugin::new(),
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(WorldDriver::default())),
@@ -4297,7 +4305,7 @@ mod tests {
         let mut registry = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         registry
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(WorldDriver::new(

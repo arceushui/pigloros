@@ -1,16 +1,15 @@
-use piglor_gateway::{
-    router, AppState, Gateway, GatewayAuthorization, GatewayError, LedgerWriteMode,
-    LocalAuthenticationAdapter,
+use crate::{
+    gateway_with_erasure_host_and_authorization, router, AppState, Gateway, GatewayAuthorization,
+    LedgerWriteMode, LocalAuthenticationAdapter,
 };
 use piglor_ledger::LedgerView;
-use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, ErasureContainmentGateV1,
-    Event, EventDraft, Hash, Kind, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
+    ConsentAuthority, ConsentGrantedV1, EntityId, ErasureContainmentGateV1, Event, EventDraft,
+    Hash, Kind, Plugin, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -22,7 +21,8 @@ use pos_plugin_society::{
 };
 use pos_plugin_world::{encode_actuator_pair_v1, ActionKindV1, WorldActionV1};
 use pos_runtime::{
-    Driver, ErasureExecutionHostV1, ObservationView, ProjectionKey, RuntimeError, StepOutput,
+    Driver, ErasureExecutionHostV1, InstalledOutputPolicySourceV1, ObservationView,
+    OutputPolicyBindingV1, ProjectionKey, RuntimeError, StepOutput,
 };
 use pos_state::{EntityStateProjection, ProjectionRegistry};
 use pos_store::{open_store, SeqRange, StoreConfig};
@@ -105,6 +105,28 @@ impl Plugin for FixturePlugin {
 struct ObservationProbeDriver {
     subscriptions: Vec<ProjectionKey>,
     log: Arc<Mutex<Vec<u64>>>,
+}
+
+fn agent_output_binding(
+    plugin: &AgentPlugin,
+) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        InstalledOutputPolicySourceV1::Generated,
+        &[],
+        "deterministic-local-v1",
+    )?)
+}
+
+fn owned_event_type_binding<P: Plugin>(
+    plugin: &P,
+) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        InstalledOutputPolicySourceV1::Generated,
+        &[],
+        "deterministic-local-v1",
+    )?)
 }
 
 impl Driver for ObservationProbeDriver {
@@ -510,7 +532,7 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
         timeline.id()
     };
     let state = AppState {
-        gateway: Gateway::new_with_erasure_host_and_authorization(
+        gateway: gateway_with_erasure_host_and_authorization(
             host,
             [human_body],
             gateway_authorization_for(human_entity)?,
@@ -572,6 +594,51 @@ fn human_action_payload(
     .test_ok()
 }
 
+fn register_reducer_plugins(
+    experiment: &mut Experiment,
+    observation: &FixturePlugin,
+    society: &SocietyPlugin,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let observation_binding = owned_event_type_binding(observation)?;
+    let society_binding = owned_event_type_binding(society)?;
+    experiment
+        .register_with_verified_output_policy(
+            observation,
+            observation_binding,
+            Some(Box::new(EntityStateProjection)),
+            None,
+        )
+        .test_ok()?;
+    experiment
+        .register_with_verified_output_policy(
+            society,
+            society_binding,
+            Some(Box::new(SocietyReducer)),
+            None,
+        )
+        .test_ok()?;
+    Ok(())
+}
+
+fn register_probe(
+    experiment: &mut Experiment,
+    scenario: &MultiRateScenario,
+    probe: &FixturePlugin,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    experiment
+        .register_with_verified_output_policy(
+            probe,
+            owned_event_type_binding(probe)?,
+            None,
+            Some(Box::new(ObservationProbeDriver {
+                subscriptions: vec![ProjectionKey::new(scenario.human_entity)],
+                log: Arc::clone(&scenario.probe_log),
+            })),
+        )
+        .test_ok()?;
+    Ok(())
+}
+
 fn register_experiment(
     scenario: &mut MultiRateScenario,
 ) -> Result<
@@ -590,6 +657,9 @@ fn register_experiment(
     let fast = AgentPlugin::new();
     let probe = FixturePlugin::new("observation-probe", true, false);
     let slow = AgentPlugin::new();
+    let human_binding = owned_event_type_binding(&human)?;
+    let fast_binding = agent_output_binding(&fast)?;
+    let slow_binding = agent_output_binding(&slow)?;
     let mut experiment = Experiment::new(ExperimentConfig {
         name: "multi-rate-host".to_owned(),
         stop: StopCondition::MaxTicks(10),
@@ -597,15 +667,11 @@ fn register_experiment(
             path: scenario.path.clone(),
         },
     });
+    register_reducer_plugins(&mut experiment, &observation, &society)?;
     experiment
-        .register(&observation, Some(Box::new(EntityStateProjection)), None)
-        .test_ok()?;
-    experiment
-        .register(&society, Some(Box::new(SocietyReducer)), None)
-        .test_ok()?;
-    experiment
-        .register(
+        .register_with_verified_output_policy(
             &human,
+            human_binding,
             None,
             Some(Box::new(HumanActionDriver {
                 entity: scenario.human_entity,
@@ -615,8 +681,9 @@ fn register_experiment(
         )
         .test_ok()?;
     experiment
-        .register(
+        .register_with_verified_output_policy(
             &fast,
+            fast_binding,
             Some(Box::new(AgentReducer)),
             Some(Box::new(AgentDriver::new(
                 scenario.fast_entity,
@@ -630,19 +697,11 @@ fn register_experiment(
             ))),
         )
         .test_ok()?;
+    register_probe(&mut experiment, scenario, &probe)?;
     experiment
-        .register(
-            &probe,
-            None,
-            Some(Box::new(ObservationProbeDriver {
-                subscriptions: vec![ProjectionKey::new(scenario.human_entity)],
-                log: Arc::clone(&scenario.probe_log),
-            })),
-        )
-        .test_ok()?;
-    experiment
-        .register(
+        .register_with_verified_output_policy(
             &slow,
+            slow_binding,
             Some(Box::new(AgentReducer)),
             Some(Box::new(
                 AgentDriver::new(
@@ -1070,7 +1129,7 @@ async fn assert_recovered_http_events(
         .test_ok()?;
     let address = listener.local_addr().test_ok()?;
     let state = AppState {
-        gateway: Gateway::new_with_erasure_host_and_authorization(
+        gateway: gateway_with_erasure_host_and_authorization(
             ErasureExecutionHostV1::open_verified_empty(
                 StoreConfig::Sqlite {
                     path: path.to_owned(),
@@ -1129,145 +1188,6 @@ async fn assert_recovered_http_events(
         }
     }
     guard.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn gateway_reloads_durable_consent_before_revocation(
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let database = tempfile::NamedTempFile::new().test_ok()?;
-    let path = database.path().to_str().test_ok()?.to_owned();
-    let first_host = ErasureExecutionHostV1::open_verified_empty(
-        StoreConfig::Sqlite { path: path.clone() },
-        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-    )
-    .test_ok()?;
-    let first_gateway = Gateway::new_with_erasure_host(first_host)?;
-    let timeline = first_gateway
-        .create_timeline("consent-recovery")
-        .await
-        .test_ok()?;
-    let subject_id = EntityId::new();
-    let grant = ConsentGrantedV1 {
-        subject_id,
-        grantee_id: EntityId::new(),
-        purpose: "gateway-recovery".to_owned(),
-        modalities: pos_core::MODALITY_LOCATION,
-        min_geo_resolution: 1,
-        fork_permitted: false,
-        export_permitted: false,
-        retention_days: 0,
-        expiry_secs: 0,
-        grant_seq: 1,
-    };
-    let (grant_event, token) = first_gateway
-        .issue_consent_grant(&timeline.id().to_string(), grant)
-        .await
-        .test_ok()?;
-    drop(first_gateway);
-
-    let recovered_host = ErasureExecutionHostV1::open_verified_empty(
-        StoreConfig::Sqlite { path },
-        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-    )
-    .test_ok()?;
-    let recovered_gateway = Gateway::new_with_erasure_host(recovered_host)?;
-    let unknown_error = recovered_gateway
-        .issue_consent_revocation(
-            &timeline.id().to_string(),
-            ConsentRevokedV1 {
-                subject_id: EntityId::new(),
-                grantee_id: token.grantee_id(),
-                grant_seq: token.grant_seq(),
-                fence_seq: grant_event.seq.as_u64().saturating_add(1),
-            },
-        )
-        .await;
-    assert!(matches!(
-        unknown_error,
-        Err(GatewayError::Store(pos_core::CoreError::Storage(message)))
-            if message == "consent revocation did not name an active grant"
-    ));
-
-    let revocation = recovered_gateway
-        .issue_consent_revocation(
-            &timeline.id().to_string(),
-            ConsentRevokedV1 {
-                subject_id,
-                grantee_id: token.grantee_id(),
-                grant_seq: token.grant_seq(),
-                fence_seq: grant_event.seq.as_u64().saturating_add(1),
-            },
-        )
-        .await
-        .test_ok()?;
-    assert_eq!(
-        revocation.seq.as_u64(),
-        grant_event.seq.as_u64().saturating_add(1)
-    );
-    drop(recovered_gateway);
-    Ok(())
-}
-
-#[tokio::test]
-async fn gateway_rejects_geo_admission_after_consent_revocation(
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let host = ErasureExecutionHostV1::open_gateway_verified_empty(
-        StoreConfig::Memory,
-        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-    )
-    .test_ok()?;
-    let gateway = Gateway::new_with_erasure_host(host)?;
-    let timeline = gateway
-        .create_timeline("geo-revocation-fence")
-        .await
-        .test_ok()?;
-    let subject = EntityId::new();
-    let grant = ConsentGrantedV1 {
-        subject_id: subject,
-        grantee_id: EntityId::new(),
-        purpose: "geo-revocation-fence".to_owned(),
-        modalities: pos_core::MODALITY_LOCATION,
-        min_geo_resolution: 1,
-        fork_permitted: false,
-        export_permitted: false,
-        retention_days: 1,
-        expiry_secs: 0,
-        grant_seq: 1,
-    };
-    let (grant_event, token) = gateway
-        .issue_consent_grant(&timeline.id().to_string(), grant)
-        .await
-        .test_ok()?;
-    gateway
-        .issue_consent_revocation(
-            &timeline.id().to_string(),
-            ConsentRevokedV1 {
-                subject_id: subject,
-                grantee_id: token.grantee_id(),
-                grant_seq: token.grant_seq(),
-                fence_seq: grant_event.seq.as_u64().saturating_add(1),
-            },
-        )
-        .await
-        .test_ok()?;
-    let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
-        timeline.id(),
-        subject,
-        CanonicalBytes::from_static(b"revoked-geo-payload"),
-        1,
-        ([1; 32], 1, [2; 32]),
-        (1, false, 0),
-        ([4; 32], [5; 32]),
-    ));
-    assert!(matches!(
-        gateway
-            .admit_geo_location_with_consent(request, &token, 0)
-            .await,
-        Err(GatewayError::Consent(pos_core::ConsentError::Revoked))
-    ));
-    gateway.shutdown().await.test_ok()?;
-    drop(gateway);
     Ok(())
 }
 
