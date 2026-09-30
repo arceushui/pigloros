@@ -10367,7 +10367,7 @@ impl MemoryStore {
             (None, None, None) => Ok(()),
             (Some(existing_root), Some(existing_operation), Some(row))
                 if *existing_root == root_address
-                    && existing_operation == &operation_key.1
+                    && existing_operation == operation_key.1
                     && row.owner_id() == &operation_key.0 =>
             {
                 Ok(())
