@@ -24,11 +24,8 @@
 //! use pos_plugin_society::{
 //!     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 //! };
-//! use pos_runtime::{
-//!     registry::PluginRegistry, InstalledOutputPolicySourceV1, OutputPolicyBindingV1,
-//! };
+//! use pos_runtime::{InstalledOutputPolicySourceV1, OutputPolicyBindingV1};
 //!
-//! let mut registry = PluginRegistry::new();
 //! let plugin = SocietyPlugin::new();
 //! let binding = OutputPolicyBindingV1::from_installed_source(
 //!     &plugin,
@@ -36,20 +33,12 @@
 //!     &[],
 //!     "deterministic-local-v1",
 //! );
+//! // Wave 8 has no installed Society EPF1. Workspace doctests may enable
+//! // `test-support` and construct a Draft fixture; neither path installs it.
 //! match binding {
-//!     Ok(binding) => assert!(registry
-//!         .register_with_verified_output_policy(
-//!             &plugin,
-//!             binding,
-//!             Some(Box::new(SocietyReducer)),
-//!             None,
-//!         )
-//!         .is_ok()),
-//!     Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }) => {
-//!         // No installed Society profile: registration remains closed.
-//!         assert!(registry.is_empty());
-//!     }
-//!     Err(error) => panic!("unexpected Society policy binding failure: {error}"),
+//!     Ok(binding) => assert!(!binding.execution_profile_artifact().is_empty()),
+//!     Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }) => {}
+//!     Err(error) => panic!("unexpected Society binding failure: {error}"),
 //! }
 //!
 //! let draft = draft_signal(
@@ -184,6 +173,53 @@ impl Plugin for SocietyPlugin {
         Capability {
             owned_event_types: vec![Kind::new(EVENT_TYPE_SIGNAL)],
             owned_entity_kinds: vec![ENTITY_KIND.to_owned()],
+            has_driver: false,
+            has_reducer: true,
+        }
+    }
+}
+
+/// Installed read-only projection of Society Signals owned by another Plugin.
+///
+/// This Plugin has a Reducer but no Driver, `ActionApprover`, or owned Event
+/// types. Its empty output policy is still part of the admitted Plugin roster.
+///
+/// It is a reducer-only installed Plugin with no production composition root
+/// yet; a Wave 9 catalogue entry (Redmine #445) will install it. It currently
+/// backs the #412 zero-output acceptance test.
+pub struct SocietySignalProjectionPlugin {
+    id: PluginId,
+}
+
+impl Default for SocietySignalProjectionPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SocietySignalProjectionPlugin {
+    /// Create an independently identified Society Signal projection.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            id: PluginId::new(),
+        }
+    }
+}
+
+impl Plugin for SocietySignalProjectionPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "society-signal-projection"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: Vec::new(),
+            owned_entity_kinds: Vec::new(),
             has_driver: false,
             has_reducer: true,
         }

@@ -25,6 +25,34 @@ pub const MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1: usize = 1_048_576;
 pub const MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1: usize =
     MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1;
 
+/// Host role for one exact installed Plugin instance.
+///
+/// A Plugin name is not an identity: distinct `PluginIds` may share it in one
+/// admitted composition. The role therefore includes the registered ID.
+#[must_use]
+pub fn installed_plugin_role_v1<P: Plugin + ?Sized>(plugin: &P) -> String {
+    format!("{}:{}", plugin.name(), plugin.id())
+}
+
+/// Operator-trusted native registration pinning one installed Plugin
+/// instance to the output policy recorded by its binding.
+///
+/// # Errors
+/// Returns [`crate::PluginCompositionErrorV1::InvalidMetadata`] when the pin
+/// metadata is invalid.
+pub fn installed_plugin_registration_v1<P: Plugin + ?Sized>(
+    plugin: &P,
+    binding: &crate::OutputPolicyBindingV1,
+) -> Result<crate::PluginRegistrationV1, crate::PluginCompositionErrorV1> {
+    crate::PluginPinV1::try_new(
+        crate::DomainImplementationKindV1::Plugin,
+        crate::PluginIsolationV1::OperatorTrustedNative,
+        binding.policy().digest(),
+        vec![installed_plugin_role_v1(plugin)],
+    )
+    .map(|pin| crate::PluginRegistrationV1::new(pin, crate::PluginAvailabilityV1::Available))
+}
+
 /// Closed errors for host-owned reviewed policy artifacts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ReviewedPolicyArtifactErrorV1 {

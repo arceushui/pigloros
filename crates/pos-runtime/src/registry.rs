@@ -19,14 +19,15 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
+use crate::output_admission::InstalledCallbacksV1;
 #[cfg(any(test, feature = "test-support"))]
 use crate::output_admission::{draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1};
 use crate::{
     composition::{
-        PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
-        PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin,
-        RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
-        ResolvedPluginV1,
+        DomainImplementationKindV1, PluginAvailabilityV1, PluginComposition,
+        PluginCompositionErrorV1, PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1,
+        PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin, RequiredPluginCompositionV1,
+        RequiredPluginV1, ResolvedPluginCompositionV1, ResolvedPluginV1,
     },
     driver::{
         CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey,
@@ -2968,6 +2969,7 @@ impl PluginRegistry {
     /// # Errors
     /// Returns a registration, identity, artifact, or capability error before
     /// mutating the registry.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn register_with_verified_output_policy(
         &mut self,
         plugin: &dyn Plugin,
@@ -2990,6 +2992,7 @@ impl PluginRegistry {
     /// # Errors
     /// Returns the runtime registration or output-admission error when the
     /// authority, ownership, or approver route is invalid.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn register_with_verified_output_policy_and_approver(
         &mut self,
         plugin: &dyn Plugin,
@@ -3010,6 +3013,76 @@ impl PluginRegistry {
         )
     }
 
+    /// Return the first pin field that is incompatible with an installed
+    /// operator-trusted native Plugin and its binding, if any.
+    fn incompatible_installed_pin(
+        pin: &crate::composition::PluginPinV1,
+        binding: &OutputPolicyBindingV1,
+        plugin: &dyn Plugin,
+    ) -> Option<PluginPinFieldV1> {
+        if pin.implementation_kind() != DomainImplementationKindV1::Plugin {
+            Some(PluginPinFieldV1::ImplementationKind)
+        } else if pin.isolation() != PluginIsolationV1::OperatorTrustedNative {
+            Some(PluginPinFieldV1::Isolation)
+        } else if pin.configuration_digest() != binding.policy().digest() {
+            Some(PluginPinFieldV1::ConfigurationDigest)
+        } else if pin.roles() != [crate::reviewed_policy::installed_plugin_role_v1(plugin)] {
+            Some(PluginPinFieldV1::Roles)
+        } else {
+            None
+        }
+    }
+
+    /// Register one installed Plugin with its verified callbacks and exact
+    /// available session pin. No callback or pin can be added after this seam.
+    ///
+    /// # Errors
+    /// Rejects a foreign callback, incompatible pin, invalid policy closure,
+    /// or capability mismatch before any registry mutation.
+    pub fn register_installed_output<P: Plugin>(
+        &mut self,
+        plugin: &P,
+        mut binding: OutputPolicyBindingV1,
+        registration: PluginRegistrationV1,
+        reducer: Option<Box<dyn Reducer>>,
+    ) -> Result<(), RuntimeError> {
+        if !binding.verifies_erased_owner_instance(plugin) {
+            return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
+        }
+        let id = plugin.id();
+        let incompatible = Self::incompatible_installed_pin(registration.pin(), &binding, plugin);
+        if let Some(field) = incompatible {
+            return Err(PluginCompositionErrorV1::IncompatibleImplementation {
+                plugin_id: id,
+                field,
+            }
+            .into());
+        }
+        if registration.availability() != PluginAvailabilityV1::Available {
+            return Err(PluginCompositionErrorV1::ImplementationUnavailable {
+                plugin_id: id,
+                availability: registration.availability(),
+            }
+            .into());
+        }
+        Self::validate_required_installed_approver(&binding)?;
+        self.validate_registration_roles(&registration)?;
+        let InstalledCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = binding.take_callbacks();
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            driver,
+            approver,
+            approver_event_types,
+            Some(registration),
+        )
+    }
+
     fn register_with_verified_output_policy_inner(
         &mut self,
         plugin: &dyn Plugin,
@@ -3021,9 +3094,7 @@ impl PluginRegistry {
         registration: Option<PluginRegistrationV1>,
     ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
-        if binding.owner_token()
-            != pos_core::plugin::PluginInstanceIdentity::installed_owner_token(plugin)
-        {
+        if !binding.verifies_erased_owner_instance(plugin) {
             return Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::PluginMismatch,
             ));
@@ -3099,6 +3170,18 @@ impl PluginRegistry {
         )
     }
 
+    pub(crate) fn validate_required_installed_approver(
+        binding: &OutputPolicyBindingV1,
+    ) -> Result<(), RuntimeError> {
+        if binding.requires_action_approver() && !binding.has_action_approver_route() {
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" },
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn registration_context(
         &self,
         plugin: &dyn Plugin,
@@ -3130,6 +3213,72 @@ impl PluginRegistry {
         })
     }
 
+    fn validate_installed_reducer_name(
+        name: &str,
+        installed: bool,
+        has_reducer: bool,
+    ) -> Result<(), RuntimeError> {
+        if installed
+            && has_reducer
+            && (name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES)
+        {
+            return Err(RuntimeError::CapabilityMismatch {
+                name: name.to_owned(),
+                reason: "installed reducer name is outside the canonical text bound".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_reserved_owned_event_types(
+        name: &str,
+        cap: &Capability,
+    ) -> Result<(), RuntimeError> {
+        if let Some(kind) = cap
+            .owned_event_types
+            .iter()
+            .find(|kind| pos_core::is_geographic_event_type(kind))
+        {
+            return Err(RuntimeError::ReservedGeographicEventType {
+                name: name.to_owned(),
+                event_type: kind.as_str().to_owned(),
+            });
+        }
+        if let Some(kind) = cap
+            .owned_event_types
+            .iter()
+            .find(|kind| pos_core::is_consent_event_type(kind))
+        {
+            return Err(RuntimeError::ReservedConsentEventType {
+                name: name.to_owned(),
+                event_type: kind.as_str().to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn install_reducer(
+        &mut self,
+        id: PluginId,
+        name: &str,
+        reducer: Option<Box<dyn Reducer>>,
+        installed: bool,
+    ) -> Result<(), RuntimeError> {
+        if let Some(reducer) = reducer {
+            if installed {
+                self.projections
+                    .register_installed_reducer(id, name, reducer)
+                    .map_err(|error| RuntimeError::CapabilityMismatch {
+                        name: name.to_owned(),
+                        reason: format!("installed projection slot rejected: {error:?}"),
+                    })?;
+            } else {
+                self.projections.register(name, reducer);
+            }
+        }
+        Ok(())
+    }
+
     fn register_with_approver_slice(
         &mut self,
         plugin: &dyn Plugin,
@@ -3141,26 +3290,7 @@ impl PluginRegistry {
         options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         let (id, name, cap) = context;
-        if let Some(kind) = cap
-            .owned_event_types
-            .iter()
-            .find(|kind| pos_core::is_geographic_event_type(kind))
-        {
-            return Err(RuntimeError::ReservedGeographicEventType {
-                name,
-                event_type: kind.as_str().to_owned(),
-            });
-        }
-        if let Some(kind) = cap
-            .owned_event_types
-            .iter()
-            .find(|kind| pos_core::is_consent_event_type(kind))
-        {
-            return Err(RuntimeError::ReservedConsentEventType {
-                name,
-                event_type: kind.as_str().to_owned(),
-            });
-        }
+        Self::validate_reserved_owned_event_types(&name, &cap)?;
 
         if cap.has_driver != driver.is_some() {
             return Err(RuntimeError::CapabilityMismatch {
@@ -3210,6 +3340,17 @@ impl PluginRegistry {
             }
         }
 
+        // All fallible installed-slot checks precede the first registry mutation.
+        Self::validate_installed_reducer_name(
+            &name,
+            options.registration.is_some(),
+            reducer.is_some(),
+        )?;
+        let version = plugin.version().to_owned();
+
+        // The only fallible commit action runs before schemas or routes mutate.
+        self.install_reducer(id, &name, reducer, options.registration.is_some())?;
+
         // Register event type schemas
         for kind in &cap.owned_event_types {
             self.schemas.register(EventTypeSchema {
@@ -3217,11 +3358,6 @@ impl PluginRegistry {
                 description: format!("owned by plugin '{name}'"),
                 json_schema: None,
             });
-        }
-
-        // Wire reducer into projection registry
-        if let Some(r) = reducer {
-            self.projections.register(&name, r);
         }
 
         // Index action approver if present
@@ -3235,7 +3371,7 @@ impl PluginRegistry {
             id,
             PluginEntry {
                 name,
-                version: plugin.version().to_owned(),
+                version,
                 owned_event_types: cap.owned_event_types,
                 driver,
                 approver,
@@ -3420,7 +3556,10 @@ impl PluginRegistry {
     /// Register a driver without an output declaration.
     ///
     /// Drivers registered here can process empty steps; any proposed Event is rejected
-    /// by the output-admission gate. Production Plugins use a verified policy binding.
+    /// by the output-admission gate. The entry is unpinned, so this seam exists only for
+    /// tests and explicit `test-support` builds; production Plugins use a verified policy
+    /// binding.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
         self.restored_binding = None;
         let plugin_id = PluginId::new();
@@ -4449,6 +4588,152 @@ mod tests {
         ));
         assert!(registry.contains(&first.id()));
         assert!(!registry.contains(&second.id()));
+    }
+
+    #[test]
+    fn same_name_pinned_reducers_preserve_each_plugin_state_after_rejection() {
+        let first = plugin_with_caps("same-name", &["first.output"], false, true);
+        let second = plugin_with_caps("same-name", &["second.output"], false, true);
+        let rejected = plugin_with_caps("same-name", &["third.output"], false, false);
+        let registration = |role: &str| {
+            let pin = crate::composition::PluginPinV1::try_new(
+                crate::composition::DomainImplementationKindV1::Plugin,
+                crate::composition::PluginIsolationV1::OperatorTrustedNative,
+                Hash::from_bytes([1; 32]),
+                vec![role.to_owned()],
+            )
+            .test_ok();
+            PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available)
+        };
+        let mut registry = gated_registry();
+        registry
+            .register_pinned_generated(
+                &first,
+                registration("first-role"),
+                Some(Box::new(CountReducer)),
+                None,
+            )
+            .test_ok();
+        let entity = EntityId::new();
+        let timeline = TimelineId::new();
+        registry.projections.apply_event(
+            timeline,
+            &Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new("first.output"),
+                payload: CanonicalBytes::from_static(b"fixture"),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                origin: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            },
+        );
+        registry
+            .register_pinned_generated(
+                &second,
+                registration("second-role"),
+                Some(Box::new(CountReducer)),
+                None,
+            )
+            .test_ok();
+        let count = |registry: &PluginRegistry, id| {
+            registry
+                .projections
+                .state_for_plugin(timeline, id, &entity)
+                .ok()
+                .flatten()
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64))
+        };
+        assert_eq!(count(&registry, first.id()), Some(1));
+        assert_eq!(count(&registry, second.id()), None);
+        assert!(matches!(
+            registry.register_pinned_generated(
+                &rejected,
+                registration("third-role"),
+                Some(Box::new(CountReducer)),
+                None,
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert_eq!(count(&registry, first.id()), Some(1));
+        assert_eq!(count(&registry, second.id()), None);
+        assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn installed_reducer_name_check_runs_only_for_installed_reducers() {
+        assert!(matches!(
+            PluginRegistry::validate_installed_reducer_name("", true, true),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(matches!(
+            PluginRegistry::validate_installed_reducer_name(
+                &"x".repeat(pos_core::MAX_AUTHORITY_TEXT_BYTES + 1),
+                true,
+                true,
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(PluginRegistry::validate_installed_reducer_name("", false, true).is_ok());
+        assert!(PluginRegistry::validate_installed_reducer_name("", true, false).is_ok());
+    }
+
+    #[test]
+    fn invalid_installed_reducer_name_rejects_before_any_registry_change() {
+        let plugin = plugin_with_caps("", &["invalid-name.output"], false, true);
+        let pin = crate::composition::PluginPinV1::try_new(
+            crate::composition::DomainImplementationKindV1::Plugin,
+            crate::composition::PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([1; 32]),
+            vec!["invalid-name-role".to_owned()],
+        )
+        .test_ok();
+        let mut registry = gated_registry();
+        let schemas_before = registry.schemas.len();
+        let context = registry.registration_context(&plugin).test_ok();
+        assert!(matches!(
+            registry.register_with_approver_slice(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                None,
+                None,
+                &[],
+                context,
+                RegistrationOptions {
+                    registration: Some(PluginRegistrationV1::new(
+                        pin,
+                        PluginAvailabilityV1::Available,
+                    )),
+                    output_admission: None,
+                },
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert_eq!(registry.len(), 0);
+        assert_eq!(registry.schemas.len(), schemas_before);
+        assert!(registry.projections.reducer_names().is_empty());
+    }
+
+    #[test]
+    fn duplicate_projection_slot_rejects_before_schema_mutation() {
+        let mut registry = gated_registry();
+        let id = PluginId::new();
+        registry
+            .install_reducer(id, "same", Some(Box::new(CountReducer)), true)
+            .test_ok();
+        let schemas_before = registry.schemas.len();
+        assert!(matches!(
+            registry.install_reducer(id, "other", Some(Box::new(CountReducer)), true),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert_eq!(registry.schemas.len(), schemas_before);
+        assert_eq!(registry.projections.reducer_names(), vec!["same"]);
     }
 
     #[test]

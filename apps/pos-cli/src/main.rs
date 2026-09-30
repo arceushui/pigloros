@@ -56,9 +56,10 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn builtin_reference_runner_registers_both_reference_plugins() {
+    fn builtin_reference_runner_uses_test_support_profile() {
         assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
-        assert!(run_builtin_reference_experiment(StoreConfig::Memory, 1).is_ok());
+        assert!(run_builtin_reference_experiment_fixture(StoreConfig::Memory, 0).is_ok());
+        assert!(run_builtin_reference_experiment_fixture(StoreConfig::Memory, 1).is_ok());
     }
 
     #[test]
@@ -86,6 +87,19 @@ mod coverage_entrypoints {
             "deterministic-local-v1",
         )
         .is_err());
+    }
+
+    #[test]
+    fn installed_synthetic_binding_uses_test_support_profile() {
+        use pos_plugin_synthetic_obs::SyntheticObsPlugin;
+        let plugin = SyntheticObsPlugin::new();
+        assert!(builtin_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+            &1.0_f64.to_be_bytes(),
+            "deterministic-local-v1",
+        )
+        .is_ok());
     }
 }
 
@@ -119,7 +133,7 @@ const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
 
-fn builtin_output_binding<P: Plugin + ?Sized>(
+fn builtin_output_binding<P: Plugin>(
     plugin: &P,
     source: pos_runtime::InstalledOutputPolicySourceV1,
     configuration_details: &[u8],
@@ -132,6 +146,13 @@ fn builtin_output_binding<P: Plugin + ?Sized>(
         profile_id,
     )
     .map_err(Into::into)
+}
+
+fn builtin_output_registration<P: Plugin>(
+    plugin: &P,
+    binding: &pos_runtime::OutputPolicyBindingV1,
+) -> Result<pos_runtime::PluginRegistrationV1, Box<dyn std::error::Error>> {
+    pos_runtime::installed_plugin_registration_v1(plugin, binding).map_err(Into::into)
 }
 
 /// Open a store through the CLI composition seam.
@@ -602,14 +623,16 @@ fn run_builtin_reference_experiment(
             &agent_configuration,
             "deterministic-local-v1",
         ) => |agent_closure|;
-        exp.register_with_verified_output_policy(
+        agent_closure.with_installed_driver(RuleAgentDriver::new(
+            agent_entity,
+            agent_plugin.actions().to_vec(),
+        )).map_err(Into::into) => |agent_closure|;
+        builtin_output_registration(&agent_plugin, &agent_closure) => |agent_registration|;
+        exp.register_installed_output(
             &agent_plugin,
             agent_closure,
+            agent_registration,
             Some(Box::new(RuleAgentReducer)),
-            Some(Box::new(RuleAgentDriver::new(
-                agent_entity,
-                agent_plugin.actions().to_vec(),
-            ))),
         ).map_err(Into::into) => |()|;
         builtin_output_binding(
             &obs_plugin,
@@ -617,21 +640,73 @@ fn run_builtin_reference_experiment(
             &obs_configuration,
             "deterministic-local-v1",
         ) => |obs_closure|;
-        exp.register_with_verified_output_policy(
+        obs_closure.with_installed_driver(SyntheticDriver::new(obs_entity))
+            .map_err(Into::into) => |obs_closure|;
+        builtin_output_registration(&obs_plugin, &obs_closure) => |obs_registration|;
+        exp.register_installed_output(
             &obs_plugin,
             obs_closure,
+            obs_registration,
             Some(Box::new(SyntheticReducer)),
-            Some(Box::new(SyntheticDriver::new(obs_entity))),
         ).map_err(Into::into) => |()|;
         exp.run().map_err(Into::into)
     }
 }
 
+// This fixture never enters the installed-registration seam or creates a
+// production Plugin pin. The real CLI command above stays fail-closed until
+// the host catalogue has an operator-approved profile.
+#[cfg(test)]
+fn run_builtin_reference_experiment_fixture(
+    store_config: StoreConfig,
+    ticks: u64,
+) -> Result<RunResult, Box<dyn std::error::Error>> {
+    use pos_core::ids::EntityId;
+    use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
+    use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
+
+    let mut exp = Experiment::new(ExperimentConfig {
+        name: "cli-fixture".to_owned(),
+        stop: StopCondition::MaxTicks(ticks),
+        store_config,
+    });
+    let agent_entity = EntityId::new();
+    let agent_plugin = RuleAgentPlugin::new();
+    exp.register_generated(
+        &agent_plugin,
+        Some(Box::new(RuleAgentReducer)),
+        Some(Box::new(RuleAgentDriver::new(
+            agent_entity,
+            agent_plugin.actions().to_vec(),
+        ))),
+    )?;
+    let obs_plugin = SyntheticObsPlugin::new();
+    exp.register_generated(
+        &obs_plugin,
+        Some(Box::new(SyntheticReducer)),
+        Some(Box::new(SyntheticDriver::new(EntityId::new()))),
+    )?;
+    exp.run().map_err(Into::into)
+}
+
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_experiment_run_with(path, ticks, run_builtin_reference_experiment)
+}
+
+#[cfg(test)]
+fn cmd_experiment_run_fixture(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_experiment_run_with(path, ticks, run_builtin_reference_experiment_fixture)
+}
+
+fn cmd_experiment_run_with(
+    path: &str,
+    ticks: u64,
+    run: impl FnOnce(StoreConfig, u64) -> Result<RunResult, Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     validate_experiment_ticks(ticks)
         .map_err(Into::into)
         .and_then(|()| {
-            run_builtin_reference_experiment(
+            run(
                 StoreConfig::Sqlite {
                     path: path.to_owned(),
                 },
@@ -1042,18 +1117,18 @@ mod tests {
     }
 
     #[test]
-    fn handle_experiment_run_executes() {
+    fn handle_experiment_run_executes_with_test_support_profile() {
         let (_dir, path) = tmp_db();
         let a = args(&["run", &path, "--ticks", "3"]);
-        handle_experiment(&a).test_ok();
+        assert!(handle_experiment(&a).is_ok());
     }
 
     #[test]
-    fn cmd_experiment_run_wires_plugins_and_produces_events() {
-        // Directly call cmd_experiment_run to cover the plugin registration lines.
+    fn fixture_experiment_run_wires_plugins_and_produces_events() {
+        // Cover the nonproduction generated runner without claiming an installed profile.
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("run-test.db").to_str().test_ok().to_owned();
-        cmd_experiment_run(&path, 2).test_ok();
+        cmd_experiment_run_fixture(&path, 2).test_ok();
         // Verify manifest was written alongside store
         let manifest_path = path.replace(".db", "-manifest.json");
         assert!(std::path::Path::new(&manifest_path).exists());
@@ -1071,7 +1146,7 @@ mod tests {
             .to_str()
             .test_ok()
             .to_owned();
-        cmd_experiment_run(&path, 3).test_ok();
+        cmd_experiment_run_fixture(&path, 3).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
         let error = cmd_experiment_reproduce(&manifest_path).test_err();
         assert!(error.to_string().contains("owner-verified policy closure"));
@@ -1229,7 +1304,7 @@ mod tests {
     fn handle_experiment_reproduce_dispatches_and_requires_manifest() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("dispatch.db").to_str().test_ok().to_owned();
-        cmd_experiment_run(&path, 1).test_ok();
+        cmd_experiment_run_fixture(&path, 1).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
         let error = handle_experiment(&args(&["reproduce", &manifest_path])).test_err();
         assert!(error.to_string().contains("owner-verified policy closure"));
@@ -2292,11 +2367,11 @@ mod fault_injection_tests {
     fn cmd_experiment_run_manifest_write_fails_when_path_is_directory() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("run.db").to_str().test_ok().to_owned();
-        cmd_experiment_run(&path, 1).test_ok();
+        cmd_experiment_run_fixture(&path, 1).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
         std::fs::remove_file(&manifest_path).test_ok();
         std::fs::create_dir_all(&manifest_path).test_ok();
-        assert!(cmd_experiment_run(&path, 1).is_err());
+        assert!(cmd_experiment_run_fixture(&path, 1).is_err());
     }
 
     #[test]

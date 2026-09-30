@@ -25,6 +25,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
+pos-experiment = { path = "../pos-experiment", features = ["test-support"] }
 tempfile = "3"
 rusqlite = { workspace = true }
 
