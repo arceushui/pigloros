@@ -124,9 +124,11 @@ impl ArtifactRegistrationV1 {
         if bytes.len() > MAX_ARTIFACT_REGISTRATION_BYTES_V1 {
             return Err(ArtifactRegistrationErrorV1::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader {
+            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+        };
         let fields = reader.registration()?;
-        if reader.offset != bytes.len() {
+        if !reader.cursor.is_finished() {
             return Err(ArtifactRegistrationErrorV1::InvalidEncoding);
         }
         let registration = Self::new(fields)?;
@@ -413,50 +415,32 @@ const fn transition_code(value: ArtifactTransitionRuleV1) -> u64 {
 }
 
 struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
+    cursor: crate::cbor_cursor::CborCursor<'a>,
 }
 
 impl<'a> Reader<'a> {
     fn take(&mut self, length: usize) -> Result<&'a [u8], ArtifactRegistrationErrorV1> {
-        // The whole input is at most one MiB; every requested scalar is at
-        // most 128 bytes, so this offset addition cannot overflow usize.
-        let end = self.offset + length;
-        let value = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(ArtifactRegistrationErrorV1::InvalidEncoding)?;
-        self.offset = end;
-        Ok(value)
+        self.cursor
+            .take(length)
+            .map_err(|_| ArtifactRegistrationErrorV1::InvalidEncoding)
     }
 
     fn byte(&mut self) -> Result<u8, ArtifactRegistrationErrorV1> {
-        self.take(1).map(|value| value[0])
+        self.cursor
+            .byte()
+            .map_err(|_| ArtifactRegistrationErrorV1::InvalidEncoding)
     }
 
     fn unsigned_bytes(&mut self, length: usize) -> Result<u64, ArtifactRegistrationErrorV1> {
-        self.take(length).map(|bytes| {
-            bytes
-                .iter()
-                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
-        })
+        self.cursor
+            .unsigned_bytes(length)
+            .map_err(|_| ArtifactRegistrationErrorV1::InvalidEncoding)
     }
 
     fn head(&mut self, major: u8) -> Result<u64, ArtifactRegistrationErrorV1> {
-        let first = self.byte()?;
-        if first >> 5 != major {
-            return Err(ArtifactRegistrationErrorV1::InvalidEncoding);
-        }
-        let extra = first & 31;
-        let value = match extra {
-            0..=23 => u64::from(extra),
-            24 => u64::from(self.byte()?),
-            25 => self.unsigned_bytes(2)?,
-            26 => self.unsigned_bytes(4)?,
-            27 => self.unsigned_bytes(8)?,
-            _ => return Err(ArtifactRegistrationErrorV1::InvalidEncoding),
-        };
-        Ok(value)
+        self.cursor
+            .head(major)
+            .map_err(|_| ArtifactRegistrationErrorV1::InvalidEncoding)
     }
 
     fn array(&mut self, length: u64) -> Result<(), ArtifactRegistrationErrorV1> {

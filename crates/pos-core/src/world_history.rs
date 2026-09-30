@@ -800,17 +800,18 @@ fn correlation_id_from_bytes(bytes: [u8; 16]) -> CorrelationId {
 }
 
 struct Parser<'a> {
-    bytes: &'a [u8],
-    position: usize,
+    cursor: crate::cbor_cursor::CborCursor<'a>,
 }
 
 impl<'a> Parser<'a> {
     const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
+        Self {
+            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+        }
     }
 
     const fn finished(&self) -> bool {
-        self.position == self.bytes.len()
+        self.cursor.is_finished()
     }
 
     fn event_occurrence(&mut self) -> Result<WorldEventOccurrenceV1, WorldHistoryErrorV1> {
@@ -1121,8 +1122,7 @@ impl<'a> Parser<'a> {
         major_type: u8,
         expected_length: usize,
     ) -> Result<Option<[u8; N]>, WorldHistoryErrorV1> {
-        if self.bytes.get(self.position) == Some(&0xf6) {
-            self.position += 1;
+        if self.cursor.consume_if(0xf6) {
             Ok(None)
         } else {
             self.fixed(major_type, expected_length).map(Some)
@@ -1130,49 +1130,14 @@ impl<'a> Parser<'a> {
     }
 
     fn header(&mut self, expected_major_type: u8) -> Result<u64, WorldHistoryErrorV1> {
-        self.raw::<1>().and_then(|[first]| {
-            if first >> 5 == expected_major_type {
-                self.additional(first & 0x1f)
-            } else {
-                Err(WorldHistoryErrorV1::InvalidEncoding)
-            }
-        })
-    }
-
-    fn additional(&mut self, additional: u8) -> Result<u64, WorldHistoryErrorV1> {
-        match additional {
-            0..=23 => Ok(u64::from(additional)),
-            24 => self.raw::<1>().map(|[byte]| u64::from(byte)),
-            25 => self
-                .raw::<2>()
-                .map(|bytes| u64::from(u16::from_be_bytes(bytes))),
-            26 => self
-                .raw::<4>()
-                .map(|bytes| u64::from(u32::from_be_bytes(bytes))),
-            27 => self.raw::<8>().map(u64::from_be_bytes),
-            _ => Err(WorldHistoryErrorV1::InvalidEncoding),
-        }
-    }
-
-    fn raw<const N: usize>(&mut self) -> Result<[u8; N], WorldHistoryErrorV1> {
-        self.take(N).and_then(|bytes| {
-            bytes
-                .try_into()
-                .map_err(|_| WorldHistoryErrorV1::InvalidEncoding)
-        })
+        self.cursor
+            .head(expected_major_type)
+            .map_err(|_| WorldHistoryErrorV1::InvalidEncoding)
     }
 
     fn take(&mut self, length: usize) -> Result<&'a [u8], WorldHistoryErrorV1> {
-        // All calls follow a parser bound: fixed widths are at most 64 bytes,
-        // text is at most 128 bytes, and the enclosing record is capped at 64
-        // KiB, so this sum cannot overflow `usize`.
-        let end = self.position + length;
-        match self.bytes.get(self.position..end) {
-            Some(value) => {
-                self.position = end;
-                Ok(value)
-            }
-            None => Err(WorldHistoryErrorV1::InvalidEncoding),
-        }
+        self.cursor
+            .take(length)
+            .map_err(|_| WorldHistoryErrorV1::InvalidEncoding)
     }
 }
