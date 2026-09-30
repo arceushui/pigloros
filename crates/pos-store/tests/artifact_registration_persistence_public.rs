@@ -221,15 +221,6 @@ fn alternate_root_with_same_operation(
 fn memory_catalog_commits_complete_exact_rows_and_retries_idempotently(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (owner_id, root_address, batch) = prepared_repro_manifest()?;
-    let alternate_source: Vec<_> = batch
-        .records()
-        .iter()
-        .map(|record| ArtifactRegistrationInputV1 {
-            owner_id: *record.owner_id(),
-            artifact_bytes: record.artifact_bytes().to_vec(),
-            registration_cbor: record.registration().canonical_cbor().to_vec(),
-        })
-        .collect();
     let mut store = MemoryStore::new();
     close_repro_manifest_recording(&mut store, &batch)?;
     assert_eq!(
