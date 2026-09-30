@@ -12,6 +12,7 @@ use std::{
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
+    close_adapter_recording_v1, completed_adapter_call_v1,
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft, EventOriginV1, Kind},
@@ -43,15 +44,17 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    validate_artifact_registration_catalog_graph_v1, ArtifactRegistrationCatalogRowV1,
-    ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationGraphNodeV1,
-    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
-    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
-    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureArtifactClassV1,
-    ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
-    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
-    ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
+    validate_artifact_registration_catalog_graph_v1, validate_closed_adapter_recording_v1,
+    AdapterCallReservationOutcomeV1, AdapterCallReservationV1, AdapterRecordingSessionV1,
+    AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1, AdapterTranscriptCallV1,
+    AdapterTranscriptV1, ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
+    ArtifactRegistrationGraphNodeV1, ArtifactRegistrationPersistenceErrorV1,
+    ArtifactRegistrationPersistencePortV1, AuthorityCommitOutcomeV1, AuthorityMutationPermitV1,
+    AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
+    AuthorityPersistenceStateV1, CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit,
+    ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
+    ErasureForkPersistencePortV1, ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate,
+    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
     ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
@@ -258,6 +261,8 @@ pub struct MemoryStore {
     artifact_registration_identities: BTreeMap<(OwnerIdV1, ErasureArtifactClassV1, Hash), Hash>,
     /// Immutable `(owner, MRM1 operation ID) -> root registration` index.
     artifact_registration_operations: BTreeMap<(OwnerIdV1, Hash), Hash>,
+    /// Crash-recoverable local adapter recorder sessions by owner/run ID.
+    adapter_recording_sessions: BTreeMap<(Hash, Hash), MemoryAdapterRecordingSessionV1>,
     /// Canonical ERS1 history needed to validate predecessor links after restart.
     erasure_states: BTreeMap<ErasureReferenceV1, Vec<u8>>,
     erasure_attempt_pages: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
@@ -272,6 +277,27 @@ pub struct MemoryStore {
     erasure_fork_recovery_proofs: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryProofV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MemoryAdapterRecordingStatusV1 {
+    Open,
+    Closed,
+    Aborted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryAdapterRecordingCallV1 {
+    reservation: AdapterCallReservationV1,
+    output_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryAdapterRecordingSessionV1 {
+    session: AdapterRecordingSessionV1,
+    status: MemoryAdapterRecordingStatusV1,
+    calls: BTreeMap<u64, MemoryAdapterRecordingCallV1>,
+    transcript_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy)]
@@ -613,6 +639,7 @@ impl MemoryStore {
             artifact_registrations: BTreeMap::new(),
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
+            adapter_recording_sessions: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
             erasure_attempt_pages: BTreeMap::new(),
             erasure_scope_nodes: BTreeMap::new(),
@@ -10453,6 +10480,223 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         self.validate_artifact_registration_closure(registration_address)?;
         Ok(Some(row.clone()))
     }
+}
+
+impl AdapterRecordingStoreV1 for MemoryStore {
+    fn open_adapter_recording_session(
+        &mut self,
+        session: AdapterRecordingSessionV1,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        let key = (session.owner_reference(), session.run_operation_id());
+        match self.adapter_recording_sessions.get(&key) {
+            Some(existing) if existing.session != session => {
+                Err(AdapterRecordingStoreErrorV1::Conflict)
+            }
+            Some(existing) if existing.status == MemoryAdapterRecordingStatusV1::Open => Ok(()),
+            Some(_) => Err(AdapterRecordingStoreErrorV1::InvalidState),
+            None => {
+                self.adapter_recording_sessions.insert(
+                    key,
+                    MemoryAdapterRecordingSessionV1 {
+                        session,
+                        status: MemoryAdapterRecordingStatusV1::Open,
+                        calls: BTreeMap::new(),
+                        transcript_bytes: None,
+                    },
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn reserve_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: AdapterCallReservationV1,
+    ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+        let key = (owner_reference, run_operation_id);
+        let journal = self
+            .adapter_recording_sessions
+            .get_mut(&key)
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        if journal.status != MemoryAdapterRecordingStatusV1::Open
+            || journal.session.owner_reference() != owner_reference
+        {
+            return Err(AdapterRecordingStoreErrorV1::InvalidState);
+        }
+        let global_index = reservation.invocation().as_input().global_call_index;
+        if let Some(existing) = journal.calls.get(&global_index) {
+            if !same_memory_adapter_reservation(&existing.reservation, &reservation) {
+                return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+            }
+            return Ok(match &existing.output_bytes {
+                Some(output_bytes) => AdapterCallReservationOutcomeV1::Completed {
+                    output_bytes: output_bytes.clone(),
+                    reserved_at_micros: existing.reservation.reserved_at_micros(),
+                },
+                None => AdapterCallReservationOutcomeV1::Reserved {
+                    reserved_at_micros: existing.reservation.reserved_at_micros(),
+                },
+            });
+        }
+        let expected_index = u64::try_from(journal.calls.len())
+            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+        if global_index != expected_index
+            || journal.calls.len() >= pos_core::MAX_ADAPTER_TRANSCRIPT_CALLS_V1
+        {
+            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+        }
+        let expected_plugin_index = journal
+            .calls
+            .values()
+            .filter(|call| call.reservation.plugin_id() == reservation.plugin_id())
+            .count();
+        if usize::try_from(reservation.per_plugin_call_index()).ok() != Some(expected_plugin_index)
+        {
+            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+        }
+        journal.calls.insert(
+            global_index,
+            MemoryAdapterRecordingCallV1 {
+                reservation: reservation.clone(),
+                output_bytes: None,
+            },
+        );
+        Ok(AdapterCallReservationOutcomeV1::Reserved {
+            reserved_at_micros: reservation.reserved_at_micros(),
+        })
+    }
+
+    fn complete_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        if output_bytes.len() > pos_core::MAX_ADAPTER_CALL_BYTES_V1 {
+            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+        }
+        let journal = self
+            .adapter_recording_sessions
+            .get_mut(&(owner_reference, run_operation_id))
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        if journal.status != MemoryAdapterRecordingStatusV1::Open {
+            return Err(AdapterRecordingStoreErrorV1::InvalidState);
+        }
+        let call = journal
+            .calls
+            .get_mut(&global_call_index)
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidCall)?;
+        match &call.output_bytes {
+            Some(existing) if existing == &output_bytes => Ok(()),
+            Some(_) => Err(AdapterRecordingStoreErrorV1::Conflict),
+            None => {
+                call.output_bytes = Some(output_bytes);
+                Ok(())
+            }
+        }
+    }
+
+    fn close_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+        let journal = self
+            .adapter_recording_sessions
+            .get_mut(&(owner_reference, run_operation_id))
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        if journal.status == MemoryAdapterRecordingStatusV1::Closed {
+            let retained = journal
+                .transcript_bytes
+                .clone()
+                .ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+            let derived = memory_adapter_recording_transcript(journal)?;
+            if retained != derived {
+                return Err(AdapterRecordingStoreErrorV1::CorruptState);
+            }
+            return Ok(retained);
+        }
+        if journal.status != MemoryAdapterRecordingStatusV1::Open {
+            return Err(AdapterRecordingStoreErrorV1::InvalidState);
+        }
+        let transcript_bytes = memory_adapter_recording_transcript(journal)?;
+        journal.status = MemoryAdapterRecordingStatusV1::Closed;
+        journal.transcript_bytes = Some(transcript_bytes.clone());
+        Ok(transcript_bytes)
+    }
+
+    fn read_closed_adapter_recording_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, AdapterRecordingStoreErrorV1> {
+        let Some(journal) = self
+            .adapter_recording_sessions
+            .get(&(owner_reference, run_operation_id))
+        else {
+            return Ok(None);
+        };
+        if journal.session.owner_reference() != owner_reference {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        if journal.status != MemoryAdapterRecordingStatusV1::Closed {
+            return Ok(None);
+        }
+        let bytes = journal
+            .transcript_bytes
+            .as_ref()
+            .ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+        if memory_adapter_recording_transcript(journal)?.as_slice() != bytes.as_slice() {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        validate_closed_adapter_recording_v1(&journal.session, bytes)?;
+        Ok(Some(bytes.clone()))
+    }
+
+    fn abort_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        let journal = self
+            .adapter_recording_sessions
+            .get_mut(&(owner_reference, run_operation_id))
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        if journal.status != MemoryAdapterRecordingStatusV1::Open {
+            return Err(AdapterRecordingStoreErrorV1::InvalidState);
+        }
+        journal.status = MemoryAdapterRecordingStatusV1::Aborted;
+        Ok(())
+    }
+}
+
+fn memory_adapter_recording_transcript(
+    journal: &MemoryAdapterRecordingSessionV1,
+) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+    let calls = journal
+        .calls
+        .values()
+        .map(|call| {
+            call.output_bytes
+                .as_ref()
+                .map(|output| completed_adapter_call_v1(call.reservation.clone(), output.clone()))
+                .ok_or(AdapterRecordingStoreErrorV1::InvalidState)
+        })
+        .collect::<Result<Vec<AdapterTranscriptCallV1>, _>>()?;
+    close_adapter_recording_v1(&journal.session, calls)
+}
+
+fn same_memory_adapter_reservation(
+    existing: &AdapterCallReservationV1,
+    retry: &AdapterCallReservationV1,
+) -> bool {
+    existing.plugin_id() == retry.plugin_id()
+        && existing.per_plugin_call_index() == retry.per_plugin_call_index()
+        && existing.invocation() == retry.invocation()
+        && existing.idempotency_key() == retry.idempotency_key()
 }
 
 impl MemoryStore {
