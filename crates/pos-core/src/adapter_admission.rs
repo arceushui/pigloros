@@ -3,10 +3,7 @@
 //! These structural bytes do not prove owner admission, `PublicRecord`
 //! provenance, a complete Plugin roster, or authority to invoke an adapter.
 
-use crate::{
-    adapter_codec::{encode_bytes, encode_hash, hash_bytes, length_hash},
-    encode_head, Hash, PluginId,
-};
+use crate::{encode_head, Hash, PluginId};
 use ulid::Ulid;
 
 /// One admitted Plugin operation, before any owner-authority claim.
@@ -241,7 +238,7 @@ impl AdapterAdmissionV1 {
             return Err(AdapterAdmissionErrorV1::FieldOutOfBounds);
         }
         let mut reader = Reader {
-            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+            cursor: crate::CborCursor::new(bytes),
         };
         reader.fixed(&[0x86, 0x44, b'M', b'A', b'A', b'1', 1])?;
         let owner_reference = reader.hash()?;
@@ -312,6 +309,31 @@ pub fn adapter_configuration_digest_v1(bytes: &[u8]) -> Hash {
     length_hash(b"pigloros.repro.adapter-configuration.v1\0", bytes)
 }
 
+pub(crate) fn length_hash(domain: &[u8], bytes: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+pub(crate) fn hash_bytes(domain: &[u8], bytes: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(bytes);
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+pub(crate) fn encode_hash(out: &mut Vec<u8>, hash: Hash) {
+    out.extend_from_slice(&[0x58, 0x20]);
+    out.extend_from_slice(hash.as_bytes());
+}
+
+pub(crate) fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8], major: u8) {
+    encode_head(out, major, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
 fn validate_entry(entry: &AdapterAdmissionEntryV1) -> Result<(), AdapterAdmissionErrorV1> {
     if entry.exact_configuration_bytes.len() > MAX_ADAPTER_CONFIGURATION_BYTES_V1 {
         return Err(AdapterAdmissionErrorV1::FieldOutOfBounds);
@@ -332,7 +354,7 @@ fn validate_entry(entry: &AdapterAdmissionEntryV1) -> Result<(), AdapterAdmissio
 }
 
 struct Reader<'a> {
-    cursor: crate::cbor_cursor::CborCursor<'a>,
+    cursor: crate::CborCursor<'a>,
 }
 
 impl Reader<'_> {

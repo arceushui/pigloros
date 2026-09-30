@@ -125,7 +125,7 @@ impl ArtifactRegistrationV1 {
             return Err(ArtifactRegistrationErrorV1::FieldOutOfBounds);
         }
         let mut reader = Reader {
-            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+            cursor: crate::CborCursor::new(bytes),
         };
         let fields = reader.registration()?;
         if !reader.cursor.is_finished() {
@@ -415,7 +415,7 @@ const fn transition_code(value: ArtifactTransitionRuleV1) -> u64 {
 }
 
 struct Reader<'a> {
-    cursor: crate::cbor_cursor::CborCursor<'a>,
+    cursor: crate::CborCursor<'a>,
 }
 
 impl<'a> Reader<'a> {
