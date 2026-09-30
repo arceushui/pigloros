@@ -10,7 +10,7 @@ use pos_core::{
     ProposedAction, Reducer, State,
 };
 use pos_runtime::{
-    ActionSubmissionError, Driver, InstalledOutputPolicySourceV1, ObservationView,
+    ActionSubmissionError, Driver, OutputPolicySourceV1, ObservationView,
     OutputPolicyBindingV1, PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput,
     TimelineHistorySegment,
 };
@@ -82,9 +82,9 @@ fn register_output_driver(
         id: plugin_id,
         event_type: Kind::new(event_type),
     };
-    let binding = test_ok(OutputPolicyBindingV1::from_installed_source(
+    let binding = test_ok(OutputPolicyBindingV1::from_source(
         &binding_plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &[],
         "deterministic-local-v1",
     ));

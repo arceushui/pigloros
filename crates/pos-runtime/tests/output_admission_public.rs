@@ -6,7 +6,7 @@ use pos_core::{
 };
 use pos_runtime::{
     installed_plugin_role_v1, validate_output_policy_artifacts_v1, DomainImplementationKindV1,
-    Driver, InstalledOutputPolicySourceV1, ObservationView, OutputAdmissionErrorV1,
+    Driver, OutputPolicySourceV1, ObservationView, OutputAdmissionErrorV1,
     PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
     RuntimeError, StepOutput, TickScheduler,
 };
@@ -27,9 +27,9 @@ struct FixtureBinding {
 
 fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Error>> {
     let configuration_details = b"fixture-configuration";
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    let binding = pos_runtime::OutputPolicyBindingV1::from_source(
         plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Generated,
+        pos_runtime::OutputPolicySourceV1::Generated,
         configuration_details,
         "deterministic-local-v1",
     )?;
@@ -450,9 +450,9 @@ fn local_execution_profile_absence_does_not_create_installed_authority() -> Test
 
     // Generated local admission has no EPF1 profile member.
     let local = verified_binding(&plugin)?;
-    let changed = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    let changed = pos_runtime::OutputPolicyBindingV1::from_source(
         &plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         b"fixture-configuration",
         "deterministic-air-gapped-v1",
     )?;
@@ -740,9 +740,9 @@ fn public_binding_rejects_foreign_capability_name() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::RuleAgent,
             &[],
             "deterministic-local-v1",
         ),
@@ -756,9 +756,9 @@ fn public_binding_rejects_name_only_installed_source_claims() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::RuleAgent,
             &[],
             "deterministic-local-v1",
         ),
@@ -943,9 +943,9 @@ fn explicit_registration_rejects_unowned_installed_source() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::RuleAgent,
             b"fixture-configuration",
             "deterministic-local-v1",
         ),
@@ -959,9 +959,9 @@ fn explicit_registration_rejects_name_only_source_even_with_configuration() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::Agent,
+            OutputPolicySourceV1::Agent,
             b"fixture-configuration",
             "deterministic-local-v1",
         ),
@@ -1232,9 +1232,9 @@ fn verified_binding_rejects_an_undeclared_execution_profile() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             b"fixture-configuration",
             "undeclared-profile-v1",
         ),
@@ -1279,9 +1279,9 @@ fn verified_registration_rejects_a_policy_recorded_for_another_plugin_identity()
         id: PluginId::new(),
         upgraded: AtomicBool::new(false),
     };
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    let binding = pos_runtime::OutputPolicyBindingV1::from_source(
         &plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         b"fixture-configuration",
         "deterministic-local-v1",
     )?;

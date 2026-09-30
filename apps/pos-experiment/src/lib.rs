@@ -7163,9 +7163,9 @@ mod coverage_entrypoints {
     fn register_undeclared_output_driver(registry: &mut PluginRegistry) {
         let plugin_id = PluginId::new();
         let binding_plugin = CoveragePlugin { id: plugin_id };
-        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        let binding = pos_runtime::OutputPolicyBindingV1::from_source(
             &binding_plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            pos_runtime::OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -7182,9 +7182,9 @@ mod coverage_entrypoints {
     fn register_owned_schema_failure_driver(registry: &mut PluginRegistry) {
         let plugin_id = PluginId::new();
         let binding_plugin = OwnedSchemaPlugin { id: plugin_id };
-        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        let binding = pos_runtime::OutputPolicyBindingV1::from_source(
             &binding_plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            pos_runtime::OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -7392,9 +7392,9 @@ mod coverage_entrypoints {
         let plugin = CoveragePlugin {
             id: PluginId::new(),
         };
-        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        let binding = pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            pos_runtime::OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )

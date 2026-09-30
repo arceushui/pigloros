@@ -59,7 +59,7 @@ pub use erasure_host::{
 pub use error::{ActionSubmissionError, RuntimeError, WorldInstallationErrorV1};
 pub use measured_process_image::MeasuredProcessImageV1;
 pub use output_admission::{
-    validate_output_policy_artifacts_v1, InstalledOutputPolicySourceV1, OutputAdmissionErrorV1,
+    validate_output_policy_artifacts_v1, OutputPolicySourceV1, OutputAdmissionErrorV1,
     OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1,
     MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1,
 };
