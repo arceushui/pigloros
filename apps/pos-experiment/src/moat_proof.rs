@@ -1873,14 +1873,26 @@ fn failure_probe(
     profile_id: &str,
     admission: ProofAdmission,
 ) -> Result<PluginFailureV1, MoatProofError> {
-    match admission {
-        ProofAdmission::Installed => Err(MoatProofError::from(installed_failure_probe_admission(
-            class,
-            resource_limit,
-            profile_id,
-        ))),
-        #[cfg(test)]
-        ProofAdmission::GeneratedFixture => failure_probe_fixture(class, resource_limit),
+    admission.probe_failure(class, resource_limit, profile_id)
+}
+
+impl ProofAdmission {
+    /// Run one failure probe under this admission mode.
+    fn probe_failure(
+        self,
+        class: &'static str,
+        resource_limit: u64,
+        profile_id: &str,
+    ) -> Result<PluginFailureV1, MoatProofError> {
+        match self {
+            Self::Installed => Err(MoatProofError::from(installed_failure_probe_admission(
+                class,
+                resource_limit,
+                profile_id,
+            ))),
+            #[cfg(test)]
+            Self::GeneratedFixture => failure_probe_fixture(class, resource_limit),
+        }
     }
 }
 
