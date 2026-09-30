@@ -21,18 +21,8 @@ macro_rules! output_stderr {
 }
 
 #[cfg(target_os = "linux")]
-pub mod local_fork_authentication;
-#[cfg(target_os = "linux")]
-pub mod local_fork_coordinator;
-#[cfg(target_os = "linux")]
-pub mod local_fork_listener;
-#[cfg(target_os = "linux")]
-pub mod local_fork_service;
-
-#[cfg(target_os = "linux")]
-use local_fork_service::{
-    provision_local_fork_admission_authority, start_local_fork_admission_listener,
-    LocalForkAdmissionListenerV1,
+use piglor_gateway::local_fork_service::{
+    provision_local_fork_admission_authority, serve_local_fork_admission, LocalForkAdmissionPathsV1,
 };
 use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
@@ -422,19 +412,31 @@ async fn serve_with_owntracks_and_fork_admission(
             .transpose()?
     };
     #[cfg(target_os = "linux")]
-    let fork_listener = match (
+    match (
         sqlite_path,
         fork_admission_socket,
         fork_admission_credentials,
     ) {
-        (Some(path), Some(socket), Some(credentials)) => Some(start_local_fork_admission_listener(
-            path,
-            credentials,
-            socket,
-        )?),
-        (_, None, None) => None,
+        // ADR-109 r9: one erasure host serves HTTP and the Fork listener, and
+        // the binary composes only the closed erasure authority.
+        (Some(sqlite_path), Some(socket_path), Some(credential_directory)) => {
+            return serve_local_fork_admission(
+                addr,
+                LocalForkAdmissionPathsV1 {
+                    sqlite_path,
+                    socket_path,
+                    credential_directory,
+                },
+                owntracks_owner_key.as_ref(),
+                &ErasureCoordinatorCompositionV1::closed(),
+                shutdown,
+                (ledger_view, ledger_write),
+            )
+            .await;
+        }
+        (_, None, None) => {}
         _ => return Err("Fork admission requires SQLite, socket, and credential directory".into()),
-    };
+    }
     #[cfg(not(target_os = "linux"))]
     if fork_admission_socket.is_some() || fork_admission_credentials.is_some() {
         return Err("fork admission requires Linux Unix peer credentials".into());
@@ -461,11 +463,6 @@ async fn serve_with_owntracks_and_fork_admission(
         .await;
     let shutdown_result = gateway.shutdown().await;
     drop(gateway);
-    // The Fork listener always stops; a serve error still takes precedence.
-    #[cfg(target_os = "linux")]
-    let fork_stop_result = fork_listener.map_or(Ok(()), LocalForkAdmissionListenerV1::stop);
-    #[cfg(target_os = "linux")]
-    let serve_result = serve_result.and(fork_stop_result);
     finish_run(serve_result, shutdown_result)
 }
 
@@ -1515,58 +1512,6 @@ mod erasure_gate_coverage_tests {
         )
         .await;
         assert!(started.is_err());
-        assert!(!socket.exists());
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn managed_fork_listener_and_gateway_open_one_provisioned_database(
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let directory = tempfile::tempdir()?;
-        let runtime_directory = tempfile::tempdir()?;
-        std::fs::set_permissions(
-            runtime_directory.path(),
-            std::fs::Permissions::from_mode(0o750),
-        )?;
-        let database = directory.path().join("gateway.db");
-        let socket = runtime_directory.path().join("fork.sock");
-        let credentials = directory.path().join("credentials");
-        std::fs::create_dir(&credentials)?;
-        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700))?;
-        let service_uid = rustix::process::geteuid().as_raw();
-        let (auth, host) = local_fork_authentication::test_credential_bytes_for_service(
-            service_uid,
-            [7; 32],
-            [8; 32],
-        )?;
-        for (name, bytes) in [
-            ("pigloros.fork-admission-auth", auth),
-            ("pigloros.fork-admission-host-signer", host),
-        ] {
-            let path = credentials.join(name);
-            std::fs::write(&path, bytes)?;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
-        }
-        let sqlite_path = database
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("temporary database path is not UTF-8"))?;
-        provision_local_fork_admission_authority(sqlite_path, &credentials)?;
-
-        let socket_at_shutdown = socket.clone();
-        serve_with_owntracks_and_fork_admission(
-            "127.0.0.1:0".parse()?,
-            Some(sqlite_path),
-            None,
-            Some(&socket),
-            Some(&credentials),
-            async move { assert!(socket_at_shutdown.exists()) },
-            LedgerView::default(),
-            LedgerWriteMode::Disabled,
-        )
-        .await?;
         assert!(!socket.exists());
         Ok(())
     }
