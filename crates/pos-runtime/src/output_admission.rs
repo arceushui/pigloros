@@ -5,13 +5,18 @@ use pos_core::{
     output_policy::{
         OutputFidelityV1, OutputPolicyV1, MAX_OUTPUT_DECLARATIONS_V1, MAX_OUTPUT_POLICY_BYTES_V1,
     },
-    plugin::{PluginInstanceIdentity, PluginOwnerTokenV1},
+    plugin::PluginInstanceIdentity,
     retention::{WorldRetentionPolicyV1, MAX_WORLD_RETENTION_RECORD_BYTES_V1},
     ActionApprover, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
     Hash, Plugin, PluginCpuReservationV1, PluginId, WorkloadProfileV1,
     MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
 };
 use std::{any::type_name, sync::Mutex};
+
+// Only fixture registration consumes owner tokens until installed
+// registration returns with Wave 9 (#467/#462).
+#[cfg(any(test, feature = "test-support"))]
+use pos_core::plugin::PluginOwnerTokenV1;
 
 use crate::driver::Driver;
 
