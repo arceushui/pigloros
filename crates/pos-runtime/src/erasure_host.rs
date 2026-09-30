@@ -4310,7 +4310,10 @@ mod tests {
             reads.admit_world_replay(&bad_generation, &replay_use(&bad_generation)),
             Err(ErasureHostErrorV1::StaleGeneration)
         );
+    }
 
+    #[test]
+    fn world_replay_admission_rejects_each_mismatched_verifier_binding() {
         for mode in [
             WorldReplayVerifierModeV1::WrongDigest,
             WorldReplayVerifierModeV1::WrongTimeline,
