@@ -6,7 +6,8 @@ use pos_core::{
     ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
     ArtifactRegistrationPreparationErrorV1, ArtifactRegistrationV1, ArtifactTransitionRuleV1,
     ErasureArtifactClassV1, Hash, OwnerIdV1, ReproManifestRootInputV1,
-    ReproManifestRootRegistrationInputV1, ReproManifestRootV1, WorldRecordingReceiptInputV1,
+    ReproManifestRootRegistrationInputV1, ReproManifestRootV1,
+    MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1, WorldRecordingReceiptInputV1,
     WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
 };
 use ulid::Ulid;
@@ -214,6 +215,29 @@ fn rejecting_test_owner_does_not_produce_a_batch() -> Result<(), Box<dyn std::er
         Err(ArtifactRegistrationPreparationErrorV1::OwnerRejected)
     );
     Ok(())
+}
+
+#[test]
+fn exact_artifact_byte_bound_is_256_mib_and_checked_before_parsing() {
+    assert_eq!(
+        MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
+        256 * 1024 * 1024
+    );
+    let owner_id = OwnerIdV1::from_static("wave8-local-owner");
+    let root = Hash::from_bytes([0x49; 32]);
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            vec![ArtifactRegistrationInputV1 {
+                owner_id,
+                artifact_bytes: vec![0; MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1 + 1],
+                registration_cbor: Vec::new(),
+            }],
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::BoundExceeded)
+    );
 }
 
 #[test]

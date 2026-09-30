@@ -12,9 +12,10 @@ use crate::{
     WorldRecordingReceiptV1,
 };
 
-/// Maximum retained artifact bytes in one prepared registration closure.
-pub const MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1: usize =
-    256 * 1024 * 1024 + MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1;
+/// Maximum exact artifact bytes in one prepared registration closure.
+///
+/// Canonical ARD1 registration bytes use their separate 64 MiB graph bound.
+pub const MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1: usize = 256 * 1024 * 1024;
 
 /// Untrusted exact artifact and ARD1 bytes submitted for owner verification.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -862,4 +863,4 @@ const fn map_graph_error(
     }
 }
 
-const _: () = assert!(MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1 >= 256 * 1024 * 1024);
+const _: () = assert!(MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1 == 256 * 1024 * 1024);
