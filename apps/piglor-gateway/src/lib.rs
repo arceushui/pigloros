@@ -38,21 +38,19 @@ use pos_core::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1,
-    ProposedAction,
+    ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError, ConsentError,
+    ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1, ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{
     geo_admission::GeoLocationAdmissionStore, store::EventStore, Capability, Plugin, PluginId,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
-use pos_plugin_world::{
-    encode_actuator_pair_v1, ActionKindV1, WorldActionV1,
-    EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
-};
 #[cfg(test)]
 use pos_plugin_world::WorldPlugin;
+use pos_plugin_world::{
+    encode_actuator_pair_v1, ActionKindV1, WorldActionV1, EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
+};
 use pos_runtime::{
     ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
 };
