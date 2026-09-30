@@ -2163,24 +2163,19 @@ impl Gateway {
             consent_authority.append_permit(),
             slot,
         )?;
-        let gateway = Self {
+        let gateway = Self::from_host_components(
             store,
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: owntracks_owner_key.is_some(),
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
-                std::iter::empty(),
-                Some(consent_authority.clone()),
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            owntracks_owner_key.is_some(),
+            Ok(gateway_empty_action_registry(
+                consent_authority.clone(),
                 gate,
-            ),
+            )),
             consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: None,
-            #[cfg(test)]
-            action_principal: None,
-        };
-        Ok((gateway.schedule_startup_consent_cleanup(), submitter))
+            None,
+        )?;
+        Ok((gateway, submitter))
     }
 
     /// Wrap a store and configure the World body catalogue used for actions.
