@@ -1031,9 +1031,9 @@ impl Plugin for GeneratedDriverPlugin {
 struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
-    manifest_slot: Option<String>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct RegistrationCallbacks {
     driver: Option<Box<dyn Driver>>,
     approver: Option<Box<dyn ActionApprover>>,
@@ -3114,7 +3114,6 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: None,
-                manifest_slot: None,
             },
         )
     }
@@ -3196,7 +3195,6 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration: None,
                 output_admission: None,
-                manifest_slot: None,
             },
         )
     }
@@ -3214,111 +3212,34 @@ impl PluginRegistry {
     /// `EPF1` without mutating the registry.
     pub fn register_installed_output<P: Plugin>(
         &mut self,
-        plugin: &P,
-        binding: OutputPolicyBindingV1,
-        registration: PluginRegistrationV1,
-        reducer: Option<Box<dyn Reducer>>,
+        _plugin: &P,
+        _binding: OutputPolicyBindingV1,
+        _registration: PluginRegistrationV1,
+        _reducer: Option<Box<dyn Reducer>>,
     ) -> Result<(), RuntimeError> {
-        self.register_installed_output_inner(plugin, binding, registration, reducer, None)
+        Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into())
     }
 
     /// Register one installed Plugin in its owner-preassigned stable slot.
     ///
-    /// The complete batch must have been prepared before the first Plugin was
-    /// registered. This method does not mint an owner receipt or claim Replay.
+    /// Wave 8 has no installed EPF1 execution profile, so this seam fails
+    /// closed before any registry mutation exactly like
+    /// [`Self::register_installed_output`]. The manifest-slot success path
+    /// arrives with Wave 9 (#467/#462). This method never mints an owner
+    /// receipt or claims Replay.
     ///
     /// # Errors
-    /// Rejects absent/mismatched batch rows, test-support sources, or any
-    /// installed callback/pin/policy mismatch before mutating the registry.
+    /// Always returns [`crate::OutputAdmissionErrorV1::ArtifactInvalid`] for
+    /// `EPF1` without mutating the registry.
     pub fn register_installed_output_in_manifest_slot<P: Plugin>(
         &mut self,
-        plugin: &P,
-        binding: OutputPolicyBindingV1,
-        registration: PluginRegistrationV1,
-        reducer: Option<Box<dyn Reducer>>,
-        stable_slot: &str,
+        _plugin: &P,
+        _binding: OutputPolicyBindingV1,
+        _registration: PluginRegistrationV1,
+        _reducer: Option<Box<dyn Reducer>>,
+        _stable_slot: &str,
     ) -> Result<(), RuntimeError> {
-        self.register_installed_output_inner(
-            plugin,
-            binding,
-            registration,
-            reducer,
-            Some(stable_slot),
-        )
-    }
-
-    fn register_installed_output_inner<P: Plugin>(
-        &mut self,
-        plugin: &P,
-        mut binding: OutputPolicyBindingV1,
-        registration: PluginRegistrationV1,
-        reducer: Option<Box<dyn Reducer>>,
-        stable_slot: Option<&str>,
-    ) -> Result<(), RuntimeError> {
-        if !binding.has_installed_profile_provenance() {
-            return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
-        }
-        self.validate_installed_registration_details(plugin, &binding, &registration)?;
-        let InstalledCallbacksV1 {
-            driver,
-            approver,
-            approver_event_types,
-        } = binding.take_callbacks();
-        self.register_with_verified_output_policy_inner(
-            plugin,
-            binding,
-            reducer,
-            RegistrationCallbacks { driver, approver },
-            approver_event_types,
-            RegistrationOptions {
-                registration: Some(registration),
-                output_admission: None,
-                manifest_slot: stable_slot.map(str::to_owned),
-            },
-        )
-    }
-
-    // Pure validation is also exercised by nonproduction structural fixtures.
-    // It never installs a profile, registers a Plugin, or mints a pin.
-    fn validate_installed_registration_details<P: Plugin>(
-        &self,
-        plugin: &P,
-        binding: &OutputPolicyBindingV1,
-        registration: &PluginRegistrationV1,
-    ) -> Result<(), RuntimeError> {
-        if !binding.verifies_owner_instance(plugin) {
-            return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
-        }
-        let id = plugin.id();
-        let pin = registration.pin();
-        let incompatible = if pin.implementation_kind() != DomainImplementationKindV1::Plugin {
-            Some(PluginPinFieldV1::ImplementationKind)
-        } else if pin.isolation() != PluginIsolationV1::OperatorTrustedNative {
-            Some(PluginPinFieldV1::Isolation)
-        } else if pin.configuration_digest() != binding.policy().digest() {
-            Some(PluginPinFieldV1::ConfigurationDigest)
-        } else if pin.roles() != [crate::reviewed_policy::installed_plugin_role_v1(plugin)] {
-            Some(PluginPinFieldV1::Roles)
-        } else {
-            None
-        };
-        if let Some(field) = incompatible {
-            return Err(PluginCompositionErrorV1::IncompatibleImplementation {
-                plugin_id: id,
-                field,
-            }
-            .into());
-        }
-        if registration.availability() != PluginAvailabilityV1::Available {
-            return Err(PluginCompositionErrorV1::ImplementationUnavailable {
-                plugin_id: id,
-                availability: registration.availability(),
-            }
-            .into());
-        }
-        Self::validate_required_installed_approver(binding)?;
-        self.validate_registration_roles(registration)?;
-        Ok(())
+        Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3331,16 +3252,11 @@ impl PluginRegistry {
         approver_event_types: impl IntoIterator<Item = Kind>,
         mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
-        let manifest_candidate = match (
-            self.manifest_batch.as_ref(),
-            options.manifest_slot.as_deref(),
-        ) {
-            (Some(batch), Some(slot)) => Some((batch, slot)),
-            (None, None) => None,
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(ManifestRegistrationErrorV1::BatchState.into());
-            }
-        };
+        // A prepared manifest batch admits only installed manifest-slot
+        // registrations, which stay closed until Wave 9.
+        if self.manifest_batch.is_some() {
+            return Err(ManifestRegistrationErrorV1::BatchState.into());
+        }
         let context = self.registration_context(plugin)?;
         if !binding.verifies_erased_owner_instance(plugin) {
             return Err(RuntimeError::OutputAdmission(
@@ -3402,12 +3318,6 @@ impl PluginRegistry {
             closure,
             owner_token,
         )?;
-        Self::validate_manifest_candidate(
-            plugin,
-            &admission,
-            options.registration.as_ref(),
-            manifest_candidate,
-        )?;
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
         options.output_admission = Some(admission);
         let RegistrationCallbacks { driver, approver } = callbacks;
@@ -3423,44 +3333,7 @@ impl PluginRegistry {
         )
     }
 
-    fn validate_manifest_candidate(
-        plugin: &dyn Plugin,
-        admission: &OutputAdmissionV1,
-        registration: Option<&PluginRegistrationV1>,
-        manifest_candidate: Option<(&ManifestAdmissionCatalogV1, &str)>,
-    ) -> Result<(), RuntimeError> {
-        let Some((batch, slot)) = manifest_candidate else {
-            return Ok(());
-        };
-        let row = batch
-            .as_input()
-            .rows
-            .iter()
-            .find(|row| row.plugin_id == plugin.id())
-            .ok_or(ManifestRegistrationErrorV1::PluginMismatch)?;
-        Self::validate_manifest_facts(
-            row,
-            plugin.name(),
-            plugin.version(),
-            registration,
-            Some(admission),
-            Some(slot),
-        )
-        .map_err(Into::into)
-    }
-
-    pub(crate) fn validate_required_installed_approver(
-        binding: &OutputPolicyBindingV1,
-    ) -> Result<(), RuntimeError> {
-        if binding.requires_action_approver() && !binding.has_action_approver_route() {
-            Err(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" },
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     fn registration_context(
         &self,
         plugin: &dyn Plugin,
@@ -3663,7 +3536,7 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: options.registration,
                 output_admission: options.output_admission,
-                manifest_slot: options.manifest_slot,
+                manifest_slot: None,
             },
         );
         self.registration_revision += 1;
@@ -3837,6 +3710,8 @@ impl PluginRegistry {
                 manifest_slot: None,
             },
         );
+        // A Plugin registered outside a manifest slot can never match the
+        // prepared batch, so drop the batch rather than leave it admissible.
         self.manifest_batch = None;
         self.registration_revision += 1;
         Ok(())
@@ -3868,6 +3743,8 @@ impl PluginRegistry {
                 manifest_slot: None,
             },
         );
+        // A Plugin registered outside a manifest slot can never match the
+        // prepared batch, so drop the batch rather than leave it admissible.
         self.manifest_batch = None;
         self.registration_revision += 1;
     }
@@ -3910,6 +3787,8 @@ impl PluginRegistry {
                 manifest_slot: None,
             },
         );
+        // A Plugin registered outside a manifest slot can never match the
+        // prepared batch, so drop the batch rather than leave it admissible.
         self.manifest_batch = None;
         self.registration_revision += 1;
         Ok(())
@@ -5040,7 +4919,6 @@ mod tests {
                         PluginAvailabilityV1::Available,
                     )),
                     output_admission: None,
-                    manifest_slot: None,
                 },
             ),
             Err(RuntimeError::CapabilityMismatch { .. })
@@ -5579,6 +5457,20 @@ mod tests {
         assert!(matches!(
             registry.admit_complete_manifest_registration(),
             Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+    }
+
+    #[test]
+    fn manifest_revalidation_rejects_missing_batch_and_unverified_entry() {
+        let (mut registry, id, catalog) = manifest_validation_fixture();
+        assert!(matches!(
+            PluginRegistry::new().revalidate_manifest_registration(catalog.clone()),
+            Err(ManifestRegistrationErrorV1::BatchState)
+        ));
+        registry.plugins.get_mut(&id).test_ok().registration = None;
+        assert!(matches!(
+            registry.revalidate_manifest_registration(catalog),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
         ));
     }
 

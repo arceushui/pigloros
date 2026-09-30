@@ -892,7 +892,6 @@ impl OutputPolicyClosureV1 {
     /// # Errors
     /// Returns a closed artifact or canonicality error when one referenced
     /// object is absent, malformed, or does not match its recorded identity.
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_artifacts(
         output_policy_bytes: &[u8],
         executable_budget_bytes: &[u8],
@@ -1797,54 +1796,6 @@ mod tests {
                 proposal.payload.clone(),
             ))
         }
-    }
-
-    #[test]
-    fn installed_owner_binding_checks_instance_and_required_action_route() {
-        let plugin = FixturePlugin {
-            id: PluginId::new(),
-            name: "fixture",
-            events: vec![Kind::new("plugin.output")],
-        };
-        let budget = budget(plugin.id(), 16, 2, 32, 100, [10, 10, 10]);
-        let binding = OutputPolicyBindingV1::from_installed_source_with_policy(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            policy(plugin.id(), &budget),
-            budget,
-            &[],
-            "deterministic-local-v1",
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-
-        let cloned_plugin = plugin.clone();
-        assert!(binding.verifies_owner_instance(&plugin));
-        assert!(!binding.verifies_owner_instance(&cloned_plugin));
-        assert!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&binding).is_ok()
-        );
-
-        let mut world_binding = binding;
-        world_binding.source = InstalledOutputPolicySourceV1::World;
-        assert!(matches!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&world_binding),
-            Err(crate::RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
-            ))
-        ));
-        world_binding.approver = Some(Box::new(BindingTestApprover));
-        world_binding.approver_event_types = vec![Kind::new("plugin.output")];
-        assert!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&world_binding)
-                .is_ok()
-        );
-        world_binding.approver_event_types.clear();
-        assert!(matches!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&world_binding),
-            Err(crate::RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
-            ))
-        ));
     }
 
     #[test]
