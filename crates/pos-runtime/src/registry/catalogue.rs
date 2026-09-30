@@ -447,6 +447,7 @@ impl PluginRegistry {
             RegistrationOptions {
                 registration,
                 output_admission: None,
+                manifest_slot: None,
                 reducer_slot: ReducerSlotV1::ByPluginId,
             },
         )

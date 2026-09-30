@@ -268,7 +268,6 @@ pub fn validate_closed_adapter_recording_v1(
 /// # Errors
 /// Returns `CorruptState` if the calls do not form the closed session's exact
 /// admitted transcript.
-#[must_use]
 pub fn close_adapter_recording_v1(
     session: &AdapterRecordingSessionV1,
     calls: Vec<crate::AdapterTranscriptCallV1>,
