@@ -21,13 +21,19 @@ use pos_core::{
     timeline::Timeline,
     ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
     CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
-    OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, PreparedOwnTracksIngressV1, ProposedAction,
-    Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
+    ForkAuthenticationPolicyV1, Hash, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
+    PreparedOwnTracksIngressV1, ProposedAction, Seq, EVENT_TYPE_CONSENT_GRANTED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, OwnTracksIngressStore};
 use pos_runtime::{
     ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
+};
+use pos_store::{
+    ForkAdmissionAuthoritySessionV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
+    ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryTupleV1,
 };
 use std::{
     collections::HashMap,
@@ -47,7 +53,7 @@ pub(crate) const RESERVED_WRITE_CAPACITY: usize = 8;
 const READ_CAPACITY: usize = QUEUE_CAPACITY - RESERVED_WRITE_CAPACITY;
 const READ_BURST: u8 = 8;
 const COMMAND_DEADLINE: Duration = Duration::from_secs(5);
-const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 const OWNTRACKS_RATE_BURST: u8 = 5;
 const OWNTRACKS_RATE_KEYS_MAXIMUM: usize = 64;
 const OWNTRACKS_RATE_STATE_TTL: Duration = Duration::from_mins(15);
@@ -110,7 +116,7 @@ mod lifecycle_coverage_tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-        let host = ExecutorStore::Host(Box::new(host));
+        let host = ExecutorStore::Host(Box::new(host), None);
         assert_eq!(
             host.erasure_status(),
             pos_runtime::ErasureHostStatusV1::Ready
@@ -146,7 +152,7 @@ mod lifecycle_coverage_tests {
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
         for mut store in [
-            ExecutorStore::Host(Box::new(host)),
+            ExecutorStore::Host(Box::new(host), None),
             ExecutorStore::Generic(Box::new(MemoryStore::new())),
             ExecutorStore::Gateway(GatewayExecutorStore::GeoLocation(Box::new(
                 MemoryStore::new(),
@@ -349,6 +355,28 @@ impl ActionCommand {
     }
 }
 
+/// A boxed Write-class worker command that owns its execution and expiry.
+///
+/// Rare, larger commands share one `Command` variant through this seam, so
+/// the worker's exhaustive dispatch does not grow with each of them.
+trait WorkerCommandV1: Send {
+    /// Execute on the store worker after the command's execution claim.
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState);
+
+    /// Reply that the command expired unexecuted.
+    fn expire_unrun(self: Box<Self>);
+}
+
+impl WorkerCommandV1 for ActionCommand {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        (*self).execute(state);
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        (*self).expire();
+    }
+}
+
 enum Command {
     PrepareOwnTracksIngress {
         basic_handle: [u8; 32],
@@ -399,7 +427,8 @@ enum Command {
         maximum: Option<u64>,
         reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
     },
-    Action(Box<ActionCommand>),
+    /// A boxed Write-class command that owns its execution and expiry.
+    Action(Box<dyn WorkerCommandV1>),
     AppendConsentGrant {
         timeline: TimelineId,
         grant: ConsentGrantedV1,
@@ -617,7 +646,12 @@ impl GatewayExecutorStore {
 }
 
 enum ExecutorStore {
-    Host(Box<ErasureExecutionHostV1>),
+    /// The one erasure host and, for the local Fork-admission Gateway, its
+    /// private ADR-109 revision 9 Fork-admission slot.
+    Host(
+        Box<ErasureExecutionHostV1>,
+        Option<Box<ForkAdmissionSlotV1>>,
+    ),
     #[cfg(test)]
     Generic(Box<dyn EventStore>),
     #[cfg(test)]
@@ -625,9 +659,20 @@ enum ExecutorStore {
 }
 
 impl ExecutorStore {
+    /// The host and Fork-admission slot of a local Fork-admission Gateway.
+    fn fork_admission_target(
+        &mut self,
+    ) -> Option<(&mut ErasureExecutionHostV1, &ForkAdmissionSlotV1)> {
+        match self {
+            Self::Host(host, slot) => slot.as_deref().map(|slot| (host.as_mut(), slot)),
+            #[cfg(test)]
+            Self::Generic(_) | Self::Gateway(_) => None,
+        }
+    }
+
     fn erasure_status(&self) -> ErasureHostStatusV1 {
         match self {
-            Self::Host(host) => host.status(),
+            Self::Host(host, _) => host.status(),
             #[cfg(test)]
             // Test-only compatibility stores do not own an
             // `ErasureExecutionHostV1`, so they must not claim recovered
@@ -642,7 +687,7 @@ impl ExecutorStore {
     #[cfg(test)]
     fn bind_test_erasure_gate(&mut self) {
         match self {
-            Self::Host(_) => {}
+            Self::Host(..) => {}
             Self::Generic(store) => {
                 drop(store.bind_erasure_gate(Arc::new(
                     pos_core::ErasureContainmentGateV1::new_test_open(),
@@ -664,7 +709,7 @@ impl ExecutorStore {
         #[cfg(not(test))]
         let _ = store_operation;
         match self {
-            Self::Host(host) => host_operation(host).map_err(host_error_to_core),
+            Self::Host(host, _) => host_operation(host).map_err(host_error_to_core),
             #[cfg(test)]
             Self::Generic(store) => store_operation(store.as_mut()),
             #[cfg(test)]
@@ -674,7 +719,7 @@ impl ExecutorStore {
 
     fn protected_logical_head(&mut self, timeline: TimelineId) -> Result<Seq, CoreError> {
         match self {
-            Self::Host(host) => host
+            Self::Host(host, _) => host
                 .read_sender()
                 .and_then(|mut sender| sender.protected_logical_head(timeline))
                 .map_err(host_error_to_core),
@@ -690,7 +735,7 @@ impl ExecutorStore {
         input: OwnTracksIngressInputV1,
     ) -> Result<PreparedOwnTracksIngressV1, CoreError> {
         match self {
-            Self::Host(host) => host
+            Self::Host(host, _) => host
                 .command_sender()
                 .and_then(|mut sender| sender.prepare_owntracks_ingress(input))
                 .map_err(host_error_to_core),
@@ -706,7 +751,7 @@ impl ExecutorStore {
         request: GeoLocationAdmissionRequestV1,
     ) -> Result<GeoLocationAdmissionOutcome, CoreError> {
         match self {
-            Self::Host(host) => host
+            Self::Host(host, _) => host
                 .command_sender()
                 .and_then(|mut sender| sender.admit_geo_location(request))
                 .map_err(host_error_to_core),
@@ -1003,7 +1048,7 @@ impl StoreExecutor {
     ) -> Result<Self, CoreError> {
         host.bind_consent_authority(permit)
             .map_err(host_error_to_core)?;
-        Ok(Self::spawn(ExecutorStore::Host(Box::new(host)), None))
+        Ok(Self::spawn(ExecutorStore::Host(Box::new(host), None), None))
     }
 
     pub(crate) fn new_with_owntracks_erasure_host(
@@ -1014,7 +1059,7 @@ impl StoreExecutor {
         host.bind_consent_authority(permit)
             .map_err(host_error_to_core)?;
         Ok(Self::spawn(
-            ExecutorStore::Host(Box::new(host)),
+            ExecutorStore::Host(Box::new(host), None),
             Some(owner_key),
         ))
     }
@@ -1664,6 +1709,450 @@ impl StoreExecutor {
     pub(crate) async fn erasure_status(&self) -> Result<ErasureHostStatusV1, StoreExecutorError> {
         submit!(self, |reply| Command::ErasureStatus { reply })
     }
+
+    /// Move the recovered host and its Fork-admission slot into a new worker
+    /// (ADR-109 revision 9, Decision 1 items 1, 2 and 7 step 5).
+    ///
+    /// The returned submitter is the only handle that can submit the private
+    /// Fork-admission commands; the executor handle kept by the Gateway
+    /// cannot construct them.
+    pub(crate) fn new_with_fork_admission_host(
+        mut host: ErasureExecutionHostV1,
+        owntracks_owner_key: Option<[u8; 32]>,
+        permit: ConsentAppendPermit,
+        slot: ForkAdmissionSlotV1,
+    ) -> Result<(Self, ForkAdmissionSubmitterV1), CoreError> {
+        host.bind_consent_authority(permit)
+            .map_err(host_error_to_core)?;
+        let executor = Self::spawn(
+            ExecutorStore::Host(Box::new(host), Some(Box::new(slot))),
+            owntracks_owner_key,
+        );
+        Ok((executor.clone(), ForkAdmissionSubmitterV1 { executor }))
+    }
+
+    /// Submit one Fork-admission command from a plain OS thread and block for
+    /// its reply (ADR-109 revision 9, Decision 1 item 5).
+    ///
+    /// Admission, deadline and lifecycle are those of every HTTP command,
+    /// except that `Saturated` is retried with a short backoff until the
+    /// command deadline. A command still queued at the deadline expires
+    /// unexecuted; a started command is awaited to completion.
+    ///
+    /// `build` runs exactly once: the built command is shared by every
+    /// admission attempt, and each retry only re-wraps it, so the values it
+    /// captures are moved, never copied per attempt.
+    fn submit_fork_admission<T>(
+        &self,
+        build: impl FnOnce(ForkAdmissionReplyV1<T>) -> ForkAdmissionCommandV1,
+    ) -> ForkAdmissionSubmissionV1<T> {
+        let deadline = Instant::now() + self.command_deadline();
+        let lifecycle = Arc::new(CommandLifecycle::new());
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        let command = Arc::new(Mutex::new(Some(build(reply))));
+        loop {
+            let attempt = Command::Action(Box::new(ForkAdmissionAttemptV1(Arc::clone(&command))));
+            match self.try_submit(attempt, deadline, Arc::clone(&lifecycle)) {
+                Ok(()) => {
+                    // Only the queued attempt may keep the reply sender alive,
+                    // so a discarded queue is observed as a dropped reply.
+                    drop(command);
+                    return await_fork_admission_reply(&result, &lifecycle, deadline);
+                }
+                Err(StoreExecutorError::Saturated) if Instant::now() < deadline => {
+                    thread::sleep(FORK_ADMISSION_ADMISSION_BACKOFF);
+                }
+                Err(StoreExecutorError::Saturated) => {
+                    return Err(ForkAdmissionSubmissionErrorV1::Busy);
+                }
+                Err(_) => return Err(ForkAdmissionSubmissionErrorV1::Unavailable),
+            }
+        }
+    }
+}
+
+/// One admission attempt of a built Fork-admission command. Every attempt of
+/// one submission shares the command; the attempt that runs or expires takes
+/// it.
+struct ForkAdmissionAttemptV1(Arc<Mutex<Option<ForkAdmissionCommandV1>>>);
+
+impl ForkAdmissionAttemptV1 {
+    fn take(&self) -> Option<ForkAdmissionCommandV1> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+impl WorkerCommandV1 for ForkAdmissionAttemptV1 {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Some(command) = self.take() else {
+            return;
+        };
+        command.run_on(state.store.fork_admission_target());
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        let Some(command) = self.take() else {
+            return;
+        };
+        command.refuse(ForkAdmissionSubmissionErrorV1::Busy);
+    }
+}
+
+/// Backoff between admission retries of one saturated Fork-admission command.
+const FORK_ADMISSION_ADMISSION_BACKOFF: Duration = Duration::from_millis(5);
+
+/// Wait for one Fork-admission reply until the command deadline, then expire
+/// the command if it is still queued or await its completion if it started.
+fn await_fork_admission_reply<T>(
+    result: &std::sync::mpsc::Receiver<ForkAdmissionSubmissionV1<T>>,
+    lifecycle: &CommandLifecycle,
+    deadline: Instant,
+) -> ForkAdmissionSubmissionV1<T> {
+    match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(reply) => reply,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) if lifecycle.expire_if_queued() => {
+            Err(ForkAdmissionSubmissionErrorV1::Busy)
+        }
+        // A started command is awaited to completion with no deadline
+        // (ADR-109 r9 Decision 1 item 5). A wedged worker therefore holds the
+        // listener thread, and process shutdown bounds that thread's join
+        // instead (`LocalForkAdmissionListenerV1::stop`).
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => result
+            .recv()
+            .unwrap_or(Err(ForkAdmissionSubmissionErrorV1::Lost)),
+        // The reply was dropped unsent: before the start the executor
+        // discarded the queue, after the start the worker failed.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) if lifecycle.expire_if_queued() => {
+            Err(ForkAdmissionSubmissionErrorV1::Unavailable)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(ForkAdmissionSubmissionErrorV1::Lost)
+        }
+    }
+}
+
+/// The private ADR-109 revision 9 Fork-admission slot of one executor: the
+/// ADR-106 authority session opened on the host adapter and an immutable copy
+/// of the FACR1 FAP1 policy.
+///
+/// It is installed with the host at startup and never exposed to HTTP. The
+/// listener thread keeps only the session identity digest.
+pub(crate) struct ForkAdmissionSlotV1 {
+    session: ForkAdmissionAuthoritySessionV1,
+    policy: ForkAuthenticationPolicyV1,
+}
+
+impl ForkAdmissionSlotV1 {
+    /// Pair one opened authority session with its pinned policy.
+    #[must_use]
+    pub(crate) const fn new(
+        session: ForkAdmissionAuthoritySessionV1,
+        policy: ForkAuthenticationPolicyV1,
+    ) -> Self {
+        Self { session, policy }
+    }
+}
+
+/// Why a Fork-admission command produced no store result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ForkAdmissionSubmissionErrorV1 {
+    /// Definitely not run: the queue stayed saturated through the bounded
+    /// admission wait, or the command expired while queued.
+    Busy,
+    /// Definitely not run: the executor is draining, closed, or unhealthy,
+    /// or it holds no Fork-admission slot.
+    Unavailable,
+    /// The command started but its reply was lost, so its outcome is unknown.
+    Lost,
+}
+
+/// One Fork-admission store result, or why none was produced.
+pub(crate) type ForkAdmissionSubmissionV1<T> =
+    Result<Result<T, ForkDeliveryJournalErrorV1>, ForkAdmissionSubmissionErrorV1>;
+
+/// The response-delivery mark recorded after a FARL1 write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ForkDeliveryMarkV1 {
+    /// The complete response was written.
+    Delivered,
+    /// The response write failed; the committed tuple stays recoverable.
+    Uncertain,
+}
+
+type ForkAdmissionReplyV1<T> = std::sync::mpsc::SyncSender<ForkAdmissionSubmissionV1<T>>;
+
+/// The five private Fork-admission commands (ADR-109 revision 9, Decision 1
+/// item 4). They carry no FAL1 bytes, UID, or Owner; the session and policy
+/// come from the executor's slot.
+enum ForkAdmissionCommandV1 {
+    Claim {
+        tuple: ForkDeliveryTupleV1,
+        reply: ForkAdmissionReplyV1<ForkDeliveryClaimOutcomeV1>,
+    },
+    Cancel {
+        claim: ForkDeliveryClaimV1,
+        reply: ForkAdmissionReplyV1<()>,
+    },
+    Execute {
+        claim: ForkDeliveryClaimV1,
+        command: Box<ForkAdmissionHostCommandV1>,
+        reply: ForkAdmissionReplyV1<ForkDeliveryExecutionV1>,
+    },
+    Recover {
+        tuple: ForkDeliveryTupleV1,
+        proof: Box<ForkAdmissionRecoveryProofV1>,
+        principal: Hash,
+        reply: ForkAdmissionReplyV1<ForkAdmissionOperationResultV1>,
+    },
+    Mark {
+        claim: ForkDeliveryClaimV1,
+        mark: ForkDeliveryMarkV1,
+        reply: ForkAdmissionReplyV1<()>,
+    },
+}
+
+impl ForkAdmissionCommandV1 {
+    fn run_on(self, target: Option<(&mut ErasureExecutionHostV1, &ForkAdmissionSlotV1)>) {
+        let Some((host, slot)) = target else {
+            return self.refuse(ForkAdmissionSubmissionErrorV1::Unavailable);
+        };
+        let session = &slot.session;
+        match self {
+            Self::Claim { tuple, reply } => {
+                send_fork_admission_result(&reply, host.claim_fork_delivery(session, tuple));
+            }
+            Self::Cancel { claim, reply } => send_fork_admission_result(
+                &reply,
+                host.cancel_pending_fork_delivery(session, claim),
+            ),
+            Self::Execute {
+                claim,
+                command,
+                reply,
+            } => send_fork_admission_result(
+                &reply,
+                host.execute_claimed_fork_delivery(session, &slot.policy, claim, &command),
+            ),
+            Self::Recover {
+                tuple,
+                proof,
+                principal,
+                reply,
+            } => send_fork_admission_result(
+                &reply,
+                host.recover_fork_delivery(session, tuple, &proof, principal),
+            ),
+            Self::Mark {
+                claim,
+                mark: ForkDeliveryMarkV1::Delivered,
+                reply,
+            } => send_fork_admission_result(
+                &reply,
+                host.mark_fork_delivery_delivered(session, claim),
+            ),
+            Self::Mark {
+                claim,
+                mark: ForkDeliveryMarkV1::Uncertain,
+                reply,
+            } => send_fork_admission_result(
+                &reply,
+                host.mark_fork_delivery_uncertain(session, claim),
+            ),
+        }
+    }
+
+    fn refuse(self, error: ForkAdmissionSubmissionErrorV1) {
+        match self {
+            Self::Claim { reply, .. } => send_fork_admission_refusal(&reply, error),
+            Self::Cancel { reply, .. } | Self::Mark { reply, .. } => {
+                send_fork_admission_refusal(&reply, error);
+            }
+            Self::Execute { reply, .. } => send_fork_admission_refusal(&reply, error),
+            Self::Recover { reply, .. } => send_fork_admission_refusal(&reply, error),
+        }
+    }
+}
+
+fn send_fork_admission_result<T>(
+    reply: &ForkAdmissionReplyV1<T>,
+    result: Result<T, ForkDeliveryJournalErrorV1>,
+) {
+    // A submitter that already expired the command no longer listens.
+    let _abandoned = reply.send(Ok(result));
+}
+
+fn send_fork_admission_refusal<T>(
+    reply: &ForkAdmissionReplyV1<T>,
+    error: ForkAdmissionSubmissionErrorV1,
+) {
+    let _abandoned = reply.send(Err(error));
+}
+
+/// Blocking Fork-admission submission handle for the ADR-109 listener thread.
+///
+/// It is issued once, with the slot, by the Gateway constructor that installs
+/// the slot; the Gateway and its HTTP routes never hold it. Each call submits
+/// one private Write-class command with the executor's admission, deadline
+/// and lifecycle semantics and blocks the calling OS thread for its reply, so
+/// it must not be called from an asynchronous task.
+#[derive(Clone)]
+pub(crate) struct ForkAdmissionSubmitterV1 {
+    executor: StoreExecutor,
+}
+
+impl ForkAdmissionSubmitterV1 {
+    /// Claim one delivery tuple.
+    ///
+    /// # Errors
+    /// Returns why the command produced no store result.
+    pub(crate) fn claim_fork_delivery(
+        &self,
+        tuple: ForkDeliveryTupleV1,
+    ) -> ForkAdmissionSubmissionV1<ForkDeliveryClaimOutcomeV1> {
+        self.executor
+            .submit_fork_admission(|reply| ForkAdmissionCommandV1::Claim { tuple, reply })
+    }
+
+    /// Delete one fenced Pending claim.
+    ///
+    /// # Errors
+    /// Returns why the command produced no store result.
+    pub(crate) fn cancel_pending_fork_delivery(
+        &self,
+        claim: ForkDeliveryClaimV1,
+    ) -> ForkAdmissionSubmissionV1<()> {
+        self.executor
+            .submit_fork_admission(|reply| ForkAdmissionCommandV1::Cancel { claim, reply })
+    }
+
+    /// Execute one signed FAC1 for a claimed tuple through the host.
+    ///
+    /// # Errors
+    /// Returns why the command produced no store result.
+    pub(crate) fn execute_claimed_fork_delivery(
+        &self,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> ForkAdmissionSubmissionV1<ForkDeliveryExecutionV1> {
+        self.executor
+            .submit_fork_admission(|reply| ForkAdmissionCommandV1::Execute {
+                claim,
+                command: Box::new(command.clone()),
+                reply,
+            })
+    }
+
+    /// Recover one retained tuple through a signed FRP1 and the transient
+    /// Principal digest of the current peer.
+    ///
+    /// # Errors
+    /// Returns why the command produced no store result.
+    pub(crate) fn recover_fork_delivery(
+        &self,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+        principal: Hash,
+    ) -> ForkAdmissionSubmissionV1<ForkAdmissionOperationResultV1> {
+        self.executor
+            .submit_fork_admission(|reply| ForkAdmissionCommandV1::Recover {
+                tuple,
+                proof: Box::new(proof.clone()),
+                principal,
+                reply,
+            })
+    }
+
+    /// Record the response-delivery outcome of a committed claim.
+    ///
+    /// # Errors
+    /// Returns why the command produced no store result.
+    pub(crate) fn mark_fork_delivery(
+        &self,
+        claim: ForkDeliveryClaimV1,
+        mark: ForkDeliveryMarkV1,
+    ) -> ForkAdmissionSubmissionV1<()> {
+        self.executor
+            .submit_fork_admission(|reply| ForkAdmissionCommandV1::Mark { claim, mark, reply })
+    }
+}
+
+/// Test-only worker command that blocks the worker until it is released.
+#[cfg(test)]
+struct WorkerBlockForTestV1 {
+    started: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl WorkerCommandV1 for WorkerBlockForTestV1 {
+    fn run_on_worker(self: Box<Self>, _state: &mut ExecutorState) {
+        let _started = self.started.send(());
+        let _released = self.release.recv();
+    }
+
+    fn expire_unrun(self: Box<Self>) {}
+}
+
+/// Test-only worker command that does nothing.
+#[cfg(test)]
+struct WorkerNoopForTestV1;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl WorkerCommandV1 for WorkerNoopForTestV1 {
+    fn run_on_worker(self: Box<Self>, _state: &mut ExecutorState) {}
+
+    fn expire_unrun(self: Box<Self>) {}
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl StoreExecutor {
+    /// Block the worker on one admitted command until the returned sender
+    /// sends or is dropped.
+    pub(crate) fn block_worker_for_test(
+        &self,
+    ) -> Result<std::sync::mpsc::SyncSender<()>, StoreExecutorError> {
+        let (started, worker_started) = std::sync::mpsc::sync_channel(1);
+        let (release, worker_release) = std::sync::mpsc::sync_channel(1);
+        self.try_submit(
+            Command::Action(Box::new(WorkerBlockForTestV1 {
+                started,
+                release: worker_release,
+            })),
+            Instant::now() + Duration::from_mins(1),
+            Arc::new(CommandLifecycle::new()),
+        )?;
+        worker_started
+            .recv()
+            .map_err(|_| StoreExecutorError::Unhealthy)?;
+        Ok(release)
+    }
+
+    /// Admit no-op writes until the queue is saturated; returns their count.
+    pub(crate) fn saturate_for_test(&self) -> usize {
+        let mut admitted = 0;
+        while self
+            .try_submit(
+                Command::Action(Box::new(WorkerNoopForTestV1)),
+                Instant::now() + Duration::from_mins(1),
+                Arc::new(CommandLifecycle::new()),
+            )
+            .is_ok()
+        {
+            admitted += 1;
+        }
+        admitted
+    }
+
+    /// Commands admitted and not yet finished.
+    pub(crate) fn admitted_for_test(&self) -> usize {
+        QUEUE_CAPACITY - self.control.global_budget.available_permits()
+    }
 }
 
 async fn await_command_result<T, E>(
@@ -1994,7 +2483,7 @@ fn expire_command_impl(command: Command) {
         Command::Append { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::Action(command) => (*command).expire(),
+        Command::Action(command) => command.expire_unrun(),
         Command::AppendConsentGrant { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -2173,7 +2662,7 @@ fn execute_command_impl(state: &mut ExecutorState, command: Command) -> CommandE
             maximum,
             reply,
         } => execute_append_command(state, timeline, &drafts, maximum, reply),
-        Command::Action(command) => (*command).execute(state),
+        Command::Action(command) => command.run_on_worker(state),
         Command::AppendConsentGrant {
             timeline,
             grant,
@@ -2315,7 +2804,7 @@ fn execute_read_page_command(
     reply: oneshot::Sender<Result<ProtectedReadPage, StoreExecutorError>>,
 ) {
     let result = match &mut state.store {
-        ExecutorStore::Host(host) => host
+        ExecutorStore::Host(host, _) => host
             .read_sender()
             .and_then(|mut sender| {
                 sender.read_bounded_at_generation(timeline, range, bounds, expected_generation)
@@ -2480,7 +2969,7 @@ fn execute_submit_action_command(
     reply: oneshot::Sender<Result<(Event, GatewayAuthorizationDecision), ActionCommandError>>,
 ) {
     match &mut state.store {
-        ExecutorStore::Host(host) => execute_host_action(host, context, reply),
+        ExecutorStore::Host(host, _) => execute_host_action(host, context, reply),
         #[cfg(test)]
         ExecutorStore::Generic(store) => {
             let result = execute_test_store_action(store.as_mut(), context);
@@ -2505,7 +2994,9 @@ fn execute_submit_identified_action_command(
     >,
 ) {
     match &mut state.store {
-        ExecutorStore::Host(host) => execute_host_identified_action(host, context, identity, reply),
+        ExecutorStore::Host(host, _) => {
+            execute_host_identified_action(host, context, identity, reply);
+        }
         #[cfg(test)]
         ExecutorStore::Generic(store) => {
             let result = execute_test_store_identified_action(store.as_mut(), context, identity);
@@ -3210,7 +3701,7 @@ mod tests {
             maximum: 1,
         };
         let mut state = ExecutorState {
-            store: ExecutorStore::Host(Box::new(host)),
+            store: ExecutorStore::Host(Box::new(host), None),
             owntracks_owner_key: None,
             owntracks_rate_limiter: OwnTracksRateLimiter {
                 buckets: HashMap::new(),
@@ -3361,7 +3852,7 @@ mod tests {
             .create_timeline("unbounded-host-append")?
             .id();
         let mut hosted_state = ExecutorState {
-            store: ExecutorStore::Host(Box::new(host)),
+            store: ExecutorStore::Host(Box::new(host), None),
             owntracks_owner_key: None,
             owntracks_rate_limiter: OwnTracksRateLimiter {
                 buckets: HashMap::new(),
@@ -6773,6 +7264,298 @@ mod tests {
         assert!(limiter.buckets.contains_key(&replacement));
         assert!(limiter.buckets.contains_key(&newest));
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod fork_admission_submission_tests {
+    use super::*;
+    use ciborium::value::Value;
+    use pos_crypto::fork_authentication::{
+        verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
+        ForkHostSigningKeyV1,
+    };
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+    struct ForkCommandsV1 {
+        tuple: ForkDeliveryTupleV1,
+        claim: ForkDeliveryClaimV1,
+        command: ForkAdmissionHostCommandV1,
+        proof: ForkAdmissionRecoveryProofV1,
+    }
+
+    fn cbor(value: &Value) -> TestResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Well-formed, signed FCC1 and FRP1 values; no executor below has a
+    /// store that could accept them.
+    fn fork_commands() -> TestResult<ForkCommandsV1> {
+        let host = ForkHostSigningKeyV1::from_seed([81; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([82; 32])?;
+        let policy = ForkAuthenticationPolicyV1::new(vec![
+            pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1 {
+                adapter_id: "executor-adapter".to_owned(),
+                verifying_key: adapter.public_key(),
+                minimum_assurance: 1,
+                registry_bindings: vec![Hash::from_bytes([83; 32])],
+            },
+        ])?;
+        let evidence = adapter.sign_authenticated_principal(
+            pos_core::fork_authentication::AuthenticatedPrincipalRecordV1 {
+                principal: pos_core::PrincipalRefV1::try_new([84; 16], "executor.local")?,
+                adapter_id: "executor-adapter".to_owned(),
+                assurance: 1,
+                issued_at: 0,
+                expires_at: u64::MAX,
+                registry_binding: Hash::from_bytes([83; 32]),
+                operation_nonce: [85; 32],
+            },
+        )?;
+        let verified = verify_authenticated_principal_evidence_v1(&policy, evidence)?;
+        let principal = pos_core::fork_authentication::principal_digest_v1(
+            &verified.evidence().record().principal,
+        )?;
+        let inner = cbor(&Value::Array(vec![
+            Value::Text("FCC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![86; 32]),
+            Value::Bytes(vec![87; 32]),
+            Value::Bytes(vec![88; 32]),
+            Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+            Value::Bytes(principal.as_bytes().to_vec()),
+            Value::Bytes(TimelineId::new().inner().to_bytes().to_vec()),
+            Value::Integer(0.into()),
+            Value::Integer(0.into()),
+            Value::Bytes(vec![89; 32]),
+            Value::Bytes(vec![90; 32]),
+            Value::Integer(0.into()),
+            Value::Text("executor-child".to_owned()),
+        ]))?;
+        let signature = host.sign_command(&inner, &verified)?;
+        let command =
+            ForkAdmissionHostCommandV1::from_canonical_cbor(&cbor(&Value::Array(vec![
+                Value::Text("FAC1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Bytes(inner),
+                Value::Bytes(verified.evidence().to_canonical_cbor()?),
+                Value::Bytes(signature.as_bytes().to_vec()),
+            ]))?)?;
+        let recovery = cbor(&Value::Array(vec![
+            Value::Text("FRC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![86; 32]),
+            Value::Bytes(vec![87; 32]),
+            Value::Integer(2.into()),
+            Value::Bytes(vec![88; 32]),
+        ]))?;
+        let proof =
+            ForkAdmissionRecoveryProofV1::from_canonical_cbor(&cbor(&Value::Array(vec![
+                Value::Text("FRP1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Bytes(recovery.clone()),
+                Value::Bytes(host.sign_recovery(&recovery)?.as_bytes().to_vec()),
+            ]))?)?;
+        let tuple = ForkDeliveryTupleV1::new(
+            Hash::from_bytes([91; 32]),
+            pos_core::ForkAdmissionOperationKindV1::Fork,
+            Hash::from_bytes([88; 32]),
+        )?;
+        Ok(ForkCommandsV1 {
+            tuple,
+            claim: ForkDeliveryClaimV1 {
+                tuple,
+                owner_fence: 1,
+            },
+            command,
+            proof,
+        })
+    }
+
+    /// Every command kind, submitted on a plain OS thread; returns the
+    /// submission error of each, or `None` for a store result.
+    fn submit_every_command(
+        submitter: ForkAdmissionSubmitterV1,
+    ) -> TestResult<Vec<Option<ForkAdmissionSubmissionErrorV1>>> {
+        let commands = fork_commands()?;
+        std::thread::spawn(move || {
+            vec![
+                submitter.claim_fork_delivery(commands.tuple).err(),
+                submitter.cancel_pending_fork_delivery(commands.claim).err(),
+                submitter
+                    .execute_claimed_fork_delivery(commands.claim, &commands.command)
+                    .err(),
+                submitter
+                    .recover_fork_delivery(
+                        commands.tuple,
+                        &commands.proof,
+                        Hash::from_bytes([92; 32]),
+                    )
+                    .err(),
+                submitter
+                    .mark_fork_delivery(commands.claim, ForkDeliveryMarkV1::Delivered)
+                    .err(),
+                submitter
+                    .mark_fork_delivery(commands.claim, ForkDeliveryMarkV1::Uncertain)
+                    .err(),
+            ]
+        })
+        .join()
+        .map_err(|_| "Fork-admission submission thread panicked".into())
+    }
+
+    /// An attempt whose shared command was already taken by an earlier
+    /// attempt neither runs nor replies again.
+    #[test]
+    fn a_taken_admission_attempt_is_inert() -> TestResult {
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        let command = Arc::new(Mutex::new(Some(ForkAdmissionCommandV1::Claim {
+            tuple: fork_commands()?.tuple,
+            reply,
+        })));
+        Box::new(ForkAdmissionAttemptV1(Arc::clone(&command))).expire_unrun();
+        assert_eq!(
+            result.try_recv()?,
+            Err(ForkAdmissionSubmissionErrorV1::Busy)
+        );
+        Box::new(ForkAdmissionAttemptV1(Arc::clone(&command))).expire_unrun();
+        let mut state = ExecutorState {
+            store: ExecutorStore::Generic(Box::new(pos_store::memory::MemoryStore::new())),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+        Box::new(ForkAdmissionAttemptV1(command)).run_on_worker(&mut state);
+        assert!(result.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn executors_without_a_fork_admission_slot_refuse_every_command() -> TestResult {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let hosted = StoreExecutor::new_with_erasure_host(
+            host,
+            pos_core::ConsentAuthority::new().append_permit(),
+        )?;
+        let generic = StoreExecutor::new(Box::new(pos_store::memory::MemoryStore::new()));
+        for executor in [hosted, generic] {
+            let refused = submit_every_command(ForkAdmissionSubmitterV1 {
+                executor: executor.clone(),
+            })?;
+            assert_eq!(
+                refused,
+                vec![Some(ForkAdmissionSubmissionErrorV1::Unavailable); 6]
+            );
+            executor
+                .shutdown()
+                .await
+                .map_err(|error| format!("executor shutdown failed: {error:?}"))?;
+            assert_eq!(
+                submit_every_command(ForkAdmissionSubmitterV1 { executor })?,
+                vec![Some(ForkAdmissionSubmissionErrorV1::Unavailable); 6]
+            );
+        }
+        Ok(())
+    }
+
+    fn short_deadline_submitter(
+        capacity: usize,
+    ) -> (ForkAdmissionSubmitterV1, mpsc::Receiver<CommandEnvelope>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        (
+            ForkAdmissionSubmitterV1 {
+                executor: StoreExecutor::from_sender_with_deadlines_for_test(
+                    tx,
+                    Duration::from_millis(100),
+                    Duration::from_secs(1),
+                ),
+            },
+            rx,
+        )
+    }
+
+    fn claim_on_thread(
+        submitter: &ForkAdmissionSubmitterV1,
+    ) -> TestResult<std::thread::JoinHandle<Option<ForkAdmissionSubmissionErrorV1>>> {
+        let tuple = fork_commands()?.tuple;
+        let submitter = submitter.clone();
+        Ok(std::thread::spawn(move || {
+            submitter.claim_fork_delivery(tuple).err()
+        }))
+    }
+
+    fn joined(
+        handle: std::thread::JoinHandle<Option<ForkAdmissionSubmissionErrorV1>>,
+    ) -> TestResult<Option<ForkAdmissionSubmissionErrorV1>> {
+        handle
+            .join()
+            .map_err(|_| "Fork-admission submission thread panicked".into())
+    }
+
+    /// ADR-109 r9 Decision 1 item 5: a command still queued at its deadline
+    /// expires unexecuted, and a saturated queue is retried only until the
+    /// same deadline; both are `Busy` (code 6).
+    #[tokio::test]
+    async fn queued_expiry_and_bounded_saturation_are_busy() -> TestResult {
+        let (submitter, rx) = short_deadline_submitter(1);
+        assert_eq!(
+            joined(claim_on_thread(&submitter)?)?,
+            Some(ForkAdmissionSubmissionErrorV1::Busy)
+        );
+        assert_eq!(
+            joined(claim_on_thread(&submitter)?)?,
+            Some(ForkAdmissionSubmissionErrorV1::Busy)
+        );
+        drop(rx);
+        Ok(())
+    }
+
+    /// A reply dropped before the command started is `Unavailable`; after the
+    /// start its outcome is unknown (`Lost`), and a started command is
+    /// awaited past its deadline.
+    #[tokio::test]
+    async fn dropped_and_late_replies_follow_the_command_lifecycle() -> TestResult {
+        let (submitter, mut rx) = short_deadline_submitter(4);
+        let queued = claim_on_thread(&submitter)?;
+        drop(rx.recv().await.ok_or("queued claim was not admitted")?);
+        assert_eq!(
+            joined(queued)?,
+            Some(ForkAdmissionSubmissionErrorV1::Unavailable)
+        );
+
+        let started = claim_on_thread(&submitter)?;
+        let envelope = rx.recv().await.ok_or("started claim was not admitted")?;
+        assert_eq!(envelope.lifecycle.start(), StartOutcome::Started);
+        drop(envelope);
+        assert_eq!(joined(started)?, Some(ForkAdmissionSubmissionErrorV1::Lost));
+
+        let late = claim_on_thread(&submitter)?;
+        {
+            let envelope = rx.recv().await.ok_or("late claim was not admitted")?;
+            assert_eq!(envelope.lifecycle.start(), StartOutcome::Started);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            expire_envelope(envelope);
+        }
+        assert_eq!(joined(late)?, Some(ForkAdmissionSubmissionErrorV1::Busy));
+
+        let abandoned = claim_on_thread(&submitter)?;
+        let envelope = rx.recv().await.ok_or("abandoned claim was not admitted")?;
+        assert_eq!(envelope.lifecycle.start(), StartOutcome::Started);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(envelope);
+        assert_eq!(
+            joined(abandoned)?,
+            Some(ForkAdmissionSubmissionErrorV1::Lost)
+        );
         Ok(())
     }
 }

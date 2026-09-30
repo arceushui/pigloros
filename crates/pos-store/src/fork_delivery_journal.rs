@@ -5,8 +5,9 @@
 //! persist.  Those values belong to the local Gateway composition root.
 
 use pos_core::{
-    ForkAdmissionErrorV1, ForkAdmissionHostCommandV1, ForkAdmissionOperationKindV1,
-    ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1, Hash,
+    ErasureAdmittedForkContextV1, ForkAdmissionErrorV1, ForkAdmissionHostCommandV1,
+    ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
+    Hash,
 };
 
 use crate::ForkAdmissionAuthoritySessionV1;
@@ -166,6 +167,19 @@ pub(crate) fn fork_delivery_execution(
     }
 }
 
+/// Whether a permit-bearing delivery outcome may have added a child to the
+/// store topology, so the adapter's captured inventory generation must be
+/// re-established (ADR-109 revision 9, Decision 2 step 6).
+pub(crate) const fn fork_delivery_may_have_changed_topology(
+    result: Result<&ForkDeliveryExecutionV1, &ForkDeliveryJournalErrorV1>,
+) -> bool {
+    matches!(
+        result,
+        Ok(ForkDeliveryExecutionV1::Committed(_) | ForkDeliveryExecutionV1::Uncertain)
+            | Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    )
+}
+
 /// Result of graph-backed startup reconciliation, without releasing a result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForkDeliveryStartupOutcomeV1 {
@@ -210,6 +224,35 @@ pub trait ForkAdmissionDeliveryJournalPortV1 {
     /// Returns a journal failure without exposing stored delivery payloads.
     fn execute_claimed_fork_delivery(
         &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::ForkAuthenticationPolicyV1,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1>;
+
+    /// Execute one already-signed FCC1 inside the erasure host's admitted-Fork
+    /// topology transition while the matching Pending fence is held
+    /// (ADR-109 revision 9, Decision 2).
+    ///
+    /// The session, FAC1 signature and policy, and the claimed tuple are
+    /// checked before the write boundary opens. A POC1 is not a topology
+    /// mutation and is refused as [`ForkDeliveryJournalErrorV1::Conflict`].
+    /// The write boundary opens through `context`, and a mismatched Pending
+    /// row is [`ForkDeliveryJournalErrorV1::Fenced`] with nothing written. The
+    /// FCC1 applies the ADR-106 revision 3 permit containment of `context`.
+    /// In the same transaction a commit moves Pending to Uncertain, and a
+    /// definite rejection rolls back only the FAC1 portion through `context`
+    /// before it deletes Pending. A FAC1 `StorageIndeterminate` rolls the
+    /// whole transaction back and records Uncertain in a fresh one.
+    ///
+    /// # Errors
+    /// Returns a closed journal error. A failed final commit is
+    /// [`ForkDeliveryJournalErrorV1::StorageIndeterminate`]; `context` then
+    /// reports that nothing was written only when the FAC1 portion had
+    /// already been rolled back.
+    fn execute_claimed_fork_delivery_in_topology_transition(
+        &mut self,
+        context: &ErasureAdmittedForkContextV1<'_>,
         session: &ForkAdmissionAuthoritySessionV1,
         policy: &pos_core::ForkAuthenticationPolicyV1,
         claim: ForkDeliveryClaimV1,

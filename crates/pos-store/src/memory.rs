@@ -73,8 +73,9 @@ use crate::fork_admission_authority::{
     ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
 use crate::fork_delivery_journal::{
-    fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
-    ForkDeliveryClaimV1, ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryRowV1,
+    fork_delivery_execution, fork_delivery_may_have_changed_topology,
+    ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
+    ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryRowV1,
     ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 use crate::fork_event_authority::fork_append_request;
@@ -1692,18 +1693,68 @@ impl ForkAdmissionDeliveryJournalPortV1 for MemoryStore {
             .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
         let execution =
             fork_delivery_execution(self.execute_fork_admission_command(session, policy, command));
+        self.record_fork_delivery_disposition(claim, &execution);
+        Ok(execution)
+    }
+
+    fn execute_claimed_fork_delivery_in_topology_transition(
+        &mut self,
+        context: &pos_core::ErasureAdmittedForkContextV1<'_>,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::ForkAuthenticationPolicyV1,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+        // Same pre-write order as the SQLite adapter (ADR-109 r9 Decision 2):
+        // authenticate the command, then bind it to the claimed FCC1 tuple. A
+        // POC1 is not a topology mutation and is refused as Conflict.
+        let host = self.live_fork_delivery_host(session)?;
+        let verified = verify_command(
+            session,
+            self.fork_admission_authority.session_identity,
+            host,
+            policy,
+            command,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        let target = verified
+            .fork_target()
+            .filter(|_| {
+                verified.kind() == claim.tuple.kind
+                    && verified.operation_id() == claim.tuple.operation_id
+            })
+            .ok_or(ForkDeliveryJournalErrorV1::Conflict)?;
+        // The exclusive borrow is the write boundary; a changed owner writes
+        // nothing.
+        self.fork_delivery_journal
+            .get(&claim.tuple.host_request_id)
+            .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Pending))
+            .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
+        let containment = admitted_fork_context_containment(
+            context,
+            self.validated_erasure_gate().ok().as_deref(),
+            self.erasure_topology_store_binding.as_ref(),
+            target,
+        );
+        let execution = fork_delivery_execution(self.execute_verified_fork_admission(
+            session,
+            verified,
+            containment,
+        ));
         if matches!(execution, ForkDeliveryExecutionV1::Rejected(_)) {
-            self.fork_delivery_journal
-                .remove(&claim.tuple.host_request_id);
-        } else {
-            self.fork_delivery_journal.insert(
-                claim.tuple.host_request_id,
-                ForkDeliveryRowV1 {
-                    tuple: claim.tuple,
-                    state: ForkDeliveryStateV1::Uncertain,
-                    owner_fence: claim.owner_fence,
-                },
-            );
+            // The rejected FAC1 was staged but never applied, so no FAC1 or
+            // topology write survives; only the Pending deletion remains.
+            let Ok(()) =
+                context.roll_back_write_boundary(|| Ok::<(), std::convert::Infallible>(()));
+        }
+        self.record_fork_delivery_disposition(claim, &execution);
+        // As in this adapter's r3 permit method, a possible topology change
+        // alone invalidates the captured generation: the exclusive borrow
+        // applies a FAC1 only when it commits, so no outcome here can have
+        // opened and rolled back a partial write that `nothing_written` would
+        // need to rule out.
+        if fork_delivery_may_have_changed_topology(Ok(&execution)) {
+            self.erasure_inventory_generation = None;
         }
         Ok(execution)
     }
@@ -1863,6 +1914,28 @@ impl ForkAdmissionDeliveryJournalPortV1 for MemoryStore {
 }
 
 impl MemoryStore {
+    /// Apply one FAC1 outcome to its claimed tuple: a definite rejection
+    /// deletes Pending, and every other outcome retains the tuple Uncertain.
+    fn record_fork_delivery_disposition(
+        &mut self,
+        claim: ForkDeliveryClaimV1,
+        execution: &ForkDeliveryExecutionV1,
+    ) {
+        if matches!(execution, ForkDeliveryExecutionV1::Rejected(_)) {
+            self.fork_delivery_journal
+                .remove(&claim.tuple.host_request_id);
+        } else {
+            self.fork_delivery_journal.insert(
+                claim.tuple.host_request_id,
+                ForkDeliveryRowV1 {
+                    tuple: claim.tuple,
+                    state: ForkDeliveryStateV1::Uncertain,
+                    owner_fence: claim.owner_fence,
+                },
+            );
+        }
+    }
+
     /// Returns the live FAH1 host, or `Corrupt` for a stale session.
     fn live_fork_delivery_host(
         &self,
