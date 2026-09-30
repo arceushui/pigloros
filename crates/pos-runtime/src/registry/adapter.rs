@@ -10,8 +10,8 @@ use pos_core::{
     validate_closed_adapter_recording_v1, AdapterAdmissionEntryV1, AdapterAdmissionInputV1,
     AdapterAdmissionV1, AdapterCallReservationOutcomeV1, AdapterCallReservationV1,
     AdapterInvocationInputV1, AdapterInvocationV1, AdapterRecordingSessionV1,
-    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1, Hash,
-    PluginId, WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_BYTES_V1,
+    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1, Hash, PluginId,
+    WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_BYTES_V1,
     MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 
