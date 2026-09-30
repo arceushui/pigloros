@@ -136,3 +136,71 @@ and caps cumulative response bytes at 64 MiB.
 - `GET /v1/timelines/:id/stream` (WebSocket)
 - Auth / passkeys (#68)
 - TLS, rate limits, multi-tenant hosting
+
+## Local Fork admission (ADR-107)
+
+Local Fork admission is a Linux systemd deployment. The managed Gateway starts
+it only with `--require-local-fork-authority`; the fixed socket pathname and
+credential directory are selected by the installed
+[systemd unit](../../deploy/systemd/piglor-gateway.service), never by a shell
+argument. The binary requires `CREDENTIALS_DIRECTORY` to be the exact unit
+directory, so direct invocation fails before it opens the authority database.
+
+The two inputs are separate encrypted systemd credentials named
+`pigloros.fork-admission-auth` (FACR1) and
+`pigloros.fork-admission-host-signer` (FAHK1). Create separate envelopes with
+systemd 250 or newer; `host+tpm2` is the production default:
+
+```bash
+systemd-creds encrypt --name=pigloros.fork-admission-auth \
+  --with-key=host+tpm2 FACR1.cbor pigloros.fork-admission-auth.cred
+systemd-creds encrypt --name=pigloros.fork-admission-host-signer \
+  --with-key=host+tpm2 FAHK1.cbor pigloros.fork-admission-host-signer.cred
+install -o root -g root -m 0600 pigloros.fork-admission-auth.cred \
+  /etc/credstore.encrypted/pigloros.fork-admission-auth.cred
+install -o root -g root -m 0600 pigloros.fork-admission-host-signer.cred \
+  /etc/credstore.encrypted/pigloros.fork-admission-host-signer.cred
+```
+
+Do not use `LoadCredential=`, `SetCredential=`, null-key encryption,
+environment variables, command-line credential bytes, or one envelope for both
+names. Create and destroy each plaintext separately in a root-only,
+non-swappable staging location; verify its same-name decrypt before activation.
+
+The service runs as `pigloros:pigloros`. Its runtime directory is
+`/run/pigloros` with mode `0750`; its socket is
+`/run/pigloros/fork-admission.sock` with mode `0660`. Group access only reaches
+the pathname: `SO_PEERCRED` rejects a UID absent from FACR1 before it reads a
+FAL1 frame. Both units use `PrivateMounts=yes`. The Gateway keeps its
+loopback HTTP listener reachable and limits sockets with
+`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`; the one-shot provisioner
+also uses `PrivateNetwork=yes` and starts no listener, router, Plugin, or
+background task.
+
+Before provisioning, store independent offline encrypted backups of the exact
+FACR1 and FAHK1 values under a separately controlled recovery key. Record each
+credential name and SHA-256 in the deployment inventory. Keep the FAHK1 backup
+separate from the authority database backup. With `host+tpm2`, retain the
+original TPM2 and `/var/lib/systemd/credential.secret` for online envelope
+recovery.
+
+To restore, decrypt both offline backups separately in root-only non-swappable
+staging, verify the recorded SHA-256 values and unequal seeds, re-encrypt each
+under its exact credential name, install both root-owned `0600` envelopes, and
+destroy the plaintext staging files. An initialized authority store is never
+rebound: if either exact value cannot be restored, it remains unavailable.
+
+Provision only through the installed disabled one-shot unit while the Gateway
+service is stopped, then start the managed service:
+
+```bash
+systemctl start piglor-gateway-fork-admission-provision.service
+systemctl enable --now piglor-gateway.service
+```
+
+The provision unit fails before database open for a direct shell invocation,
+wrong credential directory, or extra, missing, or swapped credential. It also
+fails if authority state already exists. Managed startup performs private FRP1
+reconciliation before binding the client socket. The listener requires a
+complete bounded FAL1 request ending in EOF and exposes no append-permit or
+public permit-issuance path.

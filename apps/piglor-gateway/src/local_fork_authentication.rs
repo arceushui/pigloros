@@ -1,8 +1,10 @@
 //! Host-private Linux credential and peer-identity boundary for ADR-107.
 //!
 //! It produces FAE1 only from a kernel-authenticated Unix peer and resolves
-//! the Owner only through the same protected FACR1 registry. #450 owns all
-//! listener, FAH1, session, command, and durable-authority orchestration.
+//! the Owner only through the same protected FACR1 registry. It also signs the
+//! typed FAI1/FAO1/FAC1/FRP1 inputs that the private coordinator builds; the
+//! ADR-109 listener and journal orchestration live in `local_fork_listener`
+//! and `local_fork_coordinator`.
 
 use std::{
     fs::{File, OpenOptions},
@@ -18,16 +20,23 @@ use std::{
 use ciborium::value::Value;
 use pos_core::{
     fork_authentication::{
-        AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
+        principal_digest_v1, AuthenticatedPrincipalEvidenceV1, AuthenticatedPrincipalRecordV1,
         ForkAuthenticationPolicyV1, LocalAccountBindingV1, LocalAccountRegistryV1,
         MAX_FORK_AUTH_CREDENTIAL_BYTES_V1, MAX_FORK_AUTH_POLICY_BYTES_V1,
     },
-    CanonicalBytes, OwnerIdV1, PrincipalRefV1,
+    CanonicalBytes, ForkAdmissionCommandCodecErrorV1, ForkAdmissionHostCommandV1,
+    ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
+    ForkAdmissionRecoveryCommandV1, ForkAdmissionRecoveryProofV1, ForkCreateCommandV1, Hash,
+    OwnerIdV1, PrincipalOwnerCommandV1, PrincipalRefV1, PublicKey,
 };
 use pos_crypto::fork_authentication::{
     verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
     ForkAuthenticationSignatureErrorV1, ForkHostSigningKeyV1,
     VerifiedAuthenticatedPrincipalEvidenceV1,
+};
+use pos_store::{
+    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
+    ForkAdmissionAuthoritySessionV1,
 };
 use rustix::fs::{openat, Dir, Mode, OFlags};
 use rustix::net::sockopt::socket_peercred;
@@ -54,6 +63,15 @@ pub(super) enum LocalForkAuthenticationErrorV1 {
     CredentialInvalid,
     #[error("fork admission peer is not authenticated")]
     PeerUnauthenticated,
+}
+
+/// Closed result of the deployment-only FAI1/FAO1 host lifecycle.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub(super) enum LocalForkAuthorityBootstrapErrorV1 {
+    #[error("fork admission credentials are unavailable")]
+    Credentials(#[from] LocalForkAuthenticationErrorV1),
+    #[error("fork admission authority bootstrap failed")]
+    Authority(#[from] ForkAdmissionAuthorityErrorV1),
 }
 
 /// Loaded, purpose-separated authority inputs retained only by the host.
@@ -93,6 +111,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         self.resolver.policy()
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(super) const fn adapter_public_key(&self) -> [u8; 32] {
         self.adapter_signer.public_key()
@@ -165,47 +184,114 @@ impl LocalForkAuthenticationCredentialsV1 {
         self.resolver.resolve(evidence.0)
     }
 
-    /// Sign one canonical ADR-106 FAI1 challenge through protected host custody.
+    /// Sign one typed ADR-106 FAI1 challenge through protected host custody.
     pub(super) fn sign_initialize(
         &self,
-        challenge: &CanonicalBytes,
+        challenge: &ForkAdmissionInitializeChallengeV1,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
         self.host_signer.sign_initialize(challenge)
     }
 
-    /// Sign one canonical ADR-106 FAO1 challenge through protected host custody.
+    /// Sign one typed ADR-106 FAO1 challenge through protected host custody.
     pub(super) fn sign_open(
         &self,
-        challenge: &CanonicalBytes,
+        challenge: &ForkAdmissionOpenChallengeV1,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
         self.host_signer.sign_open(challenge)
     }
 
-    /// Sign one owner-bound canonical ADR-106 POC1 command through protected custody.
-    pub(super) fn sign_principal_owner_command(
-        &self,
-        command: &CanonicalBytes,
-        authentication: &ResolvedLocalAuthenticationV1,
-    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        self.host_signer
-            .sign_principal_owner_command(command, authentication)
+    #[must_use]
+    pub(super) const fn host_public_key(&self) -> [u8; 32] {
+        self.host_signer.public_key()
     }
 
-    /// Sign one canonical ADR-106 FCC1 command through protected host custody.
+    /// Sign one owner-bound typed ADR-106 POC1 command through protected custody.
+    pub(super) fn sign_principal_owner_command(
+        &self,
+        command: &PrincipalOwnerCommandV1,
+        authentication: &ResolvedLocalAuthenticationV1,
+    ) -> Result<ForkAdmissionHostCommandV1, LocalForkAuthenticationErrorV1> {
+        self.host_signer.sign_command(command, authentication)
+    }
+
+    /// Sign one typed ADR-106 FCC1 command through protected host custody.
     pub(super) fn sign_fork_command(
         &self,
-        command: &CanonicalBytes,
+        command: &ForkCreateCommandV1,
         authentication: &ResolvedLocalAuthenticationV1,
-    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+    ) -> Result<ForkAdmissionHostCommandV1, LocalForkAuthenticationErrorV1> {
         self.host_signer.sign_fork_command(command, authentication)
     }
 
-    /// Sign one canonical ADR-106 FRC1 recovery command through protected custody.
+    /// Sign one typed ADR-106 FRC1 recovery command through protected custody.
     pub(super) fn sign_recovery(
         &self,
-        command: &CanonicalBytes,
-    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        command: &ForkAdmissionRecoveryCommandV1,
+    ) -> Result<ForkAdmissionRecoveryProofV1, LocalForkAuthenticationErrorV1> {
         self.host_signer.sign_recovery(command)
+    }
+
+    /// Consume one FAI1 challenge and durably establish this credential's FAH1.
+    /// This deployment operation never accepts a public policy or host key.
+    pub(super) fn provision_authority<S>(
+        &self,
+        store: &mut S,
+    ) -> Result<ForkAdmissionHostRecordV1, LocalForkAuthorityBootstrapErrorV1>
+    where
+        S: ForkAdmissionAuthorityBootstrapPortV1,
+    {
+        self.policy()
+            .digest()
+            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+            .map_err(LocalForkAuthorityBootstrapErrorV1::from)
+            .and_then(|policy_digest| {
+                store
+                    .begin_fork_admission_initialize(
+                        PublicKey::from_bytes(self.host_public_key()),
+                        policy_digest,
+                    )
+                    .map_err(LocalForkAuthorityBootstrapErrorV1::from)
+                    .and_then(|challenge| {
+                        self.sign_initialize(&challenge)
+                            .map_err(LocalForkAuthorityBootstrapErrorV1::from)
+                            .and_then(|signature| {
+                                store
+                                    .finalize_fork_admission_initialize(&challenge, &signature)
+                                    .map_err(LocalForkAuthorityBootstrapErrorV1::from)
+                            })
+                    })
+            })
+    }
+
+    /// Consume one FAO1 challenge after proving exact persisted FAH1 identity.
+    pub(super) fn open_authority<S>(
+        &self,
+        store: &mut S,
+    ) -> Result<ForkAdmissionAuthoritySessionV1, LocalForkAuthorityBootstrapErrorV1>
+    where
+        S: ForkAdmissionAuthorityBootstrapPortV1,
+    {
+        self.policy()
+            .digest()
+            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+            .map_err(LocalForkAuthorityBootstrapErrorV1::from)
+            .and_then(|policy_digest| {
+                store
+                    .begin_fork_admission_open(
+                        PublicKey::from_bytes(self.host_public_key()),
+                        policy_digest,
+                    )
+                    .map_err(LocalForkAuthorityBootstrapErrorV1::from)
+                    .and_then(|challenge| {
+                        self.sign_open(&challenge)
+                            .map_err(LocalForkAuthorityBootstrapErrorV1::from)
+                            .and_then(|signature| {
+                                store
+                                    .finalize_fork_admission_open(&challenge, &signature)
+                                    .map_err(LocalForkAuthorityBootstrapErrorV1::from)
+                            })
+                    })
+            })
     }
 }
 
@@ -235,107 +321,168 @@ impl PrincipalOwnerResolverV1 {
         verify_authenticated_principal_evidence_v1(&self.policy, evidence)
             .map_err(signature_invalid)
             .and_then(|verified| {
-                self.registry
-                    .digest()
-                    .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
-                    .and_then(|registry_binding| {
-                        let owner = {
-                            let record = verified.evidence().record();
+                // Every commitment is computed once here, from the verified
+                // FAE1 bytes, so later FAC1/FRP1 construction is infallible.
+                let resolved = {
+                    let evidence = verified.evidence();
+                    let record = evidence.record();
+                    self.registry
+                        .digest()
+                        .and_then(|registry_binding| {
+                            principal_digest_v1(&record.principal).and_then(|principal_digest| {
+                                evidence.digest().map(|evidence_digest| {
+                                    (registry_binding, principal_digest, evidence_digest)
+                                })
+                            })
+                        })
+                        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
+                        .and_then(|(registry_binding, principal_digest, evidence_digest)| {
                             if record.adapter_id != self.registry.adapter_id()
                                 || record.assurance != self.registry.assurance()
                                 || record.registry_binding != registry_binding
                             {
                                 return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
                             }
-                            self.registry.lookup_principal(&record.principal)
-                        };
-                        owner
-                            .map(|owner| ResolvedLocalAuthenticationV1 { verified, owner })
-                            .ok_or(LocalForkAuthenticationErrorV1::PeerUnauthenticated)
-                    })
+                            self.registry
+                                .lookup_principal(&record.principal)
+                                .map(|owner| (owner, principal_digest, evidence_digest))
+                                .ok_or(LocalForkAuthenticationErrorV1::PeerUnauthenticated)
+                        })
+                };
+                resolved.map(|(owner, principal_digest, evidence_digest)| {
+                    ResolvedLocalAuthenticationV1 {
+                        verified,
+                        owner,
+                        principal_digest,
+                        evidence_digest,
+                    }
+                })
             })
     }
 }
 
 /// Opaque host-signing custody.
+///
+/// Only typed ADR-106 challenges and commands enter this boundary, so the
+/// command marker is fixed by the input type. The raw purpose-limited signer
+/// never crosses it.
 pub(super) struct LocalForkHostSignerV1 {
     signer: ForkHostSigningKeyV1,
 }
 
 impl LocalForkHostSignerV1 {
+    const fn public_key(&self) -> [u8; 32] {
+        self.signer.public_key()
+    }
+
     fn sign_initialize(
         &self,
-        challenge: &CanonicalBytes,
+        challenge: &ForkAdmissionInitializeChallengeV1,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
         self.signer
-            .sign_initialize(challenge.as_slice())
+            .sign_initialize(&challenge.canonical_bytes())
             .map_err(signature_invalid)
     }
 
     fn sign_open(
         &self,
-        challenge: &CanonicalBytes,
+        challenge: &ForkAdmissionOpenChallengeV1,
     ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
         self.signer
-            .sign_open(challenge.as_slice())
+            .sign_open(&challenge.canonical_bytes())
             .map_err(signature_invalid)
     }
 
-    fn sign_principal_owner_command(
+    fn sign_command(
         &self,
-        command: &CanonicalBytes,
+        command: &PrincipalOwnerCommandV1,
         authentication: &ResolvedLocalAuthenticationV1,
-    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+    ) -> Result<ForkAdmissionHostCommandV1, LocalForkAuthenticationErrorV1> {
         if !principal_owner_matches(command, authentication.owner()) {
             return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
         }
-        self.signer
-            .sign_command(command.as_slice(), authentication.verified_evidence())
-            .map_err(signature_invalid)
+        self.command(command.to_canonical_cbor(), authentication)
     }
 
     fn sign_fork_command(
         &self,
-        command: &CanonicalBytes,
+        command: &ForkCreateCommandV1,
         authentication: &ResolvedLocalAuthenticationV1,
-    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
-        if command_fields(command, "FCC1").is_none() {
-            return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
-        }
-        self.signer
-            .sign_command(command.as_slice(), authentication.verified_evidence())
-            .map_err(signature_invalid)
+    ) -> Result<ForkAdmissionHostCommandV1, LocalForkAuthenticationErrorV1> {
+        self.command(command.to_canonical_cbor(), authentication)
     }
 
     fn sign_recovery(
         &self,
-        command: &CanonicalBytes,
-    ) -> Result<pos_core::Signature, LocalForkAuthenticationErrorV1> {
+        command: &ForkAdmissionRecoveryCommandV1,
+    ) -> Result<ForkAdmissionRecoveryProofV1, LocalForkAuthenticationErrorV1> {
+        let command = command.to_canonical_cbor();
         self.signer
-            .sign_recovery(command.as_slice())
+            .sign_recovery(&command)
             .map_err(signature_invalid)
+            .and_then(|signature| {
+                decode_record(
+                    vec![
+                        Value::Text("FRP1".to_owned()),
+                        Value::Integer(1.into()),
+                        Value::Bytes(command),
+                        Value::Bytes(signature.as_bytes().to_vec()),
+                    ],
+                    ForkAdmissionRecoveryProofV1::from_canonical_cbor,
+                )
+            })
+    }
+
+    fn command(
+        &self,
+        command: Vec<u8>,
+        authentication: &ResolvedLocalAuthenticationV1,
+    ) -> Result<ForkAdmissionHostCommandV1, LocalForkAuthenticationErrorV1> {
+        // Both FAC1 inputs fail closed with the same credential code, so one
+        // mapped arm covers the signature and the FAE1 encoding.
+        let verified = authentication.verified_evidence();
+        self.signer
+            .sign_command(&command, verified)
+            .ok()
+            .zip(verified.evidence().to_canonical_cbor().ok())
+            .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
+            .and_then(|(signature, evidence)| {
+                decode_record(
+                    vec![
+                        Value::Text("FAC1".to_owned()),
+                        Value::Integer(1.into()),
+                        Value::Bytes(command),
+                        Value::Bytes(evidence),
+                        Value::Bytes(signature.as_bytes().to_vec()),
+                    ],
+                    ForkAdmissionHostCommandV1::from_canonical_cbor,
+                )
+            })
     }
 }
 
-fn principal_owner_matches(command: &CanonicalBytes, owner: OwnerIdV1) -> bool {
-    command_fields(command, "POC1").is_some_and(|fields| {
-        matches!(fields.get(7), Some(Value::Text(candidate)) if candidate == owner.as_str())
-    })
-}
-
-/// Decode one complete command array whose first field is the exact marker.
-fn command_fields(command: &CanonicalBytes, marker: &str) -> Option<Vec<Value>> {
-    let mut cursor = Cursor::new(command.as_slice());
+fn principal_owner_matches(command: &PrincipalOwnerCommandV1, owner: OwnerIdV1) -> bool {
+    let bytes = command.to_canonical_cbor();
+    let mut cursor = Cursor::new(bytes.as_slice());
     let value = ciborium::from_reader(&mut cursor);
-    match value {
+    matches!(
+        value,
         Ok(Value::Array(fields))
-            if cursor.position() == u64::try_from(command.len()).unwrap_or(u64::MAX)
-                && matches!(fields.first(), Some(Value::Text(candidate)) if candidate == marker) =>
-        {
-            Some(fields)
-        }
-        _ => None,
-    }
+            if cursor.position() == u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+                && matches!(fields.get(7), Some(Value::Text(candidate)) if candidate == owner.as_str())
+    )
+}
+
+fn decode_record<T>(
+    record: Vec<Value>,
+    decode: impl FnOnce(&[u8]) -> Result<T, ForkAdmissionCommandCodecErrorV1>,
+) -> Result<T, LocalForkAuthenticationErrorV1> {
+    // Encoding into a Vec cannot fail; one arm covers both steps.
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&Value::Array(record), &mut bytes)
+        .ok()
+        .and_then(|()| decode(&bytes).ok())
+        .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
 }
 
 /// Non-cloneable result of one kernel-authenticated Unix connection.
@@ -343,20 +490,16 @@ pub(super) struct AuthenticatedUnixPeerV1 {
     principal: PrincipalRefV1,
 }
 
-impl AuthenticatedUnixPeerV1 {
-    #[must_use]
-    pub(super) const fn principal(&self) -> &PrincipalRefV1 {
-        &self.principal
-    }
-}
-
 /// Opaque evidence created only from a kernel-authenticated Unix peer.
 pub(super) struct ProducedLocalAuthenticationEvidenceV1(AuthenticatedPrincipalEvidenceV1);
 
-/// Verified local FAE1 together with the Owner resolved from the same FACR1 row.
+/// Verified local FAE1 together with the Owner resolved from the same FACR1 row
+/// and the FAE1/Principal commitments computed once at resolution.
 pub(super) struct ResolvedLocalAuthenticationV1 {
     verified: VerifiedAuthenticatedPrincipalEvidenceV1,
     owner: OwnerIdV1,
+    principal_digest: Hash,
+    evidence_digest: Hash,
 }
 
 impl ResolvedLocalAuthenticationV1 {
@@ -368,6 +511,16 @@ impl ResolvedLocalAuthenticationV1 {
     #[must_use]
     pub(super) const fn verified_evidence(&self) -> &VerifiedAuthenticatedPrincipalEvidenceV1 {
         &self.verified
+    }
+
+    #[must_use]
+    pub(super) const fn principal_digest(&self) -> Hash {
+        self.principal_digest
+    }
+
+    #[must_use]
+    pub(super) const fn evidence_digest(&self) -> Hash {
+        self.evidence_digest
     }
 }
 
@@ -800,6 +953,159 @@ fn operation_nonce_with(
     }
 }
 
+/// Build valid private credentials for a real current-UID Unix-socket test.
+///
+/// Production loading deliberately requires the credential files and directory
+/// to be owned by the service UID, while FACR1 forbids that UID as a client.
+/// A non-root test process cannot model both facts through filesystem ownership,
+/// so this fixture directly exercises the private parser with a synthetic,
+/// distinct service UID. It is unavailable outside tests and exposes neither a
+/// seed nor a production constructor.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(super) fn test_credentials_for_current_peer(
+) -> Result<LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1> {
+    test_credentials_for_current_peer_with_seeds([7; 32], [8; 32])
+}
+
+/// Build valid credentials whose registry deliberately excludes the current
+/// Unix peer, for listener fail-closed boundary tests.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(super) fn test_credentials_rejecting_current_peer(
+) -> Result<LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1> {
+    let peer_uid = rustix::process::geteuid().as_raw();
+    let service_uid = [1, 2]
+        .into_iter()
+        .find(|uid| *uid != peer_uid)
+        .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let registered_uid = [3, 4, 5]
+        .into_iter()
+        .find(|uid| *uid != peer_uid && *uid != service_uid)
+        .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let (facr1, fahk1) =
+        test_credential_bytes_for_client(registered_uid, service_uid, [7; 32], [8; 32])?;
+    parse_credentials(&facr1, &fahk1, service_uid)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(super) fn test_unregistered_peer(
+) -> Result<AuthenticatedUnixPeerV1, LocalForkAuthenticationErrorV1> {
+    let principal = PrincipalRefV1::try_new([0xff; 16], "unix.unregistered")
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    Ok(AuthenticatedUnixPeerV1 { principal })
+}
+
+/// Build current-peer credentials with explicit purpose-separated test seeds.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(super) fn test_credentials_for_current_peer_with_seeds(
+    adapter_seed: [u8; 32],
+    host_seed: [u8; 32],
+) -> Result<LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1> {
+    let peer_uid = rustix::process::geteuid().as_raw();
+    let service_uid = [1, 2]
+        .into_iter()
+        .find(|uid| *uid != peer_uid)
+        .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let (facr1, fahk1) =
+        test_credential_bytes_for_client(peer_uid, service_uid, adapter_seed, host_seed)?;
+    parse_credentials(&facr1, &fahk1, service_uid)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn test_credential_bytes_for_client(
+    client_uid: u32,
+    service_uid: u32,
+    adapter_seed: [u8; 32],
+    host_seed: [u8; 32],
+) -> Result<(Vec<u8>, Vec<u8>), LocalForkAuthenticationErrorV1> {
+    use ciborium::value::Value;
+    use pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1;
+
+    let principal = PrincipalRefV1::try_new([9; 16], "unix.test")
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let registry = LocalAccountRegistryV1::new(
+        "local-unix".to_owned(),
+        2,
+        vec![LocalAccountBindingV1 {
+            uid: client_uid,
+            principal: principal.clone(),
+            owner: OwnerIdV1::from_static("owner"),
+        }],
+        service_uid,
+    )
+    .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(adapter_seed)
+        .map_err(signature_invalid)?;
+    let policy = ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
+        adapter_id: "local-unix".to_owned(),
+        verifying_key: adapter.public_key(),
+        minimum_assurance: 2,
+        registry_bindings: vec![registry
+            .digest()
+            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?],
+    }])
+    .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let principal = principal
+        .encode()
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    let facr1 = test_credential_cbor(&Value::Array(vec![
+        Value::Text("FACR1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(adapter_seed.to_vec()),
+        Value::Bytes(
+            policy
+                .to_canonical_cbor()
+                .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?,
+        ),
+        Value::Text("local-unix".to_owned()),
+        Value::Integer(2.into()),
+        Value::Array(vec![Value::Array(vec![
+            Value::Integer(client_uid.into()),
+            Value::Bytes(principal.as_slice().to_vec()),
+            Value::Text("owner".to_owned()),
+        ])]),
+    ]))?;
+    let fahk1 = test_credential_cbor(&Value::Array(vec![
+        Value::Text("FAHK1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(host_seed.to_vec()),
+    ]))?;
+    Ok((facr1, fahk1))
+}
+
+/// Produce two valid, purpose-separated credential payloads for service tests.
+///
+/// This fixture is test-only. Production authority inputs can only enter
+/// through the protected filesystem loader.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(super) fn test_credential_bytes_for_service(
+    service_uid: u32,
+    adapter_seed: [u8; 32],
+    host_seed: [u8; 32],
+) -> Result<(Vec<u8>, Vec<u8>), LocalForkAuthenticationErrorV1> {
+    let client_uid = [1, 2]
+        .into_iter()
+        .find(|uid| *uid != service_uid)
+        .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    test_credential_bytes_for_client(client_uid, service_uid, adapter_seed, host_seed)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn test_credential_cbor(
+    value: &ciborium::value::Value,
+) -> Result<Vec<u8>, LocalForkAuthenticationErrorV1> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -828,7 +1134,7 @@ mod tests {
     }
 
     fn current_uid() -> u32 {
-        rustix::process::getuid().as_raw()
+        rustix::process::geteuid().as_raw()
     }
 
     fn mapped_uid() -> u32 {
@@ -847,49 +1153,30 @@ mod tests {
         }
     }
 
-    fn registry(uid: u32) -> LocalAccountRegistryV1 {
+    fn registry(uid: u32, service_uid: u32) -> LocalAccountRegistryV1 {
         test_ok(LocalAccountRegistryV1::new(
             "local-unix".to_owned(),
             2,
             vec![binding(uid)],
-            current_uid(),
+            service_uid,
+        ))
+    }
+
+    fn credential_bytes_for_service(
+        uid: u32,
+        service_uid: u32,
+        host_seed: [u8; 32],
+    ) -> (Vec<u8>, Vec<u8>) {
+        test_ok(test_credential_bytes_for_client(
+            uid,
+            service_uid,
+            [7; 32],
+            host_seed,
         ))
     }
 
     fn credential_bytes(uid: u32, host_seed: [u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        let adapter_seed = [7; 32];
-        let registry = registry(uid);
-        let adapter = test_ok(ForkAuthenticationAdapterSigningKeyV1::from_seed(
-            adapter_seed,
-        ));
-        let policy = test_ok(ForkAuthenticationPolicyV1::new(vec![
-            ForkAuthenticationAdapterPolicyV1 {
-                adapter_id: "local-unix".to_owned(),
-                verifying_key: adapter.public_key(),
-                minimum_assurance: 2,
-                registry_bindings: vec![test_ok(registry.digest())],
-            },
-        ]));
-        let principal = test_ok(binding(uid).principal.encode());
-        let facr1 = encode(&Value::Array(vec![
-            Value::Text("FACR1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(adapter_seed.to_vec()),
-            Value::Bytes(test_ok(policy.to_canonical_cbor())),
-            Value::Text("local-unix".to_owned()),
-            Value::Integer(2.into()),
-            Value::Array(vec![Value::Array(vec![
-                Value::Integer(uid.into()),
-                Value::Bytes(principal.as_slice().to_vec()),
-                Value::Text("owner".to_owned()),
-            ])]),
-        ]));
-        let fahk1 = encode(&Value::Array(vec![
-            Value::Text("FAHK1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(host_seed.to_vec()),
-        ]));
-        (facr1, fahk1)
+        credential_bytes_for_service(uid, current_uid(), host_seed)
     }
 
     fn credentials_directory(auth: &[u8], host: &[u8]) -> tempfile::TempDir {
@@ -972,142 +1259,11 @@ mod tests {
         Ok(fields)
     }
 
-    fn loaded_credentials() -> LocalForkAuthenticationCredentialsV1 {
-        let (auth, host) = credential_bytes(mapped_uid(), [8; 32]);
-        let directory = credentials_directory(&auth, &host);
-        test_ok(LocalForkAuthenticationCredentialsV1::load(
-            directory.path(),
-            current_uid(),
-        ))
-    }
-
-    fn resolved_authentication(
-        credentials: &LocalForkAuthenticationCredentialsV1,
-    ) -> ResolvedLocalAuthenticationV1 {
-        let peer = AuthenticatedUnixPeerV1 {
-            principal: binding(mapped_uid()).principal,
-        };
-        let evidence = test_ok(credentials.produce_with(peer, || Ok(1), || Ok([1; 32])));
-        test_ok(credentials.resolve(evidence))
-    }
-
-    fn host_signer() -> ForkHostSigningKeyV1 {
-        test_ok(ForkHostSigningKeyV1::from_seed([8; 32]))
-    }
-
-    #[test]
-    fn protected_host_signer_accepts_only_typed_adr106_proofs() {
-        let credentials = loaded_credentials();
-        let signer = host_signer();
-        let initialize = CanonicalBytes::from_vec(encode(&Value::Array(vec![
-            Value::Text("FAI1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(vec![1; 32]),
-            Value::Bytes(vec![2; 32]),
-            Value::Bytes(signer.public_key().to_vec()),
-            Value::Bytes(vec![4; 32]),
-        ])));
-        assert_eq!(
-            test_ok(credentials.sign_initialize(&initialize)),
-            test_ok(signer.sign_initialize(initialize.as_slice()))
-        );
-
-        let open = CanonicalBytes::from_vec(encode(&Value::Array(vec![
-            Value::Text("FAO1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(vec![1; 32]),
-            Value::Bytes(vec![2; 32]),
-            Value::Bytes(vec![3; 32]),
-        ])));
-        assert_eq!(
-            test_ok(credentials.sign_open(&open)),
-            test_ok(signer.sign_open(open.as_slice()))
-        );
-
-        let recovery = CanonicalBytes::from_vec(encode(&Value::Array(vec![
-            Value::Text("FRC1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(vec![1; 32]),
-            Value::Bytes(vec![2; 32]),
-            Value::Integer(1.into()),
-            Value::Bytes(vec![3; 32]),
-        ])));
-        assert_eq!(
-            test_ok(credentials.sign_recovery(&recovery)),
-            test_ok(signer.sign_recovery(recovery.as_slice()))
-        );
-
-        expect_invalid(credentials.sign_initialize(&CanonicalBytes::from_static(b"FAI1")));
-        expect_invalid(credentials.sign_open(&CanonicalBytes::from_static(b"FAO1")));
-        expect_invalid(credentials.sign_recovery(&CanonicalBytes::from_static(b"FRC1")));
-    }
-
-    #[test]
-    fn protected_host_signer_binds_commands_to_resolved_authentication() {
-        let credentials = loaded_credentials();
-        let signer = host_signer();
-        let authentication = resolved_authentication(&credentials);
-        let evidence = authentication.verified_evidence();
-        let evidence_digest = test_ok(evidence.evidence().digest());
-        let principal_digest =
-            test_ok(principal_digest_v1(&evidence.evidence().record().principal));
-        let owner = authentication.owner();
-        let principal_owner = CanonicalBytes::from_vec(encode(&Value::Array(vec![
-            Value::Text("POC1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(vec![1; 32]),
-            Value::Bytes(vec![2; 32]),
-            Value::Bytes(vec![3; 32]),
-            Value::Bytes(evidence_digest.as_bytes().to_vec()),
-            Value::Bytes(principal_digest.as_bytes().to_vec()),
-            Value::Text(owner.as_str().to_owned()),
-        ])));
-        assert_eq!(
-            test_ok(credentials.sign_principal_owner_command(&principal_owner, &authentication)),
-            test_ok(signer.sign_command(principal_owner.as_slice(), evidence))
-        );
-
-        let fork = CanonicalBytes::from_vec(encode(&Value::Array(vec![
-            Value::Text("FCC1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(vec![1; 32]),
-            Value::Bytes(vec![2; 32]),
-            Value::Bytes(vec![3; 32]),
-            Value::Bytes(evidence_digest.as_bytes().to_vec()),
-            Value::Bytes(principal_digest.as_bytes().to_vec()),
-            Value::Bytes(vec![4; 16]),
-            Value::Integer(5.into()),
-            Value::Integer(5.into()),
-            Value::Bytes(vec![6; 32]),
-            Value::Bytes(vec![7; 32]),
-            Value::Integer(1.into()),
-            Value::Text("child".to_owned()),
-        ])));
-        assert_eq!(
-            test_ok(credentials.sign_fork_command(&fork, &authentication)),
-            test_ok(signer.sign_command(fork.as_slice(), evidence))
-        );
-
-        let wrong_owner = CanonicalBytes::from_vec(encode(&Value::Array(vec![
-            Value::Text("POC1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(vec![1; 32]),
-            Value::Bytes(vec![2; 32]),
-            Value::Bytes(vec![3; 32]),
-            Value::Bytes(evidence_digest.as_bytes().to_vec()),
-            Value::Bytes(principal_digest.as_bytes().to_vec()),
-            Value::Text("other-owner".to_owned()),
-        ])));
-        expect_invalid(credentials.sign_principal_owner_command(&wrong_owner, &authentication));
-        expect_invalid(credentials.sign_fork_command(&principal_owner, &authentication));
-        expect_invalid(credentials.sign_principal_owner_command(&fork, &authentication));
-    }
-
     #[test]
     fn pathname_unix_listener_rejects_service_peer_and_resolves_trusted_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let uid = mapped_uid();
-        let (auth, host) = credential_bytes(uid, [8; 32]);
+        let (auth, host) = credential_bytes_for_service(uid, current_uid(), [8; 32]);
         let directory = credentials_directory(&auth, &host);
         let credentials =
             LocalForkAuthenticationCredentialsV1::load(directory.path(), current_uid())?;
@@ -1133,7 +1289,7 @@ mod tests {
         let peer = AuthenticatedUnixPeerV1 {
             principal: binding(uid).principal,
         };
-        assert_eq!(peer.principal().trust_domain(), "unix.test");
+        assert_eq!(peer.principal.trust_domain(), "unix.test");
         let evidence = credentials.produce(peer)?;
         let resolved = credentials.resolve(evidence)?;
         assert_eq!(resolved.owner(), OwnerIdV1::from_static("owner"));
@@ -1193,17 +1349,10 @@ mod tests {
             directory.path(),
             current_uid(),
         ));
-        let initialize = CanonicalBytes::from_vec(encode(&Value::Array(vec![
-            Value::Text("FAI1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(vec![1; 32]),
-            Value::Bytes(vec![2; 32]),
-            Value::Bytes(host_signer().public_key().to_vec()),
-            Value::Bytes(vec![4; 32]),
-        ])));
+        let initialize = initialize_challenge(host_signer().public_key());
         assert_eq!(
             test_ok(credentials.sign_initialize(&initialize)),
-            test_ok(host_signer().sign_initialize(initialize.as_slice()))
+            test_ok(host_signer().sign_initialize(&test_ok(initialize.to_canonical_cbor())))
         );
 
         expect_load_invalid(&auth, &literal[..41], current_uid());
@@ -1215,7 +1364,7 @@ mod tests {
     #[test]
     fn loader_accepts_separate_valid_credentials() {
         let uid = mapped_uid();
-        let (auth, host) = credential_bytes(uid, [8; 32]);
+        let (auth, host) = credential_bytes_for_service(uid, current_uid(), [8; 32]);
         let directory = credentials_directory(&auth, &host);
         let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
@@ -1235,7 +1384,7 @@ mod tests {
     #[test]
     fn resolver_rejects_policy_and_exact_registry_mismatches() {
         let uid = mapped_uid();
-        let (auth, host) = credential_bytes(uid, [8; 32]);
+        let (auth, host) = credential_bytes_for_service(uid, current_uid(), [8; 32]);
         let directory = credentials_directory(&auth, &host);
         let credentials = test_ok(LocalForkAuthenticationCredentialsV1::load(
             directory.path(),
@@ -1293,6 +1442,143 @@ mod tests {
                 .sign_authenticated_principal(registry_mismatch),
         );
         expect_invalid(credentials.resolve(ProducedLocalAuthenticationEvidenceV1(evidence)));
+    }
+
+    fn loaded_credentials() -> LocalForkAuthenticationCredentialsV1 {
+        let (auth, host) = credential_bytes(mapped_uid(), [8; 32]);
+        let directory = credentials_directory(&auth, &host);
+        test_ok(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            current_uid(),
+        ))
+    }
+
+    fn resolved_authentication(
+        credentials: &LocalForkAuthenticationCredentialsV1,
+    ) -> ResolvedLocalAuthenticationV1 {
+        let peer = AuthenticatedUnixPeerV1 {
+            principal: binding(mapped_uid()).principal,
+        };
+        let evidence = test_ok(credentials.produce_with(peer, || Ok(1), || Ok([1; 32])));
+        test_ok(credentials.resolve(evidence))
+    }
+
+    fn host_signer() -> ForkHostSigningKeyV1 {
+        test_ok(ForkHostSigningKeyV1::from_seed([8; 32]))
+    }
+
+    fn initialize_challenge(host_key: [u8; 32]) -> ForkAdmissionInitializeChallengeV1 {
+        test_ok(ForkAdmissionInitializeChallengeV1::new(
+            pos_core::Hash::from_bytes([1; 32]),
+            pos_core::Hash::from_bytes([2; 32]),
+            pos_core::PublicKey::from_bytes(host_key),
+            pos_core::Hash::from_bytes([4; 32]),
+        ))
+    }
+
+    #[test]
+    fn protected_host_signer_accepts_only_typed_adr106_proofs() {
+        let credentials = loaded_credentials();
+        let signer = host_signer();
+        let initialize = initialize_challenge(signer.public_key());
+        assert_eq!(
+            test_ok(credentials.sign_initialize(&initialize)),
+            test_ok(signer.sign_initialize(&test_ok(initialize.to_canonical_cbor())))
+        );
+        // FAI1 is bound to the custody key; a challenge for another key is refused.
+        let foreign = test_ok(ForkHostSigningKeyV1::from_seed([9; 32]));
+        expect_invalid(credentials.sign_initialize(&initialize_challenge(foreign.public_key())));
+
+        let open = test_ok(ForkAdmissionOpenChallengeV1::new(
+            pos_core::Hash::from_bytes([1; 32]),
+            pos_core::Hash::from_bytes([2; 32]),
+            pos_core::Hash::from_bytes([3; 32]),
+        ));
+        assert_eq!(
+            test_ok(credentials.sign_open(&open)),
+            test_ok(signer.sign_open(&test_ok(open.to_canonical_cbor())))
+        );
+
+        let recovery_bytes = encode(&Value::Array(vec![
+            Value::Text("FRC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![3; 32]),
+        ]));
+        let recovery = test_ok(ForkAdmissionRecoveryCommandV1::from_canonical_cbor(
+            &recovery_bytes,
+        ));
+        let proof = test_ok(credentials.sign_recovery(&recovery));
+        assert_eq!(proof.command_bytes(), recovery_bytes);
+        assert_eq!(
+            proof.signature(),
+            test_ok(signer.sign_recovery(&recovery_bytes))
+        );
+    }
+
+    #[test]
+    fn protected_host_signer_binds_commands_to_resolved_authentication() {
+        let credentials = loaded_credentials();
+        let signer = host_signer();
+        let authentication = resolved_authentication(&credentials);
+        let evidence = authentication.verified_evidence();
+        let evidence_digest = test_ok(evidence.evidence().digest());
+        let principal_digest =
+            test_ok(principal_digest_v1(&evidence.evidence().record().principal));
+        let poc1 = |owner: &str| {
+            encode(&Value::Array(vec![
+                Value::Text("POC1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Bytes(vec![1; 32]),
+                Value::Bytes(vec![2; 32]),
+                Value::Bytes(vec![3; 32]),
+                Value::Bytes(evidence_digest.as_bytes().to_vec()),
+                Value::Bytes(principal_digest.as_bytes().to_vec()),
+                Value::Text(owner.to_owned()),
+            ]))
+        };
+        let principal_owner_bytes = poc1(authentication.owner().as_str());
+        let principal_owner = test_ok(PrincipalOwnerCommandV1::from_canonical_cbor(
+            &principal_owner_bytes,
+        ));
+        let host_command =
+            test_ok(credentials.sign_principal_owner_command(&principal_owner, &authentication));
+        assert_eq!(host_command.command_bytes(), principal_owner_bytes);
+        assert_eq!(
+            host_command.signature(),
+            test_ok(signer.sign_command(&principal_owner_bytes, evidence))
+        );
+
+        let fork_bytes = encode(&Value::Array(vec![
+            Value::Text("FCC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Bytes(vec![3; 32]),
+            Value::Bytes(evidence_digest.as_bytes().to_vec()),
+            Value::Bytes(principal_digest.as_bytes().to_vec()),
+            Value::Bytes(vec![4; 16]),
+            Value::Integer(5.into()),
+            Value::Integer(5.into()),
+            Value::Bytes(vec![6; 32]),
+            Value::Bytes(vec![7; 32]),
+            Value::Integer(1.into()),
+            Value::Text("child".to_owned()),
+        ]));
+        let fork = test_ok(ForkCreateCommandV1::from_canonical_cbor(&fork_bytes));
+        let host_command = test_ok(credentials.sign_fork_command(&fork, &authentication));
+        assert_eq!(host_command.command_bytes(), fork_bytes);
+        assert_eq!(
+            host_command.signature(),
+            test_ok(signer.sign_command(&fork_bytes, evidence))
+        );
+
+        let wrong_owner = test_ok(PrincipalOwnerCommandV1::from_canonical_cbor(&poc1(
+            "other-owner",
+        )));
+        expect_invalid(credentials.sign_principal_owner_command(&wrong_owner, &authentication));
     }
 
     #[test]
@@ -1364,6 +1650,35 @@ mod tests {
             || Ok(1),
             || Err(LocalForkAuthenticationErrorV1::CredentialUnavailable),
         ));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn principal_owner_command_is_bound_to_the_resolved_owner(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let credentials = test_credentials_for_current_peer()?;
+        let (_client, server) = UnixStream::pair()?;
+        let authentication =
+            credentials.resolve(credentials.produce(credentials.authenticate_peer(&server)?)?)?;
+        let command = |owner: &str| {
+            PrincipalOwnerCommandV1::from_canonical_cbor(&encode(&Value::Array(vec![
+                Value::Text("POC1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Bytes(vec![1; 32]),
+                Value::Bytes(vec![2; 32]),
+                Value::Bytes(vec![3; 32]),
+                Value::Bytes(vec![4; 32]),
+                Value::Bytes(vec![5; 32]),
+                Value::Text(owner.to_owned()),
+            ])))
+        };
+
+        let substituted = command("other-owner")?;
+        assert_eq!(
+            credentials.sign_principal_owner_command(&substituted, &authentication),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        Ok(())
     }
 
     #[test]
@@ -1480,6 +1795,14 @@ mod tests {
         test_ok(fs::set_permissions(
             directory.path().join(AUTH_CREDENTIAL_NAME),
             fs::Permissions::from_mode(0o600),
+        ));
+        test_ok(fs::set_permissions(
+            directory.path().join(HOST_CREDENTIAL_NAME),
+            fs::Permissions::from_mode(0o400),
+        ));
+        expect_invalid(LocalForkAuthenticationCredentialsV1::load(
+            directory.path(),
+            current_uid(),
         ));
         test_ok(fs::write(
             directory.path().join(AUTH_CREDENTIAL_NAME),
@@ -1643,7 +1966,7 @@ mod tests {
         let service_uid = current_uid();
         expect_invalid(parse_credentials(&auth, &host, uid));
 
-        let registry = registry(uid);
+        let registry = registry(uid, service_uid);
         let wrong_signer = test_ok(ForkAuthenticationAdapterSigningKeyV1::from_seed([9; 32]));
         let wrong_policy = test_ok(ForkAuthenticationPolicyV1::new(vec![
             ForkAuthenticationAdapterPolicyV1 {

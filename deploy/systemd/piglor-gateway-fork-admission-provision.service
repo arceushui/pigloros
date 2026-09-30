@@ -1,0 +1,22 @@
+[Unit]
+Description=Provision Piglor Gateway Fork admission authority
+Conflicts=piglor-gateway.service
+Before=piglor-gateway.service
+
+[Service]
+Type=oneshot
+User=pigloros
+Group=pigloros
+UMask=0077
+StateDirectory=pigloros
+StateDirectoryMode=0700
+LoadCredentialEncrypted=pigloros.fork-admission-auth:/etc/credstore.encrypted/pigloros.fork-admission-auth.cred
+LoadCredentialEncrypted=pigloros.fork-admission-host-signer:/etc/credstore.encrypted/pigloros.fork-admission-host-signer.cred
+ExecStart=/usr/bin/piglor-gateway provision-local-fork-authority /var/lib/pigloros/gateway.db
+NoNewPrivileges=yes
+PrivateMounts=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/pigloros
