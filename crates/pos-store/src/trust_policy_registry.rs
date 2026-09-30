@@ -561,7 +561,10 @@ mod tests {
     #[test]
     fn registry_errors_have_stable_public_messages() {
         for (error, message) in [
-            (TrustPolicyRegistryErrorV1::InvalidSnapshot, "invalid deployment TPS1 snapshot"),
+            (
+                TrustPolicyRegistryErrorV1::InvalidSnapshot,
+                "invalid deployment TPS1 snapshot",
+            ),
             (
                 TrustPolicyRegistryErrorV1::InvalidOperatorSignature,
                 "TPS1 operator signature is not trusted",
@@ -627,9 +630,10 @@ mod tests {
         DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)?;
         let mut registry = DeploymentTrustPolicyRegistryV1::open_current(&path, anchor)?;
         let profile = fixture_profile()?;
-        let epoch = registry.with_admitted_epf1(&genesis, request(&snapshot, &profile), |proof| {
-            Ok(proof.epoch())
-        })?;
+        let epoch =
+            registry.with_admitted_epf1(&genesis, request(&snapshot, &profile), |proof| {
+                Ok(proof.epoch())
+            })?;
         assert_eq!(epoch, 1);
         Ok(())
     }
