@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    cell::Cell,
+    sync::{Arc, Mutex},
+};
 
 use pos_core::{
     adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
@@ -74,6 +77,21 @@ impl LocalAdapterProviderV1 for EchoProvider {
 
 struct RejectingProvider;
 
+struct MutableLocalProvider {
+    calls: Cell<u32>,
+}
+
+impl LocalAdapterProviderV1 for MutableLocalProvider {
+    fn invoke(
+        &mut self,
+        _: &AdapterInvocationV1,
+        _: LocalAdapterIdempotencyKeyV1,
+    ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
+        self.calls.set(self.calls.get().saturating_add(1));
+        Ok(LocalAdapterProviderResponseV1::unacknowledged(Vec::new()))
+    }
+}
+
 impl LocalAdapterProviderV1 for RejectingProvider {
     fn invoke(
         &mut self,
@@ -96,7 +114,7 @@ impl LocalAdapterProviderV1 for UnacknowledgedProvider {
         _: &AdapterInvocationV1,
         _: LocalAdapterIdempotencyKeyV1,
     ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
-        Ok(LocalAdapterProviderResponseV1::read_only(b"response".to_vec()))
+        Ok(LocalAdapterProviderResponseV1::unacknowledged(b"response".to_vec()))
     }
 }
 
@@ -315,6 +333,15 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
             .as_deref(),
         Some(closed_bytes.as_slice())
     );
+}
+
+#[test]
+fn local_registry_accepts_send_but_not_sync_providers() {
+    let provider = MutableLocalProvider {
+        calls: Cell::new(0),
+    };
+    let (_registry, admitted, _) = registry_with_adapter(Box::new(provider));
+    assert_eq!(admitted.adapter_admission().as_input().entries.len(), 1);
 }
 
 #[test]
