@@ -74,6 +74,8 @@ pub use pos_core::store::{
 };
 use pos_core::ErasureGate;
 pub use pos_core::{
+    ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
+    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     CanonicalBytes, CapabilityRevocationV1, CoreError, CorrelationId, EntityId,

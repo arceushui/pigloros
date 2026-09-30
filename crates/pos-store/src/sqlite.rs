@@ -11,7 +11,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, TransactionBehavior,
 };
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -45,12 +45,15 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
-    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
-    ErasureForkRecoveryMutationV1, ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate,
-    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
+    validate_artifact_registration_catalog_graph_v1, ArtifactRegistrationCatalogRowV1,
+    ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1,
+    ArtifactRegistrationPersistencePortV1, AuthorityCommitOutcomeV1, AuthorityMutationPermitV1,
+    AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
+    AuthorityPersistenceStateV1, CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit,
+    CoreError, ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1,
+    ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryMutationV1,
+    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
+    ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
     ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
     ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
     ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
@@ -64,10 +67,11 @@ use pos_core::{
     ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
     KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryErrorV1,
     KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PersistedAuthorityV1, PreparedArtifactRegistrationBatchV1,
+    PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PublicKey, Signature, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
+    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 use crate::fork_admission_authority::{
@@ -911,6 +915,24 @@ fn normalize_schema_sql(sql: &str) -> String {
         .collect()
 }
 
+const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artifact_registrations (
+         owner_id TEXT NOT NULL,
+         registration_address BLOB NOT NULL CHECK (length(registration_address) = 32),
+         artifact_class INTEGER NOT NULL CHECK (artifact_class BETWEEN 0 AND 6),
+         artifact_digest BLOB NOT NULL CHECK (length(artifact_digest) = 32),
+         artifact_bytes BLOB NOT NULL,
+         registration_cbor BLOB NOT NULL CHECK (length(registration_cbor) <= 1048576),
+         PRIMARY KEY (registration_address),
+         UNIQUE (owner_id, artifact_class, artifact_digest)
+     );
+     CREATE TABLE IF NOT EXISTS artifact_registration_operations (
+         owner_id TEXT NOT NULL,
+         operation_id BLOB NOT NULL CHECK (length(operation_id) = 32),
+         root_registration_address BLOB NOT NULL CHECK (length(root_registration_address) = 32),
+         PRIMARY KEY (owner_id, operation_id),
+         UNIQUE (owner_id, root_registration_address)
+     );";
+
 /// Validated `(EOR1, optional FIA1, FOP1)` rows for one child suffix.
 type ForkEventSuffixV1 = Vec<(
     EventOriginRecordV1,
@@ -1529,6 +1551,7 @@ impl SqliteStore {
                     self.validate_erasure_schema()
                 }
             })
+            .and_then(|()| self.prepare_artifact_registration_schema(read_only))
             .and_then(|()| {
                 if read_only {
                     self.validate_authority_schema_and_state()
@@ -1538,6 +1561,16 @@ impl SqliteStore {
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                 }
             })
+    }
+
+    fn prepare_artifact_registration_schema(&self, read_only: bool) -> Result<(), CoreError> {
+        if read_only {
+            Ok(())
+        } else {
+            self.conn
+                .execute_batch(ARTIFACT_REGISTRATION_SCHEMA_SQL)
+                .map_err(Self::into_storage_error)
+        }
     }
 
     fn should_initialize_schema(&self, initialize: bool) -> Result<bool, CoreError> {
@@ -4795,6 +4828,29 @@ impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
 }
 
 impl EventStore for SqliteStore {
+    fn commit_artifact_registration_batch(
+        &mut self,
+        batch: pos_core::PreparedArtifactRegistrationBatchV1,
+    ) -> Result<
+        pos_core::ArtifactRegistrationCommitOutcomeV1,
+        pos_core::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        ArtifactRegistrationPersistencePortV1::commit_artifact_registration_batch(self, batch)
+    }
+
+    fn read_artifact_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        registration_address: Hash,
+    ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>
+    {
+        ArtifactRegistrationPersistencePortV1::read_artifact_registration(
+            self,
+            owner_id,
+            registration_address,
+        )
+    }
+
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         self.bind_erasure_gate_impl(gate)
     }
@@ -6044,6 +6100,503 @@ impl crate::ErasureRejoinPersistencePortV1 for SqliteStore {
                 result.and_then(|proof| crate::validate_rejoin_proof_reference(reference, proof))
             })
             .transpose()
+    }
+}
+
+impl ArtifactRegistrationPersistencePortV1 for SqliteStore {
+    fn commit_artifact_registration_batch(
+        &mut self,
+        batch: PreparedArtifactRegistrationBatchV1,
+    ) -> Result<ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1> {
+        if batch.records().is_empty()
+            || !batch.records().iter().any(|record| {
+                record.owner_id() == batch.owner_id()
+                    && record.registration_address() == batch.root_registration_address()
+            })
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure);
+        }
+        sqlite_artifact_registration_schema_exists(&self.conn)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+            .and_then(|table_exists| {
+                if table_exists {
+                    Ok(())
+                } else {
+                    Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+                }
+            })?;
+
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+        let owner_id = *batch.owner_id();
+        let result = (|| {
+            sqlite_check_artifact_registration_operation(
+                &self.conn,
+                &owner_id,
+                batch.root_operation_id(),
+                batch.root_registration_address(),
+            )?;
+            let mut inserted = false;
+            for record in batch.records() {
+                inserted |= commit_sqlite_artifact_registration_record(&self.conn, record)?;
+            }
+            sqlite_commit_artifact_registration_operation(
+                &self.conn,
+                &owner_id,
+                batch.root_operation_id(),
+                batch.root_registration_address(),
+            )?;
+            sqlite_validate_artifact_registration_closure(
+                &self.conn,
+                batch.root_registration_address(),
+            )?;
+            Ok(if inserted {
+                ArtifactRegistrationCommitOutcomeV1::Applied
+            } else {
+                ArtifactRegistrationCommitOutcomeV1::ExactRetry
+            })
+        })();
+        finish_artifact_registration_scope(&self.conn, scope, result)
+    }
+
+    fn read_artifact_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        registration_address: Hash,
+    ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>
+    {
+        sqlite_read_artifact_registration(&self.conn, owner_id, registration_address)
+    }
+}
+
+fn commit_sqlite_artifact_registration_record(
+    connection: &Connection,
+    record: &PreparedArtifactRegistrationRecordV1,
+) -> Result<bool, ArtifactRegistrationPersistenceErrorV1> {
+    let expected = ArtifactRegistrationCatalogRowV1::from_persisted(
+        *record.owner_id(),
+        record.artifact_class(),
+        record.artifact_digest(),
+        record.registration_address(),
+        record.artifact_bytes().to_vec(),
+        record.registration().canonical_cbor(),
+    )?;
+    let by_address =
+        sqlite_load_artifact_registration_by_address(connection, record.registration_address())?;
+    let identity_address = connection
+        .query_row(
+            "SELECT registration_address FROM artifact_registrations
+             WHERE owner_id = ?1 AND artifact_class = ?2 AND artifact_digest = ?3",
+            params![
+                record.owner_id().as_str(),
+                artifact_class_code(record.artifact_class()),
+                record.artifact_digest().as_bytes().as_slice(),
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    match (by_address, identity_address) {
+        (Some(existing), Some(address))
+            if existing == expected
+                && address.as_slice() == record.registration_address().as_bytes().as_slice() =>
+        {
+            Ok(false)
+        }
+        (None, None) => {
+            connection
+                .execute(
+                    "INSERT INTO artifact_registrations
+                     (owner_id, registration_address, artifact_class,
+                      artifact_digest, artifact_bytes, registration_cbor)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        record.owner_id().as_str(),
+                        record.registration_address().as_bytes().as_slice(),
+                        artifact_class_code(record.artifact_class()),
+                        record.artifact_digest().as_bytes().as_slice(),
+                        record.artifact_bytes(),
+                        record.registration().canonical_cbor(),
+                    ],
+                )
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+            let stored = sqlite_load_artifact_registration_by_address(
+                connection,
+                record.registration_address(),
+            )?
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if stored != expected {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+            Ok(true)
+        }
+        (Some(_), None) | (None, Some(_)) | (Some(_), Some(_)) => {
+            Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
+        }
+    }
+}
+
+fn sqlite_artifact_registration_table_exists(
+    connection: &Connection,
+) -> Result<bool, rusqlite::Error> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'artifact_registrations')",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn sqlite_artifact_registration_schema_exists(
+    connection: &Connection,
+) -> Result<bool, rusqlite::Error> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'artifact_registrations')
+         AND EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'artifact_registration_operations')",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn sqlite_read_artifact_registration(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    registration_address: Hash,
+) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+    let table_exists = sqlite_artifact_registration_table_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if !table_exists {
+        return Ok(None);
+    }
+    let complete_schema = sqlite_artifact_registration_schema_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if !complete_schema {
+        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+    }
+    let Some(row) = sqlite_load_artifact_registration_by_address(connection, registration_address)?
+    else {
+        if sqlite_artifact_registration_operation_references_root(
+            connection,
+            owner_id,
+            registration_address,
+        )? {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        return Ok(None);
+    };
+    if row.owner_id() != owner_id {
+        return Ok(None);
+    }
+    sqlite_validate_artifact_registration_closure(connection, registration_address)?;
+    Ok(Some(row))
+}
+
+fn sqlite_artifact_registration_operation_references_root(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    root_address: Hash,
+) -> Result<bool, ArtifactRegistrationPersistenceErrorV1> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM artifact_registration_operations
+             WHERE owner_id = ?1 AND root_registration_address = ?2)",
+            params![owner_id.as_str(), root_address.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+}
+
+fn sqlite_load_artifact_registration_by_address(
+    connection: &Connection,
+    registration_address: Hash,
+) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+    let table_exists = sqlite_artifact_registration_table_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if !table_exists {
+        return Ok(None);
+    }
+    let row = connection
+        .query_row(
+            "SELECT owner_id, artifact_class, artifact_digest, artifact_bytes, registration_cbor
+             FROM artifact_registrations
+             WHERE registration_address = ?1",
+            params![registration_address.as_bytes().as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    row.map(
+        |(owner_text, class_code, digest_bytes, artifact_bytes, registration_cbor)| {
+            let owner_id = OwnerIdV1::new(owner_text)
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            let artifact_class = artifact_class_from_code(class_code)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            let artifact_digest = sqlite_hash(&digest_bytes)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            ArtifactRegistrationCatalogRowV1::from_persisted(
+                owner_id,
+                artifact_class,
+                artifact_digest,
+                registration_address,
+                artifact_bytes,
+                &registration_cbor,
+            )
+        },
+    )
+    .transpose()
+}
+
+fn sqlite_validate_artifact_registration_closure(
+    connection: &Connection,
+    root: Hash,
+) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    let mut pending = vec![root];
+    let mut seen = BTreeSet::new();
+    let mut catalog_rows = Vec::new();
+    while let Some(address) = pending.pop() {
+        if !seen.insert(address) {
+            continue;
+        }
+        let row = sqlite_load_artifact_registration_by_address(connection, address)?
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        let identity_address = connection
+            .query_row(
+                "SELECT registration_address FROM artifact_registrations
+                 WHERE owner_id = ?1 AND artifact_class = ?2 AND artifact_digest = ?3",
+                params![
+                    row.owner_id().as_str(),
+                    artifact_class_code(row.artifact_class()),
+                    row.artifact_digest().as_bytes().as_slice(),
+                ],
+                |stored| stored.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if identity_address.as_slice() != address.as_bytes().as_slice() {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        pending.extend(
+            row.registration()
+                .fields()
+                .child_artifacts
+                .iter()
+                .map(|edge| edge.registration_address),
+        );
+        catalog_rows.push(row);
+    }
+    validate_artifact_registration_catalog_graph_v1(root, &catalog_rows)?;
+    let root_row = sqlite_load_artifact_registration_by_address(connection, root)?
+        .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+    if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
+        && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
+    {
+        let root_record = ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        let stored_root = sqlite_artifact_registration_operation_root(
+            connection,
+            root_row.owner_id(),
+            root_record.as_input().run_operation_id,
+        )?;
+        if stored_root != Some(root) {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_artifact_registration_operation_root(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    operation_id: Hash,
+) -> Result<Option<Hash>, ArtifactRegistrationPersistenceErrorV1> {
+    connection
+        .query_row(
+            "SELECT root_registration_address FROM artifact_registration_operations
+             WHERE owner_id = ?1 AND operation_id = ?2",
+            params![owner_id.as_str(), operation_id.as_bytes().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?
+        .map(|bytes| {
+            sqlite_hash(&bytes).ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        })
+        .transpose()
+}
+
+fn sqlite_check_artifact_registration_operation(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    operation_id: Hash,
+    root_address: Hash,
+) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    let operation_root =
+        sqlite_artifact_registration_operation_root(connection, owner_id, operation_id)?;
+    let root_operation = connection
+        .query_row(
+            "SELECT operation_id FROM artifact_registration_operations
+             WHERE owner_id = ?1 AND root_registration_address = ?2",
+            params![owner_id.as_str(), root_address.as_bytes().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?
+        .map(|bytes| {
+            sqlite_hash(&bytes).ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        })
+        .transpose()?;
+    let root_row = sqlite_load_artifact_registration_by_address(connection, root_address)?;
+    match (operation_root, root_operation, root_row) {
+        (None, None, None) => Ok(()),
+        (Some(existing_root), Some(existing_operation), Some(row))
+            if existing_root == root_address
+                && existing_operation == operation_id
+                && row.owner_id() == owner_id
+                && row.artifact_class() == ErasureArtifactClassV1::ReproManifest =>
+        {
+            let root = ReproManifestRootV1::from_canonical_cbor(row.artifact_bytes())
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if root.as_input().run_operation_id == operation_id {
+                Ok(())
+            } else {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            }
+        }
+        (Some(existing_root), _, _) if existing_root != root_address => {
+            let existing_row =
+                sqlite_load_artifact_registration_by_address(connection, existing_root)?
+                    .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if existing_row.owner_id() != owner_id
+                || existing_row.artifact_class() != ErasureArtifactClassV1::ReproManifest
+            {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+            let existing_manifest =
+                ReproManifestRootV1::from_canonical_cbor(existing_row.artifact_bytes())
+                    .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if existing_manifest.as_input().run_operation_id != operation_id {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+            let existing_operation = sqlite_artifact_registration_operation_root(
+                connection,
+                owner_id,
+                existing_manifest.as_input().run_operation_id,
+            )?;
+            if existing_operation != Some(existing_root) {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            } else {
+                Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
+            }
+        }
+        (None, None, Some(_)) | (Some(_), None, _) | (None, Some(_), _) => {
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        }
+        _ => Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
+    }
+}
+
+fn sqlite_commit_artifact_registration_operation(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    operation_id: Hash,
+    root_address: Hash,
+) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    match sqlite_artifact_registration_operation_root(connection, owner_id, operation_id)? {
+        Some(existing_root) if existing_root == root_address => Ok(()),
+        Some(_) => Err(ArtifactRegistrationPersistenceErrorV1::Conflict),
+        None => {
+            connection
+                .execute(
+                    "INSERT INTO artifact_registration_operations
+                     (owner_id, operation_id, root_registration_address)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        owner_id.as_str(),
+                        operation_id.as_bytes().as_slice(),
+                        root_address.as_bytes().as_slice(),
+                    ],
+                )
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::Conflict)?;
+            if sqlite_artifact_registration_operation_root(connection, owner_id, operation_id)?
+                == Some(root_address)
+            {
+                Ok(())
+            } else {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            }
+        }
+    }
+}
+
+fn artifact_class_code(class: ErasureArtifactClassV1) -> i64 {
+    match class {
+        ErasureArtifactClassV1::TimelineReplay => 0,
+        ErasureArtifactClassV1::ReproManifest => 1,
+        ErasureArtifactClassV1::CausalTrace => 2,
+        ErasureArtifactClassV1::CalibrationReport => 3,
+        ErasureArtifactClassV1::Export => 4,
+        ErasureArtifactClassV1::ForkOrSnapshot => 5,
+        ErasureArtifactClassV1::ConformanceReport => 6,
+    }
+}
+
+fn artifact_class_from_code(code: i64) -> Option<ErasureArtifactClassV1> {
+    match code {
+        0 => Some(ErasureArtifactClassV1::TimelineReplay),
+        1 => Some(ErasureArtifactClassV1::ReproManifest),
+        2 => Some(ErasureArtifactClassV1::CausalTrace),
+        3 => Some(ErasureArtifactClassV1::CalibrationReport),
+        4 => Some(ErasureArtifactClassV1::Export),
+        5 => Some(ErasureArtifactClassV1::ForkOrSnapshot),
+        6 => Some(ErasureArtifactClassV1::ConformanceReport),
+        _ => None,
+    }
+}
+
+fn sqlite_hash(bytes: &[u8]) -> Option<Hash> {
+    let array: [u8; 32] = bytes.try_into().ok()?;
+    Some(Hash::from_bytes(array))
+}
+
+fn finish_artifact_registration_scope<T>(
+    connection: &Connection,
+    scope: SqliteImmediateScopeV1,
+    result: Result<T, ArtifactRegistrationPersistenceErrorV1>,
+) -> Result<T, ArtifactRegistrationPersistenceErrorV1> {
+    match scope {
+        SqliteImmediateScopeV1::Transaction => finish_transaction(
+            connection,
+            result,
+            |_, _| ArtifactRegistrationPersistenceErrorV1::StorageFailure,
+            |_, _| ArtifactRegistrationPersistenceErrorV1::StorageFailure,
+        ),
+        SqliteImmediateScopeV1::Savepoint => match result {
+            Ok(value) => connection
+                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+                .map(|()| value)
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure),
+            Err(error) => {
+                let rollback = connection.execute_batch(
+                    "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
+                     RELEASE SAVEPOINT pigloros_protected_effect",
+                );
+                match rollback {
+                    Ok(()) => Err(error),
+                    Err(_) => Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure),
+                }
+            }
+        },
     }
 }
 
