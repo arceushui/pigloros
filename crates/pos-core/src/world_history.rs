@@ -800,13 +800,13 @@ fn correlation_id_from_bytes(bytes: [u8; 16]) -> CorrelationId {
 }
 
 struct Parser<'a> {
-    cursor: crate::cbor_cursor::CborCursor<'a>,
+    cursor: crate::CborCursor<'a>,
 }
 
 impl<'a> Parser<'a> {
     const fn new(bytes: &'a [u8]) -> Self {
         Self {
-            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+            cursor: crate::CborCursor::new(bytes),
         }
     }
 

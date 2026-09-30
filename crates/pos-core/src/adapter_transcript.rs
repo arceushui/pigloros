@@ -4,8 +4,10 @@
 //! MAA1 policy, actual `PublicRecord` provenance, or protected-use authority.
 
 use crate::{
-    adapter_admission::{valid_adapter_identity, AdapterContractKey},
-    adapter_codec::{encode_bytes, encode_hash, hash_bytes, length_hash},
+    adapter_admission::{
+        encode_bytes, encode_hash, hash_bytes, length_hash, valid_adapter_identity,
+        AdapterContractKey,
+    },
     encode_head, public_adapter_schema_digest_v1, AdapterAdmissionV1, Hash, PluginId,
     WorldReplayHandleV1,
 };
@@ -148,7 +150,7 @@ impl AdapterInvocationV1 {
             return Err(AdapterTranscriptErrorV1::FieldOutOfBounds);
         }
         let mut reader = Reader {
-            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+            cursor: crate::CborCursor::new(bytes),
         };
         reader.fixed(&[0x8b, 0x44, b'A', b'I', b'R', b'1', 1])?;
         let input = AdapterInvocationInputV1 {
@@ -339,7 +341,7 @@ impl AdapterTranscriptV1 {
             return Err(AdapterTranscriptErrorV1::FieldOutOfBounds);
         }
         let mut reader = Reader {
-            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+            cursor: crate::CborCursor::new(bytes),
         };
         reader.fixed(&[0x87, 0x44, b'M', b'A', b'T', b'1', 1])?;
         let owner_reference = reader.hash()?;
@@ -431,7 +433,7 @@ const fn head_size(value: u64) -> usize {
 }
 
 struct Reader<'a> {
-    cursor: crate::cbor_cursor::CborCursor<'a>,
+    cursor: crate::CborCursor<'a>,
 }
 
 impl Reader<'_> {

@@ -115,7 +115,7 @@ impl ReproManifestRootV1 {
             return Err(ReproManifestRootErrorV1::FieldOutOfBounds);
         }
         let mut reader = Reader {
-            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+            cursor: crate::CborCursor::new(bytes),
         };
         reader.root().and_then(|root| {
             if !reader.cursor.is_finished() || root.to_canonical_cbor() != bytes {
@@ -138,7 +138,7 @@ fn encode_bytes(bytes: &mut Vec<u8>, value: &[u8], major: u8) {
 }
 
 struct Reader<'a> {
-    cursor: crate::cbor_cursor::CborCursor<'a>,
+    cursor: crate::CborCursor<'a>,
 }
 
 impl Reader<'_> {

@@ -120,7 +120,7 @@ impl WorldKeyEvidenceV1 {
             return Err(WorldKeyEvidenceErrorV1::FieldOutOfBounds);
         }
         let mut reader = Reader {
-            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+            cursor: crate::CborCursor::new(bytes),
         };
         reader
             .fixed(&[0x88, 0x44, b'W', b'K', b'E', b'1', 1])
@@ -182,7 +182,7 @@ fn encode_owner(out: &mut Vec<u8>, owner: OwnerIdV1) {
 }
 
 struct Reader<'a> {
-    cursor: crate::cbor_cursor::CborCursor<'a>,
+    cursor: crate::CborCursor<'a>,
 }
 
 impl Reader<'_> {
