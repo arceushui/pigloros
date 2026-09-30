@@ -547,12 +547,12 @@ mod coverage_tests {
             super::FrozenGatewayActionConfiguration::resolve([EntityId::new()]).test_ok(),
         ];
         assert_eq!(identity(&baseline), identity(&resolved()));
-        for changed in &changes {
+        for revised in &changes {
             assert_ne!(
                 GatewayActionPlugin::configuration_details(&baseline),
-                GatewayActionPlugin::configuration_details(changed)
+                GatewayActionPlugin::configuration_details(revised)
             );
-            assert_ne!(identity(&baseline), identity(changed));
+            assert_ne!(identity(&baseline), identity(revised));
         }
     }
 
@@ -1243,10 +1243,10 @@ fn gateway_action_registry_with(
         &pos_runtime::HostCatalogueEntryV1::gateway(),
         &frozen,
     )?;
-    Ok(match authority {
-        Some(authority) => registry.with_consent_authority(authority),
-        None => registry,
-    })
+    if let Some(authority) = authority {
+        registry = registry.with_consent_authority(authority);
+    }
+    Ok(registry)
 }
 
 #[cfg(test)]
