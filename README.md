@@ -88,12 +88,12 @@ pigloros/
     pos-crypto/           # Wave 1 ✅ — BLAKE3 + Ed25519 + canonical CBOR
     pos-store/            # Wave 1 ✅ — EventStore trait + SQLite WAL + in-memory
     pos-state/            # Wave 2 ✅ — ProjectionRegistry, fold layer
-    pos-time/             # Wave 2 ✅ — replay, snapshot, fork compare, merge
+    pos-time/             # Wave 2 — fork, merge; replay/snapshot/compare fail closed until an installed World Replay verifier exists (#396/#397)
     pos-query/            # Wave 2 ✅ — EventQuery builder, traversal
     pos-runtime/          # Wave 3 ✅ — plugin host: SchemaRegistry, Driver, Recorder
   apps/
     pos-experiment/       # Wave 4 ✅ — experiment host: tick loop, StopCondition, Fork, library backtest
-    pos-cli/              # Wave 4/5 ✅ — pos binary: store, timeline, experiment, merge
+    pos-cli/              # Wave 4/5 ✅ — pos binary: store, timeline, experiment, merge (timeline replay/snapshot/compare currently unavailable)
     piglor-gateway/       # Wave 6 ✅ — local-first HTTP gateway (ADR-014 / #69)
     piglor-ledger/         # Wave 4 ✅ — Prediction Ledger CLI + static renderer (ADR-017 / #58)
     piglor-world-client/  # Engineering-only 3D fixture shell; not Gateway-backed MVP evidence
@@ -118,7 +118,7 @@ Wave 6 will add `bindings/piglor-py` (PyO3); that directory is not in-tree yet.
 |---|---|---|
 | Wave 0 | Tracer Bullet — validate prediction baseline | Deferred |
 | Wave 1 | Kernel Primitives (pos-core, pos-crypto, pos-store) | ✅ Complete |
-| Wave 2 | Temporal Engine (replay, fork, merge) | ✅ Complete |
+| Wave 2 | Temporal Engine (replay, fork, merge) | Partial — fork/merge complete; replay, snapshot and compare fail closed until an installed World Replay verifier exists (#396/#397) |
 | Wave 3 | Plugin Runtime (pos-runtime) | ✅ Complete |
 | Wave 4 | Experiment Framework + CLI (pos-experiment, pos-cli) | ✅ Complete |
 | Wave 5 | Moat Plugins + Validation Foundation | ✅ Complete — plugin seams and calibration infrastructure; no product MVP claim |
