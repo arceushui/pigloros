@@ -6071,8 +6071,22 @@ mod tests {
     fn catalogue_same_name_distinct_plugin_ids_survive_a_failed_registration() {
         let mut registry = gated_registry();
         let first = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
+        // A pinned registration keys the first Reducer by PluginId, so both
+        // same-name slots stay individually addressable.
+        let pin = crate::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([1; 32]),
+            vec!["first-role".to_owned()],
+        )
+        .test_ok();
         registry
-            .register_generated(&first, Some(Box::new(CountReducer)), None)
+            .register_pinned_generated(
+                &first,
+                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                Some(Box::new(CountReducer)),
+                None,
+            )
             .test_ok();
         let configuration = reducer_catalogue_configuration(true, true);
         registry
