@@ -699,8 +699,10 @@ fn derive_expected_registration(
         }
         NativeArtifactV1::ReproManifestRoot(root) => {
             let root_input = root.as_input();
-            let recording =
-                find_recording_receipt(closure, root_input.world_handle.recording_receipt_digest)?;
+            let recording = find_recording_receipt(
+                closure,
+                root_input.world_handle.as_input().recording_receipt_digest,
+            )?;
             let transcript = find_transcript(closure, root_input.adapter_transcript_digest)?;
             let transcript_native = match &transcript.native {
                 NativeArtifactV1::AdapterTranscript(value) => value,

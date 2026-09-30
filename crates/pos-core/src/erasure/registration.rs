@@ -365,11 +365,11 @@ pub fn extract_repro_manifest_root_registration_v1(
     let root_input = root.as_input();
     let recording_input = recording.as_input();
     let transcript_input = transcript.as_input();
+    let world_handle_input = root_input.world_handle.as_input();
     if root_input.owner_reference != owner_reference
-        || root_input.world_handle.owner_reference != root_input.owner_reference
-        || root_input.world_handle.recording_receipt_digest != recording.digest()
-        || root_input.world_handle.commit_receipt_digest
-            != recording_input.actual_commit_receipt_digest
+        || world_handle_input.owner_reference != root_input.owner_reference
+        || world_handle_input.recording_receipt_digest != recording.digest()
+        || world_handle_input.commit_receipt_digest != recording_input.actual_commit_receipt_digest
         || recording_input.operation_id != root_input.run_operation_id
         || transcript.digest() != root_input.adapter_transcript_digest
         || transcript_input.owner_reference != root_input.owner_reference
