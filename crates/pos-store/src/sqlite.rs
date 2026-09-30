@@ -8474,9 +8474,11 @@ impl SqliteStore {
             .map(|(exists, geographic)| exists && !geographic)
             .ok_or(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
             .and_then(|visible| {
-                visible
-                    .then_some(())
-                    .ok_or(pos_core::ForkAdmissionErrorV1::ParentChanged)
+                if visible {
+                    Ok(())
+                } else {
+                    Err(pos_core::ForkAdmissionErrorV1::ParentChanged)
+                }
             })
     }
 

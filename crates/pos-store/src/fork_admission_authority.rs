@@ -842,11 +842,12 @@ pub trait ForkAdmissionAuthorityPortV1 {
     ///
     /// The host builds `context` inside the transition callback. After the
     /// same pre-transaction verification as
-    /// [`Self::execute_fork_admission_command`], the adapter takes its write
-    /// boundary; an exact committed operation returns its original result
-    /// without an erasure check. Otherwise, after the parent-visibility check,
-    /// the adapter claims the context's permit, requires the context to name
-    /// this FCC1's operation ID and parent, and applies its parent verdict.
+    /// [`Self::execute_fork_admission_command`], the adapter claims the
+    /// context's permit, requires the context to name this FCC1's operation
+    /// ID and parent, and evaluates its parent verdict before taking its
+    /// write boundary. An exact committed operation returns its original
+    /// result without applying that verdict; otherwise the verdict is applied
+    /// after the parent-visibility check.
     ///
     /// # Errors
     /// Returns `InvalidRequest` for a POC1, `ParentErasureContained` or

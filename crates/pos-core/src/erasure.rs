@@ -534,8 +534,10 @@ impl ErasureAdmittedForkContextV1<'_> {
     /// Claim this context's permit for one store and authorize exactly one
     /// FCC1 against the verdict computed under the transition fence.
     ///
-    /// Store adapters call this only when no operation of that kind and ID
-    /// is committed, after the parent-visibility check.
+    /// Store adapters evaluate this before their exact-operation lookup but
+    /// apply the result only when no operation of that kind and ID is
+    /// committed, after the parent-visibility check; an exact committed
+    /// operation returns its original result whatever the verdict.
     ///
     /// # Errors
     /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
