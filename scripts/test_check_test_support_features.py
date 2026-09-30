@@ -44,6 +44,13 @@ pos-runtime = { path = "crates/pos-runtime", features = ["test-support"] }
 default = ["test-support"]
 test-support = []
 """,
+    "transitive default feature": """
+[features]
+default = ["foo"]
+foo = ["bar"]
+bar = ["test-support"]
+test-support = []
+""",
     "renamed forwarding feature": """
 [features]
 fixtures = ["pos-runtime/test-support"]
