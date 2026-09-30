@@ -3026,7 +3026,7 @@ impl PluginRegistry {
         registration: PluginRegistrationV1,
         reducer: Option<Box<dyn Reducer>>,
     ) -> Result<(), RuntimeError> {
-        if !binding.verifies_owner_instance(plugin) {
+        if !binding.verifies_erased_owner_instance(plugin) {
             return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
         }
         let id = plugin.id();

@@ -808,10 +808,6 @@ impl OutputPolicyBindingV1 {
         }
     }
 
-    pub(crate) fn verifies_owner_instance<P: Plugin>(&self, plugin: &P) -> bool {
-        self.verifies_erased_owner_instance(plugin)
-    }
-
     pub(crate) fn verifies_erased_owner_instance(&self, plugin: &dyn Plugin) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if self.source == InstalledOutputPolicySourceV1::Generated {
@@ -1756,8 +1752,8 @@ mod tests {
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
 
         let cloned_plugin = plugin.clone();
-        assert!(binding.verifies_owner_instance(&plugin));
-        assert!(!binding.verifies_owner_instance(&cloned_plugin));
+        assert!(binding.verifies_erased_owner_instance(&plugin));
+        assert!(!binding.verifies_erased_owner_instance(&cloned_plugin));
         assert!(
             crate::registry::PluginRegistry::validate_required_installed_approver(&binding).is_ok()
         );
