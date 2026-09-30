@@ -120,18 +120,16 @@ impl<'a> CborCursor<'a> {
     /// Take an exact byte range and advance the cursor.
     ///
     /// # Errors
-    /// Returns `InvalidEncoding` when the range exceeds the input or its end overflows.
+    /// Returns `InvalidEncoding` when the range exceeds the remaining input.
     pub(crate) fn take(&mut self, length: usize) -> Result<&'a [u8], CborReadError> {
-        let end = self
-            .offset
-            .checked_add(length)
-            .ok_or(CborReadError::InvalidEncoding)?;
-        let value = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(CborReadError::InvalidEncoding)?;
-        self.offset = end;
-        Ok(value)
+        self.bytes
+            .get(self.offset..)
+            .and_then(|remaining| remaining.get(..length))
+            .map(|value| {
+                self.offset += length;
+                value
+            })
+            .ok_or(CborReadError::InvalidEncoding)
     }
 
     /// Read one byte and advance the cursor.
@@ -139,7 +137,7 @@ impl<'a> CborCursor<'a> {
     /// # Errors
     /// Returns `InvalidEncoding` when no byte remains.
     pub(crate) fn byte(&mut self) -> Result<u8, CborReadError> {
-        Ok(self.take(1)?[0])
+        self.take(1).map(|bytes| bytes[0])
     }
 
     /// Match and consume an exact byte prefix.
@@ -147,11 +145,13 @@ impl<'a> CborCursor<'a> {
     /// # Errors
     /// Returns `InvalidEncoding` when the bytes do not match or are truncated.
     pub(crate) fn fixed(&mut self, expected: &[u8]) -> Result<(), CborReadError> {
-        if self.take(expected.len())? == expected {
-            Ok(())
-        } else {
-            Err(CborReadError::InvalidEncoding)
-        }
+        self.take(expected.len()).and_then(|actual| {
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(CborReadError::InvalidEncoding)
+            }
+        })
     }
 
     /// Read a definite-length CBOR head of the expected major type.
@@ -160,18 +160,19 @@ impl<'a> CborCursor<'a> {
     /// Returns `InvalidEncoding` for a wrong major type, reserved additional
     /// information, or a truncated numeric argument.
     pub(crate) fn head(&mut self, expected_major: u8) -> Result<u64, CborReadError> {
-        let first = self.byte()?;
-        if first >> 5 != expected_major {
-            return Err(CborReadError::InvalidEncoding);
-        }
-        match first & 0x1f {
-            small @ 0..=23 => Ok(u64::from(small)),
-            24 => self.number::<1>(),
-            25 => self.number::<2>(),
-            26 => self.number::<4>(),
-            27 => self.number::<8>(),
-            _ => Err(CborReadError::InvalidEncoding),
-        }
+        self.byte().and_then(|first| {
+            if first >> 5 != expected_major {
+                return Err(CborReadError::InvalidEncoding);
+            }
+            match first & 0x1f {
+                small @ 0..=23 => Ok(u64::from(small)),
+                24 => self.number::<1>(),
+                25 => self.number::<2>(),
+                26 => self.number::<4>(),
+                27 => self.number::<8>(),
+                _ => Err(CborReadError::InvalidEncoding),
+            }
+        })
     }
 
     /// Read an unsigned integer represented by exactly `N` big-endian bytes.
@@ -187,10 +188,11 @@ impl<'a> CborCursor<'a> {
     /// # Errors
     /// Returns `InvalidEncoding` when the requested width exceeds the input.
     pub(crate) fn unsigned_bytes(&mut self, length: usize) -> Result<u64, CborReadError> {
-        Ok(self
-            .take(length)?
-            .iter()
-            .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte)))
+        self.take(length).map(|bytes| {
+            bytes
+                .iter()
+                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
+        })
     }
 }
 
