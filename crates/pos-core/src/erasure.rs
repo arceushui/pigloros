@@ -516,10 +516,18 @@ impl ErasureTopologyTransitionPermitV1 {
 #[derive(Debug)]
 pub struct ErasureAdmittedForkContextV1<'permit> {
     permit: &'permit ErasureTopologyTransitionPermitV1,
-    generation: Option<ErasureReferenceV1>,
+    /// The gate's installed generation when the context was minted. "No
+    /// verified inventory" and "generation unreadable" share one
+    /// fail-closed error value: authorization needs the gate to report the
+    /// identical result again, and the verdict is computed from the same
+    /// installed state, so neither case can authorize a different
+    /// generation.
+    generation: Result<ErasureReferenceV1, ErasureContainmentErrorV1>,
     operation_id: crate::Hash,
     parent: TimelineId,
     verdict: Result<(), ErasureContainmentErrorV1>,
+    /// Set by the adapter when its write boundary could not be opened.
+    write_boundary_unopened: AtomicBool,
 }
 
 impl ErasureAdmittedForkContextV1<'_> {
@@ -545,7 +553,7 @@ impl ErasureAdmittedForkContextV1<'_> {
         parent: TimelineId,
     ) -> Result<(), ErasureContainmentErrorV1> {
         let bound = self.permit.claim_for_store(gate, binding)
-            && gate.inventory_generation().ok() == self.generation
+            && gate.inventory_generation() == self.generation
             && self.operation_id == operation_id
             && self.parent == parent;
         if bound {
@@ -553,6 +561,24 @@ impl ErasureAdmittedForkContextV1<'_> {
         } else {
             Err(ErasureContainmentErrorV1::RecoveryUnavailable)
         }
+    }
+
+    /// Record that the adapter could not open its write boundary for this
+    /// FCC1, so it made no write.
+    ///
+    /// This is an in-process channel from the adapter to the erasure host,
+    /// not a wire or error value. The host may then treat an indeterminate
+    /// storage error as a definite pre-write failure instead of an
+    /// uncertain commit.
+    pub fn record_unopened_write_boundary(&self) {
+        self.write_boundary_unopened
+            .store(true, AtomicOrdering::Release);
+    }
+
+    /// Whether the adapter reported that its write boundary never opened.
+    #[must_use]
+    pub fn write_boundary_unopened(&self) -> bool {
+        self.write_boundary_unopened.load(AtomicOrdering::Acquire)
     }
 }
 
@@ -1108,10 +1134,11 @@ impl ErasureContainmentGateV1 {
         };
         ErasureAdmittedForkContextV1 {
             permit,
-            generation: self.inventory_generation().ok(),
+            generation: self.inventory_generation(),
             operation_id,
             parent,
             verdict,
+            write_boundary_unopened: AtomicBool::new(false),
         }
     }
 
@@ -1129,14 +1156,14 @@ impl ErasureContainmentGateV1 {
                 // the parent.
                 self.authorize_state(parent, ErasureProtectedOperationV1::Fork, &authority)
                     .and_then(|()| {
-                        authority
-                            .inventory
-                            .as_ref()
-                            .is_none_or(|inventory| {
-                                inventory.require_unaffected_topology(parent).is_ok()
-                            })
-                            .then_some(())
-                            .ok_or(ErasureContainmentErrorV1::AccessFrozen)
+                        let unaffected = authority.inventory.as_ref().is_none_or(|inventory| {
+                            inventory.require_unaffected_topology(parent).is_ok()
+                        });
+                        if unaffected {
+                            Ok(())
+                        } else {
+                            Err(ErasureContainmentErrorV1::AccessFrozen)
+                        }
                     })
             })
     }

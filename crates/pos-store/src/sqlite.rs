@@ -70,12 +70,13 @@ use pos_core::{
 };
 
 use crate::fork_admission_authority::{
-    admitted_fork_context_containment, admitted_fork_may_have_changed_topology, advance_wall_fence,
-    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment,
-    principal_owner_commitment, validate_live_session, verify_command, verify_recovery_proof,
-    with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
-    ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
-    ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
+    admitted_fork_context_containment, admitted_fork_may_have_changed_topology,
+    admitted_fork_target, advance_wall_fence, begin_initialize, begin_open, finalize_initialize,
+    finalize_open, fork_commitment, principal_owner_commitment, validate_live_session,
+    verify_command, verify_recovery_proof, with_unfenced_fork_containment,
+    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
+    ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityStateV1,
+    ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
 use crate::fork_delivery_journal::{
     fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
@@ -7749,7 +7750,13 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
             self.erasure_topology_requires_permit,
             self.validated_erasure_gate(),
             |containment| {
-                self.execute_fork_admission_transaction(session, host, command.clone(), containment)
+                self.execute_fork_admission_transaction(
+                    session,
+                    host,
+                    command.clone(),
+                    containment,
+                    || {},
+                )
             },
         )
     }
@@ -7762,16 +7769,22 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
         command: &ForkAdmissionHostCommandV1,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
         let (host, command) = self.verify_fork_admission_command(session, policy, command)?;
+        let target = admitted_fork_target(&command)?;
         // The erasure host already holds the gate fence for this whole call,
         // so BEGIN IMMEDIATE is always the inner lock.
         let containment = admitted_fork_context_containment(
             context,
             self.validated_erasure_gate().ok().as_deref(),
             self.erasure_topology_store_binding.as_ref(),
-            &command,
-        )?;
-        let result = self.execute_fork_admission_transaction(session, host, command, containment);
-        if admitted_fork_may_have_changed_topology(&result) {
+            target,
+        );
+        // A write boundary that never opened is a definite pre-write failure;
+        // report it to the host so only uncertain outcomes poison it.
+        let result =
+            self.execute_fork_admission_transaction(session, host, command, containment, || {
+                context.record_unopened_write_boundary();
+            });
+        if admitted_fork_may_have_changed_topology(&result) && !context.write_boundary_unopened() {
             self.erasure_inventory_generation = None;
         }
         result
@@ -8257,16 +8270,20 @@ impl SqliteStore {
     }
 
     /// Run one verified FAC1 in its own `BEGIN IMMEDIATE` transaction.
+    /// `on_unopened` runs when that write boundary cannot be opened, before
+    /// any write.
     fn execute_fork_admission_transaction(
         &self,
         session: &ForkAdmissionAuthoritySessionV1,
         host: ForkAdmissionHostRecordV1,
         command: VerifiedForkAdmissionCommandV1,
         containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+        on_unopened: impl FnOnce(),
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(|_| {
+            on_unopened();
+            pos_core::ForkAdmissionErrorV1::StorageIndeterminate
+        })?;
         let result =
             self.execute_fork_admission_in_transaction(session, host, command, containment);
         match result {

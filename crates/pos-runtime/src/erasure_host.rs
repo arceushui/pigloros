@@ -1474,13 +1474,18 @@ impl ErasureExecutionHostV1 {
                 } else {
                     Err(ErasureErrorV1::ProvenanceMissing)
                 };
-                outcome = Some(result);
+                outcome = Some((result, context.write_boundary_unopened()));
                 successor.map(|inventory| (inventory, ()))
             };
             gate.install_from_verified_inventory_transition(&mut transition)
         };
-        outcome.map(|result| {
-            self.finish_admitted_fork(result, publication, source.maximum_requests, limits)
+        outcome.map(|(result, write_boundary_unopened)| {
+            self.finish_admitted_fork(
+                result,
+                publication,
+                (source.maximum_requests, limits),
+                write_boundary_unopened,
+            )
         })
     }
 
@@ -1520,14 +1525,17 @@ impl ErasureExecutionHostV1 {
 
     /// Publish the verified successor of a committed admitted Fork.
     ///
-    /// Only an uncertain commit or publication poisons the host; a definite
-    /// rejection leaves it Ready with its installed inventory.
+    /// Only an uncertain commit or publication poisons the host. A definite
+    /// rejection, including an adapter write boundary that never opened,
+    /// leaves it Ready with its installed inventory. A failed gate
+    /// publication and a failed post-publication verification are one
+    /// uncertain-publication outcome.
     fn finish_admitted_fork(
         &mut self,
         result: AdmittedForkResultV1,
         publication: Result<(ErasureVerifiedInventoryV1, ()), pos_core::ErasureContainmentErrorV1>,
-        maximum_requests: usize,
-        limits: ErasureRecoveryLimitsV1,
+        (maximum_requests, limits): (usize, ErasureRecoveryLimitsV1),
+        write_boundary_unopened: bool,
     ) -> AdmittedForkResultV1 {
         let finished = result.and_then(|result| {
             publication
@@ -1539,7 +1547,9 @@ impl ErasureExecutionHostV1 {
                 })
                 .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)
         });
-        if matches!(finished, Err(ForkAdmissionErrorV1::StorageIndeterminate)) {
+        if matches!(finished, Err(ForkAdmissionErrorV1::StorageIndeterminate))
+            && !write_boundary_unopened
+        {
             self.poison();
         }
         finished

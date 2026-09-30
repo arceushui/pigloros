@@ -221,31 +221,37 @@ pub(crate) const fn admitted_fork_may_have_changed_topology<T>(
     )
 }
 
-/// Resolve the ADR-106 r3 containment decision for the permit-bearing method.
+/// The FCC1 operation ID and parent the permit-bearing method may admit.
 ///
-/// A POC1 is not a topology mutation and is `InvalidRequest`. For an FCC1 the
-/// returned inner result is applied only on the absent-operation branch, after
-/// the parent-visibility check. `gate` is the adapter's validated gate, and
-/// `binding` its host-issued topology binding.
+/// A POC1 is not a topology mutation and is `InvalidRequest` there.
+pub(crate) fn admitted_fork_target(
+    command: &VerifiedForkAdmissionCommandV1,
+) -> Result<(Hash, TimelineId), pos_core::ForkAdmissionErrorV1> {
+    command
+        .fork_target()
+        .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)
+}
+
+/// Resolve the ADR-106 r3 containment decision of the permit-bearing
+/// method for one FCC1 `target`.
+///
+/// The adapter applies the returned decision only on the absent-operation
+/// branch, after the parent-visibility check. `gate` is the adapter's
+/// validated gate, and `binding` its host-issued topology binding.
 pub(crate) fn admitted_fork_context_containment(
     context: &ErasureAdmittedForkContextV1<'_>,
     gate: Option<&ErasureContainmentGateV1>,
     binding: Option<&ErasureTopologyStoreBindingV1>,
-    command: &VerifiedForkAdmissionCommandV1,
-) -> Result<Result<(), pos_core::ForkAdmissionErrorV1>, pos_core::ForkAdmissionErrorV1> {
-    command
-        .fork_target()
-        .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)
-        .map(|(operation_id, parent)| {
-            gate.zip(binding).map_or(
-                Err(pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable),
-                |(gate, binding)| {
-                    context
-                        .authorize_admitted_fork(gate, binding, operation_id, parent)
-                        .map_err(containment_admission_error)
-                },
-            )
-        })
+    (operation_id, parent): (Hash, TimelineId),
+) -> Result<(), pos_core::ForkAdmissionErrorV1> {
+    gate.zip(binding).map_or(
+        Err(pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable),
+        |(gate, binding)| {
+            context
+                .authorize_admitted_fork(gate, binding, operation_id, parent)
+                .map_err(containment_admission_error)
+        },
+    )
 }
 
 /// Run one FAC1 under the ADR-106 r3 rules of the unfenced method.
@@ -286,9 +292,13 @@ pub(crate) fn with_unfenced_fork_containment<T>(
             .map_err(containment_admission_error)
         });
     outcome.unwrap_or_else(|| {
-        run(fenced.and(Err(
-            pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable,
-        )))
+        // `with_fence` runs its effect exactly when it authorizes, so a fence
+        // that ran nothing carries its rejection; any other shape fails
+        // closed as unavailable.
+        let rejection = fenced
+            .err()
+            .unwrap_or(pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable);
+        run(Err(rejection))
     })
 }
 

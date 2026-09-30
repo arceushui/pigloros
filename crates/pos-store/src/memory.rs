@@ -65,12 +65,13 @@ use pos_core::{
 };
 
 use crate::fork_admission_authority::{
-    admitted_fork_context_containment, admitted_fork_may_have_changed_topology, advance_wall_fence,
-    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment,
-    principal_owner_commitment, validate_live_session, verify_command, verify_recovery_proof,
-    with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
-    ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
-    ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
+    admitted_fork_context_containment, admitted_fork_may_have_changed_topology,
+    admitted_fork_target, advance_wall_fence, begin_initialize, begin_open, finalize_initialize,
+    finalize_open, fork_commitment, principal_owner_commitment, validate_live_session,
+    verify_command, verify_recovery_proof, with_unfenced_fork_containment,
+    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
+    ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityStateV1,
+    ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
 use crate::fork_delivery_journal::{
     fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
@@ -1555,12 +1556,13 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
         command: &ForkAdmissionHostCommandV1,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
         let verified = self.verify_fork_admission_command(session, policy, command)?;
+        let target = admitted_fork_target(&verified)?;
         let containment = admitted_fork_context_containment(
             context,
             self.validated_erasure_gate().ok().as_deref(),
             self.erasure_topology_store_binding.as_ref(),
-            &verified,
-        )?;
+            target,
+        );
         let result = self.execute_verified_fork_admission(session, verified, containment);
         if admitted_fork_may_have_changed_topology(&result) {
             self.erasure_inventory_generation = None;
@@ -2571,16 +2573,22 @@ impl MemoryStore {
     /// ADR-106 r3 steps 6 and 7: an absent or geographic parent is
     /// indistinguishable from a changed one, and visibility precedes the
     /// erasure containment decision.
+    ///
+    /// Unlike `SQLite`, the in-memory Timeline and geographic-marker reads
+    /// cannot fail, so the `StorageIndeterminate` marker outcome has no
+    /// in-memory cause.
     fn admitted_fork_parent_gate(
         &self,
         parent: TimelineId,
         containment: Result<(), pos_core::ForkAdmissionErrorV1>,
     ) -> Result<(), pos_core::ForkAdmissionErrorV1> {
-        self.timeline_contains_geographic_evidence(parent)
-            .is_ok_and(|geographic| !geographic)
-            .then_some(())
-            .ok_or(pos_core::ForkAdmissionErrorV1::ParentChanged)
-            .and(containment)
+        let visible =
+            self.timelines.contains_key(&parent) && !self.geographic_timelines.contains(&parent);
+        if visible {
+            containment
+        } else {
+            Err(pos_core::ForkAdmissionErrorV1::ParentChanged)
+        }
     }
 
     fn exact_fork_admission_result(
@@ -5652,6 +5660,121 @@ mod tests {
             Value::Bytes(signature.as_bytes().to_vec()),
         ]))?;
         Ok(ForkAdmissionHostCommandV1::from_canonical_cbor(&fac1)?)
+    }
+
+    /// One host-signed FCC1 at cut zero for the fixture's bound Principal.
+    fn memory_fork_fac1(
+        fixture: &MemoryFac1Fixture,
+        operation: u8,
+        parent: TimelineId,
+    ) -> Result<ForkAdmissionHostCommandV1, Box<dyn std::error::Error>> {
+        use ciborium::value::Value;
+        use pos_core::fork_authentication::{principal_digest_v1, AuthenticatedPrincipalRecordV1};
+        let encode = |value: &Value| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            let mut bytes = Vec::new();
+            ciborium::into_writer(value, &mut bytes)?;
+            Ok(bytes)
+        };
+        let evidence =
+            fixture
+                .adapter
+                .sign_authenticated_principal(AuthenticatedPrincipalRecordV1 {
+                    principal: pos_core::PrincipalRefV1::try_new([4; 16], "test.local")?,
+                    adapter_id: "test-adapter".to_owned(),
+                    assurance: 1,
+                    issued_at: 0,
+                    expires_at: u64::MAX,
+                    registry_binding: Hash::from_bytes([3; 32]),
+                    operation_nonce: [5; 32],
+                })?;
+        let verified = pos_crypto::fork_authentication::verify_authenticated_principal_evidence_v1(
+            &fixture.policy,
+            evidence,
+        )?;
+        let principal = principal_digest_v1(&verified.evidence().record().principal)?;
+        let store_id = fixture.store.fork_admission_host_record()?.store_id();
+        let inner = encode(&Value::Array(vec![
+            Value::Text("FCC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(store_id.as_bytes().to_vec()),
+            Value::Bytes(fixture.session.identity().as_bytes().to_vec()),
+            Value::Bytes(vec![operation; 32]),
+            Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+            Value::Bytes(principal.as_bytes().to_vec()),
+            Value::Bytes(parent.inner().to_bytes().to_vec()),
+            Value::Integer(0.into()),
+            Value::Integer(0.into()),
+            Value::Bytes(vec![8; 32]),
+            Value::Bytes(vec![9; 32]),
+            Value::Integer(1.into()),
+            Value::Text(format!("memory-precedence-child-{operation}")),
+        ]))?;
+        let signature = fixture.host.sign_command(&inner, &verified)?;
+        let fac1 = encode(&Value::Array(vec![
+            Value::Text("FAC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(inner),
+            Value::Bytes(verified.evidence().to_canonical_cbor()?),
+            Value::Bytes(signature.as_bytes().to_vec()),
+        ]))?;
+        Ok(ForkAdmissionHostCommandV1::from_canonical_cbor(&fac1)?)
+    }
+
+    /// ADR-106 r3 T10/T14 on MemoryStore: committed corruption and a clock
+    /// rollback still precede containment of a frozen parent.
+    #[test]
+    fn fork_admission_memory_corruption_and_clock_rollback_precede_containment(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = memory_fac1_fixture()?;
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        fixture.store.bind_erasure_gate(Arc::clone(&gate))?;
+        let principal = memory_principal_fac1(&fixture, u64::MAX)?;
+        fixture.store.execute_fork_admission_command(
+            &fixture.session,
+            &fixture.policy,
+            &principal,
+        )?;
+        let parent = fixture.store.create_timeline("memory-precedence-parent")?;
+        let committed = memory_fork_fac1(&fixture, 74, parent.id())?;
+        assert!(matches!(
+            fixture.store.execute_fork_admission_command(
+                &fixture.session,
+                &fixture.policy,
+                &committed
+            ),
+            Ok(ForkAdmissionOperationResultV1::Fork(_))
+        ));
+        gate.freeze_timeline_for_test(parent.id());
+        for row in fixture
+            .store
+            .fork_admission_operations
+            .values_mut()
+            .filter(|row| row.kind == ForkAdmissionOperationKindV1::Fork)
+        {
+            row.result_digest = Hash::zero();
+        }
+        assert_eq!(
+            fixture.store.execute_fork_admission_command(
+                &fixture.session,
+                &fixture.policy,
+                &committed
+            ),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        fixture
+            .store
+            .fork_admission_authority
+            .last_authority_wall_time = u64::MAX;
+        let later = memory_fork_fac1(&fixture, 75, parent.id())?;
+        assert_eq!(
+            fixture
+                .store
+                .execute_fork_admission_command(&fixture.session, &fixture.policy, &later),
+            Err(pos_core::ForkAdmissionErrorV1::ClockRollback)
+        );
+        assert_eq!(fixture.store.fork_admission_operations.len(), 2);
+        assert_eq!(fixture.store.fork_admissions.len(), 1);
+        Ok(())
     }
 
     #[test]
