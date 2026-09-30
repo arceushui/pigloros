@@ -129,8 +129,11 @@ impl LocalAdapterProviderResponseV1 {
 /// A provider admitted with `ExternallyIdempotent` must guarantee deduplication
 /// at its side-effect boundary for the owner/run/global-call key, then return
 /// that same key in its response. The runtime retains only the exact public
-/// request and response bytes returned through this callback.
-pub trait LocalAdapterProviderV1: Send {
+/// request and response bytes returned through this callback. The containing
+/// registry is shared with Gateway callers and sent to its store-owner thread,
+/// so providers must support both transfers even though each session serializes
+/// invocation through mutable access.
+pub trait LocalAdapterProviderV1: Send + Sync {
     /// Assert that this provider enforces deduplication for every supplied key.
     ///
     /// The default denies externally idempotent registration. Implementations
