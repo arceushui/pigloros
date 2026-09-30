@@ -6052,3 +6052,327 @@ fn sqlite_admitted_fork_is_recovered_after_reopen_and_freeze() -> Result<(), Box
     assert_eq!(sqlite_graph_rows(&path)?, before);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// ADR-109 revision 9 (A11): permit-bearing delivery execution parity.
+// ---------------------------------------------------------------------------
+
+type DeliveryResult = Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1>;
+
+/// Every adapter capability the revision 9 delivery vectors use.
+trait AdmittedDeliveryStore: AdmittedForkStore + ForkAdmissionDeliveryJournalPortV1 {}
+
+impl<T> AdmittedDeliveryStore for T where T: AdmittedForkStore + ForkAdmissionDeliveryJournalPortV1 {}
+
+/// One permit-bearing delivery: its outcome, whether the gate published a
+/// successor, and whether the erasure context reports nothing written.
+struct PermitDeliveryV1 {
+    result: DeliveryResult,
+    published: bool,
+    nothing_written: bool,
+}
+
+impl AdmittedForkFixture {
+    /// Claim one fresh FCC1 or POC1 tuple for `operation`.
+    fn claim_delivery<S: ForkAdmissionDeliveryJournalPortV1>(
+        &self,
+        store: &mut S,
+        kind: pos_core::ForkAdmissionOperationKindV1,
+        operation: u8,
+    ) -> Result<ForkDeliveryClaimV1, Box<dyn Error>> {
+        let request = operation
+            .checked_add(40)
+            .ok_or("delivery request seed overflows u8")?;
+        let tuple = ForkDeliveryTupleV1::new(
+            Hash::from_bytes([request; 32]),
+            kind,
+            Hash::from_bytes([operation; 32]),
+        )?;
+        claim_delivery(store, &self.session, tuple, "permit-bearing")
+    }
+
+    /// Execute through the ADR-109 r9 permit-bearing delivery method inside
+    /// `gate_pair.0`'s topology transition with a context minted by
+    /// `gate_pair.1` for `target`, then publish the store's verified-empty
+    /// successor inventory after a commit.
+    fn deliver_in_transition<S: AdmittedDeliveryStore>(
+        &self,
+        store: &mut S,
+        gate_pair: (&ErasureContainmentGateV1, &ErasureContainmentGateV1),
+        target: (Hash, TimelineId),
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> PermitDeliveryV1 {
+        let (gate, minted_by) = gate_pair;
+        let mut outcome = None;
+        let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| {
+            let context = minted_by.admitted_fork_context(permit, target.0, target.1);
+            let result = store.execute_claimed_fork_delivery_in_topology_transition(
+                &context,
+                &self.session,
+                &self.policy,
+                claim,
+                command,
+            );
+            let committed = matches!(result, Ok(ForkDeliveryExecutionV1::Committed(_)));
+            outcome = Some((result, context.nothing_written()));
+            let successor = if committed {
+                successor_inventory(store)
+            } else {
+                Err(pos_core::ErasureErrorV1::ProvenanceMissing)
+            };
+            successor.map(|inventory| (inventory, ()))
+        };
+        let published = gate
+            .install_from_verified_inventory_transition(&mut transition)
+            .is_ok();
+        let (result, nothing_written) =
+            outcome.unwrap_or((Err(ForkDeliveryJournalErrorV1::Corrupt), false));
+        PermitDeliveryV1 {
+            result,
+            published,
+            nothing_written,
+        }
+    }
+}
+
+fn delivery_label(result: &DeliveryResult) -> String {
+    match result {
+        Ok(ForkDeliveryExecutionV1::Committed(committed)) => {
+            format!("committed-{}", admission_label(&Ok((**committed).clone())))
+        }
+        Ok(ForkDeliveryExecutionV1::Rejected(error)) => format!("rejected-{error:?}"),
+        Ok(ForkDeliveryExecutionV1::Uncertain) => "uncertain".to_owned(),
+        Err(error) => format!("{error:?}"),
+    }
+}
+
+/// The journal state of `claim`'s tuple, observed through a fresh claim that
+/// is cancelled again when the tuple was absent.
+fn delivery_state<S: ForkAdmissionDeliveryJournalPortV1>(
+    store: &mut S,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+    claim: ForkDeliveryClaimV1,
+) -> Result<String, Box<dyn Error>> {
+    Ok(match store.claim_fork_delivery(session, claim.tuple)? {
+        ForkDeliveryClaimOutcomeV1::Owner(fresh) => {
+            store.cancel_pending_fork_delivery(session, fresh)?;
+            "absent".to_owned()
+        }
+        ForkDeliveryClaimOutcomeV1::Busy => "pending".to_owned(),
+        ForkDeliveryClaimOutcomeV1::Reconcile(_, state) => format!("{state:?}"),
+    })
+}
+
+/// ADR-106 r3 T1 and the r9 context-binding vectors through the delivery
+/// journal: every definite rejection deletes Pending and writes nothing.
+fn assert_permit_delivery_rejections<S: AdmittedDeliveryStore>(
+    store: &mut S,
+    fixture: &AdmittedForkFixture,
+    gate: &ErasureContainmentGateV1,
+    (frozen, open): (TimelineId, TimelineId),
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let fork = pos_core::ForkAdmissionOperationKindV1::Fork;
+    let mut labels = Vec::new();
+    for (operation, parent, target) in [
+        // T1: a frozen parent is contained.
+        (162, frozen, (Hash::from_bytes([162; 32]), frozen)),
+        // The context was minted for another operation.
+        (163, open, (Hash::from_bytes([200; 32]), open)),
+        // The context was minted for another parent.
+        (164, open, (Hash::from_bytes([164; 32]), frozen)),
+    ] {
+        let claim = fixture.claim_delivery(store, fork, operation)?;
+        let command = fixture.fork(store, operation, parent, "r9-rejected-child", u64::MAX)?;
+        let delivered = fixture.deliver_in_transition(store, (gate, gate), target, claim, &command);
+        assert!(!delivered.published, "a rejection keeps the inventory");
+        assert!(delivered.nothing_written, "a rejection writes no FAC1");
+        labels.push(delivery_label(&delivered.result));
+        labels.push(delivery_state(store, &fixture.session, claim)?);
+        labels.push(admission_label(&fixture.recover(store, operation)?));
+    }
+    Ok(labels)
+}
+
+/// A11: pre-write refusals, the committed T7 path and T8 recovery through
+/// the permit-bearing delivery method.
+fn assert_permit_delivery_contract<S: AdmittedDeliveryStore>(
+    store: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(store, 161, true)?;
+    let frozen = store.create_timeline("r9-frozen-parent")?.id();
+    let open = store.create_timeline("r9-open-parent")?.id();
+    gate.freeze_timeline_for_test(frozen);
+    let mut labels = assert_permit_delivery_rejections(store, &fixture, &gate, (frozen, open))?;
+    let gate_pair = (gate.as_ref(), gate.as_ref());
+
+    // A POC1 is not a topology mutation: Conflict before any write.
+    let owner = fixture.claim_delivery(
+        store,
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        165,
+    )?;
+    let principal = principal_command(
+        store,
+        &fixture.host,
+        &fixture.adapter,
+        &fixture.policy,
+        &fixture.session,
+        [165; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let target = (Hash::from_bytes([165; 32]), open);
+    let refused = fixture.deliver_in_transition(store, gate_pair, target, owner, &principal);
+    assert!(!refused.published && !refused.nothing_written);
+    labels.push(delivery_label(&refused.result));
+    labels.push(delivery_state(store, &fixture.session, owner)?);
+    store.cancel_pending_fork_delivery(&fixture.session, owner)?;
+
+    // T7: a proven-unaffected parent commits, Pending becomes Uncertain in
+    // the same transaction, and the successor is published first.
+    let claim = fixture.claim_delivery(store, pos_core::ForkAdmissionOperationKindV1::Fork, 166)?;
+    let admitted = fixture.fork(store, 166, open, "r9-admitted-child", u64::MAX)?;
+    let target = (Hash::from_bytes([166; 32]), open);
+    let committed = fixture.deliver_in_transition(store, gate_pair, target, claim, &admitted);
+    assert!(committed.published && !committed.nothing_written);
+    labels.push(delivery_label(&committed.result));
+    labels.push(delivery_state(store, &fixture.session, claim)?);
+    let Ok(ForkDeliveryExecutionV1::Committed(receipt)) = committed.result else {
+        return Err("the unaffected parent was not admitted".into());
+    };
+    let ForkAdmissionOperationResultV1::Fork(receipt) = *receipt else {
+        return Err("the admitted FCC1 released a POC1 result".into());
+    };
+    assert_eq!(
+        gate.authorize(
+            receipt.child_id,
+            pos_core::ErasureProtectedOperationV1::Read
+        ),
+        Ok(())
+    );
+
+    // A changed owner fence is refused before any FAC1 work.
+    let stale = ForkDeliveryClaimV1 {
+        owner_fence: claim
+            .owner_fence
+            .checked_add(1)
+            .ok_or("delivery fence overflows u64")?,
+        ..claim
+    };
+    let fenced = fixture.deliver_in_transition(store, gate_pair, target, stale, &admitted);
+    assert!(!fenced.published);
+    labels.push(delivery_label(&fenced.result));
+
+    // T8: after a later freeze FRP1 still returns the original receipt.
+    gate.freeze_timeline_for_test(open);
+    labels.push(admission_label(&fixture.recover(store, 166)?));
+    Ok(labels)
+}
+
+#[test]
+fn permit_bearing_delivery_has_adapter_parity() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let (mut sqlite, path) = sqlite_store_at(&directory, "r9-delivery.db")?;
+    let memory = assert_permit_delivery_contract(&mut MemoryStore::new())?;
+    assert_eq!(
+        memory,
+        [
+            "rejected-ParentErasureContained",
+            "absent",
+            "OperationMissing",
+            "rejected-ErasureContainmentUnavailable",
+            "absent",
+            "OperationMissing",
+            "rejected-ErasureContainmentUnavailable",
+            "absent",
+            "OperationMissing",
+            "Conflict",
+            "pending",
+            "committed-fork",
+            "Uncertain",
+            "Fenced",
+            "fork",
+        ]
+    );
+    assert_eq!(assert_permit_delivery_contract(&mut sqlite)?, memory);
+    let [timelines, far1, operations, _] = sqlite_graph_rows(&path)?;
+    assert_eq!((timelines, far1, operations), (3, 1, 1));
+    Ok(())
+}
+
+/// A11 pre-write refusals: a stale session or foreign policy is Corrupt, an
+/// FCC1 for another tuple is Conflict, and an unrepresentable owner fence is
+/// Fenced, all before the write boundary opens.
+fn assert_permit_delivery_refuses_before_writing<S: AdmittedDeliveryStore>(
+    store: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(store, 171, true)?;
+    let parent = store.create_timeline("r9-refused-parent")?.id();
+    let fork = pos_core::ForkAdmissionOperationKindV1::Fork;
+    let claim = fixture.claim_delivery(store, fork, 172)?;
+    let command = fixture.fork(store, 172, parent, "r9-refused-child", u64::MAX)?;
+    let target = (Hash::from_bytes([172; 32]), parent);
+    let gate_pair = (gate.as_ref(), gate.as_ref());
+    let mut labels = Vec::new();
+
+    let other = fixture.fork(store, 173, parent, "r9-other-child", u64::MAX)?;
+    labels.push(delivery_label(
+        &fixture
+            .deliver_in_transition(store, gate_pair, target, claim, &other)
+            .result,
+    ));
+    let unrepresentable = ForkDeliveryClaimV1 {
+        owner_fence: u64::MAX,
+        ..claim
+    };
+    labels.push(delivery_label(
+        &fixture
+            .deliver_in_transition(store, gate_pair, target, unrepresentable, &command)
+            .result,
+    ));
+    let pinned_policy = fixture.policy.clone();
+    let foreign_adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([174; 32])?;
+    let foreign = AdmittedForkFixture {
+        policy: authority_policy(&foreign_adapter)?,
+        ..fixture
+    };
+    labels.push(delivery_label(
+        &foreign
+            .deliver_in_transition(store, gate_pair, target, claim, &command)
+            .result,
+    ));
+    // A superseded session is refused even with the pinned policy.
+    let session = reopen_session(store, &foreign.host, &pinned_policy)?;
+    let stale = AdmittedForkFixture {
+        policy: pinned_policy,
+        ..foreign
+    };
+    labels.push(delivery_label(
+        &stale
+            .deliver_in_transition(store, gate_pair, target, claim, &command)
+            .result,
+    ));
+    labels.push(delivery_state(store, &session, claim)?);
+    Ok(labels)
+}
+
+#[test]
+fn permit_bearing_delivery_refuses_before_writing_on_both_adapters() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let (mut sqlite, _) = sqlite_store_at(&directory, "r9-refused.db")?;
+    let memory = assert_permit_delivery_refuses_before_writing(&mut MemoryStore::new())?;
+    assert_eq!(
+        memory,
+        ["Conflict", "Fenced", "Corrupt", "Corrupt", "pending"]
+    );
+    assert_eq!(
+        assert_permit_delivery_refuses_before_writing(&mut sqlite)?,
+        memory
+    );
+    Ok(())
+}

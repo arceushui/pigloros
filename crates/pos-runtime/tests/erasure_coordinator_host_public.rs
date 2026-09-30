@@ -4289,3 +4289,236 @@ fn sqlite_host_stays_ready_after_a_rolled_back_marker_read_failure(
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// ADR-106 revision 4 / ADR-109 revision 9: claimed deliveries through the host.
+// ---------------------------------------------------------------------------
+
+type DeliveryResult =
+    Result<pos_store::ForkDeliveryExecutionV1, pos_store::ForkDeliveryJournalErrorV1>;
+
+impl HostForkAuthority {
+    /// Claim one fresh ADR-109 delivery tuple of `kind` (1 POC1, 2 FCC1).
+    fn claim_delivery(
+        &self,
+        host: &mut ErasureExecutionHostV1,
+        kind: pos_core::ForkAdmissionOperationKindV1,
+        operation: u8,
+    ) -> Result<pos_store::ForkDeliveryClaimV1, Box<dyn std::error::Error>> {
+        let request = operation
+            .checked_add(100)
+            .ok_or("delivery request seed overflows u8")?;
+        let tuple = pos_store::ForkDeliveryTupleV1::new(
+            pos_core::Hash::from_bytes([request; 32]),
+            kind,
+            pos_core::Hash::from_bytes([operation; 32]),
+        )?;
+        match host.claim_fork_delivery(&self.session, tuple)? {
+            pos_store::ForkDeliveryClaimOutcomeV1::Owner(claim) => Ok(claim),
+            outcome => Err(format!("unexpected delivery claim {outcome:?}").into()),
+        }
+    }
+
+    fn deliver(
+        &self,
+        host: &mut ErasureExecutionHostV1,
+        claim: pos_store::ForkDeliveryClaimV1,
+        command: &pos_core::ForkAdmissionHostCommandV1,
+    ) -> DeliveryResult {
+        host.execute_claimed_fork_delivery(&self.session, &self.policy, claim, command)
+    }
+
+    /// A host-signed FRP1 for one operation of `kind`.
+    fn delivery_proof(
+        &self,
+        kind: pos_core::ForkAdmissionOperationKindV1,
+        operation: u8,
+    ) -> Result<pos_core::ForkAdmissionRecoveryProofV1, Box<dyn std::error::Error>> {
+        use ciborium::value::Value;
+        let recovery = cbor(&Value::Array(vec![
+            Value::Text("FRC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(self.store_id.as_bytes().to_vec()),
+            Value::Bytes(self.session.identity().as_bytes().to_vec()),
+            Value::Integer(kind.wire().into()),
+            Value::Bytes(vec![operation; 32]),
+        ]))?;
+        Ok(pos_core::ForkAdmissionRecoveryProofV1::from_canonical_cbor(
+            &cbor(&Value::Array(vec![
+                Value::Text("FRP1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Bytes(recovery.clone()),
+                Value::Bytes(self.signer.sign_recovery(&recovery)?.as_bytes().to_vec()),
+            ]))?,
+        )?)
+    }
+
+    /// The journal state of one tuple observed through a fresh claim, which
+    /// is cancelled again when the tuple was absent.
+    fn delivery_state(
+        &self,
+        host: &mut ErasureExecutionHostV1,
+        tuple: pos_store::ForkDeliveryTupleV1,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(match host.claim_fork_delivery(&self.session, tuple)? {
+            pos_store::ForkDeliveryClaimOutcomeV1::Owner(fresh) => {
+                host.cancel_pending_fork_delivery(&self.session, fresh)?;
+                "absent".to_owned()
+            }
+            pos_store::ForkDeliveryClaimOutcomeV1::Busy => "pending".to_owned(),
+            pos_store::ForkDeliveryClaimOutcomeV1::Reconcile(_, state) => format!("{state:?}"),
+        })
+    }
+}
+
+fn delivered_fork(
+    result: DeliveryResult,
+) -> Result<pos_core::ForkAdmissionReceiptV1, Box<dyn std::error::Error>> {
+    match result {
+        Ok(pos_store::ForkDeliveryExecutionV1::Committed(committed)) => {
+            admitted_receipt(Ok(*committed))
+        }
+        other => Err(format!("expected a committed delivery, got {other:?}").into()),
+    }
+}
+
+/// The delivery lifecycle through the host's journal forwarding methods:
+/// commit, Delivered, recovery, purge, and startup reconciliation.
+fn assert_host_delivery_lifecycle(
+    fixture: &mut AdmittedForkHostV1,
+) -> Result<pos_core::ForkAdmissionReceiptV1, Box<dyn std::error::Error>> {
+    let AdmittedForkHostV1 {
+        host,
+        authority,
+        forks,
+        parent,
+        ..
+    } = fixture;
+    let fork = pos_core::ForkAdmissionOperationKindV1::Fork;
+    let claim = forks.claim_delivery(host, fork, 31)?;
+    let receipt = delivered_fork(forks.deliver(host, claim, &forks.command(31, Some(*parent))?))?;
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    test_stage(
+        "classify delivered child",
+        authority.set_timeline_unaffected(receipt.child_id),
+    )?;
+    assert_eq!(forks.delivery_state(host, claim.tuple)?, "Uncertain");
+    host.mark_fork_delivery_uncertain(&forks.session, claim)?;
+    host.mark_fork_delivery_delivered(&forks.session, claim)?;
+    assert_eq!(forks.delivery_state(host, claim.tuple)?, "Delivered");
+    let principal = pos_core::fork_authentication::principal_digest_v1(
+        &pos_core::PrincipalRefV1::try_new([4; 16], "test.local")?,
+    )?;
+    let proof = forks.delivery_proof(fork, 31)?;
+    assert_eq!(
+        host.recover_fork_delivery(&forks.session, claim.tuple, &proof, principal)?,
+        pos_core::ForkAdmissionOperationResultV1::Fork(receipt)
+    );
+    assert!(host
+        .reconcile_fork_delivery_journal(&forks.session)?
+        .is_empty());
+    host.purge_expired_fork_delivery(&forks.session, claim.tuple)?;
+    assert_eq!(forks.delivery_state(host, claim.tuple)?, "absent");
+
+    // An abandoned Pending claim with no FAC1 is released at startup.
+    let abandoned = forks.claim_delivery(host, fork, 32)?;
+    assert_eq!(
+        host.reconcile_fork_delivery_journal(&forks.session)?,
+        vec![abandoned.tuple]
+    );
+    let proof = forks.delivery_proof(fork, 32)?;
+    assert_eq!(
+        host.reconcile_fork_delivery_startup(&forks.session, abandoned.tuple, &proof)?,
+        pos_store::ForkDeliveryStartupOutcomeV1::ReleasedPending
+    );
+    Ok(receipt)
+}
+
+/// ADR-109 r9 A2/A10/A11 through the host: a frozen parent is a definite
+/// rejection that deletes Pending, a POC1 bypasses the transition, a
+/// failed successor publication is `Uncertain` and poisons the host, and a
+/// poisoned host fails new Forks closed while FRP1 still recovers.
+fn assert_host_delivery_contract(config: StoreConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = admitted_fork_host(config)?;
+    assert_host_delivery_lifecycle(&mut fixture)?;
+    let AdmittedForkHostV1 {
+        host,
+        authority,
+        forks,
+        parent,
+        other,
+        request,
+    } = &mut fixture;
+    let fork = pos_core::ForkAdmissionOperationKindV1::Fork;
+    let mut commands = test_stage("open delivery freeze sender", host.command_sender())?;
+    test_stage(
+        "freeze delivery request",
+        commands.freeze_access(*request, &freeze_transition()),
+    )?;
+
+    let contained = forks.claim_delivery(host, fork, 33)?;
+    assert_eq!(
+        forks.deliver(host, contained, &forks.command(33, Some(*parent))?),
+        Ok(pos_store::ForkDeliveryExecutionV1::Rejected(
+            pos_core::ForkAdmissionErrorV1::ParentErasureContained
+        ))
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    assert_eq!(forks.delivery_state(host, contained.tuple)?, "absent");
+
+    let owner = forks.claim_delivery(
+        host,
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        34,
+    )?;
+    assert!(matches!(
+        forks.deliver(host, owner, &forks.command(34, None)?),
+        Ok(pos_store::ForkDeliveryExecutionV1::Committed(_))
+    ));
+
+    authority.deny_topology.store(true, Ordering::Release);
+    let unpublished = forks.claim_delivery(host, fork, 35)?;
+    assert_eq!(
+        forks.deliver(host, unpublished, &forks.command(35, Some(*other))?),
+        Ok(pos_store::ForkDeliveryExecutionV1::Uncertain)
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    assert_eq!(forks.delivery_state(host, unpublished.tuple)?, "Uncertain");
+    let principal = pos_core::fork_authentication::principal_digest_v1(
+        &pos_core::PrincipalRefV1::try_new([4; 16], "test.local")?,
+    )?;
+    let proof = forks.delivery_proof(fork, 35)?;
+    assert!(matches!(
+        host.recover_fork_delivery(&forks.session, unpublished.tuple, &proof, principal)?,
+        pos_core::ForkAdmissionOperationResultV1::Fork(_)
+    ));
+
+    let closed = forks.claim_delivery(host, fork, 36)?;
+    assert_eq!(
+        forks.deliver(host, closed, &forks.command(36, Some(*other))?),
+        Ok(pos_store::ForkDeliveryExecutionV1::Rejected(
+            pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable
+        ))
+    );
+    assert_eq!(forks.delivery_state(host, closed.tuple)?, "absent");
+    authority.deny_topology.store(false, Ordering::Release);
+    Ok(())
+}
+
+#[test]
+fn memory_host_delivers_claimed_forks_through_the_transition(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_host_delivery_contract(StoreConfig::Memory)
+}
+
+#[test]
+fn sqlite_host_delivers_claimed_forks_through_the_transition(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("claimed-delivery-host.db")
+        .to_string_lossy()
+        .into_owned();
+    assert_host_delivery_contract(StoreConfig::Sqlite { path })
+}

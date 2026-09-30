@@ -37,7 +37,9 @@ use pos_core::{
 };
 use pos_store::{
     ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
-    ForkAdmissionAuthoritySessionV1, StoreConfig,
+    ForkAdmissionAuthoritySessionV1, ForkAdmissionDeliveryJournalPortV1,
+    ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1, ForkDeliveryExecutionV1,
+    ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1, ForkDeliveryTupleV1, StoreConfig,
 };
 use std::num::NonZeroUsize;
 
@@ -103,6 +105,8 @@ struct AdmittedForkSuccessorSourceV1 {
 
 type AdmittedForkResultV1 = Result<ForkAdmissionOperationResultV1, ForkAdmissionErrorV1>;
 
+type ClaimedForkDeliveryResultV1 = Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UnaffectedTopologyTransitionError {
     Host(ErasureHostErrorV1),
@@ -159,6 +163,7 @@ trait ErasureHostStore:
     + ErasurePersistencePortV1
     + ForkAdmissionAuthorityBootstrapPortV1
     + ForkAdmissionAuthorityPortV1
+    + ForkAdmissionDeliveryJournalPortV1
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -175,7 +180,8 @@ where
         + ErasureForkPersistencePortV1
         + ErasurePersistencePortV1
         + ForkAdmissionAuthorityBootstrapPortV1
-        + ForkAdmissionAuthorityPortV1,
+        + ForkAdmissionAuthorityPortV1
+        + ForkAdmissionDeliveryJournalPortV1,
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -1106,6 +1112,17 @@ fn open_host_store(config: StoreConfig) -> Result<Box<dyn ErasureHostStore>, Cor
     }
 }
 
+/// The child of a committed FCC1 delivery, or `None` for every other outcome.
+fn committed_fork_child(execution: &ForkDeliveryExecutionV1) -> Option<TimelineId> {
+    match execution {
+        ForkDeliveryExecutionV1::Committed(result) => match result.as_ref() {
+            ForkAdmissionOperationResultV1::Fork(receipt) => Some(receipt.child_id),
+            ForkAdmissionOperationResultV1::PrincipalOwner(_) => None,
+        },
+        ForkDeliveryExecutionV1::Rejected(_) | ForkDeliveryExecutionV1::Uncertain => None,
+    }
+}
+
 fn open_gateway_host_store(
     config: StoreConfig,
 ) -> Result<Box<dyn ErasureGatewayHostStore>, CoreError> {
@@ -1413,6 +1430,258 @@ impl ErasureExecutionHostV1 {
         self.store
             .host_store()
             .recover_fork_admission_command(session, proof)
+    }
+
+    /// Execute one claimed ADR-109 delivery of a signed FAC1 against the owned
+    /// store (ADR-106 revision 4; ADR-109 revision 9, Decision 2).
+    ///
+    /// While this host is Ready, an FCC1 runs the store's permit-bearing
+    /// delivery method inside the gate topology transition, so the FAC1 and
+    /// its Pending disposition share one write transaction under the held
+    /// fence. The successor inventory that classifies a committed child is
+    /// published before the result returns. A POC1, or an FCC1 while the host
+    /// cannot enter a transition, uses the store's unfenced delivery method,
+    /// which returns only an exact committed result or a definite rejection
+    /// for a new Fork.
+    ///
+    /// # Errors
+    /// Returns the store's closed journal error. A definite rejection leaves
+    /// the host and its installed inventory unchanged. When a commit is
+    /// followed by a failed successor publication or verification, the host
+    /// is poisoned and the result is `Uncertain`, never `Committed`. Any other
+    /// indeterminate outcome poisons the host only when the FAC1 portion may
+    /// have been written.
+    pub fn execute_claimed_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &ForkAuthenticationPolicyV1,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> ClaimedForkDeliveryResultV1 {
+        let transition = command
+            .validated_command_facts()
+            .fork_target()
+            .zip(self.admitted_fork_successor_source())
+            .and_then(|(target, source)| {
+                self.execute_claimed_fork_delivery_transition(
+                    target,
+                    &source,
+                    (session, policy),
+                    claim,
+                    command,
+                )
+            });
+        // A POC1, a host that is not Ready, or a gate that refused to start
+        // the transition uses the unfenced delivery method.
+        transition.unwrap_or_else(|| {
+            self.store
+                .host_store()
+                .execute_claimed_fork_delivery(session, policy, claim, command)
+        })
+    }
+
+    /// Claim one ADR-109 delivery tuple in the owned store's journal.
+    ///
+    /// # Errors
+    /// Returns the store's closed journal error.
+    pub fn claim_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+    ) -> Result<ForkDeliveryClaimOutcomeV1, ForkDeliveryJournalErrorV1> {
+        self.store.host_store().claim_fork_delivery(session, tuple)
+    }
+
+    /// Delete a fenced Pending delivery after a definite pre-FAC1 failure.
+    ///
+    /// # Errors
+    /// Returns the store's closed journal error, such as `Fenced`.
+    pub fn cancel_pending_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        self.store
+            .host_store()
+            .cancel_pending_fork_delivery(session, claim)
+    }
+
+    /// Recover a retained delivery through a lookup-only FRP1, which needs no
+    /// gate (ADR-106 revision 3), so it stays available while this host is
+    /// closed or poisoned.
+    ///
+    /// # Errors
+    /// Returns the store's closed journal error.
+    pub fn recover_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+        current_principal_digest: Hash,
+    ) -> Result<ForkAdmissionOperationResultV1, ForkDeliveryJournalErrorV1> {
+        self.store.host_store().recover_fork_delivery(
+            session,
+            tuple,
+            proof,
+            current_principal_digest,
+        )
+    }
+
+    /// Fence a committed delivery owner after a failed response write.
+    ///
+    /// # Errors
+    /// Returns the store's closed journal error.
+    pub fn mark_fork_delivery_uncertain(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        self.store
+            .host_store()
+            .mark_fork_delivery_uncertain(session, claim)
+    }
+
+    /// Record a completely written delivery response.
+    ///
+    /// # Errors
+    /// Returns the store's closed journal error.
+    pub fn mark_fork_delivery_delivered(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        self.store
+            .host_store()
+            .mark_fork_delivery_delivered(session, claim)
+    }
+
+    /// Enumerate retained Pending and Uncertain delivery tuples.
+    ///
+    /// # Errors
+    /// Returns the store's closed journal error.
+    pub fn reconcile_fork_delivery_journal(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<Vec<ForkDeliveryTupleV1>, ForkDeliveryJournalErrorV1> {
+        self.store
+            .host_store()
+            .reconcile_fork_delivery_journal(session)
+    }
+
+    /// Reconcile one abandoned delivery tuple at startup with a host-signed
+    /// FRP1; this is fence-free like every FRP1 lookup.
+    ///
+    /// # Errors
+    /// Returns the store's closed journal error.
+    pub fn reconcile_fork_delivery_startup(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+    ) -> Result<ForkDeliveryStartupOutcomeV1, ForkDeliveryJournalErrorV1> {
+        self.store
+            .host_store()
+            .reconcile_fork_delivery_startup(session, tuple, proof)
+    }
+
+    /// Delete one exact Delivered tuple after host-owned retention expiry.
+    ///
+    /// # Errors
+    /// Returns the store's closed journal error.
+    pub fn purge_expired_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        self.store
+            .host_store()
+            .purge_expired_fork_delivery(session, tuple)
+    }
+
+    /// Run one claimed FCC1 delivery inside the gate topology transition, or
+    /// return `None` when the gate refuses to start it (nothing ran).
+    fn execute_claimed_fork_delivery_transition(
+        &mut self,
+        (operation_id, parent): (Hash, TimelineId),
+        source: &AdmittedForkSuccessorSourceV1,
+        (session, policy): (
+            &ForkAdmissionAuthoritySessionV1,
+            &ForkAuthenticationPolicyV1,
+        ),
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Option<ClaimedForkDeliveryResultV1> {
+        let gate = Arc::clone(&self.gate);
+        let limits = self.recovery_limits;
+        let mut outcome = None;
+        let publication = {
+            let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+                let context = gate.admitted_fork_context(permit, operation_id, parent);
+                let result = self
+                    .store
+                    .host_store()
+                    .execute_claimed_fork_delivery_in_topology_transition(
+                        &context, session, policy, claim, command,
+                    );
+                // Only a committed Fork has a successor. Every other outcome
+                // fails the callback, so the gate keeps its installed
+                // inventory and the host stays Ready.
+                let successor = result
+                    .as_ref()
+                    .ok()
+                    .and_then(committed_fork_child)
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+                    .and_then(|child| self.admitted_fork_successor(permit, source, child, limits));
+                outcome = Some((result, context.nothing_written()));
+                successor.map(|inventory| (inventory, ()))
+            };
+            gate.install_from_verified_inventory_transition(&mut transition)
+        };
+        outcome.map(|(result, nothing_written)| {
+            self.finish_claimed_fork_delivery(
+                result,
+                publication,
+                (source.maximum_requests, limits),
+                nothing_written,
+            )
+        })
+    }
+
+    /// Publish the verified successor of a committed claimed delivery
+    /// (ADR-106 revision 4, item 2).
+    ///
+    /// A failed gate publication or post-publication verification after a
+    /// commit poisons the host and returns `Uncertain`, so no child
+    /// identifier is released before the gate publishes it; the journal row
+    /// is already Uncertain and FRP1 recovers the receipt. Otherwise the host
+    /// is poisoned only by an indeterminate outcome whose FAC1 portion may
+    /// have been written (`nothing_written` is false).
+    fn finish_claimed_fork_delivery(
+        &mut self,
+        result: ClaimedForkDeliveryResultV1,
+        publication: Result<(ErasureVerifiedInventoryV1, ()), pos_core::ErasureContainmentErrorV1>,
+        (maximum_requests, limits): (usize, ErasureRecoveryLimitsV1),
+        nothing_written: bool,
+    ) -> ClaimedForkDeliveryResultV1 {
+        let finished = match result {
+            Ok(ForkDeliveryExecutionV1::Committed(committed)) => Ok(publication
+                .map_err(ErasureHostErrorV1::from)
+                .and_then(|(inventory, ())| self.verify_published_inventory(inventory, limits))
+                .map_or(ForkDeliveryExecutionV1::Uncertain, |inventory| {
+                    self.install_ready_inventory(inventory, maximum_requests);
+                    ForkDeliveryExecutionV1::Committed(committed)
+                })),
+            other => other,
+        };
+        if matches!(
+            finished,
+            Ok(ForkDeliveryExecutionV1::Uncertain)
+                | Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+        ) && !nothing_written
+        {
+            self.poison();
+        }
+        finished
     }
 
     /// Return how an admitted Fork transition would publish its successor,
@@ -4016,6 +4285,9 @@ mod tests {
         SecondTransitionMissing,
         MissingTransitionTimeline,
         MismatchedTopologyMetadata,
+        DeliveryIndeterminate,
+        DeliveryJournalIndeterminate,
+        DeliveryMisreportedOwner,
         Passthrough,
     }
 
@@ -4622,6 +4894,130 @@ mod tests {
                 .execute_fork_admission_command_in_topology_transition(
                     context, session, policy, command,
                 )
+        }
+    }
+
+    impl ForkAdmissionDeliveryJournalPortV1 for FaultStoreV1 {
+        fn claim_fork_delivery(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            tuple: ForkDeliveryTupleV1,
+        ) -> Result<ForkDeliveryClaimOutcomeV1, ForkDeliveryJournalErrorV1> {
+            self.inner.claim_fork_delivery(session, tuple)
+        }
+
+        fn cancel_pending_fork_delivery(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            claim: ForkDeliveryClaimV1,
+        ) -> Result<(), ForkDeliveryJournalErrorV1> {
+            self.inner.cancel_pending_fork_delivery(session, claim)
+        }
+
+        fn execute_claimed_fork_delivery(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            policy: &ForkAuthenticationPolicyV1,
+            claim: ForkDeliveryClaimV1,
+            command: &ForkAdmissionHostCommandV1,
+        ) -> ClaimedForkDeliveryResultV1 {
+            self.inner
+                .execute_claimed_fork_delivery(session, policy, claim, command)
+        }
+
+        /// The delivery faults model the three ADR-109 r9 poisoning cases: a
+        /// failed COMMIT after the FAC1 portion (uncertain), a failed
+        /// journal-only COMMIT after a rolled-back FAC1 portion (nothing
+        /// written), and a committed result that names no Fork child.
+        fn execute_claimed_fork_delivery_in_topology_transition(
+            &mut self,
+            context: &pos_core::ErasureAdmittedForkContextV1<'_>,
+            session: &ForkAdmissionAuthoritySessionV1,
+            policy: &ForkAuthenticationPolicyV1,
+            claim: ForkDeliveryClaimV1,
+            command: &ForkAdmissionHostCommandV1,
+        ) -> ClaimedForkDeliveryResultV1 {
+            match self.fault {
+                FaultModeV1::DeliveryIndeterminate => {
+                    Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+                }
+                FaultModeV1::DeliveryJournalIndeterminate => {
+                    let Ok(()) =
+                        context.roll_back_write_boundary(|| Ok::<(), std::convert::Infallible>(()));
+                    Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+                }
+                FaultModeV1::DeliveryMisreportedOwner => {
+                    pos_core::PrincipalOwnerBindingV1::new(pos_core::PrincipalOwnerBindingInputV1 {
+                        operation_id: Hash::from_bytes([63; 32]),
+                        principal_digest: Hash::from_bytes([64; 32]),
+                        owner: pos_core::OwnerIdV1::from_static("owner"),
+                        origin: pos_core::ForkAuthorityOriginV1::Local,
+                    })
+                    .map(|binding| {
+                        ForkDeliveryExecutionV1::Committed(Box::new(
+                            ForkAdmissionOperationResultV1::PrincipalOwner(binding),
+                        ))
+                    })
+                    .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)
+                }
+                _ => self
+                    .inner
+                    .execute_claimed_fork_delivery_in_topology_transition(
+                        context, session, policy, claim, command,
+                    ),
+            }
+        }
+
+        fn recover_fork_delivery(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            tuple: ForkDeliveryTupleV1,
+            proof: &ForkAdmissionRecoveryProofV1,
+            current_principal_digest: Hash,
+        ) -> Result<ForkAdmissionOperationResultV1, ForkDeliveryJournalErrorV1> {
+            self.inner
+                .recover_fork_delivery(session, tuple, proof, current_principal_digest)
+        }
+
+        fn mark_fork_delivery_uncertain(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            claim: ForkDeliveryClaimV1,
+        ) -> Result<(), ForkDeliveryJournalErrorV1> {
+            self.inner.mark_fork_delivery_uncertain(session, claim)
+        }
+
+        fn mark_fork_delivery_delivered(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            claim: ForkDeliveryClaimV1,
+        ) -> Result<(), ForkDeliveryJournalErrorV1> {
+            self.inner.mark_fork_delivery_delivered(session, claim)
+        }
+
+        fn reconcile_fork_delivery_journal(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+        ) -> Result<Vec<ForkDeliveryTupleV1>, ForkDeliveryJournalErrorV1> {
+            self.inner.reconcile_fork_delivery_journal(session)
+        }
+
+        fn reconcile_fork_delivery_startup(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            tuple: ForkDeliveryTupleV1,
+            proof: &ForkAdmissionRecoveryProofV1,
+        ) -> Result<ForkDeliveryStartupOutcomeV1, ForkDeliveryJournalErrorV1> {
+            self.inner
+                .reconcile_fork_delivery_startup(session, tuple, proof)
+        }
+
+        fn purge_expired_fork_delivery(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            tuple: ForkDeliveryTupleV1,
+        ) -> Result<(), ForkDeliveryJournalErrorV1> {
+            self.inner.purge_expired_fork_delivery(session, tuple)
         }
     }
 
@@ -6103,6 +6499,137 @@ mod tests {
 
     fn fault_store(fault: FaultModeV1) -> FaultStoreV1 {
         fault_store_with_control(fault).0
+    }
+
+    type DeliveryAuthorityV1 = (
+        ForkAdmissionAuthoritySessionV1,
+        ForkAuthenticationPolicyV1,
+        ForkAdmissionHostCommandV1,
+    );
+
+    fn delivery_cbor(
+        value: &ciborium::value::Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Provision FAH1 through the host, open a session, and sign one FCC1.
+    fn delivery_authority(
+        host: &mut ErasureExecutionHostV1,
+    ) -> Result<DeliveryAuthorityV1, Box<dyn std::error::Error>> {
+        use ciborium::value::Value;
+        let signer = pos_crypto::fork_authentication::ForkHostSigningKeyV1::from_seed([65; 32])?;
+        let adapter =
+            pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1::from_seed(
+                [66; 32],
+            )?;
+        let policy = ForkAuthenticationPolicyV1::new(vec![
+            pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1 {
+                adapter_id: "delivery-adapter".to_owned(),
+                verifying_key: adapter.public_key(),
+                minimum_assurance: 1,
+                registry_bindings: vec![Hash::from_bytes([67; 32])],
+            },
+        ])?;
+        let bootstrap = host.fork_admission_bootstrap();
+        let key = pos_core::PublicKey::from_bytes(signer.public_key());
+        let initialize = bootstrap.begin_fork_admission_initialize(key, policy.digest()?)?;
+        bootstrap.finalize_fork_admission_initialize(
+            &initialize,
+            &signer.sign_initialize(&initialize.to_canonical_cbor()?)?,
+        )?;
+        let open = bootstrap.begin_fork_admission_open(key, policy.digest()?)?;
+        let session = bootstrap
+            .finalize_fork_admission_open(&open, &signer.sign_open(&open.to_canonical_cbor()?)?)?;
+        let store_id = bootstrap.fork_admission_host_record()?.store_id();
+        let evidence = adapter.sign_authenticated_principal(
+            pos_core::fork_authentication::AuthenticatedPrincipalRecordV1 {
+                principal: pos_core::PrincipalRefV1::try_new([68; 16], "delivery.local")?,
+                adapter_id: "delivery-adapter".to_owned(),
+                assurance: 1,
+                issued_at: 0,
+                expires_at: u64::MAX,
+                registry_binding: Hash::from_bytes([67; 32]),
+                operation_nonce: [69; 32],
+            },
+        )?;
+        let verified = pos_crypto::fork_authentication::verify_authenticated_principal_evidence_v1(
+            &policy, evidence,
+        )?;
+        let principal = pos_core::fork_authentication::principal_digest_v1(
+            &verified.evidence().record().principal,
+        )?;
+        let inner = delivery_cbor(&Value::Array(vec![
+            Value::Text("FCC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(store_id.as_bytes().to_vec()),
+            Value::Bytes(session.identity().as_bytes().to_vec()),
+            Value::Bytes(vec![62; 32]),
+            Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+            Value::Bytes(principal.as_bytes().to_vec()),
+            Value::Bytes(TimelineId::new().inner().to_bytes().to_vec()),
+            Value::Integer(0.into()),
+            Value::Integer(0.into()),
+            Value::Bytes(vec![70; 32]),
+            Value::Bytes(vec![71; 32]),
+            Value::Integer(0.into()),
+            Value::Text("delivery-child".to_owned()),
+        ]))?;
+        let signature = signer.sign_command(&inner, &verified)?;
+        let command =
+            ForkAdmissionHostCommandV1::from_canonical_cbor(&delivery_cbor(&Value::Array(vec![
+                Value::Text("FAC1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Bytes(inner),
+                Value::Bytes(verified.evidence().to_canonical_cbor()?),
+                Value::Bytes(signature.as_bytes().to_vec()),
+            ]))?)?;
+        Ok((session, policy, command))
+    }
+
+    /// ADR-109 r9 A11 and ADR-106 r4 item 2: a Ready host poisons a claimed
+    /// delivery only when its FAC1 portion may have been written, and a
+    /// committed result that cannot publish a successor is `Uncertain`.
+    #[test]
+    fn claimed_delivery_poisons_only_uncertain_fac1_writes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (fault, expected, status) in [
+            (
+                FaultModeV1::DeliveryIndeterminate,
+                Err(ForkDeliveryJournalErrorV1::StorageIndeterminate),
+                ErasureHostStatusV1::Poisoned,
+            ),
+            (
+                FaultModeV1::DeliveryJournalIndeterminate,
+                Err(ForkDeliveryJournalErrorV1::StorageIndeterminate),
+                ErasureHostStatusV1::Ready,
+            ),
+            (
+                FaultModeV1::DeliveryMisreportedOwner,
+                Ok(ForkDeliveryExecutionV1::Uncertain),
+                ErasureHostStatusV1::Poisoned,
+            ),
+        ] {
+            let mut host =
+                ErasureExecutionHostV1::recover_verified_empty(Box::new(fault_store(fault)), 4)?;
+            let (session, policy, command) = delivery_authority(&mut host)?;
+            let claim = ForkDeliveryClaimV1 {
+                tuple: ForkDeliveryTupleV1::new(
+                    Hash::from_bytes([61; 32]),
+                    pos_core::ForkAdmissionOperationKindV1::Fork,
+                    Hash::from_bytes([62; 32]),
+                )?,
+                owner_fence: 1,
+            };
+            assert_eq!(
+                host.execute_claimed_fork_delivery(&session, &policy, claim, &command),
+                expected
+            );
+            assert_eq!(host.status(), status);
+        }
+        Ok(())
     }
 
     struct FailingInventoryV1;

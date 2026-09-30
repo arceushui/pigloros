@@ -78,8 +78,9 @@ use crate::fork_admission_authority::{
     ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
 use crate::fork_delivery_journal::{
-    fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
-    ForkDeliveryClaimV1, ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryRowV1,
+    fork_delivery_execution, fork_delivery_may_have_changed_topology,
+    ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
+    ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryRowV1,
     ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 use crate::fork_event_authority::fork_append_request;
@@ -7918,6 +7919,56 @@ impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
         )
     }
 
+    fn execute_claimed_fork_delivery_in_topology_transition(
+        &mut self,
+        context: &pos_core::ErasureAdmittedForkContextV1<'_>,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::ForkAuthenticationPolicyV1,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+        // ADR-109 r9 Decision 2 step 1: nothing is written before the FAC1 is
+        // authenticated and bound to the claimed FCC1 tuple. A POC1 is not a
+        // topology mutation and is refused as Conflict.
+        let host = sqlite_validate_delivery_session(self, session)?;
+        let command = verify_command(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            policy,
+            command,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        let target = command
+            .fork_target()
+            .filter(|_| {
+                command.kind() == claim.tuple.kind
+                    && command.operation_id() == claim.tuple.operation_id
+            })
+            .ok_or(ForkDeliveryJournalErrorV1::Conflict)?;
+        let owner_fence = sqlite_owner_fence(claim.owner_fence)?;
+        // The erasure host holds the gate fence for this whole call, so the
+        // write boundary opened below is always the inner lock.
+        let containment = admitted_fork_context_containment(
+            context,
+            self.validated_erasure_gate().ok().as_deref(),
+            self.erasure_topology_store_binding.as_ref(),
+            target,
+        );
+        let result = self.execute_claimed_fork_delivery_permit_transaction(
+            context,
+            session,
+            host,
+            (claim, owner_fence),
+            command,
+            containment,
+        );
+        if fork_delivery_may_have_changed_topology(&result) && !context.nothing_written() {
+            self.erasure_inventory_generation = None;
+        }
+        result
+    }
+
     fn recover_fork_delivery(
         &mut self,
         session: &ForkAdmissionAuthoritySessionV1,
@@ -8270,6 +8321,87 @@ impl SqliteStore {
                 sqlite_record_uncertain_after_rollback(&self.conn, claim.tuple, owner_fence)
             }
             result => finish_fork_delivery_transaction(&self.conn, result),
+        }
+    }
+
+    /// Execute one claimed FCC1 and its journal disposition in one
+    /// `BEGIN IMMEDIATE` transaction whose boundary `context` observes
+    /// (ADR-109 revision 9, Decision 2 steps 2 to 5).
+    ///
+    /// The FAC1 runs inside a savepoint. A definite rejection rolls back only
+    /// that savepoint through `context` before it deletes Pending, so a later
+    /// journal-only commit failure is known to have written no FAC1 or
+    /// topology row. Any other indeterminate step rolls the whole transaction
+    /// back through `context` and records Uncertain in a fresh transaction.
+    fn execute_claimed_fork_delivery_permit_transaction(
+        &self,
+        context: &pos_core::ErasureAdmittedForkContextV1<'_>,
+        session: &ForkAdmissionAuthoritySessionV1,
+        host: ForkAdmissionHostRecordV1,
+        (claim, owner_fence): (ForkDeliveryClaimV1, i64),
+        command: VerifiedForkAdmissionCommandV1,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+    ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+        context
+            .open_write_boundary(|| self.conn.execute_batch("BEGIN IMMEDIATE"))
+            .ok()
+            .ok_or(ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        if let Err(error) = sqlite_fork_delivery_row(&self.conn, claim.tuple.host_request_id)
+            .and_then(|row| {
+                row.filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Pending))
+                    .map(|_| ())
+                    .ok_or(ForkDeliveryJournalErrorV1::Fenced)
+            })
+        {
+            return Err(context
+                .roll_back_write_boundary(|| self.conn.execute_batch("ROLLBACK"))
+                .map_or(ForkDeliveryJournalErrorV1::StorageIndeterminate, |()| error));
+        }
+        let execution = fork_delivery_execution(
+            self.conn
+                .execute_batch(SQLITE_FAC1_SAVEPOINT_SQL)
+                .ok()
+                .ok_or(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+                .and_then(|()| {
+                    self.execute_fork_admission_in_transaction(session, host, command, containment)
+                }),
+        );
+        let disposition = match execution {
+            ForkDeliveryExecutionV1::Committed(result) => sqlite_set_fork_delivery_state(
+                &self.conn,
+                claim.tuple,
+                owner_fence,
+                ForkDeliveryStateV1::Uncertain,
+                ForkDeliveryStateV1::Pending,
+            )
+            .map(|()| ForkDeliveryExecutionV1::Committed(result)),
+            ForkDeliveryExecutionV1::Rejected(error) => context
+                .roll_back_write_boundary(|| self.conn.execute_batch(SQLITE_FAC1_ROLLBACK_TO_SQL))
+                .ok()
+                .ok_or(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+                .and_then(|()| {
+                    sqlite_delete_pending_fork_delivery(&self.conn, claim.tuple, owner_fence)
+                })
+                .map(|_| ForkDeliveryExecutionV1::Rejected(error)),
+            ForkDeliveryExecutionV1::Uncertain => {
+                Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+            }
+        };
+        match disposition {
+            // Never commit a transaction whose authority or journal write
+            // failed; Uncertain is recorded only after the complete rollback.
+            Err(ForkDeliveryJournalErrorV1::StorageIndeterminate) => {
+                sqlite_record_uncertain_after_permit_rollback(
+                    context,
+                    &self.conn,
+                    claim.tuple,
+                    owner_fence,
+                )
+            }
+            // A failed COMMIT is StorageIndeterminate. After a committed FCC1
+            // it is never "nothing written"; after a definite rejection the
+            // FAC1 savepoint was already rolled back through `context`.
+            disposition => finish_fork_delivery_transaction(&self.conn, disposition),
         }
     }
 
@@ -9215,6 +9347,38 @@ fn sqlite_record_uncertain_after_rollback(
     conn.execute_batch("ROLLBACK")
         .and_then(|()| conn.execute_batch("BEGIN IMMEDIATE"))
         .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)
+        .and_then(|()| {
+            let state = sqlite_set_fork_delivery_state(
+                conn,
+                tuple,
+                owner_fence,
+                ForkDeliveryStateV1::Uncertain,
+                ForkDeliveryStateV1::Pending,
+            );
+            finish_fork_delivery_transaction(conn, state)
+        })
+        .map(|()| ForkDeliveryExecutionV1::Uncertain)
+}
+
+/// Opens the savepoint that scopes one permit-bearing FAC1 inside its
+/// delivery transaction (ADR-109 revision 9, Decision 2 step 5).
+const SQLITE_FAC1_SAVEPOINT_SQL: &str = "SAVEPOINT fork_delivery_fac1";
+/// Rolls back only the FAC1 portion of a delivery transaction.
+const SQLITE_FAC1_ROLLBACK_TO_SQL: &str = "ROLLBACK TO fork_delivery_fac1";
+
+/// Rolls back a permit-bearing delivery transaction through its erasure
+/// context, then records Uncertain in a fresh journal-only transaction.
+fn sqlite_record_uncertain_after_permit_rollback(
+    context: &pos_core::ErasureAdmittedForkContextV1<'_>,
+    conn: &Connection,
+    tuple: ForkDeliveryTupleV1,
+    owner_fence: i64,
+) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+    context
+        .roll_back_write_boundary(|| conn.execute_batch("ROLLBACK"))
+        .and_then(|()| conn.execute_batch("BEGIN IMMEDIATE"))
+        .ok()
+        .ok_or(ForkDeliveryJournalErrorV1::StorageIndeterminate)
         .and_then(|()| {
             let state = sqlite_set_fork_delivery_state(
                 conn,
@@ -11657,6 +11821,241 @@ mod tests {
             .conn
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
         store.conn.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
+    type SqlitePermitDeliveryOutcome = (
+        Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1>,
+        bool,
+    );
+
+    /// Run one ADR-109 r9 permit-bearing delivery inside `gate`'s topology
+    /// transition and report its outcome with the context's nothing-written
+    /// observation. The transition never publishes a successor.
+    fn sqlite_permit_delivery(
+        store: &mut SqliteStore,
+        gate: &ErasureContainmentGateV1,
+        (session, policy): (
+            &ForkAdmissionAuthoritySessionV1,
+            &pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+        ),
+        (claim, command, parent): (ForkDeliveryClaimV1, &ForkAdmissionHostCommandV1, TimelineId),
+    ) -> SqlitePermitDeliveryOutcome {
+        let mut outcome = None;
+        let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| -> Result<
+            (ErasureVerifiedInventoryV1, ()),
+            ErasureErrorV1,
+        > {
+            let context = gate.admitted_fork_context(permit, claim.tuple.operation_id, parent);
+            let result = store.execute_claimed_fork_delivery_in_topology_transition(
+                &context, session, policy, claim, command,
+            );
+            outcome = Some((result, context.nothing_written()));
+            Err(ErasureErrorV1::ProvenanceMissing)
+        };
+        assert!(gate
+            .install_from_verified_inventory_transition(&mut transition)
+            .is_err());
+        outcome.unwrap_or((Err(ForkDeliveryJournalErrorV1::Corrupt), false))
+    }
+
+    fn sqlite_permit_claim(
+        store: &mut SqliteStore,
+        session: &ForkAdmissionAuthoritySessionV1,
+        operation: u8,
+    ) -> Result<ForkDeliveryClaimV1, Box<dyn std::error::Error>> {
+        let tuple = ForkDeliveryTupleV1::new(
+            Hash::from_bytes(
+                [operation
+                    .checked_add(1)
+                    .ok_or("permit claim request seed overflows u8")?; 32],
+            ),
+            ForkAdmissionOperationKindV1::Fork,
+            Hash::from_bytes([operation; 32]),
+        )?;
+        match store.claim_fork_delivery(session, tuple)? {
+            ForkDeliveryClaimOutcomeV1::Owner(claim) => Ok(claim),
+            outcome => Err(format!("unexpected permit delivery claim {outcome:?}").into()),
+        }
+    }
+
+    fn deny_transaction_step(
+        store: &SqliteStore,
+        denied: fn(&rusqlite::hooks::AuthAction<'_>) -> bool,
+    ) -> rusqlite::Result<()> {
+        store
+            .conn
+            .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                if denied(&context.action) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            }))
+    }
+
+    fn fork_operation_rows(store: &SqliteStore) -> rusqlite::Result<i64> {
+        store.conn.query_row(
+            "SELECT COUNT(*) FROM fork_admission_operations WHERE kind = 2",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    /// ADR-109 r9 A11: a definite FCC1 rejection rolls back only its FAC1
+    /// savepoint, so a journal-only failure afterwards is "nothing written";
+    /// the write boundary and every whole-transaction rollback report through
+    /// the erasure context.
+    #[test]
+    fn sqlite_permit_delivery_rejection_faults_report_nothing_written(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let (mut store, host, adapter, policy, session) = sqlite_authority_public_fixture()?;
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        store.bind_erasure_gate(Arc::clone(&gate))?;
+        let parent = store.create_timeline("permit-delivery-parent")?.id();
+        let keys = (&session, &policy);
+        // No POB1 is bound yet, so every FCC1 below is a definite
+        // InvalidRequest rejection.
+        let claim = sqlite_permit_claim(&mut store, &session, 111)?;
+        let command = sqlite_fork_command(
+            &store, &host, &adapter, &policy, &session, [111; 32], parent,
+        )?;
+
+        store.conn.commit_hook(Some(|| true))?;
+        assert_eq!(
+            sqlite_permit_delivery(&mut store, &gate, keys, (claim, &command, parent)),
+            (Err(ForkDeliveryJournalErrorV1::StorageIndeterminate), true)
+        );
+        store.conn.commit_hook::<fn() -> bool>(None)?;
+
+        deny_transaction_step(&store, |action| {
+            matches!(
+                action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Begin
+                }
+            )
+        })?;
+        assert_eq!(
+            sqlite_permit_delivery(&mut store, &gate, keys, (claim, &command, parent)),
+            (Err(ForkDeliveryJournalErrorV1::StorageIndeterminate), true)
+        );
+
+        deny_transaction_step(&store, |action| {
+            matches!(
+                action,
+                AuthAction::Savepoint {
+                    operation: TransactionOperation::Rollback,
+                    ..
+                }
+            )
+        })?;
+        assert_eq!(
+            sqlite_permit_delivery(&mut store, &gate, keys, (claim, &command, parent)),
+            (Ok(ForkDeliveryExecutionV1::Uncertain), true)
+        );
+
+        let stale = sqlite_permit_claim(&mut store, &session, 112)?;
+        deny_transaction_step(&store, |action| {
+            matches!(
+                action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Rollback
+                }
+            )
+        })?;
+        let fenced = ForkDeliveryClaimV1 {
+            owner_fence: stale
+                .owner_fence
+                .checked_add(1)
+                .ok_or("permit claim fence overflows u64")?,
+            ..stale
+        };
+        assert_eq!(
+            sqlite_permit_delivery(&mut store, &gate, keys, (fenced, &command, parent)),
+            (Err(ForkDeliveryJournalErrorV1::StorageIndeterminate), false)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        store.conn.execute_batch("ROLLBACK")?;
+        assert_eq!(fork_operation_rows(&store)?, 0);
+        Ok(())
+    }
+
+    /// ADR-109 r9 A11: a failed COMMIT after a committed FCC1 is uncertain,
+    /// never "nothing written"; an indeterminate FAC1 portion rolls the whole
+    /// transaction back before Uncertain is recorded.
+    #[test]
+    fn sqlite_permit_delivery_commit_faults_are_uncertain() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let (mut store, host, adapter, policy, session) = sqlite_authority_public_fixture()?;
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        store.bind_erasure_gate(Arc::clone(&gate))?;
+        let owner =
+            sqlite_principal_command(&store, &host, &adapter, &policy, &session, [120; 32])?;
+        store.execute_fork_admission_command(&session, &policy, &owner)?;
+        let parent = store.create_timeline("permit-commit-parent")?.id();
+        let keys = (&session, &policy);
+
+        let committed = sqlite_permit_claim(&mut store, &session, 121)?;
+        let command = sqlite_fork_command(
+            &store, &host, &adapter, &policy, &session, [121; 32], parent,
+        )?;
+        store.conn.commit_hook(Some(|| true))?;
+        assert_eq!(
+            sqlite_permit_delivery(&mut store, &gate, keys, (committed, &command, parent)),
+            (Err(ForkDeliveryJournalErrorV1::StorageIndeterminate), false)
+        );
+        store.conn.commit_hook::<fn() -> bool>(None)?;
+        assert_eq!(fork_operation_rows(&store)?, 0);
+
+        deny_transaction_step(&store, |action| {
+            matches!(
+                action,
+                AuthAction::Savepoint {
+                    operation: TransactionOperation::Begin,
+                    ..
+                }
+            )
+        })?;
+        assert_eq!(
+            sqlite_permit_delivery(&mut store, &gate, keys, (committed, &command, parent)),
+            (Ok(ForkDeliveryExecutionV1::Uncertain), true)
+        );
+        assert_eq!(
+            store.claim_fork_delivery(&session, committed.tuple)?,
+            ForkDeliveryClaimOutcomeV1::Reconcile(committed, ForkDeliveryStateV1::Uncertain)
+        );
+
+        let uncertain = sqlite_permit_claim(&mut store, &session, 122)?;
+        let command = sqlite_fork_command(
+            &store, &host, &adapter, &policy, &session, [122; 32], parent,
+        )?;
+        deny_transaction_step(&store, |action| {
+            matches!(
+                action,
+                AuthAction::Savepoint {
+                    operation: TransactionOperation::Begin,
+                    ..
+                } | AuthAction::Transaction {
+                    operation: TransactionOperation::Rollback
+                }
+            )
+        })?;
+        assert_eq!(
+            sqlite_permit_delivery(&mut store, &gate, keys, (uncertain, &command, parent)),
+            (Err(ForkDeliveryJournalErrorV1::StorageIndeterminate), false)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        store.conn.execute_batch("ROLLBACK")?;
+        assert_eq!(fork_operation_rows(&store)?, 0);
         Ok(())
     }
 
