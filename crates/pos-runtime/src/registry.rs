@@ -21,7 +21,7 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
-use crate::output_admission::InstalledOutputPolicySourceV1;
+use crate::output_admission::OutputPolicySourceV1;
 use crate::{
     composition::{
         AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
@@ -2568,9 +2568,9 @@ impl PluginRegistry {
             &plugin_version,
             Self::generated_budget_input(plugin),
         )?;
-        Ok(OutputPolicyBindingV1::from_installed_source_with_policy(
+        Ok(OutputPolicyBindingV1::from_source_with_policy(
             plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             policy,
             budget,
             &[],
@@ -2592,9 +2592,9 @@ impl PluginRegistry {
                 "deterministic-local-v1",
                 configuration_details,
             )?;
-        Ok(OutputPolicyBindingV1::from_installed_source_with_policy(
+        Ok(OutputPolicyBindingV1::from_source_with_policy(
             plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             policy,
             budget,
             configuration_details,
@@ -2708,7 +2708,7 @@ impl PluginRegistry {
                     reason: error.to_string(),
                 },
             )?;
-        let source = InstalledOutputPolicySourceV1::Generated;
+        let source = OutputPolicySourceV1::Generated;
         let mut declarations = plugin
             .capability()
             .owned_event_types
@@ -4056,9 +4056,9 @@ mod tests {
         assert_eq!(registry.driver_count(), 1);
 
         let plugin = simple_plugin("fixture-driver", &["fixture.output"]);
-        let binding = OutputPolicyBindingV1::from_installed_source(
+        let binding = OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -4329,9 +4329,9 @@ mod tests {
     #[test]
     fn foreign_policy_declaration_is_rejected() {
         let plugin = simple_plugin("foreign-policy", &["owned.output"]);
-        let valid_binding = OutputPolicyBindingV1::from_installed_source(
+        let valid_binding = OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -4358,9 +4358,9 @@ mod tests {
             output_declarations: vec![foreign_declaration],
         })
         .test_ok();
-        let foreign_binding = OutputPolicyBindingV1::from_installed_source_with_policy(
+        let foreign_binding = OutputPolicyBindingV1::from_source_with_policy(
             &plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             foreign_policy,
             budget,
             &[],
@@ -4382,9 +4382,9 @@ mod tests {
     #[test]
     fn missing_owned_policy_declaration_is_rejected_before_registration() {
         let plugin = simple_plugin("missing-policy", &["first.output", "second.output"]);
-        let valid_binding = OutputPolicyBindingV1::from_installed_source(
+        let valid_binding = OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -4402,9 +4402,9 @@ mod tests {
             output_declarations: vec![fields.output_declarations[0].clone()],
         })
         .test_ok();
-        let incomplete_binding = OutputPolicyBindingV1::from_installed_source_with_policy(
+        let incomplete_binding = OutputPolicyBindingV1::from_source_with_policy(
             &plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             incomplete_policy,
             budget,
             &[],
@@ -4422,9 +4422,9 @@ mod tests {
     #[test]
     fn generated_profile_cannot_enter_installed_registration() {
         let plugin = simple_plugin("fixture-profile", &["fixture.output"]);
-        let binding = OutputPolicyBindingV1::from_installed_source(
+        let binding = OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -5408,7 +5408,7 @@ mod tests {
     // The nonproduction specification is constructible only inside this crate's tests.
     const fn fixture_catalogue_entry() -> HostCatalogueEntryV1<TestPlugin> {
         HostCatalogueEntryV1 {
-            spec: InstalledOutputPolicySourceV1::Generated,
+            spec: OutputPolicySourceV1::Generated,
             factory: std::marker::PhantomData,
         }
     }
@@ -5562,8 +5562,8 @@ mod tests {
         );
         assert_eq!(CatalogueEvidenceV1::Generated.registration(pin), None);
         assert_eq!(
-            CatalogueEvidenceV1::Installed.binding_source(InstalledOutputPolicySourceV1::Gateway),
-            InstalledOutputPolicySourceV1::Gateway
+            CatalogueEvidenceV1::Installed.binding_source(OutputPolicySourceV1::Gateway),
+            OutputPolicySourceV1::Gateway
         );
     }
 
@@ -8390,9 +8390,9 @@ mod tests {
             },
         )
         .test_ok();
-        let binding = OutputPolicyBindingV1::from_installed_source_with_policy(
+        let binding = OutputPolicyBindingV1::from_source_with_policy(
             &plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             policy,
             budget,
             &[],

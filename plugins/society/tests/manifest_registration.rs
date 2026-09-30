@@ -14,7 +14,7 @@ use pos_core::{
 };
 use pos_plugin_society::{SocietyPlugin, SocietyReducer, SocietySignalProjectionPlugin};
 use pos_runtime::{
-    installed_plugin_role_v1, DomainImplementationKindV1, InstalledOutputPolicySourceV1,
+    installed_plugin_role_v1, DomainImplementationKindV1, OutputPolicySourceV1,
     ManifestRegistrationErrorV1, OutputAdmissionErrorV1, OutputPolicyBindingV1,
     PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
     RuntimeError,
@@ -24,9 +24,9 @@ fn generated_binding<P: Plugin>(
     plugin: &P,
     configuration: &[u8],
 ) -> Result<OutputPolicyBindingV1, OutputAdmissionErrorV1> {
-    OutputPolicyBindingV1::from_installed_source(
+    OutputPolicyBindingV1::from_source(
         plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         configuration,
         "deterministic-local-v1",
     )
@@ -234,9 +234,9 @@ fn malformed_catalog_and_draft_installed_source_fail_closed() -> Result<(), Box<
     ));
     registry.prepare_manifest_registration(catalog(vec![first_row])?)?;
     assert!(matches!(
-        OutputPolicyBindingV1::from_installed_source(
+        OutputPolicyBindingV1::from_source(
             &first,
-            InstalledOutputPolicySourceV1::Society,
+            OutputPolicySourceV1::Society,
             b"first-policy",
             "deterministic-local-v1",
         ),
