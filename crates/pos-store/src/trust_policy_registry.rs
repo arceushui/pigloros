@@ -4,9 +4,11 @@
 //! This registry authenticates policy state; it does not install an EPF1 or
 //! grant a runtime Plugin pin by itself.
 
-use pos_conformance::{ExecutionProfileV1, TrustPolicySnapshotV1};
-use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
-use std::os::unix::fs::MetadataExt;
+use pos_conformance::{ExecutionProfileV1, TrustPolicyRootV1, TrustPolicySnapshotV1};
+use rusqlite::{params, Connection, ErrorCode, OpenFlags, TransactionBehavior};
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,6 +37,10 @@ impl OperatorReleaseTrustV1 {
 }
 
 /// Host-owned request for one exact canonical EPF1 artifact.
+///
+/// The signing key id and root version are claims about the artifact; this
+/// registry checks them against current TPS1 policy but does not verify the
+/// EPF1 signature. See [`AdmittedTrustSnapshotV1::signing_root`].
 #[derive(Clone, Copy)]
 pub struct GatewayEpf1TrustRequestV1<'a> {
     pub exact_epf1: &'a [u8],
@@ -47,6 +53,7 @@ pub struct AdmittedTrustSnapshotV1 {
     digest: [u8; 32],
     epoch: u64,
     raw_epf1_digest: [u8; 32],
+    signing_root: TrustPolicyRootV1,
 }
 
 impl AdmittedTrustSnapshotV1 {
@@ -64,6 +71,14 @@ impl AdmittedTrustSnapshotV1 {
     pub const fn raw_epf1_digest(&self) -> [u8; 32] {
         self.raw_epf1_digest
     }
+
+    /// The current, unrevoked TPS1 root matching the request's claimed
+    /// signing key. The registration operation must verify the EPF1
+    /// signature against this root's public key before installing anything.
+    #[must_use]
+    pub const fn signing_root(&self) -> &TrustPolicyRootV1 {
+        &self.signing_root
+    }
 }
 
 /// Safe, closed TPS1 deployment admission errors.
@@ -73,6 +88,7 @@ pub enum TrustPolicyRegistryErrorV1 {
     InvalidOperatorSignature,
     InvalidGenesis,
     MissingState,
+    AlreadyProvisioned,
     CorruptState,
     StaleSnapshot,
     UnsupportedPosition,
@@ -91,6 +107,7 @@ impl std::fmt::Display for TrustPolicyRegistryErrorV1 {
             Self::InvalidOperatorSignature => "TPS1 operator signature is not trusted",
             Self::InvalidGenesis => "TPS1 genesis does not match the operator release",
             Self::MissingState => "deployment trust state is not provisioned",
+            Self::AlreadyProvisioned => "deployment trust state is already provisioned",
             Self::CorruptState => "deployment trust state is corrupt",
             Self::StaleSnapshot => "TPS1 epoch or predecessor is stale",
             Self::UnsupportedPosition => "global Gateway requires TPS1 position zero",
@@ -130,7 +147,10 @@ impl DeploymentTrustPolicyRegistryV1 {
     ///
     /// # Errors
     /// Rejects a non-genesis or incorrectly signed record, wrong release
-    /// anchor, nonzero global position, existing state, or failed transaction.
+    /// anchor, nonzero global position, unreadable expiry, any existing file
+    /// at `path`, or a failed transaction. The state file is created with
+    /// owner-only permissions. A transaction that fails after the file is
+    /// created leaves it in place; the operator must remove it to retry.
     pub fn provision_explicit(
         path: &Path,
         release: &OperatorReleaseTrustV1,
@@ -145,33 +165,36 @@ impl DeploymentTrustPolicyRegistryV1 {
             return Err(TrustPolicyRegistryErrorV1::InvalidGenesis);
         }
         require_global_position(&snapshot)?;
-        let mut connection = open_connection(path, true)?;
-        connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .and_then(|transaction| {
-                transaction
-                    .execute_batch(
-                        "CREATE TABLE IF NOT EXISTS deployment_trust_state (
-                            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                            policy_id TEXT NOT NULL, epoch INTEGER NOT NULL,
-                            full_digest BLOB NOT NULL, exact_bytes BLOB NOT NULL,
-                            genesis_digest BLOB NOT NULL
-                        );
-                        CREATE TABLE IF NOT EXISTS deployment_trust_audit (
-                            sequence INTEGER PRIMARY KEY, action TEXT NOT NULL,
-                            epoch INTEGER NOT NULL, full_digest BLOB NOT NULL
-                        );",
-                    )
-                    .and_then(|()| {
-                        transaction.execute(
-                            "INSERT INTO deployment_trust_state VALUES (1, ?1, 1, ?2, ?3, ?2)",
-                            params![&release.policy_id, digest.as_slice(), exact_tps1],
+        readable_expiry(&snapshot)?;
+        create_state_file(path)?;
+        open_connection(path).and_then(|mut connection| {
+            connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .and_then(|transaction| {
+                    transaction
+                        .execute_batch(
+                            "CREATE TABLE IF NOT EXISTS deployment_trust_state (
+                                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                                policy_id TEXT NOT NULL, epoch INTEGER NOT NULL,
+                                full_digest BLOB NOT NULL, exact_bytes BLOB NOT NULL,
+                                genesis_digest BLOB NOT NULL
+                            );
+                            CREATE TABLE IF NOT EXISTS deployment_trust_audit (
+                                sequence INTEGER PRIMARY KEY, action TEXT NOT NULL,
+                                epoch INTEGER NOT NULL, full_digest BLOB NOT NULL
+                            );",
                         )
-                    })
-                    .and_then(|_| audit(&transaction, "operator-genesis", 1, &digest))
-                    .and_then(|()| transaction.commit())
-            })
-            .map_err(storage_unavailable)
+                        .and_then(|()| {
+                            transaction.execute(
+                                "INSERT INTO deployment_trust_state VALUES (1, ?1, 1, ?2, ?3, ?2)",
+                                params![&release.policy_id, digest.as_slice(), exact_tps1],
+                            )
+                        })
+                        .and_then(|_| audit(&transaction, "operator-genesis", 1, &digest))
+                        .and_then(|()| transaction.commit())
+                })
+                .map_err(storage_unavailable)
+        })
     }
 
     /// Open only an existing, intact and authenticated operator state store.
@@ -182,21 +205,30 @@ impl DeploymentTrustPolicyRegistryV1 {
         path: &Path,
         release: OperatorReleaseTrustV1,
     ) -> Result<Self, TrustPolicyRegistryErrorV1> {
-        let connection = open_connection(path, false)?;
+        let state_identity = path_identity(path)?;
+        let connection = open_connection(path)?;
         read_trusted_state(&connection, &release)?;
-        path_identity(path).map(|state_identity| Self {
-            connection,
-            release,
-            path: path.to_owned(),
-            state_identity,
-        })
+        // The validated connection must still belong to the file whose
+        // identity later admissions compare against.
+        path_identity(path)
+            .ok()
+            .filter(|identity| *identity == state_identity)
+            .map(|_| Self {
+                connection,
+                release,
+                path: path.to_owned(),
+                state_identity,
+            })
+            .ok_or(TrustPolicyRegistryErrorV1::CorruptState)
     }
 
     /// Authenticate current TPS1 and one raw EPF1 before calling the trusted
     /// registration operation while this registry remains mutably borrowed.
     ///
-    /// A signed successor is durably committed before checking whether this
-    /// EPF1 is allowed, so a revocation cannot be lost on a denied request.
+    /// A signed successor with a readable expiry is durably committed before
+    /// checking whether this EPF1 is allowed, so a revocation cannot be lost
+    /// on a denied request. A successor whose expiry cannot be read is not
+    /// usable authority and is rejected without changing state.
     /// The callback receives evidence only after that check succeeds.
     /// The callback must perform registry mutation synchronously and must not
     /// hand this evidence to a caller as a production capability.
@@ -239,6 +271,7 @@ impl DeploymentTrustPolicyRegistryV1 {
         self.ensure_path_identity()?;
         let incoming = authenticate(exact_tps1, &self.release)?;
         require_global_position(&incoming)?;
+        let expiry = readable_expiry(&incoming)?;
         let digest = raw_digest(exact_tps1);
         let release = &self.release;
         self.connection
@@ -249,11 +282,12 @@ impl DeploymentTrustPolicyRegistryV1 {
                     .and_then(|()| transaction.commit().map_err(storage_unavailable))
             })
             .and_then(|()| self.ensure_path_identity())
-            .and_then(|()| verify_epf1(&incoming, &request, now))
-            .map(|raw_epf1_digest| AdmittedTrustSnapshotV1 {
+            .and_then(|()| verify_epf1(&incoming, &request, now, expiry))
+            .map(|(raw_epf1_digest, signing_root)| AdmittedTrustSnapshotV1 {
                 digest,
                 epoch: incoming.epoch,
                 raw_epf1_digest,
+                signing_root,
             })
     }
 
@@ -344,13 +378,17 @@ const fn require_global_position(
     }
 }
 
+fn readable_expiry(snapshot: &TrustPolicySnapshotV1) -> Result<u64, TrustPolicyRegistryErrorV1> {
+    parse_utc_seconds(&snapshot.offline_valid_through)
+        .ok_or(TrustPolicyRegistryErrorV1::InvalidSnapshot)
+}
+
 fn verify_epf1(
     snapshot: &TrustPolicySnapshotV1,
     request: &GatewayEpf1TrustRequestV1<'_>,
     now: u64,
-) -> Result<[u8; 32], TrustPolicyRegistryErrorV1> {
-    let expiry = parse_utc_seconds(&snapshot.offline_valid_through)
-        .ok_or(TrustPolicyRegistryErrorV1::Expired)?;
+    expiry: u64,
+) -> Result<([u8; 32], TrustPolicyRootV1), TrustPolicyRegistryErrorV1> {
     if now > expiry {
         return Err(TrustPolicyRegistryErrorV1::Expired);
     }
@@ -368,11 +406,14 @@ fn verify_epf1(
     {
         return Err(TrustPolicyRegistryErrorV1::Revoked);
     }
-    if !snapshot.trust_roots.iter().any(|root| {
-        root.key_id == request.signing_key_id && root.root_version == request.signing_root_version
-    }) {
-        return Err(TrustPolicyRegistryErrorV1::UnsupportedRoot);
-    }
+    let signing_root = snapshot
+        .trust_roots
+        .iter()
+        .find(|root| {
+            root.key_id == request.signing_key_id
+                && root.root_version == request.signing_root_version
+        })
+        .ok_or(TrustPolicyRegistryErrorV1::UnsupportedRoot)?;
     let minimum = snapshot
         .minimum_versions
         .iter()
@@ -381,25 +422,45 @@ fn verify_epf1(
     if !profile.meets_minimum_version_v1(&minimum.semantic_version) {
         return Err(TrustPolicyRegistryErrorV1::UnsupportedVersion);
     }
-    Ok(raw_epf1_digest)
+    Ok((raw_epf1_digest, signing_root.clone()))
 }
 
 fn raw_digest(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
 
-fn open_connection(path: &Path, create: bool) -> Result<Connection, TrustPolicyRegistryErrorV1> {
-    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE;
-    if create {
-        flags |= OpenFlags::SQLITE_OPEN_CREATE;
-    }
-    let connection = Connection::open_with_flags(path, flags).map_err(|_| {
-        if create {
-            TrustPolicyRegistryErrorV1::StorageUnavailable
-        } else {
-            TrustPolicyRegistryErrorV1::MissingState
-        }
-    })?;
+/// Atomically create the private state file; an existing path is never reused.
+fn create_state_file(path: &Path) -> Result<(), TrustPolicyRegistryErrorV1> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map(drop)
+        .map_err(|error| {
+            if error.kind() == ErrorKind::AlreadyExists {
+                TrustPolicyRegistryErrorV1::AlreadyProvisioned
+            } else {
+                TrustPolicyRegistryErrorV1::StorageUnavailable
+            }
+        })
+}
+
+/// Open an existing state file. Callers establish that the path exists, so an
+/// unopenable or non-database file is corrupt state, not missing state.
+fn open_connection(path: &Path) -> Result<Connection, TrustPolicyRegistryErrorV1> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
+    connection
+        .query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+        .map_err(|error| {
+            error
+                .sqlite_error_code()
+                .filter(|code| *code == ErrorCode::NotADatabase)
+                .map_or(TrustPolicyRegistryErrorV1::StorageUnavailable, |_| {
+                    TrustPolicyRegistryErrorV1::CorruptState
+                })
+        })?;
     let durable = connection
         .query_row("PRAGMA journal_mode = WAL", [], |row| {
             row.get::<_, String>(0)
@@ -609,6 +670,10 @@ mod tests {
                 "deployment trust state is not provisioned",
             ),
             (
+                TrustPolicyRegistryErrorV1::AlreadyProvisioned,
+                "deployment trust state is already provisioned",
+            ),
+            (
                 TrustPolicyRegistryErrorV1::CorruptState,
                 "deployment trust state is corrupt",
             ),
@@ -748,8 +813,10 @@ mod tests {
             Err(TrustPolicyRegistryErrorV1::MissingState)
         ));
         DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis)?;
-        assert!(
-            DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis).is_err()
+        assert_eq!(std::fs::metadata(&path)?.mode() & 0o777, 0o600);
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(&path, &anchor, &genesis),
+            Err(TrustPolicyRegistryErrorV1::AlreadyProvisioned)
         );
         let mut registry = DeploymentTrustPolicyRegistryV1::open_current(&path, anchor)?;
         let profile = fixture_profile()?;
@@ -757,8 +824,16 @@ mod tests {
             &genesis,
             request(&snapshot, &profile),
             TEST_NOW,
-            |proof| Ok((proof.epoch(), proof.digest(), proof.raw_epf1_digest())),
+            |proof| {
+                Ok((
+                    proof.epoch(),
+                    proof.digest(),
+                    proof.raw_epf1_digest(),
+                    proof.signing_root().clone(),
+                ))
+            },
         )?;
+        assert_eq!(evidence.3, snapshot.trust_roots[0]);
         assert_eq!(evidence.0, 1);
         assert_eq!(evidence.1, raw_digest(&genesis));
         assert_eq!(evidence.2, raw_digest(&profile));
@@ -1029,7 +1104,7 @@ mod tests {
         let snapshot = fixture_snapshot()?;
         let genesis = signed(snapshot.clone())?;
         let profile = fixture_profile()?;
-        for case in 0..3 {
+        for drop_minimum in [false, true] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("trust.db");
             DeploymentTrustPolicyRegistryV1::provision_explicit(
@@ -1042,27 +1117,21 @@ mod tests {
             let mut successor = snapshot.clone();
             successor.epoch = 2;
             successor.previous_snapshot_digest = Some(raw_digest(&genesis));
-            let expected = match case {
-                0 => {
-                    let minimum = successor
-                        .minimum_versions
-                        .iter_mut()
-                        .find(|minimum| minimum.artifact_kind == "execution-profile")
-                        .ok_or_else(|| std::io::Error::other("execution-profile minimum"))?;
-                    minimum.semantic_version = "999.0.0".to_owned();
-                    TrustPolicyRegistryErrorV1::UnsupportedVersion
-                }
-                1 => {
-                    successor
-                        .minimum_versions
-                        .retain(|minimum| minimum.artifact_kind != "execution-profile");
-                    TrustPolicyRegistryErrorV1::UnsupportedVersion
-                }
-                _ => {
-                    successor.offline_valid_through = "unparseable".to_owned();
-                    TrustPolicyRegistryErrorV1::Expired
-                }
-            };
+            // A missing execution-profile minimum fails closed, like one
+            // the EPF1 does not meet.
+            if drop_minimum {
+                successor
+                    .minimum_versions
+                    .retain(|minimum| minimum.artifact_kind != "execution-profile");
+            } else {
+                let minimum = successor
+                    .minimum_versions
+                    .iter_mut()
+                    .find(|minimum| minimum.artifact_kind == "execution-profile")
+                    .ok_or_else(|| std::io::Error::other("execution-profile minimum"))?;
+                minimum.semantic_version = "999.0.0".to_owned();
+            }
+            let expected = TrustPolicyRegistryErrorV1::UnsupportedVersion;
             let result = registry.with_admitted_epf1_at(
                 &signed(successor)?,
                 request(&snapshot, &profile),
@@ -1115,6 +1184,78 @@ mod tests {
             &genesis,
         )?;
         Ok((directory, path, snapshot, genesis, fixture_profile()?))
+    }
+
+    #[test]
+    fn unreadable_expiry_is_rejected_before_state_advances(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for expiry in ["unparseable", "2030-01-01T00:00:00+00:00"] {
+            let (_directory, path, snapshot, genesis, profile) = provisioned()?;
+            let mut registry =
+                DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
+            let mut successor = snapshot.clone();
+            successor.epoch = 2;
+            successor.previous_snapshot_digest = Some(raw_digest(&genesis));
+            successor.offline_valid_through = expiry.to_owned();
+            assert_eq!(
+                registry
+                    .with_admitted_epf1_at(
+                        &signed(successor)?,
+                        request(&snapshot, &profile),
+                        TEST_NOW,
+                        |_| Ok(())
+                    )
+                    .err(),
+                Some(TrustPolicyRegistryErrorV1::InvalidSnapshot),
+                "{expiry}"
+            );
+            registry.with_admitted_epf1_at(
+                &genesis,
+                request(&snapshot, &profile),
+                TEST_NOW,
+                |_| Ok(()),
+            )?;
+        }
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("trust.db");
+        let mut unreadable = fixture_snapshot()?;
+        unreadable.offline_valid_through = "2030-01-01T00:00:00+00:00".to_owned();
+        let genesis = signed(unreadable.clone())?;
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(
+                &path,
+                &release(&unreadable, &genesis),
+                &genesis
+            ),
+            Err(TrustPolicyRegistryErrorV1::InvalidSnapshot)
+        );
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn unopenable_or_non_database_state_is_corrupt() -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        let directory = tempfile::tempdir()?;
+        let garbage = directory.path().join("garbage.db");
+        std::fs::write(&garbage, [0x5a; 4096])?;
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::open_current(&garbage, release(&snapshot, &genesis))
+                .err(),
+            Some(TrustPolicyRegistryErrorV1::CorruptState)
+        );
+        let not_a_file = directory.path().join("not-a-file.db");
+        std::fs::create_dir(&not_a_file)?;
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::open_current(
+                &not_a_file,
+                release(&snapshot, &genesis)
+            )
+            .err(),
+            Some(TrustPolicyRegistryErrorV1::CorruptState)
+        );
+        Ok(())
     }
 
     #[test]
