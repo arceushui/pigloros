@@ -3013,6 +3013,26 @@ impl PluginRegistry {
         )
     }
 
+    /// Return the first pin field that is incompatible with an installed
+    /// operator-trusted native Plugin and its binding, if any.
+    fn incompatible_installed_pin(
+        pin: &crate::composition::PluginPinV1,
+        binding: &OutputPolicyBindingV1,
+        plugin: &dyn Plugin,
+    ) -> Option<PluginPinFieldV1> {
+        if pin.implementation_kind() != DomainImplementationKindV1::Plugin {
+            Some(PluginPinFieldV1::ImplementationKind)
+        } else if pin.isolation() != PluginIsolationV1::OperatorTrustedNative {
+            Some(PluginPinFieldV1::Isolation)
+        } else if pin.configuration_digest() != binding.policy().digest() {
+            Some(PluginPinFieldV1::ConfigurationDigest)
+        } else if pin.roles() != [crate::reviewed_policy::installed_plugin_role_v1(plugin)] {
+            Some(PluginPinFieldV1::Roles)
+        } else {
+            None
+        }
+    }
+
     /// Register one installed Plugin with its verified callbacks and exact
     /// available session pin. No callback or pin can be added after this seam.
     ///
@@ -3030,18 +3050,7 @@ impl PluginRegistry {
             return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
         }
         let id = plugin.id();
-        let pin = registration.pin();
-        let incompatible = if pin.implementation_kind() != DomainImplementationKindV1::Plugin {
-            Some(PluginPinFieldV1::ImplementationKind)
-        } else if pin.isolation() != PluginIsolationV1::OperatorTrustedNative {
-            Some(PluginPinFieldV1::Isolation)
-        } else if pin.configuration_digest() != binding.policy().digest() {
-            Some(PluginPinFieldV1::ConfigurationDigest)
-        } else if pin.roles() != [crate::reviewed_policy::installed_plugin_role_v1(plugin)] {
-            Some(PluginPinFieldV1::Roles)
-        } else {
-            None
-        };
+        let incompatible = Self::incompatible_installed_pin(registration.pin(), &binding, plugin);
         if let Some(field) = incompatible {
             return Err(PluginCompositionErrorV1::IncompatibleImplementation {
                 plugin_id: id,
