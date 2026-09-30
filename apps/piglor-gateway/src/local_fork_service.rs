@@ -1506,6 +1506,7 @@ mod tests {
             .block_worker_for_test()
             .map_err(|error| format!("{error:?}"))?;
         assert!(executor.saturate_for_test() > 0);
+        drop(executor);
         let saturated = request(&world.socket, &fork_payload(33, parents[0])?, false)?;
         drop(release);
         assert_eq!(saturated, rejected(6));
@@ -1797,6 +1798,7 @@ mod tests {
         .await
         .is_err());
         assert!(!gateway.is_ready());
+        drop(gateway);
         assert!(!world.socket.exists());
 
         fs::set_permissions(world.runtime.path(), fs::Permissions::from_mode(0o777))?;
@@ -1818,6 +1820,7 @@ mod tests {
         .await
         .is_err());
         assert!(!gateway.is_ready());
+        drop(gateway);
         assert!(!world.socket.exists());
         Ok(())
     }

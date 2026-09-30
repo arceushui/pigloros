@@ -2124,7 +2124,7 @@ impl StoreExecutor {
                 started,
                 release: worker_release,
             })),
-            Instant::now() + Duration::from_secs(60),
+            Instant::now() + Duration::from_mins(1),
             Arc::new(CommandLifecycle::new()),
         )?;
         worker_started
@@ -2139,7 +2139,7 @@ impl StoreExecutor {
         while self
             .try_submit(
                 Command::Action(Box::new(WorkerNoopForTestV1)),
-                Instant::now() + Duration::from_secs(60),
+                Instant::now() + Duration::from_mins(1),
                 Arc::new(CommandLifecycle::new()),
             )
             .is_ok()
@@ -7539,10 +7539,12 @@ mod fork_admission_submission_tests {
         assert_eq!(joined(started)?, Some(ForkAdmissionSubmissionErrorV1::Lost));
 
         let late = claim_on_thread(&submitter)?;
-        let envelope = rx.recv().await.ok_or("late claim was not admitted")?;
-        assert_eq!(envelope.lifecycle.start(), StartOutcome::Started);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        expire_envelope(envelope);
+        {
+            let envelope = rx.recv().await.ok_or("late claim was not admitted")?;
+            assert_eq!(envelope.lifecycle.start(), StartOutcome::Started);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            expire_envelope(envelope);
+        }
         assert_eq!(joined(late)?, Some(ForkAdmissionSubmissionErrorV1::Busy));
 
         let abandoned = claim_on_thread(&submitter)?;
