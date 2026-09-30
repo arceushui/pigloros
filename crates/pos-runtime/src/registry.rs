@@ -2577,6 +2577,7 @@ impl PluginRegistry {
         )?)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding_with_configuration_details(
         plugin: &dyn Plugin,
         configuration_details: &[u8],
