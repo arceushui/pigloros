@@ -1552,7 +1552,7 @@ mod tests {
             profile_id,
             InstalledOutputPolicySourceV1::Generated
         )
-        .test_ok()
+        .or_resume()
         .is_empty());
         for source in [
             InstalledOutputPolicySourceV1::Gateway,

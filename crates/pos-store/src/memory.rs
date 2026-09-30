@@ -10439,12 +10439,13 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         &mut self,
         batch: PreparedArtifactRegistrationBatchV1,
     ) -> Result<ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1> {
-        if batch.records().is_empty()
-            || !batch.records().iter().any(|record| {
-                record.owner_id() == batch.owner_id()
-                    && record.registration_address() == batch.root_registration_address()
-            })
-        {
+        let root_registration_address = batch.root_registration_address();
+        let has_root_record = batch.records().iter().any(|record| {
+            let same_owner = record.owner_id() == batch.owner_id();
+            let same_address = record.registration_address() == root_registration_address;
+            same_owner && same_address
+        });
+        if batch.records().is_empty() || !has_root_record {
             return Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure);
         }
 
@@ -10469,7 +10470,7 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
                 (None, None) => has_new_rows = true,
                 (Some(existing), Some(address))
                     if existing == &row && *address == row.registration_address() => {}
-                (None, Some(_)) | (Some(_), None) | (Some(_), Some(_)) => {
+                (None | Some(_), Some(_)) | (Some(_), None) => {
                     return Err(ArtifactRegistrationPersistenceErrorV1::Conflict);
                 }
             }
@@ -10520,7 +10521,7 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         }
         self.artifact_registration_operations
             .entry(operation_key)
-            .or_insert(batch.root_registration_address());
+            .or_insert(root_registration_address);
         Ok(if has_new_rows {
             ArtifactRegistrationCommitOutcomeV1::Applied
         } else {
@@ -10606,15 +10607,15 @@ impl AdapterRecordingStoreV1 for MemoryStore {
             if !same_memory_adapter_reservation(&existing.reservation, &reservation) {
                 return Err(AdapterRecordingStoreErrorV1::InvalidCall);
             }
-            return Ok(match &existing.output_bytes {
-                Some(output_bytes) => AdapterCallReservationOutcomeV1::Completed {
+            return Ok(existing.output_bytes.as_ref().map_or_else(
+                || AdapterCallReservationOutcomeV1::Reserved {
+                    reserved_at_micros: existing.reservation.reserved_at_micros(),
+                },
+                |output_bytes| AdapterCallReservationOutcomeV1::Completed {
                     output_bytes: output_bytes.clone(),
                     reserved_at_micros: existing.reservation.reserved_at_micros(),
                 },
-                None => AdapterCallReservationOutcomeV1::Reserved {
-                    reserved_at_micros: existing.reservation.reserved_at_micros(),
-                },
-            });
+            ));
         }
         let expected_index = u64::try_from(journal.calls.len())
             .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
@@ -10838,11 +10839,8 @@ impl MemoryStore {
             (Some(existing_root), _, _) if *existing_root != root_address => {
                 Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
             }
-            (Some(_), Some(_), Some(_)) => {
-                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
-            }
-            (Some(_), Some(_), None) => Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
-            (None, None, Some(_)) | (Some(_), None, _) | (None, Some(_), _) => {
+            (Some(_), Some(_), Some(_)) | (Some(_), Some(_), None) | (None, None, Some(_))
+            | (Some(_), None, _) | (None, Some(_), _) => {
                 Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
             }
         }
