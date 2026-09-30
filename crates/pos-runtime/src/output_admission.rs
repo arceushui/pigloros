@@ -1278,6 +1278,18 @@ mod tests {
         ExecutableBudgetPolicyInputV1, FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     };
 
+    /// Unwrap a fixture result, resuming the unwind with the error's debug text.
+    trait OrResume<T> {
+        fn or_resume(self) -> T;
+    }
+
+    impl<T, E: std::fmt::Debug> OrResume<T> for Result<T, E> {
+        #[track_caller]
+        fn or_resume(self) -> T {
+            self.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+        }
+    }
+
     fn budget(
         plugin_id: PluginId,
         max_event_bytes: u32,
@@ -1322,7 +1334,7 @@ mod tests {
             execution_profile_hash: Hash::from_bytes([7; 32]),
             max_pass_wall_duration_us: 1_000,
         })
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+        .or_resume()
     }
 
     fn policy(plugin_id: PluginId, budget: &ExecutableBudgetPolicyV1) -> OutputPolicyV1 {
@@ -1334,7 +1346,7 @@ mod tests {
             None,
             None,
         )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        .or_resume();
         OutputPolicyV1::new(OutputPolicyInputV1 {
             plugin_id,
             plugin_version: "1.0.0".to_owned(),
@@ -1345,7 +1357,7 @@ mod tests {
             policy_revision: 1,
             output_declarations: vec![declaration],
         })
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+        .or_resume()
     }
 
     fn draft(event_type: &str, bytes: &[u8]) -> EventDraft {
@@ -1410,8 +1422,7 @@ mod tests {
         plugin_id: PluginId,
         workload_profile: WorkloadProfileV1,
     ) -> OutputPolicyClosureV1 {
-        let profile = execution_profile_artifact_v1("deterministic-local-v1")
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let profile = execution_profile_artifact_v1("deterministic-local-v1").or_resume();
         let profile_hash = crate::reviewed_policy::execution_profile_artifact_hash_v1(&profile);
         let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -1452,7 +1463,7 @@ mod tests {
             execution_profile_hash: profile_hash,
             max_pass_wall_duration_us: 1_000,
         })
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        .or_resume();
         let implementation = b"fixture-implementation";
         let configuration = fixture_configuration_artifact();
         let declarations = vec![
@@ -1464,7 +1475,7 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+            .or_resume(),
             OutputDeclarationV1::new(
                 "b.derived".to_owned(),
                 OutputAuthorityV1::ReproducibleDerived,
@@ -1473,7 +1484,7 @@ mod tests {
                 Some(2),
                 None,
             )
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+            .or_resume(),
             OutputDeclarationV1::new(
                 "c.ephemeral".to_owned(),
                 OutputAuthorityV1::Ephemeral,
@@ -1482,7 +1493,7 @@ mod tests {
                 None,
                 Some(10),
             )
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}")))),
+            .or_resume(),
         ];
         let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
             plugin_id,
@@ -1499,7 +1510,7 @@ mod tests {
             policy_revision: 1,
             output_declarations: declarations,
         })
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        .or_resume();
         OutputPolicyClosureV1::from_artifacts(
             &policy.to_canonical_cbor(),
             &budget.to_canonical_cbor(),
@@ -1508,7 +1519,7 @@ mod tests {
             &profile,
             crate::reviewed_policy::reviewed_retention_policy_bytes_v1(),
         )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+        .or_resume()
     }
 
     fn fixture_configuration_artifact() -> Vec<u8> {
@@ -1603,7 +1614,7 @@ mod tests {
             );
             let budget = source
                 .build_budget(plugin.id, Hash::from_bytes([9; 32]))
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+                .or_resume();
             if matches!(source, InstalledOutputPolicySourceV1::Generated) {
                 assert!(accepts_plugin);
                 source
@@ -1613,9 +1624,7 @@ mod tests {
                         Hash::from_bytes([8; 32]),
                         &budget,
                     )
-                    .unwrap_or_else(|error| {
-                        std::panic::resume_unwind(Box::new(format!("{error:?}")))
-                    });
+                    .or_resume();
             } else {
                 assert!(!accepts_plugin);
             }
@@ -1661,7 +1670,7 @@ mod tests {
         };
         let budget = InstalledOutputPolicySourceV1::Generated
             .build_budget(empty.id, Hash::from_bytes([9; 32]))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            .or_resume();
         assert!(InstalledOutputPolicySourceV1::Generated
             .build_policy(
                 &empty,
@@ -1676,7 +1685,7 @@ mod tests {
         };
         let budget = InstalledOutputPolicySourceV1::Generated
             .build_budget(long_version_plugin.id(), Hash::from_bytes([9; 32]))
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            .or_resume();
         assert!(InstalledOutputPolicySourceV1::Generated
             .build_policy(
                 &long_version_plugin,
@@ -1866,7 +1875,7 @@ mod tests {
         let policy_a = policy(plugin_id, &budget_a);
         let admission =
             OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy_a.clone(), budget_a.clone())
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+                .or_resume();
         assert_eq!(admission.plugin_id(), plugin_id);
         assert_eq!(admission.policy(), &policy_a);
         assert_eq!(admission.budget(), &budget_a);
@@ -1917,7 +1926,7 @@ mod tests {
             }
             .installed_owner_token(),
         )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        .or_resume();
         assert!(verified.closure().is_some());
         assert!(verified.owner_token().is_some());
     }
@@ -1928,10 +1937,10 @@ mod tests {
         let budget = budget(plugin_id, 16, 2, 32, 100, [10, 10, 10]);
         let admission =
             OutputAdmissionV1::try_new(plugin_id, "1.0.0", policy(plugin_id, &budget), budget)
-                .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+                .or_resume();
         admission
             .validate_batch(&[draft("plugin.output", b"accepted")])
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            .or_resume();
         assert!(matches!(
             admission.validate_batch(&[
                 draft("plugin.output", b"second"),
@@ -1956,15 +1965,15 @@ mod tests {
             ],
         }
         .installed_owner_token();
-        let admission = OutputAdmissionV1::try_new_verified(plugin_id, "1.0.0", closure, owner)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let admission =
+            OutputAdmissionV1::try_new_verified(plugin_id, "1.0.0", closure, owner).or_resume();
         admission
             .validate_batch(&[
                 draft("a.authoritative", b"a"),
                 draft("b.derived", b"b"),
                 draft("c.ephemeral", b"c"),
             ])
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+            .or_resume();
     }
 
     #[test]
@@ -1977,7 +1986,7 @@ mod tests {
             policy(plugin_id, &budget),
             budget.clone(),
         )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        .or_resume();
         assert!(matches!(
             admission.validate_batch(&[draft("plugin.unknown", b"x")]),
             Err(OutputAdmissionErrorV1::MissingDeclaration { .. })
@@ -2007,7 +2016,7 @@ mod tests {
             policy(plugin_id, &bytes_budget),
             bytes_budget,
         )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        .or_resume();
         assert!(matches!(
             bytes_admission.validate_batch(&[draft("plugin.output", b"12345")]),
             Err(OutputAdmissionErrorV1::EventBytesExceeded { .. })
@@ -2020,7 +2029,7 @@ mod tests {
             policy(plugin_id, &batch_budget),
             batch_budget,
         )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        .or_resume();
         assert!(matches!(
             batch_admission
                 .validate_batch(&[draft("plugin.output", b"ab"), draft("plugin.output", b"cd")]),
@@ -2034,7 +2043,7 @@ mod tests {
             policy(plugin_id, &cpu_budget),
             cpu_budget,
         )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        .or_resume();
         assert!(cpu_admission
             .validate_batch(&[draft("plugin.output", b"a"), draft("plugin.output", b"b")])
             .is_ok());
