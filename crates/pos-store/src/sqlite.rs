@@ -6549,7 +6549,7 @@ impl AdapterRecordingStoreV1 for SqliteStore {
             &self.conn,
             owner_reference,
             run_operation_id,
-            reservation,
+            &reservation,
         );
         finish_adapter_recording_scope(&self.conn, scope, result)
     }
@@ -6780,7 +6780,7 @@ fn sqlite_reserve_adapter_call_in_scope(
     connection: &Connection,
     owner_reference: Hash,
     run_operation_id: Hash,
-    reservation: AdapterCallReservationV1,
+    reservation: &AdapterCallReservationV1,
 ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
     let global_index = reservation.invocation().as_input().global_call_index;
     let global_index_sql =
@@ -25215,7 +25215,7 @@ pub(super) mod key_registry_coverage {
         let (session, reservation, _) = adapter_recording_fixture(49);
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
-        let mut store = new_store();
+        let mut store = open_store().expect("SQLite test store should open");
         store
             .open_adapter_recording_session(session.clone())
             .expect("the recorder session should open");
