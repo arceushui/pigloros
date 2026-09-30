@@ -58,11 +58,11 @@ use pos_core::{
     ForkAppendOperationV1, ForkAttributionOriginV1, ForkAuthorityOriginV1, ForkClassifiedEventV1,
     ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
     ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1,
-    ForkInterventionAdmissionV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1,
-    PrincipalOwnerBindingV1, PublicKey, Signature, StoredErasureManifestV1,
-    KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRoleV1,
-    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
+    ForkInterventionAdmissionV1, KeyIdentityV1, KeyRegistryErrorV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
+    PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PublicKey, Signature,
+    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
     GEOGRAPHIC_EVENT_TYPE,
 };
 
