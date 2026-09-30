@@ -101,7 +101,7 @@ impl WorldReplayHandleV1 {
             return Err(WorldReplayHandleErrorV1::FieldOutOfBounds);
         }
         let mut reader = Reader {
-            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+            cursor: crate::CborCursor::new(bytes),
         };
         reader.handle().and_then(|handle| {
             if !reader.cursor.is_finished() {
@@ -141,7 +141,7 @@ fn encode_unsigned(bytes: &mut Vec<u8>, value: u64) {
 }
 
 struct Reader<'a> {
-    cursor: crate::cbor_cursor::CborCursor<'a>,
+    cursor: crate::CborCursor<'a>,
 }
 
 impl Reader<'_> {
@@ -204,7 +204,7 @@ impl Reader<'_> {
                 0x19 => self.cursor.number::<2>(),
                 0x1a => self.cursor.number::<4>(),
                 0x1b => self.cursor.number::<8>(),
-                _ => return Err(crate::cbor_cursor::CborReadError::InvalidEncoding),
+                _ => return Err(crate::CborReadError::InvalidEncoding),
             })
             .map_err(|_| WorldReplayHandleErrorV1::InvalidEncoding)
     }

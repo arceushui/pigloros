@@ -11,10 +11,8 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod adapter_admission;
-mod adapter_codec;
 pub mod adapter_transcript;
 pub mod authority;
-mod cbor_cursor;
 #[cfg(test)]
 extern crate self as pos_core;
 
@@ -84,6 +82,117 @@ pub(crate) fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
             out.push(prefix | 0x1b);
             out.extend_from_slice(&bytes);
         }
+    }
+}
+
+/// Low-level structural read failure for bounded definite-length CBOR records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CborReadError {
+    /// The requested token, byte range, or CBOR major type is invalid.
+    InvalidEncoding,
+}
+
+/// Shared byte cursor for the bounded structural CBOR codecs.
+///
+/// Protocol modules retain their own field bounds, semantic validation, and
+/// public errors. This cursor owns only byte movement and basic CBOR heads.
+pub(crate) struct CborCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> CborCursor<'a> {
+    pub(crate) const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    pub(crate) const fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+
+    pub(crate) fn consume_if(&mut self, byte: u8) -> bool {
+        if self.bytes.get(self.offset) == Some(&byte) {
+            self.offset += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take an exact byte range and advance the cursor.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when the range exceeds the input or its end overflows.
+    pub(crate) fn take(&mut self, length: usize) -> Result<&'a [u8], CborReadError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(CborReadError::InvalidEncoding)?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(CborReadError::InvalidEncoding)?;
+        self.offset = end;
+        Ok(value)
+    }
+
+    /// Read one byte and advance the cursor.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when no byte remains.
+    pub(crate) fn byte(&mut self) -> Result<u8, CborReadError> {
+        Ok(self.take(1)?[0])
+    }
+
+    /// Match and consume an exact byte prefix.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when the bytes do not match or are truncated.
+    pub(crate) fn fixed(&mut self, expected: &[u8]) -> Result<(), CborReadError> {
+        if self.take(expected.len())? == expected {
+            Ok(())
+        } else {
+            Err(CborReadError::InvalidEncoding)
+        }
+    }
+
+    /// Read a definite-length CBOR head of the expected major type.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` for a wrong major type, reserved additional
+    /// information, or a truncated numeric argument.
+    pub(crate) fn head(&mut self, expected_major: u8) -> Result<u64, CborReadError> {
+        let first = self.byte()?;
+        if first >> 5 != expected_major {
+            return Err(CborReadError::InvalidEncoding);
+        }
+        match first & 0x1f {
+            small @ 0..=23 => Ok(u64::from(small)),
+            24 => self.number::<1>(),
+            25 => self.number::<2>(),
+            26 => self.number::<4>(),
+            27 => self.number::<8>(),
+            _ => Err(CborReadError::InvalidEncoding),
+        }
+    }
+
+    /// Read an unsigned integer represented by exactly `N` big-endian bytes.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when fewer than `N` bytes remain.
+    pub(crate) fn number<const N: usize>(&mut self) -> Result<u64, CborReadError> {
+        self.unsigned_bytes(N)
+    }
+
+    /// Read an unsigned integer represented by the requested big-endian width.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when the requested width exceeds the input.
+    pub(crate) fn unsigned_bytes(&mut self, length: usize) -> Result<u64, CborReadError> {
+        Ok(self
+            .take(length)?
+            .iter()
+            .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte)))
     }
 }
 
@@ -175,11 +284,10 @@ pub use erasure::{
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
-    ErasureAdmittedForkContextV1,
-    ErasureApplicabilityDecisionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
-    ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
-    ErasureAtomicFreezeResultV1, ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1,
-    ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    ErasureAdmittedForkContextV1, ErasureApplicabilityDecisionV1, ErasureArtifactClassV1,
+    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptOutcomeInputV1,
+    ErasureAttemptOutcomeV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
     ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1, ErasureCasEffectV1,
     ErasureCasOutcomeV1, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureCoordinator,
     ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
