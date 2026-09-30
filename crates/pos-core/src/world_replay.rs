@@ -5,16 +5,22 @@
 //! module joins those records at one small seam and requires a host-owned
 //! authority to report the current clock and every artifact state before a
 //! Replay claim can be used.
+//!
+//! [`WorldReplayClosureV1::evaluate`] is the production degradation policy: it
+//! maps one closure, one trusted evaluation time, and one host observation per
+//! leaf to a monotonic Replay claim. Obtaining those observations from native
+//! owners remains the installed verifier's responsibility.
 
 use crate::retention::{WorldRetentionLeaseV1, WorldRetentionPolicyV1};
-use crate::{Hash, TimelineId, WorldArtifactKindV1, WorldArtifactLeafV1, WorldConsumerSetV1};
+use crate::world_artifact::WorldArtifactLeafInputV1;
+use crate::{
+    ArtifactClaimInputV1, ArtifactStateV1, ErasureArtifactClassV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, Hash, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, TimelineId,
+    WallTime, WorldArtifactKindV1, WorldArtifactLeafV1, WorldConsumerSetV1,
+};
 
 #[cfg(feature = "test-support")]
-use crate::{
-    ArtifactClaimInputV1, ArtifactStateV1, ErasureArtifactClassV1, ErasureErrorV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, PluginId, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, WallTime,
-};
+use crate::{ErasureErrorV1, PluginId};
 #[cfg(feature = "test-support")]
 use ulid::Ulid;
 
@@ -38,89 +44,84 @@ const REQUIRED_KINDS: [WorldArtifactKindV1; 12] = [
 
 const CLOSURE_DOMAIN: &[u8] = b"pigloros.world-replay-closure.v1\0";
 
+/// Deterministic identities used only by the `test-support` seam fixtures.
+#[cfg(feature = "test-support")]
+mod fixture_identity {
+    use crate::Hash;
+
+    pub(super) const REDUCER_IMPLEMENTATION: Hash = Hash::from_bytes([40; 32]);
+    pub(super) const SCHEMA: Hash = Hash::from_bytes([41; 32]);
+    pub(super) const RUNTIME_IDENTITY: Hash = Hash::from_bytes([42; 32]);
+    pub(super) const OUTPUT_POLICY: Hash = Hash::from_bytes([43; 32]);
+    pub(super) const EXECUTABLE_BUDGET_POLICY: Hash = Hash::from_bytes([44; 32]);
+    pub(super) const BASE_CONFIGURATION: Hash = Hash::from_bytes([45; 32]);
+    pub(super) const EXECUTION_PROFILE: Hash = Hash::from_bytes([46; 32]);
+    pub(super) const AUDIENCE_POLICY: Hash = Hash::from_bytes([47; 32]);
+    pub(super) const PLUGIN_IMPLEMENTATION: Hash = Hash::from_bytes([48; 32]);
+    pub(super) const KEY_DEPENDENCY_EVIDENCE: Hash = Hash::from_bytes([49; 32]);
+    pub(super) const TIMELINE_PAYLOAD: Hash = Hash::from_bytes([50; 32]);
+    pub(super) const OPTIONAL_VIEW: Hash = Hash::from_bytes([53; 32]);
+    pub(super) const OPERATION: Hash = Hash::from_bytes([60; 32]);
+    pub(super) const SOURCE_HEAD: Hash = Hash::from_bytes([61; 32]);
+    pub(super) const INVENTORY_GENERATION: Hash = Hash::from_bytes([62; 32]);
+    pub(super) const RETENTION_AUDIENCE_POLICY: Hash = Hash::from_bytes([10; 32]);
+    /// First byte of the per-leaf host owner; each leaf adds its offset.
+    pub(super) const OWNER_BASE: u8 = 100;
+}
+
 #[cfg(feature = "test-support")]
 fn test_fixture_artifacts(
     scope: Hash,
     retention_policy: &WorldRetentionPolicyV1,
     retention_lease: &WorldRetentionLeaseV1,
 ) -> Result<Vec<WorldArtifactLeafV1>, WorldReplayClosureErrorV1> {
+    use fixture_identity as id;
     let fixtures = [
-        (
-            WorldArtifactKindV1::OutputPolicy,
-            Hash::from_bytes([43; 32]),
-            0,
-        ),
+        (WorldArtifactKindV1::OutputPolicy, id::OUTPUT_POLICY),
         (
             WorldArtifactKindV1::ExecutableBudgetPolicy,
-            Hash::from_bytes([44; 32]),
-            1,
+            id::EXECUTABLE_BUDGET_POLICY,
         ),
         (
             WorldArtifactKindV1::RetentionPolicy,
             retention_policy.digest(),
-            2,
         ),
         (
             WorldArtifactKindV1::RetentionLease,
             retention_lease.digest(),
-            3,
         ),
         (
             WorldArtifactKindV1::BaseConfiguration,
-            Hash::from_bytes([45; 32]),
-            4,
+            id::BASE_CONFIGURATION,
         ),
-        (
-            WorldArtifactKindV1::ExecutionProfile,
-            Hash::from_bytes([46; 32]),
-            5,
-        ),
-        (
-            WorldArtifactKindV1::AudiencePolicy,
-            Hash::from_bytes([47; 32]),
-            6,
-        ),
-        (WorldArtifactKindV1::Schema, Hash::from_bytes([41; 32]), 7),
+        (WorldArtifactKindV1::ExecutionProfile, id::EXECUTION_PROFILE),
+        (WorldArtifactKindV1::AudiencePolicy, id::AUDIENCE_POLICY),
+        (WorldArtifactKindV1::Schema, id::SCHEMA),
         (
             WorldArtifactKindV1::ReducerImplementation,
-            Hash::from_bytes([40; 32]),
-            8,
+            id::REDUCER_IMPLEMENTATION,
         ),
-        (
-            WorldArtifactKindV1::RuntimeIdentity,
-            Hash::from_bytes([42; 32]),
-            9,
-        ),
+        (WorldArtifactKindV1::RuntimeIdentity, id::RUNTIME_IDENTITY),
         (
             WorldArtifactKindV1::PluginImplementationIdentity,
-            Hash::from_bytes([48; 32]),
-            10,
+            id::PLUGIN_IMPLEMENTATION,
         ),
         (
             WorldArtifactKindV1::KeyDependencyEvidence,
-            Hash::from_bytes([49; 32]),
-            11,
+            id::KEY_DEPENDENCY_EVIDENCE,
         ),
-        (
-            WorldArtifactKindV1::TimelinePayload,
-            Hash::from_bytes([50; 32]),
-            12,
-        ),
-        (
-            WorldArtifactKindV1::OptionalView,
-            Hash::from_bytes([53; 32]),
-            13,
-        ),
+        (WorldArtifactKindV1::TimelinePayload, id::TIMELINE_PAYLOAD),
+        (WorldArtifactKindV1::OptionalView, id::OPTIONAL_VIEW),
     ];
-    fixtures
-        .into_iter()
-        .map(|(kind, native_digest, owner_offset)| {
-            WorldArtifactLeafV1::new(crate::world_artifact::WorldArtifactLeafInputV1 {
+    (id::OWNER_BASE..)
+        .zip(fixtures)
+        .map(|(owner, (kind, native_digest))| {
+            WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
                 scope,
                 kind,
                 native_digest,
                 native_byte_length: 1,
-                owner: [100 + owner_offset; 32],
+                owner: [owner; 32],
                 data_class: crate::ArtifactDataClassV1::StructuralAuditMetadata,
                 optionality: if kind == WorldArtifactKindV1::OptionalView {
                     crate::ArtifactOptionalityV1::Optional
@@ -198,6 +199,9 @@ pub enum WorldReplayClosureErrorV1 {
     /// The retention clock or artifact authority could not be read.
     #[error("World Replay artifact authority is unavailable")]
     AuthorityUnavailable,
+    /// The host did not report exactly one observation for every leaf.
+    #[error("World Replay observations do not cover the closure")]
+    ObservationMismatch,
     /// The current artifact closure cannot support an authoritative claim.
     #[error("World Replay claim is not authoritative")]
     ClaimUnavailable,
@@ -283,28 +287,10 @@ impl WorldReplayClosureV1 {
         }) {
             return Err(WorldReplayClosureErrorV1::DuplicateArtifact);
         }
-        if artifacts.iter().any(|leaf| {
-            let input = leaf.as_input();
-            input.scope != scope || input.source_lease_hash != lease_digest
-        }) {
-            return Err(WorldReplayClosureErrorV1::ScopeMismatch);
-        }
-        if artifacts.iter().any(|leaf| {
-            let input = leaf.as_input();
-            input.owner == [0; 32] || input.native_byte_length == 0
-        }) {
-            return Err(WorldReplayClosureErrorV1::UnownedArtifact);
-        }
-        if artifacts.iter().any(|leaf| {
-            let input = leaf.as_input();
-            input.kind != WorldArtifactKindV1::OptionalView
-                && input.optionality != crate::ArtifactOptionalityV1::Required
-        }) {
-            return Err(WorldReplayClosureErrorV1::MissingRequiredArtifact);
-        }
+        validate_leaf_rules(&artifacts, scope, lease_digest)?;
         if REQUIRED_KINDS
             .iter()
-            .any(|kind| !artifacts.iter().any(|leaf| leaf.as_input().kind == *kind))
+            .any(|kind| !has_leaf(&artifacts, *kind, |_| true))
         {
             return Err(WorldReplayClosureErrorV1::MissingRequiredArtifact);
         }
@@ -408,7 +394,7 @@ impl WorldReplayClosureV1 {
     /// records fail their own public validation.
     #[cfg(feature = "test-support")]
     pub fn test_fixture() -> Result<Self, WorldReplayClosureErrorV1> {
-        Self::test_fixture_with_inventory_generation(Hash::from_bytes([62; 32]))
+        Self::test_fixture_with_inventory_generation(fixture_identity::INVENTORY_GENERATION)
     }
 
     /// Build the deterministic seam fixture against one caller-supplied
@@ -460,7 +446,7 @@ impl WorldReplayClosureV1 {
             crate::retention::WorldRetentionPolicyInputV1 {
                 policy_revision: 1,
                 purpose: "world-replay".to_owned(),
-                audience_policy_hash: Hash::from_bytes([10; 32]),
+                audience_policy_hash: fixture_identity::RETENTION_AUDIENCE_POLICY,
                 minimum_post_admission_days: 90,
                 maximum_active_days: 30,
                 maximum_total_days: 120,
@@ -505,8 +491,8 @@ impl WorldReplayClosureV1 {
             .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
         Self::new(WorldReplayClosureInputV1 {
             timeline_id,
-            operation_identity: Hash::from_bytes([60; 32]),
-            source_head: Hash::from_bytes([61; 32]),
+            operation_identity: fixture_identity::OPERATION,
+            source_head: fixture_identity::SOURCE_HEAD,
             inventory_generation,
             retention_policy,
             retention_lease,
@@ -515,51 +501,40 @@ impl WorldReplayClosureV1 {
         })
     }
 
-    /// Admit the closure against a host-owned clock and artifact authority.
+    /// Evaluate this closure's Replay claim from host-observed evidence.
     ///
-    /// The authority is the only source of current time and artifact state.
-    /// Callers cannot turn structural WAL1 metadata into an Exact claim by
-    /// supplying a hand-written state snapshot.
+    /// This is the production degradation policy that every installed
+    /// verifier must apply after it has read trusted inputs from the native
+    /// owners: `now` is the trusted evaluation time, and `observations` holds
+    /// exactly one host observation per leaf, in [`Self::artifacts`] order.
+    /// Expiry fails closed, a native digest that differs from the recorded
+    /// leaf fails closed, and each current artifact state weakens the claim
+    /// monotonically. The result also records which WCS1 optional-view roots
+    /// may be authorized for the requested use.
     ///
     /// # Errors
-    /// Returns a closed error when the authority cannot provide trusted time
-    /// or artifact state, or when the evaluated closure is not admissible.
-    #[cfg(feature = "test-support")]
-    pub fn admit(
+    /// Returns [`WorldReplayClosureErrorV1::RetentionExpired`] at or after the
+    /// lease deadline, [`WorldReplayClosureErrorV1::ObservationMismatch`] when
+    /// the observations do not cover every leaf exactly once,
+    /// [`WorldReplayClosureErrorV1::NativeDigestMismatch`] when a native owner
+    /// verified different content, or
+    /// [`WorldReplayClosureErrorV1::EvaluationRejected`] when the core claim
+    /// evaluator rejects the assembled artifact set.
+    pub fn evaluate(
         &self,
-        authority: &mut dyn WorldReplayClosureAuthorityV1,
+        now: WallTime,
+        observations: &[WorldReplayArtifactObservationV1],
     ) -> Result<WorldReplayAdmissionV1, WorldReplayClosureErrorV1> {
-        let now = authority
-            .now()
-            .map_err(|_| WorldReplayClosureErrorV1::AuthorityUnavailable)?;
-        if now.as_micros() >= self.retention_lease.as_input().retention_deadline_micros {
-            return Err(WorldReplayClosureErrorV1::RetentionExpired);
+        self.ensure_retained(now)?;
+        if observations.len() != self.artifacts.len() {
+            return Err(WorldReplayClosureErrorV1::ObservationMismatch);
         }
-        let mut claims = Vec::with_capacity(self.artifacts.len());
-        for leaf in &self.artifacts {
-            let verified_digest = authority
-                .verify_native_artifact(leaf)
-                .map_err(|_| WorldReplayClosureErrorV1::NativeVerificationUnavailable)?;
-            if verified_digest != leaf.as_input().native_digest {
-                return Err(WorldReplayClosureErrorV1::NativeDigestMismatch);
-            }
-            let state = authority
-                .artifact_state(leaf)
-                .map_err(|_| WorldReplayClosureErrorV1::AuthorityUnavailable)?;
-            claims.push(ArtifactClaimInputV1 {
-                registration: crate::RegisteredArtifactV1::new(
-                    ErasureArtifactClassV1::TimelineReplay,
-                    ErasureReferenceV1::from_digest(*leaf.as_input().native_digest.as_bytes()),
-                    leaf.as_input().data_class,
-                    None,
-                    ErasureReferenceV1::from_digest(leaf.as_input().owner),
-                    leaf.as_input().optionality,
-                    leaf.as_input().transition,
-                ),
-                current_claim: ErasureReplayClaimV1::Exact,
-                state,
-            });
-        }
+        let claims = self
+            .artifacts
+            .iter()
+            .zip(observations)
+            .map(|(leaf, observation)| artifact_claim(leaf, *observation))
+            .collect::<Result<Vec<_>, _>>()?;
         let evaluation = ReplayClaimEvaluatorV1::evaluate(ErasureReplayClaimV1::Exact, &claims)
             .map_err(|_| WorldReplayClosureErrorV1::EvaluationRejected)?;
         Ok(WorldReplayAdmissionV1 {
@@ -577,6 +552,127 @@ impl WorldReplayClosureV1 {
                 .collect(),
         })
     }
+
+    fn ensure_retained(&self, now: WallTime) -> Result<(), WorldReplayClosureErrorV1> {
+        if now.as_micros() >= self.retention_lease.as_input().retention_deadline_micros {
+            Err(WorldReplayClosureErrorV1::RetentionExpired)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Admit the closure against a host-owned clock and artifact authority.
+    ///
+    /// The authority is the only source of current time and artifact state.
+    /// Callers cannot turn structural WAL1 metadata into an Exact claim by
+    /// supplying a hand-written state snapshot. The collected observations
+    /// are evaluated by [`Self::evaluate`].
+    ///
+    /// # Errors
+    /// Returns a closed error when the authority cannot provide trusted time
+    /// or artifact state, or when the evaluated closure is not admissible.
+    #[cfg(feature = "test-support")]
+    pub fn admit(
+        &self,
+        authority: &mut dyn WorldReplayClosureAuthorityV1,
+    ) -> Result<WorldReplayAdmissionV1, WorldReplayClosureErrorV1> {
+        let now = authority
+            .now()
+            .map_err(|_| WorldReplayClosureErrorV1::AuthorityUnavailable)?;
+        self.ensure_retained(now)?;
+        let mut observations = Vec::with_capacity(self.artifacts.len());
+        for leaf in &self.artifacts {
+            let verified_native_digest = authority
+                .verify_native_artifact(leaf)
+                .map_err(|_| WorldReplayClosureErrorV1::NativeVerificationUnavailable)?;
+            let state = authority
+                .artifact_state(leaf)
+                .map_err(|_| WorldReplayClosureErrorV1::AuthorityUnavailable)?;
+            observations.push(WorldReplayArtifactObservationV1 {
+                verified_native_digest,
+                state,
+            });
+        }
+        self.evaluate(now, &observations)
+    }
+}
+
+/// One host observation of a closure leaf, reported by its native owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorldReplayArtifactObservationV1 {
+    /// Content identity the native owner verified for the leaf's bytes.
+    pub verified_native_digest: Hash,
+    /// Current retained, transitioned, or missing state of the leaf.
+    pub state: ArtifactStateV1,
+}
+
+fn artifact_claim(
+    leaf: &WorldArtifactLeafV1,
+    observation: WorldReplayArtifactObservationV1,
+) -> Result<ArtifactClaimInputV1, WorldReplayClosureErrorV1> {
+    let input = leaf.as_input();
+    if observation.verified_native_digest != input.native_digest {
+        return Err(WorldReplayClosureErrorV1::NativeDigestMismatch);
+    }
+    Ok(ArtifactClaimInputV1 {
+        registration: crate::RegisteredArtifactV1::new(
+            ErasureArtifactClassV1::TimelineReplay,
+            ErasureReferenceV1::from_digest(*input.native_digest.as_bytes()),
+            input.data_class,
+            None,
+            ErasureReferenceV1::from_digest(input.owner),
+            input.optionality,
+            input.transition,
+        ),
+        current_claim: ErasureReplayClaimV1::Exact,
+        state: observation.state,
+    })
+}
+
+/// Per-leaf structural rules, checked in this order across every leaf.
+fn validate_leaf_rules(
+    artifacts: &[WorldArtifactLeafV1],
+    scope: Hash,
+    lease_digest: Hash,
+) -> Result<(), WorldReplayClosureErrorV1> {
+    let out_of_scope = |leaf: &WorldArtifactLeafInputV1| {
+        leaf.scope != scope || leaf.source_lease_hash != lease_digest
+    };
+    let unowned =
+        |leaf: &WorldArtifactLeafInputV1| leaf.owner == [0; 32] || leaf.native_byte_length == 0;
+    let optional_mandatory = |leaf: &WorldArtifactLeafInputV1| {
+        leaf.kind != WorldArtifactKindV1::OptionalView
+            && leaf.optionality != crate::ArtifactOptionalityV1::Required
+    };
+    let rules: [(
+        &dyn Fn(&WorldArtifactLeafInputV1) -> bool,
+        WorldReplayClosureErrorV1,
+    ); 3] = [
+        (&out_of_scope, WorldReplayClosureErrorV1::ScopeMismatch),
+        (&unowned, WorldReplayClosureErrorV1::UnownedArtifact),
+        (
+            &optional_mandatory,
+            WorldReplayClosureErrorV1::MissingRequiredArtifact,
+        ),
+    ];
+    match rules
+        .iter()
+        .find(|(violates, _)| artifacts.iter().any(|leaf| violates(leaf.as_input())))
+    {
+        Some((_, error)) => Err(*error),
+        None => Ok(()),
+    }
+}
+
+/// Return whether any leaf of `kind` satisfies `predicate`.
+fn has_leaf(
+    artifacts: &[WorldArtifactLeafV1],
+    kind: WorldArtifactKindV1,
+    predicate: impl Fn(&WorldArtifactLeafV1) -> bool,
+) -> bool {
+    artifacts
+        .iter()
+        .any(|leaf| leaf.as_input().kind == kind && predicate(leaf))
 }
 
 fn has_identity(
@@ -584,9 +680,9 @@ fn has_identity(
     kind: WorldArtifactKindV1,
     digest: Hash,
 ) -> bool {
-    artifacts
-        .iter()
-        .any(|leaf| leaf.as_input().kind == kind && leaf.as_input().native_digest == digest)
+    has_leaf(artifacts, kind, |leaf| {
+        leaf.as_input().native_digest == digest
+    })
 }
 
 fn has_leaf_address(
@@ -594,9 +690,7 @@ fn has_leaf_address(
     kind: WorldArtifactKindV1,
     address: Hash,
 ) -> bool {
-    artifacts
-        .iter()
-        .any(|leaf| leaf.as_input().kind == kind && leaf.digest() == address)
+    has_leaf(artifacts, kind, |leaf| leaf.digest() == address)
 }
 
 fn validate_consumer_set_references(
@@ -624,18 +718,15 @@ fn validate_consumer_set_references(
             producer.output_policy_hash(),
         )
     }) || consumer_set.optional_view_roots().iter().any(|root| {
-        !artifacts.iter().any(|leaf| {
-            let input = leaf.as_input();
-            input.kind == WorldArtifactKindV1::OptionalView
-                && leaf.digest() == *root
-                && input.optionality == crate::ArtifactOptionalityV1::Optional
+        !has_leaf(artifacts, WorldArtifactKindV1::OptionalView, |leaf| {
+            leaf.digest() == *root
+                && leaf.as_input().optionality == crate::ArtifactOptionalityV1::Optional
         })
     }) {
         return Err(WorldReplayClosureErrorV1::MissingConsumerArtifact);
     }
-    if artifacts.iter().any(|leaf| {
-        leaf.as_input().kind == WorldArtifactKindV1::OptionalView
-            && !consumer_set.optional_view_roots().contains(&leaf.digest())
+    if has_leaf(artifacts, WorldArtifactKindV1::OptionalView, |leaf| {
+        !consumer_set.optional_view_roots().contains(&leaf.digest())
     }) {
         return Err(WorldReplayClosureErrorV1::UnselectedOptionalView);
     }
@@ -673,16 +764,14 @@ pub trait WorldReplayClosureAuthorityV1 {
     ) -> Result<ArtifactStateV1, ErasureErrorV1>;
 }
 
-/// An admitted closure and its monotonic Replay claim.
+/// An evaluated closure and its monotonic Replay claim.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg(feature = "test-support")]
 pub struct WorldReplayAdmissionV1 {
     closure_digest: Hash,
     evaluation: ReplayClaimEvaluationV1,
     optional_views: Vec<(Hash, Hash)>,
 }
 
-#[cfg(feature = "test-support")]
 impl WorldReplayAdmissionV1 {
     /// Return the exact closure identity used for this admission.
     #[must_use]

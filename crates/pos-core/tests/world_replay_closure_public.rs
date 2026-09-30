@@ -8,8 +8,9 @@ use pos_core::{
     ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1,
     ErasureErrorV1, ErasureReplayClaimV1, Hash, PluginId, TimelineId, WallTime,
     WorldArtifactKindV1, WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1,
-    WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1, WorldReplayClosureAuthorityV1,
-    WorldReplayClosureErrorV1, WorldReplayClosureInputV1, WorldReplayClosureV1,
+    WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1, WorldReplayArtifactObservationV1,
+    WorldReplayClosureAuthorityV1, WorldReplayClosureErrorV1, WorldReplayClosureInputV1,
+    WorldReplayClosureV1,
 };
 use std::fmt::Debug;
 use ulid::Ulid;
@@ -830,4 +831,69 @@ fn authority_failures_are_not_treated_as_replay_evidence() {
         admitted(&mut wrong_native),
         Err(WorldReplayClosureErrorV1::NativeDigestMismatch)
     );
+}
+
+fn observations(closure: &WorldReplayClosureV1) -> Vec<WorldReplayArtifactObservationV1> {
+    closure
+        .artifacts()
+        .iter()
+        .map(|leaf| WorldReplayArtifactObservationV1 {
+            verified_native_digest: leaf.as_input().native_digest,
+            state: ArtifactStateV1::Retained,
+        })
+        .collect()
+}
+
+#[test]
+fn production_evaluation_applies_expiry_digest_and_state_policy() -> TestResult {
+    let closure = WorldReplayClosureV1::new(closure_input())?;
+    let now = WallTime::from_micros(1);
+    let retained = closure.evaluate(now, &observations(&closure))?;
+    assert_eq!(retained.closure_digest(), closure.digest());
+    assert_eq!(
+        retained.evaluation().replay_claim(),
+        ErasureReplayClaimV1::Exact
+    );
+    let optional_view_root = closure.consumer_set().optional_view_roots()[0];
+    assert_eq!(
+        retained.require_authoritative_use_for(&[optional_view_root]),
+        Ok(())
+    );
+
+    assert_eq!(
+        closure.evaluate(
+            WallTime::from_micros(120 * DAY_MICROS),
+            &observations(&closure)
+        ),
+        Err(WorldReplayClosureErrorV1::RetentionExpired)
+    );
+    let mut short = observations(&closure);
+    short.pop();
+    assert_eq!(
+        closure.evaluate(now, &short),
+        Err(WorldReplayClosureErrorV1::ObservationMismatch)
+    );
+    let mut wrong_digest = observations(&closure);
+    wrong_digest[0].verified_native_digest = hash(254);
+    assert_eq!(
+        closure.evaluate(now, &wrong_digest),
+        Err(WorldReplayClosureErrorV1::NativeDigestMismatch)
+    );
+    let schema = closure
+        .artifacts()
+        .iter()
+        .position(|leaf| leaf.as_input().kind == WorldArtifactKindV1::Schema)
+        .ok_or("schema leaf")?;
+    let mut missing = observations(&closure);
+    missing[schema].state = ArtifactStateV1::MissingRequiredOutput;
+    let degraded = closure.evaluate(now, &missing)?;
+    assert_eq!(
+        degraded.evaluation().replay_claim(),
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
+    );
+    assert_eq!(
+        degraded.require_authoritative_use(),
+        Err(WorldReplayClosureErrorV1::ClaimUnavailable)
+    );
+    Ok(())
 }
