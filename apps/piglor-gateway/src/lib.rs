@@ -521,6 +521,32 @@ mod coverage_tests {
     }
 
     #[test]
+    fn gateway_body_cap_leaves_room_for_the_frozen_configuration_prefix() {
+        let max_bodies = super::max_gateway_bodies();
+        let at_cap = super::FrozenGatewayActionConfiguration::resolve(
+            (0..max_bodies).map(|_| EntityId::new()),
+        )
+        .test_ok();
+        assert_eq!(at_cap.bodies.len(), max_bodies);
+        let details = GatewayActionPlugin::configuration_details(&at_cap);
+        assert!(details.len() <= pos_runtime::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1);
+        assert_eq!(
+            details.len(),
+            super::gateway_configuration_details_overhead() + 16 * max_bodies
+        );
+        assert!(matches!(
+            super::FrozenGatewayActionConfiguration::resolve(
+                (0..=max_bodies).map(|_| EntityId::new()),
+            ),
+            Err(pos_runtime::RuntimeError::OutputAdmission(
+                pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid {
+                    kind: "configuration"
+                }
+            ))
+        ));
+    }
+
+    #[test]
     fn frozen_gateway_defaults_change_configuration_and_policy_identity() {
         let resolved = || super::FrozenGatewayActionConfiguration::resolve(Vec::new()).test_ok();
         let identity = |frozen: &super::FrozenGatewayActionConfiguration| {
@@ -1166,6 +1192,8 @@ impl pos_core::ActionApprover for GatewayWorldActionApprover {
 /// Gateway action configuration with every output-affecting default resolved.
 struct FrozenGatewayActionConfiguration {
     bodies: Vec<EntityId>,
+    // Frozen from the reviewed Gateway constants so they enter the CFG1
+    // identity; they are not operator-configurable.
     allowed_action_kinds: Vec<String>,
     catalogue_version: u32,
 }
@@ -1335,10 +1363,28 @@ fn gateway_with_erasure_host_and_authorization(
     )
 }
 
+/// Bytes the Gateway configuration details spend before the bodies: the
+/// catalogue version, the allowed-kind count and each length-framed kind.
+fn gateway_configuration_details_overhead() -> usize {
+    GATEWAY_ALLOWED_ACTION_KINDS
+        .iter()
+        .fold(size_of::<u32>() + size_of::<u64>(), |len, kind| {
+            len + size_of::<u64>() + kind.len()
+        })
+}
+
+/// Most bodies whose 16-byte identities still fit the configuration details
+/// after [`gateway_configuration_details_overhead`].
+fn max_gateway_bodies() -> usize {
+    let available = pos_runtime::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1
+        .saturating_sub(gateway_configuration_details_overhead());
+    available / 16
+}
+
 fn canonical_gateway_bodies(
     bodies: impl IntoIterator<Item = EntityId>,
 ) -> Result<Vec<EntityId>, pos_runtime::RuntimeError> {
-    let max_bodies = pos_runtime::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 / 16;
+    let max_bodies = max_gateway_bodies();
     let mut bodies = bodies.into_iter().take(max_bodies + 1).collect::<Vec<_>>();
     if bodies.len() > max_bodies {
         return Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid {
