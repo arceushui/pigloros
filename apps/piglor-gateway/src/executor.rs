@@ -2961,7 +2961,7 @@ fn execute_submit_identified_action_command(
 ) {
     match &mut state.store {
         ExecutorStore::Host(host, _) => {
-            execute_host_identified_action(host, context, identity, reply)
+            execute_host_identified_action(host, context, identity, reply);
         }
         #[cfg(test)]
         ExecutorStore::Generic(store) => {

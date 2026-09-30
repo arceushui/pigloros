@@ -120,15 +120,9 @@ pub(super) fn open_fork_admission_session(
     LocalForkAuthenticationErrorV1,
 > {
     let bootstrap = host.fork_admission_bootstrap();
-    credentials
-        .open_authority(bootstrap)
-        .ok()
-        .and_then(|session| {
-            bootstrap
-                .fork_admission_host_record()
-                .ok()
-                .map(|record| (session, record))
-        })
+    let session = credentials.open_authority(bootstrap).ok();
+    session
+        .zip(bootstrap.fork_admission_host_record().ok())
         .ok_or(LocalForkAuthenticationErrorV1::CredentialUnavailable)
 }
 
