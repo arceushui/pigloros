@@ -183,6 +183,10 @@ impl Plugin for SocietyPlugin {
 ///
 /// This Plugin has a Reducer but no Driver, `ActionApprover`, or owned Event
 /// types. Its empty output policy is still part of the admitted Plugin roster.
+///
+/// It is a reducer-only installed Plugin with no production composition root
+/// yet; a Wave 9 catalogue entry (Redmine #445) will install it. It currently
+/// backs the #412 zero-output acceptance test.
 pub struct SocietySignalProjectionPlugin {
     id: PluginId,
 }
