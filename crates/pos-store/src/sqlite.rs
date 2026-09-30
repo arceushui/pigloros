@@ -18,6 +18,7 @@ use std::{
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
+    close_adapter_recording_v1, completed_adapter_call_v1,
     event::{CanonicalBytes, Event, EventDraft, EventOriginV1, Kind, SchemaVersion},
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
@@ -45,33 +46,36 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    validate_artifact_registration_catalog_graph_v1, ArtifactRegistrationCatalogRowV1,
-    ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1,
-    ArtifactRegistrationPersistencePortV1, AuthorityCommitOutcomeV1, AuthorityMutationPermitV1,
-    AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
-    AuthorityPersistenceStateV1, CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit,
-    CoreError, ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1,
-    ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryMutationV1,
-    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
-    ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
-    ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
-    ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
-    ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
-    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, EventOriginRecordV1,
-    ForkAdmissionHostCommandV1, ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1,
-    ForkAdmissionOpenChallengeV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
-    ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
-    ForkAdmissionRecoveryProofV1, ForkAppendOperationV1, ForkAttributionOriginV1,
-    ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
-    ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
-    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
-    PersistedAuthorityV1, PreparedArtifactRegistrationBatchV1,
+    validate_artifact_registration_catalog_graph_v1, validate_closed_adapter_recording_v1,
+    AdapterAdmissionV1, AdapterCallReservationOutcomeV1, AdapterCallReservationV1,
+    AdapterInvocationV1, AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1,
+    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1,
+    ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
+    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
+    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
+    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError,
+    ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
+    ErasureForkPersistencePortV1, ErasureForkRecoveryMutationV1, ErasureForkRecoveryProofV1,
+    ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1,
+    ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1,
+    ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
+    ErasureVerifiedInventoryV1, EventOriginRecordV1, ForkAdmissionHostCommandV1,
+    ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
+    ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1, ForkAdmissionReceiptV1,
+    ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAdmissionRecoveryProofV1,
+    ForkAppendOperationV1, ForkAttributionOriginV1, ForkAuthorityOriginV1, ForkClassifiedEventV1,
+    ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
+    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1,
+    ForkInterventionAdmissionV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1,
+    KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PluginId, PreparedArtifactRegistrationBatchV1,
     PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
-    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1, WorldReplayHandleV1,
+    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 
 use crate::fork_admission_authority::{
@@ -931,6 +935,32 @@ const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artif
          root_registration_address BLOB NOT NULL CHECK (length(root_registration_address) = 32),
          PRIMARY KEY (owner_id, operation_id),
          UNIQUE (owner_id, root_registration_address)
+     );
+     CREATE TABLE IF NOT EXISTS adapter_recording_sessions (
+         owner_reference BLOB NOT NULL CHECK (length(owner_reference) = 32),
+         run_operation_id BLOB NOT NULL CHECK (length(run_operation_id) = 32),
+         world_handle_cbor BLOB NOT NULL CHECK (length(world_handle_cbor) <= 256),
+         admission_cbor BLOB NOT NULL CHECK (length(admission_cbor) <= 16777216),
+         state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 2),
+         transcript_cbor BLOB CHECK (transcript_cbor IS NULL OR length(transcript_cbor) <= 268435456),
+         PRIMARY KEY (owner_reference, run_operation_id),
+         CHECK ((state = 1 AND transcript_cbor IS NOT NULL) OR
+                (state != 1 AND transcript_cbor IS NULL))
+     );
+     CREATE TABLE IF NOT EXISTS adapter_recording_calls (
+         owner_reference BLOB NOT NULL CHECK (length(owner_reference) = 32),
+         run_operation_id BLOB NOT NULL CHECK (length(run_operation_id) = 32),
+         global_call_index INTEGER NOT NULL CHECK (global_call_index >= 0),
+         plugin_id BLOB NOT NULL CHECK (length(plugin_id) = 16),
+         per_plugin_call_index INTEGER NOT NULL CHECK (per_plugin_call_index >= 0),
+         invocation_cbor BLOB NOT NULL CHECK (length(invocation_cbor) <= 16777216),
+         idempotency_key BLOB NOT NULL CHECK (length(idempotency_key) = 32),
+         reserved_at_micros INTEGER NOT NULL CHECK (reserved_at_micros >= 0),
+         output_bytes BLOB CHECK (output_bytes IS NULL OR length(output_bytes) <= 16777216),
+         PRIMARY KEY (owner_reference, run_operation_id, global_call_index),
+         UNIQUE (owner_reference, run_operation_id, plugin_id, per_plugin_call_index),
+         FOREIGN KEY (owner_reference, run_operation_id)
+             REFERENCES adapter_recording_sessions(owner_reference, run_operation_id)
      );";
 
 /// Validated `(EOR1, optional FIA1, FOP1)` rows for one child suffix.
@@ -6166,6 +6196,593 @@ impl ArtifactRegistrationPersistencePortV1 for SqliteStore {
     ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>
     {
         sqlite_read_artifact_registration(&self.conn, owner_id, registration_address)
+    }
+}
+
+impl AdapterRecordingStoreV1 for SqliteStore {
+    fn open_adapter_recording_session(
+        &mut self,
+        session: AdapterRecordingSessionV1,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let handle_bytes = session.world_handle().to_canonical_cbor();
+        let admission_bytes = session.admission().to_canonical_cbor();
+        let result = (|| {
+            let existing = self
+                .conn
+                .query_row(
+                    "SELECT world_handle_cbor, admission_cbor, state
+                     FROM adapter_recording_sessions
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice()
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            if let Some((stored_handle, stored_admission, state)) = existing {
+                if stored_handle != handle_bytes || stored_admission != admission_bytes {
+                    return Err(AdapterRecordingStoreErrorV1::Conflict);
+                }
+                return if state == 0 {
+                    Ok(())
+                } else {
+                    Err(AdapterRecordingStoreErrorV1::InvalidState)
+                };
+            }
+            self.conn
+                .execute(
+                    "INSERT INTO adapter_recording_sessions
+                     (owner_reference, run_operation_id, world_handle_cbor, admission_cbor, state)
+                     VALUES (?1, ?2, ?3, ?4, 0)",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                        handle_bytes,
+                        admission_bytes,
+                    ],
+                )
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            Ok(())
+        })();
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+
+    fn reserve_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: AdapterCallReservationV1,
+    ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let global_index = reservation.invocation().as_input().global_call_index;
+        let global_index_sql =
+            i64::try_from(global_index).map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+        let per_plugin_index_sql = i64::try_from(reservation.per_plugin_call_index())
+            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+        let reserved_at_sql = i64::try_from(reservation.reserved_at_micros())
+            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+        let maximum_call_count = u64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)
+            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+        let maximum_call_count_sql = i64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)
+            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+        if global_index >= maximum_call_count {
+            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+        }
+        let plugin_id = reservation.plugin_id().inner().to_bytes();
+        let invocation_bytes = reservation.invocation().to_canonical_cbor();
+        let idempotency_key = reservation.idempotency_key();
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let result = (|| {
+            let session_state =
+                sqlite_adapter_recording_state(&self.conn, owner_reference, run_operation_id)?
+                    .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+            if session_state != 0 {
+                return Err(AdapterRecordingStoreErrorV1::InvalidState);
+            }
+            let existing = self
+                .conn
+                .query_row(
+                    "SELECT plugin_id, per_plugin_call_index, invocation_cbor,
+                            idempotency_key, reserved_at_micros, output_bytes
+                     FROM adapter_recording_calls
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2
+                       AND global_call_index = ?3",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                        global_index_sql
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, Vec<u8>>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, Option<Vec<u8>>>(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            if let Some((
+                stored_plugin,
+                stored_per_plugin_index,
+                stored_invocation,
+                stored_idempotency_key,
+                stored_reserved_at,
+                output_bytes,
+            )) = existing
+            {
+                if stored_plugin.as_slice() != plugin_id.as_slice()
+                    || stored_per_plugin_index != per_plugin_index_sql
+                    || stored_invocation != invocation_bytes
+                    || stored_idempotency_key.as_slice() != idempotency_key.as_bytes().as_slice()
+                {
+                    return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+                }
+                let reserved_at_micros = u64::try_from(stored_reserved_at)
+                    .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+                return Ok(match output_bytes {
+                    Some(output_bytes) => AdapterCallReservationOutcomeV1::Completed {
+                        output_bytes,
+                        reserved_at_micros,
+                    },
+                    None => AdapterCallReservationOutcomeV1::Reserved { reserved_at_micros },
+                });
+            }
+            let global_count: i64 = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM adapter_recording_calls
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice()
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            if global_count != global_index_sql || global_count >= maximum_call_count_sql {
+                return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+            }
+            let plugin_count: i64 = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM adapter_recording_calls
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2 AND plugin_id = ?3",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                        plugin_id.as_slice()
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            if plugin_count != per_plugin_index_sql {
+                return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+            }
+            self.conn
+                .execute(
+                    "INSERT INTO adapter_recording_calls
+                     (owner_reference, run_operation_id, global_call_index, plugin_id,
+                      per_plugin_call_index, invocation_cbor, idempotency_key, reserved_at_micros)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                        global_index_sql,
+                        plugin_id.as_slice(),
+                        per_plugin_index_sql,
+                        invocation_bytes,
+                        idempotency_key.as_bytes().as_slice(),
+                        reserved_at_sql,
+                    ],
+                )
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            Ok(AdapterCallReservationOutcomeV1::Reserved {
+                reserved_at_micros: reservation.reserved_at_micros(),
+            })
+        })();
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+
+    fn complete_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        if output_bytes.len() > pos_core::MAX_ADAPTER_CALL_BYTES_V1 {
+            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+        }
+        let global_index_sql = i64::try_from(global_call_index)
+            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let result = (|| {
+            if sqlite_adapter_recording_state(&self.conn, owner_reference, run_operation_id)?
+                != Some(0)
+            {
+                return Err(AdapterRecordingStoreErrorV1::InvalidState);
+            }
+            let existing = self
+                .conn
+                .query_row(
+                    "SELECT output_bytes FROM adapter_recording_calls
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2
+                       AND global_call_index = ?3",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                        global_index_sql
+                    ],
+                    |row| row.get::<_, Option<Vec<u8>>>(0),
+                )
+                .optional()
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?
+                .ok_or(AdapterRecordingStoreErrorV1::InvalidCall)?;
+            match existing {
+                Some(existing) if existing == output_bytes => Ok(()),
+                Some(_) => Err(AdapterRecordingStoreErrorV1::Conflict),
+                None => {
+                    let changed = self
+                        .conn
+                        .execute(
+                            "UPDATE adapter_recording_calls SET output_bytes = ?1
+                             WHERE owner_reference = ?2 AND run_operation_id = ?3
+                               AND global_call_index = ?4 AND output_bytes IS NULL",
+                            params![
+                                output_bytes,
+                                owner_reference.as_bytes().as_slice(),
+                                run_operation_id.as_bytes().as_slice(),
+                                global_index_sql,
+                            ],
+                        )
+                        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+                    if changed == 1 {
+                        Ok(())
+                    } else {
+                        Err(AdapterRecordingStoreErrorV1::Conflict)
+                    }
+                }
+            }
+        })();
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+
+    fn close_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let result = (|| {
+            let (session, state, transcript) = sqlite_load_adapter_recording_session(
+                &self.conn,
+                owner_reference,
+                run_operation_id,
+            )?
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+            if state == 1 {
+                let transcript_bytes =
+                    transcript.ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+                let derived = sqlite_adapter_recording_transcript(
+                    &self.conn,
+                    owner_reference,
+                    run_operation_id,
+                    &session,
+                )?;
+                if derived != transcript_bytes {
+                    return Err(AdapterRecordingStoreErrorV1::CorruptState);
+                }
+                return Ok(transcript_bytes);
+            }
+            if state != 0 || transcript.is_some() {
+                return Err(AdapterRecordingStoreErrorV1::InvalidState);
+            }
+            let transcript_bytes = sqlite_adapter_recording_transcript(
+                &self.conn,
+                owner_reference,
+                run_operation_id,
+                &session,
+            )?;
+            let changed = self
+                .conn
+                .execute(
+                    "UPDATE adapter_recording_sessions
+                     SET state = 1, transcript_cbor = ?1
+                     WHERE owner_reference = ?2 AND run_operation_id = ?3 AND state = 0",
+                    params![
+                        transcript_bytes,
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                    ],
+                )
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            if changed != 1 {
+                return Err(AdapterRecordingStoreErrorV1::Conflict);
+            }
+            Ok(transcript_bytes)
+        })();
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+
+    fn read_closed_adapter_recording_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let Some((session, state, transcript)) =
+            sqlite_load_adapter_recording_session(&self.conn, owner_reference, run_operation_id)?
+        else {
+            return Ok(None);
+        };
+        if state != 1 {
+            return Ok(None);
+        }
+        let transcript_bytes = transcript.ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+        let derived = sqlite_adapter_recording_transcript(
+            &self.conn,
+            owner_reference,
+            run_operation_id,
+            &session,
+        )?;
+        if derived != transcript_bytes {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        validate_closed_adapter_recording_v1(&session, &transcript_bytes)?;
+        Ok(Some(transcript_bytes))
+    }
+
+    fn abort_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let result = (|| {
+            let changed = self
+                .conn
+                .execute(
+                    "UPDATE adapter_recording_sessions SET state = 2
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2 AND state = 0",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice()
+                    ],
+                )
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            if changed == 1 {
+                Ok(())
+            } else {
+                Err(AdapterRecordingStoreErrorV1::InvalidState)
+            }
+        })();
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+}
+
+fn sqlite_require_adapter_recording_schema(
+    connection: &Connection,
+) -> Result<(), AdapterRecordingStoreErrorV1> {
+    let exists = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'adapter_recording_sessions')
+             AND EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'adapter_recording_calls')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AdapterRecordingStoreErrorV1::StorageFailure)
+    }
+}
+
+fn sqlite_adapter_recording_state(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+) -> Result<Option<i64>, AdapterRecordingStoreErrorV1> {
+    connection
+        .query_row(
+            "SELECT state FROM adapter_recording_sessions
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)
+}
+
+fn sqlite_load_adapter_recording_session(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+) -> Result<Option<(AdapterRecordingSessionV1, i64, Option<Vec<u8>>)>, AdapterRecordingStoreErrorV1>
+{
+    let stored = connection
+        .query_row(
+            "SELECT world_handle_cbor, admission_cbor, state, transcript_cbor
+             FROM adapter_recording_sessions
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    let Some((handle_bytes, admission_bytes, state, transcript_bytes)) = stored else {
+        return Ok(None);
+    };
+    if !(0..=2).contains(&state) || (state == 1) != transcript_bytes.is_some() {
+        return Err(AdapterRecordingStoreErrorV1::CorruptState);
+    }
+    let handle = WorldReplayHandleV1::from_canonical_cbor(&handle_bytes)
+        .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+    let admission = AdapterAdmissionV1::from_canonical_cbor(&admission_bytes)
+        .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+    let session =
+        AdapterRecordingSessionV1::new(owner_reference, handle, run_operation_id, admission)
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+    if handle.to_canonical_cbor() != handle_bytes
+        || session.admission().to_canonical_cbor() != admission_bytes
+    {
+        return Err(AdapterRecordingStoreErrorV1::CorruptState);
+    }
+    if let Some(bytes) = transcript_bytes.as_deref() {
+        validate_closed_adapter_recording_v1(&session, bytes)?;
+    }
+    Ok(Some((session, state, transcript_bytes)))
+}
+
+fn sqlite_adapter_recording_transcript(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+    session: &AdapterRecordingSessionV1,
+) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+    let mut statement = connection
+        .prepare(
+            "SELECT global_call_index, plugin_id, per_plugin_call_index,
+                    invocation_cbor, idempotency_key, reserved_at_micros, output_bytes
+             FROM adapter_recording_calls
+             WHERE owner_reference = ?1 AND run_operation_id = ?2
+             ORDER BY global_call_index",
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    let rows = statement
+        .query_map(
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(6)?,
+                ))
+            },
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    let mut calls = Vec::new();
+    for (expected_global_index, row) in rows.enumerate() {
+        let (
+            global_index,
+            plugin_id_bytes,
+            per_plugin_index,
+            invocation_bytes,
+            idempotency_bytes,
+            reserved_at,
+            output_bytes,
+        ) = row.map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let expected_global_index = i64::try_from(expected_global_index)
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        if global_index != expected_global_index {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        let plugin_id_bytes: [u8; 16] = plugin_id_bytes
+            .try_into()
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let idempotency_bytes: [u8; 32] = idempotency_bytes
+            .try_into()
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let per_plugin_index = u64::try_from(per_plugin_index)
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let global_index =
+            u64::try_from(global_index).map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let reserved_at =
+            u64::try_from(reserved_at).map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let invocation = AdapterInvocationV1::from_canonical_cbor(&invocation_bytes)
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        if invocation.as_input().global_call_index != global_index {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        let reservation = AdapterCallReservationV1::new(
+            PluginId::from_ulid(ulid::Ulid::from_bytes(plugin_id_bytes)),
+            per_plugin_index,
+            invocation,
+            Hash::from_bytes(idempotency_bytes),
+            reserved_at,
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let output_bytes = output_bytes.ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        calls.push(completed_adapter_call_v1(reservation, output_bytes));
+    }
+    close_adapter_recording_v1(session, calls)
+}
+
+fn finish_adapter_recording_scope<T>(
+    connection: &Connection,
+    scope: SqliteImmediateScopeV1,
+    result: Result<T, AdapterRecordingStoreErrorV1>,
+) -> Result<T, AdapterRecordingStoreErrorV1> {
+    match scope {
+        SqliteImmediateScopeV1::Transaction => finish_transaction(
+            connection,
+            result,
+            |_, _| AdapterRecordingStoreErrorV1::StorageFailure,
+            |_, _| AdapterRecordingStoreErrorV1::StorageFailure,
+        ),
+        SqliteImmediateScopeV1::Savepoint => match result {
+            Ok(value) => connection
+                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+                .map(|()| value)
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure),
+            Err(error) => {
+                let rollback = connection.execute_batch(
+                    "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
+                     RELEASE SAVEPOINT pigloros_protected_effect",
+                );
+                if rollback.is_ok() {
+                    Err(error)
+                } else {
+                    Err(AdapterRecordingStoreErrorV1::StorageFailure)
+                }
+            }
+        },
     }
 }
 
@@ -22939,5 +23556,243 @@ pub(super) mod key_registry_coverage {
         let serialization = store.save_key_registry(&KeyRegistryStateV1::new());
         FAIL_REGISTRY_SERIALIZATION.with(|flag| flag.set(false));
         assert!(matches!(serialization, Err(CoreError::Serialization(_))));
+    }
+
+    fn adapter_recording_fixture(
+        run_byte: u8,
+    ) -> (
+        AdapterRecordingSessionV1,
+        AdapterCallReservationV1,
+        PluginId,
+    ) {
+        let owner_reference = Hash::from_bytes([41; 32]);
+        let plugin_id = PluginId::new();
+        let configuration = b"sqlite-recorder-config".to_vec();
+        let schema_digest = pos_core::public_adapter_schema_digest_v1();
+        let entry = pos_core::AdapterAdmissionEntryV1 {
+            plugin_id,
+            adapter_id: "weather.client".to_owned(),
+            provider_id: "fixture.provider".to_owned(),
+            operation_id: "read-current".to_owned(),
+            protocol_version: 1,
+            request_schema_digest: schema_digest,
+            response_schema_digest: schema_digest,
+            configuration_digest: pos_core::adapter_configuration_digest_v1(&configuration),
+            exact_configuration_bytes: configuration,
+            input_data_class: pos_core::AdapterDataClassV1::PublicRecord,
+            output_data_class: pos_core::AdapterDataClassV1::PublicRecord,
+            effect_mode: pos_core::AdapterEffectModeV1::ReadOnly,
+        };
+        let admission = AdapterAdmissionV1::new(pos_core::AdapterAdmissionInputV1 {
+            owner_reference,
+            configuration_generation: 7,
+            scope_digest: Hash::from_bytes([42; 32]),
+            entries: vec![entry.clone()],
+        })
+        .expect("the recorder test admission should be valid");
+        let world_handle = WorldReplayHandleV1::new(pos_core::WorldReplayHandleInputV1 {
+            owner_reference,
+            timeline_id: TimelineId::new(),
+            cut_id: 5,
+            commit_receipt_digest: Hash::from_bytes([43; 32]),
+            recording_receipt_digest: Hash::from_bytes([44; 32]),
+            logical_head: 9,
+            stitched_head_hash: Hash::from_bytes([45; 32]),
+        })
+        .expect("the recorder test handle should be valid");
+        let run_operation_id = Hash::from_bytes([run_byte; 32]);
+        let session = AdapterRecordingSessionV1::new(
+            owner_reference,
+            world_handle,
+            run_operation_id,
+            admission,
+        )
+        .expect("the recorder test session should be valid");
+        let invocation = AdapterInvocationV1::new(pos_core::AdapterInvocationInputV1 {
+            adapter_id: entry.adapter_id,
+            provider_id: entry.provider_id,
+            operation_id: entry.operation_id,
+            protocol_version: entry.protocol_version,
+            request_schema_digest: entry.request_schema_digest,
+            response_schema_digest: entry.response_schema_digest,
+            configuration_digest: entry.configuration_digest,
+            global_call_index: 0,
+            exact_request_payload: b"exact recorder request".to_vec(),
+        })
+        .expect("the recorder test invocation should be valid");
+        let reservation = AdapterCallReservationV1::new(
+            plugin_id,
+            0,
+            invocation,
+            Hash::from_bytes([46; 32]),
+            100,
+        )
+        .expect("the recorder test reservation should be valid");
+        (session, reservation, plugin_id)
+    }
+
+    #[test]
+    fn sqlite_adapter_recording_resumes_and_closes_durable_exact_calls() {
+        let directory = tempfile::tempdir().expect("a temporary directory should be available");
+        let path = directory.path().join("adapter-recording.sqlite");
+        let path = path
+            .to_str()
+            .expect("the temporary SQLite path should be UTF-8");
+        let (session, reservation, plugin_id) = adapter_recording_fixture(47);
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let mut store = SqliteStore::open(path).expect("the SQLite store should open");
+
+        store
+            .open_adapter_recording_session(session.clone())
+            .expect("a new recorder session should open");
+        store
+            .open_adapter_recording_session(session.clone())
+            .expect("the same open session should resume");
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Ok(None)
+        );
+
+        let mut changed_handle = session.world_handle().as_input().clone();
+        changed_handle.logical_head += 1;
+        let changed_session = AdapterRecordingSessionV1::new(
+            owner_reference,
+            WorldReplayHandleV1::new(changed_handle)
+                .expect("the changed handle should remain structurally valid"),
+            run_operation_id,
+            session.admission().clone(),
+        )
+        .expect("the changed session identity should be structurally valid");
+        assert_eq!(
+            store.open_adapter_recording_session(changed_session),
+            Err(AdapterRecordingStoreErrorV1::Conflict)
+        );
+
+        let mut gap_input = reservation.invocation().as_input().clone();
+        gap_input.global_call_index = 1;
+        let gap_invocation = AdapterInvocationV1::new(gap_input)
+            .expect("the gap invocation should remain structurally valid");
+        let gap_reservation = AdapterCallReservationV1::new(
+            plugin_id,
+            0,
+            gap_invocation,
+            Hash::from_bytes([48; 32]),
+            100,
+        )
+        .expect("the gap reservation should remain structurally valid");
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, gap_reservation),
+            Err(AdapterRecordingStoreErrorV1::InvalidCall)
+        );
+
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone()),
+            Ok(AdapterCallReservationOutcomeV1::Reserved {
+                reserved_at_micros: 100
+            })
+        );
+        let retry = AdapterCallReservationV1::new(
+            plugin_id,
+            reservation.per_plugin_call_index(),
+            reservation.invocation().clone(),
+            reservation.idempotency_key(),
+            999,
+        )
+        .expect("the exact retry should be structurally valid");
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, retry),
+            Ok(AdapterCallReservationOutcomeV1::Reserved {
+                reserved_at_micros: 100
+            })
+        );
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        store
+            .complete_adapter_call(
+                owner_reference,
+                run_operation_id,
+                0,
+                b"exact response".to_vec(),
+            )
+            .expect("the reserved call should complete durably");
+        store
+            .complete_adapter_call(
+                owner_reference,
+                run_operation_id,
+                0,
+                b"exact response".to_vec(),
+            )
+            .expect("an exact completion retry should succeed");
+        assert_eq!(
+            store.complete_adapter_call(
+                owner_reference,
+                run_operation_id,
+                0,
+                b"different response".to_vec()
+            ),
+            Err(AdapterRecordingStoreErrorV1::Conflict)
+        );
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, reservation),
+            Ok(AdapterCallReservationOutcomeV1::Completed {
+                output_bytes: b"exact response".to_vec(),
+                reserved_at_micros: 100
+            })
+        );
+
+        let closed = store
+            .close_adapter_recording_session(owner_reference, run_operation_id)
+            .expect("a fully completed recorder should close");
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Ok(closed.clone())
+        );
+        drop(store);
+
+        let mut reopened = SqliteStore::open(path).expect("the durable SQLite store should reopen");
+        assert_eq!(
+            reopened.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Ok(Some(closed))
+        );
+        assert_eq!(
+            reopened.open_adapter_recording_session(session),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+    }
+
+    #[test]
+    fn sqlite_adapter_recording_abort_prevents_close() {
+        let (session, reservation, _) = adapter_recording_fixture(49);
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let mut store = new_store();
+        store
+            .open_adapter_recording_session(session.clone())
+            .expect("the recorder session should open");
+        store
+            .reserve_adapter_call(owner_reference, run_operation_id, reservation)
+            .expect("the first call should reserve");
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        store
+            .abort_adapter_recording_session(owner_reference, run_operation_id)
+            .expect("the open recorder session should abort");
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store.open_adapter_recording_session(session),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
     }
 }

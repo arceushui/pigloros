@@ -7,10 +7,12 @@ use std::{
 };
 
 use pos_core::{
-    AdapterAdmissionEntryV1, AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterInvocationInputV1,
-    AdapterInvocationV1, AdapterTranscriptCallV1, AdapterTranscriptInputV1, AdapterTranscriptV1,
-    Hash, OwnerIdV1, PluginId, WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1,
-    MAX_ADAPTER_TRANSCRIPT_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+    validate_closed_adapter_recording_v1, AdapterAdmissionEntryV1, AdapterAdmissionInputV1,
+    AdapterAdmissionV1, AdapterCallReservationOutcomeV1, AdapterCallReservationV1,
+    AdapterInvocationInputV1, AdapterInvocationV1, AdapterRecordingSessionV1,
+    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1, Hash, OwnerIdV1,
+    PluginId, WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_BYTES_V1,
+    MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 
 use super::{PluginEntry, PluginRegistry};
@@ -47,6 +49,8 @@ pub enum LocalAdapterErrorV1 {
     ClockUnavailable,
     #[error("local adapter transcript does not match its admission")]
     TranscriptInvalid,
+    #[error("local adapter recorder could not durably commit the call")]
+    RecordingFailed,
 }
 
 /// Actual in-process adapter callback selected by a local owner.
@@ -107,9 +111,11 @@ impl ClosedAdapterTranscriptV1 {
 }
 
 /// One consumable local adapter run. An unclosed or failed run yields no MAT1.
-pub struct LocalAdapterSessionV1<'registry, 'composition> {
+pub struct LocalAdapterSessionV1<'registry, 'composition, 'store> {
     registry: &'registry mut PluginRegistry,
     admitted: &'composition AdmittedCompositionV1,
+    recorder: &'store mut dyn AdapterRecordingStoreV1,
+    recording_session: AdapterRecordingSessionV1,
     admission: AdapterAdmissionV1,
     world_handle: WorldReplayHandleV1,
     run_operation_id: Hash,
@@ -119,7 +125,7 @@ pub struct LocalAdapterSessionV1<'registry, 'composition> {
     failed: bool,
 }
 
-impl LocalAdapterSessionV1<'_, '_> {
+impl LocalAdapterSessionV1<'_, '_, '_> {
     /// Invoke one locally admitted adapter and record its exact public bytes.
     ///
     /// The request and response are retained only inside this consuming
@@ -223,26 +229,68 @@ impl LocalAdapterSessionV1<'_, '_> {
             plugin_id,
             invocation.digest(),
         );
-        let output = match catch_unwind(AssertUnwindSafe(|| {
-            self.registry.local_adapters[adapter_index]
-                .provider
-                .invoke(&invocation, idempotency_key)
-        })) {
-            Ok(Ok(output)) if output.len() <= MAX_ADAPTER_CALL_BYTES_V1 => output,
-            Ok(Ok(_)) => {
-                self.failed = true;
-                return Err(LocalAdapterErrorV1::CallBoundExceeded);
+        let reservation = AdapterCallReservationV1::new(
+            plugin_id,
+            per_plugin_call_index,
+            invocation.clone(),
+            idempotency_key,
+            recorded_wall_time_micros,
+        )
+        .map_err(|_| LocalAdapterErrorV1::RecordingFailed)?;
+        let output = match self.recorder.reserve_adapter_call(
+            self.recording_session.owner_reference(),
+            self.recording_session.run_operation_id(),
+            reservation.clone(),
+        ) {
+            Ok(AdapterCallReservationOutcomeV1::Completed {
+                output_bytes,
+                reserved_at_micros,
+            }) => (output_bytes, reserved_at_micros),
+            Ok(AdapterCallReservationOutcomeV1::Reserved { reserved_at_micros }) => {
+                let output = match catch_unwind(AssertUnwindSafe(|| {
+                    self.registry.local_adapters[adapter_index]
+                        .provider
+                        .invoke(&invocation, idempotency_key)
+                })) {
+                    Ok(Ok(output)) if output.len() <= MAX_ADAPTER_CALL_BYTES_V1 => output,
+                    Ok(Ok(_)) => {
+                        self.failed = true;
+                        return Err(LocalAdapterErrorV1::CallBoundExceeded);
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        self.failed = true;
+                        return Err(LocalAdapterErrorV1::ProviderRejected);
+                    }
+                };
+                if self
+                    .recorder
+                    .complete_adapter_call(
+                        self.recording_session.owner_reference(),
+                        self.recording_session.run_operation_id(),
+                        global_call_index,
+                        output.clone(),
+                    )
+                    .is_err()
+                {
+                    self.failed = true;
+                    return Err(LocalAdapterErrorV1::RecordingFailed);
+                }
+                (output, reserved_at_micros)
             }
-            Ok(Err(_)) | Err(_) => {
+            Err(_) => {
                 self.failed = true;
-                return Err(LocalAdapterErrorV1::ProviderRejected);
+                return Err(LocalAdapterErrorV1::RecordingFailed);
             }
         };
+        if output.0.len() > MAX_ADAPTER_CALL_BYTES_V1 {
+            self.failed = true;
+            return Err(LocalAdapterErrorV1::CallBoundExceeded);
+        }
         let call_size = transcript_call_size(
             per_plugin_call_index,
             invocation.to_canonical_cbor().len(),
-            output.len(),
-            recorded_wall_time_micros,
+            output.0.len(),
+            output.1,
         );
         let transcript_size = transcript_base_size(self.world_handle)
             .saturating_add(cbor_head_size(self.calls.len().saturating_add(1)))
@@ -256,13 +304,13 @@ impl LocalAdapterSessionV1<'_, '_> {
             plugin_id,
             per_plugin_call_index,
             input: invocation,
-            exact_output_bytes: output.clone(),
-            recorded_wall_time_micros,
+            exact_output_bytes: output.0.clone(),
+            recorded_wall_time_micros: output.1,
         });
         self.encoded_call_bytes = self.encoded_call_bytes.saturating_add(call_size);
         self.next_per_plugin_call
             .insert(plugin_id, per_plugin_call_index.saturating_add(1));
-        Ok(output)
+        Ok(output.0)
     }
 
     /// Close the session and return its exact MAA1 and MAT1 records.
@@ -284,21 +332,33 @@ impl LocalAdapterSessionV1<'_, '_> {
         {
             return Err(LocalAdapterErrorV1::SessionAborted);
         }
-        let transcript = AdapterTranscriptV1::new(AdapterTranscriptInputV1 {
-            owner_reference: self.admission.as_input().owner_reference,
-            world_handle: self.world_handle,
-            run_operation_id: self.run_operation_id,
-            adapter_admission_digest: self.admission.digest(),
-            calls: self.calls,
-        })
-        .map_err(|_| LocalAdapterErrorV1::TranscriptInvalid)?;
-        transcript
-            .compare_call_contracts(&self.admission)
+        let bytes = self
+            .recorder
+            .close_adapter_recording_session(
+                self.recording_session.owner_reference(),
+                self.recording_session.run_operation_id(),
+            )
+            .map_err(|_| LocalAdapterErrorV1::RecordingFailed)?;
+        let transcript = validate_closed_adapter_recording_v1(&self.recording_session, &bytes)
             .map_err(|_| LocalAdapterErrorV1::TranscriptInvalid)?;
         Ok(ClosedAdapterTranscriptV1 {
             admission: self.admission,
             transcript,
         })
+    }
+
+    /// Abort this run so its incomplete recorder state can never produce MAT1.
+    ///
+    /// # Errors
+    /// Returns `RecordingFailed` when the store cannot durably mark the run
+    /// aborted.
+    pub fn abort(self) -> Result<(), LocalAdapterErrorV1> {
+        self.recorder
+            .abort_adapter_recording_session(
+                self.recording_session.owner_reference(),
+                self.recording_session.run_operation_id(),
+            )
+            .map_err(|_| LocalAdapterErrorV1::RecordingFailed)
     }
 }
 
@@ -363,12 +423,13 @@ impl PluginRegistry {
     /// Rejects a stale composition, zero run operation, or mismatched World
     /// handle owner reference. The local registry checks WRH1 structure and
     /// owner identity only; it does not look up or authenticate a native cut.
-    pub fn begin_local_adapter_session<'registry, 'composition>(
+    pub fn begin_local_adapter_session<'registry, 'composition, 'store>(
         &'registry mut self,
         admitted: &'composition AdmittedCompositionV1,
         world_handle: WorldReplayHandleV1,
         run_operation_id: Hash,
-    ) -> Result<LocalAdapterSessionV1<'registry, 'composition>, LocalAdapterErrorV1> {
+        recorder: &'store mut dyn AdapterRecordingStoreV1,
+    ) -> Result<LocalAdapterSessionV1<'registry, 'composition, 'store>, LocalAdapterErrorV1> {
         let generation = admitted.catalog().as_input().configuration_generation;
         if run_operation_id == Hash::zero()
             || !self.is_admitted_composition_current_for_generation(admitted, generation)
@@ -377,9 +438,21 @@ impl PluginRegistry {
         {
             return Err(LocalAdapterErrorV1::StaleAdmission);
         }
+        let recording_session = AdapterRecordingSessionV1::new(
+            admitted.adapter_admission().as_input().owner_reference,
+            world_handle,
+            run_operation_id,
+            admitted.adapter_admission().clone(),
+        )
+        .map_err(|_| LocalAdapterErrorV1::StaleAdmission)?;
+        recorder
+            .open_adapter_recording_session(recording_session.clone())
+            .map_err(|_| LocalAdapterErrorV1::RecordingFailed)?;
         Ok(LocalAdapterSessionV1 {
             registry: self,
             admitted,
+            recorder,
+            recording_session,
             admission: admitted.adapter_admission().clone(),
             world_handle,
             run_operation_id,
