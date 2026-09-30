@@ -41,10 +41,11 @@ pub mod world_replay;
 
 pub use authorization_cache::AuthorizationCacheKeyV1;
 pub use composition::{
-    DomainImplementationKindV1, PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1,
-    PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1,
-    RegisteredEventSchema, RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1,
-    ResolvedPluginCompositionV1, ResolvedPluginV1, MAX_REQUIRED_PLUGINS_V1,
+    AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
+    PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
+    PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1, RegisteredEventSchema,
+    RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
+    ResolvedPluginV1, MAX_REQUIRED_PLUGINS_V1,
 };
 pub use driver::{
     CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey,

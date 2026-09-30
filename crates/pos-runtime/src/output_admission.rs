@@ -846,6 +846,25 @@ impl OutputPolicyBindingV1 {
     pub fn retention_policy_artifact(&self) -> &[u8] {
         self.artifacts.retention_policy_artifact()
     }
+
+    /// ADR-088 OPC1 identity of this exact installed source binding.
+    ///
+    /// This is a structural hash, not owner authentication or permission to
+    /// release retained bytes.
+    ///
+    /// # Errors
+    /// Rejects an incomplete or noncanonical installed closure.
+    pub fn manifest_closure_hash(&self) -> Result<Hash, OutputAdmissionErrorV1> {
+        let closure = OutputPolicyClosureV1::from_artifacts(
+            &self.policy.to_canonical_cbor(),
+            &self.budget.to_canonical_cbor(),
+            self.implementation_artifact(),
+            self.configuration_artifact(),
+            self.execution_profile_artifact(),
+            self.retention_policy_artifact(),
+        )?;
+        Ok(closure.manifest_closure_hash())
+    }
 }
 
 /// The immutable artifact closure required to activate one output policy.
@@ -873,7 +892,6 @@ impl OutputPolicyClosureV1 {
     /// # Errors
     /// Returns a closed artifact or canonicality error when one referenced
     /// object is absent, malformed, or does not match its recorded identity.
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_artifacts(
         output_policy_bytes: &[u8],
         executable_budget_bytes: &[u8],
@@ -1031,6 +1049,18 @@ impl OutputPolicyClosureV1 {
             hasher.update(&bytes_len.to_le_bytes());
             hasher.update(bytes);
         }
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    }
+
+    /// ADR-088's exact OPC1 identity for the later scoped native closure leaf.
+    ///
+    /// This hash identifies retained bytes; it does not prove owner admission,
+    /// native retention, or permission to release protected material.
+    #[must_use]
+    pub fn manifest_closure_hash(&self) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
+        hasher.update(&self.to_canonical_bytes());
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
 
@@ -1766,6 +1796,25 @@ mod tests {
                 proposal.payload.clone(),
             ))
         }
+    }
+
+    #[test]
+    fn manifest_binding_hash_rejects_a_changed_artifact() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            name: "fixture",
+            events: Vec::new(),
+        };
+        let mut binding = OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        assert!(binding.manifest_closure_hash().is_ok());
+        binding.artifacts.configuration.push(0xff);
+        assert!(binding.manifest_closure_hash().is_err());
     }
 
     struct LongVersionPlugin {

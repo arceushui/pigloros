@@ -56,6 +56,8 @@ pub enum ActionSubmissionError {
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error(transparent)]
+    ManifestRegistration(#[from] crate::ManifestRegistrationErrorV1),
+    #[error(transparent)]
     OutputAdmission(#[from] crate::OutputAdmissionErrorV1),
     #[error(transparent)]
     WorldInstallation(#[from] WorldInstallationErrorV1),
