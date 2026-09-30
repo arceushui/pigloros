@@ -254,34 +254,12 @@ impl LocalForkAdmissionCoordinatorV1 {
             Ok(command) => command,
             Err(error) => return self.cancel_pending(claim, authentication_code(error)),
         };
-        match self.journal.execute(claim, &command) {
-            Ok(Ok(ForkDeliveryExecutionV1::Committed(result))) => {
+        match execute_disposition(self.journal.execute(claim, &command)) {
+            ExecuteDisposition::Release(result) => {
                 PreparedDeliveryV1::release(claim, &result, true)
             }
-            Ok(Ok(ForkDeliveryExecutionV1::Rejected(error))) => {
-                PreparedDeliveryV1::plain(reject(authority_code(error)))
-            }
-            Ok(
-                Ok(ForkDeliveryExecutionV1::Uncertain)
-                | Err(ForkDeliveryJournalErrorV1::StorageIndeterminate),
-            )
-            | Err(ForkAdmissionSubmissionErrorV1::Lost) => {
-                PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate))
-            }
-            // The journal refused the claim before FAC1 submission, so the
-            // Pending row is still live and must be deleted (ADR-109).
-            Ok(Err(
-                ForkDeliveryJournalErrorV1::InvalidTuple
-                | ForkDeliveryJournalErrorV1::Conflict
-                | ForkDeliveryJournalErrorV1::Fenced
-                | ForkDeliveryJournalErrorV1::Corrupt,
-            )) => self.cancel_pending(claim, LocalForkAdmissionCodeV1::AuthorityUnavailable),
-            // The execute command definitely did not run (ADR-109 r9
-            // Decision 1 item 6): cancel Pending, then answer 6 or 5.
-            Err(
-                error @ (ForkAdmissionSubmissionErrorV1::Busy
-                | ForkAdmissionSubmissionErrorV1::Unavailable),
-            ) => self.cancel_pending(claim, submission_code(error)),
+            ExecuteDisposition::Answer(code) => PreparedDeliveryV1::plain(reject(code)),
+            ExecuteDisposition::CancelThenAnswer(code) => self.cancel_pending(claim, code),
         }
     }
 
@@ -321,17 +299,20 @@ impl LocalForkAdmissionCoordinatorV1 {
                 LocalForkAdmissionCodeV1::AuthorityUnavailable,
             ));
         };
-        match self
-            .journal
+        self.journal
             .recover(tuple, &proof, authentication.principal_digest())
-        {
-            Ok(Ok(result)) => {
-                PreparedDeliveryV1::release(claim, &result, state != ForkDeliveryStateV1::Delivered)
-            }
-            Ok(Err(_)) | Err(_) => {
-                PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate))
-            }
-        }
+            .ok()
+            .and_then(Result::ok)
+            .map_or_else(
+                || PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate)),
+                |result| {
+                    PreparedDeliveryV1::release(
+                        claim,
+                        &result,
+                        state != ForkDeliveryStateV1::Delivered,
+                    )
+                },
+            )
     }
 
     fn command(
@@ -422,6 +403,49 @@ fn recovery_proof(
 
 /// FARL1 code of a Fork-admission command that produced no store result
 /// (ADR-109 revision 9, Decision 1 item 6).
+/// What the coordinator does with one execute submission outcome.
+enum ExecuteDisposition {
+    /// FAC1 committed; release the result for delivery.
+    Release(Box<ForkAdmissionOperationResultV1>),
+    /// Answer with this code; the journal row needs no cancellation.
+    Answer(LocalForkAdmissionCodeV1),
+    /// Pending is still live: cancel it, then answer with this code.
+    CancelThenAnswer(LocalForkAdmissionCodeV1),
+}
+
+/// Classify an execute submission (ADR-109 r9 Decision 1 item 6).
+fn execute_disposition(
+    outcome: ForkAdmissionSubmissionV1<ForkDeliveryExecutionV1>,
+) -> ExecuteDisposition {
+    match outcome {
+        Ok(Ok(ForkDeliveryExecutionV1::Committed(result))) => ExecuteDisposition::Release(result),
+        Ok(Ok(ForkDeliveryExecutionV1::Rejected(error))) => {
+            ExecuteDisposition::Answer(authority_code(error))
+        }
+        Ok(
+            Ok(ForkDeliveryExecutionV1::Uncertain)
+            | Err(ForkDeliveryJournalErrorV1::StorageIndeterminate),
+        )
+        | Err(ForkAdmissionSubmissionErrorV1::Lost) => {
+            ExecuteDisposition::Answer(LocalForkAdmissionCodeV1::Indeterminate)
+        }
+        // The journal refused the claim before FAC1 submission, so the
+        // Pending row is still live and must be deleted (ADR-109).
+        Ok(Err(
+            ForkDeliveryJournalErrorV1::InvalidTuple
+            | ForkDeliveryJournalErrorV1::Conflict
+            | ForkDeliveryJournalErrorV1::Fenced
+            | ForkDeliveryJournalErrorV1::Corrupt,
+        )) => ExecuteDisposition::CancelThenAnswer(LocalForkAdmissionCodeV1::AuthorityUnavailable),
+        // The execute command definitely did not run (ADR-109 r9 Decision 1
+        // item 6): cancel Pending, then answer 6 or 5.
+        Err(
+            error @ (ForkAdmissionSubmissionErrorV1::Busy
+            | ForkAdmissionSubmissionErrorV1::Unavailable),
+        ) => ExecuteDisposition::CancelThenAnswer(submission_code(error)),
+    }
+}
+
 const fn submission_code(error: ForkAdmissionSubmissionErrorV1) -> LocalForkAdmissionCodeV1 {
     match error {
         ForkAdmissionSubmissionErrorV1::Busy | ForkAdmissionSubmissionErrorV1::Lost => {
