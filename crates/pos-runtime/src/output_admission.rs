@@ -470,9 +470,11 @@ fn source_artifact_bundle(parts: &[(&str, &[u8])]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"PSB1");
     for (path, source) in parts {
-        bytes.extend_from_slice(&(path.len() as u64).to_be_bytes());
+        let path_len = u64::try_from(path.len()).unwrap_or(u64::MAX);
+        bytes.extend_from_slice(&path_len.to_be_bytes());
         bytes.extend_from_slice(path.as_bytes());
-        bytes.extend_from_slice(&(source.len() as u64).to_be_bytes());
+        let source_len = u64::try_from(source.len()).unwrap_or(u64::MAX);
+        bytes.extend_from_slice(&source_len.to_be_bytes());
         bytes.extend_from_slice(source);
     }
     bytes
@@ -480,7 +482,8 @@ fn source_artifact_bundle(parts: &[(&str, &[u8])]) -> Vec<u8> {
 
 #[cfg(any(test, feature = "test-support"))]
 fn append_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
-    output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    output.extend_from_slice(&bytes_len.to_le_bytes());
     output.extend_from_slice(bytes);
 }
 
@@ -792,7 +795,8 @@ impl OutputPolicyClosureV1 {
             self.execution_profile_artifact(),
             self.retention_policy_artifact(),
         ] {
-            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            hasher.update(&bytes_len.to_le_bytes());
             hasher.update(bytes);
         }
         Hash::from_bytes(*hasher.finalize().as_bytes())
@@ -905,7 +909,8 @@ impl OutputPolicyClosureV1 {
         let mut output = Vec::with_capacity(total_len.min(MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1));
         output.extend_from_slice(b"OPC1");
         for bytes in members {
-            output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+            let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            output.extend_from_slice(&bytes_len.to_be_bytes());
             output.extend_from_slice(bytes);
         }
         output
@@ -940,7 +945,8 @@ pub fn validate_output_policy_artifacts_v1(
 }
 
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(&bytes_len.to_le_bytes());
     hasher.update(bytes);
 }
 
