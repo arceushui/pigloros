@@ -2206,7 +2206,9 @@ mod tests {
                 &[],
                 "missing-profile",
             ),
-            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+            Ok(binding)
+                if binding.source == InstalledOutputPolicySourceV1::Generated
+                    && binding.execution_profile_artifact().is_empty()
         ));
         let budget = budget(plugin.id, 16, 2, 32, 100, [10, 10, 10]);
         let policy = policy(plugin.id, &budget);
@@ -2232,7 +2234,9 @@ mod tests {
                 &[],
                 "missing-profile",
             ),
-            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+            Ok(binding)
+                if binding.source == InstalledOutputPolicySourceV1::Generated
+                    && binding.execution_profile_artifact().is_empty()
         ));
     }
 
