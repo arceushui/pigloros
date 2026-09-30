@@ -214,8 +214,11 @@ impl ProjectionRegistry {
 
     /// Register a named reducer.
     ///
-    /// If a reducer with the same name was already registered it is replaced and
-    /// its accumulated state is cleared.
+    /// If a legacy reducer with the same name was already registered it is
+    /// replaced and its accumulated state is cleared. Installed slots are keyed
+    /// by `PluginId` and are never evicted by a legacy name registration; a
+    /// shared name then makes name-based reads, snapshot, restore, and diff
+    /// fail closed as ambiguous.
     pub fn register(&mut self, name: &str, reducer: Box<dyn Reducer>) {
         self.register_with_policy(name, reducer, None);
     }
@@ -439,7 +442,9 @@ impl ProjectionRegistry {
     /// current Timeline fence is held.
     ///
     /// # Errors
-    /// Returns a closed source error when the Timeline has no verified access.
+    /// Returns a closed source error when the Timeline has no verified access
+    /// or, as for snapshot, restore, and diff, when more than one reducer slot
+    /// shares `name`.
     pub fn state_for_reducer(
         &self,
         timeline: TimelineId,
@@ -448,11 +453,12 @@ impl ProjectionRegistry {
     ) -> Result<Option<State>, AuthorityErrorV1> {
         self.with_erasure_fence(timeline, |registry| {
             let mut matches = registry.slots.iter().filter(|(n, _)| n == name);
-            Ok(matches
-                .next()
-                .filter(|_| matches.next().is_none())
-                .and_then(|(_, slot)| slot.registry.get(entity))
-                .cloned())
+            match (matches.next(), matches.next()) {
+                (_, Some(_)) => Err(AuthorityErrorV1::SourceUnavailable),
+                (first, None) => Ok(first
+                    .and_then(|(_, slot)| slot.registry.get(entity))
+                    .cloned()),
+            }
         })
     }
 
@@ -2421,7 +2427,10 @@ mod wave3_tests {
         };
         assert_eq!(count(&registry, first), Some(1));
         assert_eq!(count(&registry, second), None);
-        assert!(test_ok(registry.state_for_reducer(timeline, "same", &entity)).is_none());
+        assert_eq!(
+            registry.state_for_reducer(timeline, "same", &entity),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
         assert!(test_ok(registry.state_for(timeline, &entity)).is_some());
         assert!(matches!(
             registry.state_snapshot(timeline),
