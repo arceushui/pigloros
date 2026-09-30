@@ -781,6 +781,11 @@ impl OutputPolicyBindingV1 {
         Ok(self)
     }
 
+    #[cfg(test)]
+    pub(crate) fn take_action_approver(&mut self) -> Option<(Box<dyn ActionApprover>, Vec<Kind>)> {
+        self.approver.take()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn verifies_erased_owner_instance(&self, plugin: &dyn Plugin) -> bool {
         if self.source == InstalledOutputPolicySourceV1::Generated {
