@@ -233,11 +233,11 @@ fn memory_catalog_commits_complete_exact_rows_and_retries_idempotently(
     let mut store = MemoryStore::new();
     close_repro_manifest_recording(&mut store, &batch)?;
     assert_eq!(
-        pos_core::store::EventStore::commit_artifact_registration_batch(&mut *store, batch)?,
+        pos_core::store::EventStore::commit_artifact_registration_batch(&mut store, batch)?,
         ArtifactRegistrationCommitOutcomeV1::Applied
     );
     let root =
-        pos_core::store::EventStore::read_artifact_registration(&*store, &owner_id, root_address)?
+        pos_core::store::EventStore::read_artifact_registration(&store, &owner_id, root_address)?
             .ok_or_else(|| std::io::Error::other("committed root was not visible"))?;
     assert_eq!(root.registration_address(), root_address);
     assert!(root
@@ -572,7 +572,7 @@ fn sqlite_catalog_rejects_changed_closed_recorder_bytes_on_read(
             ArtifactRegistrationV1::owner_reference(&owner_id)
                 .as_bytes()
                 .as_slice(),
-            [0x51; 32].as_slice(),
+            [0x51_u8; 32].as_slice(),
         ],
     )?;
     drop(connection);
