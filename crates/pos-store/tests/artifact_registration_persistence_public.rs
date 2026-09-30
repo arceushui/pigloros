@@ -2,13 +2,14 @@ use pos_core::{
     extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
     extract_repro_manifest_root_registration_v1, prepare_artifact_registration_batch_v1,
     validate_artifact_registration_catalog_graph_v1, AdapterAdmissionInputV1, AdapterAdmissionV1,
+    AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1,
     AdapterTranscriptInputV1, AdapterTranscriptV1, ArtifactDataClassV1,
     ArtifactRegistrationCatalogRowV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
     ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
     ArtifactRegistrationV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, Hash, OwnerIdV1,
-    ReproManifestRootInputV1, ReproManifestRootRegistrationInputV1, ReproManifestRootV1,
-    WorldRecordingReceiptInputV1, WorldRecordingReceiptV1, WorldReplayHandleInputV1,
-    WorldReplayHandleV1,
+    PreparedArtifactRegistrationBatchV1, ReproManifestRootInputV1,
+    ReproManifestRootRegistrationInputV1, ReproManifestRootV1, WorldRecordingReceiptInputV1,
+    WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
 };
 use pos_store::{
     memory::MemoryStore, open_store, ArtifactRegistrationCommitOutcomeV1,
@@ -103,7 +104,7 @@ fn prepared_repro_manifest() -> Result<
         owner_reference,
         world_handle,
         run_operation_id: operation_id,
-        plugin_roster_digest: Hash::from_bytes([0x57; 32]),
+        plugin_roster_digest: admission.as_input().scope_digest,
         adapter_transcript_digest: transcript.digest(),
         created_at_micros: 2,
         label: None,
@@ -159,6 +160,37 @@ fn prepared_repro_manifest() -> Result<
     Ok((owner_id, root_address, batch))
 }
 
+fn close_repro_manifest_recording<R: AdapterRecordingStoreV1 + ?Sized>(
+    store: &mut R,
+    batch: &PreparedArtifactRegistrationBatchV1,
+) -> Result<(), AdapterRecordingStoreErrorV1> {
+    let root = batch
+        .records()
+        .iter()
+        .find(|record| record.registration_address() == batch.root_registration_address())
+        .and_then(|record| ReproManifestRootV1::from_canonical_cbor(record.artifact_bytes()).ok())
+        .ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+    let admission = batch
+        .records()
+        .iter()
+        .find(|record| record.artifact_bytes().get(2..6) == Some(b"MAA1"))
+        .and_then(|record| AdapterAdmissionV1::from_canonical_cbor(record.artifact_bytes()).ok())
+        .ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+    let session = AdapterRecordingSessionV1::new(
+        root.as_input().owner_reference,
+        root.as_input().world_handle,
+        root.as_input().run_operation_id,
+        admission,
+    )?;
+    store.open_adapter_recording_session(session)?;
+    store
+        .close_adapter_recording_session(
+            root.as_input().owner_reference,
+            root.as_input().run_operation_id,
+        )
+        .map(|_| ())
+}
+
 fn alternate_root_with_same_operation(
     mut inputs: Vec<ArtifactRegistrationInputV1>,
 ) -> Result<(Hash, Vec<ArtifactRegistrationInputV1>), Box<dyn std::error::Error>> {
@@ -199,6 +231,7 @@ fn memory_catalog_commits_complete_exact_rows_and_retries_idempotently(
         })
         .collect();
     let mut store = MemoryStore::new();
+    close_repro_manifest_recording(&mut store, &batch)?;
     assert_eq!(
         pos_core::store::EventStore::commit_artifact_registration_batch(&mut *store, batch)?,
         ArtifactRegistrationCommitOutcomeV1::Applied
@@ -239,6 +272,7 @@ fn standard_store_factory_exposes_the_artifact_registration_port(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (owner_id, root_address, batch) = prepared_repro_manifest()?;
     let mut store = open_store(StoreConfig::Memory)?;
+    close_repro_manifest_recording(&mut *store, &batch)?;
     assert_eq!(
         store.commit_artifact_registration_batch(batch)?,
         ArtifactRegistrationCommitOutcomeV1::Applied
@@ -247,6 +281,42 @@ fn standard_store_factory_exposes_the_artifact_registration_port(
         .read_artifact_registration(&owner_id, root_address)?
         .ok_or_else(|| std::io::Error::other("committed root was not visible"))?;
     assert_eq!(root.registration_address(), root_address);
+    Ok(())
+}
+
+#[test]
+fn memory_catalog_rejects_a_root_without_a_closed_same_store_recording(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root_address, batch) = prepared_repro_manifest()?;
+    let mut store = MemoryStore::new();
+    assert_eq!(
+        store.commit_artifact_registration_batch(batch),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    assert!(store
+        .read_artifact_registration(&owner_id, root_address)?
+        .is_none());
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_catalog_rejects_a_root_without_a_closed_same_store_recording(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
+    let (owner_id, root_address, batch) = prepared_repro_manifest()?;
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    assert_eq!(
+        store.commit_artifact_registration_batch(batch),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    assert!(store
+        .read_artifact_registration(&owner_id, root_address)?
+        .is_none());
     Ok(())
 }
 
@@ -264,6 +334,7 @@ fn memory_catalog_rejects_a_second_root_for_the_same_operation_atomically(
         })
         .collect();
     let mut store = MemoryStore::new();
+    close_repro_manifest_recording(&mut store, &batch)?;
     assert_eq!(
         store.commit_artifact_registration_batch(batch)?,
         ArtifactRegistrationCommitOutcomeV1::Applied
@@ -344,6 +415,7 @@ fn sqlite_catalog_is_visible_across_handles_and_after_reopen(
     let mut writer = pos_store::sqlite::SqliteStore::open(path)?;
     let reader = pos_store::sqlite::SqliteStore::open(path)?;
     let (owner_id, root_address, batch) = prepared_repro_manifest()?;
+    close_repro_manifest_recording(&mut writer, &batch)?;
     assert_eq!(
         writer.commit_artifact_registration_batch(batch)?,
         ArtifactRegistrationCommitOutcomeV1::Applied
@@ -381,6 +453,7 @@ fn sqlite_catalog_rejects_a_second_root_for_the_same_operation_atomically(
             registration_cbor: record.registration().canonical_cbor().to_vec(),
         })
         .collect();
+    close_repro_manifest_recording(&mut store, &batch)?;
     assert_eq!(
         store.commit_artifact_registration_batch(batch)?,
         ArtifactRegistrationCommitOutcomeV1::Applied
@@ -417,6 +490,7 @@ fn sqlite_catalog_reports_a_missing_operation_index_as_corruption(
         .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
     let mut store = pos_store::sqlite::SqliteStore::open(path)?;
     let (owner_id, root_address, batch) = prepared_repro_manifest()?;
+    close_repro_manifest_recording(&mut store, &batch)?;
     store.commit_artifact_registration_batch(batch)?;
     drop(store);
 
@@ -451,6 +525,7 @@ fn sqlite_catalog_reports_modified_artifact_bytes_as_corruption(
         .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
     let mut store = pos_store::sqlite::SqliteStore::open(path)?;
     let (owner_id, root_address, batch) = prepared_repro_manifest()?;
+    close_repro_manifest_recording(&mut store, &batch)?;
     store.commit_artifact_registration_batch(batch)?;
     drop(store);
 
@@ -461,6 +536,43 @@ fn sqlite_catalog_reports_modified_artifact_bytes_as_corruption(
         rusqlite::params![
             b"corrupt MRM1 bytes".as_slice(),
             root_address.as_bytes().as_slice()
+        ],
+    )?;
+    drop(connection);
+
+    let reopened = pos_store::sqlite::SqliteStore::open(path)?;
+    assert_eq!(
+        reopened.read_artifact_registration(&owner_id, root_address),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_catalog_rejects_changed_closed_recorder_bytes_on_read(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    let (owner_id, root_address, batch) = prepared_repro_manifest()?;
+    close_repro_manifest_recording(&mut store, &batch)?;
+    store.commit_artifact_registration_batch(batch)?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE adapter_recording_sessions SET transcript_cbor = ?1
+         WHERE owner_reference = ?2 AND run_operation_id = ?3",
+        rusqlite::params![
+            b"changed closed MAT1".as_slice(),
+            ArtifactRegistrationV1::owner_reference(&owner_id)
+                .as_bytes()
+                .as_slice(),
+            [0x51; 32].as_slice(),
         ],
     )?;
     drop(connection);
@@ -498,6 +610,7 @@ fn sqlite_rolls_back_the_entire_closure_when_root_commit_fails(
     drop(connection);
 
     let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    close_repro_manifest_recording(&mut store, &batch)?;
     assert_eq!(
         store.commit_artifact_registration_batch(batch),
         Err(pos_core::ArtifactRegistrationPersistenceErrorV1::StorageFailure)

@@ -264,6 +264,11 @@ pub fn validate_closed_adapter_recording_v1(
 
 /// Construct a transcript only from the exact completed rows returned by a
 /// durable session store.
+///
+/// # Errors
+/// Returns `CorruptState` if the calls do not form the closed session's exact
+/// admitted transcript.
+#[must_use]
 pub fn close_adapter_recording_v1(
     session: &AdapterRecordingSessionV1,
     calls: Vec<crate::AdapterTranscriptCallV1>,
@@ -283,6 +288,7 @@ pub fn close_adapter_recording_v1(
 }
 
 /// Build one typed completed call from exact persisted call facts.
+#[must_use]
 pub fn completed_adapter_call_v1(
     reservation: AdapterCallReservationV1,
     output_bytes: Vec<u8>,
@@ -329,7 +335,7 @@ mod tests {
                 effect_mode: AdapterEffectModeV1::ReadOnly,
             }],
         })
-        .expect("the recording test admission should be valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
             owner_reference,
             timeline_id: TimelineId::new(),
@@ -339,14 +345,14 @@ mod tests {
             logical_head: 0,
             stitched_head_hash: Hash::from_bytes([65; 32]),
         })
-        .expect("the recording test handle should be valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let session = AdapterRecordingSessionV1::new(
             owner_reference,
             world_handle,
             Hash::from_bytes([66; 32]),
             admission,
         )
-        .expect("the recording test session should be valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
             adapter_id: "weather.client".to_owned(),
             provider_id: "fixture.provider".to_owned(),
@@ -358,7 +364,7 @@ mod tests {
             global_call_index: 0,
             exact_request_payload: b"exact request".to_vec(),
         })
-        .expect("the recording test invocation should be valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         (session, plugin_id, invocation)
     }
 
@@ -372,12 +378,12 @@ mod tests {
             Hash::from_bytes([67; 32]),
             123,
         )
-        .expect("the recording test reservation should be valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let call = completed_adapter_call_v1(reservation, b"exact response".to_vec());
         let transcript_bytes = close_adapter_recording_v1(&session, vec![call])
-            .expect("the complete recorder row should form a MAT1 transcript");
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         let transcript = validate_closed_adapter_recording_v1(&session, &transcript_bytes)
-            .expect("the transcript should match its session");
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(transcript.as_input().calls.len(), 1);
         assert_eq!(
             transcript.as_input().calls[0].exact_output_bytes.as_slice(),
@@ -394,7 +400,7 @@ mod tests {
             Hash::from_bytes([68; 32]),
             session.admission().clone(),
         )
-        .expect("the alternate session should be structurally valid");
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
         assert_eq!(
             validate_closed_adapter_recording_v1(&other_session, &transcript_bytes),
             Err(AdapterRecordingStoreErrorV1::CorruptState)
