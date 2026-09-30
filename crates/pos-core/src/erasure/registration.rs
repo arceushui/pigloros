@@ -5,7 +5,10 @@ use super::{
     ErasureArtifactClassV1,
 };
 use crate::encode_head;
-use crate::{AdapterAdmissionV1, AdapterTranscriptV1, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1};
+use crate::{
+    AdapterAdmissionV1, AdapterTranscriptV1, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1,
+    ReproManifestRootV1, WorldRecordingReceiptV1,
+};
 use std::collections::BTreeSet;
 
 /// Maximum canonical size of one ARD1 record.
@@ -68,6 +71,32 @@ pub enum AdapterArtifactRegistrationErrorV1 {
     AdmissionRegistrationMismatch,
 }
 
+/// Failure while extracting an ADR-101 `MRM1` registration closure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ReproManifestArtifactRegistrationErrorV1 {
+    /// MRM1 bytes are malformed, noncanonical, or outside their accepted profile.
+    #[error("invalid MRM1 artifact bytes")]
+    InvalidManifestRoot,
+    /// WCR1 bytes are malformed or outside their accepted profile.
+    #[error("invalid WCR1 artifact bytes")]
+    InvalidRecordingReceipt,
+    /// MAT1 bytes are malformed or outside their accepted profile.
+    #[error("invalid MAT1 artifact bytes")]
+    InvalidTranscript,
+    /// MAA1 bytes or its supplied registration are invalid.
+    #[error("invalid MAA1 artifact or registration")]
+    InvalidAdmission,
+    /// The supplied WCR1 registration is not exactly derived from its bytes.
+    #[error("WCR1 registration does not match its retained bytes")]
+    RecordingRegistrationMismatch,
+    /// The supplied MAT1 registration is not exactly derived from its bytes.
+    #[error("MAT1 registration does not match its retained bytes")]
+    TranscriptRegistrationMismatch,
+    /// The MRM1 selector does not identify the supplied WCR1 and MAT1 records.
+    #[error("MRM1 does not bind its retained WCR1 and MAT1 records")]
+    ManifestBindingMismatch,
+}
+
 /// One immutable child registration address and its parent-fixed membership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArtifactChildEdgeV1 {
@@ -75,6 +104,27 @@ pub struct ArtifactChildEdgeV1 {
     pub artifact_digest: Hash,
     pub registration_address: Hash,
     pub required: bool,
+}
+
+/// Exact retained records used to derive one MRM1 root registration.
+#[derive(Clone, Copy, Debug)]
+pub struct ReproManifestRootRegistrationInputV1<'a> {
+    /// Exact MRM1 bytes.
+    pub root_bytes: &'a [u8],
+    /// Exact ADR-100 WCR1 bytes.
+    pub recording_receipt_bytes: &'a [u8],
+    /// Complete class-0 registration derived by the installed World owner.
+    pub recording_registration: &'a ArtifactRegistrationV1,
+    /// Exact MAT1 bytes.
+    pub transcript_bytes: &'a [u8],
+    /// Exact MAA1 bytes referenced by MAT1.
+    pub admission_bytes: &'a [u8],
+    /// Exact MAA1 registration derived from its bytes.
+    pub admission_registration: &'a ArtifactRegistrationV1,
+    /// Exact MAT1 registration derived from its bytes and MAA1 child.
+    pub transcript_registration: &'a ArtifactRegistrationV1,
+    /// Local owner identity selected by the installed owner.
+    pub owner_id: &'a OwnerIdV1,
 }
 
 /// Untrusted ARD1 fields. A byte owner must derive and compare them at commit.
@@ -262,6 +312,103 @@ pub fn extract_adapter_transcript_registration_v1(
         }],
     })
     .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidTranscript)
+}
+
+/// Derive the fixed ARD1 fields for one complete retained ADR-101 MRM1 root.
+///
+/// The root has exactly two required children: its matching WCR1 receipt and
+/// MAT1 transcript. The MAT1 transcript must itself reference the exact MAA1
+/// admission registration. Native owner admission, the actual WCR1 commit,
+/// the complete Plugin roster, and closed recorder provenance remain checks
+/// for the installed local owner verifier.
+///
+/// # Errors
+/// Returns an error when any supplied byte record is noncanonical, any
+/// supplied child registration differs from extraction, or the MRM1/WCR1/
+/// MAT1 identity bindings do not agree.
+pub fn extract_repro_manifest_root_registration_v1(
+    input: ReproManifestRootRegistrationInputV1<'_>,
+) -> Result<ArtifactRegistrationV1, ReproManifestArtifactRegistrationErrorV1> {
+    let root = ReproManifestRootV1::from_canonical_cbor(input.root_bytes)
+        .map_err(|_| ReproManifestArtifactRegistrationErrorV1::InvalidManifestRoot)?;
+    let recording = WorldRecordingReceiptV1::from_canonical_cbor(input.recording_receipt_bytes)
+        .map_err(|_| ReproManifestArtifactRegistrationErrorV1::InvalidRecordingReceipt)?;
+    let transcript = AdapterTranscriptV1::from_canonical_cbor(input.transcript_bytes)
+        .map_err(|_| ReproManifestArtifactRegistrationErrorV1::InvalidTranscript)?;
+    let owner_reference = ArtifactRegistrationV1::owner_reference(input.owner_id);
+    let recording_registration = input.recording_registration;
+    if recording_registration.fields().artifact_class != ErasureArtifactClassV1::TimelineReplay
+        || recording_registration.fields().artifact_digest
+            != ArtifactRegistrationV1::artifact_digest(
+                ErasureArtifactClassV1::TimelineReplay,
+                input.recording_receipt_bytes,
+            )
+        || recording_registration.fields().owner_reference != owner_reference
+    {
+        return Err(ReproManifestArtifactRegistrationErrorV1::RecordingRegistrationMismatch);
+    }
+    let expected_admission = extract_adapter_admission_registration_v1(input.admission_bytes)
+        .map_err(|_| ReproManifestArtifactRegistrationErrorV1::InvalidAdmission)?;
+    if input.admission_registration != &expected_admission {
+        return Err(ReproManifestArtifactRegistrationErrorV1::InvalidAdmission);
+    }
+    let expected_transcript = extract_adapter_transcript_registration_v1(
+        input.transcript_bytes,
+        input.admission_bytes,
+        input.admission_registration,
+    )
+    .map_err(|_| ReproManifestArtifactRegistrationErrorV1::InvalidTranscript)?;
+    if input.transcript_registration != &expected_transcript {
+        return Err(ReproManifestArtifactRegistrationErrorV1::TranscriptRegistrationMismatch);
+    }
+
+    let root_input = root.as_input();
+    let recording_input = recording.as_input();
+    let transcript_input = transcript.as_input();
+    if root_input.owner_reference != owner_reference
+        || root_input.world_handle.owner_reference != root_input.owner_reference
+        || root_input.world_handle.recording_receipt_digest != recording.digest()
+        || root_input.world_handle.commit_receipt_digest
+            != recording_input.actual_commit_receipt_digest
+        || recording_input.operation_id != root_input.run_operation_id
+        || transcript.digest() != root_input.adapter_transcript_digest
+        || transcript_input.owner_reference != root_input.owner_reference
+        || transcript_input.world_handle != root_input.world_handle
+        || transcript_input.run_operation_id != root_input.run_operation_id
+    {
+        return Err(ReproManifestArtifactRegistrationErrorV1::ManifestBindingMismatch);
+    }
+
+    let mut child_artifacts = vec![
+        ArtifactChildEdgeV1 {
+            artifact_class: recording_registration.fields().artifact_class,
+            artifact_digest: recording_registration.fields().artifact_digest,
+            registration_address: recording_registration.address(),
+            required: true,
+        },
+        ArtifactChildEdgeV1 {
+            artifact_class: ErasureArtifactClassV1::ReproManifest,
+            artifact_digest: expected_transcript.fields().artifact_digest,
+            registration_address: expected_transcript.address(),
+            required: true,
+        },
+    ];
+    child_artifacts.sort_by_key(child_sort_key);
+    ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+        artifact_class: ErasureArtifactClassV1::ReproManifest,
+        artifact_digest: ArtifactRegistrationV1::artifact_digest(
+            ErasureArtifactClassV1::ReproManifest,
+            input.root_bytes,
+        ),
+        owner_reference: root_input.owner_reference,
+        data_class: ArtifactDataClassV1::PublicRecord,
+        optionality: ArtifactOptionalityV1::Required,
+        transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+        required_key_roles: Vec::new(),
+        key_dependencies: Vec::new(),
+        child_artifacts,
+    })
+    .map_err(|_| ReproManifestArtifactRegistrationErrorV1::InvalidManifestRoot)
 }
 
 fn domain_hash(domain: &[u8], bytes: &[u8]) -> Hash {

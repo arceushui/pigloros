@@ -11,16 +11,17 @@ use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::{PluginId, TimelineId},
-    manifest_owner_link::{ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1},
+    manifest_owner_link::{
+        ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
+    },
     ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, Capability, ConsentAuthority,
     ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentErrorV1,
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, KnowledgeSnapshotV1,
-    PersistedAuthorityV1, Plugin, ProposedAction, Reducer, Timeline,
+    OwnerIdV1, PersistedAuthorityV1, Plugin, ProposedAction, Reducer, Timeline,
     MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
-#[cfg(any(test, feature = "test-support"))]
 use crate::output_admission::{draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1};
 use crate::{
     composition::{
@@ -44,8 +45,12 @@ use std::{
     sync::Arc,
 };
 
+mod adapter;
 mod catalogue;
 
+pub use adapter::{
+    ClosedAdapterTranscriptV1, LocalAdapterErrorV1, LocalAdapterProviderV1, LocalAdapterSessionV1,
+};
 pub use catalogue::{HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPluginProductV1};
 
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
@@ -1037,6 +1042,7 @@ struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
     reducer_slot: ReducerSlotV1,
+    manifest_slot: Option<String>,
 }
 
 /// How a registered reducer is keyed in the projection registry.
@@ -1123,6 +1129,7 @@ pub struct PluginRegistry {
     manifest_batch: Option<ManifestAdmissionCatalogV1>,
     manifest_identity: Arc<()>,
     registration_revision: u64,
+    local_adapters: Vec<adapter::RegisteredLocalAdapterV1>,
     approver_map: IndexMap<Kind, PluginId>,
     pub schemas: SchemaRegistry,
     projections: ProjectionRegistry,
@@ -1179,10 +1186,98 @@ impl PluginRegistry {
             .as_ref()
             .ok_or(ManifestRegistrationErrorV1::BatchState)?;
         self.validate_complete_manifest_batch(batch)?;
+        let adapter_admission = self
+            .adapter_admission_for_catalog(batch)
+            .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
         Ok(AdmittedCompositionV1 {
             registry_identity: Arc::clone(&self.manifest_identity),
             registration_revision: self.registration_revision,
             catalog: batch.clone(),
+            adapter_admission,
+        })
+    }
+
+    /// Admit every Plugin already registered in this local registry.
+    ///
+    /// Unlike the installed-source path, this derives the complete catalog
+    /// from the actual in-process entries and uses the PluginId as its local
+    /// stable slot. It requires no EPF1 or deployment qualification. The
+    /// returned capability is tied to this registry instance and expires
+    /// after any registration change.
+    ///
+    /// # Errors
+    /// Rejects an empty, replay, air-gapped, already sealed, unpinned, or
+    /// incomplete registry.
+    pub fn admit_local_manifest_registration(
+        &mut self,
+        owner_id: OwnerIdV1,
+        configuration_generation: u64,
+    ) -> Result<AdmittedCompositionV1, ManifestRegistrationErrorV1> {
+        if self.run_mode != RunMode::Live || self.composition_mode != PluginExecutionModeV1::Local {
+            return Err(ManifestRegistrationErrorV1::RegistryState);
+        }
+        if self.manifest_batch.is_some() {
+            return Err(ManifestRegistrationErrorV1::BatchState);
+        }
+        if self.plugins.is_empty() {
+            return Err(ManifestRegistrationErrorV1::EmptyBatch);
+        }
+        let owner_reference = pos_core::ArtifactRegistrationV1::owner_reference(&owner_id);
+        let mut rows = Vec::with_capacity(self.plugins.len());
+        for (plugin_id, entry) in &self.plugins {
+            let registration = entry
+                .registration
+                .as_ref()
+                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+            let admission = entry
+                .output_admission
+                .as_ref()
+                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+            let closure = admission
+                .closure()
+                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+            let row = ManifestAdmissionCatalogRowV1 {
+                stable_slot: format!("plugin-{plugin_id}"),
+                plugin_id: *plugin_id,
+                plugin_name: entry.name.clone(),
+                plugin_version: entry.version.clone(),
+                implementation_hash: admission.policy().fields().implementation_hash,
+                eop1_native_digest: admission.policy_digest(),
+                closure_hash: closure.manifest_closure_hash(),
+            };
+            Self::validate_manifest_entry_fields(&row, entry)?;
+            rows.push(row);
+            // An available pin is required and checked above; retaining it
+            // here avoids accepting a local catalog made from an unpinned row.
+            if registration.availability() != PluginAvailabilityV1::Available {
+                return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
+            }
+        }
+        rows.sort_unstable_by(|left, right| left.stable_slot.cmp(&right.stable_slot));
+        let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
+            owner_id: *owner_reference.as_bytes(),
+            configuration_generation,
+            rows,
+        })
+        .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
+        let adapter_admission = self
+            .adapter_admission_for_catalog(&catalog)
+            .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
+
+        for row in &catalog.as_input().rows {
+            let entry = self
+                .plugins
+                .get_mut(&row.plugin_id)
+                .ok_or(ManifestRegistrationErrorV1::IncompleteBatch)?;
+            entry.manifest_slot = Some(row.stable_slot.clone());
+        }
+        self.registration_revision += 1;
+        self.manifest_batch = Some(catalog.clone());
+        Ok(AdmittedCompositionV1 {
+            registry_identity: Arc::clone(&self.manifest_identity),
+            registration_revision: self.registration_revision,
+            catalog,
+            adapter_admission,
         })
     }
 
@@ -1207,10 +1302,14 @@ impl PluginRegistry {
             return Err(ManifestRegistrationErrorV1::IncompleteBatch);
         }
         self.validate_complete_manifest_batch(&batch)?;
+        let adapter_admission = self
+            .adapter_admission_for_catalog(&batch)
+            .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
         Ok(AdmittedCompositionV1 {
             registry_identity: Arc::clone(&self.manifest_identity),
             registration_revision: self.registration_revision,
             catalog: batch,
+            adapter_admission,
         })
     }
 
@@ -1233,6 +1332,10 @@ impl PluginRegistry {
                 batch.as_input().owner_id == admitted.catalog.as_input().owner_id
                     && batch.as_input().rows == admitted.catalog.as_input().rows
             })
+            && matches!(
+                self.adapter_admission_for_catalog(&admitted.catalog),
+                Ok(ref current) if current == &admitted.adapter_admission
+            )
     }
 
     fn validate_complete_manifest_batch(
@@ -1256,6 +1359,16 @@ impl PluginRegistry {
         row: &ManifestAdmissionCatalogRowV1,
         entry: &PluginEntry,
     ) -> Result<(), ManifestRegistrationErrorV1> {
+        if entry.manifest_slot.as_deref() != Some(row.stable_slot.as_str()) {
+            return Err(ManifestRegistrationErrorV1::SlotMismatch);
+        }
+        Self::validate_manifest_entry_fields(row, entry)
+    }
+
+    fn validate_manifest_entry_fields(
+        row: &ManifestAdmissionCatalogRowV1,
+        entry: &PluginEntry,
+    ) -> Result<(), ManifestRegistrationErrorV1> {
         let registration = entry
             .registration
             .as_ref()
@@ -1274,9 +1387,6 @@ impl PluginRegistry {
             || registration.pin().configuration_digest() != admission.policy_digest()
         {
             return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
-        }
-        if entry.manifest_slot.as_deref() != Some(row.stable_slot.as_str()) {
-            return Err(ManifestRegistrationErrorV1::SlotMismatch);
         }
         if entry.name != row.plugin_name
             || entry.version != row.plugin_version
@@ -1612,6 +1722,7 @@ impl PluginRegistry {
             manifest_batch: None,
             manifest_identity: Arc::new(()),
             registration_revision: 0,
+            local_adapters: Vec::new(),
             approver_map: IndexMap::new(),
             schemas,
             // Keep both defaults fail-closed. The composition root must bind a
@@ -2841,13 +2952,15 @@ impl PluginRegistry {
         Ok(())
     }
 
-    /// Register a plugin with a deterministic policy derived from its declared
-    /// event namespace and the bounded Interactive executable profile.
+    /// Register a local Plugin with a deterministic policy derived from its
+    /// declared event namespace and the bounded local Interactive profile.
+    ///
+    /// This ordinary open-source path records local metadata and enforces the
+    /// Plugin's output policy. It does not claim installed-source, deployment,
+    /// or release provenance.
     ///
     /// # Errors
-    /// Returns policy-construction or registration errors.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
+    /// Returns policy-construction or registration errors before mutation.
     pub fn register_generated(
         &mut self,
         plugin: &dyn Plugin,
@@ -2855,10 +2968,68 @@ impl PluginRegistry {
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
         let binding = Self::generated_output_binding(plugin)?;
-        self.register_with_verified_output_policy(plugin, binding, reducer, driver)
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            PendingRegistrationCallbacksV1 {
+                driver,
+                approver: None,
+                approver_event_types: std::iter::empty(),
+            },
+            RegistrationOptions {
+                registration: None,
+                output_admission: None,
+                reducer_slot: ReducerSlotV1::ByPluginId,
+                manifest_slot: None,
+            },
+        )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    /// Register a local Plugin and bind it to the caller's domain roles.
+    ///
+    /// This is the short path for ordinary open-source local compositions.
+    /// The runtime builds a same-process output policy and an available native
+    /// pin; no EPF1, installed bundle, or deployment qualification is needed.
+    /// The roles remain explicit because they describe application semantics.
+    ///
+    /// # Errors
+    /// Returns policy, pin, duplicate-role, or Plugin registration errors.
+    pub fn register_local(
+        &mut self,
+        plugin: &dyn Plugin,
+        roles: Vec<String>,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        let binding = Self::generated_output_binding(plugin)?;
+        let pin = crate::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            binding.policy().digest(),
+            roles,
+        )?;
+        self.register_with_verified_output_policy_inner(
+            plugin,
+            binding,
+            reducer,
+            PendingRegistrationCallbacksV1 {
+                driver,
+                approver: None,
+                approver_event_types: std::iter::empty(),
+            },
+            RegistrationOptions {
+                registration: Some(PluginRegistrationV1::new(
+                    pin,
+                    PluginAvailabilityV1::Available,
+                )),
+                output_admission: None,
+                reducer_slot: ReducerSlotV1::ByPluginId,
+                manifest_slot: None,
+            },
+        )
+    }
+
     fn generated_output_binding(
         plugin: &dyn Plugin,
     ) -> Result<OutputPolicyBindingV1, RuntimeError> {
@@ -2878,7 +3049,6 @@ impl PluginRegistry {
         )?)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding_with_configuration_details(
         plugin: &dyn Plugin,
         configuration_details: &[u8],
@@ -2902,7 +3072,6 @@ impl PluginRegistry {
         )?)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn generated_budget_input(plugin: &dyn Plugin) -> pos_core::ExecutableBudgetPolicyInputV1 {
         pos_core::ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -2942,7 +3111,6 @@ impl PluginRegistry {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding_with_budget_input(
         plugin: &dyn Plugin,
         plugin_version: &str,
@@ -2962,7 +3130,6 @@ impl PluginRegistry {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding_with_budget_input_for_profile(
         plugin: &dyn Plugin,
         plugin_version: &str,
@@ -2984,7 +3151,6 @@ impl PluginRegistry {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn generated_output_binding_with_budget_input_for_profile_with_details(
         plugin: &dyn Plugin,
         plugin_version: &str,
@@ -3063,12 +3229,13 @@ impl PluginRegistry {
         Ok((policy, budget))
     }
 
-    /// Register an implementation through the explicit V1 composition seam.
+    /// Register a local Plugin with an owner-selected role pin.
+    ///
+    /// The metadata-derived implementation identity is scoped to this local
+    /// registry and is not installed-source or release evidence.
     ///
     /// # Errors
-    /// Returns a registration or closed composition error before mutating the registry.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
+    /// Returns a registration or closed composition error before mutation.
     pub fn register_pinned_generated(
         &mut self,
         plugin: &dyn Plugin,
@@ -3086,12 +3253,10 @@ impl PluginRegistry {
         )
     }
 
-    /// Register a pinned implementation with an optional action approver.
+    /// Register a pinned local Plugin with an optional action approver.
     ///
     /// # Errors
     /// Returns a registration or closed composition error before mutating the registry.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
     pub fn register_pinned_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
@@ -3115,6 +3280,7 @@ impl PluginRegistry {
                 registration: Some(registration),
                 output_admission: None,
                 reducer_slot: ReducerSlotV1::ByPluginId,
+                manifest_slot: None,
             },
         )
     }
@@ -3123,8 +3289,6 @@ impl PluginRegistry {
     ///
     /// # Errors
     /// Returns policy-construction, capability, or registration errors.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
     pub fn register_generated_with_approver(
         &mut self,
         plugin: &dyn Plugin,
@@ -3134,13 +3298,21 @@ impl PluginRegistry {
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
         let binding = Self::generated_output_binding(plugin)?;
-        self.register_with_verified_output_policy_and_approver(
+        self.register_with_verified_output_policy_inner(
             plugin,
             binding,
             reducer,
-            driver,
-            approver,
-            approver_event_types,
+            PendingRegistrationCallbacksV1 {
+                driver,
+                approver,
+                approver_event_types,
+            },
+            RegistrationOptions {
+                registration: None,
+                output_admission: None,
+                reducer_slot: ReducerSlotV1::ByPluginId,
+                manifest_slot: None,
+            },
         )
     }
 
@@ -3200,6 +3372,7 @@ impl PluginRegistry {
                 registration: None,
                 output_admission: None,
                 reducer_slot: ReducerSlotV1::ByName,
+                manifest_slot: None,
             },
         )
     }
@@ -3518,7 +3691,7 @@ impl PluginRegistry {
                 event_cursor: Seq::ZERO,
                 registration: options.registration,
                 output_admission: options.output_admission,
-                manifest_slot: None,
+                manifest_slot: options.manifest_slot,
             },
         );
         self.registration_revision += 1;
@@ -4885,6 +5058,7 @@ mod tests {
                     )),
                     output_admission: None,
                     reducer_slot: ReducerSlotV1::ByPluginId,
+                    manifest_slot: None,
                 },
             ),
             Err(RuntimeError::CapabilityMismatch { .. })

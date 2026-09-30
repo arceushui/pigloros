@@ -1,7 +1,7 @@
 #![cfg(not(target_os = "linux"))]
 
 use pos_core::{Capability, Plugin, PluginId};
-use pos_runtime::{InstalledOutputPolicySourceV1, OutputAdmissionErrorV1, OutputPolicyBindingV1};
+use pos_runtime::PluginRegistry;
 
 struct FixturePlugin(PluginId);
 
@@ -20,15 +20,11 @@ impl Plugin for FixturePlugin {
 }
 
 #[test]
-fn non_linux_host_cannot_promote_generated_profile() {
+fn non_linux_host_can_register_a_local_plugin() {
     let plugin = FixturePlugin(PluginId::new());
-    assert!(matches!(
-        OutputPolicyBindingV1::from_installed_source(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            &[],
-            "deterministic-local-v1",
-        ),
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    ));
+    let mut registry = PluginRegistry::new();
+    registry
+        .register_local(&plugin, vec!["non-linux.fixture".to_owned()], None, None)
+        .expect("local registration should work without installed profile evidence");
+    assert_eq!(registry.len(), 1);
 }

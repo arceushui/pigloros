@@ -341,6 +341,41 @@ pub struct TimelineExport {
 /// Export/import helpers live as free functions alongside the trait so callers can
 /// hold `Box<dyn EventStore>` and swap backends without changing call sites.
 pub trait EventStore: Send {
+    /// Atomically persist an owner-verified immutable artifact-registration closure.
+    ///
+    /// This seam lets callers returned by the standard store factory use the
+    /// same backend for Timeline data and artifact catalogs. Stores that do
+    /// not retain artifact catalogs fail closed by default.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error when the backend does not support
+    /// this catalog or cannot commit the complete closure atomically.
+    fn commit_artifact_registration_batch(
+        &mut self,
+        _batch: crate::PreparedArtifactRegistrationBatchV1,
+    ) -> Result<
+        crate::ArtifactRegistrationCommitOutcomeV1,
+        crate::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+    }
+
+    /// Read one exact owner-specific artifact-registration row.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error when a retained row is corrupt or
+    /// the backend cannot determine its current value.
+    fn read_artifact_registration(
+        &self,
+        _owner_id: &crate::OwnerIdV1,
+        _registration_address: Hash,
+    ) -> Result<
+        Option<crate::ArtifactRegistrationCatalogRowV1>,
+        crate::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+    }
+
     /// Bind the host-owned erasure containment gate used by protected store
     /// operations. Adapters retain the gate for their lifetime and must check
     /// it inside the same logical boundary as the protected effect.
