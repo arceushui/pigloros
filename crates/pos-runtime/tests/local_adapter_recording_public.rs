@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use pos_core::{
     adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
-    AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationV1, AdapterTranscriptV1,
-    ArtifactRegistrationV1, Capability, Hash, OwnerIdV1, Plugin, PluginId, TimelineId,
-    WorldReplayHandleInputV1, WorldReplayHandleV1,
+    AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationV1, AdapterRecordingStoreV1,
+    AdapterTranscriptV1, ArtifactRegistrationV1, Capability, Hash, OwnerIdV1, Plugin, PluginId,
+    TimelineId, WorldReplayHandleInputV1, WorldReplayHandleV1,
 };
 use pos_runtime::{LocalAdapterErrorV1, LocalAdapterProviderV1, PluginRegistry};
 
@@ -123,11 +123,12 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
     };
     let (mut registry, admitted, handle) = registry_with_adapter(Box::new(provider));
     assert_eq!(admitted.adapter_admission().as_input().entries.len(), 1);
+    let mut recorder = pos_store::memory::MemoryStore::new();
 
     let operation_id = Hash::from_bytes([21; 32]);
     let request = b"exact request".to_vec();
     let mut session = registry
-        .begin_local_adapter_session(&admitted, handle, operation_id)
+        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
         .expect("the sealed local admission should start a run");
     let response = session
         .invoke(
@@ -140,7 +141,22 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
         )
         .expect("the registered local provider should run");
     assert_eq!(response, b"tseuqer tcaxe");
-    let closed = session.finish().expect("the successful run should close");
+    drop(session);
+    let mut retry = registry
+        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
+        .expect("the same still-open operation should resume");
+    let retried_response = retry
+        .invoke(
+            admitted.adapter_admission().as_input().entries[0].plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"exact request".to_vec(),
+        )
+        .expect("a committed response should be reused on retry");
+    assert_eq!(retried_response, response);
+    let closed = retry.finish().expect("the successful run should close");
     let transcript = AdapterTranscriptV1::from_canonical_cbor(&closed.transcript_bytes())
         .expect("the closed transcript should have exact MAT1 bytes");
     assert_eq!(transcript.as_input().calls.len(), 1);
@@ -162,32 +178,27 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
         Hash::zero()
     );
 
-    let mut retry = registry
-        .begin_local_adapter_session(&admitted, handle, operation_id)
-        .expect("the same operation may be retried under its deterministic key");
-    retry
-        .invoke(
-            admitted.adapter_admission().as_input().entries[0].plugin_id,
-            "weather.client",
-            "fixture.provider",
-            "read-current",
-            1,
-            b"exact request".to_vec(),
-        )
-        .expect("the repeated call should reach the provider");
-    retry.finish().expect("the retry should also close");
     let keys = keys
         .lock()
         .expect("idempotency key lock should be available");
-    assert_eq!(keys.len(), 2);
-    assert_eq!(keys[0], keys[1]);
+    assert_eq!(keys.len(), 1);
+    assert_ne!(keys[0], Hash::zero());
+    let closed_bytes = closed.transcript_bytes();
+    assert_eq!(
+        recorder
+            .read_closed_adapter_recording_session(handle.as_input().owner_reference, operation_id)
+            .expect("the closed transcript should remain readable")
+            .as_deref(),
+        Some(closed_bytes.as_slice())
+    );
 }
 
 #[test]
 fn local_adapter_session_emits_an_explicit_empty_transcript() {
     let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider));
+    let mut recorder = pos_store::memory::MemoryStore::new();
     let session = registry
-        .begin_local_adapter_session(&admitted, handle, Hash::from_bytes([22; 32]))
+        .begin_local_adapter_session(&admitted, handle, Hash::from_bytes([22; 32]), &mut recorder)
         .expect("the sealed local admission should start a run");
     let closed = session
         .finish()
@@ -202,6 +213,7 @@ fn failed_local_adapter_session_cannot_produce_a_transcript() {
     let plugin = LocalPlugin { id: plugin_id };
     let owner = OwnerIdV1::from_static("local-adapter-failure-test");
     let owner_reference = ArtifactRegistrationV1::owner_reference(&owner);
+    let mut recorder = pos_store::memory::MemoryStore::new();
     let mut registry = PluginRegistry::new();
     registry
         .register_local(&plugin, vec!["weather.read".to_owned()], None, None)
@@ -217,6 +229,7 @@ fn failed_local_adapter_session_cannot_produce_a_transcript() {
             &admitted,
             world_handle(owner_reference),
             Hash::from_bytes([23; 32]),
+            &mut recorder,
         )
         .expect("the sealed local admission should start a run");
     assert_eq!(
@@ -230,8 +243,13 @@ fn failed_local_adapter_session_cannot_produce_a_transcript() {
         ),
         Err(LocalAdapterErrorV1::ProviderRejected)
     );
-    assert!(matches!(
-        session.finish(),
-        Err(LocalAdapterErrorV1::SessionAborted)
-    ));
+    session
+        .abort()
+        .expect("a provider failure can explicitly abort the recorder");
+    assert_eq!(
+        recorder
+            .read_closed_adapter_recording_session(owner_reference, Hash::from_bytes([23; 32]))
+            .expect("the aborted recorder should remain readable as unclosed"),
+        None
+    );
 }
