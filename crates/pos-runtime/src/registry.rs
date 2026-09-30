@@ -7,14 +7,12 @@
 
 use indexmap::IndexMap;
 
-#[cfg(any(test, feature = "test-support"))]
-use pos_core::Capability;
 use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::{PluginId, TimelineId},
     manifest_owner_link::{ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1},
-    ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, ConsentAuthority,
+    ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, Capability, ConsentAuthority,
     ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentErrorV1,
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, KnowledgeSnapshotV1,
     PersistedAuthorityV1, Plugin, ProposedAction, Reducer, Timeline,
@@ -23,9 +21,7 @@ use pos_core::{
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
 #[cfg(any(test, feature = "test-support"))]
-use crate::output_admission::{
-    draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1, OutputPolicyClosureV1,
-};
+use crate::output_admission::{draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1};
 use crate::{
     composition::{
         AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
@@ -39,7 +35,7 @@ use crate::{
         SnapshotAnchor, StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
-    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1},
+    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
@@ -48,9 +44,19 @@ use std::{
     sync::Arc,
 };
 
+mod catalogue;
+
+pub use catalogue::{HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPluginProductV1};
+
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
+}
+
+struct PendingRegistrationCallbacksV1<I> {
+    driver: Option<Box<dyn Driver>>,
+    approver: Option<Box<dyn ActionApprover>>,
+    approver_event_types: I,
 }
 
 fn replay_policy_identity_digest(
@@ -1027,16 +1033,20 @@ impl Plugin for GeneratedDriverPlugin {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
+    reducer_slot: ReducerSlotV1,
 }
 
-#[cfg(any(test, feature = "test-support"))]
-struct RegistrationCallbacks {
-    driver: Option<Box<dyn Driver>>,
-    approver: Option<Box<dyn ActionApprover>>,
+/// How a registered reducer is keyed in the projection registry.
+#[derive(Clone, Copy)]
+enum ReducerSlotV1 {
+    /// Name-keyed slot used by plain generated fixtures.
+    #[cfg(any(test, feature = "test-support"))]
+    ByName,
+    /// Slot keyed by the registering `PluginId`, so same-name reducers coexist.
+    ByPluginId,
 }
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
@@ -3096,11 +3106,15 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            RegistrationCallbacks { driver, approver },
-            approver_event_types,
+            PendingRegistrationCallbacksV1 {
+                driver,
+                approver,
+                approver_event_types,
+            },
             RegistrationOptions {
                 registration: Some(registration),
                 output_admission: None,
+                reducer_slot: ReducerSlotV1::ByPluginId,
             },
         )
     }
@@ -3177,11 +3191,15 @@ impl PluginRegistry {
             plugin,
             binding,
             reducer,
-            RegistrationCallbacks { driver, approver },
-            approver_event_types,
+            PendingRegistrationCallbacksV1 {
+                driver,
+                approver,
+                approver_event_types,
+            },
             RegistrationOptions {
                 registration: None,
                 output_admission: None,
+                reducer_slot: ReducerSlotV1::ByName,
             },
         )
     }
@@ -3229,14 +3247,12 @@ impl PluginRegistry {
         Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    fn register_with_verified_output_policy_inner(
+    fn register_with_verified_output_policy_inner<I: IntoIterator<Item = Kind>>(
         &mut self,
         plugin: &dyn Plugin,
         binding: OutputPolicyBindingV1,
         reducer: Option<Box<dyn Reducer>>,
-        callbacks: RegistrationCallbacks,
-        approver_event_types: impl IntoIterator<Item = Kind>,
+        callbacks: PendingRegistrationCallbacksV1<I>,
         mut options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         // A prepared manifest batch admits only installed manifest-slot
@@ -3307,7 +3323,11 @@ impl PluginRegistry {
         )?;
         debug_assert_eq!(admission.owner_token(), Some(owner_token));
         options.output_admission = Some(admission);
-        let RegistrationCallbacks { driver, approver } = callbacks;
+        let PendingRegistrationCallbacksV1 {
+            driver,
+            approver,
+            approver_event_types,
+        } = callbacks;
         let approver_event_types: Vec<Kind> = approver_event_types.into_iter().collect();
         self.register_with_approver_slice(
             plugin,
@@ -3320,7 +3340,6 @@ impl PluginRegistry {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn registration_context(
         &self,
         plugin: &dyn Plugin,
@@ -3335,7 +3354,6 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,
@@ -3353,25 +3371,6 @@ impl PluginRegistry {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    fn validate_installed_reducer_name(
-        name: &str,
-        installed: bool,
-        has_reducer: bool,
-    ) -> Result<(), RuntimeError> {
-        if installed
-            && has_reducer
-            && (name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES)
-        {
-            return Err(RuntimeError::CapabilityMismatch {
-                name: name.to_owned(),
-                reason: "installed reducer name is outside the canonical text bound".to_owned(),
-            });
-        }
-        Ok(())
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     fn validate_reserved_owned_event_types(
         name: &str,
         cap: &Capability,
@@ -3399,30 +3398,32 @@ impl PluginRegistry {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn install_reducer(
         &mut self,
         id: PluginId,
         name: &str,
         reducer: Option<Box<dyn Reducer>>,
-        installed: bool,
+        slot: ReducerSlotV1,
     ) -> Result<(), RuntimeError> {
         if let Some(reducer) = reducer {
-            if installed {
-                self.projections
-                    .register_installed_reducer(id, name, reducer)
-                    .map_err(|error| RuntimeError::CapabilityMismatch {
-                        name: name.to_owned(),
-                        reason: format!("installed projection slot rejected: {error:?}"),
-                    })?;
-            } else {
-                self.projections.register(name, reducer);
+            match slot {
+                // The projection registry enforces the canonical name bound
+                // and PluginId uniqueness before it adds the slot.
+                ReducerSlotV1::ByPluginId => {
+                    self.projections
+                        .register_installed_reducer(id, name, reducer)
+                        .map_err(|error| RuntimeError::CapabilityMismatch {
+                            name: name.to_owned(),
+                            reason: format!("installed projection slot rejected: {error:?}"),
+                        })?;
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                ReducerSlotV1::ByName => self.projections.register(name, reducer),
             }
         }
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn register_with_approver_slice(
         &mut self,
         plugin: &dyn Plugin,
@@ -3484,16 +3485,10 @@ impl PluginRegistry {
             }
         }
 
-        // All fallible installed-slot checks precede the first registry mutation.
-        Self::validate_installed_reducer_name(
-            &name,
-            options.registration.is_some(),
-            reducer.is_some(),
-        )?;
         let version = plugin.version().to_owned();
 
         // The only fallible commit action runs before schemas or routes mutate.
-        self.install_reducer(id, &name, reducer, options.registration.is_some())?;
+        self.install_reducer(id, &name, reducer, options.reducer_slot)?;
 
         // Register event type schemas
         for kind in &cap.owned_event_types {
@@ -4244,6 +4239,7 @@ impl Default for PluginRegistry {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use super::catalogue::{seal_catalogue_bundle, CatalogueEvidenceV1, CatalogueLinksV1};
     use super::*;
     use crate::driver::{ObservationView, SnapshotAnchor, StepOutput};
     use pos_core::{
@@ -4862,24 +4858,6 @@ mod tests {
     }
 
     #[test]
-    fn installed_reducer_name_check_runs_only_for_installed_reducers() {
-        assert!(matches!(
-            PluginRegistry::validate_installed_reducer_name("", true, true),
-            Err(RuntimeError::CapabilityMismatch { .. })
-        ));
-        assert!(matches!(
-            PluginRegistry::validate_installed_reducer_name(
-                &"x".repeat(pos_core::MAX_AUTHORITY_TEXT_BYTES + 1),
-                true,
-                true,
-            ),
-            Err(RuntimeError::CapabilityMismatch { .. })
-        ));
-        assert!(PluginRegistry::validate_installed_reducer_name("", false, true).is_ok());
-        assert!(PluginRegistry::validate_installed_reducer_name("", true, false).is_ok());
-    }
-
-    #[test]
     fn invalid_installed_reducer_name_rejects_before_any_registry_change() {
         let plugin = plugin_with_caps("", &["invalid-name.output"], false, true);
         let pin = crate::composition::PluginPinV1::try_new(
@@ -4906,6 +4884,7 @@ mod tests {
                         PluginAvailabilityV1::Available,
                     )),
                     output_admission: None,
+                    reducer_slot: ReducerSlotV1::ByPluginId,
                 },
             ),
             Err(RuntimeError::CapabilityMismatch { .. })
@@ -4920,11 +4899,21 @@ mod tests {
         let mut registry = gated_registry();
         let id = PluginId::new();
         registry
-            .install_reducer(id, "same", Some(Box::new(CountReducer)), true)
+            .install_reducer(
+                id,
+                "same",
+                Some(Box::new(CountReducer)),
+                ReducerSlotV1::ByPluginId,
+            )
             .test_ok();
         let schemas_before = registry.schemas.len();
         assert!(matches!(
-            registry.install_reducer(id, "other", Some(Box::new(CountReducer)), true),
+            registry.install_reducer(
+                id,
+                "other",
+                Some(Box::new(CountReducer)),
+                ReducerSlotV1::ByPluginId,
+            ),
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
         assert_eq!(registry.schemas.len(), schemas_before);
@@ -5649,6 +5638,549 @@ mod tests {
                 has_reducer,
             },
         }
+    }
+
+    struct CatalogueFixtureConfiguration {
+        plugin_id: PluginId,
+        details: Vec<u8>,
+        declares_reducer: bool,
+        supplies_reducer: bool,
+        builds: std::cell::Cell<usize>,
+    }
+
+    fn catalogue_configuration(
+        plugin_id: PluginId,
+        details: &[u8],
+    ) -> CatalogueFixtureConfiguration {
+        CatalogueFixtureConfiguration {
+            plugin_id,
+            details: details.to_vec(),
+            declares_reducer: false,
+            supplies_reducer: false,
+            builds: std::cell::Cell::new(0),
+        }
+    }
+
+    fn reducer_catalogue_configuration(
+        declares_reducer: bool,
+        supplies_reducer: bool,
+    ) -> CatalogueFixtureConfiguration {
+        CatalogueFixtureConfiguration {
+            declares_reducer,
+            supplies_reducer,
+            ..catalogue_configuration(PluginId::new(), &[])
+        }
+    }
+
+    // Nonproduction factory for catalogue mechanics; runtime tests cannot
+    // build the Gateway's native Plugin.
+    impl InstalledPluginFactoryV1 for TestPlugin {
+        type Configuration = CatalogueFixtureConfiguration;
+        type Plugin = Self;
+        type Approver = MockActionApprover;
+
+        fn configuration_details(configuration: &CatalogueFixtureConfiguration) -> Vec<u8> {
+            configuration.details.clone()
+        }
+
+        fn build(
+            configuration: &CatalogueFixtureConfiguration,
+        ) -> InstalledPluginProductV1<Self, MockActionApprover> {
+            configuration.builds.set(configuration.builds.get() + 1);
+            let reducer: Option<Box<dyn Reducer>> = if configuration.supplies_reducer {
+                Some(Box::new(CountReducer))
+            } else {
+                None
+            };
+            InstalledPluginProductV1 {
+                plugin: Self {
+                    id: configuration.plugin_id,
+                    name: "catalogue-fixture",
+                    cap: Capability {
+                        owned_event_types: vec![Kind::new("world.action.v1")],
+                        has_reducer: configuration.declares_reducer,
+                        ..Capability::default()
+                    },
+                },
+                reducer,
+                approver: MockActionApprover,
+            }
+        }
+    }
+
+    // The nonproduction specification is constructible only inside this crate's tests.
+    const fn fixture_catalogue_entry() -> HostCatalogueEntryV1<TestPlugin> {
+        HostCatalogueEntryV1 {
+            spec: InstalledOutputPolicySourceV1::Generated,
+            factory: std::marker::PhantomData,
+        }
+    }
+
+    struct RevisedCatalogueFixturePlugin {
+        id: PluginId,
+    }
+
+    impl Plugin for RevisedCatalogueFixturePlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "catalogue-fixture"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: vec![Kind::new("world.action.v1")],
+                ..Capability::default()
+            }
+        }
+
+        fn version(&self) -> &'static str {
+            "99.0.0"
+        }
+    }
+
+    fn catalogue_event(event_type: &str, entity: EntityId, seq: u64) -> Event {
+        Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(event_type),
+            payload: CanonicalBytes::from_static(b"existing"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        }
+    }
+
+    fn owned_policy_digests(registry: &PluginRegistry) -> Vec<(String, Hash)> {
+        registry
+            .output_policy_digests()
+            .map(|(name, digest)| (name.to_owned(), digest))
+            .collect()
+    }
+
+    fn reducer_count(
+        registry: &PluginRegistry,
+        timeline: TimelineId,
+        id: PluginId,
+        entity: &EntityId,
+    ) -> Option<u64> {
+        registry
+            .projections
+            .state_for_plugin(timeline, id, entity)
+            .test_ok()
+            .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64))
+    }
+
+    #[test]
+    fn gateway_catalogue_entry_rejects_a_foreign_product_for_every_evidence() {
+        let selected = HostCatalogueEntryV1::<TestPlugin>::gateway();
+        let configuration = catalogue_configuration(PluginId::new(), &[]);
+        let mut registry = gated_registry();
+        assert!(matches!(
+            registry.register_from_host_catalogue_entry(&selected, &configuration),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::PluginMismatch
+            ))
+        ));
+        assert!(matches!(
+            registry.register_host_catalogue_fixture(&selected, &configuration),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::PluginMismatch
+            ))
+        ));
+        assert_eq!(configuration.builds.get(), 2);
+        assert!(registry.is_empty());
+        assert!(registry.approver_map.is_empty());
+        assert_eq!(registry.projections.reducer_names().len(), 0);
+    }
+
+    #[test]
+    fn catalogue_fixture_builds_once_without_pin_or_append_permission() {
+        let configuration = catalogue_configuration(PluginId::new(), &[]);
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        registry
+            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .test_ok();
+        assert_eq!(configuration.builds.get(), 1);
+        assert_eq!(registry.composition().plugins.len(), 1);
+        assert!(registry.composition().plugins[0].pin.is_none());
+        assert_eq!(
+            registry.approver_map.get(&Kind::new("world.action.v1")),
+            Some(&configuration.plugin_id)
+        );
+        let proposal = ProposedAction::new(
+            Kind::new("world.action.v1"),
+            EntityId::new(),
+            CanonicalBytes::from_static(b"fixture"),
+            Kind::new("world.action.v1.submit"),
+        );
+        assert!(matches!(
+            registry.submit_action(TimelineId::new(), &proposal),
+            Err(ActionSubmissionError::ErasureOperationUnavailable)
+        ));
+    }
+
+    #[test]
+    fn catalogue_fixture_rejects_oversized_configuration_before_mutation() {
+        let configuration = CatalogueFixtureConfiguration {
+            details: vec![0; crate::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 + 1],
+            ..catalogue_configuration(PluginId::new(), &[])
+        };
+        let mut registry = gated_registry();
+        assert!(matches!(
+            registry.register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::ArtifactInvalid {
+                    kind: "configuration"
+                }
+            ))
+        ));
+        assert_eq!(configuration.builds.get(), 1);
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn only_installed_catalogue_evidence_attaches_the_candidate_pin() {
+        let pin = crate::composition::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([1; 32]),
+            vec!["catalogue-role".to_owned()],
+        )
+        .test_ok();
+        assert_eq!(
+            CatalogueEvidenceV1::Installed.registration(pin.clone()),
+            Some(PluginRegistrationV1::new(
+                pin.clone(),
+                PluginAvailabilityV1::Available
+            ))
+        );
+        assert_eq!(CatalogueEvidenceV1::Generated.registration(pin), None);
+        assert_eq!(
+            CatalogueEvidenceV1::Installed.binding_source(InstalledOutputPolicySourceV1::Gateway),
+            InstalledOutputPolicySourceV1::Gateway
+        );
+    }
+
+    #[test]
+    fn catalogue_links_reject_each_broken_link() {
+        let configuration = catalogue_configuration(PluginId::new(), b"frozen");
+        let bundle = seal_catalogue_bundle(
+            &fixture_catalogue_entry(),
+            &configuration,
+            CatalogueEvidenceV1::Generated,
+        )
+        .test_ok();
+        let foreign_configuration = catalogue_configuration(PluginId::new(), b"frozen");
+        let foreign = seal_catalogue_bundle(
+            &fixture_catalogue_entry(),
+            &foreign_configuration,
+            CatalogueEvidenceV1::Generated,
+        )
+        .test_ok();
+        assert_eq!(bundle.evidence.registration(bundle.pin.clone()), None);
+        let links = bundle.links();
+        assert_eq!(links.validate(), Ok(()));
+        let identity = |kind: &'static str| -> Result<(), crate::OutputAdmissionErrorV1> {
+            Err(crate::OutputAdmissionErrorV1::ArtifactIdentityMismatch { kind })
+        };
+
+        let other_plugin =
+            plugin_with_caps("catalogue-fixture", &["world.action.v1"], false, false);
+        assert_eq!(
+            CatalogueLinksV1 {
+                plugin: &other_plugin,
+                ..links
+            }
+            .validate(),
+            Err(crate::OutputAdmissionErrorV1::PluginMismatch)
+        );
+        let revised = RevisedCatalogueFixturePlugin {
+            id: configuration.plugin_id,
+        };
+        assert_eq!(
+            CatalogueLinksV1 {
+                plugin: &revised,
+                ..links
+            }
+            .validate(),
+            Err(crate::OutputAdmissionErrorV1::PluginVersionMismatch)
+        );
+        let undeclared = Kind::new("world.undeclared.v1");
+        assert_eq!(
+            CatalogueLinksV1 {
+                route: &undeclared,
+                ..links
+            }
+            .validate(),
+            identity("declaration")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                budget: foreign.binding.budget(),
+                ..links
+            }
+            .validate(),
+            Err(crate::OutputAdmissionErrorV1::PolicyIdentityMismatch)
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                execution_profile: b"EPF1-corrupt",
+                ..links
+            }
+            .validate(),
+            identity("EPF1")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                retention_policy: b"RTP1-corrupt",
+                ..links
+            }
+            .validate(),
+            identity("RTP1")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                configuration: b"CFG1-corrupt",
+                ..links
+            }
+            .validate(),
+            identity("configuration")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                implementation: b"source-corrupt",
+                ..links
+            }
+            .validate(),
+            identity("implementation")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                pin: &foreign.pin,
+                ..links
+            }
+            .validate(),
+            identity("pin")
+        );
+    }
+
+    #[test]
+    fn catalogue_fixture_wires_the_selected_reducer_without_a_production_pin() {
+        let mut registry = gated_registry();
+        let first = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
+        let pin = crate::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([1; 32]),
+            vec!["first-role".to_owned()],
+        )
+        .test_ok();
+        registry
+            .register_pinned_generated(
+                &first,
+                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                Some(Box::new(CountReducer)),
+                None,
+            )
+            .test_ok();
+        let entity = EntityId::new();
+        let timeline = TimelineId::new();
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("first.output", entity, 1));
+        let configuration = reducer_catalogue_configuration(true, true);
+        registry
+            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .test_ok();
+        let second_id = configuration.plugin_id;
+        assert_eq!(
+            registry.projections.reducer_names(),
+            vec!["catalogue-fixture"; 2]
+        );
+        assert_eq!(
+            reducer_count(&registry, timeline, first.id(), &entity),
+            Some(1)
+        );
+        assert_eq!(reducer_count(&registry, timeline, second_id, &entity), None);
+        assert!(registry.composition().plugins[1].pin.is_none());
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("first.output", entity, 2));
+        assert_eq!(
+            reducer_count(&registry, timeline, first.id(), &entity),
+            Some(2)
+        );
+        assert_eq!(
+            reducer_count(&registry, timeline, second_id, &entity),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn catalogue_rejects_missing_or_extra_reducer_without_partial_visibility() {
+        let mut registry = gated_registry();
+        let existing = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
+        registry
+            .register_generated(&existing, Some(Box::new(CountReducer)), None)
+            .test_ok();
+        let entity = EntityId::new();
+        let timeline = TimelineId::new();
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("first.output", entity, 1));
+        let schemas_before = registry.schemas.len();
+        let policies_before = owned_policy_digests(&registry);
+        for (declares_reducer, supplies_reducer) in [(true, false), (false, true)] {
+            assert!(matches!(
+                registry.register_host_catalogue_fixture(
+                    &fixture_catalogue_entry(),
+                    &reducer_catalogue_configuration(declares_reducer, supplies_reducer),
+                ),
+                Err(RuntimeError::CapabilityMismatch { .. })
+            ));
+        }
+        assert_eq!(registry.len(), 1);
+        assert!(registry.contains(&existing.id()));
+        assert_eq!(
+            registry.projections.reducer_names(),
+            vec!["catalogue-fixture"]
+        );
+        assert_eq!(
+            registry
+                .projections
+                .state_for_reducer(timeline, "catalogue-fixture", &entity)
+                .test_ok()
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64)),
+            Some(1)
+        );
+        assert_eq!(registry.schemas.len(), schemas_before);
+        assert!(registry.approver_map.is_empty());
+        assert_eq!(owned_policy_digests(&registry), policies_before);
+    }
+
+    #[test]
+    fn catalogue_same_name_distinct_plugin_ids_survive_a_failed_registration() {
+        let mut registry = gated_registry();
+        let first = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
+        // A pinned registration keys the first Reducer by PluginId, so both
+        // same-name slots stay individually addressable.
+        let pin = crate::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([1; 32]),
+            vec!["first-role".to_owned()],
+        )
+        .test_ok();
+        registry
+            .register_pinned_generated(
+                &first,
+                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                Some(Box::new(CountReducer)),
+                None,
+            )
+            .test_ok();
+        let configuration = reducer_catalogue_configuration(true, true);
+        registry
+            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .test_ok();
+        let second_id = configuration.plugin_id;
+        let entity = EntityId::new();
+        let timeline = TimelineId::new();
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("first.output", entity, 1));
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("world.action.v1", entity, 2));
+        let schemas_before = registry.schemas.len();
+        let policies_before = owned_policy_digests(&registry);
+        let routes_before = registry.approver_map.clone();
+        let revision_before = registry.registration_revision;
+        assert!(matches!(
+            registry.register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration),
+            Err(RuntimeError::DuplicatePlugin { .. })
+        ));
+        assert_eq!(registry.len(), 2);
+        assert!(registry.contains(&first.id()));
+        assert!(registry.contains(&second_id));
+        assert_eq!(
+            registry.projections.reducer_names(),
+            vec!["catalogue-fixture"; 2]
+        );
+        assert_eq!(
+            reducer_count(&registry, timeline, first.id(), &entity),
+            Some(2)
+        );
+        assert_eq!(
+            reducer_count(&registry, timeline, second_id, &entity),
+            Some(2)
+        );
+        assert_eq!(registry.schemas.len(), schemas_before);
+        assert_eq!(registry.approver_map, routes_before);
+        assert_eq!(registry.registration_revision, revision_before);
+        assert_eq!(owned_policy_digests(&registry), policies_before);
+    }
+
+    #[test]
+    fn catalogue_duplicate_plugin_id_preserves_state_and_routes() {
+        let mut registry = gated_registry();
+        let configuration = reducer_catalogue_configuration(true, true);
+        registry
+            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .test_ok();
+        let entity = EntityId::new();
+        let timeline = TimelineId::new();
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("world.action.v1", entity, 1));
+        let schemas_before = registry.schemas.len();
+        let policies_before = owned_policy_digests(&registry);
+        let routes_before = registry.approver_map.clone();
+        let revision_before = registry.registration_revision;
+        assert!(matches!(
+            registry.register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration),
+            Err(RuntimeError::DuplicatePlugin { .. })
+        ));
+        assert_eq!(configuration.builds.get(), 2);
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry.projections.reducer_names(),
+            vec!["catalogue-fixture"]
+        );
+        assert_eq!(
+            reducer_count(&registry, timeline, configuration.plugin_id, &entity),
+            Some(1)
+        );
+        assert_eq!(registry.schemas.len(), schemas_before);
+        assert_eq!(registry.approver_map, routes_before);
+        assert_eq!(registry.registration_revision, revision_before);
+        assert_eq!(owned_policy_digests(&registry), policies_before);
+    }
+
+    #[test]
+    fn frozen_catalogue_configuration_changes_policy_identity() {
+        let identity = |details: &[u8]| {
+            let mut registry = PluginRegistry::new().without_erasure_gate();
+            registry
+                .register_host_catalogue_fixture(
+                    &fixture_catalogue_entry(),
+                    &catalogue_configuration(PluginId::new(), details),
+                )
+                .test_ok();
+            let mut identities = registry.replay_policy_closure_identities();
+            identities.next().test_ok().1
+        };
+        assert_eq!(identity(b"first"), identity(b"first"));
+        assert_ne!(identity(b"first"), identity(b"second"));
     }
 
     struct CountReducer;
