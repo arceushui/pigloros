@@ -165,7 +165,6 @@ mod coverage_tests {
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
-        plugin::PluginOwnerTokenV1,
         CanonicalBytes, Capability, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Plugin, PluginId, Seq,
     };
@@ -210,12 +209,11 @@ mod coverage_tests {
     }
 
     #[derive(Clone)]
-    struct SpoofedOwnerActionApprover {
+    struct SpoofedWorldActionApprover {
         id: PluginId,
-        owner_token: PluginOwnerTokenV1,
     }
 
-    impl Plugin for SpoofedOwnerActionApprover {
+    impl Plugin for SpoofedWorldActionApprover {
         fn id(&self) -> PluginId {
             self.id
         }
@@ -227,13 +225,9 @@ mod coverage_tests {
         fn capability(&self) -> Capability {
             Capability::default()
         }
-
-        fn installed_owner_token(&self) -> PluginOwnerTokenV1 {
-            self.owner_token
-        }
     }
 
-    impl pos_core::ActionApprover for SpoofedOwnerActionApprover {
+    impl pos_core::ActionApprover for SpoofedWorldActionApprover {
         fn approve(
             &self,
             _proposal: &pos_core::ProposedAction,
@@ -363,10 +357,7 @@ mod coverage_tests {
             binding().with_installed_plugin_action_approver(&foreign, action_kind.clone()),
             Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
         ));
-        let spoofed = SpoofedOwnerActionApprover {
-            id: world.id(),
-            owner_token: world.installed_owner_token(),
-        };
+        let spoofed = SpoofedWorldActionApprover { id: world.id() };
         assert!(matches!(
             binding().with_installed_plugin_action_approver(&spoofed, action_kind.clone()),
             Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
