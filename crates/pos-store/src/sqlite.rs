@@ -6543,7 +6543,7 @@ fn sqlite_load_artifact_registration_by_address(
                 .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
             let artifact_class = artifact_class_from_code(class_code)
                 .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-            let artifact_digest = sqlite_hash(&digest_bytes)
+            let artifact_digest = sqlite_artifact_hash(&digest_bytes)
                 .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
             ArtifactRegistrationCatalogRowV1::from_persisted(
                 owner_id,
@@ -6632,7 +6632,8 @@ fn sqlite_artifact_registration_operation_root(
         .optional()
         .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?
         .map(|bytes| {
-            sqlite_hash(&bytes).ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            sqlite_artifact_hash(&bytes)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
         })
         .transpose()
 }
@@ -6655,7 +6656,8 @@ fn sqlite_check_artifact_registration_operation(
         .optional()
         .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?
         .map(|bytes| {
-            sqlite_hash(&bytes).ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            sqlite_artifact_hash(&bytes)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
         })
         .transpose()?;
     let root_row = sqlite_load_artifact_registration_by_address(connection, root_address)?;
@@ -6766,7 +6768,7 @@ fn artifact_class_from_code(code: i64) -> Option<ErasureArtifactClassV1> {
     }
 }
 
-fn sqlite_hash(bytes: &[u8]) -> Option<Hash> {
+fn sqlite_artifact_hash(bytes: &[u8]) -> Option<Hash> {
     let array: [u8; 32] = bytes.try_into().ok()?;
     Some(Hash::from_bytes(array))
 }
