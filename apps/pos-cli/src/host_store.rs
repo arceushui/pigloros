@@ -4,7 +4,6 @@
 /// authority never escape `ErasureExecutionHostV1`.
 struct HostedCliStore {
     host: std::sync::Mutex<pos_runtime::ErasureExecutionHostV1>,
-    gate: std::sync::Arc<dyn pos_core::ErasureGate>,
 }
 
 impl HostedCliStore {
@@ -22,12 +21,8 @@ impl HostedCliStore {
             composition,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
-        .map(|host| {
-            let gate = host.containment_gate();
-            Self {
-                host: std::sync::Mutex::new(host),
-                gate,
-            }
+        .map(|host| Self {
+            host: std::sync::Mutex::new(host),
         })
     }
 
@@ -41,26 +36,6 @@ impl HostedCliStore {
             .lock()
             .map_err(|_| pos_core::CoreError::ErasureContainmentUnavailable)
             .and_then(|mut host| operation(&mut host).map_err(hosted_cli_store_error))
-    }
-
-    fn with_read_sender<T>(
-        &self,
-        operation: impl FnOnce(
-            &mut pos_runtime::ErasureReadSenderV1<'_>,
-        ) -> Result<T, pos_core::CoreError>,
-    ) -> Result<T, pos_core::CoreError> {
-        self.host
-            .lock()
-            .map_err(|_| pos_core::CoreError::ErasureContainmentUnavailable)
-            .and_then(|mut host| {
-                host.read_sender()
-                    .map_err(hosted_cli_store_error)
-                    .and_then(|mut sender| operation(&mut sender))
-            })
-    }
-
-    fn containment_gate(&self) -> std::sync::Arc<dyn pos_core::ErasureGate> {
-        std::sync::Arc::clone(&self.gate)
     }
 }
 

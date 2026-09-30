@@ -172,7 +172,7 @@ pub enum AppendOrDuplicateOutcome {
 }
 
 /// Range of sequence numbers to read.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SeqRange {
     pub from: Seq,
     /// Inclusive upper bound. `None` means read to the end.

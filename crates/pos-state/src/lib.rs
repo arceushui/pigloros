@@ -82,6 +82,11 @@ pub struct ProjectionRegistry {
     source_timeline: Option<TimelineId>,
     source_generation: Option<ErasureReferenceV1>,
     mixed_sources: bool,
+    /// Nesting depth for state transactions, used to retain privacy effects
+    /// when a later protected-use check rolls ordinary state back.
+    state_transaction_depth: usize,
+    /// Consent revocations observed by active state transactions.
+    transaction_revocations: Vec<EntityId>,
 }
 
 impl Default for ProjectionRegistry {
@@ -93,6 +98,8 @@ impl Default for ProjectionRegistry {
             source_timeline: None,
             source_generation: None,
             mixed_sources: false,
+            state_transaction_depth: 0,
+            transaction_revocations: Vec::new(),
         }
     }
 }
@@ -573,10 +580,71 @@ impl ProjectionRegistry {
         self.mixed_sources = false;
     }
 
+    /// Run an operation, restoring accumulated state maps when it fails.
+    ///
+    /// This does not isolate protected Replay or Snapshot candidates. Reducer
+    /// registrations, reducer internals, policies, and external effects are not
+    /// rolled back; an owner-controlled private candidate is still required
+    /// before releasing protected results.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error produced by `operation` after restoring the original
+    /// accumulated state.
+    pub fn try_with_state_transaction<T, E>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mut before = self.snapshot_unfenced();
+        let before_source = (
+            self.source_timeline,
+            self.source_generation,
+            self.mixed_sources,
+        );
+        let revocation_checkpoint = self.transaction_revocations.len();
+        let outermost = self.state_transaction_depth == 0;
+        self.state_transaction_depth += 1;
+        let outcome = operation(self);
+        self.state_transaction_depth -= 1;
+        match outcome {
+            Ok(value) => {
+                if outermost {
+                    self.transaction_revocations.clear();
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let revoked_subjects =
+                    self.transaction_revocations[revocation_checkpoint..].to_vec();
+                for (name, slot) in &mut self.slots {
+                    slot.registry = before.remove(name).unwrap_or_default();
+                }
+                (
+                    self.source_timeline,
+                    self.source_generation,
+                    self.mixed_sources,
+                ) = before_source;
+                for subject in revoked_subjects {
+                    self.forget_subject(&subject);
+                }
+                if outermost {
+                    self.transaction_revocations.clear();
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Retain only one subject's accumulated state in every reducer.
     pub fn retain_subject(&mut self, subject: &EntityId) {
         for (_, slot) in &mut self.slots {
             slot.registry.retain_only(subject);
+        }
+    }
+
+    fn forget_subject(&mut self, subject: &EntityId) {
+        for (_, slot) in &mut self.slots {
+            slot.registry.remove(subject);
         }
     }
 
@@ -962,9 +1030,10 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
 
 impl ConsentRevocationFoldListener for ProjectionRegistry {
     fn on_consent_revoked(&mut self, subject_id: EntityId, _fence_seq: u64) {
-        for (_, slot) in &mut self.slots {
-            slot.registry.remove(&subject_id);
+        if self.state_transaction_depth > 0 {
+            self.transaction_revocations.push(subject_id);
         }
+        self.forget_subject(&subject_id);
     }
 }
 
@@ -1440,6 +1509,79 @@ mod tests {
         assert!(registry.state_for_test(&subject).is_none());
         assert!(registry.state_for_reducer_test("b", &subject).is_none());
         assert!(registry.state_for_test(&other).is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn failed_state_transaction_does_not_restore_revoked_subject_projection() {
+        let mut registry = open_projection_registry();
+        registry.register("events", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        let other = EntityId::new();
+        registry.apply_event(test_timeline(), &make_event(subject));
+        registry.apply_event(test_timeline(), &make_event(other));
+
+        let revocation = ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
+            fence_seq: 2,
+        };
+        let mut event = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
+        event.payload = revocation.encode().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
+        });
+
+        let result = registry.try_with_state_transaction(|candidate| {
+            candidate.apply_event(test_timeline(), &event);
+            Err::<(), _>(())
+        });
+
+        assert_eq!(result, Err(()));
+        assert!(registry.state_for_test(&subject).is_none());
+        assert!(registry.state_for_test(&other).is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn outer_state_transaction_retains_nested_revocation_after_failure() {
+        let mut registry = open_projection_registry();
+        registry.register("events", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        registry.apply_event(test_timeline(), &make_event(subject));
+        let revocation = ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
+            fence_seq: 2,
+        };
+        let mut event = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
+        event.payload = revocation.encode().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
+        });
+
+        let result = registry.try_with_state_transaction(|candidate| {
+            let nested = candidate.try_with_state_transaction(|inner| {
+                inner.apply_event(test_timeline(), &event);
+                Err::<(), _>(())
+            });
+            assert_eq!(nested, Err(()));
+            Ok::<(), ()>(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert!(registry.state_for_test(&subject).is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn successful_nested_state_transaction_keeps_outer_transaction_open() {
+        let mut registry = ProjectionRegistry::new();
+        let result = registry.try_with_state_transaction(|outer| {
+            outer.try_with_state_transaction(|_inner| Ok::<(), ()>(()))
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(registry.state_transaction_depth, 0);
     }
 
     #[test]
