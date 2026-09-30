@@ -69,16 +69,16 @@ pub enum OutputAdmissionErrorV1 {
     CallbackMismatch { kind: &'static str },
 }
 
-/// Installed implementation source selected by a trusted composition root.
+/// Local or installed implementation source selected by a composition root.
 ///
-/// These variants are the only artifact roots accepted by production output
-/// admission. The runtime observes the concrete Plugin type at this boundary,
-/// resolves its complete native source bundle from the repository, and rejects
-/// same-name or caller-authored fixture types before policy construction.
+/// `Generated` is the explicit local open-source path. Its metadata-derived
+/// implementation identity supports same-process output admission only; it
+/// is not an installed-source, deployment, or release qualification claim.
+/// The other variants resolve reviewed implementation bundles compiled into
+/// this runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstalledOutputPolicySourceV1 {
-    /// The bounded generated source available only to explicit test-support fixtures.
-    #[cfg(any(test, feature = "test-support"))]
+    /// Local metadata-derived source, with no installed-profile qualification.
     Generated,
     /// The Gateway composition root.
     Gateway,
@@ -172,7 +172,6 @@ struct InstalledSourceDescriptorV1 {
     source_files: &'static [(&'static str, &'static [u8])],
 }
 
-#[cfg(any(test, feature = "test-support"))]
 static GENERATED_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
     plugins: &[],
     approver_type: None,
@@ -387,7 +386,6 @@ impl InstalledOutputPolicySourceV1 {
     /// Return the complete native data compiled into this source.
     fn descriptor(self) -> &'static InstalledSourceDescriptorV1 {
         match self {
-            #[cfg(any(test, feature = "test-support"))]
             Self::Generated => &GENERATED_SOURCE,
             Self::Gateway => &GATEWAY_SOURCE,
             Self::World => &WORLD_SOURCE,
@@ -407,7 +405,6 @@ impl InstalledOutputPolicySourceV1 {
     }
 
     pub(crate) fn accepts_plugin<P: Plugin + ?Sized>(self, plugin: &P) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
         }
@@ -417,7 +414,6 @@ impl InstalledOutputPolicySourceV1 {
     }
 
     fn accepts_driver<D: Driver + 'static>(self, plugin_name: &str) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
         }
@@ -426,7 +422,6 @@ impl InstalledOutputPolicySourceV1 {
     }
 
     pub(crate) fn accepts_approver<A: ActionApprover + 'static>(self) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
         }
@@ -434,17 +429,13 @@ impl InstalledOutputPolicySourceV1 {
     }
 
     fn implementation_artifact<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<u8> {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return generated_implementation_artifact_v1(plugin);
         }
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = plugin;
         source_artifact_bundle(self.descriptor().source_files)
     }
 
     fn event_types<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<String> {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             let mut event_types = plugin
                 .capability()
@@ -591,11 +582,11 @@ impl InstalledOutputPolicySourceV1 {
     }
 }
 
-/// Deterministic implementation bytes for the test-support generated source.
+/// Deterministic local implementation metadata for an open-source Plugin.
 ///
-/// This remains a bounded fixture source; ordinary registration has no
-/// generated fallback and must select an installed composition root above.
-#[cfg(any(test, feature = "test-support"))]
+/// This deliberately does not claim to measure or authenticate the compiled
+/// binary. Deployment and release decisions continue to use installed source
+/// descriptors and their separately qualified execution profile.
 pub(crate) fn generated_implementation_artifact_v1<P: Plugin + ?Sized>(plugin: &P) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"pigloros.generated-implementation.v1\0");
@@ -628,7 +619,6 @@ fn source_artifact_bundle(parts: &[(&str, &[u8])]) -> Vec<u8> {
     bytes
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn append_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     output.extend_from_slice(&bytes_len.to_le_bytes());
@@ -651,11 +641,14 @@ pub struct OutputPolicyBindingV1 {
 }
 
 impl OutputPolicyBindingV1 {
-    /// Resolve the exact installed source leaves and bind them to one policy.
+    /// Resolve the selected source leaves and bind them to one local policy.
+    ///
+    /// `Generated` builds metadata-only artifacts for ordinary local Plugin
+    /// use. Installed variants require their separate host-qualified source.
     ///
     /// # Errors
-    /// Returns a closed artifact or profile error before registration can
-    /// mutate the registry.
+    /// Returns a closed source, artifact, or profile error before registration
+    /// can mutate the registry.
     pub fn from_installed_source<P: Plugin>(
         plugin: &P,
         source: InstalledOutputPolicySourceV1,
@@ -693,7 +686,6 @@ impl OutputPolicyBindingV1 {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_installed_source_with_policy<P: Plugin + ?Sized>(
         plugin: &P,
         source: InstalledOutputPolicySourceV1,
@@ -773,7 +765,6 @@ impl OutputPolicyBindingV1 {
     }
 
     pub(crate) fn verifies_erased_owner_instance(&self, plugin: &dyn Plugin) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
         if self.source == InstalledOutputPolicySourceV1::Generated {
             return self.owner_token == PluginInstanceIdentity::installed_owner_token(plugin);
         }
@@ -1233,45 +1224,25 @@ const fn validate_leaf_lengths(
 }
 
 fn validate_execution_profile_artifact_v1(bytes: &[u8]) -> Result<(), OutputAdmissionErrorV1> {
-    #[cfg(target_os = "linux")]
-    {
-        pos_conformance::ExecutionProfileV1::from_canonical_cbor(bytes)
-            .map(|_| ())
-            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = bytes;
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    }
+    pos_conformance::ExecutionProfileV1::from_canonical_cbor(bytes)
+        .map(|_| ())
+        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn draft_execution_profile_artifact_v1(
     profile_id: &str,
 ) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
-    #[cfg(target_os = "linux")]
-    {
-        pos_conformance::draft_execution_profile_bytes_v1(profile_id)
-            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = profile_id;
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    }
+    pos_conformance::draft_execution_profile_bytes_v1(profile_id)
+        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
 }
 
 fn execution_profile_artifact_v1(
     profile_id: &str,
     source: InstalledOutputPolicySourceV1,
 ) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
-    #[cfg(any(test, feature = "test-support"))]
     if source == InstalledOutputPolicySourceV1::Generated {
         return draft_execution_profile_artifact_v1(profile_id);
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    let _ = source;
     #[cfg(target_os = "linux")]
     {
         pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)

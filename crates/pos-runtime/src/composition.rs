@@ -3,7 +3,9 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use pos_core::{manifest_owner_link::ManifestAdmissionCatalogV1, Hash, PluginId};
+use pos_core::{
+    manifest_owner_link::ManifestAdmissionCatalogV1, AdapterAdmissionV1, Hash, PluginId,
+};
 
 /// Closed failures of the host's complete pre-registration manifest batch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -18,9 +20,7 @@ pub enum ManifestRegistrationErrorV1 {
     PluginMismatch,
     #[error("manifest registration slot is missing, duplicated or mismatched")]
     SlotMismatch,
-    #[error(
-        "manifest registration requires an available installed pin and retained output closure"
-    )]
+    #[error("manifest registration requires an available pin and retained output closure")]
     UnverifiedRegistration,
     #[error("manifest registration batch is incomplete or changed")]
     IncompleteBatch,
@@ -35,6 +35,7 @@ pub struct AdmittedCompositionV1 {
     pub(crate) registry_identity: Arc<()>,
     pub(crate) registration_revision: u64,
     pub(crate) catalog: ManifestAdmissionCatalogV1,
+    pub(crate) adapter_admission: AdapterAdmissionV1,
 }
 
 impl AdmittedCompositionV1 {
@@ -42,6 +43,12 @@ impl AdmittedCompositionV1 {
     #[must_use]
     pub const fn catalog(&self) -> &ManifestAdmissionCatalogV1 {
         &self.catalog
+    }
+
+    /// The exact adapter contract snapshot derived from this Plugin roster.
+    #[must_use]
+    pub const fn adapter_admission(&self) -> &AdapterAdmissionV1 {
+        &self.adapter_admission
     }
 }
 

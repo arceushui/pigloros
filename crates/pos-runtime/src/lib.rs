@@ -66,10 +66,11 @@ pub use output_admission::{
 };
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{
-    AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, HostCatalogueEntryV1,
-    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
-    InstalledPluginFactoryV1, InstalledPluginProductV1, OperationContext, PluginRegistry,
-    ScheduledPassAdmissionV1,
+    AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, ClosedAdapterTranscriptV1,
+    HostCatalogueEntryV1, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
+    HumanActionReceiptV1, InstalledPluginFactoryV1, InstalledPluginProductV1,
+    LocalAdapterErrorV1, LocalAdapterProviderV1, LocalAdapterSessionV1, OperationContext,
+    PluginRegistry, ScheduledPassAdmissionV1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
