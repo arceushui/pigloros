@@ -929,14 +929,14 @@ fn gateway_action_registry_builder(
 // production registration authority. They never enter the release builder.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub mod gateway_test_fixtures {
+mod gateway_test_fixtures {
     use super::*;
 
     /// Build a nonproduction Gateway registry without an installed profile or pin.
     ///
     /// # Errors
     /// Returns an error when canonical body validation or fixture registration fails.
-    pub fn action_registry_builder(
+    pub(super) fn action_registry_builder(
         bodies: impl IntoIterator<Item = EntityId>,
         authority: Option<ConsentAuthority>,
     ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
@@ -972,7 +972,7 @@ pub mod gateway_test_fixtures {
     ///
     /// # Errors
     /// Returns an error when the store, fixture registry, or Gateway cannot be built.
-    pub fn gateway_with_erasure_host_and_authorization(
+    pub(super) fn gateway_with_erasure_host_and_authorization(
         host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
         authorization: GatewayAuthorization,
@@ -1343,7 +1343,7 @@ pub(crate) enum OwnTracksIngressResult {
 }
 
 impl OwnTracksIngressResult {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) const fn is_rate_limited(self) -> bool {
         matches!(self, Self::RateLimited)
     }

@@ -19,22 +19,23 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
-use crate::output_admission::InstalledCallbacksV1;
 #[cfg(any(test, feature = "test-support"))]
-use crate::output_admission::{draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1};
+use crate::output_admission::{
+    draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1, OutputPolicyClosureV1,
+};
 use crate::{
     composition::{
-        DomainImplementationKindV1, PluginAvailabilityV1, PluginComposition,
-        PluginCompositionErrorV1, PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1,
-        PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin, RequiredPluginCompositionV1,
-        RequiredPluginV1, ResolvedPluginCompositionV1, ResolvedPluginV1,
+        PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
+        PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin,
+        RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
+        ResolvedPluginV1,
     },
     driver::{
         CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey,
         SnapshotAnchor, StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
-    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
+    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
@@ -1021,6 +1022,7 @@ impl Plugin for GeneratedDriverPlugin {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
@@ -3034,70 +3036,27 @@ impl PluginRegistry {
     }
 
     /// Register one installed Plugin with its verified callbacks and exact
-    /// available session pin. No callback or pin can be added after this seam.
+    /// available session pin.
+    ///
+    /// Wave 8 has no installed EPF1 execution profile, so no binding can carry
+    /// installed profile provenance. This seam therefore fails closed before
+    /// any registry mutation; the installed success path arrives with Wave 9
+    /// (#467/#462) together with a real installed EPF1.
     ///
     /// # Errors
-    /// Rejects a foreign callback, incompatible pin, invalid policy closure,
-    /// or capability mismatch before any registry mutation.
+    /// Always returns [`crate::OutputAdmissionErrorV1::ArtifactInvalid`] for
+    /// `EPF1` without mutating the registry.
     pub fn register_installed_output<P: Plugin>(
         &mut self,
-        plugin: &P,
-        mut binding: OutputPolicyBindingV1,
-        registration: PluginRegistrationV1,
-        reducer: Option<Box<dyn Reducer>>,
+        _plugin: &P,
+        _binding: OutputPolicyBindingV1,
+        _registration: PluginRegistrationV1,
+        _reducer: Option<Box<dyn Reducer>>,
     ) -> Result<(), RuntimeError> {
-        if !binding.has_installed_profile_provenance() {
-            return Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
-        }
-        self.validate_installed_registration_details(plugin, &binding, &registration)?;
-        let InstalledCallbacksV1 {
-            driver,
-            approver,
-            approver_event_types,
-        } = binding.take_callbacks();
-        self.register_with_verified_output_policy_inner(
-            plugin,
-            binding,
-            reducer,
-            driver,
-            approver,
-            approver_event_types,
-            Some(registration),
-        )
+        Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into())
     }
 
-    // Pure validation is also exercised by nonproduction structural fixtures.
-    // It never installs a profile, registers a Plugin, or mints a pin.
-    fn validate_installed_registration_details<P: Plugin>(
-        &self,
-        plugin: &P,
-        binding: &OutputPolicyBindingV1,
-        registration: &PluginRegistrationV1,
-    ) -> Result<(), RuntimeError> {
-        if !binding.verifies_owner_instance(plugin) {
-            return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
-        }
-        let id = plugin.id();
-        let incompatible = Self::incompatible_installed_pin(registration.pin(), &binding, plugin);
-        if let Some(field) = incompatible {
-            return Err(PluginCompositionErrorV1::IncompatibleImplementation {
-                plugin_id: id,
-                field,
-            }
-            .into());
-        }
-        if registration.availability() != PluginAvailabilityV1::Available {
-            return Err(PluginCompositionErrorV1::ImplementationUnavailable {
-                plugin_id: id,
-                availability: registration.availability(),
-            }
-            .into());
-        }
-        Self::validate_required_installed_approver(binding)?;
-        self.validate_registration_roles(registration)?;
-        Ok(())
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     fn register_with_verified_output_policy_inner(
         &mut self,
         plugin: &dyn Plugin,
@@ -3185,18 +3144,7 @@ impl PluginRegistry {
         )
     }
 
-    pub(crate) fn validate_required_installed_approver(
-        binding: &OutputPolicyBindingV1,
-    ) -> Result<(), RuntimeError> {
-        if binding.requires_action_approver() && !binding.has_action_approver_route() {
-            Err(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" },
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     fn registration_context(
         &self,
         plugin: &dyn Plugin,
@@ -3211,6 +3159,7 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,
@@ -3228,6 +3177,7 @@ impl PluginRegistry {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn validate_installed_reducer_name(
         name: &str,
         installed: bool,
@@ -3245,6 +3195,7 @@ impl PluginRegistry {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn validate_reserved_owned_event_types(
         name: &str,
         cap: &Capability,
@@ -3272,6 +3223,7 @@ impl PluginRegistry {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn install_reducer(
         &mut self,
         id: PluginId,
@@ -3294,6 +3246,7 @@ impl PluginRegistry {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn register_with_approver_slice(
         &mut self,
         plugin: &dyn Plugin,
@@ -4590,8 +4543,8 @@ mod tests {
         )
         .test_ok();
         let pin = crate::composition::PluginPinV1::try_new(
-            DomainImplementationKindV1::Plugin,
-            PluginIsolationV1::OperatorTrustedNative,
+            crate::composition::DomainImplementationKindV1::Plugin,
+            crate::composition::PluginIsolationV1::OperatorTrustedNative,
             binding.policy().digest(),
             vec![crate::reviewed_policy::installed_plugin_role_v1(&plugin)],
         )
@@ -4607,103 +4560,6 @@ mod tests {
             Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
             ))
-        ));
-        assert!(!registry.contains(&plugin.id()));
-    }
-
-    #[test]
-    fn installed_registration_details_validate_without_granting_fixture_authority() {
-        let plugin = simple_plugin("fixture-profile", &["fixture.output"]);
-        let binding = OutputPolicyBindingV1::from_installed_source(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            &[],
-            "deterministic-local-v1",
-        )
-        .test_ok();
-        let registry = gated_registry();
-        let role = crate::reviewed_policy::installed_plugin_role_v1(&plugin);
-        let digest = binding.policy().digest();
-        let registration = |kind, isolation, digest, roles: Vec<String>, availability| {
-            PluginRegistrationV1::new(
-                crate::composition::PluginPinV1::try_new(kind, isolation, digest, roles).test_ok(),
-                availability,
-            )
-        };
-        let valid = registration(
-            DomainImplementationKindV1::Plugin,
-            PluginIsolationV1::OperatorTrustedNative,
-            digest,
-            vec![role.clone()],
-            PluginAvailabilityV1::Available,
-        );
-        assert!(registry
-            .validate_installed_registration_details(&plugin, &binding, &valid)
-            .is_ok());
-        let foreign = simple_plugin("fixture-profile", &["fixture.output"]);
-        assert!(matches!(
-            registry.validate_installed_registration_details(&foreign, &binding, &valid),
-            Err(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::PluginMismatch
-            ))
-        ));
-
-        for (kind, isolation, hash, roles, expected) in [
-            (
-                DomainImplementationKindV1::PublicAdapter,
-                PluginIsolationV1::OperatorTrustedNative,
-                digest,
-                vec![role.clone()],
-                PluginPinFieldV1::ImplementationKind,
-            ),
-            (
-                DomainImplementationKindV1::Plugin,
-                PluginIsolationV1::GovernedCommunity,
-                digest,
-                vec![role.clone()],
-                PluginPinFieldV1::Isolation,
-            ),
-            (
-                DomainImplementationKindV1::Plugin,
-                PluginIsolationV1::OperatorTrustedNative,
-                Hash::from_bytes([7; 32]),
-                vec![role.clone()],
-                PluginPinFieldV1::ConfigurationDigest,
-            ),
-            (
-                DomainImplementationKindV1::Plugin,
-                PluginIsolationV1::OperatorTrustedNative,
-                digest,
-                vec!["foreign-role".to_owned()],
-                PluginPinFieldV1::Roles,
-            ),
-        ] {
-            let candidate = registration(
-                kind,
-                isolation,
-                hash,
-                roles,
-                PluginAvailabilityV1::Available,
-            );
-            assert!(matches!(
-                registry.validate_installed_registration_details(&plugin, &binding, &candidate),
-                Err(RuntimeError::Composition(
-                    PluginCompositionErrorV1::IncompatibleImplementation { plugin_id, field }
-                )) if plugin_id == plugin.id() && field == expected
-            ));
-        }
-        let disabled = registration(
-            DomainImplementationKindV1::Plugin,
-            PluginIsolationV1::OperatorTrustedNative,
-            digest,
-            vec![role],
-            PluginAvailabilityV1::Disabled,
-        );
-        assert!(matches!(
-            registry.validate_installed_registration_details(&plugin, &binding, &disabled),
-            Err(RuntimeError::Composition(
-                PluginCompositionErrorV1::ImplementationUnavailable { plugin_id, availability }
-            )) if plugin_id == plugin.id() && availability == PluginAvailabilityV1::Disabled
         ));
         assert!(!registry.contains(&plugin.id()));
     }

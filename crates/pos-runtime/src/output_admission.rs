@@ -635,13 +635,6 @@ fn append_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(bytes);
 }
 
-/// Concrete callbacks retained with one installed output-policy binding.
-pub(crate) struct InstalledCallbacksV1 {
-    pub(crate) driver: Option<Box<dyn Driver>>,
-    pub(crate) approver: Option<Box<dyn ActionApprover>>,
-    pub(crate) approver_event_types: Vec<Kind>,
-}
-
 /// A host-owned output policy binding with no caller-supplied artifact leaves.
 pub struct OutputPolicyBindingV1 {
     policy: OutputPolicyV1,
@@ -651,8 +644,7 @@ pub struct OutputPolicyBindingV1 {
     plugin_name: &'static str,
     owner_token: PluginOwnerTokenV1,
     driver: Option<Box<dyn Driver>>,
-    approver: Option<Box<dyn ActionApprover>>,
-    approver_event_types: Vec<Kind>,
+    approver: Option<(Box<dyn ActionApprover>, Vec<Kind>)>,
 }
 
 impl OutputPolicyBindingV1 {
@@ -695,7 +687,6 @@ impl OutputPolicyBindingV1 {
             owner_token: PluginInstanceIdentity::installed_owner_token(plugin),
             driver: None,
             approver: None,
-            approver_event_types: Vec::new(),
         })
     }
 
@@ -721,7 +712,6 @@ impl OutputPolicyBindingV1 {
             owner_token: PluginInstanceIdentity::installed_owner_token(plugin),
             driver: None,
             approver: None,
-            approver_event_types: Vec::new(),
         })
     }
 
@@ -762,8 +752,7 @@ impl OutputPolicyBindingV1 {
         if routes.len() > MAX_OUTPUT_DECLARATIONS_V1 {
             return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
         }
-        self.approver = Some(Box::new(approver));
-        self.approver_event_types = routes;
+        self.approver = Some((Box::new(approver), routes));
         Ok(self)
     }
 
@@ -795,36 +784,12 @@ impl OutputPolicyBindingV1 {
         if route.as_str() != WORLD_ACTION_EVENT_TYPE_V1 {
             return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
         }
-        self.approver = Some(Box::new(plugin.clone()));
-        self.approver_event_types = vec![route];
+        self.approver = Some((Box::new(plugin.clone()), vec![route]));
         Ok(self)
     }
 
-    pub(crate) fn take_callbacks(&mut self) -> InstalledCallbacksV1 {
-        InstalledCallbacksV1 {
-            driver: self.driver.take(),
-            approver: self.approver.take(),
-            approver_event_types: std::mem::take(&mut self.approver_event_types),
-        }
-    }
-
-    pub(crate) fn verifies_owner_instance<P: Plugin>(&self, plugin: &P) -> bool {
-        self.verifies_erased_owner_instance(plugin)
-    }
-
-    pub(crate) fn has_installed_profile_provenance(&self) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            self.source != InstalledOutputPolicySourceV1::Generated
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            true
-        }
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn verifies_erased_owner_instance(&self, plugin: &dyn Plugin) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
         if self.source == InstalledOutputPolicySourceV1::Generated {
             return self.owner_token == PluginInstanceIdentity::installed_owner_token(plugin);
         }
@@ -834,14 +799,7 @@ impl OutputPolicyBindingV1 {
         })
     }
 
-    pub(crate) fn requires_action_approver(&self) -> bool {
-        self.source.descriptor().approver_type.is_some()
-    }
-
-    pub(crate) fn has_action_approver_route(&self) -> bool {
-        self.approver.is_some() && !self.approver_event_types.is_empty()
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -922,6 +880,7 @@ impl OutputPolicyClosureV1 {
     /// # Errors
     /// Returns a closed artifact or canonicality error when one referenced
     /// object is absent, malformed, or does not match its recorded identity.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_artifacts(
         output_policy_bytes: &[u8],
         executable_budget_bytes: &[u8],
@@ -1325,6 +1284,7 @@ pub struct OutputAdmissionV1 {
     budget: ExecutableBudgetPolicyV1,
     usage: Mutex<AdmissionUsage>,
     closure: Option<OutputPolicyClosureV1>,
+    #[cfg(any(test, feature = "test-support"))]
     owner_token: Option<PluginOwnerTokenV1>,
 }
 
@@ -1355,6 +1315,7 @@ impl OutputAdmissionV1 {
     /// # Errors
     /// Returns an identity, artifact, or budget error when the closure does
     /// not describe the registered Plugin and its executable reservation.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn try_new_verified(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -1367,6 +1328,7 @@ impl OutputAdmissionV1 {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn try_new_verified_inner(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -1381,6 +1343,7 @@ impl OutputAdmissionV1 {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn try_new_core(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -1441,6 +1404,7 @@ impl OutputAdmissionV1 {
         self.closure.as_ref()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn owner_token(&self) -> Option<PluginOwnerTokenV1> {
         self.owner_token
     }
@@ -1775,54 +1739,6 @@ mod tests {
                 proposal.payload.clone(),
             ))
         }
-    }
-
-    #[test]
-    fn installed_owner_binding_checks_instance_and_required_action_route() {
-        let plugin = FixturePlugin {
-            id: PluginId::new(),
-            name: "fixture",
-            events: vec![Kind::new("plugin.output")],
-        };
-        let budget = budget(plugin.id(), 16, 2, 32, 100, [10, 10, 10]);
-        let binding = OutputPolicyBindingV1::from_installed_source_with_policy(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            policy(plugin.id(), &budget),
-            budget,
-            &[],
-            "deterministic-local-v1",
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-
-        let cloned_plugin = plugin.clone();
-        assert!(binding.verifies_erased_owner_instance(&plugin));
-        assert!(!binding.verifies_erased_owner_instance(&cloned_plugin));
-        assert!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&binding).is_ok()
-        );
-
-        let mut world_binding = binding;
-        world_binding.source = InstalledOutputPolicySourceV1::World;
-        assert!(matches!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&world_binding),
-            Err(crate::RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
-            ))
-        ));
-        world_binding.approver = Some(Box::new(BindingTestApprover));
-        world_binding.approver_event_types = vec![Kind::new("plugin.output")];
-        assert!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&world_binding)
-                .is_ok()
-        );
-        world_binding.approver_event_types.clear();
-        assert!(matches!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&world_binding),
-            Err(crate::RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
-            ))
-        ));
     }
 
     struct LongVersionPlugin {
