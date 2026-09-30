@@ -80,20 +80,11 @@ fn reviewed_output_binding<P: Plugin>(
     .map_err(Into::into)
 }
 
-fn reviewed_output_registration<P: Plugin + ?Sized>(
+fn reviewed_output_registration<P: Plugin>(
     plugin: &P,
     binding: &pos_runtime::OutputPolicyBindingV1,
 ) -> Result<pos_runtime::PluginRegistrationV1, RuntimeError> {
-    pos_runtime::PluginPinV1::try_new(
-        pos_runtime::DomainImplementationKindV1::Plugin,
-        pos_runtime::PluginIsolationV1::OperatorTrustedNative,
-        binding.policy().digest(),
-        vec![pos_runtime::installed_plugin_role_v1(plugin)],
-    )
-    .map(|pin| {
-        pos_runtime::PluginRegistrationV1::new(pin, pos_runtime::PluginAvailabilityV1::Available)
-    })
-    .map_err(Into::into)
+    pos_runtime::installed_plugin_registration_v1(plugin, binding).map_err(Into::into)
 }
 
 fn world_output_binding(
