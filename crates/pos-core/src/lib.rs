@@ -87,6 +87,17 @@ pub(crate) fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     }
 }
 
+/// Write one preferred definite-length CBOR byte or text string.
+pub(crate) fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8], major: u8) {
+    encode_head(out, major, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+/// Write one preferred definite-length CBOR hash byte string.
+pub(crate) fn encode_hash(out: &mut Vec<u8>, hash: Hash) {
+    encode_bytes(out, hash.as_bytes(), 2);
+}
+
 /// Low-level structural read failure for bounded definite-length CBOR records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CborReadError {

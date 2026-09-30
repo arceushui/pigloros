@@ -4,8 +4,8 @@
 //! Events, source chains, Fork lineage, native dependencies, or Replay use.
 
 use crate::{
-    encode_head, CanonicalBytes, CorrelationId, EntityId, EventId, Hash, SchemaVersion, Signature,
-    TimelineId,
+    encode_bytes, encode_hash, encode_head, CanonicalBytes, CorrelationId, EntityId, EventId, Hash,
+    SchemaVersion, Signature, TimelineId,
 };
 use ulid::Ulid;
 
@@ -174,7 +174,7 @@ impl WorldEventOccurrenceV1 {
     pub fn encode(&self) -> CanonicalBytes {
         let mut output = Vec::new();
         encode_array(&mut output, 4);
-        encode_bytes(&mut output, WOR1_MAGIC);
+        encode_bytes(&mut output, WOR1_MAGIC, 2);
         encode_unsigned(&mut output, VERSION);
         encode_id(&mut output, self.queried_timeline_id.inner());
         encode_event_row(&mut output, self.row.as_input());
@@ -255,7 +255,7 @@ impl WorldEventPageV1 {
     pub fn encode(&self) -> CanonicalBytes {
         let mut output = Vec::new();
         encode_array(&mut output, 6);
-        encode_bytes(&mut output, WEP1_MAGIC);
+        encode_bytes(&mut output, WEP1_MAGIC, 2);
         encode_unsigned(&mut output, VERSION);
         encode_id(&mut output, self.timeline_id.inner());
         encode_unsigned(&mut output, self.first_logical_seq);
@@ -410,7 +410,7 @@ impl WorldHistoryBranchV1 {
         let input = &self.0;
         let mut output = Vec::new();
         encode_array(&mut output, 8);
-        encode_bytes(&mut output, WHB1_MAGIC);
+        encode_bytes(&mut output, WHB1_MAGIC, 2);
         encode_unsigned(&mut output, VERSION);
         encode_id(&mut output, input.timeline_id.inner());
         encode_unsigned(&mut output, u64::from(input.height));
@@ -714,7 +714,7 @@ fn encode_optional_correlation(output: &mut Vec<u8>, id: Option<CorrelationId>) 
 
 fn encode_optional_signature(output: &mut Vec<u8>, signature: Option<Signature>) {
     if let Some(signature) = signature {
-        encode_bytes(output, signature.as_bytes());
+        encode_bytes(output, signature.as_bytes(), 2);
     } else {
         output.push(0xf6);
     }
@@ -729,20 +729,11 @@ fn encode_optional_hash(output: &mut Vec<u8>, hash: Option<Hash>) {
 }
 
 fn encode_id(output: &mut Vec<u8>, id: Ulid) {
-    encode_bytes(output, &u128::from(id).to_be_bytes());
-}
-
-fn encode_hash(output: &mut Vec<u8>, hash: Hash) {
-    encode_bytes(output, hash.as_bytes());
+    encode_bytes(output, &u128::from(id).to_be_bytes(), 2);
 }
 
 fn encode_array(output: &mut Vec<u8>, length: usize) {
     encode_head(output, 4, length as u64);
-}
-
-fn encode_bytes(output: &mut Vec<u8>, value: &[u8]) {
-    encode_head(output, 2, value.len() as u64);
-    output.extend_from_slice(value);
 }
 
 fn encode_text(output: &mut Vec<u8>, value: &str) {
