@@ -6382,3 +6382,402 @@ fn permit_bearing_delivery_refuses_before_writing_on_both_adapters() -> Result<(
     );
     Ok(())
 }
+
+impl AdmittedForkFixture {
+    /// Execute through the unfenced delivery method, which the erasure host
+    /// uses for a POC1 or whenever it cannot enter a transition.
+    fn deliver_unfenced<S: AdmittedDeliveryStore>(
+        &self,
+        store: &mut S,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> DeliveryResult {
+        store.execute_claimed_fork_delivery(&self.session, &self.policy, claim, command)
+    }
+}
+
+// ADR-106 r3 T2 (a parent affected by an active request that is not yet
+// frozen) cannot be built through this seam: included scopes exist only once
+// a request's freeze commits them, so a store fixture can only freeze. The
+// verdict is pinned at gate/context level by pos-core
+// `admitted_fork_context_binds_one_fcc1_and_its_fenced_parent_verdict`.
+
+/// A11 T3 through the delivery journal: a geographic parent, and one that is
+/// also frozen, are `ParentChanged` before any erasure decision; Pending is
+/// deleted and nothing is written.
+fn assert_permit_delivery_hides_invisible_parents<S: AdmittedDeliveryStore>(
+    store: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(store, 181, true)?;
+    let geographic = geographic_parent(store)?;
+    let mut labels = Vec::new();
+    for (operation, freeze) in [(185, false), (186, true)] {
+        if freeze {
+            gate.freeze_timeline_for_test(geographic);
+        }
+        let claim = fixture.claim_delivery(
+            store,
+            pos_core::ForkAdmissionOperationKindV1::Fork,
+            operation,
+        )?;
+        let command = fixture.fork(
+            store,
+            operation,
+            geographic,
+            "r9-geographic-child",
+            u64::MAX,
+        )?;
+        let target = (Hash::from_bytes([operation; 32]), geographic);
+        let delivered =
+            fixture.deliver_in_transition(store, (&gate, &gate), target, claim, &command);
+        assert!(!delivered.published && delivered.nothing_written);
+        labels.push(delivery_label(&delivered.result));
+        labels.push(delivery_state(store, &fixture.session, claim)?);
+    }
+    Ok(labels)
+}
+
+#[test]
+fn permit_bearing_delivery_hides_invisible_parents_on_both_adapters() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let (mut sqlite, _) = sqlite_store_at(&directory, "r9-invisible.db")?;
+    let memory = assert_permit_delivery_hides_invisible_parents(&mut MemoryStore::new())?;
+    assert_eq!(memory, ["rejected-ParentChanged", "absent"].repeat(2));
+    assert_eq!(
+        assert_permit_delivery_hides_invisible_parents(&mut sqlite)?,
+        memory
+    );
+    Ok(())
+}
+
+/// A11 T4 and T5 through the delivery journal on a store whose production
+/// gate requires topology permits: without a verified inventory the permit
+/// method is a definite containment rejection, a new FCC1 through the
+/// unfenced method is too, and a POC1 through the unfenced method commits.
+fn assert_permit_requiring_delivery_contract<S: AdmittedDeliveryStore>(
+    store: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let parent = store.create_timeline("r9-permit-parent")?.id();
+    let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(store, 187, true)?;
+    let fork = pos_core::ForkAdmissionOperationKindV1::Fork;
+    let mut labels = Vec::new();
+
+    // T4: no verified inventory is installed.
+    let claim = fixture.claim_delivery(store, fork, 190)?;
+    let command = fixture.fork(store, 190, parent, "r9-permit-child", u64::MAX)?;
+    let target = (Hash::from_bytes([190; 32]), parent);
+    let delivered = fixture.deliver_in_transition(store, (&gate, &gate), target, claim, &command);
+    assert!(!delivered.published && delivered.nothing_written);
+    labels.push(delivery_label(&delivered.result));
+    labels.push(delivery_state(store, &fixture.session, claim)?);
+
+    // T5: an absent FCC1 through the unfenced method writes nothing.
+    let claim = fixture.claim_delivery(store, fork, 190)?;
+    labels.push(delivery_label(
+        &fixture.deliver_unfenced(store, claim, &command),
+    ));
+    labels.push(delivery_state(store, &fixture.session, claim)?);
+    labels.push(admission_label(&fixture.recover(store, 190)?));
+
+    // T5: a POC1 through the unfenced method commits.
+    let owner = fixture.claim_delivery(
+        store,
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        191,
+    )?;
+    let principal = principal_command(
+        store,
+        &fixture.host,
+        &fixture.adapter,
+        &fixture.policy,
+        &fixture.session,
+        [191; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    labels.push(delivery_label(
+        &fixture.deliver_unfenced(store, owner, &principal),
+    ));
+    labels.push(delivery_state(store, &fixture.session, owner)?);
+    Ok(labels)
+}
+
+/// A11 T4 on the default unbound store and on a poisoned gate: a context
+/// from a gate the store is not bound to, and the unfenced method under a
+/// poisoned gate, are definite containment rejections that delete Pending.
+fn assert_unavailable_gates_reject_deliveries<S: AdmittedDeliveryStore>(
+    unbound: &mut S,
+    poisoned: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let fork = pos_core::ForkAdmissionOperationKindV1::Fork;
+    let mut labels = Vec::new();
+    let foreign = ErasureContainmentGateV1::new_test_open();
+    let fixture = AdmittedForkFixture::open(unbound, 131, true)?;
+    let parent = unbound.create_timeline("r9-unbound-parent")?.id();
+    let claim = fixture.claim_delivery(unbound, fork, 134)?;
+    let command = fixture.fork(unbound, 134, parent, "r9-unbound-child", u64::MAX)?;
+    let target = (Hash::from_bytes([134; 32]), parent);
+    let delivered =
+        fixture.deliver_in_transition(unbound, (&foreign, &foreign), target, claim, &command);
+    labels.push(delivery_label(&delivered.result));
+    labels.push(delivery_state(unbound, &fixture.session, claim)?);
+
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    poisoned.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(poisoned, 135, true)?;
+    let parent = poisoned.create_timeline("r9-poisoned-parent")?.id();
+    gate.poison();
+    let claim = fixture.claim_delivery(poisoned, fork, 138)?;
+    let command = fixture.fork(poisoned, 138, parent, "r9-poisoned-child", u64::MAX)?;
+    labels.push(delivery_label(
+        &fixture.deliver_unfenced(poisoned, claim, &command),
+    ));
+    labels.push(delivery_state(poisoned, &fixture.session, claim)?);
+    Ok(labels)
+}
+
+#[test]
+fn permit_requiring_and_unavailable_gates_have_delivery_parity() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let memory = assert_permit_requiring_delivery_contract(&mut MemoryStore::new())?;
+    assert_eq!(
+        memory,
+        [
+            "rejected-ErasureContainmentUnavailable",
+            "absent",
+            "rejected-ErasureContainmentUnavailable",
+            "absent",
+            "OperationMissing",
+            "committed-principal-owner",
+            "Uncertain",
+        ]
+    );
+    let (mut sqlite, _) = sqlite_store_at(&directory, "r9-permit-delivery.db")?;
+    assert_eq!(
+        assert_permit_requiring_delivery_contract(&mut sqlite)?,
+        memory
+    );
+
+    let memory = assert_unavailable_gates_reject_deliveries(
+        &mut MemoryStore::new(),
+        &mut MemoryStore::new(),
+    )?;
+    assert_eq!(
+        memory,
+        ["rejected-ErasureContainmentUnavailable", "absent"].repeat(2)
+    );
+    let (mut unbound, _) = sqlite_store_at(&directory, "r9-unbound-delivery.db")?;
+    let (mut poisoned, _) = sqlite_store_at(&directory, "r9-poisoned-delivery.db")?;
+    assert_eq!(
+        assert_unavailable_gates_reject_deliveries(&mut unbound, &mut poisoned)?,
+        memory
+    );
+    Ok(())
+}
+
+/// A11 T10 through the delivery journal: under a frozen parent every earlier
+/// ADR-106 rule still wins, and an exact retry returns the original receipt.
+/// The `SQLite`-only committed-corruption and clock-rollback rows are in
+/// `sqlite_permit_delivery_corruption_and_clock_rollback_precede_containment`.
+fn assert_permit_delivery_precedence<S: AdmittedDeliveryStore>(
+    store: &mut S,
+    unbound_owner: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(store, 141, true)?;
+    let parent = store.create_timeline("r9-precedence-parent")?.id();
+    let stale = store.create_timeline("r9-precedence-stale")?.id();
+    store.append(
+        stale,
+        &[EventDraft::new(
+            EntityId::new(),
+            Kind::new("fork.admission.coverage"),
+            CanonicalBytes::from_vec(b"advances the cut".to_vec()),
+        )],
+    )?;
+    let committed = fixture.fork(store, 147, parent, "r9-precedence-child", u64::MAX)?;
+    assert_eq!(admission_label(&fixture.execute(store, &committed)), "fork");
+    gate.freeze_timeline_for_test(parent);
+    gate.freeze_timeline_for_test(stale);
+    let fork = pos_core::ForkAdmissionOperationKindV1::Fork;
+    let mut labels = Vec::new();
+    for (operation, target, child, expires_at) in [
+        (147, parent, "r9-unequal-child", u64::MAX),
+        (148, parent, "r9-expired-child", 1),
+        (149, stale, "r9-stale-child", u64::MAX),
+        (147, parent, "r9-precedence-child", u64::MAX),
+    ] {
+        let claim = fixture.claim_delivery(store, fork, operation)?;
+        let command = fixture.fork(store, operation, target, child, expires_at)?;
+        let target = (Hash::from_bytes([operation; 32]), target);
+        let delivered =
+            fixture.deliver_in_transition(store, (&gate, &gate), target, claim, &command);
+        labels.push(delivery_label(&delivered.result));
+    }
+
+    let unbound_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    unbound_owner.bind_erasure_gate(Arc::clone(&unbound_gate))?;
+    let unbound = AdmittedForkFixture::open(unbound_owner, 151, false)?;
+    let unbound_parent = unbound_owner.create_timeline("r9-precedence-unbound")?.id();
+    unbound_gate.freeze_timeline_for_test(unbound_parent);
+    let claim = unbound.claim_delivery(unbound_owner, fork, 154)?;
+    let command = unbound.fork(unbound_owner, 154, unbound_parent, "r9-no-owner", u64::MAX)?;
+    let target = (Hash::from_bytes([154; 32]), unbound_parent);
+    let delivered = unbound.deliver_in_transition(
+        unbound_owner,
+        (&unbound_gate, &unbound_gate),
+        target,
+        claim,
+        &command,
+    );
+    labels.push(delivery_label(&delivered.result));
+    Ok(labels)
+}
+
+#[test]
+fn permit_bearing_delivery_keeps_containment_precedence_on_both_adapters(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let memory =
+        assert_permit_delivery_precedence(&mut MemoryStore::new(), &mut MemoryStore::new())?;
+    assert_eq!(
+        memory,
+        [
+            "rejected-Conflict",
+            "rejected-Unauthenticated",
+            "rejected-ParentErasureContained",
+            "committed-fork",
+            "rejected-InvalidRequest",
+        ]
+    );
+    let (mut sqlite, _) = sqlite_store_at(&directory, "r9-delivery-precedence.db")?;
+    let (mut sqlite_unbound, _) = sqlite_store_at(&directory, "r9-delivery-unbound.db")?;
+    assert_eq!(
+        assert_permit_delivery_precedence(&mut sqlite, &mut sqlite_unbound)?,
+        memory
+    );
+    Ok(())
+}
+
+/// A11 T10 (`SQLite` rows): committed corruption precedes `Conflict` and
+/// containment, and a clock rollback precedes containment, through the
+/// delivery journal; both delete Pending and write nothing.
+#[test]
+fn sqlite_permit_delivery_corruption_and_clock_rollback_precede_containment(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let (mut store, path) = sqlite_store_at(&directory, "r9-delivery-corruption.db")?;
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(&mut store, 155, true)?;
+    let parent = store.create_timeline("r9-corruption-parent")?.id();
+    let committed = fixture.fork(&store, 158, parent, "r9-corruption-child", u64::MAX)?;
+    assert_eq!(
+        admission_label(&fixture.execute(&mut store, &committed)),
+        "fork"
+    );
+    gate.freeze_timeline_for_test(parent);
+    let connection = Connection::open(&path)?;
+    connection.execute("UPDATE fork_admissions SET far1_cbor = X'00'", [])?;
+    connection.execute(
+        "UPDATE fork_admission_authority SET last_authority_wall_time = ?1 WHERE singleton = 1",
+        params![i64::MAX],
+    )?;
+    drop(connection);
+    let before = sqlite_graph_rows(&path)?;
+    let fork = pos_core::ForkAdmissionOperationKindV1::Fork;
+    let mut labels = Vec::new();
+    for (operation, command) in [
+        (158, committed),
+        (
+            159,
+            fixture.fork(&store, 159, parent, "r9-rollback-child", u64::MAX)?,
+        ),
+    ] {
+        let claim = fixture.claim_delivery(&mut store, fork, operation)?;
+        let target = (Hash::from_bytes([operation; 32]), parent);
+        let delivered =
+            fixture.deliver_in_transition(&mut store, (&gate, &gate), target, claim, &command);
+        assert!(delivered.nothing_written);
+        labels.push(delivery_label(&delivered.result));
+        labels.push(delivery_state(&mut store, &fixture.session, claim)?);
+    }
+    assert_eq!(
+        labels,
+        [
+            "rejected-CorruptAuthority",
+            "absent",
+            "rejected-ClockRollback",
+            "absent"
+        ]
+    );
+    assert_eq!(sqlite_graph_rows(&path)?, before);
+    Ok(())
+}
+
+/// A11 T11 with a real external write lock: another connection holds
+/// `BEGIN IMMEDIATE` while the delivery runs. Pre-write checks answer
+/// without touching the lock, the write boundary fails definitely with
+/// nothing written and Pending retained, and once the lock is gone the gate
+/// fence has been released: the next transition commits and publishes.
+#[test]
+fn sqlite_permit_delivery_under_an_external_write_lock_releases_the_gate_fence(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let (mut store, path) = sqlite_store_at(&directory, "r9-delivery-lock.db")?;
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(&mut store, 161, true)?;
+    let parent = store.create_timeline("r9-locked-parent")?.id();
+    let claim = fixture.claim_delivery(
+        &mut store,
+        pos_core::ForkAdmissionOperationKindV1::Fork,
+        164,
+    )?;
+    let owner = fixture.claim_delivery(
+        &mut store,
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        165,
+    )?;
+    let command = fixture.fork(&store, 164, parent, "r9-locked-child", u64::MAX)?;
+    let principal = principal_command(
+        &store,
+        &fixture.host,
+        &fixture.adapter,
+        &fixture.policy,
+        &fixture.session,
+        [165; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let target = (Hash::from_bytes([164; 32]), parent);
+    let gate_pair = (gate.as_ref(), gate.as_ref());
+    let before = sqlite_graph_rows(&path)?;
+    let lock = Connection::open(&path)?;
+    lock.execute_batch("BEGIN IMMEDIATE")?;
+    let refused = fixture.deliver_in_transition(&mut store, gate_pair, target, owner, &principal);
+    assert_eq!(refused.result, Err(ForkDeliveryJournalErrorV1::Conflict));
+    let locked = fixture.deliver_in_transition(&mut store, gate_pair, target, claim, &command);
+    assert_eq!(
+        locked.result,
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    assert!(locked.nothing_written && !locked.published);
+    lock.execute_batch("ROLLBACK")?;
+    drop(lock);
+    assert_eq!(sqlite_graph_rows(&path)?, before);
+    assert_eq!(
+        delivery_state(&mut store, &fixture.session, claim)?,
+        "pending"
+    );
+    let admitted = fixture.deliver_in_transition(&mut store, gate_pair, target, claim, &command);
+    assert!(admitted.published && !admitted.nothing_written);
+    assert_eq!(delivery_label(&admitted.result), "committed-fork");
+    Ok(())
+}
