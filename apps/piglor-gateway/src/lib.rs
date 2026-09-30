@@ -21,6 +21,7 @@ pub mod local_fork_listener;
 pub mod local_fork_service;
 pub mod owntracks;
 pub mod owntracks_http;
+pub mod startup;
 
 pub use authorization::{
     AirGappedAuthenticationAdapter, GatewayAuthenticationAdapter, GatewayAuthenticationError,
@@ -1370,7 +1371,7 @@ impl Gateway {
     /// # Errors
     /// Returns a store error if the recovered host cannot bind the Gateway's
     /// independently owned consent authority.
-    pub fn new_with_fork_admission_erasure_host(
+    pub(crate) fn new_with_fork_admission_erasure_host(
         host: ErasureExecutionHostV1,
         owntracks_owner_key: Option<&OwnTracksOwnerKey>,
         slot: executor::ForkAdmissionSlotV1,

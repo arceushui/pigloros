@@ -24,12 +24,14 @@ macro_rules! output_stderr {
 use piglor_gateway::local_fork_service::{
     provision_local_fork_admission_authority, serve_local_fork_admission, LocalForkAdmissionPathsV1,
 };
+use piglor_gateway::startup::{
+    announce_listening, open_recovered_erasure_host, stop_after_bind_failure, GatewayHostStoreV1,
+};
 use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
-use pos_core::ErasureHostErrorV1;
-use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
+use pos_runtime::ErasureCoordinatorCompositionV1;
 use pos_store::StoreConfig;
 use std::{
     ffi::OsString,
@@ -332,31 +334,22 @@ fn gateway_for_startup_with_recovery(
 ) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
     match (owntracks_owner_key, sqlite_path) {
         (Some(owner_key), Some(path)) => {
-            let host = ErasureExecutionHostV1::open_gateway_with_authority(
+            let host = open_recovered_erasure_host(
                 StoreConfig::Sqlite {
                     path: path.to_owned(),
                 },
+                GatewayHostStoreV1::OwnTracks,
                 composition,
-                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-            )
-            .map_err(erasure_host_recovery_error)?;
+            )?;
             Gateway::new_with_owntracks_erasure_host(host, owner_key).map_err(Into::into)
         }
         (None, _) => {
-            let host = ErasureExecutionHostV1::open_with_authority(
-                config,
-                composition,
-                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-            )
-            .map_err(erasure_host_recovery_error)?;
+            let host =
+                open_recovered_erasure_host(config, GatewayHostStoreV1::Standard, composition)?;
             Gateway::new_with_erasure_host(host).map_err(Into::into)
         }
         (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),
     }
-}
-
-fn erasure_host_recovery_error(error: ErasureHostErrorV1) -> std::io::Error {
-    std::io::Error::other(format!("erasure host recovery failed ({})", error.code()))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -452,12 +445,9 @@ async fn serve_with_owntracks_and_fork_admission(
     );
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
-        Err(error) => {
-            drop(gateway.shutdown().await);
-            return Err(Box::new(error));
-        }
+        Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
-    output_stderr!("piglor-gateway listening on http://{addr}");
+    announce_listening(addr);
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await;
@@ -580,15 +570,6 @@ mod coverage_tests {
         .test_err()?;
         assert!(!ledger_error.to_string().is_empty());
         Ok(())
-    }
-
-    #[test]
-    fn startup_recovery_error_is_payload_free() {
-        assert_eq!(
-            super::erasure_host_recovery_error(pos_core::ErasureHostErrorV1::RecoveryUnavailable)
-                .to_string(),
-            "erasure host recovery failed (0)"
-        );
     }
 }
 

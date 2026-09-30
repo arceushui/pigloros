@@ -1514,6 +1514,10 @@ mod tests {
                 LocalForkAdmissionCodeV1::AuthorityUnavailable
             );
         }
+    }
+
+    #[test]
+    fn submission_outcomes_have_exact_wire_codes() {
         for (error, expected) in [
             (
                 ForkAdmissionSubmissionErrorV1::Busy,

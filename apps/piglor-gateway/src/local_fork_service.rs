@@ -5,7 +5,7 @@
 use std::{
     fs,
     future::Future,
-    io::{self, Write as _},
+    io,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -17,7 +17,7 @@ use std::{
 };
 
 use piglor_ledger::LedgerView;
-use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
+use pos_runtime::ErasureCoordinatorCompositionV1;
 use pos_store::{sqlite::SqliteStore, StoreConfig};
 
 use crate::{
@@ -27,7 +27,12 @@ use crate::{
         open_fork_admission_session, reconcile_startup, LocalForkAdmissionCoordinatorV1,
     },
     local_fork_listener::bind_pathname_listener,
-    router_for_addr, AppState, Gateway, LedgerWriteMode, OwnTracksOwnerKey,
+    router_for_addr,
+    startup::{
+        announce_listening, open_recovered_erasure_host, stop_after_bind_failure,
+        GatewayHostStoreV1,
+    },
+    AppState, Gateway, LedgerWriteMode, OwnTracksOwnerKey,
 };
 
 type ServeError = Box<dyn std::error::Error + Send + Sync>;
@@ -53,31 +58,62 @@ pub(super) struct LocalForkAdmissionListenerV1 {
     socket_path: Option<PathBuf>,
 }
 
+/// How long shutdown waits for the listener thread to finish its in-flight
+/// request (ADR-109 revision 9, Decision 1 item 8 step 2): the executor's own
+/// shutdown deadline.
+const LISTENER_STOP_DEADLINE: Duration = crate::executor::SHUTDOWN_DEADLINE;
+
 impl LocalForkAdmissionListenerV1 {
-    /// Stop accepting new local admission requests, join the worker on a
-    /// blocking task, and unlink the socket pathname this listener bound
-    /// (ADR-109 revision 9, Decision 1 item 8 step 2). An in-flight request
-    /// finishes its remaining commands first, because the executor is still
-    /// open.
-    pub(super) async fn stop(mut self) -> io::Result<()> {
-        tokio::task::spawn_blocking(move || self.shutdown())
+    /// Stop accepting new local admission requests, join the worker, and
+    /// unlink the socket pathname this listener bound (ADR-109 revision 9,
+    /// Decision 1 item 8 step 2).
+    ///
+    /// An in-flight request finishes its remaining commands first, because
+    /// the executor is still open, and a started executor command is awaited
+    /// to completion (Decision 1 item 5). Only this join is bounded: it runs on
+    /// a detached joiner thread, so a wedged worker cannot hang process
+    /// shutdown; after `LISTENER_STOP_DEADLINE` the socket is unlinked anyway
+    /// and the stop reports `TimedOut`.
+    pub(super) async fn stop(self) -> io::Result<()> {
+        self.stop_within(LISTENER_STOP_DEADLINE).await
+    }
+
+    async fn stop_within(mut self, deadline: Duration) -> io::Result<()> {
+        self.stopping.store(true, Ordering::Release);
+        let worker = self.worker.take();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        drop(thread::spawn(move || {
+            drop(sender.send(join_listener_worker(worker)));
+        }));
+        let joined = tokio::time::timeout(deadline, receiver)
             .await
-            .map_err(io::Error::other)
-            .flatten()
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Fork-admission listener did not stop",
+                )
+            })
+            .and_then(|received| received.map_err(io::Error::other).flatten());
+        let unlinked = self.socket_path.take().map_or(Ok(()), fs::remove_file);
+        joined.and(unlinked)
     }
 
     /// Idempotent: the worker is joined and the pathname removed at most once.
     /// The worker owns the bound listener, so its fd is closed before unlink.
     fn shutdown(&mut self) -> io::Result<()> {
         self.stopping.store(true, Ordering::Release);
-        let joined = self.worker.take().map_or(Ok(()), |worker| {
-            worker
-                .join()
-                .map_err(|_| io::Error::other("Fork-admission listener worker panicked"))
-        });
+        let joined = join_listener_worker(self.worker.take());
         let unlinked = self.socket_path.take().map_or(Ok(()), fs::remove_file);
         joined.and(unlinked)
     }
+}
+
+fn join_listener_worker(worker: Option<JoinHandle<()>>) -> io::Result<()> {
+    worker.map_or(Ok(()), |worker| {
+        worker
+            .join()
+            .map_err(|_| io::Error::other("Fork-admission listener worker panicked"))
+    })
 }
 
 impl Drop for LocalForkAdmissionListenerV1 {
@@ -152,7 +188,19 @@ fn open_with_credentials(
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
     composition: &ErasureCoordinatorCompositionV1,
 ) -> io::Result<(Gateway, LocalForkAdmissionCoordinatorV1)> {
-    let mut host = open_host(sqlite_path, owntracks_owner_key.is_some(), composition)?;
+    // Startup step 2: the one read-write adapter and erasure host of the store.
+    let store = if owntracks_owner_key.is_some() {
+        GatewayHostStoreV1::OwnTracks
+    } else {
+        GatewayHostStoreV1::Standard
+    };
+    let mut host = open_recovered_erasure_host(
+        StoreConfig::Sqlite {
+            path: sqlite_path.to_owned(),
+        },
+        store,
+        composition,
+    )?;
     let (session, record) =
         open_fork_admission_session(&mut host, &credentials).map_err(io::Error::other)?;
     let tuples = host.reconcile_fork_delivery_journal(&session);
@@ -177,27 +225,13 @@ fn open_with_credentials(
     Ok((gateway, coordinator))
 }
 
-/// Startup step 2: the one read-write adapter and erasure host of the store.
-fn open_host(
-    sqlite_path: &str,
-    owntracks: bool,
-    composition: &ErasureCoordinatorCompositionV1,
-) -> io::Result<ErasureExecutionHostV1> {
-    let config = StoreConfig::Sqlite {
-        path: sqlite_path.to_owned(),
-    };
-    let limits = pos_core::ErasureRecoveryLimitsV1::compiled_maximum();
-    let host = if owntracks {
-        ErasureExecutionHostV1::open_gateway_with_authority(config, composition, limits)
-    } else {
-        ErasureExecutionHostV1::open_with_authority(config, composition, limits)
-    };
-    host.map_err(|error| {
-        io::Error::other(format!("erasure host recovery failed ({})", error.code()))
-    })
-}
-
 /// Startup step 6 and the shutdown order of Decision 1 item 8.
+///
+/// The shutdown order (TCP, listener, executor) is this function's linear
+/// sequence of awaits; no test seam observes its interleaving inside
+/// `axum::serve`. The load-bearing property, that the listener finishes an
+/// in-flight request while the executor is still open, is asserted on the
+/// same two calls by the A8 test.
 async fn serve_started(
     addr: SocketAddr,
     (gateway, coordinator): (Gateway, LocalForkAdmissionCoordinatorV1),
@@ -229,20 +263,6 @@ async fn serve_started(
         .and(stop_result)
         .map_err(ServeError::from)
         .and(shutdown_result)
-}
-
-/// A bind failure stops what was started, in shutdown order, and exits.
-async fn stop_after_bind_failure(gateway: &Gateway, error: io::Error) -> Result<(), ServeError> {
-    drop(gateway.shutdown().await);
-    Err(Box::new(error))
-}
-
-fn announce_listening(addr: SocketAddr) {
-    let mut output = io::stderr().lock();
-    drop(writeln!(
-        output,
-        "piglor-gateway listening on http://{addr}"
-    ));
 }
 
 /// Bind the Unix pathname socket last and spawn the listener thread.
@@ -313,7 +333,7 @@ mod tests {
         ErasureScopeV1, ErasureStateTransitionV1, ErasureVerifiedTopologyObservationV1,
         EventStore as _, TimelineId, TimelineMeta,
     };
-    use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureHostStatusV1};
+    use pos_runtime::{ErasureCoordinatorAuthorityV1, ErasureExecutionHostV1, ErasureHostStatusV1};
     use rusqlite::{params, OptionalExtension as _};
     use std::{
         collections::BTreeMap,
@@ -543,7 +563,7 @@ mod tests {
 
     /// A database with FAH1 provisioned for the current-peer credentials and
     /// one root Timeline per name.
-    fn world(parents: &[&str]) -> TestResult<(World, Vec<TimelineId>)> {
+    fn provisioned_world(parents: &[&str]) -> TestResult<(World, Vec<TimelineId>)> {
         let world = unprovisioned_world()?;
         let mut store = SqliteStore::open(world.path()?)?;
         let parents = parents
@@ -630,20 +650,22 @@ mod tests {
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         });
-        Ok(app.oneshot(request).await?.status())
+        let response = app.oneshot(request).await?;
+        Ok(response.status())
     }
 
     async fn health(gateway: &Gateway) -> TestResult<StatusCode> {
-        http(
-            gateway,
-            Request::builder().uri("/health").body(Body::empty())?,
-        )
-        .await
+        let request = Request::builder().uri("/health").body(Body::empty())?;
+        let status = http(gateway, request).await?;
+        Ok(status)
     }
 
     async fn read_status(gateway: &Gateway, timeline: TimelineId) -> TestResult<StatusCode> {
-        let uri = format!("/v1/timelines/{timeline}/events");
-        http(gateway, Request::builder().uri(uri).body(Body::empty())?).await
+        let request = Request::builder()
+            .uri(format!("/v1/timelines/{timeline}/events"))
+            .body(Body::empty())?;
+        let status = http(gateway, request).await?;
+        Ok(status)
     }
 
     async fn append_status(gateway: &Gateway, timeline: TimelineId) -> TestResult<StatusCode> {
@@ -657,17 +679,19 @@ mod tests {
             .uri(format!("/v1/timelines/{timeline}/signals"))
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))?;
-        http(gateway, request).await
+        let status = http(gateway, request).await?;
+        Ok(status)
     }
 
     async fn inventory_generation(
         gateway: &Gateway,
         timeline: TimelineId,
     ) -> TestResult<Option<ErasureReferenceV1>> {
-        Ok(gateway
-            .read_events_page_at_generation(&timeline.to_string(), 0, 1, None)
-            .await?
-            .inventory_generation)
+        let timeline = timeline.to_string();
+        let page = gateway
+            .read_events_page_at_generation(&timeline, 0, 1, None)
+            .await?;
+        Ok(page.inventory_generation)
     }
 
     // -----------------------------------------------------------------
@@ -1062,20 +1086,22 @@ mod tests {
         authority: &Arc<ForkTestAuthority>,
     ) -> TestResult<ErasureCoordinatorCompositionV1> {
         let plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
-        Ok(ErasureCoordinatorCompositionV1::new(plugin, reference(30))?)
+        let composition = ErasureCoordinatorCompositionV1::new(plugin, reference(30))?;
+        Ok(composition)
     }
 
     fn open_test_host(
         world: &World,
         composition: &ErasureCoordinatorCompositionV1,
     ) -> TestResult<ErasureExecutionHostV1> {
-        Ok(ErasureExecutionHostV1::open_with_authority(
+        let host = ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Sqlite {
                 path: world.path()?.to_owned(),
             },
             composition,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )?)
+        )?;
+        Ok(host)
     }
 
     /// Submit and authorize the one erasure request of the test authority
@@ -1112,7 +1138,7 @@ mod tests {
         Arc<ForkTestAuthority>,
         ErasureCoordinatorCompositionV1,
     )> {
-        let (world, parents) = world(parents)?;
+        let (world, parents) = provisioned_world(parents)?;
         let authority = Arc::new(ForkTestAuthority::default());
         for parent in &parents {
             authority.track(*parent);
@@ -1125,7 +1151,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // ADR-109 revision 9 acceptance vectors A1 to A10.
+    // ADR-109 revision 9 acceptance vectors A1 to A12 (Gateway part).
+    //
+    // A3 ("parent affected by an active, not yet frozen request") is not
+    // constructible through durable state: an erasure request's included
+    // scope is committed only by its access freeze, and pos-core
+    // `validate_committed_scope_timeline_bindings` rejects included bindings
+    // before it, so every included classification a host recovers is
+    // frozen. The verdict for an affected-but-unfrozen parent is covered
+    // only at gate/context level: pos-core
+    // `admitted_fork_context_binds_one_fcc1_and_its_fenced_parent_verdict`
+    // (ADR-106 r3 T2; see also the #474 note in pos-runtime
+    // `erasure_coordinator_host_public::assert_host_admitted_fork_contract`).
+    // A11 is covered by the pos-store and pos-runtime delivery tests, and
+    // A12 by the unchanged ADR-109 golden tests in `local_fork_listener`.
     // -----------------------------------------------------------------
 
     /// A1: a proven-unaffected parent on a Ready host (closed composition,
@@ -1136,7 +1175,7 @@ mod tests {
     #[tokio::test]
     async fn listener_creates_one_fork_and_retries_its_result_for_the_same_principal() -> TestResult
     {
-        let (world, parents) = world(&["listener Fork parent"])?;
+        let (world, parents) = provisioned_world(&["listener Fork parent"])?;
         let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
         assert_eq!(
             &request(&world.socket, &bind_payload(5), false)?[..10],
@@ -1151,7 +1190,8 @@ mod tests {
         assert_ne!(first.1, [0; 32]);
         assert_eq!(graph_rows(&world)?[..4], [2, 1, 2, 1]);
         assert_eq!(health(&gateway).await?, StatusCode::OK);
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     /// A2: a parent in a frozen scope is code 5 with zero child, FAR1,
@@ -1181,12 +1221,15 @@ mod tests {
         assert_eq!(health(&gateway).await?, StatusCode::OK);
         // The deleted Pending tuple answers the retry again, never Busy.
         assert_eq!(request(&world.socket, &payload, false)?, rejected(5));
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     fn assert_single_host_connection_structure() {
+        // Everything before the unit-test module, including test-only
+        // production helpers such as `map_journal_for_test`, is scanned.
         let production =
-            |source: &'static str| source.split("#[cfg(test)]").next().unwrap_or(source);
+            |source: &'static str| source.split("\nmod tests {").next().unwrap_or(source);
         let coordinator = production(include_str!("local_fork_coordinator.rs"));
         let listener = production(include_str!("local_fork_listener.rs"));
         let service = production(include_str!("local_fork_service.rs"));
@@ -1247,7 +1290,8 @@ mod tests {
         fork_result(&request(&world.socket, &uncertain, false)?)?;
         wait_for_delivery_state(&world, 14, 3)?;
         assert_http(&gateway, timeline).await?;
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     /// A5: commit, then freeze the parent, then an exact FAL1 retry returns
@@ -1255,7 +1299,7 @@ mod tests {
     /// now-frozen parent is contained.
     #[tokio::test]
     async fn exact_retry_returns_the_original_receipt_after_the_parent_is_frozen() -> TestResult {
-        let (world, parents) = world(&["a5 parent", "a5 other"])?;
+        let (world, parents) = provisioned_world(&["a5 parent", "a5 other"])?;
         let authority = Arc::new(ForkTestAuthority::default());
         authority.scope(parents[0]);
         authority.track(parents[1]);
@@ -1283,7 +1327,8 @@ mod tests {
             request(&world.socket, &fork_payload(17, parents[0])?, false)?,
             rejected(5)
         );
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     /// Start a listener over a Ready host with one authorized request, then
@@ -1296,7 +1341,7 @@ mod tests {
         ErasureCoordinatorCompositionV1,
         (Gateway, LocalForkAdmissionListenerV1),
     )> {
-        let (world, parents) = world(&["poisoned parent", "poisoned other"])?;
+        let (world, parents) = provisioned_world(&["poisoned parent", "poisoned other"])?;
         let authority = Arc::new(ForkTestAuthority::default());
         for parent in &parents {
             authority.track(*parent);
@@ -1340,7 +1385,8 @@ mod tests {
             recovered
         );
         assert_eq!(health(&gateway).await?, StatusCode::OK);
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     /// A10: with no Ready host a new FCC1 fails closed with code 5 and its
@@ -1366,7 +1412,8 @@ mod tests {
             false,
         )?)?;
         assert_ne!(recovered.1, [0; 32]);
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     /// Forwards to the executor's journal, except that the execute command
@@ -1429,7 +1476,7 @@ mod tests {
     /// bounded admission wait; no journal row and no FAC1 remain.
     #[tokio::test]
     async fn saturated_executor_answers_busy_without_journal_rows() -> TestResult {
-        let (world, parents) = world(&["a7 parent"])?;
+        let (world, parents) = provisioned_world(&["a7 parent"])?;
         let (gateway, coordinator) = open_with_credentials(
             world.path()?,
             current_peer_credentials()?,
@@ -1464,7 +1511,8 @@ mod tests {
         assert_eq!(saturated, rejected(6));
         assert_eq!(delivery_state(&world, 33)?, None);
         assert_eq!(graph_rows(&world)?, before);
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     /// A8: a request in flight when shutdown starts completes with its real
@@ -1474,7 +1522,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_completes_in_flight_requests_and_closed_submissions_are_code_five(
     ) -> TestResult {
-        let (world, _) = world(&[])?;
+        let (world, _) = provisioned_world(&[])?;
         let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
         let release = gateway
             .store
@@ -1539,7 +1587,7 @@ mod tests {
     #[tokio::test]
     async fn startup_fails_closed_before_any_bind() -> TestResult {
         let closed = ErasureCoordinatorCompositionV1::closed();
-        let (world, parents) = world(&["a9 parent"])?;
+        let (world, parents) = provisioned_world(&["a9 parent"])?;
         let authority = Arc::new(ForkTestAuthority::default());
         authority.track(parents[0]);
         authorize_request(&world, &test_composition(&authority)?)?;
@@ -1578,7 +1626,7 @@ mod tests {
             0
         );
 
-        let (corrupt, _) = world(&[])?;
+        let (corrupt, _) = provisioned_world(&[])?;
         let connection = rusqlite::Connection::open(&corrupt.database)?;
         connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
         connection.execute(
@@ -1669,15 +1717,11 @@ mod tests {
         paths: LocalForkAdmissionPathsV1<'_>,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), ServeError> {
-        serve_local_fork_admission(
-            "127.0.0.1:0".parse()?,
-            paths,
-            None,
-            &ErasureCoordinatorCompositionV1::closed(),
-            shutdown,
-            (LedgerView::default(), LedgerWriteMode::Disabled),
-        )
-        .await
+        let addr = "127.0.0.1:0".parse()?;
+        let composition = ErasureCoordinatorCompositionV1::closed();
+        let ledger = (LedgerView::default(), LedgerWriteMode::Disabled);
+        serve_local_fork_admission(addr, paths, None, &composition, shutdown, ledger).await?;
+        Ok(())
     }
 
     /// Step 1 and step 3: missing credentials fail before the database is
@@ -1733,7 +1777,7 @@ mod tests {
     /// socket.
     #[tokio::test]
     async fn bind_failures_stop_what_was_started() -> TestResult {
-        let (world, _) = world(&[])?;
+        let (world, _) = provisioned_world(&[])?;
         let occupied = std::net::TcpListener::bind("127.0.0.1:0")?;
         let started = open_with_credentials(
             world.path()?,
@@ -1780,7 +1824,7 @@ mod tests {
 
     #[tokio::test]
     async fn owntracks_deployments_share_the_one_gateway_host() -> TestResult {
-        let (world, _) = world(&[])?;
+        let (world, _) = provisioned_world(&[])?;
         let owner_key_path = world.runtime.path().join("owner.key");
         crate::owntracks::create_or_load_owner_key(&owner_key_path)?;
         let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
@@ -1796,26 +1840,28 @@ mod tests {
             &BIND_OK
         );
         assert_eq!(health(&gateway).await?, StatusCode::OK);
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     #[tokio::test]
     async fn listener_retains_post_commit_disconnect_as_uncertain_for_same_principal_retry(
     ) -> TestResult {
-        let (world, _) = world(&[])?;
+        let (world, _) = provisioned_world(&[])?;
         let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
         let payload = bind_payload(1);
         disconnect_after_complete_request(&world.socket, &payload)?;
         wait_for_delivery_state(&world, 1, 2)?;
         assert_eq!(&request(&world.socket, &payload, false)?[..10], &BIND_OK);
         wait_for_delivery_state(&world, 1, 3)?;
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     #[tokio::test]
     async fn listener_accepts_fragmented_frames_and_refuses_unclosed_or_trailing_input(
     ) -> TestResult {
-        let (world, _) = world(&[])?;
+        let (world, _) = provisioned_world(&[])?;
         let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
         assert_eq!(
             &request(&world.socket, &bind_payload(2), true)?[..10],
@@ -1830,19 +1876,21 @@ mod tests {
             &request(&world.socket, &bind_payload(4), false)?[..10],
             &BIND_OK
         );
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     #[tokio::test]
     async fn listener_rejects_a_fork_before_principal_ownership_is_bound() -> TestResult {
-        let (world, parents) = world(&["unbound Fork parent"])?;
+        let (world, parents) = provisioned_world(&["unbound Fork parent"])?;
         let (gateway, listener) = start(&world, &ErasureCoordinatorCompositionV1::closed())?;
         // An unbound Principal is a semantic rejection (#465 InvalidRequest).
         assert_eq!(
             request(&world.socket, &fork_payload(6, parents[0])?, false)?,
             rejected(7)
         );
-        stop(&world, gateway, listener).await
+        stop(&world, gateway, listener).await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -1853,6 +1901,31 @@ mod tests {
             socket_path: None,
         };
         listener.stop().await?;
+        Ok(())
+    }
+
+    /// A worker wedged on a started command cannot hang shutdown: the join is
+    /// bounded, the socket pathname is still unlinked, and the stop reports
+    /// `TimedOut`.
+    #[tokio::test]
+    async fn stopped_listener_bounds_the_join_of_a_wedged_worker() -> TestResult {
+        let world = unprovisioned_world()?;
+        fs::write(&world.socket, [])?;
+        let (release, wedged) = std::sync::mpsc::channel::<()>();
+        let listener = LocalForkAdmissionListenerV1 {
+            stopping: Arc::new(AtomicBool::new(false)),
+            worker: Some(thread::spawn(move || {
+                let _released = wedged.recv();
+            })),
+            socket_path: Some(world.socket.clone()),
+        };
+        let stopped = listener.stop_within(Duration::from_millis(50)).await;
+        assert_eq!(
+            stopped.err().map(|error| error.kind()),
+            Some(io::ErrorKind::TimedOut)
+        );
+        assert!(!world.socket.exists());
+        drop(release);
         Ok(())
     }
 

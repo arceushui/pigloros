@@ -53,7 +53,7 @@ pub(crate) const RESERVED_WRITE_CAPACITY: usize = 8;
 const READ_CAPACITY: usize = QUEUE_CAPACITY - RESERVED_WRITE_CAPACITY;
 const READ_BURST: u8 = 8;
 const COMMAND_DEADLINE: Duration = Duration::from_secs(5);
-const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
+pub(crate) const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 const OWNTRACKS_RATE_BURST: u8 = 5;
 const OWNTRACKS_RATE_KEYS_MAXIMUM: usize = 64;
 const OWNTRACKS_RATE_STATE_TTL: Duration = Duration::from_mins(15);
@@ -1738,17 +1738,27 @@ impl StoreExecutor {
     /// except that `Saturated` is retried with a short backoff until the
     /// command deadline. A command still queued at the deadline expires
     /// unexecuted; a started command is awaited to completion.
+    ///
+    /// `build` runs exactly once: the built command is shared by every
+    /// admission attempt, and each retry only re-wraps it, so the values it
+    /// captures are moved, never copied per attempt.
     fn submit_fork_admission<T>(
         &self,
-        build: impl Fn(ForkAdmissionReplyV1<T>) -> ForkAdmissionCommandV1,
+        build: impl FnOnce(ForkAdmissionReplyV1<T>) -> ForkAdmissionCommandV1,
     ) -> ForkAdmissionSubmissionV1<T> {
         let deadline = Instant::now() + self.command_deadline();
         let lifecycle = Arc::new(CommandLifecycle::new());
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        let command = Arc::new(Mutex::new(Some(build(reply))));
         loop {
-            let (reply, result) = std::sync::mpsc::sync_channel(1);
-            let command = Command::Action(Box::new(build(reply)));
-            match self.try_submit(command, deadline, Arc::clone(&lifecycle)) {
-                Ok(()) => return await_fork_admission_reply(&result, &lifecycle, deadline),
+            let attempt = Command::Action(Box::new(ForkAdmissionAttemptV1(Arc::clone(&command))));
+            match self.try_submit(attempt, deadline, Arc::clone(&lifecycle)) {
+                Ok(()) => {
+                    // Only the queued attempt may keep the reply sender alive,
+                    // so a discarded queue is observed as a dropped reply.
+                    drop(command);
+                    return await_fork_admission_reply(&result, &lifecycle, deadline);
+                }
                 Err(StoreExecutorError::Saturated) if Instant::now() < deadline => {
                     thread::sleep(FORK_ADMISSION_ADMISSION_BACKOFF);
                 }
@@ -1758,6 +1768,36 @@ impl StoreExecutor {
                 Err(_) => return Err(ForkAdmissionSubmissionErrorV1::Unavailable),
             }
         }
+    }
+}
+
+/// One admission attempt of a built Fork-admission command. Every attempt of
+/// one submission shares the command; the attempt that runs or expires takes
+/// it.
+struct ForkAdmissionAttemptV1(Arc<Mutex<Option<ForkAdmissionCommandV1>>>);
+
+impl ForkAdmissionAttemptV1 {
+    fn take(&self) -> Option<ForkAdmissionCommandV1> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+impl WorkerCommandV1 for ForkAdmissionAttemptV1 {
+    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
+        let Some(command) = self.take() else {
+            return;
+        };
+        command.run_on(state.store.fork_admission_target());
+    }
+
+    fn expire_unrun(self: Box<Self>) {
+        let Some(command) = self.take() else {
+            return;
+        };
+        command.refuse(ForkAdmissionSubmissionErrorV1::Busy);
     }
 }
 
@@ -1776,6 +1816,10 @@ fn await_fork_admission_reply<T>(
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) if lifecycle.expire_if_queued() => {
             Err(ForkAdmissionSubmissionErrorV1::Busy)
         }
+        // A started command is awaited to completion with no deadline
+        // (ADR-109 r9 Decision 1 item 5). A wedged worker therefore holds the
+        // listener thread, and process shutdown bounds that thread's join
+        // instead (`LocalForkAdmissionListenerV1::stop`).
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => result
             .recv()
             .unwrap_or(Err(ForkAdmissionSubmissionErrorV1::Lost)),
@@ -1796,7 +1840,7 @@ fn await_fork_admission_reply<T>(
 ///
 /// It is installed with the host at startup and never exposed to HTTP. The
 /// listener thread keeps only the session identity digest.
-pub struct ForkAdmissionSlotV1 {
+pub(crate) struct ForkAdmissionSlotV1 {
     session: ForkAdmissionAuthoritySessionV1,
     policy: ForkAuthenticationPolicyV1,
 }
@@ -1804,7 +1848,7 @@ pub struct ForkAdmissionSlotV1 {
 impl ForkAdmissionSlotV1 {
     /// Pair one opened authority session with its pinned policy.
     #[must_use]
-    pub const fn new(
+    pub(crate) const fn new(
         session: ForkAdmissionAuthoritySessionV1,
         policy: ForkAuthenticationPolicyV1,
     ) -> Self {
@@ -1814,7 +1858,7 @@ impl ForkAdmissionSlotV1 {
 
 /// Why a Fork-admission command produced no store result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ForkAdmissionSubmissionErrorV1 {
+pub(crate) enum ForkAdmissionSubmissionErrorV1 {
     /// Definitely not run: the queue stayed saturated through the bounded
     /// admission wait, or the command expired while queued.
     Busy,
@@ -1826,12 +1870,12 @@ pub enum ForkAdmissionSubmissionErrorV1 {
 }
 
 /// One Fork-admission store result, or why none was produced.
-pub type ForkAdmissionSubmissionV1<T> =
+pub(crate) type ForkAdmissionSubmissionV1<T> =
     Result<Result<T, ForkDeliveryJournalErrorV1>, ForkAdmissionSubmissionErrorV1>;
 
 /// The response-delivery mark recorded after a FARL1 write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ForkDeliveryMarkV1 {
+pub(crate) enum ForkDeliveryMarkV1 {
     /// The complete response was written.
     Delivered,
     /// The response write failed; the committed tuple stays recoverable.
@@ -1868,16 +1912,6 @@ enum ForkAdmissionCommandV1 {
         mark: ForkDeliveryMarkV1,
         reply: ForkAdmissionReplyV1<()>,
     },
-}
-
-impl WorkerCommandV1 for ForkAdmissionCommandV1 {
-    fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
-        (*self).run_on(state.store.fork_admission_target());
-    }
-
-    fn expire_unrun(self: Box<Self>) {
-        (*self).refuse(ForkAdmissionSubmissionErrorV1::Busy);
-    }
 }
 
 impl ForkAdmissionCommandV1 {
@@ -1965,7 +1999,7 @@ fn send_fork_admission_refusal<T>(
 /// and lifecycle semantics and blocks the calling OS thread for its reply, so
 /// it must not be called from an asynchronous task.
 #[derive(Clone)]
-pub struct ForkAdmissionSubmitterV1 {
+pub(crate) struct ForkAdmissionSubmitterV1 {
     executor: StoreExecutor,
 }
 
@@ -1974,7 +2008,7 @@ impl ForkAdmissionSubmitterV1 {
     ///
     /// # Errors
     /// Returns why the command produced no store result.
-    pub fn claim_fork_delivery(
+    pub(crate) fn claim_fork_delivery(
         &self,
         tuple: ForkDeliveryTupleV1,
     ) -> ForkAdmissionSubmissionV1<ForkDeliveryClaimOutcomeV1> {
@@ -1986,7 +2020,7 @@ impl ForkAdmissionSubmitterV1 {
     ///
     /// # Errors
     /// Returns why the command produced no store result.
-    pub fn cancel_pending_fork_delivery(
+    pub(crate) fn cancel_pending_fork_delivery(
         &self,
         claim: ForkDeliveryClaimV1,
     ) -> ForkAdmissionSubmissionV1<()> {
@@ -1998,7 +2032,7 @@ impl ForkAdmissionSubmitterV1 {
     ///
     /// # Errors
     /// Returns why the command produced no store result.
-    pub fn execute_claimed_fork_delivery(
+    pub(crate) fn execute_claimed_fork_delivery(
         &self,
         claim: ForkDeliveryClaimV1,
         command: &ForkAdmissionHostCommandV1,
@@ -2016,7 +2050,7 @@ impl ForkAdmissionSubmitterV1 {
     ///
     /// # Errors
     /// Returns why the command produced no store result.
-    pub fn recover_fork_delivery(
+    pub(crate) fn recover_fork_delivery(
         &self,
         tuple: ForkDeliveryTupleV1,
         proof: &ForkAdmissionRecoveryProofV1,
@@ -2035,7 +2069,7 @@ impl ForkAdmissionSubmitterV1 {
     ///
     /// # Errors
     /// Returns why the command produced no store result.
-    pub fn mark_fork_delivery(
+    pub(crate) fn mark_fork_delivery(
         &self,
         claim: ForkDeliveryClaimV1,
         mark: ForkDeliveryMarkV1,
@@ -7373,6 +7407,33 @@ mod fork_admission_submission_tests {
         })
         .join()
         .map_err(|_| "Fork-admission submission thread panicked".into())
+    }
+
+    /// An attempt whose shared command was already taken by an earlier
+    /// attempt neither runs nor replies again.
+    #[test]
+    fn a_taken_admission_attempt_is_inert() -> TestResult {
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        let command = Arc::new(Mutex::new(Some(ForkAdmissionCommandV1::Claim {
+            tuple: fork_commands()?.tuple,
+            reply,
+        })));
+        Box::new(ForkAdmissionAttemptV1(Arc::clone(&command))).expire_unrun();
+        assert_eq!(
+            result.try_recv()?,
+            Err(ForkAdmissionSubmissionErrorV1::Busy)
+        );
+        Box::new(ForkAdmissionAttemptV1(Arc::clone(&command))).expire_unrun();
+        let mut state = ExecutorState {
+            store: ExecutorStore::Generic(Box::new(pos_store::memory::MemoryStore::new())),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+        Box::new(ForkAdmissionAttemptV1(command)).run_on_worker(&mut state);
+        assert!(result.try_recv().is_err());
+        Ok(())
     }
 
     #[tokio::test]
