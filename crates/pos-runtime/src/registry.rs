@@ -21,7 +21,7 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
-use crate::output_admission::{draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1};
+use crate::output_admission::InstalledOutputPolicySourceV1;
 use crate::{
     composition::{
         AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
@@ -2750,7 +2750,7 @@ impl PluginRegistry {
         plugin: &dyn Plugin,
         plugin_version: &str,
         mut budget_input: pos_core::ExecutableBudgetPolicyInputV1,
-        profile_id: &str,
+        _profile_id: &str,
         configuration_details: &[u8],
     ) -> Result<
         (
@@ -2759,15 +2759,7 @@ impl PluginRegistry {
         ),
         RuntimeError,
     > {
-        let profile_artifact =
-            draft_execution_profile_artifact_v1(profile_id).map_err(|error| {
-                RuntimeError::CapabilityMismatch {
-                    name: plugin.name().to_owned(),
-                    reason: error.to_string(),
-                }
-            })?;
-        budget_input.execution_profile_hash =
-            crate::execution_profile_artifact_hash_v1(&profile_artifact);
+        budget_input.execution_profile_hash = crate::execution_profile_artifact_hash_v1(&[]);
         let budget = pos_core::ExecutableBudgetPolicyV1::new(budget_input).map_err(|error| {
             RuntimeError::CapabilityMismatch {
                 name: plugin.name().to_owned(),
@@ -4246,7 +4238,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_binding_reports_unknown_execution_profile() {
+    fn generated_binding_does_not_claim_a_named_execution_profile() {
         let plugin = simple_plugin("profile-fixture", &["profile.output"]);
         let result = PluginRegistry::generated_output_binding_with_budget_input_for_profile(
             &plugin,
@@ -4289,10 +4281,11 @@ mod tests {
             },
             "missing-profile",
         );
-        assert!(matches!(
-            result,
-            Err(RuntimeError::CapabilityMismatch { .. })
-        ));
+        let (_, budget) = result.test_ok();
+        assert_eq!(
+            budget.fields().execution_profile_hash,
+            crate::execution_profile_artifact_hash_v1(&[])
+        );
     }
 
     #[test]

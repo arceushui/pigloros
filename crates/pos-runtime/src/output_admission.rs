@@ -816,7 +816,8 @@ impl OutputPolicyBindingV1 {
         self.artifacts.configuration_artifact()
     }
 
-    /// Exact installed EPF1 bytes retained by this binding.
+    /// Exact execution-profile bytes retained by this binding. The local
+    /// `Generated` source has no EPF1 profile; installed sources retain exact EPF1.
     #[must_use]
     pub fn execution_profile_artifact(&self) -> &[u8] {
         self.artifacts.execution_profile_artifact()
@@ -850,11 +851,10 @@ impl OutputPolicyBindingV1 {
 
 /// The immutable artifact closure required to activate one output policy.
 ///
-/// EOP1/EBP1 identify the declarations and executable bounds.  The remaining
-/// bytes are the exact implementation, configuration, EPF1, and RTP1 inputs
-/// that those records reference.  Keeping the bytes with the admission owner
-/// makes the Replay identity retrievable instead of reducing it to opaque
-/// digests.
+/// EOP1/EBP1 identify the declarations and executable bounds. The remaining
+/// bytes are the exact implementation, configuration, optional EPF1, and RTP1
+/// inputs that those records reference. The local `Generated` path has no
+/// installed execution profile, so its EPF1 member is empty.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutputPolicyClosureV1 {
     output_policy: OutputPolicyV1,
@@ -1001,7 +1001,8 @@ impl OutputPolicyClosureV1 {
         &self.configuration_artifact
     }
 
-    /// Exact EPF1 bytes retained for Replay closure retrieval.
+    /// Exact execution-profile bytes retained for Replay closure retrieval.
+    /// Metadata-only local admission has an empty profile member.
     #[must_use]
     pub fn execution_profile_artifact(&self) -> &[u8] {
         &self.execution_profile_artifact
@@ -1132,9 +1133,9 @@ impl OutputPolicyClosureV1 {
 
     /// Encode the retained closure as one deterministic, length-framed record.
     ///
-    /// This is a retrieval envelope for a Replay manifest; each member keeps
-    /// its own native EOP1/EBP1/EPF1/RTP1 encoding and is independently
-    /// revalidated before use.
+    /// This is a retrieval envelope for a Replay manifest; each nonempty
+    /// member keeps its native encoding and is independently revalidated
+    /// before use. The local metadata-only profile member is empty.
     #[must_use]
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let members = [
@@ -1167,7 +1168,9 @@ impl OutputPolicyClosureV1 {
 ///
 /// # Errors
 /// Returns the closed artifact or identity error reported by the native
-/// policy, budget, profile, and retention decoders.
+/// policy, budget, profile, and retention decoders. An empty execution-profile
+/// member is valid for metadata-only local admission and makes no installed
+/// profile claim.
 pub fn validate_output_policy_artifacts_v1(
     output_policy_bytes: &[u8],
     executable_budget_bytes: &[u8],
@@ -1224,16 +1227,19 @@ const fn validate_leaf_lengths(
 }
 
 fn validate_execution_profile_artifact_v1(bytes: &[u8]) -> Result<(), OutputAdmissionErrorV1> {
-    pos_conformance::ExecutionProfileV1::from_canonical_cbor(bytes)
-        .map(|_| ())
-        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-}
-
-pub(crate) fn draft_execution_profile_artifact_v1(
-    profile_id: &str,
-) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
-    pos_conformance::draft_execution_profile_bytes_v1(profile_id)
-        .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        pos_conformance::ExecutionProfileV1::from_canonical_cbor(bytes)
+            .map(|_| ())
+            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    }
 }
 
 fn execution_profile_artifact_v1(
@@ -1241,7 +1247,8 @@ fn execution_profile_artifact_v1(
     source: InstalledOutputPolicySourceV1,
 ) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
     if source == InstalledOutputPolicySourceV1::Generated {
-        return draft_execution_profile_artifact_v1(profile_id);
+        let _ = profile_id;
+        return Ok(Vec::new());
     }
     #[cfg(target_os = "linux")]
     {
@@ -1539,14 +1546,14 @@ mod tests {
     }
 
     #[test]
-    fn draft_epf1_requires_generated_source() -> Result<(), Box<dyn std::error::Error>> {
+    fn generated_source_has_no_installed_execution_profile() {
         let profile_id = "deterministic-local-v1";
-        let generated =
-            execution_profile_artifact_v1(profile_id, InstalledOutputPolicySourceV1::Generated)?;
-        assert_eq!(
-            generated,
-            pos_conformance::draft_execution_profile_bytes_v1(profile_id)?
-        );
+        assert!(execution_profile_artifact_v1(
+            profile_id,
+            InstalledOutputPolicySourceV1::Generated
+        )
+        .test_ok()
+        .is_empty());
         for source in [
             InstalledOutputPolicySourceV1::Gateway,
             InstalledOutputPolicySourceV1::World,
@@ -1561,7 +1568,6 @@ mod tests {
                 Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
             );
         }
-        Ok(())
     }
 
     #[test]
@@ -1817,7 +1823,7 @@ mod tests {
         plugin_id: PluginId,
         workload_profile: WorkloadProfileV1,
     ) -> OutputPolicyClosureV1 {
-        let profile = draft_execution_profile_artifact_v1("deterministic-local-v1").or_resume();
+        let profile = [];
         let profile_hash = crate::reviewed_policy::execution_profile_artifact_hash_v1(&profile);
         let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -2287,7 +2293,7 @@ mod tests {
                 closure.configuration_artifact(),
                 fixture_configuration_artifact()
             );
-            assert!(!closure.execution_profile_artifact().is_empty());
+            assert!(closure.execution_profile_artifact().is_empty());
             assert!(!closure.retention_policy_artifact().is_empty());
             assert!(!closure.to_canonical_bytes().is_empty());
         }
