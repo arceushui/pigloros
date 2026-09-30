@@ -4069,6 +4069,10 @@ fn assert_host_admitted_fork_contract(
         "freeze request",
         commands.freeze_access(*request, &freeze_transition()),
     )?;
+    // T2 (affected but not yet frozen) cannot be reached from durable
+    // coordinator state: a request's scope is committed by its access freeze,
+    // so every included classification a host recovers is already frozen.
+    // The pos-core gate/context tests build that inventory directly.
     // T1: a frozen parent is contained without a write or a poisoned host.
     let contained = forks.command(3, Some(*parent))?;
     assert_eq!(
@@ -4189,4 +4193,67 @@ fn assert_verified_empty_host_admits_a_fork(
 fn verified_empty_hosts_admit_forks_on_both_adapters() -> Result<(), Box<dyn std::error::Error>> {
     assert_verified_empty_host_admits_a_fork(StoreConfig::Memory)?;
     assert_verified_empty_host_admits_a_fork(StoreConfig::SqliteInMemory)
+}
+
+/// Timelines and FAR1 rows read through an independent `SQLite` connection.
+fn admitted_fork_rows(path: &str) -> Result<(i64, i64), Box<dyn std::error::Error>> {
+    let connection = rusqlite::Connection::open(path)?;
+    let count = |query: &str| connection.query_row(query, [], |row| row.get::<_, i64>(0));
+    Ok((
+        count("SELECT COUNT(*) FROM timelines")?,
+        count("SELECT COUNT(*) FROM fork_admissions")?,
+    ))
+}
+
+/// T11 through the erasure host: a write lock held by another connection is
+/// a definite pre-write failure. Nothing is written, the host stays Ready,
+/// and the next freeze transition succeeds.
+#[test]
+fn sqlite_host_stays_ready_when_a_write_lock_blocks_an_admitted_fork(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("admitted-fork-lock.db")
+        .to_string_lossy()
+        .into_owned();
+    let mut fixture = admitted_fork_host(StoreConfig::Sqlite { path: path.clone() })?;
+    let AdmittedForkHostV1 {
+        host,
+        forks,
+        other,
+        request,
+        ..
+    } = &mut fixture;
+    let command = forks.command(21, Some(*other))?;
+    let before = admitted_fork_rows(&path)?;
+    let lock = rusqlite::Connection::open(&path)?;
+    lock.execute_batch("BEGIN IMMEDIATE")?;
+    assert_eq!(
+        forks.execute(host, &command),
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    lock.execute_batch("ROLLBACK")?;
+    drop(lock);
+    assert_eq!(admitted_fork_rows(&path)?, before);
+    assert_eq!(
+        forks.recover(host, 21)?,
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    let mut commands = test_stage("open post-lock sender", host.command_sender())?;
+    assert_eq!(
+        test_stage(
+            "freeze after the lock",
+            commands.freeze_access(*request, &freeze_transition()),
+        )?
+        .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    assert!(matches!(
+        forks.execute(host, &command),
+        Ok(pos_core::ForkAdmissionOperationResultV1::Fork(_))
+    ));
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    Ok(())
 }

@@ -5869,13 +5869,21 @@ fn assert_containment_precedence_under_a_frozen_parent<S: AdmittedForkStore>(
     let mut labels = vec![admission_label(&fixture.execute(store, &committed))];
     gate.freeze_timeline_for_test(parent.id());
     gate.freeze_timeline_for_test(stale.id());
-    for command in [
-        committed,
-        fixture.fork(store, 262, parent.id(), "r3-unequal-child", u64::MAX)?,
-        fixture.fork(store, 263, parent.id(), "r3-expired-child", 1)?,
-        fixture.fork(store, 264, stale.id(), "r3-stale-child", u64::MAX)?,
+    labels.push(admission_label(&fixture.execute(store, &committed)));
+    // Each later rule is checked through both the unfenced and the permit
+    // method; every rejection leaves the gate's inventory unpublished.
+    let gate_pair = (gate.as_ref(), gate.as_ref());
+    for (operation, target, child, expires_at) in [
+        (262, parent.id(), "r3-unequal-child", u64::MAX),
+        (263, parent.id(), "r3-expired-child", 1),
+        (264, stale.id(), "r3-stale-child", u64::MAX),
     ] {
+        let command = fixture.fork(store, operation, target, child, expires_at)?;
         labels.push(admission_label(&fixture.execute(store, &command)));
+        let target = (Hash::from_bytes([operation; 32]), target);
+        let (result, published) = fixture.in_transition(store, gate_pair, target, &command);
+        assert!(!published);
+        labels.push(admission_label(&result));
     }
     let unbound_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     unbound_owner.bind_erasure_gate(Arc::clone(&unbound_gate))?;
@@ -5908,7 +5916,10 @@ fn containment_follows_every_earlier_rule_on_both_adapters() -> Result<(), Box<d
             "fork",
             "fork",
             "Conflict",
+            "Conflict",
             "Unauthenticated",
+            "Unauthenticated",
+            "ParentErasureContained",
             "ParentErasureContained",
             "InvalidRequest",
         ]
