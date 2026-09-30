@@ -10839,11 +10839,7 @@ impl MemoryStore {
             (Some(existing_root), _, _) if *existing_root != root_address => {
                 Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
             }
-            (Some(_), Some(_), Some(_))
-            | (Some(_), Some(_), None)
-            | (None, None, Some(_))
-            | (Some(_), None, _)
-            | (None, Some(_), _) => Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
+            _ => Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
         }
     }
 
