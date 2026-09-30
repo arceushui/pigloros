@@ -1,6 +1,6 @@
 use crate::{
-    gateway_test_fixtures::gateway_with_erasure_host_and_authorization, router, AppState, Gateway,
-    GatewayAuthorization, GatewayError, LedgerWriteMode, LocalAuthenticationAdapter,
+    gateway_with_erasure_host_and_authorization, router, AppState, Gateway, GatewayAuthorization,
+    GatewayError, LedgerWriteMode, LocalAuthenticationAdapter,
 };
 use piglor_ledger::LedgerView;
 use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};

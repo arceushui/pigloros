@@ -771,10 +771,6 @@ fn installed_world_registration(
             profile_id,
         ) => |binding|;
         binding.with_installed_driver(driver).map_err(Into::into) => |binding|;
-        binding.with_installed_plugin_action_approver(
-            &topology.world_plugin,
-            [Kind::new(EVENT_TYPE_ACTION_V1)],
-        ).map_err(Into::into) => |binding|;
         reviewed_output_registration(&topology.world_plugin, &binding) => |registration|;
         Ok((binding, registration))
     }

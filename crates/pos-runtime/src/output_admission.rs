@@ -642,6 +642,9 @@ pub struct OutputPolicyBindingV1 {
     artifacts: OutputPolicyArtifactInputV1,
     source: InstalledOutputPolicySourceV1,
     plugin_name: &'static str,
+    /// Owner of the bound instance; only fixture registration consumes it
+    /// until installed registration returns with Wave 9 (#467/#462).
+    #[cfg(any(test, feature = "test-support"))]
     owner_token: PluginOwnerTokenV1,
     driver: Option<Box<dyn Driver>>,
     approver: Option<(Box<dyn ActionApprover>, Vec<Kind>)>,
@@ -684,6 +687,7 @@ impl OutputPolicyBindingV1 {
             artifacts,
             source,
             plugin_name: plugin.name(),
+            #[cfg(any(test, feature = "test-support"))]
             owner_token: PluginInstanceIdentity::installed_owner_token(plugin),
             driver: None,
             approver: None,
@@ -753,38 +757,6 @@ impl OutputPolicyBindingV1 {
             return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
         }
         self.approver = Some((Box::new(approver), routes));
-        Ok(self)
-    }
-
-    /// Clone the World approver from the exact `Plugin` instance that owns this binding.
-    ///
-    /// # Errors
-    /// Rejects a foreign instance, foreign implementation, or duplicate approver.
-    pub fn with_installed_plugin_action_approver<A>(
-        mut self,
-        plugin: &A,
-        event_types: impl IntoIterator<Item = Kind>,
-    ) -> Result<Self, OutputAdmissionErrorV1>
-    where
-        A: Plugin + ActionApprover + Clone + 'static,
-    {
-        if self.approver.is_some()
-            || self.source != InstalledOutputPolicySourceV1::World
-            || self.owner_token != PluginInstanceIdentity::installed_owner_token(plugin)
-            || !self.source.accepts_approver::<A>()
-        {
-            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
-        }
-        // Accept exactly one route, the World action type. The second `next`
-        // only proves that no further route exists; the rest is not consumed.
-        let mut routes = event_types.into_iter();
-        let (Some(route), None) = (routes.next(), routes.next()) else {
-            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
-        };
-        if route.as_str() != WORLD_ACTION_EVENT_TYPE_V1 {
-            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
-        }
-        self.approver = Some((Box::new(plugin.clone()), vec![route]));
         Ok(self)
     }
 
