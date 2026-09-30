@@ -31,6 +31,7 @@ impl Plugin for LocalPlugin {
 
 struct EchoProvider {
     idempotency_keys: Arc<Mutex<Vec<LocalAdapterIdempotencyKeyV1>>>,
+    completed_responses: Arc<Mutex<Vec<(LocalAdapterIdempotencyKeyV1, Vec<u8>)>>>,
 }
 
 impl LocalAdapterProviderV1 for EchoProvider {
@@ -43,20 +44,31 @@ impl LocalAdapterProviderV1 for EchoProvider {
         invocation: &AdapterInvocationV1,
         idempotency_key: LocalAdapterIdempotencyKeyV1,
     ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
-        self.idempotency_keys
+        let mut completed_responses = self
+            .completed_responses
             .lock()
-            .expect("idempotency key lock should be available")
-            .push(idempotency_key);
-        Ok(LocalAdapterProviderResponseV1::acknowledged(
-            invocation
+            .expect("idempotent response lock should be available");
+        let cached_response = completed_responses
+            .iter()
+            .find(|(key, _)| *key == idempotency_key)
+            .map(|(_, response)| response.clone());
+        let response = cached_response.unwrap_or_else(|| {
+            let response = invocation
                 .as_input()
                 .exact_request_payload
                 .iter()
                 .rev()
                 .copied()
-                .collect(),
-            idempotency_key,
-        ))
+                .collect();
+            completed_responses.push((idempotency_key, response.clone()));
+            response
+        });
+        drop(completed_responses);
+        self.idempotency_keys
+            .lock()
+            .expect("idempotency key lock should be available")
+            .push(idempotency_key);
+        Ok(LocalAdapterProviderResponseV1::acknowledged(response, idempotency_key))
     }
 }
 
@@ -85,6 +97,78 @@ impl LocalAdapterProviderV1 for UnacknowledgedProvider {
         _: LocalAdapterIdempotencyKeyV1,
     ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
         Ok(LocalAdapterProviderResponseV1::read_only(b"response".to_vec()))
+    }
+}
+
+struct FailFirstCompletionStore {
+    inner: pos_store::memory::MemoryStore,
+    fail_next_completion: bool,
+}
+
+impl AdapterRecordingStoreV1 for FailFirstCompletionStore {
+    fn open_adapter_recording_session(
+        &mut self,
+        session: pos_core::AdapterRecordingSessionV1,
+    ) -> Result<(), pos_core::AdapterRecordingStoreErrorV1> {
+        self.inner.open_adapter_recording_session(session)
+    }
+
+    fn reserve_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: pos_core::AdapterCallReservationV1,
+    ) -> Result<
+        pos_core::AdapterCallReservationOutcomeV1,
+        pos_core::AdapterRecordingStoreErrorV1,
+    > {
+        self.inner
+            .reserve_adapter_call(owner_reference, run_operation_id, reservation)
+    }
+
+    fn complete_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), pos_core::AdapterRecordingStoreErrorV1> {
+        if std::mem::replace(&mut self.fail_next_completion, false) {
+            return Err(pos_core::AdapterRecordingStoreErrorV1::StorageFailure);
+        }
+        self.inner.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            global_call_index,
+            output_bytes,
+        )
+    }
+
+    fn close_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, pos_core::AdapterRecordingStoreErrorV1> {
+        self.inner
+            .close_adapter_recording_session(owner_reference, run_operation_id)
+    }
+
+    fn read_closed_adapter_recording_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, pos_core::AdapterRecordingStoreErrorV1> {
+        self.inner
+            .read_closed_adapter_recording_session(owner_reference, run_operation_id)
+    }
+
+    fn abort_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), pos_core::AdapterRecordingStoreErrorV1> {
+        self.inner
+            .abort_adapter_recording_session(owner_reference, run_operation_id)
     }
 }
 
@@ -163,6 +247,7 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
     let keys = Arc::new(Mutex::new(Vec::new()));
     let provider = EchoProvider {
         idempotency_keys: Arc::clone(&keys),
+        completed_responses: Arc::new(Mutex::new(Vec::new())),
     };
     let (mut registry, admitted, handle) = registry_with_adapter(Box::new(provider));
     assert_eq!(admitted.adapter_admission().as_input().entries.len(), 1);
@@ -296,9 +381,11 @@ fn failed_local_adapter_session_cannot_produce_a_transcript() {
 #[test]
 fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it() {
     let keys = Arc::new(Mutex::new(Vec::new()));
+    let completed_responses = Arc::new(Mutex::new(Vec::new()));
     let (mut registry, admitted, handle) = registry_with_adapter_mode(
         Box::new(EchoProvider {
             idempotency_keys: Arc::clone(&keys),
+            completed_responses: Arc::clone(&completed_responses),
         }),
         AdapterEffectModeV1::ExternallyIdempotent,
     );
@@ -329,12 +416,22 @@ fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it
     assert_eq!(keys[0].owner_reference(), owner_reference);
     assert_eq!(keys[0].run_operation_id(), operation_id);
     assert_eq!(keys[0].global_call_index(), 0);
+    assert_eq!(
+        completed_responses
+            .lock()
+            .expect("idempotent response lock should be available")
+            .len(),
+        1
+    );
 
     let (mut registry, admitted, handle) = registry_with_adapter_mode(
         Box::new(UnacknowledgedProvider),
         AdapterEffectModeV1::ExternallyIdempotent,
     );
-    let mut recorder = pos_store::memory::MemoryStore::new();
+    let mut recorder = FailFirstCompletionStore {
+        inner: pos_store::memory::MemoryStore::new(),
+        fail_next_completion: false,
+    };
     let mut session = registry
         .begin_local_adapter_session(
             &admitted,
@@ -373,5 +470,76 @@ fn externally_idempotent_registration_requires_a_provider_deduplication_guarante
     assert_eq!(
         registry.register_local_adapter(entry, Box::new(RejectingProvider)),
         Err(LocalAdapterErrorV1::IdempotencyUnavailable)
+    );
+}
+
+#[test]
+fn externally_idempotent_retry_reuses_provider_output_after_completion_failure() {
+    let keys = Arc::new(Mutex::new(Vec::new()));
+    let completed_responses = Arc::new(Mutex::new(Vec::new()));
+    let (mut registry, admitted, handle) = registry_with_adapter_mode(
+        Box::new(EchoProvider {
+            idempotency_keys: Arc::clone(&keys),
+            completed_responses: Arc::clone(&completed_responses),
+        }),
+        AdapterEffectModeV1::ExternallyIdempotent,
+    );
+    let operation_id = Hash::from_bytes([26; 32]);
+    let mut recorder = FailFirstCompletionStore {
+        inner: pos_store::memory::MemoryStore::new(),
+        fail_next_completion: true,
+    };
+    let mut session = registry
+        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
+        .expect("the guaranteed provider should start");
+    assert_eq!(
+        session.invoke(
+            admitted.adapter_admission().as_input().entries[0].plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::RecordingFailed)
+    );
+    drop(session);
+
+    let mut retry = registry
+        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
+        .expect("the open reservation should resume after completion failure");
+    assert_eq!(
+        retry.invoke(
+            admitted.adapter_admission().as_input().entries[0].plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Ok(b"tseuqer".to_vec())
+    );
+    retry
+        .finish()
+        .expect("the deduplicated response should complete and close");
+    assert!(recorder
+        .read_closed_adapter_recording_session(handle.as_input().owner_reference, operation_id)
+        .expect("the wrapper should delegate the closed-session read")
+        .is_some());
+
+    let keys = keys
+        .lock()
+        .expect("idempotency key lock should be available");
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], keys[1]);
+    assert_eq!(keys[0].owner_reference(), handle.as_input().owner_reference);
+    assert_eq!(keys[0].run_operation_id(), operation_id);
+    assert_eq!(keys[0].global_call_index(), 0);
+    assert_eq!(
+        completed_responses
+            .lock()
+            .expect("idempotent response lock should be available")
+            .len(),
+        1
     );
 }
