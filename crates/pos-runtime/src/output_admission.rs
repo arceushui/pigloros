@@ -1211,10 +1211,13 @@ impl OutputAdmissionV1 {
                 });
             };
             let payload_bytes = draft.payload.len();
+            // Compare in u64 without lossy casts; a length beyond u64 saturates
+            // and is rejected by every u32 event limit.
+            let payload_len = u64::try_from(payload_bytes).unwrap_or(u64::MAX);
             let event_limit = declaration
                 .max_bytes()
                 .min(self.budget.fields().max_event_bytes);
-            if payload_bytes > event_limit as usize {
+            if payload_len > u64::from(event_limit) {
                 return Err(OutputAdmissionErrorV1::EventBytesExceeded {
                     event_type: draft.event_type.as_str().to_owned(),
                     requested: payload_bytes,
@@ -1227,7 +1230,7 @@ impl OutputAdmissionV1 {
                 OutputFidelityV1::L2 => 2,
             };
             counts[level] = counts[level].saturating_add(1);
-            bytes[level] = bytes[level].saturating_add(payload_bytes as u64);
+            bytes[level] = bytes[level].saturating_add(payload_len);
         }
 
         for (level_index, budget) in self.budget.fields().fidelity_budgets.iter().enumerate() {
