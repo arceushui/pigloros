@@ -5303,7 +5303,9 @@ impl AdmittedForkFixture {
         bind_owner: bool,
     ) -> Result<Self, Box<dyn Error>> {
         let host = ForkHostSigningKeyV1::from_seed([seed; 32])?;
-        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([seed.wrapping_add(1); 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed(
+            [seed.checked_add(1).ok_or("adapter seed overflows u8")?; 32],
+        )?;
         let policy = authority_policy(&adapter)?;
         let session = open_session(store, &host, &policy)?;
         if bind_owner {
@@ -5313,7 +5315,8 @@ impl AdmittedForkFixture {
                 &adapter,
                 &policy,
                 &session,
-                [seed.wrapping_add(2); 32],
+                [seed.checked_add(2)
+                    .ok_or("POC1 operation seed overflows u8")?; 32],
                 u64::MAX,
                 "owner",
             )?;
@@ -5807,7 +5810,7 @@ fn assert_context_binds_this_fcc1<S: AdmittedForkStore>(
         labels.push(admission_label(&result));
     }
     labels.push(admission_label(&fixture.recover(store, 252)?));
-    let unbound_fixture = AdmittedForkFixture::open(unbound, 254, true)?;
+    let unbound_fixture = AdmittedForkFixture::open(unbound, 228, true)?;
     let unbound_parent = unbound.create_timeline("r3-context-unbound-parent")?;
     let unbound_command = unbound_fixture.fork(
         unbound,
