@@ -71,6 +71,11 @@ use crate::fork_admission_authority::{
     ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityStateV1,
     ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
+use crate::fork_delivery_journal::{
+    fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
+    ForkDeliveryClaimV1, ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryRowV1,
+    ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
+};
 use crate::fork_event_authority::fork_append_request;
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
@@ -225,6 +230,10 @@ pub struct MemoryStore {
     /// Durable-equivalent operation roots keyed by `(kind, operation ID)`.
     fork_admission_operations:
         HashMap<(ForkAdmissionOperationKindV1, Hash), ForkAdmissionOperationRowV1>,
+    /// Private tuple-only local listener delivery journal.
+    fork_delivery_journal: HashMap<Hash, ForkDeliveryRowV1>,
+    /// Never-reused local listener ownership fence, including purged rows.
+    fork_delivery_last_fence: u64,
     fork_classifier_sources: HashMap<(Hash, String), ForkClassifierSourceV1>,
     fork_classifier_tables: HashMap<TimelineId, ForkClassifierTableV1>,
     fork_classifier_registrations: HashMap<Hash, ForkClassifierRegistrationV1>,
@@ -577,6 +586,8 @@ impl MemoryStore {
             fork_principal_owner_binding_digests: HashMap::new(),
             fork_admissions: HashMap::new(),
             fork_admission_operations: HashMap::new(),
+            fork_delivery_journal: HashMap::new(),
+            fork_delivery_last_fence: 0,
             fork_classifier_sources: HashMap::new(),
             fork_classifier_tables: HashMap::new(),
             fork_classifier_registrations: HashMap::new(),
@@ -1646,6 +1657,308 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
             .get(&(query.kind, query.operation_id))
             .ok_or(pos_core::ForkAdmissionErrorV1::OperationMissing)?;
         self.stored_fork_admission_result(row)
+    }
+}
+
+impl ForkAdmissionDeliveryJournalPortV1 for MemoryStore {
+    fn claim_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+    ) -> Result<ForkDeliveryClaimOutcomeV1, ForkDeliveryJournalErrorV1> {
+        if !validate_live_session(&self.fork_admission_authority, session) {
+            return Err(ForkDeliveryJournalErrorV1::Corrupt);
+        }
+        let tuple = tuple.revalidate()?;
+        if let Some(row) = self.fork_delivery_journal.get(&tuple.host_request_id) {
+            if row.tuple != tuple {
+                return Err(ForkDeliveryJournalErrorV1::Conflict);
+            }
+            return Ok(match row.state {
+                ForkDeliveryStateV1::Pending => ForkDeliveryClaimOutcomeV1::Busy,
+                state => ForkDeliveryClaimOutcomeV1::Reconcile(
+                    ForkDeliveryClaimV1 {
+                        tuple,
+                        owner_fence: row.owner_fence,
+                    },
+                    state,
+                ),
+            });
+        }
+        if self
+            .fork_delivery_journal
+            .values()
+            .any(|row| row.tuple.kind == tuple.kind && row.tuple.operation_id == tuple.operation_id)
+        {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        let owner_fence = self
+            .fork_delivery_last_fence
+            .checked_add(1)
+            .ok_or(ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        self.fork_delivery_last_fence = owner_fence;
+        let claim = ForkDeliveryClaimV1 { tuple, owner_fence };
+        self.fork_delivery_journal.insert(
+            tuple.host_request_id,
+            ForkDeliveryRowV1 {
+                tuple,
+                state: ForkDeliveryStateV1::Pending,
+                owner_fence,
+            },
+        );
+        Ok(ForkDeliveryClaimOutcomeV1::Owner(claim))
+    }
+
+    fn cancel_pending_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        if !validate_live_session(&self.fork_admission_authority, session) {
+            return Err(ForkDeliveryJournalErrorV1::Corrupt);
+        }
+        self.fork_delivery_journal
+            .get(&claim.tuple.host_request_id)
+            .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Pending))
+            .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
+        self.fork_delivery_journal
+            .remove(&claim.tuple.host_request_id);
+        Ok(())
+    }
+
+    fn execute_claimed_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::ForkAuthenticationPolicyV1,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+        // Same order as the SQLite adapter: authenticate the command, bind it
+        // to the claimed tuple, then check the owner fence.
+        let host = self
+            .fork_admission_authority
+            .host
+            .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+        let verified = verify_command(
+            session,
+            self.fork_admission_authority.session_identity,
+            host,
+            policy,
+            command,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if verified.kind() != claim.tuple.kind
+            || verified.operation_id() != claim.tuple.operation_id
+        {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        self.fork_delivery_journal
+            .get(&claim.tuple.host_request_id)
+            .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Pending))
+            .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
+        let execution =
+            fork_delivery_execution(self.execute_fork_admission_command(session, policy, command));
+        if matches!(execution, ForkDeliveryExecutionV1::Rejected(_)) {
+            self.fork_delivery_journal
+                .remove(&claim.tuple.host_request_id);
+        } else {
+            self.fork_delivery_journal.insert(
+                claim.tuple.host_request_id,
+                ForkDeliveryRowV1 {
+                    tuple: claim.tuple,
+                    state: ForkDeliveryStateV1::Uncertain,
+                    owner_fence: claim.owner_fence,
+                },
+            );
+        }
+        Ok(execution)
+    }
+
+    fn recover_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+        current_principal_digest: Hash,
+    ) -> Result<ForkAdmissionOperationResultV1, ForkDeliveryJournalErrorV1> {
+        let host = self.live_fork_delivery_host(session)?;
+        if current_principal_digest == Hash::zero() {
+            return Err(ForkDeliveryJournalErrorV1::InvalidTuple);
+        }
+        let row = self
+            .fork_delivery_journal
+            .get(&tuple.host_request_id)
+            .copied()
+            .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+        if row.tuple != tuple {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        if row.state == ForkDeliveryStateV1::Pending {
+            return Err(ForkDeliveryJournalErrorV1::Fenced);
+        }
+        let query = verify_recovery_proof(
+            session,
+            self.fork_admission_authority.session_identity,
+            host,
+            proof,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if query.kind != tuple.kind || query.operation_id != tuple.operation_id {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        let result = self
+            .recover_fork_admission_command(session, proof)
+            .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if !self.delivery_result_matches_principal(&result, current_principal_digest) {
+            return Err(ForkDeliveryJournalErrorV1::Corrupt);
+        }
+        Ok(result)
+    }
+
+    fn mark_fork_delivery_uncertain(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        if !validate_live_session(&self.fork_admission_authority, session) {
+            return Err(ForkDeliveryJournalErrorV1::Corrupt);
+        }
+        // A committed FAC1 already recorded Uncertain; this call is only the
+        // owner-fence check that the committed owner still holds the tuple.
+        self.fork_delivery_journal
+            .get(&claim.tuple.host_request_id)
+            .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Uncertain))
+            .map(|_| ())
+            .ok_or(ForkDeliveryJournalErrorV1::Fenced)
+    }
+
+    fn mark_fork_delivery_delivered(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        if !validate_live_session(&self.fork_admission_authority, session) {
+            return Err(ForkDeliveryJournalErrorV1::Corrupt);
+        }
+        self.fork_delivery_journal
+            .get_mut(&claim.tuple.host_request_id)
+            .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Uncertain))
+            .map(|row| row.state = ForkDeliveryStateV1::Delivered)
+            .ok_or(ForkDeliveryJournalErrorV1::Fenced)
+    }
+
+    fn reconcile_fork_delivery_journal(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<Vec<ForkDeliveryTupleV1>, ForkDeliveryJournalErrorV1> {
+        if !validate_live_session(&self.fork_admission_authority, session) {
+            return Err(ForkDeliveryJournalErrorV1::Corrupt);
+        }
+        Ok(self
+            .fork_delivery_journal
+            .values()
+            .filter(|row| row.state != ForkDeliveryStateV1::Delivered)
+            .map(|row| row.tuple)
+            .collect())
+    }
+
+    fn reconcile_fork_delivery_startup(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+    ) -> Result<ForkDeliveryStartupOutcomeV1, ForkDeliveryJournalErrorV1> {
+        // Same order as the SQLite adapter: verify FRP1 before the row.
+        let host = self.live_fork_delivery_host(session)?;
+        let query = verify_recovery_proof(
+            session,
+            self.fork_admission_authority.session_identity,
+            host,
+            proof,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if query.kind != tuple.kind || query.operation_id != tuple.operation_id {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        let row = self
+            .fork_delivery_journal
+            .get(&tuple.host_request_id)
+            .copied()
+            .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+        if row.tuple != tuple || row.state == ForkDeliveryStateV1::Delivered {
+            return Err(ForkDeliveryJournalErrorV1::Fenced);
+        }
+        match self.recover_fork_admission_command(session, proof) {
+            Ok(_) => {
+                self.fork_delivery_journal.insert(
+                    tuple.host_request_id,
+                    ForkDeliveryRowV1 {
+                        tuple,
+                        state: ForkDeliveryStateV1::Uncertain,
+                        owner_fence: row.owner_fence,
+                    },
+                );
+                Ok(ForkDeliveryStartupOutcomeV1::RetainedUncertain)
+            }
+            Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+                if row.state == ForkDeliveryStateV1::Pending =>
+            {
+                self.fork_delivery_journal.remove(&tuple.host_request_id);
+                Ok(ForkDeliveryStartupOutcomeV1::ReleasedPending)
+            }
+            Err(_) => Err(ForkDeliveryJournalErrorV1::Corrupt),
+        }
+    }
+
+    fn purge_expired_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        if !validate_live_session(&self.fork_admission_authority, session) {
+            return Err(ForkDeliveryJournalErrorV1::Corrupt);
+        }
+        // Same as the SQLite exact-row DELETE: any non-exact or absent row is Fenced.
+        self.fork_delivery_journal
+            .get(&tuple.host_request_id)
+            .filter(|row| row.tuple == tuple && row.state == ForkDeliveryStateV1::Delivered)
+            .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
+        self.fork_delivery_journal.remove(&tuple.host_request_id);
+        Ok(())
+    }
+}
+
+impl MemoryStore {
+    /// Returns the live FAH1 host, or `Corrupt` for a stale session.
+    fn live_fork_delivery_host(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<ForkAdmissionHostRecordV1, ForkDeliveryJournalErrorV1> {
+        self.fork_admission_authority
+            .host
+            .filter(|_| validate_live_session(&self.fork_admission_authority, session))
+            .ok_or(ForkDeliveryJournalErrorV1::Corrupt)
+    }
+
+    fn delivery_result_matches_principal(
+        &self,
+        result: &ForkAdmissionOperationResultV1,
+        principal_digest: Hash,
+    ) -> bool {
+        match result {
+            ForkAdmissionOperationResultV1::PrincipalOwner(binding) => {
+                binding.input().principal_digest == principal_digest
+            }
+            ForkAdmissionOperationResultV1::Fork(receipt) => self
+                .fork_admissions
+                .get(&receipt.child_id)
+                .and_then(|admission| {
+                    self.principal_owner_binding_by_digest(
+                        admission.input().principal_owner_binding_digest,
+                    )
+                })
+                .is_some_and(|binding| binding.input().principal_digest == principal_digest),
+        }
     }
 }
 
@@ -4668,8 +4981,13 @@ impl MemoryStore {
 mod tests {
     use super::*;
     use crate::ErasureRejoinPersistencePortV1;
+    use ciborium::value::Value;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
+        fork_authentication::{
+            principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
+            ForkAuthenticationPolicyV1,
+        },
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1,
             GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore, GeoLocationReplayEvidenceV1,
@@ -4685,11 +5003,16 @@ mod tests {
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
         ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
-        ErasureVerifiedInventoryV1, EventOriginRecordInputV1, ForkAppendOperationInputV1,
-        ForkAppendSourceIdentityV1, ForkClassifierSourceInputV1, ForkClassifierTableInputV1,
-        ForkEventOriginKindV1, ForkInterventionAdmissionInputV1, KeyIdentityV1, KeyRegistrationV1,
-        KeyRegistryStateV1, KeyRoleV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore,
-        OwnerIdV1, PublicKey,
+        ErasureVerifiedInventoryV1, EventOriginRecordInputV1, ForkAdmissionHostCommandV1,
+        ForkAppendOperationInputV1, ForkAppendSourceIdentityV1, ForkClassifierSourceInputV1,
+        ForkClassifierTableInputV1, ForkEventOriginKindV1, ForkInterventionAdmissionInputV1,
+        KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, OwnerIdV1, PrincipalRefV1,
+        PublicKey,
+    };
+    use pos_crypto::fork_authentication::{
+        verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
+        ForkHostSigningKeyV1,
     };
 
     #[test]
@@ -5773,6 +6096,265 @@ mod tests {
 
     pub(super) fn new_store() -> MemoryStore {
         fixture_store(MemoryStore::new())
+    }
+
+    fn delivery_encode(value: &Value) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes).test_ok();
+        bytes
+    }
+
+    fn delivery_policy(
+        adapter: &ForkAuthenticationAdapterSigningKeyV1,
+    ) -> ForkAuthenticationPolicyV1 {
+        ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
+            adapter_id: "memory-delivery-adapter".to_owned(),
+            verifying_key: adapter.public_key(),
+            minimum_assurance: 1,
+            registry_bindings: vec![Hash::from_bytes([3; 32])],
+        }])
+        .test_ok()
+    }
+
+    fn delivery_session(
+        store: &mut MemoryStore,
+        host: &ForkHostSigningKeyV1,
+        policy: &ForkAuthenticationPolicyV1,
+    ) -> ForkAdmissionAuthoritySessionV1 {
+        let host_key = PublicKey::from_bytes(host.public_key());
+        let initialize = store
+            .begin_fork_admission_initialize(host_key, policy.digest().test_ok())
+            .test_ok();
+        store
+            .finalize_fork_admission_initialize(
+                &initialize,
+                &host
+                    .sign_initialize(&initialize.to_canonical_cbor().test_ok())
+                    .test_ok(),
+            )
+            .test_ok();
+        let open = store
+            .begin_fork_admission_open(host_key, policy.digest().test_ok())
+            .test_ok();
+        store
+            .finalize_fork_admission_open(
+                &open,
+                &host
+                    .sign_open(&open.to_canonical_cbor().test_ok())
+                    .test_ok(),
+            )
+            .test_ok()
+    }
+
+    fn delivery_principal_command(
+        store: &MemoryStore,
+        host: &ForkHostSigningKeyV1,
+        adapter: &ForkAuthenticationAdapterSigningKeyV1,
+        policy: &ForkAuthenticationPolicyV1,
+        session: &ForkAdmissionAuthoritySessionV1,
+        operation_id: [u8; 32],
+    ) -> ForkAdmissionHostCommandV1 {
+        let evidence = adapter
+            .sign_authenticated_principal(AuthenticatedPrincipalRecordV1 {
+                principal: PrincipalRefV1::try_new([4; 16], "memory.test").test_ok(),
+                adapter_id: "memory-delivery-adapter".to_owned(),
+                assurance: 1,
+                issued_at: 0,
+                expires_at: u64::MAX,
+                registry_binding: Hash::from_bytes([3; 32]),
+                operation_nonce: [5; 32],
+            })
+            .test_ok();
+        let verified = verify_authenticated_principal_evidence_v1(policy, evidence).test_ok();
+        let principal = principal_digest_v1(&verified.evidence().record().principal).test_ok();
+        let inner = delivery_encode(&Value::Array(vec![
+            Value::Text("POC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(
+                store
+                    .fork_admission_host_record()
+                    .test_ok()
+                    .store_id()
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            Value::Bytes(session.identity().as_bytes().to_vec()),
+            Value::Bytes(operation_id.to_vec()),
+            Value::Bytes(verified.evidence().digest().test_ok().as_bytes().to_vec()),
+            Value::Bytes(principal.as_bytes().to_vec()),
+            Value::Text("memory-delivery-owner".to_owned()),
+        ]));
+        let signature = host.sign_command(&inner, &verified).test_ok();
+        ForkAdmissionHostCommandV1::from_canonical_cbor(&delivery_encode(&Value::Array(vec![
+            Value::Text("FAC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(inner),
+            Value::Bytes(verified.evidence().to_canonical_cbor().test_ok()),
+            Value::Bytes(signature.as_bytes().to_vec()),
+        ])))
+        .test_ok()
+    }
+
+    fn delivery_recovery_proof(
+        store: &MemoryStore,
+        host: &ForkHostSigningKeyV1,
+        session: &ForkAdmissionAuthoritySessionV1,
+        operation_id: [u8; 32],
+    ) -> ForkAdmissionRecoveryProofV1 {
+        let recovery = delivery_encode(&Value::Array(vec![
+            Value::Text("FRC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(
+                store
+                    .fork_admission_host_record()
+                    .test_ok()
+                    .store_id()
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            Value::Bytes(session.identity().as_bytes().to_vec()),
+            Value::Integer(1.into()),
+            Value::Bytes(operation_id.to_vec()),
+        ]));
+        ForkAdmissionRecoveryProofV1::from_canonical_cbor(&delivery_encode(&Value::Array(vec![
+            Value::Text("FRP1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(recovery.clone()),
+            Value::Bytes(host.sign_recovery(&recovery).test_ok().as_bytes().to_vec()),
+        ])))
+        .test_ok()
+    }
+
+    fn delivery_owner_claim(
+        store: &mut MemoryStore,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+    ) -> Result<ForkDeliveryClaimV1, String> {
+        match store.claim_fork_delivery(session, tuple) {
+            Ok(ForkDeliveryClaimOutcomeV1::Owner(claim)) => Ok(claim),
+            outcome => Err(format!("expected delivery owner, got {outcome:?}")),
+        }
+    }
+
+    #[test]
+    fn delivery_journal_fails_closed_for_exhausted_or_missing_memory_rows() {
+        let host = ForkHostSigningKeyV1::from_seed([201; 32]).test_ok();
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([202; 32]).test_ok();
+        let policy = delivery_policy(&adapter);
+        let mut store = MemoryStore::new();
+        let session = delivery_session(&mut store, &host, &policy);
+        let tuple = ForkDeliveryTupleV1::new(
+            Hash::from_bytes([203; 32]),
+            ForkAdmissionOperationKindV1::PrincipalOwner,
+            Hash::from_bytes([204; 32]),
+        )
+        .test_ok();
+
+        store.fork_delivery_last_fence = u64::MAX;
+        assert_eq!(
+            store.claim_fork_delivery(&session, tuple),
+            Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+        );
+
+        store.fork_delivery_last_fence = 0;
+        let claim = delivery_owner_claim(&mut store, &session, tuple).test_ok();
+        let command =
+            delivery_principal_command(&store, &host, &adapter, &policy, &session, [204; 32]);
+        let proof = delivery_recovery_proof(&store, &host, &session, [204; 32]);
+        store.fork_delivery_journal.remove(&tuple.host_request_id);
+
+        assert_eq!(
+            store.execute_claimed_fork_delivery(&session, &policy, claim, &command),
+            Err(ForkDeliveryJournalErrorV1::Fenced)
+        );
+        assert_eq!(
+            store.mark_fork_delivery_uncertain(&session, claim),
+            Err(ForkDeliveryJournalErrorV1::Fenced)
+        );
+        assert_eq!(
+            store.mark_fork_delivery_delivered(&session, claim),
+            Err(ForkDeliveryJournalErrorV1::Fenced)
+        );
+        assert_eq!(
+            store.recover_fork_delivery(&session, tuple, &proof, Hash::from_bytes([205; 32])),
+            Err(ForkDeliveryJournalErrorV1::Corrupt)
+        );
+        assert_eq!(
+            store.reconcile_fork_delivery_startup(&session, tuple, &proof),
+            Err(ForkDeliveryJournalErrorV1::Corrupt)
+        );
+    }
+
+    #[test]
+    fn delivery_journal_rejects_corrupt_authority_and_orphaned_uncertain_rows() {
+        let host = ForkHostSigningKeyV1::from_seed([211; 32]).test_ok();
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([212; 32]).test_ok();
+        let policy = delivery_policy(&adapter);
+        let mut store = MemoryStore::new();
+        let session = delivery_session(&mut store, &host, &policy);
+        let tuple = ForkDeliveryTupleV1::new(
+            Hash::from_bytes([213; 32]),
+            ForkAdmissionOperationKindV1::PrincipalOwner,
+            Hash::from_bytes([214; 32]),
+        )
+        .test_ok();
+        let claim = delivery_owner_claim(&mut store, &session, tuple).test_ok();
+        let command =
+            delivery_principal_command(&store, &host, &adapter, &policy, &session, [214; 32]);
+        let proof = delivery_recovery_proof(&store, &host, &session, [214; 32]);
+
+        store.fork_admission_authority.host = None;
+        assert_eq!(
+            store.execute_claimed_fork_delivery(&session, &policy, claim, &command),
+            Err(ForkDeliveryJournalErrorV1::Corrupt)
+        );
+        assert_eq!(
+            store.recover_fork_delivery(&session, tuple, &proof, Hash::from_bytes([215; 32])),
+            Err(ForkDeliveryJournalErrorV1::Corrupt)
+        );
+        assert_eq!(
+            store.reconcile_fork_delivery_startup(&session, tuple, &proof),
+            Err(ForkDeliveryJournalErrorV1::Corrupt)
+        );
+
+        let mut store = MemoryStore::new();
+        let session = delivery_session(&mut store, &host, &policy);
+        let tuple = ForkDeliveryTupleV1::new(
+            Hash::from_bytes([216; 32]),
+            ForkAdmissionOperationKindV1::PrincipalOwner,
+            Hash::from_bytes([217; 32]),
+        )
+        .test_ok();
+        let _claim = delivery_owner_claim(&mut store, &session, tuple).test_ok();
+        store
+            .fork_delivery_journal
+            .get_mut(&tuple.host_request_id)
+            .test_ok()
+            .state = ForkDeliveryStateV1::Uncertain;
+        let proof = delivery_recovery_proof(&store, &host, &session, [217; 32]);
+        let wrong_proof = delivery_recovery_proof(&store, &host, &session, [219; 32]);
+
+        assert_eq!(
+            store.recover_fork_delivery(&session, tuple, &proof, Hash::zero()),
+            Err(ForkDeliveryJournalErrorV1::InvalidTuple)
+        );
+        assert_eq!(
+            store
+                .recover_fork_delivery(&session, tuple, &wrong_proof, Hash::from_bytes([218; 32]),),
+            Err(ForkDeliveryJournalErrorV1::Conflict)
+        );
+        assert_eq!(
+            store.reconcile_fork_delivery_startup(&session, tuple, &wrong_proof),
+            Err(ForkDeliveryJournalErrorV1::Conflict)
+        );
+        assert_eq!(
+            store.recover_fork_delivery(&session, tuple, &proof, Hash::from_bytes([218; 32])),
+            Err(ForkDeliveryJournalErrorV1::Corrupt)
+        );
+        assert_eq!(
+            store.reconcile_fork_delivery_startup(&session, tuple, &proof),
+            Err(ForkDeliveryJournalErrorV1::Corrupt)
+        );
     }
 
     #[test]

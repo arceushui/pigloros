@@ -23,6 +23,9 @@ use pos_crypto::fork_authentication::{
 use pos_store::{
     memory::MemoryStore, sqlite::SqliteStore, ForkAdmissionAuthorityBootstrapPortV1,
     ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
+    ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
+    ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1,
+    ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 use rusqlite::{params, Connection};
 
@@ -107,6 +110,30 @@ fn public_custom_clock_cannot_bootstrap_authority() -> Result<(), Box<dyn Error>
         Err(ForkAdmissionAuthorityErrorV1::AuthorityClockUnavailable)
     );
     Ok(())
+}
+
+#[test]
+fn public_delivery_tuple_constructor_fails_closed_and_preserves_values() {
+    let host_request_id = Hash::from_bytes([1; 32]);
+    let operation_id = Hash::from_bytes([2; 32]);
+    let kind = pos_core::ForkAdmissionOperationKindV1::Fork;
+
+    assert_eq!(
+        ForkDeliveryTupleV1::new(Hash::zero(), kind, operation_id),
+        Err(ForkDeliveryJournalErrorV1::InvalidTuple)
+    );
+    assert_eq!(
+        ForkDeliveryTupleV1::new(host_request_id, kind, Hash::zero()),
+        Err(ForkDeliveryJournalErrorV1::InvalidTuple)
+    );
+    assert_eq!(
+        ForkDeliveryTupleV1::new(host_request_id, kind, operation_id),
+        Ok(ForkDeliveryTupleV1 {
+            host_request_id,
+            kind,
+            operation_id,
+        })
+    );
 }
 
 #[test]
@@ -393,6 +420,1968 @@ fn sqlite_principal_recovery_fixture(
         ForkAdmissionOperationResultV1::PrincipalOwner(_)
     ));
     Ok((store, host, session))
+}
+
+fn claim_delivery<S: ForkAdmissionDeliveryJournalPortV1>(
+    store: &mut S,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+    tuple: ForkDeliveryTupleV1,
+    context: &str,
+) -> Result<ForkDeliveryClaimV1, Box<dyn Error>> {
+    match store.claim_fork_delivery(session, tuple)? {
+        ForkDeliveryClaimOutcomeV1::Owner(claim) => Ok(claim),
+        outcome => Err(std::io::Error::other(format!(
+            "unexpected {context} delivery claim: {outcome:?}"
+        ))
+        .into()),
+    }
+}
+
+fn assert_delivery_claim_is_fenced<S>(
+    store: &mut S,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+    tuple: ForkDeliveryTupleV1,
+    claim: ForkDeliveryClaimV1,
+    host: &ForkHostSigningKeyV1,
+    operation: [u8; 32],
+) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionDeliveryJournalPortV1,
+{
+    assert_eq!(
+        store.claim_fork_delivery(session, tuple)?,
+        ForkDeliveryClaimOutcomeV1::Busy
+    );
+    let conflicting = ForkDeliveryTupleV1::new(
+        tuple.host_request_id,
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([35; 32]),
+    )?;
+    assert_eq!(
+        store.claim_fork_delivery(session, conflicting),
+        Err(ForkDeliveryJournalErrorV1::Conflict)
+    );
+    assert_eq!(
+        store.mark_fork_delivery_delivered(session, claim),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.mark_fork_delivery_uncertain(session, claim),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    let pending_proof = recovery_proof(store, host, session, 1, operation)?;
+    assert!(store
+        .recover_fork_delivery(session, tuple, &pending_proof, Hash::from_bytes([4; 32]))
+        .is_err());
+    Ok(())
+}
+
+fn assert_absent_delivery_is_released<S>(
+    store: &mut S,
+    session: &pos_store::ForkAdmissionAuthoritySessionV1,
+    host: &ForkHostSigningKeyV1,
+) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionDeliveryJournalPortV1,
+{
+    let absent_operation = [50; 32];
+    let absent_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([51; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(absent_operation),
+    )?;
+    let absent_claim = claim_delivery(store, session, absent_tuple, "absent-operation")?;
+    let absent_proof = recovery_proof(store, host, session, 1, absent_operation)?;
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(session, absent_tuple, &absent_proof)?,
+        ForkDeliveryStartupOutcomeV1::ReleasedPending
+    );
+    let retry = claim_delivery(store, session, absent_tuple, "released retry")?;
+    assert!(retry.owner_fence > absent_claim.owner_fence);
+    store.cancel_pending_fork_delivery(session, retry)?;
+    Ok(())
+}
+
+fn assert_delivery_journal<S>(store: &mut S) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1
+        + ForkAdmissionDeliveryJournalPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([31; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([32; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut session = open_session(store, &host, &policy)?;
+    let operation = [33; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([34; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    let claim = claim_delivery(store, &session, tuple, "first")?;
+    assert_delivery_claim_is_fenced(store, &session, tuple, claim, &host, operation)?;
+    let command = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        operation,
+        u64::MAX,
+        "delivery-owner",
+    )?;
+    assert!(matches!(
+        store.execute_claimed_fork_delivery(&session, &policy, claim, &command)?,
+        ForkDeliveryExecutionV1::Committed(_)
+    ));
+    store.mark_fork_delivery_uncertain(&session, claim)?;
+    assert!(store
+        .reconcile_fork_delivery_journal(&session)?
+        .contains(&tuple));
+    assert_eq!(
+        store.claim_fork_delivery(&session, tuple)?,
+        ForkDeliveryClaimOutcomeV1::Reconcile(claim, ForkDeliveryStateV1::Uncertain)
+    );
+    let proof = recovery_proof(store, &host, &session, 1, operation)?;
+    assert_eq!(
+        store.recover_fork_delivery(&session, tuple, &proof, Hash::from_bytes([36; 32])),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    let current_principal = principal_digest_v1(&PrincipalRefV1::try_new([4; 16], "test.local")?)?;
+    assert!(matches!(
+        store.recover_fork_delivery(&session, tuple, &proof, current_principal)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    store.mark_fork_delivery_delivered(&session, claim)?;
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, tuple, &proof),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.mark_fork_delivery_uncertain(&session, claim),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.claim_fork_delivery(&session, tuple)?,
+        ForkDeliveryClaimOutcomeV1::Reconcile(claim, ForkDeliveryStateV1::Delivered)
+    );
+    let next_session = reopen_session(store, &host, &policy)?;
+    assert_eq!(
+        store.recover_fork_delivery(&session, tuple, &proof, current_principal),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    session = next_session;
+    let next_proof = recovery_proof(store, &host, &session, 1, operation)?;
+    assert!(matches!(
+        store.recover_fork_delivery(&session, tuple, &next_proof, current_principal)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    store.purge_expired_fork_delivery(&session, tuple)?;
+    let replacement = claim_delivery(store, &session, tuple, "replacement")?;
+    assert!(replacement.owner_fence > claim.owner_fence);
+    assert_eq!(
+        store.mark_fork_delivery_uncertain(&session, claim),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    store.cancel_pending_fork_delivery(&session, replacement)?;
+    let next = claim_delivery(store, &session, tuple, "post-cancel")?;
+    assert!(next.owner_fence > replacement.owner_fence);
+    assert_eq!(
+        store.cancel_pending_fork_delivery(&session, replacement),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, tuple, &next_proof)?,
+        ForkDeliveryStartupOutcomeV1::RetainedUncertain
+    );
+    assert_eq!(
+        store.claim_fork_delivery(&session, tuple)?,
+        ForkDeliveryClaimOutcomeV1::Reconcile(next, ForkDeliveryStateV1::Uncertain)
+    );
+    assert_absent_delivery_is_released(store, &session, &host)
+}
+
+fn assert_delivery_journal_fences_stale_and_incomplete_work<S>(
+    store: &mut S,
+) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1
+        + ForkAdmissionDeliveryJournalPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([61; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([62; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let stale = open_session(store, &host, &policy)?;
+    let session = reopen_session(store, &host, &policy)?;
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([63; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([64; 32]),
+    )?;
+    let claim = claim_delivery(store, &session, tuple, "incomplete")?;
+    let command = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [64; 32],
+        u64::MAX,
+        "incomplete-owner",
+    )?;
+    let proof = recovery_proof(store, &host, &session, 1, [64; 32])?;
+
+    assert!(store.claim_fork_delivery(&stale, tuple).is_err());
+    assert!(store.cancel_pending_fork_delivery(&stale, claim).is_err());
+    assert!(store
+        .execute_claimed_fork_delivery(&stale, &policy, claim, &command)
+        .is_err());
+    assert!(store
+        .recover_fork_delivery(&stale, tuple, &proof, Hash::from_bytes([65; 32]))
+        .is_err());
+    assert!(store.mark_fork_delivery_uncertain(&stale, claim).is_err());
+    assert!(store.mark_fork_delivery_delivered(&stale, claim).is_err());
+    assert!(store.reconcile_fork_delivery_journal(&stale).is_err());
+    assert!(store
+        .reconcile_fork_delivery_startup(&stale, tuple, &proof)
+        .is_err());
+    assert!(store.purge_expired_fork_delivery(&stale, tuple).is_err());
+
+    assert!(store
+        .recover_fork_delivery(&session, tuple, &proof, Hash::from_bytes([65; 32]))
+        .is_err());
+    assert!(store
+        .execute_claimed_fork_delivery(
+            &session,
+            &policy,
+            ForkDeliveryClaimV1 {
+                owner_fence: claim.owner_fence + 1,
+                ..claim
+            },
+            &command,
+        )
+        .is_err());
+    assert!(store.purge_expired_fork_delivery(&session, tuple).is_err());
+
+    let conflicting = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([66; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([64; 32]),
+    )?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, conflicting),
+        Err(ForkDeliveryJournalErrorV1::Conflict)
+    );
+    let wrong_proof = recovery_proof(store, &host, &session, 1, [67; 32])?;
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, tuple, &wrong_proof),
+        Err(ForkDeliveryJournalErrorV1::Conflict)
+    );
+    store.cancel_pending_fork_delivery(&session, claim)?;
+    assert!(store.purge_expired_fork_delivery(&session, tuple).is_err());
+    Ok(())
+}
+
+fn assert_delivery_rejects_mismatched_and_unauthenticated_commands<S>(
+    store: &mut S,
+) -> Result<(), Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1
+        + ForkAdmissionDeliveryJournalPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([41; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([42; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+
+    let mismatch_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([43; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([44; 32]),
+    )?;
+    let mismatch_claim = claim_delivery(store, &session, mismatch_tuple, "mismatch")?;
+    let mismatched_command = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [45; 32],
+        u64::MAX,
+        "mismatch-owner",
+    )?;
+    assert_eq!(
+        store.execute_claimed_fork_delivery(&session, &policy, mismatch_claim, &mismatched_command),
+        Err(ForkDeliveryJournalErrorV1::Conflict)
+    );
+    store.cancel_pending_fork_delivery(&session, mismatch_claim)?;
+
+    let rejected_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([46; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([47; 32]),
+    )?;
+    let rejected_claim = claim_delivery(store, &session, rejected_tuple, "expired")?;
+    let expired_command = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [47; 32],
+        1,
+        "expired-owner",
+    )?;
+    assert!(matches!(
+        store.execute_claimed_fork_delivery(&session, &policy, rejected_claim, &expired_command)?,
+        ForkDeliveryExecutionV1::Rejected(pos_core::ForkAdmissionErrorV1::Unauthenticated)
+    ));
+    let retry = claim_delivery(store, &session, rejected_tuple, "expired retry")?;
+    store.cancel_pending_fork_delivery(&session, retry)?;
+    Ok(())
+}
+
+fn assert_fork_delivery_recovers_for_current_principal<S>(
+    store: &mut S,
+) -> Result<(), Box<dyn Error>>
+where
+    S: EventStore
+        + ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1
+        + ForkAdmissionDeliveryJournalPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([51; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([52; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let owner = principal_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        [53; 32],
+        u64::MAX,
+        "fork-owner",
+    )?;
+    store.execute_fork_admission_command(&session, &policy, &owner)?;
+    let parent = store.create_timeline("delivery-fork-parent")?;
+    let operation = [54; 32];
+    let command = fork_command(
+        store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        operation,
+        parent.id(),
+        "delivery-fork-child",
+    )?;
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([55; 32]),
+        pos_core::ForkAdmissionOperationKindV1::Fork,
+        Hash::from_bytes(operation),
+    )?;
+    let claim = claim_delivery(store, &session, tuple, "fork")?;
+    assert!(matches!(
+        store.execute_claimed_fork_delivery(&session, &policy, claim, &command)?,
+        ForkDeliveryExecutionV1::Committed(_)
+    ));
+    let proof = recovery_proof(store, &host, &session, 2, operation)?;
+    let current_principal = principal_digest_v1(&PrincipalRefV1::try_new([4; 16], "test.local")?)?;
+    assert!(matches!(
+        store.recover_fork_delivery(&session, tuple, &proof, current_principal)?,
+        ForkAdmissionOperationResultV1::Fork(_)
+    ));
+    assert_eq!(
+        store.recover_fork_delivery(&session, tuple, &proof, Hash::from_bytes([56; 32])),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    let foreign_host = ForkHostSigningKeyV1::from_seed([57; 32])?;
+    let foreign_proof = recovery_proof(store, &foreign_host, &session, 2, operation)?;
+    assert_eq!(
+        store.recover_fork_delivery(&session, tuple, &foreign_proof, current_principal),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, tuple, &foreign_proof),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    Ok(())
+}
+
+#[test]
+fn memory_delivery_journal_is_exact_fenced_and_principal_scoped() -> Result<(), Box<dyn Error>> {
+    assert_delivery_journal(&mut MemoryStore::new())
+}
+
+#[test]
+fn memory_delivery_journal_rejects_bad_commands_and_recovers_forks() -> Result<(), Box<dyn Error>> {
+    assert_delivery_rejects_mismatched_and_unauthenticated_commands(&mut MemoryStore::new())?;
+    assert_fork_delivery_recovers_for_current_principal(&mut MemoryStore::new())?;
+    assert_delivery_journal_fences_stale_and_incomplete_work(&mut MemoryStore::new())
+}
+
+fn execution_label(
+    outcome: &Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1>,
+) -> String {
+    match outcome {
+        Ok(ForkDeliveryExecutionV1::Committed(_)) => "Ok(Committed)".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn recovery_label(
+    outcome: &Result<ForkAdmissionOperationResultV1, ForkDeliveryJournalErrorV1>,
+) -> String {
+    match outcome {
+        Ok(ForkAdmissionOperationResultV1::PrincipalOwner(_)) => "Ok(PrincipalOwner)".to_owned(),
+        Ok(ForkAdmissionOperationResultV1::Fork(_)) => "Ok(Fork)".to_owned(),
+        Err(error) => format!("Err({error:?})"),
+    }
+}
+
+struct DeliveryContractFixture {
+    host: ForkHostSigningKeyV1,
+    adapter: ForkAuthenticationAdapterSigningKeyV1,
+    policy: ForkAuthenticationPolicyV1,
+    session: pos_store::ForkAdmissionAuthoritySessionV1,
+}
+
+/// Zero digests and a definite FAC1 rejection, before any operation commits.
+fn delivery_contract_rejections<S>(
+    store: &mut S,
+    fixture: &DeliveryContractFixture,
+) -> Result<Vec<String>, Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1
+        + ForkAdmissionDeliveryJournalPortV1,
+{
+    let session = &fixture.session;
+    let operation = [148; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([149; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    let mut outcomes = Vec::new();
+    // Public fields can bypass the constructor; the port still rejects zeros.
+    for zero in [
+        ForkDeliveryTupleV1 {
+            host_request_id: Hash::zero(),
+            ..tuple
+        },
+        ForkDeliveryTupleV1 {
+            operation_id: Hash::zero(),
+            ..tuple
+        },
+    ] {
+        outcomes.push(format!("{:?}", store.claim_fork_delivery(session, zero)));
+    }
+    let claim = claim_delivery(store, session, tuple, "contract rejection")?;
+    let expired = principal_command(
+        store,
+        &fixture.host,
+        &fixture.adapter,
+        &fixture.policy,
+        session,
+        operation,
+        1,
+        "contract-expired-owner",
+    )?;
+    outcomes.push(execution_label(&store.execute_claimed_fork_delivery(
+        session,
+        &fixture.policy,
+        claim,
+        &expired,
+    )));
+    outcomes.push(format!(
+        "{:?}",
+        store
+            .claim_fork_delivery(session, tuple)
+            .map(|outcome| matches!(outcome, ForkDeliveryClaimOutcomeV1::Owner(_)))
+    ));
+    Ok(outcomes)
+}
+
+/// Pending, mismatched, zero-principal, and committed recovery transitions.
+fn delivery_contract_lifecycle<S>(
+    store: &mut S,
+    fixture: &DeliveryContractFixture,
+) -> Result<Vec<String>, Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1
+        + ForkAdmissionDeliveryJournalPortV1,
+{
+    let session = &fixture.session;
+    let principal = principal_digest_v1(&PrincipalRefV1::try_new([4; 16], "test.local")?)?;
+    let operation = [143; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([144; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    let mismatched = ForkDeliveryTupleV1 {
+        operation_id: Hash::from_bytes([145; 32]),
+        ..tuple
+    };
+    let absent = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([146; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([147; 32]),
+    )?;
+    let claim = claim_delivery(store, session, tuple, "contract lifecycle")?;
+    let proof = recovery_proof(store, &fixture.host, session, 1, operation)?;
+    let command = principal_command(
+        store,
+        &fixture.host,
+        &fixture.adapter,
+        &fixture.policy,
+        session,
+        operation,
+        u64::MAX,
+        "contract-owner",
+    )?;
+    Ok(vec![
+        recovery_label(&store.recover_fork_delivery(session, tuple, &proof, principal)),
+        recovery_label(&store.recover_fork_delivery(session, tuple, &proof, Hash::zero())),
+        recovery_label(&store.recover_fork_delivery(session, mismatched, &proof, principal)),
+        format!("{:?}", store.mark_fork_delivery_uncertain(session, claim)),
+        format!("{:?}", store.purge_expired_fork_delivery(session, tuple)),
+        format!("{:?}", store.purge_expired_fork_delivery(session, absent)),
+        execution_label(&store.execute_claimed_fork_delivery(
+            session,
+            &fixture.policy,
+            claim,
+            &command,
+        )),
+        format!("{:?}", store.mark_fork_delivery_uncertain(session, claim)),
+        recovery_label(&store.recover_fork_delivery(session, mismatched, &proof, principal)),
+        recovery_label(&store.recover_fork_delivery(session, tuple, &proof, principal)),
+    ])
+}
+
+fn delivery_contract_outcomes<S>(store: &mut S) -> Result<Vec<String>, Box<dyn Error>>
+where
+    S: ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1
+        + ForkAdmissionDeliveryJournalPortV1,
+{
+    let host = ForkHostSigningKeyV1::from_seed([141; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([142; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let session = open_session(store, &host, &policy)?;
+    let fixture = DeliveryContractFixture {
+        host,
+        adapter,
+        policy,
+        session,
+    };
+    let mut outcomes = delivery_contract_rejections(store, &fixture)?;
+    outcomes.extend(delivery_contract_lifecycle(store, &fixture)?);
+    let mut retained = store
+        .reconcile_fork_delivery_journal(&fixture.session)?
+        .iter()
+        .map(|tuple| tuple.host_request_id.as_bytes()[0])
+        .collect::<Vec<_>>();
+    retained.sort_unstable();
+    outcomes.push(format!("{retained:?}"));
+    Ok(outcomes)
+}
+
+#[test]
+fn delivery_journal_adapters_share_one_contract() -> Result<(), Box<dyn Error>> {
+    let memory = delivery_contract_outcomes(&mut MemoryStore::new())?;
+    let sqlite = delivery_contract_outcomes(&mut SqliteStore::open_in_memory()?)?;
+    assert_eq!(memory, sqlite);
+    assert_eq!(
+        memory,
+        [
+            "Err(InvalidTuple)",
+            "Err(InvalidTuple)",
+            "Ok(Rejected(Unauthenticated))",
+            "Ok(true)",
+            "Err(Fenced)",
+            "Err(InvalidTuple)",
+            "Err(Conflict)",
+            "Err(Fenced)",
+            "Err(Fenced)",
+            "Err(Fenced)",
+            "Ok(Committed)",
+            "Ok(())",
+            "Err(Conflict)",
+            "Ok(PrincipalOwner)",
+            "[144, 149]",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_journal_reopens_without_sensitive_columns() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fork-delivery.db");
+    let path = path.to_string_lossy().into_owned();
+    {
+        let mut store = SqliteStore::open(&path)?;
+        assert_delivery_journal(&mut store)?;
+    }
+    let connection = Connection::open(&path)?;
+    let schema: String = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'fork_delivery_journal'",
+        [],
+        |row| row.get(0),
+    )?;
+    let schema = schema.to_ascii_lowercase();
+    for forbidden in ["fal1", "farl1", "principal", "receipt", "result"] {
+        assert!(
+            !schema.contains(forbidden),
+            "journal schema retained {forbidden}"
+        );
+    }
+    drop(connection);
+    let host = ForkHostSigningKeyV1::from_seed([31; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([32; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut reopened = SqliteStore::open(&path)?;
+    let session = reopen_session(&mut reopened, &host, &policy)?;
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([34; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([33; 32]),
+    )?;
+    assert_eq!(
+        reopened.reconcile_fork_delivery_journal(&session)?,
+        vec![tuple]
+    );
+    let proof = recovery_proof(&reopened, &host, &session, 1, [33; 32])?;
+    assert_eq!(
+        reopened.reconcile_fork_delivery_startup(&session, tuple, &proof)?,
+        ForkDeliveryStartupOutcomeV1::RetainedUncertain
+    );
+    let principal = principal_digest_v1(&PrincipalRefV1::try_new([4; 16], "test.local")?)?;
+    assert!(matches!(
+        reopened.recover_fork_delivery(&session, tuple, &proof, principal)?,
+        ForkAdmissionOperationResultV1::PrincipalOwner(_)
+    ));
+    drop(reopened);
+    let corrupt = Connection::open(&path)?;
+    corrupt.execute(
+        "UPDATE fork_delivery_journal SET operation_id = zeroblob(32) WHERE host_request_id = ?1",
+        params![tuple.host_request_id.as_bytes().as_slice()],
+    )?;
+    drop(corrupt);
+    let mut reopened = SqliteStore::open(&path)?;
+    let session = reopen_session(&mut reopened, &host, &policy)?;
+    assert!(reopened.reconcile_fork_delivery_journal(&session).is_err());
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_journal_rejects_bad_commands_and_recovers_forks() -> Result<(), Box<dyn Error>> {
+    assert_delivery_rejects_mismatched_and_unauthenticated_commands(
+        &mut SqliteStore::open_in_memory()?,
+    )?;
+    assert_fork_delivery_recovers_for_current_principal(&mut SqliteStore::open_in_memory()?)?;
+    assert_delivery_journal_fences_stale_and_incomplete_work(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn sqlite_delivery_journal_rejects_malformed_retained_rows() -> Result<(), Box<dyn Error>> {
+    for update in [
+        "UPDATE fork_delivery_journal SET kind = 3",
+        "UPDATE fork_delivery_journal SET host_request_id = X'00'",
+        "UPDATE fork_delivery_journal SET operation_id = X'00'",
+        "UPDATE fork_delivery_journal SET operation_id = zeroblob(32)",
+        "UPDATE fork_delivery_journal SET state = 4",
+        "UPDATE fork_delivery_journal SET owner_fence = 0",
+        "UPDATE fork_delivery_journal SET owner_fence = -1",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("malformed-delivery.db");
+        let path = path.to_string_lossy().into_owned();
+        let host = ForkHostSigningKeyV1::from_seed([71; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([72; 32])?;
+        let policy = authority_policy(&adapter)?;
+        let tuple = ForkDeliveryTupleV1::new(
+            Hash::from_bytes([73; 32]),
+            pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+            Hash::from_bytes([77; 32]),
+        )?;
+        {
+            let mut store = SqliteStore::open(&path)?;
+            let session = open_session(&mut store, &host, &policy)?;
+            claim_delivery(&mut store, &session, tuple, "malformed retained row")?;
+        }
+        let connection = Connection::open(&path)?;
+        connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        connection.execute(update, [])?;
+        drop(connection);
+
+        let mut reopened = SqliteStore::open(&path)?;
+        let session = reopen_session(&mut reopened, &host, &policy)?;
+        assert_eq!(
+            reopened.reconcile_fork_delivery_journal(&session),
+            Err(ForkDeliveryJournalErrorV1::Corrupt)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_journal_rejects_untyped_retained_columns() -> Result<(), Box<dyn Error>> {
+    for update in [
+        "UPDATE fork_delivery_journal SET kind = 'wrong-kind'",
+        "UPDATE fork_delivery_journal SET operation_id = 'wrong-operation'",
+        "UPDATE fork_delivery_journal SET state = 'wrong-state'",
+        "UPDATE fork_delivery_journal SET owner_fence = 'wrong-fence'",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("untyped-delivery.db");
+        let path = path.to_string_lossy().into_owned();
+        let host = ForkHostSigningKeyV1::from_seed([106; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([107; 32])?;
+        let policy = authority_policy(&adapter)?;
+        let tuple = ForkDeliveryTupleV1::new(
+            Hash::from_bytes([108; 32]),
+            pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+            Hash::from_bytes([109; 32]),
+        )?;
+        let mut store = SqliteStore::open(&path)?;
+        let session = open_session(&mut store, &host, &policy)?;
+        claim_delivery(&mut store, &session, tuple, "untyped retained row")?;
+        let connection = Connection::open(&path)?;
+        connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        connection.execute(update, [])?;
+        assert_eq!(
+            store.reconcile_fork_delivery_journal(&session),
+            Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_scan_omits_valid_delivered_rows_but_validates_them() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("delivered-delivery.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([78; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([79; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let operation = [80; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([81; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    let claim = claim_delivery(&mut store, &session, tuple, "delivered scan")?;
+    let command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        operation,
+        u64::MAX,
+        "delivered-scan-owner",
+    )?;
+    assert!(matches!(
+        store.execute_claimed_fork_delivery(&session, &policy, claim, &command)?,
+        ForkDeliveryExecutionV1::Committed(_)
+    ));
+    store.mark_fork_delivery_delivered(&session, claim)?;
+    assert!(store.reconcile_fork_delivery_journal(&session)?.is_empty());
+
+    let corrupt = Connection::open(&path)?;
+    corrupt.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+    corrupt.execute(
+        "UPDATE fork_delivery_journal SET owner_fence = 0 WHERE host_request_id = ?1",
+        params![tuple.host_request_id.as_bytes().as_slice()],
+    )?;
+    drop(corrupt);
+    assert_eq!(
+        store.reconcile_fork_delivery_journal(&session),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_journal_reconciles_and_purges_only_the_exact_delivered_tuple(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("delivered-reconciliation.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([89; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([90; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let operation = [91; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([92; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    let claim = claim_delivery(&mut store, &session, tuple, "delivered reconciliation")?;
+    let command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        operation,
+        u64::MAX,
+        "delivered-reconciliation-owner",
+    )?;
+    assert!(matches!(
+        store.execute_claimed_fork_delivery(&session, &policy, claim, &command)?,
+        ForkDeliveryExecutionV1::Committed(_)
+    ));
+    store.mark_fork_delivery_delivered(&session, claim)?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, tuple)?,
+        ForkDeliveryClaimOutcomeV1::Reconcile(claim, ForkDeliveryStateV1::Delivered)
+    );
+    let conflicting = ForkDeliveryTupleV1::new(
+        tuple.host_request_id,
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([93; 32]),
+    )?;
+    assert_eq!(
+        store.purge_expired_fork_delivery(&session, conflicting),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    store.purge_expired_fork_delivery(&session, tuple)?;
+    let next_claim = claim_delivery(&mut store, &session, tuple, "purged tuple")?;
+    assert_eq!(next_claim.owner_fence, claim.owner_fence + 1);
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_journal_fails_closed_for_corrupt_and_stale_retained_rows(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("corrupt-and-stale-delivery.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([94; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([95; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let operation = [96; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([97; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    let claim = claim_delivery(&mut store, &session, tuple, "stale retained row")?;
+    let command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        operation,
+        u64::MAX,
+        "stale-retained-owner",
+    )?;
+    let proof = recovery_proof(&store, &host, &session, 1, operation)?;
+    let mismatched_tuple = ForkDeliveryTupleV1::new(
+        tuple.host_request_id,
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([98; 32]),
+    )?;
+    assert_eq!(
+        store.recover_fork_delivery(
+            &session,
+            mismatched_tuple,
+            &proof,
+            Hash::from_bytes([99; 32])
+        ),
+        Err(ForkDeliveryJournalErrorV1::Conflict)
+    );
+    assert!(matches!(
+        store.execute_claimed_fork_delivery(&session, &policy, claim, &command)?,
+        ForkDeliveryExecutionV1::Committed(_)
+    ));
+    let wrong_proof = recovery_proof(&store, &host, &session, 1, [100; 32])?;
+    assert_eq!(
+        store.recover_fork_delivery(&session, tuple, &wrong_proof, Hash::from_bytes([99; 32])),
+        Err(ForkDeliveryJournalErrorV1::Conflict)
+    );
+    assert_eq!(
+        store.recover_fork_delivery(&session, tuple, &proof, Hash::zero()),
+        Err(ForkDeliveryJournalErrorV1::InvalidTuple)
+    );
+    let connection = Connection::open(&path)?;
+    connection.execute(
+        "UPDATE fork_delivery_journal SET owner_fence = owner_fence + 1 WHERE host_request_id = ?1",
+        params![tuple.host_request_id.as_bytes().as_slice()],
+    )?;
+    assert_eq!(
+        store.cancel_pending_fork_delivery(&session, claim),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.mark_fork_delivery_uncertain(&session, claim),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.execute_claimed_fork_delivery(&session, &policy, claim, &command),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+    connection.execute(
+        "UPDATE fork_delivery_journal SET owner_fence = 0 WHERE host_request_id = ?1",
+        params![tuple.host_request_id.as_bytes().as_slice()],
+    )?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, tuple),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_execution_fences_missing_and_malformed_journal_rows(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("delivery-execution-rows.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([101; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([102; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let operation = [103; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([104; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    let claim = claim_delivery(&mut store, &session, tuple, "missing execution row")?;
+    let command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        operation,
+        u64::MAX,
+        "missing-execution-row-owner",
+    )?;
+    let proof = recovery_proof(&store, &host, &session, 1, operation)?;
+    let connection = Connection::open(&path)?;
+    connection.execute(
+        "DELETE FROM fork_delivery_journal WHERE host_request_id = ?1",
+        params![tuple.host_request_id.as_bytes().as_slice()],
+    )?;
+    assert_eq!(
+        store.execute_claimed_fork_delivery(&session, &policy, claim, &command),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.recover_fork_delivery(&session, tuple, &proof, Hash::from_bytes([105; 32])),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, tuple, &proof),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+
+    let retry = claim_delivery(&mut store, &session, tuple, "malformed execution row")?;
+    connection.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+    connection.execute(
+        "UPDATE fork_delivery_journal SET kind = 3 WHERE host_request_id = ?1",
+        params![tuple.host_request_id.as_bytes().as_slice()],
+    )?;
+    assert_eq!(
+        store.execute_claimed_fork_delivery(&session, &policy, retry, &command),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_startup_reconciliation_rejects_an_uncertain_delivery_without_operation(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("missing-delivery-operation.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([91; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([92; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let operation = [93; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([94; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    {
+        let mut store = SqliteStore::open(&path)?;
+        let session = open_session(&mut store, &host, &policy)?;
+        let claim = claim_delivery(&mut store, &session, tuple, "missing operation")?;
+        let command = principal_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            operation,
+            u64::MAX,
+            "missing-operation-owner",
+        )?;
+        assert!(matches!(
+            store.execute_claimed_fork_delivery(&session, &policy, claim, &command)?,
+            ForkDeliveryExecutionV1::Committed(_)
+        ));
+    }
+    let corrupt = Connection::open(&path)?;
+    assert_eq!(
+        corrupt.execute(
+            "DELETE FROM fork_admission_operations WHERE kind = ?1 AND operation_id = ?2",
+            params![1_i64, tuple.operation_id.as_bytes().as_slice()],
+        )?,
+        1
+    );
+    drop(corrupt);
+
+    let mut reopened = SqliteStore::open(&path)?;
+    let session = reopen_session(&mut reopened, &host, &policy)?;
+    assert_eq!(
+        reopened.reconcile_fork_delivery_journal(&session)?,
+        vec![tuple]
+    );
+    let proof = recovery_proof(&reopened, &host, &session, 1, operation)?;
+    assert_eq!(
+        reopened.reconcile_fork_delivery_startup(&session, tuple, &proof),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_claim_has_one_owner_across_concurrent_handles() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("concurrent-delivery.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([31; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([32; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut first = SqliteStore::open(&path)?;
+    let first_session = open_session(&mut first, &host, &policy)?;
+    let mut second = SqliteStore::open(&path)?;
+    let second_session = reopen_session(&mut second, &host, &policy)?;
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([61; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([62; 32]),
+    )?;
+    let barrier = Arc::new(Barrier::new(2));
+    let first_barrier = Arc::clone(&barrier);
+    let first_thread = std::thread::spawn(move || {
+        first_barrier.wait();
+        first.claim_fork_delivery(&first_session, tuple)
+    });
+    let second_thread = std::thread::spawn(move || {
+        barrier.wait();
+        second.claim_fork_delivery(&second_session, tuple)
+    });
+    let first_outcome = first_thread
+        .join()
+        .map_err(|_| std::io::Error::other("first claim panicked"))?;
+    let second_outcome = second_thread
+        .join()
+        .map_err(|_| std::io::Error::other("second claim panicked"))?;
+    let outcomes = [first_outcome, second_outcome];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Ok(ForkDeliveryClaimOutcomeV1::Owner(_))))
+            .count(),
+        1
+    );
+    assert!(outcomes.iter().all(|outcome| matches!(
+        outcome,
+        Ok(ForkDeliveryClaimOutcomeV1::Owner(_) | ForkDeliveryClaimOutcomeV1::Busy)
+            | Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    )));
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_claim_rolls_back_fence_when_insert_fails() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("rollback-delivery.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([31; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([32; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let first_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([71; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([72; 32]),
+    )?;
+    let first = claim_delivery(&mut store, &session, first_tuple, "first")?;
+    store.cancel_pending_fork_delivery(&session, first)?;
+    let failing = Connection::open(&path)?;
+    failing.execute_batch("CREATE TRIGGER reject_delivery_insert BEFORE INSERT ON fork_delivery_journal BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END")?;
+    let next_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([73; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([74; 32]),
+    )?;
+    // A non-UNIQUE insert failure is an indeterminate write, not a tuple conflict.
+    assert_eq!(
+        store.claim_fork_delivery(&session, next_tuple),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    failing.execute_batch("DROP TRIGGER reject_delivery_insert")?;
+    let next = claim_delivery(&mut store, &session, next_tuple, "post-rollback")?;
+    assert_eq!(next.owner_fence, first.owner_fence + 1);
+    failing.execute_batch(
+        "UPDATE fork_delivery_fence_counter SET last_fence = 9223372036854775807 WHERE id = 1",
+    )?;
+    let exhausted_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([75; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([76; 32]),
+    )?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, exhausted_tuple),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    Ok(())
+}
+
+struct SqliteDeliveryFaultContext {
+    _directory: tempfile::TempDir,
+    host: ForkHostSigningKeyV1,
+    adapter: ForkAuthenticationAdapterSigningKeyV1,
+    policy: ForkAuthenticationPolicyV1,
+    store: SqliteStore,
+    session: pos_store::ForkAdmissionAuthoritySessionV1,
+    fault: Connection,
+}
+
+fn sqlite_delivery_fault_context() -> Result<SqliteDeliveryFaultContext, Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("delivery-write-faults.db");
+    let path = path.to_string_lossy().into_owned();
+    let host = ForkHostSigningKeyV1::from_seed([81; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([82; 32])?;
+    let policy = authority_policy(&adapter)?;
+    let mut store = SqliteStore::open(&path)?;
+    let session = open_session(&mut store, &host, &policy)?;
+    let fault = Connection::open(&path)?;
+    Ok(SqliteDeliveryFaultContext {
+        _directory: directory,
+        host,
+        adapter,
+        policy,
+        store,
+        session,
+        fault,
+    })
+}
+
+#[test]
+fn sqlite_delivery_journal_claim_fence_faults() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    fault.execute_batch("BEGIN EXCLUSIVE")?;
+    let locked_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([83; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([84; 32]),
+    )?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, locked_tuple),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("ROLLBACK")?;
+
+    let counter_update_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([96; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([97; 32]),
+    )?;
+    fault.execute_batch(
+        "CREATE TRIGGER reject_delivery_fence_counter_update BEFORE UPDATE ON fork_delivery_fence_counter BEGIN SELECT RAISE(ABORT, 'injected delivery fence counter update failure'); END",
+    )?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, counter_update_tuple),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("DROP TRIGGER reject_delivery_fence_counter_update")?;
+
+    let counter_read_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([98; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([99; 32]),
+    )?;
+    fault.execute_batch(
+        "CREATE TRIGGER remove_delivery_fence_counter AFTER UPDATE ON fork_delivery_fence_counter BEGIN DELETE FROM fork_delivery_fence_counter WHERE id = 1; END",
+    )?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, counter_read_tuple),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("DROP TRIGGER remove_delivery_fence_counter")?;
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_claim_refuses_negative_persisted_fence() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    fault.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+    assert_eq!(
+        fault.execute(
+            "UPDATE fork_delivery_fence_counter SET last_fence = -1 WHERE id = 1",
+            [],
+        )?,
+        1
+    );
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([100; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([101; 32]),
+    )?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, tuple),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_reconciliation_rejects_corrupt_journal_fence() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([102; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([103; 32]),
+    )?;
+    claim_delivery(&mut store, &session, tuple, "corrupt reconciliation row")?;
+    fault.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+    assert_eq!(
+        fault.execute(
+            "UPDATE fork_delivery_journal SET owner_fence = -1 WHERE host_request_id = ?1",
+            params![tuple.host_request_id.as_bytes().as_slice()],
+        )?,
+        1
+    );
+    assert_eq!(
+        store.reconcile_fork_delivery_journal(&session),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_recovery_rejects_corrupt_journal_row() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let operation = [104; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([105; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    claim_delivery(&mut store, &session, tuple, "corrupt recovery row")?;
+    let proof = recovery_proof(&store, &host, &session, 1, operation)?;
+    fault.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+    assert_eq!(
+        fault.execute(
+            "UPDATE fork_delivery_journal SET operation_id = zeroblob(31) WHERE host_request_id = ?1",
+            params![tuple.host_request_id.as_bytes().as_slice()],
+        )?,
+        1
+    );
+    assert_eq!(
+        store.recover_fork_delivery(&session, tuple, &proof, Hash::from_bytes([106; 32])),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_startup_rejects_corrupt_journal_row() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let operation = [107; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([108; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    claim_delivery(&mut store, &session, tuple, "corrupt startup row")?;
+    let proof = recovery_proof(&store, &host, &session, 1, operation)?;
+    fault.execute_batch("PRAGMA ignore_check_constraints = ON")?;
+    assert_eq!(
+        fault.execute(
+            "UPDATE fork_delivery_journal SET state = 0 WHERE host_request_id = ?1",
+            params![tuple.host_request_id.as_bytes().as_slice()],
+        )?,
+        1
+    );
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, tuple, &proof),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_execution_begin_and_rejection_delete_faults() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        adapter,
+        policy,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let begin_operation = [110; 32];
+    let begin_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([111; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(begin_operation),
+    )?;
+    let begin_claim = claim_delivery(&mut store, &session, begin_tuple, "execution begin fault")?;
+    let begin_command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        begin_operation,
+        u64::MAX,
+        "execution-begin-fault-owner",
+    )?;
+    fault.execute_batch("BEGIN EXCLUSIVE")?;
+    assert_eq!(
+        store.execute_claimed_fork_delivery(&session, &policy, begin_claim, &begin_command),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("ROLLBACK")?;
+    store.cancel_pending_fork_delivery(&session, begin_claim)?;
+
+    let rejection_operation = [112; 32];
+    let rejection_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([113; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(rejection_operation),
+    )?;
+    let rejection_claim = claim_delivery(
+        &mut store,
+        &session,
+        rejection_tuple,
+        "rejection delete fault",
+    )?;
+    let expired_command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        rejection_operation,
+        1,
+        "rejection-delete-fault-owner",
+    )?;
+    fault.execute_batch(
+        "CREATE TRIGGER reject_execution_rejection_delete BEFORE DELETE ON fork_delivery_journal BEGIN SELECT RAISE(ABORT, 'injected execution rejection delete failure'); END",
+    )?;
+    assert_eq!(
+        store.execute_claimed_fork_delivery(
+            &session,
+            &policy,
+            rejection_claim,
+            &expired_command
+        )?,
+        ForkDeliveryExecutionV1::Uncertain
+    );
+    fault.execute_batch("DROP TRIGGER reject_execution_rejection_delete")?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, rejection_tuple)?,
+        ForkDeliveryClaimOutcomeV1::Reconcile(rejection_claim, ForkDeliveryStateV1::Uncertain)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_journal_admission_write_fault() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        adapter,
+        policy,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let uncertain_operation = [84; 32];
+    let uncertain_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([85; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(uncertain_operation),
+    )?;
+    let uncertain_claim = claim_delivery(
+        &mut store,
+        &session,
+        uncertain_tuple,
+        "admission write fault",
+    )?;
+    let uncertain_command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        uncertain_operation,
+        u64::MAX,
+        "admission-write-fault-owner",
+    )?;
+    fault.execute_batch(
+        "CREATE TRIGGER reject_admission_operation_insert BEFORE INSERT ON fork_admission_operations BEGIN SELECT RAISE(ABORT, 'injected admission operation insert failure'); END",
+    )?;
+    assert_eq!(
+        store.execute_claimed_fork_delivery(
+            &session,
+            &policy,
+            uncertain_claim,
+            &uncertain_command
+        )?,
+        ForkDeliveryExecutionV1::Uncertain
+    );
+    fault.execute_batch("DROP TRIGGER reject_admission_operation_insert")?;
+    assert_eq!(
+        store.claim_fork_delivery(&session, uncertain_tuple)?,
+        ForkDeliveryClaimOutcomeV1::Reconcile(uncertain_claim, ForkDeliveryStateV1::Uncertain)
+    );
+    store.mark_fork_delivery_delivered(&session, uncertain_claim)?;
+    store.purge_expired_fork_delivery(&session, uncertain_tuple)?;
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_recovery_fails_closed_for_invalid_proofs_and_missing_operations(
+) -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let wrong_host = ForkHostSigningKeyV1::from_seed([115; 32])?;
+    let invalid_proof_operation = [116; 32];
+    let invalid_proof_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([117; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(invalid_proof_operation),
+    )?;
+    claim_delivery(
+        &mut store,
+        &session,
+        invalid_proof_tuple,
+        "invalid recovery proof",
+    )?;
+    assert_eq!(
+        fault.execute(
+            "UPDATE fork_delivery_journal SET state = 2 WHERE host_request_id = ?1",
+            params![invalid_proof_tuple.host_request_id.as_bytes().as_slice()],
+        )?,
+        1
+    );
+    let invalid_proof = recovery_proof(&store, &wrong_host, &session, 1, invalid_proof_operation)?;
+    assert_eq!(
+        store.recover_fork_delivery(
+            &session,
+            invalid_proof_tuple,
+            &invalid_proof,
+            Hash::from_bytes([118; 32]),
+        ),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+
+    let missing_operation = [119; 32];
+    let missing_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([120; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(missing_operation),
+    )?;
+    claim_delivery(
+        &mut store,
+        &session,
+        missing_tuple,
+        "missing recovery operation",
+    )?;
+    assert_eq!(
+        fault.execute(
+            "UPDATE fork_delivery_journal SET state = 2 WHERE host_request_id = ?1",
+            params![missing_tuple.host_request_id.as_bytes().as_slice()],
+        )?,
+        1
+    );
+    let missing_proof = recovery_proof(&store, &host, &session, 1, missing_operation)?;
+    assert_eq!(
+        store.recover_fork_delivery(
+            &session,
+            missing_tuple,
+            &missing_proof,
+            Hash::from_bytes([121; 32]),
+        ),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_startup_rejects_invalid_proofs_and_lock_contention() -> Result<(), Box<dyn Error>>
+{
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let wrong_host = ForkHostSigningKeyV1::from_seed([115; 32])?;
+
+    let startup_invalid_proof_operation = [122; 32];
+    let startup_invalid_proof_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([123; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(startup_invalid_proof_operation),
+    )?;
+    let startup_invalid_proof_claim = claim_delivery(
+        &mut store,
+        &session,
+        startup_invalid_proof_tuple,
+        "invalid startup proof",
+    )?;
+    let startup_invalid_proof = recovery_proof(
+        &store,
+        &wrong_host,
+        &session,
+        1,
+        startup_invalid_proof_operation,
+    )?;
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(
+            &session,
+            startup_invalid_proof_tuple,
+            &startup_invalid_proof,
+        ),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    store.cancel_pending_fork_delivery(&session, startup_invalid_proof_claim)?;
+
+    let startup_lock_operation = [124; 32];
+    let startup_lock_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([125; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(startup_lock_operation),
+    )?;
+    let startup_lock_claim =
+        claim_delivery(&mut store, &session, startup_lock_tuple, "startup lock")?;
+    let startup_lock_proof = recovery_proof(&store, &host, &session, 1, startup_lock_operation)?;
+    fault.execute_batch("BEGIN IMMEDIATE")?;
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, startup_lock_tuple, &startup_lock_proof),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("ROLLBACK")?;
+    store.cancel_pending_fork_delivery(&session, startup_lock_claim)?;
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_startup_rejects_corrupt_operation_row() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        adapter,
+        policy,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let corrupt_operation = [126; 32];
+    let corrupt_operation_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([127; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(corrupt_operation),
+    )?;
+    let corrupt_operation_command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        corrupt_operation,
+        u64::MAX,
+        "corrupt-startup-operation-owner",
+    )?;
+    store.execute_fork_admission_command(&session, &policy, &corrupt_operation_command)?;
+    claim_delivery(
+        &mut store,
+        &session,
+        corrupt_operation_tuple,
+        "corrupt startup operation",
+    )?;
+    let corrupt_operation_proof = recovery_proof(&store, &host, &session, 1, corrupt_operation)?;
+    assert_eq!(
+        fault.execute(
+            "UPDATE fork_admission_operations SET child_id = 'not-a-timeline-id' WHERE kind = ?1 AND operation_id = ?2",
+            params![1_i64, corrupt_operation_tuple.operation_id.as_bytes().as_slice()],
+        )?,
+        1
+    );
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(
+            &session,
+            corrupt_operation_tuple,
+            &corrupt_operation_proof,
+        ),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_startup_rejects_corrupt_result_row() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        adapter,
+        policy,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+
+    let corrupt_result = [128; 32];
+    let corrupt_result_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([129; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(corrupt_result),
+    )?;
+    let corrupt_result_command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        corrupt_result,
+        u64::MAX,
+        "corrupt-startup-result-owner",
+    )?;
+    store.execute_fork_admission_command(&session, &policy, &corrupt_result_command)?;
+    claim_delivery(
+        &mut store,
+        &session,
+        corrupt_result_tuple,
+        "corrupt startup result",
+    )?;
+    let corrupt_result_proof = recovery_proof(&store, &host, &session, 1, corrupt_result)?;
+    assert_eq!(
+        fault.execute(
+            "UPDATE fork_admission_operations SET result_digest = zeroblob(32) WHERE kind = ?1 AND operation_id = ?2",
+            params![1_i64, corrupt_result_tuple.operation_id.as_bytes().as_slice()],
+        )?,
+        1
+    );
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(
+            &session,
+            corrupt_result_tuple,
+            &corrupt_result_proof,
+        ),
+        Err(ForkDeliveryJournalErrorV1::Corrupt)
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_journal_startup_faults() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        adapter,
+        policy,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let startup_operation = [86; 32];
+    let startup_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([87; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(startup_operation),
+    )?;
+    let startup_claim = claim_delivery(&mut store, &session, startup_tuple, "startup delete race")?;
+    let startup_proof = recovery_proof(&store, &host, &session, 1, startup_operation)?;
+    fault.execute_batch(
+        "CREATE TRIGGER remove_pending_delivery_before_startup_delete BEFORE DELETE ON fork_delivery_journal BEGIN DELETE FROM fork_delivery_journal WHERE host_request_id = OLD.host_request_id; END",
+    )?;
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, startup_tuple, &startup_proof),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    fault.execute_batch("DROP TRIGGER remove_pending_delivery_before_startup_delete")?;
+    store.cancel_pending_fork_delivery(&session, startup_claim)?;
+
+    let rejected_delete_operation = [130; 32];
+    let rejected_delete_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([131; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(rejected_delete_operation),
+    )?;
+    let rejected_delete_claim = claim_delivery(
+        &mut store,
+        &session,
+        rejected_delete_tuple,
+        "startup delete rejection",
+    )?;
+    let rejected_delete_proof =
+        recovery_proof(&store, &host, &session, 1, rejected_delete_operation)?;
+    fault.execute_batch(
+        "CREATE TRIGGER reject_startup_delivery_delete BEFORE DELETE ON fork_delivery_journal BEGIN SELECT RAISE(ABORT, 'injected startup delivery delete failure'); END",
+    )?;
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(
+            &session,
+            rejected_delete_tuple,
+            &rejected_delete_proof,
+        ),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("DROP TRIGGER reject_startup_delivery_delete")?;
+    store.cancel_pending_fork_delivery(&session, rejected_delete_claim)?;
+
+    let startup_state_operation = [92; 32];
+    let startup_state_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([93; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(startup_state_operation),
+    )?;
+    let startup_state_command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        startup_state_operation,
+        u64::MAX,
+        "startup-state-write-fault-owner",
+    )?;
+    store.execute_fork_admission_command(&session, &policy, &startup_state_command)?;
+    let startup_state_claim = claim_delivery(
+        &mut store,
+        &session,
+        startup_state_tuple,
+        "startup state write fault",
+    )?;
+    let startup_state_proof = recovery_proof(&store, &host, &session, 1, startup_state_operation)?;
+    fault.execute_batch(
+        "CREATE TRIGGER reject_startup_delivery_state_update BEFORE UPDATE OF state ON fork_delivery_journal BEGIN SELECT RAISE(ABORT, 'injected startup delivery state update failure'); END",
+    )?;
+    assert_eq!(
+        store.reconcile_fork_delivery_startup(&session, startup_state_tuple, &startup_state_proof),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("DROP TRIGGER reject_startup_delivery_state_update")?;
+    store.cancel_pending_fork_delivery(&session, startup_state_claim)?;
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_journal_state_and_delete_faults() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        adapter,
+        policy,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let operation = [88; 32];
+    let tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([89; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(operation),
+    )?;
+    let claim = claim_delivery(&mut store, &session, tuple, "state write fault")?;
+    let command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        operation,
+        u64::MAX,
+        "write-fault-owner",
+    )?;
+    fault.execute_batch(
+        "CREATE TRIGGER reject_delivery_state_update BEFORE UPDATE OF state ON fork_delivery_journal BEGIN SELECT RAISE(ABORT, 'injected state update failure'); END",
+    )?;
+    assert_eq!(
+        store.execute_claimed_fork_delivery(&session, &policy, claim, &command),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("DROP TRIGGER reject_delivery_state_update")?;
+    store.cancel_pending_fork_delivery(&session, claim)?;
+
+    let delete_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([90; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes([91; 32]),
+    )?;
+    let delete_claim = claim_delivery(&mut store, &session, delete_tuple, "delete write fault")?;
+    fault.execute_batch(
+        "CREATE TRIGGER reject_delivery_delete BEFORE DELETE ON fork_delivery_journal BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END",
+    )?;
+    assert_eq!(
+        store.cancel_pending_fork_delivery(&session, delete_claim),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("DROP TRIGGER reject_delivery_delete")?;
+    store.cancel_pending_fork_delivery(&session, delete_claim)?;
+
+    let out_of_range_claim = ForkDeliveryClaimV1 {
+        owner_fence: u64::MAX,
+        ..delete_claim
+    };
+    assert_eq!(
+        store.cancel_pending_fork_delivery(&session, out_of_range_claim),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.mark_fork_delivery_uncertain(&session, out_of_range_claim),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.mark_fork_delivery_delivered(&session, out_of_range_claim),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+    assert_eq!(
+        store.execute_claimed_fork_delivery(
+            &session,
+            &policy,
+            ForkDeliveryClaimV1 {
+                owner_fence: u64::MAX,
+                ..claim
+            },
+            &command,
+        ),
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn sqlite_delivery_journal_purge_fault() -> Result<(), Box<dyn Error>> {
+    let SqliteDeliveryFaultContext {
+        _directory: _directory_guard,
+        host,
+        adapter,
+        policy,
+        mut store,
+        session,
+        fault,
+        ..
+    } = sqlite_delivery_fault_context()?;
+    let purge_operation = [94; 32];
+    let purge_tuple = ForkDeliveryTupleV1::new(
+        Hash::from_bytes([95; 32]),
+        pos_core::ForkAdmissionOperationKindV1::PrincipalOwner,
+        Hash::from_bytes(purge_operation),
+    )?;
+    let purge_claim = claim_delivery(&mut store, &session, purge_tuple, "purge write fault")?;
+    let purge_command = principal_command(
+        &store,
+        &host,
+        &adapter,
+        &policy,
+        &session,
+        purge_operation,
+        u64::MAX,
+        "purge-write-fault-owner",
+    )?;
+    assert!(matches!(
+        store.execute_claimed_fork_delivery(&session, &policy, purge_claim, &purge_command)?,
+        ForkDeliveryExecutionV1::Committed(_)
+    ));
+    store.mark_fork_delivery_delivered(&session, purge_claim)?;
+    fault.execute_batch(
+        "CREATE TRIGGER reject_delivery_purge BEFORE DELETE ON fork_delivery_journal BEGIN SELECT RAISE(ABORT, 'injected delivery purge failure'); END",
+    )?;
+    assert_eq!(
+        store.purge_expired_fork_delivery(&session, purge_tuple),
+        Err(ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    );
+    fault.execute_batch("DROP TRIGGER reject_delivery_purge")?;
+    store.purge_expired_fork_delivery(&session, purge_tuple)?;
+    Ok(())
 }
 
 fn fork_command<S: ForkAdmissionAuthorityBootstrapPortV1>(
