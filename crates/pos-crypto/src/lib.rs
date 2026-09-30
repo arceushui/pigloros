@@ -7,6 +7,7 @@
 
 pub mod canonical;
 pub mod chain;
+pub mod fork_attribution;
 pub mod key_roles;
 pub mod signing;
 pub mod timeline_erasure;
