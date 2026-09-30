@@ -4,7 +4,7 @@
 //! capability. Only the installed cut owner can resolve it against its actual
 //! visible receipt, catalog and protected-use fence.
 
-use crate::{encode_head, Hash, TimelineId};
+use crate::{encode_hash, encode_head, Hash, TimelineId};
 use ulid::Ulid;
 
 /// Maximum accepted preferred-CBOR length of one WRH1 handle.
@@ -113,11 +113,6 @@ impl WorldReplayHandleV1 {
             }
         })
     }
-}
-
-fn encode_hash(bytes: &mut Vec<u8>, hash: Hash) {
-    bytes.extend_from_slice(&[0x58, 0x20]);
-    bytes.extend_from_slice(hash.as_bytes());
 }
 
 struct Reader<'a> {

@@ -3,7 +3,7 @@
 //! These structural bytes do not prove owner admission, `PublicRecord`
 //! provenance, a complete Plugin roster, or authority to invoke an adapter.
 
-use crate::{encode_head, Hash, PluginId};
+use crate::{encode_bytes, encode_hash, encode_head, Hash, PluginId};
 use ulid::Ulid;
 
 /// One admitted Plugin operation, before any owner-authority claim.
@@ -322,16 +322,6 @@ pub(crate) fn hash_bytes(domain: &[u8], bytes: &[u8]) -> Hash {
     hasher.update(domain);
     hasher.update(bytes);
     Hash::from_bytes(*hasher.finalize().as_bytes())
-}
-
-pub(crate) fn encode_hash(out: &mut Vec<u8>, hash: Hash) {
-    out.extend_from_slice(&[0x58, 0x20]);
-    out.extend_from_slice(hash.as_bytes());
-}
-
-pub(crate) fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8], major: u8) {
-    encode_head(out, major, bytes.len() as u64);
-    out.extend_from_slice(bytes);
 }
 
 fn validate_entry(entry: &AdapterAdmissionEntryV1) -> Result<(), AdapterAdmissionErrorV1> {
