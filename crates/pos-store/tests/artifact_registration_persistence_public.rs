@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use pos_core::{
     extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
     extract_repro_manifest_root_registration_v1, prepare_artifact_registration_batch_v1,
@@ -588,11 +590,10 @@ fn sqlite_rolls_back_the_entire_closure_when_root_commit_fails(
     drop(pos_store::sqlite::SqliteStore::open(path)?);
     let (owner_id, root_address, batch) = prepared_repro_manifest()?;
     let connection = rusqlite::Connection::open(path)?;
-    let root_hex = root_address
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let mut root_hex = String::with_capacity(64);
+    for byte in root_address.as_bytes() {
+        write!(&mut root_hex, "{byte:02x}")?;
+    }
     connection.execute_batch(&format!(
         "CREATE TRIGGER fail_root_registration BEFORE INSERT ON artifact_registrations
          WHEN NEW.registration_address = X'{root_hex}'
