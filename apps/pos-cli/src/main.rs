@@ -21,15 +21,6 @@ macro_rules! output_stdout {
     }};
 }
 
-macro_rules! result_pipeline {
-    ($result:expr_2021 => |$binding:pat_param|; $($remaining:tt)+) => {
-        $result.and_then(|$binding| result_pipeline!($($remaining)+))
-    };
-    ($result:expr_2021 $(;)?) => {
-        $result
-    };
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
@@ -56,8 +47,16 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn builtin_reference_runner_uses_test_support_profile() {
-        assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
+    fn builtin_reference_runner_rejects_uninstalled_profile() {
+        assert!(run_builtin_reference_experiment().is_err_and(|error| {
+            error.downcast_ref::<pos_runtime::OutputAdmissionErrorV1>()
+                == Some(&pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+        }));
+        assert!(installed_registration_closed()
+            .downcast_ref::<pos_runtime::OutputAdmissionErrorV1>()
+            .is_some_and(|error| {
+                *error == pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+            }));
         assert!(run_builtin_reference_experiment_fixture(StoreConfig::Memory, 0).is_ok());
         assert!(run_builtin_reference_experiment_fixture(StoreConfig::Memory, 1).is_ok());
     }
@@ -90,7 +89,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn installed_synthetic_binding_uses_test_support_profile() {
+    fn installed_synthetic_binding_rejects_without_profile_authority() {
         use pos_plugin_synthetic_obs::SyntheticObsPlugin;
         let plugin = SyntheticObsPlugin::new();
         assert!(builtin_output_binding(
@@ -99,7 +98,7 @@ mod coverage_entrypoints {
             &1.0_f64.to_be_bytes(),
             "deterministic-local-v1",
         )
-        .is_ok());
+        .is_err());
     }
 }
 
@@ -119,10 +118,11 @@ use pos_core::{
     plugin::Plugin,
     store::SeqRange,
 };
-use pos_experiment::{
-    Experiment, ExperimentConfig, ReproductionManifest, ReproductionRecipe, RunResult,
-    StopCondition,
-};
+use pos_experiment::{ReproductionManifest, ReproductionRecipe, RunResult};
+// Only the generated reference fixture composes an Experiment until installed
+// registration returns with Wave 9 (#467/#462).
+#[cfg(test)]
+use pos_experiment::{Experiment, ExperimentConfig, StopCondition};
 use pos_store::StoreConfig;
 use ulid::Ulid;
 
@@ -148,11 +148,11 @@ fn builtin_output_binding<P: Plugin>(
     .map_err(Into::into)
 }
 
-fn builtin_output_registration<P: Plugin>(
-    plugin: &P,
-    binding: &pos_runtime::OutputPolicyBindingV1,
-) -> Result<pos_runtime::PluginRegistrationV1, Box<dyn std::error::Error>> {
-    pos_runtime::installed_plugin_registration_v1(plugin, binding).map_err(Into::into)
+/// Wave 8 has no installed EPF1, so installed registration fails closed even
+/// if an installed binding were resolved. #467/#462 restore the installed
+/// reference runner together with a real installed EPF1.
+fn installed_registration_closed() -> Box<dyn std::error::Error> {
+    pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into()
 }
 
 /// Open a store through the CLI composition seam.
@@ -595,62 +595,39 @@ fn handle_experiment(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-fn run_builtin_reference_experiment(
-    store_config: StoreConfig,
-    ticks: u64,
-) -> Result<RunResult, Box<dyn std::error::Error>> {
-    use pos_core::ids::EntityId;
-    use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
-    use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
-
-    let mut exp = Experiment::new(ExperimentConfig {
-        name: "cli-run".to_owned(),
-        stop: StopCondition::MaxTicks(ticks),
-        store_config,
-    });
-
-    // Register reference plugins
-    let agent_entity = EntityId::new();
-    let agent_plugin = RuleAgentPlugin::new();
-    let agent_configuration = serde_json::to_vec(agent_plugin.actions())?;
-    let obs_entity = EntityId::new();
-    let obs_plugin = SyntheticObsPlugin::new();
+/// Resolve the reference Plugins' installed bindings.
+///
+/// Wave 8 has no installed EPF1, so the runner fails closed before any
+/// Experiment or registration exists.
+fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::Error>> {
+    let agent_plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
+    let obs_plugin = pos_plugin_synthetic_obs::SyntheticObsPlugin::new();
     let obs_configuration = 1.0_f64.to_be_bytes();
-    result_pipeline! {
-        builtin_output_binding(
-            &agent_plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
-            &agent_configuration,
-            "deterministic-local-v1",
-        ) => |agent_closure|;
-        agent_closure.with_installed_driver(RuleAgentDriver::new(
-            agent_entity,
-            agent_plugin.actions().to_vec(),
-        )).map_err(Into::into) => |agent_closure|;
-        builtin_output_registration(&agent_plugin, &agent_closure) => |agent_registration|;
-        exp.register_installed_output(
-            &agent_plugin,
-            agent_closure,
-            agent_registration,
-            Some(Box::new(RuleAgentReducer)),
-        ).map_err(Into::into) => |()|;
-        builtin_output_binding(
-            &obs_plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
-            &obs_configuration,
-            "deterministic-local-v1",
-        ) => |obs_closure|;
-        obs_closure.with_installed_driver(SyntheticDriver::new(obs_entity))
-            .map_err(Into::into) => |obs_closure|;
-        builtin_output_registration(&obs_plugin, &obs_closure) => |obs_registration|;
-        exp.register_installed_output(
-            &obs_plugin,
-            obs_closure,
-            obs_registration,
-            Some(Box::new(SyntheticReducer)),
-        ).map_err(Into::into) => |()|;
-        exp.run().map_err(Into::into)
-    }
+    // Report the first binding error, or the closed installed-registration
+    // error if both bindings resolve. This stays one combinator chain on
+    // purpose: in Wave 8 every installed binding fails, so `let ... ?;`
+    // bindings would leave the serialization error, the post-binding
+    // continuations and the final closed error as unreachable LLVM regions.
+    // `and` evaluates both bindings eagerly, so both are exercised either way.
+    let obs_binding = builtin_output_binding(
+        &obs_plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+        &obs_configuration,
+        "deterministic-local-v1",
+    );
+    Err(serde_json::to_vec(agent_plugin.actions())
+        .map_err(Into::into)
+        .and_then(|agent_configuration| {
+            builtin_output_binding(
+                &agent_plugin,
+                pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+                &agent_configuration,
+                "deterministic-local-v1",
+            )
+        })
+        .and(obs_binding)
+        .err()
+        .unwrap_or_else(installed_registration_closed))
 }
 
 // This fixture never enters the installed-registration seam or creates a
@@ -690,7 +667,7 @@ fn run_builtin_reference_experiment_fixture(
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
-    cmd_experiment_run_with(path, ticks, run_builtin_reference_experiment)
+    cmd_experiment_run_with(path, ticks, |_, _| run_builtin_reference_experiment())
 }
 
 #[cfg(test)]
@@ -1117,10 +1094,10 @@ mod tests {
     }
 
     #[test]
-    fn handle_experiment_run_executes_with_test_support_profile() {
+    fn handle_experiment_run_rejects_uninstalled_profile() {
         let (_dir, path) = tmp_db();
         let a = args(&["run", &path, "--ticks", "3"]);
-        assert!(handle_experiment(&a).is_ok());
+        assert!(handle_experiment(&a).is_err());
     }
 
     #[test]

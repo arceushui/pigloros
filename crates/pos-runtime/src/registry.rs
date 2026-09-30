@@ -7,11 +7,13 @@
 
 use indexmap::IndexMap;
 
+#[cfg(any(test, feature = "test-support"))]
+use pos_core::Capability;
 use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::{PluginId, TimelineId},
-    ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, Capability, ConsentAuthority,
+    ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, ConsentAuthority,
     ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentErrorV1,
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, KnowledgeSnapshotV1,
     PersistedAuthorityV1, Plugin, ProposedAction, Reducer, Timeline,
@@ -19,22 +21,23 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
-use crate::output_admission::InstalledCallbacksV1;
 #[cfg(any(test, feature = "test-support"))]
-use crate::output_admission::{draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1};
+use crate::output_admission::{
+    draft_execution_profile_artifact_v1, InstalledOutputPolicySourceV1, OutputPolicyClosureV1,
+};
 use crate::{
     composition::{
-        DomainImplementationKindV1, PluginAvailabilityV1, PluginComposition,
-        PluginCompositionErrorV1, PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1,
-        PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin, RequiredPluginCompositionV1,
-        RequiredPluginV1, ResolvedPluginCompositionV1, ResolvedPluginV1,
+        PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
+        PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin,
+        RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
+        ResolvedPluginV1,
     },
     driver::{
         CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey,
         SnapshotAnchor, StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
-    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
+    output_admission::{OutputAdmissionV1, OutputPolicyBindingV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
@@ -1021,6 +1024,7 @@ impl Plugin for GeneratedDriverPlugin {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
@@ -3013,76 +3017,28 @@ impl PluginRegistry {
         )
     }
 
-    /// Return the first pin field that is incompatible with an installed
-    /// operator-trusted native Plugin and its binding, if any.
-    fn incompatible_installed_pin(
-        pin: &crate::composition::PluginPinV1,
-        binding: &OutputPolicyBindingV1,
-        plugin: &dyn Plugin,
-    ) -> Option<PluginPinFieldV1> {
-        if pin.implementation_kind() != DomainImplementationKindV1::Plugin {
-            Some(PluginPinFieldV1::ImplementationKind)
-        } else if pin.isolation() != PluginIsolationV1::OperatorTrustedNative {
-            Some(PluginPinFieldV1::Isolation)
-        } else if pin.configuration_digest() != binding.policy().digest() {
-            Some(PluginPinFieldV1::ConfigurationDigest)
-        } else if pin.roles() != [crate::reviewed_policy::installed_plugin_role_v1(plugin)] {
-            Some(PluginPinFieldV1::Roles)
-        } else {
-            None
-        }
-    }
-
     /// Register one installed Plugin with its verified callbacks and exact
-    /// available session pin. No callback or pin can be added after this seam.
+    /// available session pin.
+    ///
+    /// Wave 8 has no installed EPF1 execution profile, so no binding can carry
+    /// installed profile provenance. This seam therefore fails closed before
+    /// any registry mutation; the installed success path arrives with Wave 9
+    /// (#467/#462) together with a real installed EPF1.
     ///
     /// # Errors
-    /// Rejects a foreign callback, incompatible pin, invalid policy closure,
-    /// or capability mismatch before any registry mutation.
+    /// Always returns [`crate::OutputAdmissionErrorV1::ArtifactInvalid`] for
+    /// `EPF1` without mutating the registry.
     pub fn register_installed_output<P: Plugin>(
         &mut self,
-        plugin: &P,
-        mut binding: OutputPolicyBindingV1,
-        registration: PluginRegistrationV1,
-        reducer: Option<Box<dyn Reducer>>,
+        _plugin: &P,
+        _binding: OutputPolicyBindingV1,
+        _registration: PluginRegistrationV1,
+        _reducer: Option<Box<dyn Reducer>>,
     ) -> Result<(), RuntimeError> {
-        if !binding.verifies_erased_owner_instance(plugin) {
-            return Err(crate::OutputAdmissionErrorV1::PluginMismatch.into());
-        }
-        let id = plugin.id();
-        let incompatible = Self::incompatible_installed_pin(registration.pin(), &binding, plugin);
-        if let Some(field) = incompatible {
-            return Err(PluginCompositionErrorV1::IncompatibleImplementation {
-                plugin_id: id,
-                field,
-            }
-            .into());
-        }
-        if registration.availability() != PluginAvailabilityV1::Available {
-            return Err(PluginCompositionErrorV1::ImplementationUnavailable {
-                plugin_id: id,
-                availability: registration.availability(),
-            }
-            .into());
-        }
-        Self::validate_required_installed_approver(&binding)?;
-        self.validate_registration_roles(&registration)?;
-        let InstalledCallbacksV1 {
-            driver,
-            approver,
-            approver_event_types,
-        } = binding.take_callbacks();
-        self.register_with_verified_output_policy_inner(
-            plugin,
-            binding,
-            reducer,
-            driver,
-            approver,
-            approver_event_types,
-            Some(registration),
-        )
+        Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn register_with_verified_output_policy_inner(
         &mut self,
         plugin: &dyn Plugin,
@@ -3170,18 +3126,7 @@ impl PluginRegistry {
         )
     }
 
-    pub(crate) fn validate_required_installed_approver(
-        binding: &OutputPolicyBindingV1,
-    ) -> Result<(), RuntimeError> {
-        if binding.requires_action_approver() && !binding.has_action_approver_route() {
-            Err(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" },
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     fn registration_context(
         &self,
         plugin: &dyn Plugin,
@@ -3196,6 +3141,7 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,
@@ -3213,6 +3159,7 @@ impl PluginRegistry {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn validate_installed_reducer_name(
         name: &str,
         installed: bool,
@@ -3230,6 +3177,7 @@ impl PluginRegistry {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn validate_reserved_owned_event_types(
         name: &str,
         cap: &Capability,
@@ -3257,6 +3205,7 @@ impl PluginRegistry {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn install_reducer(
         &mut self,
         id: PluginId,
@@ -3279,6 +3228,7 @@ impl PluginRegistry {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn register_with_approver_slice(
         &mut self,
         plugin: &dyn Plugin,
@@ -4560,6 +4510,38 @@ mod tests {
         assert!(matches!(
             registry.register_with_verified_output_policy(&plugin, incomplete_binding, None, None),
             Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(!registry.contains(&plugin.id()));
+    }
+
+    #[test]
+    fn generated_profile_cannot_enter_installed_registration() {
+        let plugin = simple_plugin("fixture-profile", &["fixture.output"]);
+        let binding = OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let pin = crate::composition::PluginPinV1::try_new(
+            crate::composition::DomainImplementationKindV1::Plugin,
+            crate::composition::PluginIsolationV1::OperatorTrustedNative,
+            binding.policy().digest(),
+            vec![crate::reviewed_policy::installed_plugin_role_v1(&plugin)],
+        )
+        .test_ok();
+        let mut registry = gated_registry();
+        assert!(matches!(
+            registry.register_installed_output(
+                &plugin,
+                binding,
+                PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+                None,
+            ),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+            ))
         ));
         assert!(!registry.contains(&plugin.id()));
     }

@@ -471,11 +471,22 @@ jobs:
           covgate check "${{ runner.temp }}/coverage.json"
           --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || 'origin/main' }}"
           --no-github-summary
+      - name: Upload coverage JSON for region diagnosis
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-json-${{ github.sha }}
+          path: ${{ runner.temp }}/coverage.json
+          retention-days: 1
+          if-no-files-found: error
       - name: Enforce workspace coverage floor
-        run: >
-          cargo llvm-cov report --json --summary-only --show-missing-lines
-          --fail-under-lines 99
-          --fail-under-regions 99
+        run: |
+          jq -er '
+            .data[0].totals
+            | "Workspace coverage: lines \(.lines.covered)/\(.lines.count) (\(.lines.percent)%); regions \(.regions.covered)/\(.regions.count) (\(.regions.percent)%)"
+          ' "${{ runner.temp }}/coverage.json"
+          cargo llvm-cov report --json --summary-only --show-missing-lines \
+            --fail-under-lines 99 \
+            --fail-under-regions 99
       - name: Preserve failed coverage diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -588,6 +599,7 @@ jobs:
           --exclude 'src/selector/installation/tests/**'
           --exclude 'src/erasure_tests.rs'
           --exclude 'src/system_bus/tests.rs'
+          --exclude 'src/e2e_determinism.rs'
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
@@ -602,6 +614,7 @@ jobs:
           --exclude 'src/selector/installation/tests/**'
           --exclude 'src/erasure_tests.rs'
           --exclude 'src/system_bus/tests.rs'
+          --exclude 'src/e2e_determinism.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json

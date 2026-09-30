@@ -5,13 +5,18 @@ use pos_core::{
     output_policy::{
         OutputFidelityV1, OutputPolicyV1, MAX_OUTPUT_DECLARATIONS_V1, MAX_OUTPUT_POLICY_BYTES_V1,
     },
-    plugin::{PluginInstanceIdentity, PluginOwnerTokenV1},
+    plugin::PluginInstanceIdentity,
     retention::{WorldRetentionPolicyV1, MAX_WORLD_RETENTION_RECORD_BYTES_V1},
     ActionApprover, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
     Hash, Plugin, PluginCpuReservationV1, PluginId, WorkloadProfileV1,
     MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
 };
 use std::{any::type_name, sync::Mutex};
+
+// Only fixture registration consumes owner tokens until installed
+// registration returns with Wave 9 (#467/#462).
+#[cfg(any(test, feature = "test-support"))]
+use pos_core::plugin::PluginOwnerTokenV1;
 
 use crate::driver::Driver;
 
@@ -577,7 +582,7 @@ impl InstalledOutputPolicySourceV1 {
         .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid {
             kind: "configuration",
         })?;
-        let execution_profile_artifact = execution_profile_artifact_v1(profile_id)
+        let execution_profile_artifact = execution_profile_artifact_v1(profile_id, self)
             .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })?;
         let implementation_artifact = self.implementation_artifact(plugin);
         let retention_policy_artifact =
@@ -635,13 +640,6 @@ fn append_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(bytes);
 }
 
-/// Concrete callbacks retained with one installed output-policy binding.
-pub(crate) struct InstalledCallbacksV1 {
-    pub(crate) driver: Option<Box<dyn Driver>>,
-    pub(crate) approver: Option<Box<dyn ActionApprover>>,
-    pub(crate) approver_event_types: Vec<Kind>,
-}
-
 /// A host-owned output policy binding with no caller-supplied artifact leaves.
 pub struct OutputPolicyBindingV1 {
     policy: OutputPolicyV1,
@@ -649,10 +647,15 @@ pub struct OutputPolicyBindingV1 {
     artifacts: OutputPolicyArtifactInputV1,
     source: InstalledOutputPolicySourceV1,
     plugin_name: &'static str,
+    /// Owner of the bound instance; only fixture registration consumes it
+    /// until installed registration returns with Wave 9 (#467/#462).
+    #[cfg(any(test, feature = "test-support"))]
     owner_token: PluginOwnerTokenV1,
+    /// Validated installed callbacks. They stay inert until installed
+    /// registration returns with Wave 9 (#467/#462); see
+    /// [`Self::with_installed_driver`].
     driver: Option<Box<dyn Driver>>,
-    approver: Option<Box<dyn ActionApprover>>,
-    approver_event_types: Vec<Kind>,
+    approver: Option<(Box<dyn ActionApprover>, Vec<Kind>)>,
 }
 
 impl OutputPolicyBindingV1 {
@@ -692,10 +695,10 @@ impl OutputPolicyBindingV1 {
             artifacts,
             source,
             plugin_name: plugin.name(),
+            #[cfg(any(test, feature = "test-support"))]
             owner_token: PluginInstanceIdentity::installed_owner_token(plugin),
             driver: None,
             approver: None,
-            approver_event_types: Vec::new(),
         })
     }
 
@@ -721,11 +724,17 @@ impl OutputPolicyBindingV1 {
             owner_token: PluginInstanceIdentity::installed_owner_token(plugin),
             driver: None,
             approver: None,
-            approver_event_types: Vec::new(),
         })
     }
 
     /// Attach only the concrete Driver compiled into this installed source.
+    ///
+    /// The attached Driver stays inert until installed registration returns
+    /// with Wave 9 (#467/#462): no Wave 8 path consumes a binding's callbacks,
+    /// because installed registration fails closed. The method still checks
+    /// the Driver against the reviewed source descriptor now, so a foreign
+    /// or duplicate callback can never be bound to an installed source and
+    /// the Wave 9 consumer inherits an already-validated binding.
     ///
     /// # Errors
     /// Rejects a foreign or duplicate Driver before registration can mutate state.
@@ -741,6 +750,12 @@ impl OutputPolicyBindingV1 {
     }
 
     /// Attach only the concrete `ActionApprover` compiled into this installed source.
+    ///
+    /// Like [`Self::with_installed_driver`], the approver and its routes stay
+    /// inert until installed registration returns with Wave 9 (#467/#462).
+    /// The reviewed approver type and the route bound are validated now so
+    /// that a foreign, duplicate, or unbounded approver is rejected at the
+    /// binding boundary rather than at a later consumer.
     ///
     /// # Errors
     /// Rejects a foreign or duplicate approver before registration can mutate state.
@@ -762,54 +777,12 @@ impl OutputPolicyBindingV1 {
         if routes.len() > MAX_OUTPUT_DECLARATIONS_V1 {
             return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
         }
-        self.approver = Some(Box::new(approver));
-        self.approver_event_types = routes;
+        self.approver = Some((Box::new(approver), routes));
         Ok(self)
     }
 
-    /// Clone the World approver from the exact `Plugin` instance that owns this binding.
-    ///
-    /// # Errors
-    /// Rejects a foreign instance, foreign implementation, or duplicate approver.
-    pub fn with_installed_plugin_action_approver<A>(
-        mut self,
-        plugin: &A,
-        event_types: impl IntoIterator<Item = Kind>,
-    ) -> Result<Self, OutputAdmissionErrorV1>
-    where
-        A: Plugin + ActionApprover + Clone + 'static,
-    {
-        if self.approver.is_some()
-            || self.source != InstalledOutputPolicySourceV1::World
-            || self.owner_token != PluginInstanceIdentity::installed_owner_token(plugin)
-            || !self.source.accepts_approver::<A>()
-        {
-            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
-        }
-        // Accept exactly one route, the World action type. The second `next`
-        // only proves that no further route exists; the rest is not consumed.
-        let mut routes = event_types.into_iter();
-        let (Some(route), None) = (routes.next(), routes.next()) else {
-            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
-        };
-        if route.as_str() != WORLD_ACTION_EVENT_TYPE_V1 {
-            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
-        }
-        self.approver = Some(Box::new(plugin.clone()));
-        self.approver_event_types = vec![route];
-        Ok(self)
-    }
-
-    pub(crate) fn take_callbacks(&mut self) -> InstalledCallbacksV1 {
-        InstalledCallbacksV1 {
-            driver: self.driver.take(),
-            approver: self.approver.take(),
-            approver_event_types: std::mem::take(&mut self.approver_event_types),
-        }
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn verifies_erased_owner_instance(&self, plugin: &dyn Plugin) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
         if self.source == InstalledOutputPolicySourceV1::Generated {
             return self.owner_token == PluginInstanceIdentity::installed_owner_token(plugin);
         }
@@ -819,14 +792,7 @@ impl OutputPolicyBindingV1 {
         })
     }
 
-    pub(crate) fn requires_action_approver(&self) -> bool {
-        self.source.descriptor().approver_type.is_some()
-    }
-
-    pub(crate) fn has_action_approver_route(&self) -> bool {
-        self.approver.is_some() && !self.approver_event_types.is_empty()
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -907,6 +873,7 @@ impl OutputPolicyClosureV1 {
     /// # Errors
     /// Returns a closed artifact or canonicality error when one referenced
     /// object is absent, malformed, or does not match its recorded identity.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_artifacts(
         output_policy_bytes: &[u8],
         executable_budget_bytes: &[u8],
@@ -1275,19 +1242,22 @@ pub(crate) fn draft_execution_profile_artifact_v1(
     }
 }
 
-fn execution_profile_artifact_v1(profile_id: &str) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
+fn execution_profile_artifact_v1(
+    profile_id: &str,
+    source: InstalledOutputPolicySourceV1,
+) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
     #[cfg(any(test, feature = "test-support"))]
-    {
-        // `test-support` deliberately permits unsigned draft artifacts for
-        // fixtures; deployable builds must not enable that feature.
-        draft_execution_profile_artifact_v1(profile_id)
+    if source == InstalledOutputPolicySourceV1::Generated {
+        return draft_execution_profile_artifact_v1(profile_id);
     }
-    #[cfg(all(target_os = "linux", not(any(test, feature = "test-support"))))]
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = source;
+    #[cfg(target_os = "linux")]
     {
         pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
             .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
     }
-    #[cfg(all(not(target_os = "linux"), not(any(test, feature = "test-support"))))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = profile_id;
         Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
@@ -1307,6 +1277,7 @@ pub struct OutputAdmissionV1 {
     budget: ExecutableBudgetPolicyV1,
     usage: Mutex<AdmissionUsage>,
     closure: Option<OutputPolicyClosureV1>,
+    #[cfg(any(test, feature = "test-support"))]
     owner_token: Option<PluginOwnerTokenV1>,
 }
 
@@ -1337,6 +1308,7 @@ impl OutputAdmissionV1 {
     /// # Errors
     /// Returns an identity, artifact, or budget error when the closure does
     /// not describe the registered Plugin and its executable reservation.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn try_new_verified(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -1349,6 +1321,7 @@ impl OutputAdmissionV1 {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn try_new_verified_inner(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -1363,6 +1336,7 @@ impl OutputAdmissionV1 {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn try_new_core(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -1423,6 +1397,7 @@ impl OutputAdmissionV1 {
         self.closure.as_ref()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn owner_token(&self) -> Option<PluginOwnerTokenV1> {
         self.owner_token
     }
@@ -1578,6 +1553,32 @@ mod tests {
     }
 
     #[test]
+    fn draft_epf1_requires_generated_source() -> Result<(), Box<dyn std::error::Error>> {
+        let profile_id = "deterministic-local-v1";
+        let generated =
+            execution_profile_artifact_v1(profile_id, InstalledOutputPolicySourceV1::Generated)?;
+        assert_eq!(
+            generated,
+            pos_conformance::draft_execution_profile_bytes_v1(profile_id)?
+        );
+        for source in [
+            InstalledOutputPolicySourceV1::Gateway,
+            InstalledOutputPolicySourceV1::World,
+            InstalledOutputPolicySourceV1::RuleAgent,
+            InstalledOutputPolicySourceV1::Agent,
+            InstalledOutputPolicySourceV1::SyntheticObservation,
+            InstalledOutputPolicySourceV1::Society,
+            InstalledOutputPolicySourceV1::Experiment,
+        ] {
+            assert_eq!(
+                execution_profile_artifact_v1(profile_id, source),
+                Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn installed_sources_reject_unrelated_driver_types() {
         for source in [
             InstalledOutputPolicySourceV1::Gateway,
@@ -1613,6 +1614,40 @@ mod tests {
         ] {
             assert!(!source.accepts_approver::<BindingTestApprover>());
         }
+    }
+
+    #[test]
+    fn binding_attaches_one_driver_and_checks_the_owner_instance() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            name: "fixture",
+            events: vec![Kind::new("plugin.output")],
+        };
+        let generated = || {
+            OutputPolicyBindingV1::from_installed_source(
+                &plugin,
+                InstalledOutputPolicySourceV1::Generated,
+                &[],
+                "deterministic-local-v1",
+            )
+            .or_resume()
+        };
+        let driven = generated()
+            .with_installed_driver(SourceProbeDriver)
+            .or_resume();
+        assert!(matches!(
+            driven.with_installed_driver(SourceProbeDriver),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "driver" })
+        ));
+
+        let cloned_plugin = plugin.clone();
+        let mut owned = generated();
+        assert!(owned.verifies_erased_owner_instance(&plugin));
+        assert!(!owned.verifies_erased_owner_instance(&cloned_plugin));
+        // An installed source checks the owner against its descriptor types,
+        // which a fixture Plugin never matches.
+        owned.source = InstalledOutputPolicySourceV1::Gateway;
+        assert!(!owned.verifies_erased_owner_instance(&plugin));
     }
 
     fn budget(
@@ -1733,54 +1768,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn installed_owner_binding_checks_instance_and_required_action_route() {
-        let plugin = FixturePlugin {
-            id: PluginId::new(),
-            name: "fixture",
-            events: vec![Kind::new("plugin.output")],
-        };
-        let budget = budget(plugin.id(), 16, 2, 32, 100, [10, 10, 10]);
-        let binding = OutputPolicyBindingV1::from_installed_source_with_policy(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            policy(plugin.id(), &budget),
-            budget,
-            &[],
-            "deterministic-local-v1",
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-
-        let cloned_plugin = plugin.clone();
-        assert!(binding.verifies_erased_owner_instance(&plugin));
-        assert!(!binding.verifies_erased_owner_instance(&cloned_plugin));
-        assert!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&binding).is_ok()
-        );
-
-        let mut world_binding = binding;
-        world_binding.source = InstalledOutputPolicySourceV1::World;
-        assert!(matches!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&world_binding),
-            Err(crate::RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
-            ))
-        ));
-        world_binding.approver = Some(Box::new(BindingTestApprover));
-        world_binding.approver_event_types = vec![Kind::new("plugin.output")];
-        assert!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&world_binding)
-                .is_ok()
-        );
-        world_binding.approver_event_types.clear();
-        assert!(matches!(
-            crate::registry::PluginRegistry::validate_required_installed_approver(&world_binding),
-            Err(crate::RuntimeError::OutputAdmission(
-                OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
-            ))
-        ));
-    }
-
     struct LongVersionPlugin {
         version: &'static str,
     }
@@ -1810,7 +1797,7 @@ mod tests {
         plugin_id: PluginId,
         workload_profile: WorkloadProfileV1,
     ) -> OutputPolicyClosureV1 {
-        let profile = execution_profile_artifact_v1("deterministic-local-v1").or_resume();
+        let profile = draft_execution_profile_artifact_v1("deterministic-local-v1").or_resume();
         let profile_hash = crate::reviewed_policy::execution_profile_artifact_hash_v1(&profile);
         let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
             revision: 1,
