@@ -78,7 +78,7 @@ pub(super) struct RegisteredLocalAdapterV1 {
 
 /// Exact registry-derived MAA1 and locally recorded MAT1 bytes.
 ///
-/// These records do not establish native owner admission or WorldCut provenance.
+/// These records do not establish native owner admission or `WorldCut` provenance.
 pub struct ClosedAdapterTranscriptV1 {
     admission: AdapterAdmissionV1,
     transcript: AdapterTranscriptV1,
@@ -144,6 +144,47 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
         protocol_version: u64,
         exact_request_payload: Vec<u8>,
     ) -> Result<Vec<u8>, LocalAdapterErrorV1> {
+        let adapter_index = self.find_adapter_index(
+            plugin_id,
+            adapter_id,
+            provider_id,
+            operation_id,
+            protocol_version,
+        )?;
+        let entry = self.registry.local_adapters[adapter_index].entry.clone();
+        let (global_call_index, invocation) =
+            self.build_invocation(entry, exact_request_payload)?;
+        let per_plugin_call_index = self
+            .next_per_plugin_call
+            .get(&plugin_id)
+            .copied()
+            .unwrap_or_default();
+        self.ensure_call_fits_transcript(per_plugin_call_index, &invocation)?;
+        let (output_bytes, recorded_wall_time_micros) = self.record_call(
+            adapter_index,
+            plugin_id,
+            per_plugin_call_index,
+            global_call_index,
+            &invocation,
+        )?;
+        self.retain_call(
+            plugin_id,
+            per_plugin_call_index,
+            invocation,
+            output_bytes.clone(),
+            recorded_wall_time_micros,
+        )?;
+        Ok(output_bytes)
+    }
+
+    fn find_adapter_index(
+        &mut self,
+        plugin_id: PluginId,
+        adapter_id: &str,
+        provider_id: &str,
+        operation_id: &str,
+        protocol_version: u64,
+    ) -> Result<usize, LocalAdapterErrorV1> {
         if self.failed {
             return Err(LocalAdapterErrorV1::SessionAborted);
         }
@@ -167,15 +208,23 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
             self.failed = true;
             return Err(LocalAdapterErrorV1::UnknownAdapter);
         };
-        let entry = self.registry.local_adapters[adapter_index].entry.clone();
-        let global_call_index = match u64::try_from(self.calls.len()) {
-            Ok(index) if self.calls.len() < MAX_ADAPTER_TRANSCRIPT_CALLS_V1 => index,
-            _ => {
-                self.failed = true;
-                return Err(LocalAdapterErrorV1::CallBoundExceeded);
-            }
+        Ok(adapter_index)
+    }
+
+    fn build_invocation(
+        &mut self,
+        entry: AdapterAdmissionEntryV1,
+        exact_request_payload: Vec<u8>,
+    ) -> Result<(u64, AdapterInvocationV1), LocalAdapterErrorV1> {
+        let Ok(global_call_index) = u64::try_from(self.calls.len()) else {
+            self.failed = true;
+            return Err(LocalAdapterErrorV1::CallBoundExceeded);
         };
-        let invocation = match AdapterInvocationV1::new(AdapterInvocationInputV1 {
+        if self.calls.len() >= MAX_ADAPTER_TRANSCRIPT_CALLS_V1 {
+            self.failed = true;
+            return Err(LocalAdapterErrorV1::CallBoundExceeded);
+        }
+        let Ok(invocation) = AdapterInvocationV1::new(AdapterInvocationInputV1 {
             adapter_id: entry.adapter_id.clone(),
             provider_id: entry.provider_id.clone(),
             operation_id: entry.operation_id.clone(),
@@ -186,28 +235,17 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
             global_call_index,
             exact_request_payload,
         }) {
-            Ok(invocation) => invocation,
-            Err(_) => {
-                self.failed = true;
-                return Err(LocalAdapterErrorV1::CallBoundExceeded);
-            }
+            self.failed = true;
+            return Err(LocalAdapterErrorV1::CallBoundExceeded);
         };
-        let recorded_wall_time_micros = match SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| u64::try_from(duration.as_micros()).ok())
-        {
-            Some(value) => value,
-            None => {
-                self.failed = true;
-                return Err(LocalAdapterErrorV1::ClockUnavailable);
-            }
-        };
-        let per_plugin_call_index = self
-            .next_per_plugin_call
-            .get(&plugin_id)
-            .copied()
-            .unwrap_or_default();
+        Ok((global_call_index, invocation))
+    }
+
+    fn ensure_call_fits_transcript(
+        &mut self,
+        per_plugin_call_index: u64,
+        invocation: &AdapterInvocationV1,
+    ) -> Result<(), LocalAdapterErrorV1> {
         let maximum_call_size = transcript_call_size(
             per_plugin_call_index,
             invocation.to_canonical_cbor().len(),
@@ -222,6 +260,25 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
             self.failed = true;
             return Err(LocalAdapterErrorV1::CallBoundExceeded);
         }
+        Ok(())
+    }
+
+    fn record_call(
+        &mut self,
+        adapter_index: usize,
+        plugin_id: PluginId,
+        per_plugin_call_index: u64,
+        global_call_index: u64,
+        invocation: &AdapterInvocationV1,
+    ) -> Result<(Vec<u8>, u64), LocalAdapterErrorV1> {
+        let Some(recorded_wall_time_micros) = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_micros()).ok())
+        else {
+            self.failed = true;
+            return Err(LocalAdapterErrorV1::ClockUnavailable);
+        };
         let idempotency_key = adapter_idempotency_key(
             self.admission.as_input().owner_reference,
             self.admission.digest(),
@@ -232,7 +289,7 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
         let reservation = AdapterCallReservationV1::new(
             plugin_id,
             per_plugin_call_index,
-            invocation.clone(),
+            (*invocation).clone(),
             idempotency_key,
             recorded_wall_time_micros,
         )
@@ -240,7 +297,7 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
         let output = match self.recorder.reserve_adapter_call(
             self.recording_session.owner_reference(),
             self.recording_session.run_operation_id(),
-            reservation.clone(),
+            reservation,
         ) {
             Ok(AdapterCallReservationOutcomeV1::Completed {
                 output_bytes,
@@ -250,7 +307,7 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
                 let output = match catch_unwind(AssertUnwindSafe(|| {
                     self.registry.local_adapters[adapter_index]
                         .provider
-                        .invoke(&invocation, idempotency_key)
+                        .invoke(invocation, idempotency_key)
                 })) {
                     Ok(Ok(output)) if output.len() <= MAX_ADAPTER_CALL_BYTES_V1 => output,
                     Ok(Ok(_)) => {
@@ -282,15 +339,26 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
                 return Err(LocalAdapterErrorV1::RecordingFailed);
             }
         };
-        if output.0.len() > MAX_ADAPTER_CALL_BYTES_V1 {
+        Ok(output)
+    }
+
+    fn retain_call(
+        &mut self,
+        plugin_id: PluginId,
+        per_plugin_call_index: u64,
+        invocation: AdapterInvocationV1,
+        output_bytes: Vec<u8>,
+        recorded_wall_time_micros: u64,
+    ) -> Result<(), LocalAdapterErrorV1> {
+        if output_bytes.len() > MAX_ADAPTER_CALL_BYTES_V1 {
             self.failed = true;
             return Err(LocalAdapterErrorV1::CallBoundExceeded);
         }
         let call_size = transcript_call_size(
             per_plugin_call_index,
             invocation.to_canonical_cbor().len(),
-            output.0.len(),
-            output.1,
+            output_bytes.len(),
+            recorded_wall_time_micros,
         );
         let transcript_size = transcript_base_size(self.world_handle)
             .saturating_add(cbor_head_size(self.calls.len().saturating_add(1)))
@@ -304,13 +372,13 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
             plugin_id,
             per_plugin_call_index,
             input: invocation,
-            exact_output_bytes: output.0.clone(),
-            recorded_wall_time_micros: output.1,
+            exact_output_bytes: output_bytes,
+            recorded_wall_time_micros,
         });
         self.encoded_call_bytes = self.encoded_call_bytes.saturating_add(call_size);
         self.next_per_plugin_call
             .insert(plugin_id, per_plugin_call_index.saturating_add(1));
-        Ok(output.0)
+        Ok(())
     }
 
     /// Close the session and return its exact MAA1 and MAT1 records.
@@ -566,7 +634,7 @@ fn cbor_head_size(length: usize) -> usize {
     cbor_uint_size(u64::try_from(length).unwrap_or(u64::MAX))
 }
 
-fn cbor_uint_size(value: u64) -> usize {
+const fn cbor_uint_size(value: u64) -> usize {
     match value {
         0..=23 => 1,
         24..=0xff => 2,

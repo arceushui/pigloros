@@ -1194,7 +1194,7 @@ impl PluginRegistry {
     /// Admit every Plugin already registered in this local registry.
     ///
     /// Unlike the installed-source path, this derives the complete catalog
-    /// from the actual in-process entries and uses the PluginId as its local
+    /// from the actual in-process entries and uses the `PluginId` as its local
     /// stable slot. It requires no EPF1 or deployment qualification. The
     /// returned capability is tied to this registry instance and expires
     /// after any registration change.
