@@ -413,6 +413,10 @@ impl ForkAdmissionAuthoritySessionV1 {
             && self.host_key == host.host_verifying_key()
             && self.policy_digest == host.authentication_policy_digest()
     }
+
+    pub(crate) const fn store_id(&self) -> Hash {
+        self.store_id
+    }
 }
 
 /// The private durable state shared by `MemoryStore` and `SQLite`.
@@ -599,6 +603,17 @@ fn session_identity(challenge: &ForkAdmissionOpenChallengeV1, signature: &Signat
     hasher.update(&challenge.canonical_bytes());
     hasher.update(signature.as_bytes());
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Require that an ADR-099 operation presents the currently live local session.
+pub(crate) fn validate_live_session(
+    state: &ForkAdmissionAuthorityStateV1,
+    session: &ForkAdmissionAuthoritySessionV1,
+) -> bool {
+    state
+        .host
+        .zip(state.session_identity)
+        .is_some_and(|(host, identity)| session.matches(host, host.store_id(), identity))
 }
 
 fn authority_wall_time() -> Result<u64, ForkAdmissionAuthorityErrorV1> {
