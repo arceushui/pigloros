@@ -10836,7 +10836,6 @@ impl MemoryStore {
             (None, None, Some(_)) | (Some(_), None, _) | (None, Some(_), _) => {
                 Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
             }
-            _ => Err(ArtifactRegistrationPersistenceErrorV1::Conflict),
         }
     }
 
