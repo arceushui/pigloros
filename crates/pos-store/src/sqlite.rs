@@ -24967,11 +24967,11 @@ pub(super) mod key_registry_coverage {
 
     fn adapter_recording_fixture(
         run_byte: u8,
-    ) -> (
+    ) -> Result<(
         AdapterRecordingSessionV1,
         AdapterCallReservationV1,
         PluginId,
-    ) {
+    ), Box<dyn std::error::Error>> {
         let owner_reference = Hash::from_bytes([41; 32]);
         let plugin_id = PluginId::new();
         let configuration = b"sqlite-recorder-config".to_vec();
@@ -24995,8 +24995,7 @@ pub(super) mod key_registry_coverage {
             configuration_generation: 7,
             scope_digest: Hash::from_bytes([42; 32]),
             entries: vec![entry.clone()],
-        })
-        .expect("the recorder test admission should be valid");
+        })?;
         let world_handle = WorldReplayHandleV1::new(pos_core::WorldReplayHandleInputV1 {
             owner_reference,
             timeline_id: TimelineId::new(),
@@ -25005,16 +25004,14 @@ pub(super) mod key_registry_coverage {
             recording_receipt_digest: Hash::from_bytes([44; 32]),
             logical_head: 9,
             stitched_head_hash: Hash::from_bytes([45; 32]),
-        })
-        .expect("the recorder test handle should be valid");
+        })?;
         let run_operation_id = Hash::from_bytes([run_byte; 32]);
         let session = AdapterRecordingSessionV1::new(
             owner_reference,
             world_handle,
             run_operation_id,
             admission,
-        )
-        .expect("the recorder test session should be valid");
+        )?;
         let invocation = AdapterInvocationV1::new(pos_core::AdapterInvocationInputV1 {
             adapter_id: entry.adapter_id,
             provider_id: entry.provider_id,
@@ -25025,69 +25022,62 @@ pub(super) mod key_registry_coverage {
             configuration_digest: entry.configuration_digest,
             global_call_index: 0,
             exact_request_payload: b"exact recorder request".to_vec(),
-        })
-        .expect("the recorder test invocation should be valid");
+        })?;
         let reservation = AdapterCallReservationV1::new(
             plugin_id,
             0,
             invocation,
             Hash::from_bytes([46; 32]),
             100,
-        )
-        .expect("the recorder test reservation should be valid");
-        (session, reservation, plugin_id)
+        )?;
+        Ok((session, reservation, plugin_id))
     }
 
-    #[test]
-    fn sqlite_adapter_recording_resumes_and_closes_durable_exact_calls() {
-        let directory = tempfile::tempdir().expect("a temporary directory should be available");
-        let path = directory.path().join("adapter-recording.sqlite");
-        let path = path
-            .to_str()
-            .expect("the temporary SQLite path should be UTF-8");
-        let (session, reservation, plugin_id) = adapter_recording_fixture(47);
+    fn resume_sqlite_adapter_recording(
+        store: &mut SqliteStore,
+        session: &AdapterRecordingSessionV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
-        let mut store = SqliteStore::open(path).expect("the SQLite store should open");
-
-        store
-            .open_adapter_recording_session(session.clone())
-            .expect("a new recorder session should open");
-        store
-            .open_adapter_recording_session(session.clone())
-            .expect("the same open session should resume");
+        store.open_adapter_recording_session(session.clone())?;
+        store.open_adapter_recording_session(session.clone())?;
         assert_eq!(
             store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
             Ok(None)
         );
 
-        let mut changed_handle = session.world_handle().as_input().clone();
+        let mut changed_handle = *session.world_handle().as_input();
         changed_handle.logical_head += 1;
         let changed_session = AdapterRecordingSessionV1::new(
             owner_reference,
-            WorldReplayHandleV1::new(changed_handle)
-                .expect("the changed handle should remain structurally valid"),
+            WorldReplayHandleV1::new(changed_handle)?,
             run_operation_id,
             session.admission().clone(),
-        )
-        .expect("the changed session identity should be structurally valid");
+        )?;
         assert_eq!(
             store.open_adapter_recording_session(changed_session),
             Err(AdapterRecordingStoreErrorV1::Conflict)
         );
+        Ok(())
+    }
 
+    fn verify_sqlite_adapter_call_retries(
+        store: &mut SqliteStore,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: &AdapterCallReservationV1,
+        plugin_id: PluginId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut gap_input = reservation.invocation().as_input().clone();
         gap_input.global_call_index = 1;
-        let gap_invocation = AdapterInvocationV1::new(gap_input)
-            .expect("the gap invocation should remain structurally valid");
+        let gap_invocation = AdapterInvocationV1::new(gap_input)?;
         let gap_reservation = AdapterCallReservationV1::new(
             plugin_id,
             0,
             gap_invocation,
             Hash::from_bytes([48; 32]),
             100,
-        )
-        .expect("the gap reservation should remain structurally valid");
+        )?;
         assert_eq!(
             store.reserve_adapter_call(owner_reference, run_operation_id, gap_reservation),
             Err(AdapterRecordingStoreErrorV1::InvalidCall)
@@ -25105,8 +25095,7 @@ pub(super) mod key_registry_coverage {
             reservation.invocation().clone(),
             reservation.idempotency_key(),
             999,
-        )
-        .expect("the exact retry should be structurally valid");
+        )?;
         assert_eq!(
             store.reserve_adapter_call(owner_reference, run_operation_id, retry),
             Ok(AdapterCallReservationOutcomeV1::Reserved {
@@ -25117,22 +25106,18 @@ pub(super) mod key_registry_coverage {
             store.close_adapter_recording_session(owner_reference, run_operation_id),
             Err(AdapterRecordingStoreErrorV1::InvalidState)
         );
-        store
-            .complete_adapter_call(
-                owner_reference,
-                run_operation_id,
-                0,
-                b"exact response".to_vec(),
-            )
-            .expect("the reserved call should complete durably");
-        store
-            .complete_adapter_call(
-                owner_reference,
-                run_operation_id,
-                0,
-                b"exact response".to_vec(),
-            )
-            .expect("an exact completion retry should succeed");
+        store.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            b"exact response".to_vec(),
+        )?;
+        store.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            b"exact response".to_vec(),
+        )?;
         assert_eq!(
             store.complete_adapter_call(
                 owner_reference,
@@ -25143,23 +25128,56 @@ pub(super) mod key_registry_coverage {
             Err(AdapterRecordingStoreErrorV1::Conflict)
         );
         assert_eq!(
-            store.reserve_adapter_call(owner_reference, run_operation_id, reservation),
+            store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone()),
             Ok(AdapterCallReservationOutcomeV1::Completed {
                 output_bytes: b"exact response".to_vec(),
                 reserved_at_micros: 100
             })
         );
+        Ok(())
+    }
 
-        let closed = store
-            .close_adapter_recording_session(owner_reference, run_operation_id)
-            .expect("a fully completed recorder should close");
+    fn exercise_sqlite_adapter_recording(
+        store: &mut SqliteStore,
+        session: &AdapterRecordingSessionV1,
+        reservation: &AdapterCallReservationV1,
+        plugin_id: PluginId,
+    ) -> Result<(Hash, Hash, Vec<u8>), Box<dyn std::error::Error>> {
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        resume_sqlite_adapter_recording(store, session)?;
+        verify_sqlite_adapter_call_retries(
+            store,
+            owner_reference,
+            run_operation_id,
+            reservation,
+            plugin_id,
+        )?;
+        let closed = store.close_adapter_recording_session(owner_reference, run_operation_id)?;
         assert_eq!(
             store.close_adapter_recording_session(owner_reference, run_operation_id),
             Ok(closed.clone())
         );
+        Ok((owner_reference, run_operation_id, closed))
+    }
+
+    #[test]
+    fn sqlite_adapter_recording_resumes_and_closes_durable_exact_calls(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("adapter-recording.sqlite");
+        let path = path.to_string_lossy().into_owned();
+        let (session, reservation, plugin_id) = adapter_recording_fixture(47)?;
+        let mut store = SqliteStore::open(&path)?;
+        let (owner_reference, run_operation_id, closed) = exercise_sqlite_adapter_recording(
+            &mut store,
+            &session,
+            &reservation,
+            plugin_id,
+        )?;
         drop(store);
 
-        let mut reopened = SqliteStore::open(path).expect("the durable SQLite store should reopen");
+        let mut reopened = SqliteStore::open(&path)?;
         assert_eq!(
             reopened.read_closed_adapter_recording_session(owner_reference, run_operation_id),
             Ok(Some(closed))
@@ -25168,27 +25186,25 @@ pub(super) mod key_registry_coverage {
             reopened.open_adapter_recording_session(session),
             Err(AdapterRecordingStoreErrorV1::InvalidState)
         );
+        Ok(())
     }
 
     #[test]
-    fn sqlite_adapter_recording_abort_prevents_close() {
-        let (session, reservation, _) = adapter_recording_fixture(49);
+    fn sqlite_adapter_recording_abort_prevents_close() -> Result<(), Box<dyn std::error::Error>> {
+        let (session, reservation, _) = adapter_recording_fixture(49)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
-        let mut store = open_store().expect("SQLite test store should open");
+        let mut store = open_store()?;
         store
-            .open_adapter_recording_session(session.clone())
-            .expect("the recorder session should open");
+            .open_adapter_recording_session(session.clone())?;
         store
-            .reserve_adapter_call(owner_reference, run_operation_id, reservation)
-            .expect("the first call should reserve");
+            .reserve_adapter_call(owner_reference, run_operation_id, reservation)?;
         assert_eq!(
             store.close_adapter_recording_session(owner_reference, run_operation_id),
             Err(AdapterRecordingStoreErrorV1::InvalidState)
         );
         store
-            .abort_adapter_recording_session(owner_reference, run_operation_id)
-            .expect("the open recorder session should abort");
+            .abort_adapter_recording_session(owner_reference, run_operation_id)?;
         assert_eq!(
             store.close_adapter_recording_session(owner_reference, run_operation_id),
             Err(AdapterRecordingStoreErrorV1::InvalidState)
@@ -25201,5 +25217,6 @@ pub(super) mod key_registry_coverage {
             store.open_adapter_recording_session(session),
             Err(AdapterRecordingStoreErrorV1::InvalidState)
         );
+        Ok(())
     }
 }
