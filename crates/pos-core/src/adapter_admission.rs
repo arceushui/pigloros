@@ -3,7 +3,10 @@
 //! These structural bytes do not prove owner admission, `PublicRecord`
 //! provenance, a complete Plugin roster, or authority to invoke an adapter.
 
-use crate::{encode_head, Hash, PluginId};
+use crate::{
+    adapter_codec::{encode_bytes, encode_hash, hash_bytes, length_hash},
+    encode_head, Hash, PluginId,
+};
 use ulid::Ulid;
 
 /// One admitted Plugin operation, before any owner-authority claim.
@@ -237,7 +240,9 @@ impl AdapterAdmissionV1 {
         if bytes.len() > MAX_ADAPTER_ADMISSION_BYTES_V1 {
             return Err(AdapterAdmissionErrorV1::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader {
+            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+        };
         reader.fixed(&[0x86, 0x44, b'M', b'A', b'A', b'1', 1])?;
         let owner_reference = reader.hash()?;
         let configuration_generation = reader.head(0)?;
@@ -279,7 +284,7 @@ impl AdapterAdmissionV1 {
                 effect_mode,
             });
         }
-        if reader.offset != bytes.len() {
+        if !reader.cursor.is_finished() {
             return Err(AdapterAdmissionErrorV1::NonCanonical);
         }
         let record = Self::new(AdapterAdmissionInputV1 {
@@ -307,21 +312,6 @@ pub fn adapter_configuration_digest_v1(bytes: &[u8]) -> Hash {
     length_hash(b"pigloros.repro.adapter-configuration.v1\0", bytes)
 }
 
-fn length_hash(domain: &[u8], bytes: &[u8]) -> Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(&(bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-    Hash::from_bytes(*hasher.finalize().as_bytes())
-}
-
-fn hash_bytes(domain: &[u8], bytes: &[u8]) -> Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(bytes);
-    Hash::from_bytes(*hasher.finalize().as_bytes())
-}
-
 fn validate_entry(entry: &AdapterAdmissionEntryV1) -> Result<(), AdapterAdmissionErrorV1> {
     if entry.exact_configuration_bytes.len() > MAX_ADAPTER_CONFIGURATION_BYTES_V1 {
         return Err(AdapterAdmissionErrorV1::FieldOutOfBounds);
@@ -341,28 +331,15 @@ fn validate_entry(entry: &AdapterAdmissionEntryV1) -> Result<(), AdapterAdmissio
     Ok(())
 }
 
-fn encode_hash(out: &mut Vec<u8>, hash: Hash) {
-    out.extend_from_slice(&[0x58, 0x20]);
-    out.extend_from_slice(hash.as_bytes());
-}
-
-fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8], major: u8) {
-    encode_head(out, major, bytes.len() as u64);
-    out.extend_from_slice(bytes);
-}
-
 struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
+    cursor: crate::cbor_cursor::CborCursor<'a>,
 }
 
 impl Reader<'_> {
     fn fixed(&mut self, expected: &[u8]) -> Result<(), AdapterAdmissionErrorV1> {
-        if self.take(expected.len())? == expected {
-            Ok(())
-        } else {
-            Err(AdapterAdmissionErrorV1::InvalidEncoding)
-        }
+        self.cursor
+            .fixed(expected)
+            .map_err(|_| AdapterAdmissionErrorV1::InvalidEncoding)
     }
 
     fn hash(&mut self) -> Result<Hash, AdapterAdmissionErrorV1> {
@@ -403,34 +380,14 @@ impl Reader<'_> {
     }
 
     fn head(&mut self, major: u8) -> Result<u64, AdapterAdmissionErrorV1> {
-        let tag = self.take(1)?[0];
-        if tag >> 5 != major {
-            return Err(AdapterAdmissionErrorV1::InvalidEncoding);
-        }
-        match tag & 0x1f {
-            small @ 0..=23 => Ok(u64::from(small)),
-            24 => self.number::<1>(),
-            25 => self.number::<2>(),
-            26 => self.number::<4>(),
-            27 => self.number::<8>(),
-            _ => Err(AdapterAdmissionErrorV1::InvalidEncoding),
-        }
-    }
-
-    fn number<const N: usize>(&mut self) -> Result<u64, AdapterAdmissionErrorV1> {
-        Ok(self
-            .take(N)?
-            .iter()
-            .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte)))
+        self.cursor
+            .head(major)
+            .map_err(|_| AdapterAdmissionErrorV1::InvalidEncoding)
     }
 
     fn take(&mut self, length: usize) -> Result<&[u8], AdapterAdmissionErrorV1> {
-        let end = self.offset.saturating_add(length);
-        let value = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(AdapterAdmissionErrorV1::InvalidEncoding)?;
-        self.offset = end;
-        Ok(value)
+        self.cursor
+            .take(length)
+            .map_err(|_| AdapterAdmissionErrorV1::InvalidEncoding)
     }
 }

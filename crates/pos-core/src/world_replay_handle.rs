@@ -100,9 +100,11 @@ impl WorldReplayHandleV1 {
         if bytes.len() > MAX_WORLD_REPLAY_HANDLE_BYTES_V1 {
             return Err(WorldReplayHandleErrorV1::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader {
+            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+        };
         reader.handle().and_then(|handle| {
-            if reader.offset != bytes.len() {
+            if !reader.cursor.is_finished() {
                 Err(WorldReplayHandleErrorV1::InvalidEncoding)
             } else if handle.to_canonical_cbor() != bytes {
                 Err(WorldReplayHandleErrorV1::NonCanonical)
@@ -139,8 +141,7 @@ fn encode_unsigned(bytes: &mut Vec<u8>, value: u64) {
 }
 
 struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
+    cursor: crate::cbor_cursor::CborCursor<'a>,
 }
 
 impl Reader<'_> {
@@ -169,13 +170,9 @@ impl Reader<'_> {
     }
 
     fn fixed(&mut self, expected: &[u8]) -> Result<(), WorldReplayHandleErrorV1> {
-        self.take(expected.len()).and_then(|actual| {
-            if actual == expected {
-                Ok(())
-            } else {
-                Err(WorldReplayHandleErrorV1::InvalidEncoding)
-            }
-        })
+        self.cursor
+            .fixed(expected)
+            .map_err(|_| WorldReplayHandleErrorV1::InvalidEncoding)
     }
 
     fn hash(&mut self) -> Result<Hash, WorldReplayHandleErrorV1> {
@@ -199,34 +196,22 @@ impl Reader<'_> {
     }
 
     fn unsigned(&mut self) -> Result<u64, WorldReplayHandleErrorV1> {
-        self.take(1)
-            .map(|head| head[0])
+        self.cursor
+            .byte()
             .and_then(|head| match head {
                 0..=23 => Ok(u64::from(head)),
-                0x18 => self.take_number::<1>(),
-                0x19 => self.take_number::<2>(),
-                0x1a => self.take_number::<4>(),
-                0x1b => self.take_number::<8>(),
-                _ => Err(WorldReplayHandleErrorV1::InvalidEncoding),
+                0x18 => self.cursor.number::<1>(),
+                0x19 => self.cursor.number::<2>(),
+                0x1a => self.cursor.number::<4>(),
+                0x1b => self.cursor.number::<8>(),
+                _ => return Err(crate::cbor_cursor::CborReadError::InvalidEncoding),
             })
-    }
-
-    fn take_number<const N: usize>(&mut self) -> Result<u64, WorldReplayHandleErrorV1> {
-        self.take(N).map(|bytes| {
-            bytes
-                .iter()
-                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
-        })
+            .map_err(|_| WorldReplayHandleErrorV1::InvalidEncoding)
     }
 
     fn take(&mut self, length: usize) -> Result<&[u8], WorldReplayHandleErrorV1> {
-        let end = self.offset.saturating_add(length);
-        match self.bytes.get(self.offset..end) {
-            Some(value) => {
-                self.offset = end;
-                Ok(value)
-            }
-            None => Err(WorldReplayHandleErrorV1::InvalidEncoding),
-        }
+        self.cursor
+            .take(length)
+            .map_err(|_| WorldReplayHandleErrorV1::InvalidEncoding)
     }
 }
