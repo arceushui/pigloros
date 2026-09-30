@@ -600,6 +600,12 @@ mod operator_authentication_tests {
             snapshot.verify_operator_signature_v1(&foreign_key, "deployment-operator"),
             Err(TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorSignature)
         );
+        let mut off_curve_key = [0; 32];
+        off_curve_key[0] = 2;
+        assert_eq!(
+            snapshot.verify_operator_signature_v1(&off_curve_key, "deployment-operator"),
+            Err(TrustPolicySnapshotAuthenticationErrorV1::InvalidOperatorKey)
+        );
         snapshot.epoch += 1;
         assert_eq!(
             snapshot.verify_operator_signature_v1(&operator_key, "deployment-operator"),

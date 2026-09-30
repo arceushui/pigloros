@@ -5,7 +5,7 @@
 //! grant a runtime Plugin pin by itself.
 
 use pos_conformance::{ExecutionProfileV1, TrustPolicySnapshotV1};
-use rusqlite::{params, Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -146,33 +146,32 @@ impl DeploymentTrustPolicyRegistryV1 {
         }
         require_global_position(&snapshot)?;
         let mut connection = open_connection(path, true)?;
-        let transaction = connection
+        connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
-        transaction
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS deployment_trust_state (
-                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                    policy_id TEXT NOT NULL, epoch INTEGER NOT NULL,
-                    full_digest BLOB NOT NULL, exact_bytes BLOB NOT NULL,
-                    genesis_digest BLOB NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS deployment_trust_audit (
-                    sequence INTEGER PRIMARY KEY, action TEXT NOT NULL,
-                    epoch INTEGER NOT NULL, full_digest BLOB NOT NULL
-                );",
-            )
-            .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
-        transaction
-            .execute(
-                "INSERT INTO deployment_trust_state VALUES (1, ?1, 1, ?2, ?3, ?2)",
-                params![&release.policy_id, digest.as_slice(), exact_tps1],
-            )
-            .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
-        audit(&transaction, "operator-genesis", 1, &digest)?;
-        transaction
-            .commit()
-            .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)
+            .and_then(|transaction| {
+                transaction
+                    .execute_batch(
+                        "CREATE TABLE IF NOT EXISTS deployment_trust_state (
+                            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                            policy_id TEXT NOT NULL, epoch INTEGER NOT NULL,
+                            full_digest BLOB NOT NULL, exact_bytes BLOB NOT NULL,
+                            genesis_digest BLOB NOT NULL
+                        );
+                        CREATE TABLE IF NOT EXISTS deployment_trust_audit (
+                            sequence INTEGER PRIMARY KEY, action TEXT NOT NULL,
+                            epoch INTEGER NOT NULL, full_digest BLOB NOT NULL
+                        );",
+                    )
+                    .and_then(|()| {
+                        transaction.execute(
+                            "INSERT INTO deployment_trust_state VALUES (1, ?1, 1, ?2, ?3, ?2)",
+                            params![&release.policy_id, digest.as_slice(), exact_tps1],
+                        )
+                    })
+                    .and_then(|_| audit(&transaction, "operator-genesis", 1, &digest))
+                    .and_then(|()| transaction.commit())
+            })
+            .map_err(storage_unavailable)
     }
 
     /// Open only an existing, intact and authenticated operator state store.
@@ -184,16 +183,8 @@ impl DeploymentTrustPolicyRegistryV1 {
         release: OperatorReleaseTrustV1,
     ) -> Result<Self, TrustPolicyRegistryErrorV1> {
         let connection = open_connection(path, false)?;
-        let stored = read_state(&connection)?;
-        authenticate(&stored.bytes, &release)
-            .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
-        if stored.snapshot.policy_id != release.policy_id
-            || stored.genesis_digest != release.genesis_digest
-        {
-            return Err(TrustPolicyRegistryErrorV1::CorruptState);
-        }
-        let state_identity = path_identity(path)?;
-        Ok(Self {
+        read_trusted_state(&connection, &release)?;
+        path_identity(path).map(|state_identity| Self {
             connection,
             release,
             path: path.to_owned(),
@@ -218,10 +209,11 @@ impl DeploymentTrustPolicyRegistryV1 {
         request: GatewayEpf1TrustRequestV1<'_>,
         register: impl FnOnce(&AdmittedTrustSnapshotV1) -> Result<T, TrustPolicyRegistryErrorV1>,
     ) -> Result<T, TrustPolicyRegistryErrorV1> {
+        // A clock before the Unix epoch cannot prove validity, so it is
+        // treated as later than every expiry.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| TrustPolicyRegistryErrorV1::Expired)?
-            .as_secs();
+            .map_or(u64::MAX, |elapsed| elapsed.as_secs());
         self.with_admitted_epf1_at(exact_tps1, request, now, register)
     }
 
@@ -232,48 +224,37 @@ impl DeploymentTrustPolicyRegistryV1 {
         now: u64,
         register: impl FnOnce(&AdmittedTrustSnapshotV1) -> Result<T, TrustPolicyRegistryErrorV1>,
     ) -> Result<T, TrustPolicyRegistryErrorV1> {
+        self.admit_at(exact_tps1, request, now)
+            .and_then(|evidence| register(&evidence))
+    }
+
+    /// Advance and authenticate policy, then check one EPF1; only the
+    /// generic registration wrapper may expose the resulting evidence.
+    fn admit_at(
+        &mut self,
+        exact_tps1: &[u8],
+        request: GatewayEpf1TrustRequestV1<'_>,
+        now: u64,
+    ) -> Result<AdmittedTrustSnapshotV1, TrustPolicyRegistryErrorV1> {
         self.ensure_path_identity()?;
         let incoming = authenticate(exact_tps1, &self.release)?;
         require_global_position(&incoming)?;
         let digest = raw_digest(exact_tps1);
-        let transaction = self
-            .connection
+        let release = &self.release;
+        self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
-        let stored = read_state(&transaction)?;
-        authenticate(&stored.bytes, &self.release)
-            .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
-        if stored.snapshot.policy_id != self.release.policy_id
-            || stored.genesis_digest != self.release.genesis_digest
-        {
-            return Err(TrustPolicyRegistryErrorV1::CorruptState);
-        }
-        if exact_tps1 != stored.bytes.as_slice() {
-            if incoming.epoch <= stored.snapshot.epoch
-                || incoming.previous_snapshot_digest != Some(stored.digest)
-            {
-                return Err(TrustPolicyRegistryErrorV1::StaleSnapshot);
-            }
-            let epoch = i64::try_from(incoming.epoch)
-                .map_err(|_| TrustPolicyRegistryErrorV1::InvalidSnapshot)?;
-            transaction
-                .execute(
-                    "UPDATE deployment_trust_state SET epoch = ?1, full_digest = ?2, exact_bytes = ?3 WHERE singleton = 1",
-                    params![epoch, digest.as_slice(), exact_tps1],
-                )
-                .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
-            audit(&transaction, "operator-successor", epoch, &digest)?;
-        }
-        transaction
-            .commit()
-            .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
-        self.ensure_path_identity()?;
-        let raw_epf1_digest = verify_epf1(&incoming, &request, now)?;
-        register(&AdmittedTrustSnapshotV1 {
-            digest,
-            epoch: incoming.epoch,
-            raw_epf1_digest,
-        })
+            .map_err(storage_unavailable)
+            .and_then(|transaction| {
+                advance_state(&transaction, release, exact_tps1, &incoming, &digest)
+                    .and_then(|()| transaction.commit().map_err(storage_unavailable))
+            })
+            .and_then(|()| self.ensure_path_identity())
+            .and_then(|()| verify_epf1(&incoming, &request, now))
+            .map(|raw_epf1_digest| AdmittedTrustSnapshotV1 {
+                digest,
+                epoch: incoming.epoch,
+                raw_epf1_digest,
+            })
     }
 
     fn ensure_path_identity(&self) -> Result<(), TrustPolicyRegistryErrorV1> {
@@ -289,6 +270,53 @@ fn path_identity(path: &Path) -> Result<(u64, u64), TrustPolicyRegistryErrorV1> 
     std::fs::metadata(path)
         .map(|metadata| (metadata.dev(), metadata.ino()))
         .map_err(|_| TrustPolicyRegistryErrorV1::MissingState)
+}
+
+/// Advance stored TPS1 to one signed successor inside the caller's
+/// transaction; resubmitting the current exact bytes is a no-op.
+fn advance_state(
+    connection: &Connection,
+    release: &OperatorReleaseTrustV1,
+    exact_tps1: &[u8],
+    incoming: &TrustPolicySnapshotV1,
+    digest: &[u8; 32],
+) -> Result<(), TrustPolicyRegistryErrorV1> {
+    let stored = read_trusted_state(connection, release)?;
+    if exact_tps1 == stored.bytes.as_slice() {
+        return Ok(());
+    }
+    if incoming.epoch <= stored.snapshot.epoch
+        || incoming.previous_snapshot_digest != Some(stored.digest)
+    {
+        return Err(TrustPolicyRegistryErrorV1::StaleSnapshot);
+    }
+    let epoch =
+        i64::try_from(incoming.epoch).map_err(|_| TrustPolicyRegistryErrorV1::InvalidSnapshot)?;
+    connection
+        .execute(
+            "UPDATE deployment_trust_state SET epoch = ?1, full_digest = ?2, exact_bytes = ?3 WHERE singleton = 1",
+            params![epoch, digest.as_slice(), exact_tps1],
+        )
+        .and_then(|_| audit(connection, "operator-successor", epoch, digest))
+        .map_err(storage_unavailable)
+}
+
+/// Read intact state and re-authenticate it against the release anchor.
+fn read_trusted_state(
+    connection: &Connection,
+    release: &OperatorReleaseTrustV1,
+) -> Result<StoredSnapshot, TrustPolicyRegistryErrorV1> {
+    let stored = read_state(connection)?;
+    authenticate(&stored.bytes, release).map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
+    if stored.genesis_digest == release.genesis_digest {
+        Ok(stored)
+    } else {
+        Err(TrustPolicyRegistryErrorV1::CorruptState)
+    }
+}
+
+fn storage_unavailable(_: rusqlite::Error) -> TrustPolicyRegistryErrorV1 {
+    TrustPolicyRegistryErrorV1::StorageUnavailable
 }
 
 fn authenticate(
@@ -372,80 +400,80 @@ fn open_connection(path: &Path, create: bool) -> Result<Connection, TrustPolicyR
             TrustPolicyRegistryErrorV1::MissingState
         }
     })?;
-    let mode: String = connection
-        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-        .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
-    if mode != "wal" {
-        return Err(TrustPolicyRegistryErrorV1::StorageUnavailable);
-    }
-    connection
-        .execute_batch("PRAGMA synchronous = FULL")
-        .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
-    let synchronous: i64 = connection
-        .query_row("PRAGMA synchronous", [], |row| row.get(0))
-        .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)?;
-    if synchronous != 2 {
-        return Err(TrustPolicyRegistryErrorV1::StorageUnavailable);
-    }
-    Ok(connection)
+    let durable = connection
+        .query_row("PRAGMA journal_mode = WAL", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .is_ok_and(|mode| mode == "wal")
+        && connection
+            .execute_batch("PRAGMA synchronous = FULL")
+            .is_ok()
+        && connection
+            .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+            .is_ok_and(|level| level == 2);
+    durable
+        .then_some(connection)
+        .ok_or(TrustPolicyRegistryErrorV1::StorageUnavailable)
 }
 
 fn read_state(connection: &Connection) -> Result<StoredSnapshot, TrustPolicyRegistryErrorV1> {
-    let row: (String, i64, Vec<u8>, Vec<u8>, Vec<u8>) = connection
+    let (policy_id, epoch, full_digest, bytes, genesis_digest): (
+        String,
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+    ) = connection
         .query_row(
             "SELECT policy_id, epoch, full_digest, exact_bytes, genesis_digest FROM deployment_trust_state WHERE singleton = 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| row.try_into(),
         )
         .map_err(|error| match error {
             rusqlite::Error::QueryReturnedNoRows => TrustPolicyRegistryErrorV1::MissingState,
             _ => TrustPolicyRegistryErrorV1::CorruptState,
         })?;
-    let snapshot = TrustPolicySnapshotV1::from_canonical_cbor(&row.3)
+    let snapshot = TrustPolicySnapshotV1::from_canonical_cbor(&bytes)
         .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
-    if row.0 != snapshot.policy_id
-        || u64::try_from(row.1).ok() != Some(snapshot.epoch)
-        || row.2.as_slice() != raw_digest(&row.3).as_slice()
-        || row.4.len() != 32
-    {
-        return Err(TrustPolicyRegistryErrorV1::CorruptState);
-    }
-    let audit_row: (i64, Vec<u8>) = connection
-        .query_row(
-            "SELECT epoch, full_digest FROM deployment_trust_audit ORDER BY sequence DESC LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
-    if audit_row.0 != row.1 || audit_row.1 != row.2 {
-        return Err(TrustPolicyRegistryErrorV1::CorruptState);
-    }
-    let genesis_digest: [u8; 32] = row
-        .4
+    let genesis_digest: [u8; 32] = genesis_digest
         .as_slice()
         .try_into()
         .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
+    let latest_audit: (i64, Vec<u8>) = connection
+        .query_row(
+            "SELECT epoch, full_digest FROM deployment_trust_audit ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| row.try_into(),
+        )
+        .map_err(|_| TrustPolicyRegistryErrorV1::CorruptState)?;
+    let digest = raw_digest(&bytes);
+    if policy_id != snapshot.policy_id
+        || u64::try_from(epoch).ok() != Some(snapshot.epoch)
+        || full_digest != digest
+        || latest_audit != (epoch, full_digest)
+    {
+        return Err(TrustPolicyRegistryErrorV1::CorruptState);
+    }
     Ok(StoredSnapshot {
         snapshot,
-        digest: raw_digest(&row.3),
-        bytes: row.3,
+        bytes,
+        digest,
         genesis_digest,
     })
 }
 
 fn audit(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     action: &str,
     epoch: i64,
     digest: &[u8; 32],
-) -> Result<(), TrustPolicyRegistryErrorV1> {
-    transaction
+) -> rusqlite::Result<()> {
+    connection
         .execute(
             "INSERT INTO deployment_trust_audit(action, epoch, full_digest) VALUES (?1, ?2, ?3)",
             params![action, epoch, digest.as_slice()],
         )
         .map(|_| ())
-        .map_err(|_| TrustPolicyRegistryErrorV1::StorageUnavailable)
 }
 
 fn parse_utc_seconds(value: &str) -> Option<u64> {
@@ -463,22 +491,23 @@ fn parse_utc_seconds(value: &str) -> Option<u64> {
     {
         return None;
     }
+    // Every field is already known to be ASCII digits, so decoding is total.
     let number = |start: usize, end: usize| {
-        value
-            .get(start..end)
-            .and_then(|part| part.parse::<i64>().ok())
+        bytes[start..end]
+            .iter()
+            .fold(0_u16, |total, digit| total * 10 + u16::from(digit - b'0'))
     };
-    let year = number(0, 4)?;
-    let month = number(5, 7)?;
-    let day = number(8, 10)?;
-    let hour = number(11, 13)?;
-    let minute = number(14, 16)?;
-    let second = number(17, 19)?;
+    let year = number(0, 4);
+    let month = number(5, 7);
+    let day = number(8, 10);
+    let hour = number(11, 13);
+    let minute = number(14, 16);
+    let second = number(17, 19);
     if !(1970..=9999).contains(&year)
         || !(1..=12).contains(&month)
-        || !(0..=23).contains(&hour)
-        || !(0..=59).contains(&minute)
-        || !(0..=59).contains(&second)
+        || hour > 23
+        || minute > 59
+        || second > 59
     {
         return None;
     }
@@ -497,9 +526,11 @@ fn parse_utc_seconds(value: &str) -> Option<u64> {
         30,
         31,
     ];
-    if day < 1 || day > days_in_month[usize::try_from(month - 1).ok()?] {
+    if day < 1 || day > days_in_month[usize::from(month - 1)] {
         return None;
     }
+    let [year, month, day, hour, minute, second] =
+        [year, month, day, hour, minute, second].map(i64::from);
     let adjusted_year = year - i64::from(month <= 2);
     let era = adjusted_year / 400;
     let year_of_era = adjusted_year - era * 400;
@@ -1061,6 +1092,186 @@ mod tests {
         assert_eq!(parse_utc_seconds("2024-13-01T00:00:00Z"), None);
         assert_eq!(parse_utc_seconds("2024-01-01T00:00:60Z"), None);
         assert_eq!(parse_utc_seconds("2030-01-01"), None);
+        assert!(parse_utc_seconds("2000-02-29T00:00:00Z").is_some());
+        assert_eq!(parse_utc_seconds("1900-02-29T00:00:00Z"), None);
+    }
+
+    type Provisioned = (
+        tempfile::TempDir,
+        PathBuf,
+        TrustPolicySnapshotV1,
+        Vec<u8>,
+        Vec<u8>,
+    );
+
+    fn provisioned() -> Result<Provisioned, Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("trust.db");
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        DeploymentTrustPolicyRegistryV1::provision_explicit(
+            &path,
+            &release(&snapshot, &genesis),
+            &genesis,
+        )?;
+        Ok((directory, path, snapshot, genesis, fixture_profile()?))
+    }
+
+    #[test]
+    fn provisioning_without_a_writable_location_is_storage_unavailable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("missing").join("trust.db");
+        let snapshot = fixture_snapshot()?;
+        let genesis = signed(snapshot.clone())?;
+        assert_eq!(
+            DeploymentTrustPolicyRegistryV1::provision_explicit(
+                &path,
+                &release(&snapshot, &genesis),
+                &genesis
+            ),
+            Err(TrustPolicyRegistryErrorV1::StorageUnavailable)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reopen_rejects_every_tampered_state_shape() -> Result<(), Box<dyn std::error::Error>> {
+        for (tamper, expected) in [
+            (
+                "DELETE FROM deployment_trust_state",
+                TrustPolicyRegistryErrorV1::MissingState,
+            ),
+            (
+                "DROP TABLE deployment_trust_state",
+                TrustPolicyRegistryErrorV1::CorruptState,
+            ),
+            (
+                "UPDATE deployment_trust_state SET exact_bytes = x'00'",
+                TrustPolicyRegistryErrorV1::CorruptState,
+            ),
+            (
+                "UPDATE deployment_trust_state SET genesis_digest = zeroblob(31)",
+                TrustPolicyRegistryErrorV1::CorruptState,
+            ),
+            (
+                "UPDATE deployment_trust_state SET genesis_digest = zeroblob(32)",
+                TrustPolicyRegistryErrorV1::CorruptState,
+            ),
+            (
+                "DELETE FROM deployment_trust_audit",
+                TrustPolicyRegistryErrorV1::CorruptState,
+            ),
+            (
+                "UPDATE deployment_trust_state SET policy_id = 'another-policy'",
+                TrustPolicyRegistryErrorV1::CorruptState,
+            ),
+            (
+                "UPDATE deployment_trust_state SET epoch = 2",
+                TrustPolicyRegistryErrorV1::CorruptState,
+            ),
+            (
+                "UPDATE deployment_trust_audit SET full_digest = zeroblob(32)",
+                TrustPolicyRegistryErrorV1::CorruptState,
+            ),
+        ] {
+            let (_directory, path, snapshot, genesis, _) = provisioned()?;
+            Connection::open(&path)?.execute_batch(tamper)?;
+            assert_eq!(
+                DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))
+                    .err(),
+                Some(expected),
+                "{tamper}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn admission_rechecks_state_tampered_after_open() -> Result<(), Box<dyn std::error::Error>> {
+        let (_directory, path, snapshot, genesis, profile) = provisioned()?;
+        let mut registry =
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
+        Connection::open(&path)?.execute(
+            "UPDATE deployment_trust_state SET genesis_digest = zeroblob(32)",
+            [],
+        )?;
+        assert_eq!(
+            registry
+                .with_admitted_epf1_at(&genesis, request(&snapshot, &profile), TEST_NOW, |_| {
+                    Ok(())
+                })
+                .err(),
+            Some(TrustPolicyRegistryErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replaced_state_file_denies_new_admission() -> Result<(), Box<dyn std::error::Error>> {
+        let (directory, path, snapshot, genesis, profile) = provisioned()?;
+        let mut registry =
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
+        let replacement = directory.path().join("replacement.db");
+        std::fs::copy(&path, &replacement)?;
+        std::fs::rename(&replacement, &path)?;
+        assert_eq!(
+            registry
+                .with_admitted_epf1_at(&genesis, request(&snapshot, &profile), TEST_NOW, |_| {
+                    Ok(())
+                })
+                .err(),
+            Some(TrustPolicyRegistryErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn successor_epoch_beyond_storage_range_is_invalid() -> Result<(), Box<dyn std::error::Error>> {
+        let (_directory, path, snapshot, genesis, profile) = provisioned()?;
+        let mut registry =
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
+        let mut successor = snapshot.clone();
+        successor.epoch = u64::MAX;
+        successor.previous_snapshot_digest = Some(raw_digest(&genesis));
+        assert_eq!(
+            registry
+                .with_admitted_epf1_at(
+                    &signed(successor)?,
+                    request(&snapshot, &profile),
+                    TEST_NOW,
+                    |_| Ok(())
+                )
+                .err(),
+            Some(TrustPolicyRegistryErrorV1::InvalidSnapshot)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn successor_write_failure_is_storage_unavailable() -> Result<(), Box<dyn std::error::Error>> {
+        let (_directory, path, snapshot, genesis, profile) = provisioned()?;
+        let mut registry =
+            DeploymentTrustPolicyRegistryV1::open_current(&path, release(&snapshot, &genesis))?;
+        Connection::open(&path)?.execute_batch(
+            "CREATE TRIGGER deny_successor BEFORE UPDATE ON deployment_trust_state
+             BEGIN SELECT RAISE(ABORT, 'denied'); END;",
+        )?;
+        let mut successor = snapshot.clone();
+        successor.epoch = 2;
+        successor.previous_snapshot_digest = Some(raw_digest(&genesis));
+        assert_eq!(
+            registry
+                .with_admitted_epf1_at(
+                    &signed(successor)?,
+                    request(&snapshot, &profile),
+                    TEST_NOW,
+                    |_| Ok(())
+                )
+                .err(),
+            Some(TrustPolicyRegistryErrorV1::StorageUnavailable)
+        );
+        Ok(())
     }
 
     #[test]
