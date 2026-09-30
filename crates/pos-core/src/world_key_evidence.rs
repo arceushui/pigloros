@@ -119,7 +119,9 @@ impl WorldKeyEvidenceV1 {
         if bytes.len() > MAX_WORLD_KEY_EVIDENCE_BYTES_V1 {
             return Err(WorldKeyEvidenceErrorV1::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader {
+            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+        };
         reader
             .fixed(&[0x88, 0x44, b'W', b'K', b'E', b'1', 1])
             .and_then(|()| reader.owner())
@@ -149,7 +151,7 @@ impl WorldKeyEvidenceV1 {
             )
             .and_then(Self::new)
             .and_then(|record| {
-                if reader.offset != bytes.len() {
+                if !reader.cursor.is_finished() {
                     Err(WorldKeyEvidenceErrorV1::InvalidEncoding)
                 } else if record.to_canonical_cbor() != bytes {
                     Err(WorldKeyEvidenceErrorV1::NonCanonical)
@@ -180,59 +182,32 @@ fn encode_owner(out: &mut Vec<u8>, owner: OwnerIdV1) {
 }
 
 struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
+    cursor: crate::cbor_cursor::CborCursor<'a>,
 }
 
 impl Reader<'_> {
     fn take(&mut self, len: usize) -> Result<&[u8], WorldKeyEvidenceErrorV1> {
-        let end = self.offset.saturating_add(len);
-        match self.bytes.get(self.offset..end) {
-            Some(part) => {
-                self.offset = end;
-                Ok(part)
-            }
-            None => Err(WorldKeyEvidenceErrorV1::InvalidEncoding),
-        }
+        self.cursor
+            .take(len)
+            .map_err(|_| WorldKeyEvidenceErrorV1::InvalidEncoding)
     }
 
     fn fixed(&mut self, expected: &[u8]) -> Result<(), WorldKeyEvidenceErrorV1> {
-        self.take(expected.len()).and_then(|part| {
-            if part == expected {
-                Ok(())
-            } else {
-                Err(WorldKeyEvidenceErrorV1::InvalidEncoding)
-            }
-        })
+        self.cursor
+            .fixed(expected)
+            .map_err(|_| WorldKeyEvidenceErrorV1::InvalidEncoding)
     }
 
     fn byte(&mut self) -> Result<u8, WorldKeyEvidenceErrorV1> {
-        self.take(1).map(|part| part[0])
+        self.cursor
+            .byte()
+            .map_err(|_| WorldKeyEvidenceErrorV1::InvalidEncoding)
     }
 
     fn head(&mut self, major: u8) -> Result<u64, WorldKeyEvidenceErrorV1> {
-        self.byte().and_then(|first| {
-            if first >> 5 != major {
-                return Err(WorldKeyEvidenceErrorV1::InvalidEncoding);
-            }
-            let additional = first & 31;
-            match additional {
-                0..=23 => Ok(u64::from(additional)),
-                24 => self.byte().map(u64::from),
-                25 => self
-                    .take(2)
-                    .map(|part| u64::from(u16::from_be_bytes([part[0], part[1]]))),
-                26 => self.take(4).map(|part| {
-                    u64::from(u32::from_be_bytes([part[0], part[1], part[2], part[3]]))
-                }),
-                27 => self.take(8).map(|part| {
-                    let mut bytes = [0; 8];
-                    bytes.copy_from_slice(part);
-                    u64::from_be_bytes(bytes)
-                }),
-                _ => Err(WorldKeyEvidenceErrorV1::InvalidEncoding),
-            }
-        })
+        self.cursor
+            .head(major)
+            .map_err(|_| WorldKeyEvidenceErrorV1::InvalidEncoding)
     }
 
     fn owner(&mut self) -> Result<OwnerIdV1, WorldKeyEvidenceErrorV1> {
@@ -285,8 +260,7 @@ impl Reader<'_> {
     }
 
     fn optional_public_key(&mut self) -> Result<Option<PublicKey>, WorldKeyEvidenceErrorV1> {
-        if self.bytes.get(self.offset) == Some(&0xf6) {
-            self.offset += 1;
+        if self.cursor.consume_if(0xf6) {
             Ok(None)
         } else {
             self.hash()

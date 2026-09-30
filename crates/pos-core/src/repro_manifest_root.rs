@@ -114,9 +114,11 @@ impl ReproManifestRootV1 {
         if bytes.len() > MAX_REPRO_MANIFEST_ROOT_BYTES_V1 {
             return Err(ReproManifestRootErrorV1::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader {
+            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+        };
         reader.root().and_then(|root| {
-            if reader.offset != bytes.len() || root.to_canonical_cbor() != bytes {
+            if !reader.cursor.is_finished() || root.to_canonical_cbor() != bytes {
                 Err(ReproManifestRootErrorV1::NonCanonical)
             } else {
                 Ok(root)
@@ -136,8 +138,7 @@ fn encode_bytes(bytes: &mut Vec<u8>, value: &[u8], major: u8) {
 }
 
 struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
+    cursor: crate::cbor_cursor::CborCursor<'a>,
 }
 
 impl Reader<'_> {
@@ -195,23 +196,21 @@ impl Reader<'_> {
     }
 
     fn fixed(&mut self, expected: &[u8]) -> Result<(), ReproManifestRootErrorV1> {
-        self.take(expected.len()).and_then(|actual| {
-            if actual == expected {
-                Ok(())
-            } else {
-                Err(ReproManifestRootErrorV1::InvalidEncoding)
-            }
-        })
+        self.cursor
+            .fixed(expected)
+            .map_err(|_| ReproManifestRootErrorV1::InvalidEncoding)
     }
 
     fn hash(&mut self) -> Result<Hash, ReproManifestRootErrorV1> {
-        self.fixed(&[0x58, 0x20]).and_then(|()| {
-            self.take(32).map(|value| {
+        self.cursor
+            .fixed(&[0x58, 0x20])
+            .and_then(|()| self.cursor.take(32))
+            .map(|value| {
                 let mut bytes = [0; 32];
                 bytes.copy_from_slice(value);
                 Hash::from_bytes(bytes)
             })
-        })
+            .map_err(|_| ReproManifestRootErrorV1::InvalidEncoding)
     }
 
     fn unsigned(&mut self) -> Result<u64, ReproManifestRootErrorV1> {
@@ -238,8 +237,7 @@ impl Reader<'_> {
     }
 
     fn label(&mut self) -> Result<Option<String>, ReproManifestRootErrorV1> {
-        if self.bytes.get(self.offset) == Some(&0xf6) {
-            self.offset += 1;
+        if self.cursor.consume_if(0xf6) {
             Ok(None)
         } else {
             self.bounded_blob(3, MAX_REPRO_MANIFEST_LABEL_BYTES_V1)
@@ -252,37 +250,14 @@ impl Reader<'_> {
     }
 
     fn head(&mut self, major: u8) -> Result<u64, ReproManifestRootErrorV1> {
-        self.take(1).map(|value| value[0]).and_then(|tag| {
-            if tag >> 5 != major {
-                return Err(ReproManifestRootErrorV1::InvalidEncoding);
-            }
-            match tag & 0x1f {
-                small @ 0..=23 => Ok(u64::from(small)),
-                24 => self.number::<1>(),
-                25 => self.number::<2>(),
-                26 => self.number::<4>(),
-                27 => self.number::<8>(),
-                _ => Err(ReproManifestRootErrorV1::InvalidEncoding),
-            }
-        })
-    }
-
-    fn number<const N: usize>(&mut self) -> Result<u64, ReproManifestRootErrorV1> {
-        self.take(N).map(|bytes| {
-            bytes
-                .iter()
-                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
-        })
+        self.cursor
+            .head(major)
+            .map_err(|_| ReproManifestRootErrorV1::InvalidEncoding)
     }
 
     fn take(&mut self, length: usize) -> Result<&[u8], ReproManifestRootErrorV1> {
-        let end = self.offset.saturating_add(length);
-        match self.bytes.get(self.offset..end) {
-            Some(value) => {
-                self.offset = end;
-                Ok(value)
-            }
-            None => Err(ReproManifestRootErrorV1::InvalidEncoding),
-        }
+        self.cursor
+            .take(length)
+            .map_err(|_| ReproManifestRootErrorV1::InvalidEncoding)
     }
 }

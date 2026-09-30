@@ -11,8 +11,10 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod adapter_admission;
+mod adapter_codec;
 pub mod adapter_transcript;
 pub mod authority;
+mod cbor_cursor;
 #[cfg(test)]
 extern crate self as pos_core;
 
