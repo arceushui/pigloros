@@ -9,6 +9,7 @@ use std::{
 use pos_core::{
     validate_closed_adapter_recording_v1, AdapterAdmissionEntryV1, AdapterAdmissionInputV1,
     AdapterAdmissionV1, AdapterCallReservationOutcomeV1, AdapterCallReservationV1,
+    AdapterEffectModeV1,
     AdapterInvocationInputV1, AdapterInvocationV1, AdapterRecordingSessionV1,
     AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1, Hash, PluginId,
     WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_BYTES_V1,
@@ -43,6 +44,10 @@ pub enum LocalAdapterErrorV1 {
     CallBoundExceeded,
     #[error("local adapter provider rejected the invocation")]
     ProviderRejected,
+    #[error("externally idempotent adapter has no provider-enforced deduplication guarantee")]
+    IdempotencyUnavailable,
+    #[error("externally idempotent provider did not acknowledge the exact run call key")]
+    ProviderIdempotencyUnacknowledged,
     #[error("local adapter session was aborted")]
     SessionAborted,
     #[error("local adapter clock could not produce a valid timestamp")]
@@ -53,13 +58,88 @@ pub enum LocalAdapterErrorV1 {
     RecordingFailed,
 }
 
+/// ADR-101 key supplied to an externally idempotent provider for one run call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalAdapterIdempotencyKeyV1 {
+    owner_reference: Hash,
+    run_operation_id: Hash,
+    global_call_index: u64,
+}
+
+impl LocalAdapterIdempotencyKeyV1 {
+    const fn new(owner_reference: Hash, run_operation_id: Hash, global_call_index: u64) -> Self {
+        Self {
+            owner_reference,
+            run_operation_id,
+            global_call_index,
+        }
+    }
+
+    /// Return the native local owner reference for this run.
+    #[must_use]
+    pub const fn owner_reference(self) -> Hash {
+        self.owner_reference
+    }
+
+    /// Return the idempotent run operation identity.
+    #[must_use]
+    pub const fn run_operation_id(self) -> Hash {
+        self.run_operation_id
+    }
+
+    /// Return the zero-based global call ordinal in the run.
+    #[must_use]
+    pub const fn global_call_index(self) -> u64 {
+        self.global_call_index
+    }
+}
+
+/// Exact provider output and optional acknowledgement of its idempotency key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalAdapterProviderResponseV1 {
+    output_bytes: Vec<u8>,
+    idempotency_acknowledgement: Option<LocalAdapterIdempotencyKeyV1>,
+}
+
+impl LocalAdapterProviderResponseV1 {
+    /// Return a response from a read-only provider without an idempotency ack.
+    #[must_use]
+    pub fn read_only(output_bytes: Vec<u8>) -> Self {
+        Self {
+            output_bytes,
+            idempotency_acknowledgement: None,
+        }
+    }
+
+    /// Return a response acknowledging the exact supplied run call key.
+    #[must_use]
+    pub fn acknowledged(
+        output_bytes: Vec<u8>,
+        idempotency_key: LocalAdapterIdempotencyKeyV1,
+    ) -> Self {
+        Self {
+            output_bytes,
+            idempotency_acknowledgement: Some(idempotency_key),
+        }
+    }
+}
+
 /// Actual in-process adapter callback selected by a local owner.
 ///
-/// Implementations receive a deterministic idempotency key for every call.
-/// A provider admitted with `ExternallyIdempotent` must enforce that key at
-/// the remote side effect boundary. The runtime retains only the exact public
+/// A provider admitted with `ExternallyIdempotent` must guarantee deduplication
+/// at its side-effect boundary for the owner/run/global-call key, then return
+/// that same key in its response. The runtime retains only the exact public
 /// request and response bytes returned through this callback.
 pub trait LocalAdapterProviderV1: Send + Sync {
+    /// Assert that this provider enforces deduplication for every supplied key.
+    ///
+    /// The default denies externally idempotent registration. Implementations
+    /// must return `true` only when retries with the same key cannot repeat the
+    /// external effect.
+    fn guarantees_external_idempotency(&self) -> bool {
+        false
+    }
+
     /// Invoke the selected provider with one exact AIR1 request.
     ///
     /// # Errors
@@ -67,8 +147,8 @@ pub trait LocalAdapterProviderV1: Send + Sync {
     fn invoke(
         &mut self,
         invocation: &AdapterInvocationV1,
-        idempotency_key: Hash,
-    ) -> Result<Vec<u8>, LocalAdapterErrorV1>;
+        idempotency_key: LocalAdapterIdempotencyKeyV1,
+    ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1>;
 }
 
 pub(super) struct RegisteredLocalAdapterV1 {
@@ -304,12 +384,26 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
                 reserved_at_micros,
             }) => (output_bytes, reserved_at_micros),
             Ok(AdapterCallReservationOutcomeV1::Reserved { reserved_at_micros }) => {
+                let provider_key = LocalAdapterIdempotencyKeyV1::new(
+                    self.recording_session.owner_reference(),
+                    self.recording_session.run_operation_id(),
+                    global_call_index,
+                );
+                let effect_mode = self.registry.local_adapters[adapter_index].entry.effect_mode;
                 let output = match catch_unwind(AssertUnwindSafe(|| {
                     self.registry.local_adapters[adapter_index]
                         .provider
-                        .invoke(invocation, idempotency_key)
+                        .invoke(invocation, provider_key)
                 })) {
-                    Ok(Ok(output)) if output.len() <= MAX_ADAPTER_CALL_BYTES_V1 => output,
+                    Ok(Ok(response)) if response.output_bytes.len() <= MAX_ADAPTER_CALL_BYTES_V1 => {
+                        if effect_mode == AdapterEffectModeV1::ExternallyIdempotent
+                            && response.idempotency_acknowledgement != Some(provider_key)
+                        {
+                            self.failed = true;
+                            return Err(LocalAdapterErrorV1::ProviderIdempotencyUnacknowledged);
+                        }
+                        response.output_bytes
+                    }
                     Ok(Ok(_)) => {
                         self.failed = true;
                         return Err(LocalAdapterErrorV1::CallBoundExceeded);
@@ -456,6 +550,11 @@ impl PluginRegistry {
             .get(&entry.plugin_id)
             .ok_or(LocalAdapterErrorV1::PluginUnavailable)?;
         validate_local_adapter_plugin(plugin)?;
+        if entry.effect_mode == AdapterEffectModeV1::ExternallyIdempotent
+            && !provider.guarantees_external_idempotency()
+        {
+            return Err(LocalAdapterErrorV1::IdempotencyUnavailable);
+        }
         if self.local_adapters.iter().any(|adapter| {
             adapter.entry.plugin_id == entry.plugin_id
                 && adapter.entry.adapter_id == entry.adapter_id

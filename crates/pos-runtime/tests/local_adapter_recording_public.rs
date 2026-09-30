@@ -6,7 +6,10 @@ use pos_core::{
     AdapterTranscriptV1, ArtifactRegistrationV1, Capability, Hash, OwnerIdV1, Plugin, PluginId,
     TimelineId, WorldReplayHandleInputV1, WorldReplayHandleV1,
 };
-use pos_runtime::{LocalAdapterErrorV1, LocalAdapterProviderV1, PluginRegistry};
+use pos_runtime::{
+    LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1,
+    LocalAdapterProviderV1, PluginRegistry,
+};
 
 struct LocalPlugin {
     id: PluginId,
@@ -27,34 +30,61 @@ impl Plugin for LocalPlugin {
 }
 
 struct EchoProvider {
-    idempotency_keys: Arc<Mutex<Vec<Hash>>>,
+    idempotency_keys: Arc<Mutex<Vec<LocalAdapterIdempotencyKeyV1>>>,
 }
 
 impl LocalAdapterProviderV1 for EchoProvider {
+    fn guarantees_external_idempotency(&self) -> bool {
+        true
+    }
+
     fn invoke(
         &mut self,
         invocation: &AdapterInvocationV1,
-        idempotency_key: Hash,
-    ) -> Result<Vec<u8>, LocalAdapterErrorV1> {
+        idempotency_key: LocalAdapterIdempotencyKeyV1,
+    ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
         self.idempotency_keys
             .lock()
             .expect("idempotency key lock should be available")
             .push(idempotency_key);
-        Ok(invocation
-            .as_input()
-            .exact_request_payload
-            .iter()
-            .rev()
-            .copied()
-            .collect())
+        Ok(LocalAdapterProviderResponseV1::acknowledged(
+            invocation
+                .as_input()
+                .exact_request_payload
+                .iter()
+                .rev()
+                .copied()
+                .collect(),
+            idempotency_key,
+        ))
     }
 }
 
 struct RejectingProvider;
 
 impl LocalAdapterProviderV1 for RejectingProvider {
-    fn invoke(&mut self, _: &AdapterInvocationV1, _: Hash) -> Result<Vec<u8>, LocalAdapterErrorV1> {
+    fn invoke(
+        &mut self,
+        _: &AdapterInvocationV1,
+        _: LocalAdapterIdempotencyKeyV1,
+    ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
         Err(LocalAdapterErrorV1::ProviderRejected)
+    }
+}
+
+struct UnacknowledgedProvider;
+
+impl LocalAdapterProviderV1 for UnacknowledgedProvider {
+    fn guarantees_external_idempotency(&self) -> bool {
+        true
+    }
+
+    fn invoke(
+        &mut self,
+        _: &AdapterInvocationV1,
+        _: LocalAdapterIdempotencyKeyV1,
+    ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
+        Ok(LocalAdapterProviderResponseV1::read_only(b"response".to_vec()))
     }
 }
 
@@ -96,6 +126,17 @@ fn registry_with_adapter(
     pos_runtime::AdmittedCompositionV1,
     WorldReplayHandleV1,
 ) {
+    registry_with_adapter_mode(provider, AdapterEffectModeV1::ReadOnly)
+}
+
+fn registry_with_adapter_mode(
+    provider: Box<dyn LocalAdapterProviderV1>,
+    effect_mode: AdapterEffectModeV1,
+) -> (
+    PluginRegistry,
+    pos_runtime::AdmittedCompositionV1,
+    WorldReplayHandleV1,
+) {
     let plugin = LocalPlugin {
         id: PluginId::new(),
     };
@@ -105,8 +146,10 @@ fn registry_with_adapter(
     registry
         .register_local(&plugin, vec!["weather.read".to_owned()], None, None)
         .expect("a local plugin should register without installed EPF1");
+    let mut entry = adapter_entry(plugin.id());
+    entry.effect_mode = effect_mode;
     registry
-        .register_local_adapter(adapter_entry(plugin.id()), provider)
+        .register_local_adapter(entry, provider)
         .expect("the adapter should bind to an available local plugin");
     let handle = world_handle(owner_reference);
     let admitted = registry
@@ -172,17 +215,13 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
         transcript.as_input().adapter_admission_digest,
         closed.admission().digest()
     );
-    assert_ne!(
-        keys.lock()
-            .expect("idempotency key lock should be available")[0],
-        Hash::zero()
-    );
-
     let keys = keys
         .lock()
         .expect("idempotency key lock should be available");
     assert_eq!(keys.len(), 1);
-    assert_ne!(keys[0], Hash::zero());
+    assert_eq!(keys[0].owner_reference(), handle.as_input().owner_reference);
+    assert_eq!(keys[0].run_operation_id(), operation_id);
+    assert_eq!(keys[0].global_call_index(), 0);
     let closed_bytes = closed.transcript_bytes();
     assert_eq!(
         recorder
@@ -251,5 +290,88 @@ fn failed_local_adapter_session_cannot_produce_a_transcript() {
             .read_closed_adapter_recording_session(owner_reference, Hash::from_bytes([23; 32]))
             .expect("the aborted recorder should remain readable as unclosed"),
         None
+    );
+}
+
+#[test]
+fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it() {
+    let keys = Arc::new(Mutex::new(Vec::new()));
+    let (mut registry, admitted, handle) = registry_with_adapter_mode(
+        Box::new(EchoProvider {
+            idempotency_keys: Arc::clone(&keys),
+        }),
+        AdapterEffectModeV1::ExternallyIdempotent,
+    );
+    let owner_reference = handle.as_input().owner_reference;
+    let operation_id = Hash::from_bytes([24; 32]);
+    let mut recorder = pos_store::memory::MemoryStore::new();
+    let mut session = registry
+        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
+        .expect("the admitted provider guarantee should permit the session");
+    assert_eq!(
+        session.invoke(
+            admitted.adapter_admission().as_input().entries[0].plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Ok(b"tseuqer".to_vec())
+    );
+    session
+        .finish()
+        .expect("the acknowledged call should close");
+    let keys = keys
+        .lock()
+        .expect("idempotency key lock should be available");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].owner_reference(), owner_reference);
+    assert_eq!(keys[0].run_operation_id(), operation_id);
+    assert_eq!(keys[0].global_call_index(), 0);
+
+    let (mut registry, admitted, handle) = registry_with_adapter_mode(
+        Box::new(UnacknowledgedProvider),
+        AdapterEffectModeV1::ExternallyIdempotent,
+    );
+    let mut recorder = pos_store::memory::MemoryStore::new();
+    let mut session = registry
+        .begin_local_adapter_session(
+            &admitted,
+            handle,
+            Hash::from_bytes([25; 32]),
+            &mut recorder,
+        )
+        .expect("the provider advertises the external guarantee");
+    assert_eq!(
+        session.invoke(
+            admitted.adapter_admission().as_input().entries[0].plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::ProviderIdempotencyUnacknowledged)
+    );
+    session
+        .abort()
+        .expect("the rejected acknowledgement can abort the pending session");
+}
+
+#[test]
+fn externally_idempotent_registration_requires_a_provider_deduplication_guarantee() {
+    let plugin = LocalPlugin {
+        id: PluginId::new(),
+    };
+    let mut registry = PluginRegistry::new();
+    registry
+        .register_local(&plugin, vec!["weather.read".to_owned()], None, None)
+        .expect("a local plugin should register");
+    let mut entry = adapter_entry(plugin.id());
+    entry.effect_mode = AdapterEffectModeV1::ExternallyIdempotent;
+    assert_eq!(
+        registry.register_local_adapter(entry, Box::new(RejectingProvider)),
+        Err(LocalAdapterErrorV1::IdempotencyUnavailable)
     );
 }

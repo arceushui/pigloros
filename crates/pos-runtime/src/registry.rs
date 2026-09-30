@@ -51,7 +51,8 @@ mod human_admission;
 mod scheduled_admission;
 
 pub use adapter::{
-    ClosedAdapterTranscriptV1, LocalAdapterErrorV1, LocalAdapterProviderV1, LocalAdapterSessionV1,
+    ClosedAdapterTranscriptV1, LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1,
+    LocalAdapterProviderResponseV1, LocalAdapterProviderV1, LocalAdapterSessionV1,
 };
 pub use authorized_pass::{AuthorizedDriverViewV1, AuthorizedViewAuthorityV1};
 pub use catalogue::{HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPluginProductV1};
