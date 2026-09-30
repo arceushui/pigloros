@@ -1444,6 +1444,10 @@ mod tests {
             claim: pos_store::ForkDeliveryClaimV1,
             command: &pos_core::ForkAdmissionHostCommandV1,
         ) -> ForkAdmissionSubmissionV1<pos_store::ForkDeliveryExecutionV1> {
+            // A7 saturates only a Fork (FCC1) execute; a POC1 Bind passes through.
+            if command.validated_command_facts().fork_target().is_none() {
+                return self.inner.execute(claim, command);
+            }
             let Ok(release) = self.executor.block_worker_for_test() else {
                 return Err(ForkAdmissionSubmissionErrorV1::Unavailable);
             };
