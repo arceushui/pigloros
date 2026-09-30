@@ -56,6 +56,8 @@ pub enum ActionSubmissionError {
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error(transparent)]
+    OutputAdmission(#[from] crate::OutputAdmissionErrorV1),
+    #[error(transparent)]
     WorldInstallation(#[from] WorldInstallationErrorV1),
 
     #[error(transparent)]
@@ -130,6 +132,14 @@ pub enum RuntimeError {
     #[error("protected operation failed its erasure containment fence: {0}")]
     ErasureContainment(ErasureContainmentErrorV1),
 
+    #[error(
+        "erasure containment failed after appending {event_count} Event(s); committed Driver state must be quarantined: {source}"
+    )]
+    ErasureContainmentAfterCommit {
+        event_count: usize,
+        source: ErasureContainmentErrorV1,
+    },
+
     #[error("participant observation authority failed closed: {0}")]
     Authority(#[from] pos_core::AuthorityErrorV1),
 
@@ -156,6 +166,9 @@ pub enum RuntimeError {
 
     #[error("an anchored Driver step is already pending")]
     PendingDriverStep,
+
+    #[error("nonempty Driver output must be appended before the step can be committed")]
+    UnappendedDriverOutput,
 
     #[error("driver '{driver}' must be fresh before recovery")]
     DriverRecoveryNotFresh { driver: String },

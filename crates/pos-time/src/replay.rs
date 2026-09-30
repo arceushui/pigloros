@@ -144,7 +144,7 @@ mod tests {
     use pos_plugin_world::{
         encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldDriver,
         WorldObservationV1, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
-        EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
+        EVENT_TYPE_ACTION_V1, EVENT_TYPE_CONFIG_V1, EVENT_TYPE_OBSERVATION_V1,
     };
     use pos_runtime::{PluginRegistry, TimelineHistorySegment};
     use pos_state::ProjectionRegistry;
@@ -366,7 +366,7 @@ mod tests {
                 .remove(0);
             let mut registry = PluginRegistry::new().with_erasure_gate(gate);
             registry
-                .register(
+                .register_generated(
                     &WorldPlugin::new().with_bodies(bodies),
                     Some(Box::new(WorldReducer)),
                     Some(Box::new(driver)),
@@ -391,6 +391,17 @@ mod tests {
         let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
         registry.register("world", Box::new(WorldReducer));
         registry
+    }
+
+    fn assert_committed_world_step_shape(committed: &[Event]) {
+        assert_eq!(committed.len(), 3);
+        assert_eq!(
+            committed
+                .iter()
+                .filter(|event| event.event_type.as_str() == EVENT_TYPE_CONFIG_V1)
+                .count(),
+            1
+        );
     }
 
     fn assert_world_states(
@@ -418,6 +429,7 @@ mod tests {
             .iter()
             .filter(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .collect();
+        assert_committed_world_step_shape(&committed);
         assert_eq!(observations.len(), 2);
         assert_eq!(observations[0].entity, bodies[0]);
         assert_eq!(observations[1].entity, bodies[1]);

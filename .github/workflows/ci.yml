@@ -88,7 +88,7 @@ jobs:
     needs: ci_change_scope
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
       checks: write
       contents: read
@@ -398,6 +398,8 @@ jobs:
           toolchain: 1.97.1
       - name: Exercise the unsupported owned-key signing boundary
         run: cargo test -p piglor-ledger --all-features --test non_unix_store_owner --locked -- --include-ignored
+      - name: Exercise the unsupported non-Linux EPF1 boundary
+        run: cargo test -p pos-runtime --features test-support --test non_linux_profile --locked -- --include-ignored
 
   clippy:
     name: clippy
@@ -1091,6 +1093,10 @@ jobs:
         run: |
           python scripts/test_check_cargo_crap_ci_policy.py
           python scripts/test_check_cargo_crap_report.py
+      - name: Check test-support feature policy
+        run: |
+          python scripts/check_test_support_features.py
+          python scripts/test_check_test_support_features.py
 
   modules-structure:
     name: modules-structure (reports only)

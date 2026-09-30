@@ -46,11 +46,11 @@ pub(crate) fn domain_digest(domain: &[u8], value: &[u8]) -> [u8; 32] {
 pub use bundle_contract::{
     draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
     draft_trust_policy_snapshot_bytes_v1, expected_result_member_path, fixture_input_member_path,
-    verify_archive_independently, verify_archive_release_filename,
-    verify_release_tree_independently, BundleContractErrorV1, BundleExpectedResultV1,
-    BundleManifestV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
-    ConformanceBundlePairV1, ConformanceBundleV1, CONFORMANCE_BUNDLE_MAGIC_V1,
-    MAX_CONFORMANCE_BUNDLE_BYTES_V1,
+    host_verified_execution_profile_bytes_v1, verify_archive_independently,
+    verify_archive_release_filename, verify_release_tree_independently, BundleContractErrorV1,
+    BundleExpectedResultV1, BundleManifestV1, BundleMemberDescriptorV1, BundleMemberRoleV1,
+    BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
+    CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
 pub use execution_profile::{
     ExecutionProfileCapabilitiesV1, ExecutionProfileCompatibilityV1,

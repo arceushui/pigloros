@@ -545,7 +545,15 @@ const fn gateway_store_status(error: &CoreError) -> Option<StatusCode> {
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        let status = match &self {
+        let status = self.status_code();
+        let body = Json(json!({ "error": self.to_string() }));
+        (status, body).into_response()
+    }
+}
+
+impl GatewayError {
+    fn status_code(&self) -> StatusCode {
+        match self {
             Self::InvalidId(_)
             | Self::InvalidPageLimit { .. }
             | Self::InvalidEventsQuery(_)
@@ -579,6 +587,7 @@ impl IntoResponse for GatewayError {
             Self::Store(error) => {
                 gateway_store_status(error).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
             }
+            Self::ActionRegistry(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ActionAuthorizationUnavailable | Self::AuthorizationUnavailable => {
                 StatusCode::UNAUTHORIZED
             }
@@ -593,9 +602,7 @@ impl IntoResponse for GatewayError {
                 }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
-        };
-        let body = Json(json!({ "error": self.to_string() }));
-        (status, body).into_response()
+        }
     }
 }
 
@@ -2051,6 +2058,11 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         let r = GatewayError::AuthorizationDenied.into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(
+            "world.unknown".into(),
+        ))
+        .into_response();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let r = GatewayError::LedgerUnavailable.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::Ledger(pos_plugin_ledger::LedgerError::InvalidPrediction(

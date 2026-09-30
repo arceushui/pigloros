@@ -60,19 +60,9 @@ fn draft_fixture_authority_signing_key() -> ed25519_dalek::SigningKey {
     ed25519_dalek::SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES)
 }
 
-/// Build the canonical current EPF1 artifact declared by the repository Draft authority.
-///
-/// # Errors
-///
-/// Returns [`BundleContractErrorV1::ProfileInvalid`] for an undeclared profile, or
-/// [`BundleContractErrorV1::EncodingFailed`] if canonical CBOR encoding fails.
-pub fn draft_execution_profile_bytes_v1(
-    profile_id: &str,
+fn canonical_execution_profile_bytes_v1(
+    declaration: &crate::InstalledExecutionProfileSource,
 ) -> Result<Vec<u8>, BundleContractErrorV1> {
-    let declaration = DRAFT_EXECUTION_PROFILES
-        .iter()
-        .find(|candidate| candidate.profile_id == profile_id)
-        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
     let fields = vec![
         Value::Text("EPF1".to_owned()),
         Value::Integer(1_u64.into()),
@@ -117,6 +107,53 @@ pub fn draft_execution_profile_bytes_v1(
         ));
         encode(&Value::Array(signed_fields))
     })
+}
+
+/// Build the canonical current EPF1 artifact declared by the repository Draft authority.
+///
+/// # Errors
+///
+/// Returns [`BundleContractErrorV1::ProfileInvalid`] for an undeclared profile, or
+/// [`BundleContractErrorV1::EncodingFailed`] if canonical CBOR encoding fails.
+pub fn draft_execution_profile_bytes_v1(
+    profile_id: &str,
+) -> Result<Vec<u8>, BundleContractErrorV1> {
+    let declaration = DRAFT_EXECUTION_PROFILES
+        .iter()
+        .find(|candidate| candidate.profile_id == profile_id)
+        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+    canonical_execution_profile_bytes_v1(declaration)
+}
+
+/// Reject EPF1 activation until an installed authority member exists.
+///
+/// The installed execution-profile table is currently empty. Draft authority
+/// bytes cannot be promoted to a host-verified profile by this boundary.
+///
+/// # Errors
+/// Always returns [`BundleContractErrorV1::ProfileInvalid`] until a profile is installed.
+pub const fn host_verified_execution_profile_bytes_v1(
+    _profile_id: &str,
+) -> Result<Vec<u8>, BundleContractErrorV1> {
+    Err(BundleContractErrorV1::ProfileInvalid)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::{draft_execution_profile_bytes_v1, host_verified_execution_profile_bytes_v1};
+    use crate::BundleContractErrorV1;
+
+    #[test]
+    fn draft_profiles_do_not_become_host_verified_profiles() {
+        for profile_id in ["deterministic-air-gapped-v1", "deterministic-local-v1"] {
+            assert!(draft_execution_profile_bytes_v1(profile_id).is_ok());
+            assert_eq!(
+                host_verified_execution_profile_bytes_v1(profile_id),
+                Err(BundleContractErrorV1::ProfileInvalid)
+            );
+        }
+    }
 }
 
 fn text_array(values: &[&str]) -> Value {

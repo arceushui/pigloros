@@ -20,14 +20,71 @@ macro_rules! output_stdout {
     }};
 }
 
+macro_rules! result_pipeline {
+    ($result:expr_2021 => |$binding:pat_param|; $($remaining:tt)+) => {
+        $result.and_then(|$binding| result_pipeline!($($remaining)+))
+    };
+    ($result:expr_2021 $(;)?) => {
+        $result
+    };
+}
+
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
+
+    struct InvalidVersionPlugin;
+
+    impl pos_core::Plugin for InvalidVersionPlugin {
+        fn id(&self) -> pos_core::ids::PluginId {
+            pos_core::ids::PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "invalid-cli-version"
+        }
+
+        fn capability(&self) -> pos_core::Capability {
+            pos_core::Capability::default()
+        }
+
+        fn version(&self) -> &'static str {
+            ""
+        }
+    }
 
     #[test]
     fn builtin_reference_runner_registers_both_reference_plugins() {
         assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
         assert!(run_builtin_reference_experiment(StoreConfig::Memory, 1).is_ok());
+    }
+
+    #[test]
+    fn builtin_output_binding_rejects_uninstalled_source_and_profile() {
+        let plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
+        assert!(builtin_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            &[],
+            "unknown-profile",
+        )
+        .is_err());
+        assert!(builtin_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+            &[],
+            "deterministic-local-v1",
+        )
+        .is_err());
+
+        assert!(builtin_output_binding(
+            &InvalidVersionPlugin,
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            &[],
+            "deterministic-local-v1",
+        )
+        .is_err());
     }
 }
 
@@ -44,6 +101,7 @@ use pos_core::{
     crypto::Hash,
     ids::{PluginId, TimelineId},
     manifest::AdapterRecord,
+    plugin::Plugin,
     store::SeqRange,
 };
 use pos_experiment::{
@@ -59,6 +117,21 @@ const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
 const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
+
+fn builtin_output_binding<P: Plugin + ?Sized>(
+    plugin: &P,
+    source: pos_runtime::InstalledOutputPolicySourceV1,
+    configuration_details: &[u8],
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        source,
+        configuration_details,
+        profile_id,
+    )
+    .map_err(Into::into)
+}
 
 struct OpenedCliStore {
     store: HostedCliStore,
@@ -118,6 +191,10 @@ struct StrictReproManifest {
     head_hash: Hash,
     created_at: WallTime,
     plugin_versions: std::collections::HashMap<String, String>,
+    output_policy_digests: std::collections::HashMap<String, Hash>,
+    replay_policy_identities: std::collections::HashMap<String, Hash>,
+    replay_policy_closures: std::collections::HashMap<String, Vec<u8>>,
+    replay_policy_closure_identities: std::collections::HashMap<String, Hash>,
     adapter_records: Vec<StrictAdapterRecord>,
     label: Option<String>,
 }
@@ -151,6 +228,10 @@ impl From<StrictReproManifest> for pos_core::ReproManifest {
             head_hash: manifest.head_hash,
             created_at: manifest.created_at,
             plugin_versions: manifest.plugin_versions,
+            output_policy_digests: manifest.output_policy_digests,
+            replay_policy_identities: manifest.replay_policy_identities,
+            replay_policy_closures: manifest.replay_policy_closures,
+            replay_policy_closure_identities: manifest.replay_policy_closure_identities,
             adapter_records: manifest
                 .adapter_records
                 .into_iter()
@@ -714,24 +795,40 @@ fn run_builtin_reference_experiment(
     // Register reference plugins
     let agent_entity = EntityId::new();
     let agent_plugin = RuleAgentPlugin::new();
-    exp.register(
-        &agent_plugin,
-        Some(Box::new(RuleAgentReducer)),
-        Some(Box::new(RuleAgentDriver::new(
-            agent_entity,
-            agent_plugin.actions().to_vec(),
-        ))),
-    )?;
-
+    let agent_configuration = serde_json::to_vec(agent_plugin.actions())?;
     let obs_entity = EntityId::new();
     let obs_plugin = SyntheticObsPlugin::new();
-    exp.register(
-        &obs_plugin,
-        Some(Box::new(SyntheticReducer)),
-        Some(Box::new(SyntheticDriver::new(obs_entity))),
-    )?;
-
-    exp.run().map_err(Into::into)
+    let obs_configuration = 1.0_f64.to_be_bytes();
+    result_pipeline! {
+        builtin_output_binding(
+            &agent_plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            &agent_configuration,
+            "deterministic-local-v1",
+        ) => |agent_closure|;
+        exp.register_with_verified_output_policy(
+            &agent_plugin,
+            agent_closure,
+            Some(Box::new(RuleAgentReducer)),
+            Some(Box::new(RuleAgentDriver::new(
+                agent_entity,
+                agent_plugin.actions().to_vec(),
+            ))),
+        ).map_err(Into::into) => |()|;
+        builtin_output_binding(
+            &obs_plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+            &obs_configuration,
+            "deterministic-local-v1",
+        ) => |obs_closure|;
+        exp.register_with_verified_output_policy(
+            &obs_plugin,
+            obs_closure,
+            Some(Box::new(SyntheticReducer)),
+            Some(Box::new(SyntheticDriver::new(obs_entity))),
+        ).map_err(Into::into) => |()|;
+        exp.run().map_err(Into::into)
+    }
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
@@ -783,17 +880,8 @@ fn cmd_experiment_reproduce(manifest_path: &str) -> Result<(), Box<dyn std::erro
 fn reproduce_manifest(
     reproduction: ReproductionManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let recipe = reproduce_cli_recipe(reproduction.recipe)?;
-    run_builtin_reference_experiment(StoreConfig::Memory, recipe.builtin_reference_v1.ticks)
-        .and_then(|reproduced| {
-            if reproduced.manifest.head_hash == reproduction.manifest.head_hash {
-                output_stdout!("OK");
-                Ok(())
-            } else {
-                output_stdout!("MISMATCH");
-                Err("reproduced chain_head does not match manifest".into())
-            }
-        })
+    let _ = reproduce_cli_recipe(reproduction.recipe)?;
+    Err("reproduction requires an owner-verified policy closure".into())
 }
 
 fn reproduce_cli_recipe(
@@ -817,10 +905,27 @@ fn validate_experiment_ticks(ticks: u64) -> Result<(), &'static str> {
         .ok_or(TICK_LIMIT_ERROR)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManifestHeadVerification {
+    TimelineHeadOnly,
+    Mismatch,
+}
+
+impl ManifestHeadVerification {
+    const fn output_message(self) -> &'static str {
+        match self {
+            Self::TimelineHeadOnly => {
+                "Timeline head verified; output-policy and Replay identity were not checked"
+            }
+            Self::Mismatch => "MISMATCH",
+        }
+    }
+}
+
 fn verify_manifest_against_store(
     manifest: &pos_core::manifest::ReproManifest,
     store: &dyn pos_core::store::EventStore,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<ManifestHeadVerification, Box<dyn std::error::Error>> {
     let timelines = store.list_timelines()?;
     let tl = timelines.iter().find(|t| t.id() == manifest.timeline_id);
 
@@ -841,11 +946,22 @@ fn verify_manifest_against_store(
     };
 
     if matched {
-        output_stdout!("OK");
-        Ok(())
+        Ok(ManifestHeadVerification::TimelineHeadOnly)
     } else {
-        output_stdout!("MISMATCH");
-        Err("hash mismatch".into())
+        Ok(ManifestHeadVerification::Mismatch)
+    }
+}
+
+fn report_manifest_head_verification(
+    manifest: &pos_core::manifest::ReproManifest,
+    store: &dyn pos_core::store::EventStore,
+    output: &mut impl std::io::Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let verification = verify_manifest_against_store(manifest, store)?;
+    writeln!(output, "{}", verification.output_message())?;
+    match verification {
+        ManifestHeadVerification::TimelineHeadOnly => Ok(()),
+        ManifestHeadVerification::Mismatch => Err("hash mismatch".into()),
     }
 }
 
@@ -865,7 +981,9 @@ fn cmd_experiment_verify(manifest_path: &str) -> Result<(), Box<dyn std::error::
     }
     let store = open_store(StoreConfig::Sqlite { path: store_path })?;
 
-    verify_manifest_against_store(&manifest, store.as_ref())
+    let stdout = std::io::stdout();
+    let mut stdout_lock = stdout.lock();
+    report_manifest_head_verification(&manifest, store.as_ref(), &mut stdout_lock)
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_matches_builtin_recipe() {
+    fn cmd_experiment_reproduce_requires_owner_verified_policy() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir
             .path()
@@ -1247,7 +1365,8 @@ mod tests {
             .to_owned();
         cmd_experiment_run(&path, 3).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        cmd_experiment_reproduce(&manifest_path).test_ok();
+        let error = cmd_experiment_reproduce(&manifest_path).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
     }
 
     #[test]
@@ -1270,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_experiment_reproduce_reports_chain_head_mismatch() {
+    fn cmd_experiment_reproduce_requires_owner_verified_manifest() {
         let manifest = ReproductionManifest {
             manifest: pos_core::ReproManifest::new(
                 TimelineId::new(),
@@ -1281,7 +1400,8 @@ mod tests {
         };
         let file = tempfile::NamedTempFile::new().test_ok();
         std::fs::write(file.path(), serde_json::to_string(&manifest).test_ok()).test_ok();
-        assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
+        let error = cmd_experiment_reproduce(file.path().to_str().test_ok()).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
     }
 
     #[test]
@@ -1403,7 +1523,8 @@ mod tests {
         let path = dir.path().join("dispatch.db").to_str().test_ok().to_owned();
         cmd_experiment_run(&path, 1).test_ok();
         let manifest_path = path.replace(".db", "-manifest.json");
-        assert!(handle_experiment(&args(&["reproduce", &manifest_path])).is_ok());
+        let error = handle_experiment(&args(&["reproduce", &manifest_path])).test_err();
+        assert!(error.to_string().contains("owner-verified policy closure"));
         assert!(handle_experiment(&args(&["reproduce"])).is_err());
     }
 
@@ -1435,10 +1556,10 @@ mod tests {
         std::fs::write(&manifest_path, &json).test_ok();
 
         // cmd_experiment_verify finds the companion .db (via -manifest.json → .db)
-        // The timeline exists with zero head_hash → matched = true → OK
+        // The timeline exists with the recorded zero head hash, so the
+        // timeline-head-only verification result is successful.
         let result = cmd_experiment_verify(&manifest_path);
-        // May be Ok or Err depending on store state — just check it runs
-        drop(result);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2005,19 +2126,8 @@ mod main_coverage {
 
     #[test]
     fn verify_ok_path_when_manifest_matches_empty_store() {
-        // Cover the `if matched { output_stdout!("OK"); Ok(()) }` path.
-        // A fresh Memory store has no timelines, so `tl = None` → `matched = false`.
-        // To hit the OK path we need a matching manifest. Use a zero timeline_id
-        // and zero hash — the `else { false }` branch gives matched=false, which
-        // means we need to approach differently: create a real store with events.
-        //
-        // Strategy: init a store, run a 1-tick experiment, export the manifest,
-        // verify it (should return Ok since the hash matches an empty timeline).
-        //
-        // Actually the verify checks payload_hash of last event vs manifest.head_hash.
-        // For an empty store (no events), head_hash = Hash::zero() from map_or.
-        // So if manifest.head_hash = Hash::zero() and the store has the same timeline
-        // with no events after it, matched = (zero == zero) = true.
+        // Cover the scoped timeline-head-only verification message.
+        // An empty Timeline matches a manifest with the zero head hash.
         use pos_core::clock::WallTime;
         use pos_store::StoreConfig;
         use tempfile::NamedTempFile;
@@ -2053,15 +2163,13 @@ mod main_coverage {
             let mut mem = open_store(StoreConfig::Memory).test_ok();
             pos_core::store::import_timeline(mem.as_mut(), export).test_ok();
 
-            // For the OK path, just verify the manifest json round-trips correctly.
+            // Verify the success message remains explicitly scoped to the Timeline head.
             // The actual verify calls open_store(Memory) so it won't find the timeline,
-            // making matched=false. We test the OK branch differently:
-            // call the inner logic directly.
-            let matched = true; // simulate the OK case
-            if matched {
-                // This is the "OK" branch — just verify it's reachable
-                let _ = "OK";
-            }
+            // making matched=false. The direct matching-store test covers the successful result.
+            assert_eq!(
+                ManifestHeadVerification::TimelineHeadOnly.output_message(),
+                "Timeline head verified; output-policy and Replay identity were not checked"
+            );
 
             // The real test: cmd_experiment_verify with non-matching timeline returns Err
             let result = cmd_experiment_verify(f.path().to_str().test_ok());
@@ -2097,7 +2205,7 @@ mod final_coverage {
 
     #[test]
     fn verify_manifest_ok_path_when_hash_matches() {
-        // Cover the `if matched { output_stdout!("OK"); Ok(()) }` branch.
+        // Verify both the scoped result and the exact CLI success message.
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("match-test").test_ok();
 
@@ -2108,13 +2216,18 @@ mod final_coverage {
             pos_core::clock::WallTime::from_micros(0),
         );
 
-        let result = verify_manifest_against_store(&manifest, store.as_ref());
-        assert!(result.is_ok(), "expected OK for matching hash");
+        let mut output = Vec::new();
+        let result = report_manifest_head_verification(&manifest, store.as_ref(), &mut output);
+        assert!(result.is_ok());
+        assert_eq!(
+            output,
+            b"Timeline head verified; output-policy and Replay identity were not checked\n"
+        );
     }
 
     #[test]
     fn verify_manifest_mismatch_when_hash_differs() {
-        // Cover the `else { false }` branch (timeline exists but hash differs).
+        // Cover the mismatch result (timeline exists but hash differs).
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("mismatch-test").test_ok();
 
@@ -2125,8 +2238,10 @@ mod final_coverage {
             pos_core::clock::WallTime::from_micros(0),
         );
 
-        let result = verify_manifest_against_store(&manifest, store.as_ref());
-        assert!(result.is_err(), "expected MISMATCH for differing hash");
+        let mut output = Vec::new();
+        let result = report_manifest_head_verification(&manifest, store.as_ref(), &mut output);
+        assert!(result.is_err());
+        assert_eq!(output, b"MISMATCH\n");
     }
 
     #[test]
@@ -2163,15 +2278,12 @@ mod final_coverage {
             pos_core::clock::WallTime::from_micros(0),
         );
         let result = verify_manifest_against_store(&manifest, store.as_ref());
-        assert!(
-            result.is_err(),
-            "expected MISMATCH when timeline not in store"
-        );
+        assert_eq!(result.test_ok(), ManifestHeadVerification::Mismatch);
     }
 
     #[test]
     fn cmd_experiment_verify_falls_back_to_memory_when_no_db() {
-        // Cover the Memory fallback branch: store_path doesn't exist → use Memory.
+        // A missing companion store fails before verification.
         use pos_core::ids::TimelineId;
 
         let dir = tempfile::tempdir().test_ok();
@@ -2186,9 +2298,12 @@ mod final_coverage {
         std::fs::write(&manifest_path, &json).test_ok();
 
         // The companion .db would be "no-companion.db" — it doesn't exist.
-        // verify falls back to Memory store → timeline not found → MISMATCH.
+        // The command rejects the absent companion store before checking a head.
         let result = cmd_experiment_verify(manifest_path.to_str().test_ok());
-        assert!(result.is_err(), "Memory fallback should give MISMATCH");
+        assert!(
+            result.is_err(),
+            "missing companion store should be rejected"
+        );
     }
 
     #[test]
@@ -2223,17 +2338,14 @@ mod final_coverage {
         }
         let chain_head = pos_core::crypto::Hash::from_bytes(*hasher.finalize().as_bytes());
 
-        // Manifest with the correct chain_head → should match (OK)
+        // Manifest with the correct chain_head → timeline-head-only verification.
         let manifest = pos_core::ReproManifest::new(
             tl.id(),
             chain_head,
             pos_core::clock::WallTime::from_micros(0),
         );
         let result = verify_manifest_against_store(&manifest, store.as_ref());
-        assert!(
-            result.is_ok(),
-            "chain_head from non-empty timeline should match"
-        );
+        assert_eq!(result.test_ok(), ManifestHeadVerification::TimelineHeadOnly);
 
         // Manifest with wrong hash → should MISMATCH
         let bad_manifest = pos_core::ReproManifest::new(
@@ -2242,7 +2354,7 @@ mod final_coverage {
             pos_core::clock::WallTime::from_micros(0),
         );
         let bad_result = verify_manifest_against_store(&bad_manifest, store.as_ref());
-        assert!(bad_result.is_err(), "wrong hash should give MISMATCH");
+        assert_eq!(bad_result.test_ok(), ManifestHeadVerification::Mismatch);
     }
 }
 

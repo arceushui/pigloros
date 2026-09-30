@@ -13,7 +13,9 @@
 //! # Host wiring
 //!
 //! Register the plugin with a [`SocietyReducer`] (no driver), append
-//! [`draft_signal`] drafts onto a timeline, then fold with the reducer.
+//! [`draft_signal`] drafts onto a timeline, then fold with the reducer. A
+//! host must install a Society output-policy profile before registration;
+//! without one, binding fails closed and the plugin is not registered.
 //! State keys: `mean.trust`, `mean.opinion`, `count.economy`, `last.culture`,
 //! `sum.*`, and global `signals`.
 //!
@@ -22,13 +24,33 @@
 //! use pos_plugin_society::{
 //!     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 //! };
-//! use pos_runtime::registry::PluginRegistry;
+//! use pos_runtime::{
+//!     registry::PluginRegistry, InstalledOutputPolicySourceV1, OutputPolicyBindingV1,
+//! };
 //!
 //! let mut registry = PluginRegistry::new();
 //! let plugin = SocietyPlugin::new();
-//! assert!(registry
-//!     .register(&plugin, Some(Box::new(SocietyReducer)), None)
-//!     .is_ok());
+//! let binding = OutputPolicyBindingV1::from_installed_source(
+//!     &plugin,
+//!     InstalledOutputPolicySourceV1::Society,
+//!     &[],
+//!     "deterministic-local-v1",
+//! );
+//! match binding {
+//!     Ok(binding) => assert!(registry
+//!         .register_with_verified_output_policy(
+//!             &plugin,
+//!             binding,
+//!             Some(Box::new(SocietyReducer)),
+//!             None,
+//!         )
+//!         .is_ok()),
+//!     Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }) => {
+//!         // No installed Society profile: registration remains closed.
+//!         assert!(registry.is_empty());
+//!     }
+//!     Err(error) => panic!("unexpected Society policy binding failure: {error}"),
+//! }
 //!
 //! let draft = draft_signal(
 //!     EntityId::new(),

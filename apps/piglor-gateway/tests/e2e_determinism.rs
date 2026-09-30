@@ -22,7 +22,8 @@ use pos_plugin_society::{
 };
 use pos_plugin_world::{encode_actuator_pair_v1, ActionKindV1, WorldActionV1};
 use pos_runtime::{
-    Driver, ErasureExecutionHostV1, ObservationView, ProjectionKey, RuntimeError, StepOutput,
+    Driver, ErasureExecutionHostV1, InstalledOutputPolicySourceV1, ObservationView,
+    OutputPolicyBindingV1, ProjectionKey, RuntimeError, StepOutput,
 };
 use pos_state::{EntityStateProjection, ProjectionRegistry};
 use pos_store::{open_store, SeqRange, StoreConfig};
@@ -105,6 +106,28 @@ impl Plugin for FixturePlugin {
 struct ObservationProbeDriver {
     subscriptions: Vec<ProjectionKey>,
     log: Arc<Mutex<Vec<u64>>>,
+}
+
+fn agent_output_binding(
+    plugin: &AgentPlugin,
+) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        InstalledOutputPolicySourceV1::Agent,
+        &[],
+        "deterministic-local-v1",
+    )?)
+}
+
+fn owned_event_type_binding(
+    plugin: &dyn Plugin,
+) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        InstalledOutputPolicySourceV1::Generated,
+        &[],
+        "deterministic-local-v1",
+    )?)
 }
 
 impl Driver for ObservationProbeDriver {
@@ -572,6 +595,51 @@ fn human_action_payload(
     .test_ok()
 }
 
+fn register_reducer_plugins(
+    experiment: &mut Experiment,
+    observation: &FixturePlugin,
+    society: &SocietyPlugin,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let observation_binding = owned_event_type_binding(observation)?;
+    let society_binding = owned_event_type_binding(society)?;
+    experiment
+        .register_with_verified_output_policy(
+            observation,
+            observation_binding,
+            Some(Box::new(EntityStateProjection)),
+            None,
+        )
+        .test_ok()?;
+    experiment
+        .register_with_verified_output_policy(
+            society,
+            society_binding,
+            Some(Box::new(SocietyReducer)),
+            None,
+        )
+        .test_ok()?;
+    Ok(())
+}
+
+fn register_probe(
+    experiment: &mut Experiment,
+    scenario: &MultiRateScenario,
+    probe: &FixturePlugin,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    experiment
+        .register_with_verified_output_policy(
+            probe,
+            owned_event_type_binding(probe)?,
+            None,
+            Some(Box::new(ObservationProbeDriver {
+                subscriptions: vec![ProjectionKey::new(scenario.human_entity)],
+                log: Arc::clone(&scenario.probe_log),
+            })),
+        )
+        .test_ok()?;
+    Ok(())
+}
+
 fn register_experiment(
     scenario: &mut MultiRateScenario,
 ) -> Result<
@@ -590,6 +658,9 @@ fn register_experiment(
     let fast = AgentPlugin::new();
     let probe = FixturePlugin::new("observation-probe", true, false);
     let slow = AgentPlugin::new();
+    let human_binding = owned_event_type_binding(&human)?;
+    let fast_binding = agent_output_binding(&fast)?;
+    let slow_binding = agent_output_binding(&slow)?;
     let mut experiment = Experiment::new(ExperimentConfig {
         name: "multi-rate-host".to_owned(),
         stop: StopCondition::MaxTicks(10),
@@ -597,15 +668,11 @@ fn register_experiment(
             path: scenario.path.clone(),
         },
     });
+    register_reducer_plugins(&mut experiment, &observation, &society)?;
     experiment
-        .register(&observation, Some(Box::new(EntityStateProjection)), None)
-        .test_ok()?;
-    experiment
-        .register(&society, Some(Box::new(SocietyReducer)), None)
-        .test_ok()?;
-    experiment
-        .register(
+        .register_with_verified_output_policy(
             &human,
+            human_binding,
             None,
             Some(Box::new(HumanActionDriver {
                 entity: scenario.human_entity,
@@ -615,8 +682,9 @@ fn register_experiment(
         )
         .test_ok()?;
     experiment
-        .register(
+        .register_with_verified_output_policy(
             &fast,
+            fast_binding,
             Some(Box::new(AgentReducer)),
             Some(Box::new(AgentDriver::new(
                 scenario.fast_entity,
@@ -630,19 +698,11 @@ fn register_experiment(
             ))),
         )
         .test_ok()?;
+    register_probe(&mut experiment, scenario, &probe)?;
     experiment
-        .register(
-            &probe,
-            None,
-            Some(Box::new(ObservationProbeDriver {
-                subscriptions: vec![ProjectionKey::new(scenario.human_entity)],
-                log: Arc::clone(&scenario.probe_log),
-            })),
-        )
-        .test_ok()?;
-    experiment
-        .register(
+        .register_with_verified_output_policy(
             &slow,
+            slow_binding,
             Some(Box::new(AgentReducer)),
             Some(Box::new(
                 AgentDriver::new(

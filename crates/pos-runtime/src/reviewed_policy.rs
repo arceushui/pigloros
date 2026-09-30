@@ -1,0 +1,230 @@
+//! Host-owned identity helpers for the reviewed output-policy artifacts.
+//!
+//! Registration callers provide the concrete implementation artifact and the
+//! canonical configuration details for the Plugin instance.  This module
+//! supplies the stable framing used for configuration identity and the
+//! accepted RTP1 retention-policy artifact; it does not create a default
+//! admission policy or grant authority.
+
+use pos_core::{Hash, Plugin};
+
+/// Maximum bytes accepted for an installed implementation artifact.
+///
+/// Implementation artifacts are retained as opaque host-owned leaves in this
+/// bounded admission slice.  They are deliberately capped before any copy is
+/// made; the bound is large enough for the installed source artifacts used by
+/// the composition roots while preventing an unbounded blob from entering a
+/// replay closure.
+pub const MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1: usize = 1_048_576;
+
+/// Maximum bytes accepted for one canonical CFG1 configuration artifact.
+pub const MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1: usize = 1_048_576;
+
+/// Maximum bytes accepted for the caller-provided configuration details
+/// before CFG1 framing allocates its output buffer.
+pub const MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1: usize =
+    MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1;
+
+/// Closed errors for host-owned reviewed policy artifacts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ReviewedPolicyArtifactErrorV1 {
+    #[error("implementation artifact exceeds its V1 bound")]
+    ImplementationArtifactTooLarge,
+    #[error("configuration details exceed their V1 bound")]
+    ConfigurationDetailsTooLarge,
+    #[error("configuration artifact exceeds its V1 bound")]
+    ConfigurationArtifactTooLarge,
+}
+
+/// Canonical RTP1 policy artifact for the accepted initial World Replay
+/// purpose.  The audience-policy leaf is the accepted ADR-076 Revision 2
+/// identity, and the temporal values are the accepted 90/30/120-day policy.
+const REVIEWED_RETENTION_POLICY_RTP1: &[u8] = &[
+    0x8a, 0x44, b'R', b'T', b'P', b'1', 0x01, 0x01, 0x6f, b'w', b'o', b'r', b'l', b'd', b'-', b'r',
+    b'e', b'p', b'l', b'a', b'y', b'-', b'v', b'1', 0x58, 0x20, 0xb8, 0x99, 0x9e, 0x89, 0x30, 0x5c,
+    0x44, 0xdd, 0xa7, 0x5e, 0x99, 0x90, 0x82, 0xb9, 0xa0, 0x16, 0xb6, 0x3f, 0x86, 0xf4, 0x7f, 0x28,
+    0xdd, 0x1a, 0x25, 0x43, 0x7a, 0x70, 0xdd, 0x7e, 0xd2, 0x76, 0x18, 0x5a, 0x18, 0x1e, 0x18, 0x78,
+    0x00, 0x00,
+];
+
+/// Return the exact canonical RTP1 bytes used by the host composition root.
+///
+/// The caller must retain these bytes as part of the replay closure.  A digest
+/// alone is not sufficient evidence that the policy artifact can be retrieved
+/// and independently verified during Replay.
+#[must_use]
+pub const fn reviewed_retention_policy_bytes_v1() -> &'static [u8] {
+    REVIEWED_RETENTION_POLICY_RTP1
+}
+
+/// Hash one host-recorded artifact with its explicit identity domain.
+#[must_use]
+pub fn host_artifact_hash_v1(domain: &[u8], bytes: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&[0]);
+    hasher.update(bytes);
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Hash a concrete implementation artifact with the project identity domain.
+#[must_use]
+pub fn implementation_artifact_hash_v1(bytes: &[u8]) -> Hash {
+    host_artifact_hash_v1(b"pigloros.implementation-artifact.v1", bytes)
+}
+
+/// Hash an exact executable-profile artifact by its recorded BLAKE3 member
+/// identity.  EPF1 profiles are independently materialized by the conformance
+/// authority and are passed in by the composition root.
+#[must_use]
+pub fn execution_profile_artifact_hash_v1(bytes: &[u8]) -> Hash {
+    Hash::from_bytes(*blake3::hash(bytes).as_bytes())
+}
+
+/// Hash the accepted canonical RTP1 retention policy artifact.
+#[must_use]
+pub fn reviewed_retention_policy_hash_v1() -> Hash {
+    host_artifact_hash_v1(
+        b"pigloros.retention-policy.v1",
+        REVIEWED_RETENTION_POLICY_RTP1,
+    )
+}
+
+/// Build the canonical base-configuration artifact for one Plugin instance.
+///
+/// The Plugin ID is deliberately excluded because it is an allocated runtime
+/// address.  Name, version, owned namespaces and the caller's canonical
+/// configuration bytes identify the implementation configuration without
+/// making replay identity depend on a fresh ULID.
+///
+/// # Errors
+/// Returns an artifact-size error when the details or canonical CFG1 output
+/// exceeds the reviewed V1 bounds.
+pub fn canonical_plugin_configuration_v1<P: Plugin + ?Sized>(
+    plugin: &P,
+    details: &[u8],
+) -> Result<Vec<u8>, ReviewedPolicyArtifactErrorV1> {
+    if details.len() > MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 {
+        return Err(ReviewedPolicyArtifactErrorV1::ConfigurationDetailsTooLarge);
+    }
+    let mut capability = plugin.capability().owned_event_types;
+    capability.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    let mut artifact_len = 4usize
+        .saturating_add(8 + plugin.name().len())
+        .saturating_add(8 + plugin.version().len());
+    for event_type in &capability {
+        artifact_len = artifact_len.saturating_add(8 + event_type.as_str().len());
+    }
+    artifact_len = artifact_len.saturating_add(8 + details.len());
+    if artifact_len > MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1 {
+        return Err(ReviewedPolicyArtifactErrorV1::ConfigurationArtifactTooLarge);
+    }
+    let mut artifact = Vec::with_capacity(artifact_len);
+    artifact.extend_from_slice(b"CFG1");
+    frame(&mut artifact, plugin.name().as_bytes());
+    frame(&mut artifact, plugin.version().as_bytes());
+    for event_type in capability {
+        frame(&mut artifact, event_type.as_str().as_bytes());
+    }
+    frame(&mut artifact, details);
+    Ok(artifact)
+}
+
+/// Check that a retained CFG1 artifact uses the canonical length framing and
+/// sorted event-type order emitted by [`canonical_plugin_configuration_v1`].
+pub(crate) fn is_canonical_plugin_configuration_v1(artifact: &[u8]) -> bool {
+    let Some(mut remaining) = artifact.strip_prefix(b"CFG1") else {
+        return false;
+    };
+    let mut fields = Vec::new();
+    while !remaining.is_empty() {
+        let Some(length_bytes) = remaining.get(..8) else {
+            return false;
+        };
+        let Ok(length_bytes) = <[u8; 8]>::try_from(length_bytes) else {
+            return false;
+        };
+        let Ok(length) = usize::try_from(u64::from_le_bytes(length_bytes)) else {
+            return false;
+        };
+        let Some(end) = 8usize.checked_add(length) else {
+            return false;
+        };
+        let Some(field) = remaining.get(8..end) else {
+            return false;
+        };
+        fields.push(field);
+        remaining = &remaining[end..];
+    }
+    if fields.len() < 3
+        || std::str::from_utf8(fields[0]).is_err()
+        || std::str::from_utf8(fields[1]).is_err()
+    {
+        return false;
+    }
+    let event_types = &fields[2..fields.len() - 1];
+    let mut previous = None;
+    for event_type in event_types {
+        let Ok(event_type) = std::str::from_utf8(event_type) else {
+            return false;
+        };
+        if previous.is_some_and(|previous| previous > event_type) {
+            return false;
+        }
+        previous = Some(event_type);
+    }
+    true
+}
+
+fn frame(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    output.extend_from_slice(bytes);
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use pos_core::{Capability, Kind, PluginId};
+
+    struct FixturePlugin {
+        id: PluginId,
+        events: Vec<Kind>,
+    }
+
+    impl Plugin for FixturePlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "reviewed-policy-fixture"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: self.events.clone(),
+                ..Capability::default()
+            }
+        }
+    }
+
+    #[test]
+    fn configuration_bounds_reject_details_and_framed_artifacts() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            events: vec![Kind::new("fixture.event")],
+        };
+        let oversized_details = vec![0_u8; MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 + 1];
+        assert_eq!(
+            canonical_plugin_configuration_v1(&plugin, &oversized_details),
+            Err(ReviewedPolicyArtifactErrorV1::ConfigurationDetailsTooLarge)
+        );
+
+        let details_at_bound = vec![0_u8; MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1];
+        assert_eq!(
+            canonical_plugin_configuration_v1(&plugin, &details_at_bound),
+            Err(ReviewedPolicyArtifactErrorV1::ConfigurationArtifactTooLarge)
+        );
+    }
+}

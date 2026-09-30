@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Enables downstream fixture registration and draft-profile seam tests only.
+# Never enable this feature in a deployable build: draft policy artifacts are not
+# backed by installed profile authority.
+# Enforced by scripts/check_test_support_features.py in CI.
+test-support = []
+
 [dependencies]
 blake3 = { workspace = true }
 pos-core = { path = "../pos-core" }
@@ -15,12 +22,39 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+pos-conformance = { path = "../pos-conformance" }
+
 [dev-dependencies]
 ciborium = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
 pos-crypto = { path = "../pos-crypto" }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
+
+[[test]]
+name = "output_admission_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "participant_knowledge"
+required-features = ["test-support"]
+
+[[test]]
+name = "plugin_composition"
+required-features = ["test-support"]
+
+[[test]]
+name = "protected_consent"
+required-features = ["test-support"]
+
+[[test]]
+name = "recovery_evidence"
+required-features = ["test-support"]
+
+[[test]]
+name = "non_linux_profile"
+required-features = ["test-support"]
 
 [lints]
 workspace = true
