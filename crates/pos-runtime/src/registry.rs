@@ -5676,7 +5676,7 @@ mod tests {
     // build the Gateway's native Plugin.
     impl InstalledPluginFactoryV1 for TestPlugin {
         type Configuration = CatalogueFixtureConfiguration;
-        type Plugin = TestPlugin;
+        type Plugin = Self;
         type Approver = MockActionApprover;
 
         fn configuration_details(configuration: &CatalogueFixtureConfiguration) -> Vec<u8> {
@@ -5685,7 +5685,7 @@ mod tests {
 
         fn build(
             configuration: &CatalogueFixtureConfiguration,
-        ) -> InstalledPluginProductV1<TestPlugin, MockActionApprover> {
+        ) -> InstalledPluginProductV1<Self, MockActionApprover> {
             configuration.builds.set(configuration.builds.get() + 1);
             let reducer: Option<Box<dyn Reducer>> = if configuration.supplies_reducer {
                 Some(Box::new(CountReducer))
@@ -5693,7 +5693,7 @@ mod tests {
                 None
             };
             InstalledPluginProductV1 {
-                plugin: TestPlugin {
+                plugin: Self {
                     id: configuration.plugin_id,
                     name: "catalogue-fixture",
                     cap: Capability {
