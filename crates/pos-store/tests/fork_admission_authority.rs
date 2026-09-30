@@ -5,6 +5,7 @@ use std::{
 };
 
 use ciborium::value::Value;
+use pos_core::ErasureInventoryPersistencePortV1 as _;
 use pos_core::{
     clock::FixedAdmissionClock,
     fork_authentication::{
@@ -30,6 +31,13 @@ use pos_store::{
 use rusqlite::{params, Connection};
 
 const HOST_SEED: [u8; 32] = [7; 32];
+
+/// ADR-106 r3: an admitted Fork needs an available bound erasure gate, so
+/// Fork fixtures bind the open test gate (as `LedgerStore::fork` tests do).
+fn bind_open_gate<S: EventStore>(store: &mut S) -> Result<(), Box<dyn Error>> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    Ok(())
+}
 const POLICY_DIGEST: Hash = Hash::from_bytes([9; 32]);
 
 fn bootstrap<S: ForkAdmissionAuthorityBootstrapPortV1>(
@@ -752,6 +760,7 @@ where
         + ForkAdmissionAuthorityPortV1
         + ForkAdmissionDeliveryJournalPortV1,
 {
+    bind_open_gate(store)?;
     let host = ForkHostSigningKeyV1::from_seed([51; 32])?;
     let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([52; 32])?;
     let policy = authority_policy(&adapter)?;
@@ -2456,6 +2465,7 @@ fn sqlite_fork_recovery_fixture(
     let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([52; 32])?;
     let policy = authority_policy(&adapter)?;
     let mut store = SqliteStore::open(path)?;
+    bind_open_gate(&mut store)?;
     let session = open_session(&mut store, &host, &policy)?;
     let principal = principal_command(
         &store,
@@ -2539,6 +2549,7 @@ fn assert_fcc1_and_atomic_recovery<S>(store: &mut S) -> Result<(), Box<dyn Error
 where
     S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1 + EventStore,
 {
+    bind_open_gate(store)?;
     let host = ForkHostSigningKeyV1::from_seed([21; 32])?;
     let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([22; 32])?;
     let policy = authority_policy(&adapter)?;
@@ -3320,6 +3331,7 @@ fn sqlite_file_backed_failed_fork_transaction_leaves_zero_partial_graph(
     let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([72; 32])?;
     let policy = authority_policy(&adapter)?;
     let mut store = SqliteStore::open(&path)?;
+    bind_open_gate(&mut store)?;
     let session = open_session(&mut store, &host, &policy)?;
     let principal = principal_command(
         &store,
@@ -3351,6 +3363,8 @@ fn sqlite_file_backed_failed_fork_transaction_leaves_zero_partial_graph(
          BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
     )?;
     drop(connection);
+    // Re-establish the bound gate's durable snapshot after the external write.
+    store.complete_erasure_inventory_snapshot(1)?;
     assert_eq!(
         store.execute_fork_admission_command(&session, &policy, &command),
         Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
@@ -3474,6 +3488,7 @@ fn sqlite_fcc1_maps_child_and_admission_write_faults() -> Result<(), Box<dyn Err
         let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([152; 32])?;
         let policy = authority_policy(&adapter)?;
         let mut store = SqliteStore::open(&path)?;
+        bind_open_gate(&mut store)?;
         let session = open_session(&mut store, &host, &policy)?;
         let principal = principal_command(
             &store,
@@ -3500,6 +3515,7 @@ fn sqlite_fcc1_maps_child_and_admission_write_faults() -> Result<(), Box<dyn Err
         let connection = Connection::open(&path)?;
         connection.execute_batch(fault)?;
         drop(connection);
+        store.complete_erasure_inventory_snapshot(1)?;
         assert_eq!(
             store.execute_fork_admission_command(&session, &policy, &command),
             Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
@@ -3860,6 +3876,7 @@ fn sqlite_frp1_rejects_an_operation_row_with_an_invalid_child_id() -> Result<(),
     let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([122; 32])?;
     let policy = authority_policy(&adapter)?;
     let mut store = SqliteStore::open(&path)?;
+    bind_open_gate(&mut store)?;
     let session = open_session(&mut store, &host, &policy)?;
     let principal = principal_command(
         &store,
@@ -4184,6 +4201,7 @@ fn sqlite_frp1_rejects_tampered_fork_commitment_child_name_and_pob1_edge(
     let child_id;
     {
         let mut store = SqliteStore::open(&path.to_string_lossy())?;
+        bind_open_gate(&mut store)?;
         let session = open_session(&mut store, &host, &policy)?;
         let principal = principal_command(
             &store,
@@ -4304,6 +4322,7 @@ fn sqlite_file_backed_recovery_serializes_with_a_concurrent_fork_commit(
     let recovery_session = reopen_session(&mut recovery_store, &host, &policy)?;
     let recovery = recovery_proof(&recovery_store, &host, &recovery_session, 1, [93; 32])?;
     let mut writer_store = SqliteStore::open(&path.to_string_lossy())?;
+    bind_open_gate(&mut writer_store)?;
     let writer_session = reopen_session(&mut writer_store, &host, &policy)?;
     let parent = writer_store.create_timeline("concurrent-recovery-fork-parent")?;
     let command = fork_command(
@@ -5237,5 +5256,785 @@ fn sqlite_reopen_rejects_a_different_host_key_and_prior_sessions() -> Result<(),
     );
     let session = open_policy_session(&mut reopened, &signer)?;
     reopened.advance_fork_admission_wall_fence(&session)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-106 revision 3: admitted Fork erasure containment and parent visibility.
+// ---------------------------------------------------------------------------
+
+use pos_core::{ErasureGate as _, ErasureVerifiedInventoryQueryV1 as _};
+
+type AdmissionResult = Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>;
+
+/// Every adapter capability the revision 3 acceptance vectors use.
+trait AdmittedForkStore:
+    EventStore
+    + ForkAdmissionAuthorityBootstrapPortV1
+    + ForkAdmissionAuthorityPortV1
+    + pos_core::ErasureInventoryPersistencePortV1
+    + pos_core::OwnTracksEnrollmentStore
+    + pos_core::geo_admission::GeoLocationAdmissionStore
+{
+}
+
+impl<T> AdmittedForkStore for T where
+    T: EventStore
+        + ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1
+        + pos_core::ErasureInventoryPersistencePortV1
+        + pos_core::OwnTracksEnrollmentStore
+        + pos_core::geo_admission::GeoLocationAdmissionStore
+{
+}
+
+struct AdmittedForkFixture {
+    host: ForkHostSigningKeyV1,
+    adapter: ForkAuthenticationAdapterSigningKeyV1,
+    policy: ForkAuthenticationPolicyV1,
+    session: pos_store::ForkAdmissionAuthoritySessionV1,
+}
+
+impl AdmittedForkFixture {
+    /// Provision FAH1, open a session and, when `bind_owner`, commit POC1.
+    fn open<S: AdmittedForkStore>(
+        store: &mut S,
+        seed: u8,
+        bind_owner: bool,
+    ) -> Result<Self, Box<dyn Error>> {
+        let host = ForkHostSigningKeyV1::from_seed([seed; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([seed.wrapping_add(1); 32])?;
+        let policy = authority_policy(&adapter)?;
+        let session = open_session(store, &host, &policy)?;
+        if bind_owner {
+            let principal = principal_command(
+                store,
+                &host,
+                &adapter,
+                &policy,
+                &session,
+                [seed.wrapping_add(2); 32],
+                u64::MAX,
+                "owner",
+            )?;
+            store.execute_fork_admission_command(&session, &policy, &principal)?;
+        }
+        Ok(Self {
+            host,
+            adapter,
+            policy,
+            session,
+        })
+    }
+
+    /// Build one host-signed FCC1 at cut zero.
+    fn fork<S: ForkAdmissionAuthorityBootstrapPortV1>(
+        &self,
+        store: &S,
+        operation: u8,
+        parent: TimelineId,
+        child_name: &str,
+        expires_at: u64,
+    ) -> Result<ForkAdmissionHostCommandV1, Box<dyn Error>> {
+        let evidence =
+            self.adapter
+                .sign_authenticated_principal(AuthenticatedPrincipalRecordV1 {
+                    principal: PrincipalRefV1::try_new([4; 16], "test.local")?,
+                    adapter_id: "test-adapter".to_owned(),
+                    assurance: 1,
+                    issued_at: 0,
+                    expires_at,
+                    registry_binding: Hash::from_bytes([3; 32]),
+                    operation_nonce: [5; 32],
+                })?;
+        let verified = verify_authenticated_principal_evidence_v1(&self.policy, evidence)?;
+        let principal = principal_digest_v1(&verified.evidence().record().principal)?;
+        let store_id = store.fork_admission_host_record()?.store_id();
+        let inner = encode(&Value::Array(vec![
+            Value::Text("FCC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(store_id.as_bytes().to_vec()),
+            Value::Bytes(self.session.identity().as_bytes().to_vec()),
+            Value::Bytes(vec![operation; 32]),
+            Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+            Value::Bytes(principal.as_bytes().to_vec()),
+            Value::Bytes(parent.inner().to_bytes().to_vec()),
+            Value::Integer(0.into()),
+            Value::Integer(0.into()),
+            Value::Bytes(vec![8; 32]),
+            Value::Bytes(vec![9; 32]),
+            Value::Integer(1.into()),
+            Value::Text(child_name.to_owned()),
+        ]))?;
+        let signature = self.host.sign_command(&inner, &verified)?;
+        let fac1 = encode(&Value::Array(vec![
+            Value::Text("FAC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(inner),
+            Value::Bytes(verified.evidence().to_canonical_cbor()?),
+            Value::Bytes(signature.as_bytes().to_vec()),
+        ]))?;
+        Ok(ForkAdmissionHostCommandV1::from_canonical_cbor(&fac1)?)
+    }
+
+    /// Execute through the unfenced ADR-106 method.
+    fn execute<S: ForkAdmissionAuthorityPortV1>(
+        &self,
+        store: &mut S,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> AdmissionResult {
+        store.execute_fork_admission_command(&self.session, &self.policy, command)
+    }
+
+    /// Reconcile one FCC1 through lookup-only FRP1.
+    fn recover<S: AdmittedForkStore>(
+        &self,
+        store: &mut S,
+        operation: u8,
+    ) -> Result<AdmissionResult, Box<dyn Error>> {
+        let proof = recovery_proof(store, &self.host, &self.session, 2, [operation; 32])?;
+        Ok(store.recover_fork_admission_command(&self.session, &proof))
+    }
+
+    /// Execute through the permit method inside `gate_pair.0`'s topology
+    /// transition with a context minted by `gate_pair.1` for `target`, then
+    /// publish the store's verified-empty successor inventory. Returns the
+    /// adapter outcome and whether the gate published a successor.
+    fn in_transition<S: AdmittedForkStore>(
+        &self,
+        store: &mut S,
+        gate_pair: (&ErasureContainmentGateV1, &ErasureContainmentGateV1),
+        target: (Hash, TimelineId),
+        command: &ForkAdmissionHostCommandV1,
+    ) -> (AdmissionResult, bool) {
+        let (gate, minted_by) = gate_pair;
+        let mut outcome = None;
+        let mut transition = |permit: &pos_core::ErasureTopologyTransitionPermitV1| {
+            let context = minted_by.admitted_fork_context(permit, target.0, target.1);
+            let result = store.execute_fork_admission_command_in_topology_transition(
+                &context,
+                &self.session,
+                &self.policy,
+                command,
+            );
+            let committed = result.is_ok();
+            outcome = Some(result);
+            let successor = if committed {
+                successor_inventory(store)
+            } else {
+                Err(pos_core::ErasureErrorV1::ProvenanceMissing)
+            };
+            successor.map(|inventory| (inventory, ()))
+        };
+        let published = gate
+            .install_from_verified_inventory_transition(&mut transition)
+            .is_ok();
+        (
+            outcome.unwrap_or(Err(
+                pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable,
+            )),
+            published,
+        )
+    }
+}
+
+fn successor_inventory<S: pos_core::ErasureInventoryPersistencePortV1>(
+    store: &mut S,
+) -> Result<pos_core::ErasureVerifiedInventoryV1, pos_core::ErasureErrorV1> {
+    let snapshot = store.complete_erasure_inventory_snapshot(4)?;
+    pos_core::ErasureVerifiedEmptyInventoryQueryV1::new(snapshot).verified_inventory(4)
+}
+
+fn admission_label(result: &AdmissionResult) -> String {
+    match result {
+        Ok(ForkAdmissionOperationResultV1::Fork(_)) => "fork".to_owned(),
+        Ok(ForkAdmissionOperationResultV1::PrincipalOwner(_)) => "principal-owner".to_owned(),
+        Err(error) => format!("{error:?}"),
+    }
+}
+
+/// A Timeline that holds accepted geographic evidence.
+fn geographic_parent<S: AdmittedForkStore>(store: &mut S) -> Result<TimelineId, Box<dyn Error>> {
+    let timeline = store.create_timeline("r3-geographic-parent")?;
+    let entity = EntityId::new();
+    let consent = ([1; 32], 8, [2; 32]);
+    store.pair_owntracks_enrollment(pos_core::OwnTracksEnrollmentRequestV1::new(
+        timeline.id(),
+        entity,
+        pos_core::geo_admission::GeoLocationAdmissionFenceV1::new(7, consent, (1, false, 9)),
+        [42; 32],
+    ))?;
+    let admitted = store.admit_geo_location(
+        pos_core::geo_admission::GeoLocationAdmissionRequestV1::from_input(
+            pos_core::geo_admission::GeoLocationAdmissionInputV1::new(
+                timeline.id(),
+                entity,
+                CanonicalBytes::from_static(b"existing-v1-geo-location-payload"),
+                7,
+                consent,
+                (1, false, 10),
+                ([4; 32], [5; 32]),
+            ),
+        ),
+    )?;
+    if admitted.is_accepted() {
+        Ok(timeline.id())
+    } else {
+        Err("geographic evidence was not admitted".into())
+    }
+}
+
+/// Timelines, FAR1 rows, Fork operation rows, and the authority wall fence.
+fn sqlite_graph_rows(path: &str) -> Result<[i64; 4], Box<dyn Error>> {
+    let connection = Connection::open(path)?;
+    let mut rows = [0; 4];
+    for (slot, query) in rows.iter_mut().zip([
+        "SELECT COUNT(*) FROM timelines",
+        "SELECT COUNT(*) FROM fork_admissions",
+        "SELECT COUNT(*) FROM fork_admission_operations WHERE kind = 2",
+        "SELECT last_authority_wall_time FROM fork_admission_authority WHERE singleton = 1",
+    ]) {
+        *slot = connection.query_row(query, [], |row| row.get(0))?;
+    }
+    Ok(rows)
+}
+
+fn sqlite_store_at(
+    directory: &tempfile::TempDir,
+    name: &str,
+) -> Result<(SqliteStore, String), Box<dyn Error>> {
+    let path = directory.path().join(name).to_string_lossy().into_owned();
+    Ok((SqliteStore::open(&path)?, path))
+}
+
+/// T1, T7, T8: permit-method containment, publication and exact recovery.
+fn assert_admitted_fork_transition_contract<S: AdmittedForkStore>(
+    store: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(store, 201, true)?;
+    let frozen = store.create_timeline("r3-frozen-parent")?;
+    let open = store.create_timeline("r3-open-parent")?;
+    let gate_pair = (gate.as_ref(), gate.as_ref());
+    let mut labels = Vec::new();
+
+    gate.freeze_timeline_for_test(frozen.id());
+    let contained = fixture.fork(store, 211, frozen.id(), "r3-contained-child", u64::MAX)?;
+    let target = (Hash::from_bytes([211; 32]), frozen.id());
+    let (result, published) = fixture.in_transition(store, gate_pair, target, &contained);
+    labels.push(admission_label(&result));
+    assert!(
+        !published,
+        "a rejected transition keeps the installed inventory"
+    );
+    assert!(gate.inventory_generation().is_err());
+    labels.push(admission_label(&fixture.recover(store, 211)?));
+
+    let admitted = fixture.fork(store, 212, open.id(), "r3-admitted-child", u64::MAX)?;
+    let target = (Hash::from_bytes([212; 32]), open.id());
+    let (result, published) = fixture.in_transition(store, gate_pair, target, &admitted);
+    labels.push(admission_label(&result));
+    let Ok(ForkAdmissionOperationResultV1::Fork(receipt)) = result else {
+        return Err("the unaffected parent was not admitted".into());
+    };
+    assert!(published, "the successor generation is published first");
+    assert_eq!(
+        gate.authorize(
+            receipt.child_id,
+            pos_core::ErasureProtectedOperationV1::Read
+        ),
+        Ok(())
+    );
+    assert!(store.get_timeline(receipt.child_id)?.is_some());
+
+    gate.freeze_timeline_for_test(open.id());
+    let (retry, published) = fixture.in_transition(store, gate_pair, target, &admitted);
+    assert_eq!(retry, Ok(ForkAdmissionOperationResultV1::Fork(receipt)));
+    assert!(
+        published,
+        "an exact retry republishes the identical inventory"
+    );
+    // Publication replaced the fixture's frozen set; freeze the parent again.
+    gate.freeze_timeline_for_test(open.id());
+    assert_eq!(
+        fixture.execute(store, &admitted),
+        Ok(ForkAdmissionOperationResultV1::Fork(receipt))
+    );
+    assert_eq!(
+        fixture.recover(store, 212)?,
+        Ok(ForkAdmissionOperationResultV1::Fork(receipt))
+    );
+    let after_freeze = fixture.fork(store, 213, open.id(), "r3-after-freeze", u64::MAX)?;
+    labels.push(admission_label(&fixture.execute(store, &after_freeze)));
+    labels.push(admission_label(&fixture.recover(store, 213)?));
+    Ok(labels)
+}
+
+#[test]
+fn admitted_fork_transition_contract_has_adapter_parity() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let (mut sqlite, _) = sqlite_store_at(&directory, "r3-transition.db")?;
+    let memory = assert_admitted_fork_transition_contract(&mut MemoryStore::new())?;
+    assert_eq!(
+        memory,
+        [
+            "ParentErasureContained",
+            "OperationMissing",
+            "fork",
+            "ParentErasureContained",
+            "OperationMissing",
+        ]
+    );
+    assert_eq!(
+        assert_admitted_fork_transition_contract(&mut sqlite)?,
+        memory
+    );
+    Ok(())
+}
+
+/// T3: an absent, geographic, or geographic-and-frozen parent is the same
+/// `ParentChanged` on both methods, before any erasure decision.
+fn assert_parent_visibility_precedes_containment<S: AdmittedForkStore>(
+    store: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(store, 221, true)?;
+    let geographic = geographic_parent(store)?;
+    let gate_pair = (gate.as_ref(), gate.as_ref());
+    let mut labels = Vec::new();
+    for (operation, parent, freeze) in [
+        (222, geographic, false),
+        (223, TimelineId::new(), false),
+        (224, geographic, true),
+    ] {
+        if freeze {
+            gate.freeze_timeline_for_test(parent);
+        }
+        let command = fixture.fork(store, operation, parent, "r3-invisible-child", u64::MAX)?;
+        labels.push(admission_label(&fixture.execute(store, &command)));
+        let target = (Hash::from_bytes([operation; 32]), parent);
+        let (result, published) = fixture.in_transition(store, gate_pair, target, &command);
+        assert!(!published);
+        labels.push(admission_label(&result));
+        labels.push(admission_label(&fixture.recover(store, operation)?));
+    }
+    Ok(labels)
+}
+
+#[test]
+fn invisible_parents_are_parent_changed_on_both_adapters() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let (mut sqlite, _) = sqlite_store_at(&directory, "r3-visibility.db")?;
+    let memory = assert_parent_visibility_precedes_containment(&mut MemoryStore::new())?;
+    assert_eq!(
+        memory,
+        ["ParentChanged", "ParentChanged", "OperationMissing"].repeat(3)
+    );
+    assert_eq!(
+        assert_parent_visibility_precedes_containment(&mut sqlite)?,
+        memory
+    );
+    Ok(())
+}
+
+/// T4 and T5: without an available bound gate the unfenced method only
+/// returns exact committed results or `ErasureContainmentUnavailable`.
+fn assert_unfenced_forks_fail_closed_without_an_available_gate<S: AdmittedForkStore>(
+    mut stores: impl FnMut(&str) -> Result<S, Box<dyn Error>>,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut labels = Vec::new();
+    // Default unbound fail-closed store.
+    let mut unbound = stores("r3-unbound.db")?;
+    let fixture = AdmittedForkFixture::open(&mut unbound, 231, true)?;
+    let parent = unbound.create_timeline("r3-unbound-parent")?;
+    let command = fixture.fork(&unbound, 232, parent.id(), "r3-unbound-child", u64::MAX)?;
+    labels.push(admission_label(&fixture.execute(&mut unbound, &command)));
+    labels.push(admission_label(&fixture.recover(&mut unbound, 232)?));
+
+    // Poisoned gate.
+    let mut poisoned = stores("r3-poisoned.db")?;
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    poisoned.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(&mut poisoned, 233, true)?;
+    let parent = poisoned.create_timeline("r3-poisoned-parent")?;
+    gate.poison();
+    let command = fixture.fork(&poisoned, 234, parent.id(), "r3-poisoned-child", u64::MAX)?;
+    labels.push(admission_label(&fixture.execute(&mut poisoned, &command)));
+    labels.push(admission_label(&fixture.recover(&mut poisoned, 234)?));
+    Ok(labels)
+}
+
+/// T4, T5 and T6 on a store whose production gate requires topology permits.
+fn assert_permit_requiring_store_contract<S: AdmittedForkStore>(
+    store: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let parent = store.create_timeline("r3-permit-parent")?;
+    let gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    // T5: POC1 through the unfenced method still commits.
+    let fixture = AdmittedForkFixture::open(store, 241, true)?;
+    let gate_pair = (gate.as_ref(), gate.as_ref());
+    let command = fixture.fork(store, 242, parent.id(), "r3-permit-child", u64::MAX)?;
+    let target = (Hash::from_bytes([242; 32]), parent.id());
+    let mut labels = Vec::new();
+    // T4: no verified inventory is installed yet.
+    let (result, published) = fixture.in_transition(store, gate_pair, target, &command);
+    assert!(!published);
+    labels.push(admission_label(&result));
+    let inventory = successor_inventory(store)?;
+    gate.install_verified_inventory(
+        Arc::new(inventory),
+        pos_core::ErasureRecoveryLimitsV1::from_maximum_requests(4)?,
+    )?;
+    // T5: an absent FCC1 through the unfenced method writes nothing.
+    labels.push(admission_label(&fixture.execute(store, &command)));
+    labels.push(admission_label(&fixture.recover(store, 242)?));
+    // T6: POC1 through the permit method is not a topology mutation.
+    let principal = principal_command(
+        store,
+        &fixture.host,
+        &fixture.adapter,
+        &fixture.policy,
+        &fixture.session,
+        [243; 32],
+        u64::MAX,
+        "owner",
+    )?;
+    let (result, _) = fixture.in_transition(store, gate_pair, target, &principal);
+    labels.push(admission_label(&result));
+    let (result, published) = fixture.in_transition(store, gate_pair, target, &command);
+    assert!(published);
+    labels.push(admission_label(&result));
+    // T5: the committed FCC1 is still exactly recoverable without a permit.
+    labels.push(admission_label(&fixture.execute(store, &command)));
+    let later = fixture.fork(store, 244, parent.id(), "r3-permit-later", u64::MAX)?;
+    labels.push(admission_label(&fixture.execute(store, &later)));
+    Ok(labels)
+}
+
+#[test]
+fn unfenced_forks_fail_closed_without_an_available_gate_on_both_adapters(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let memory =
+        assert_unfenced_forks_fail_closed_without_an_available_gate(|_| Ok(MemoryStore::new()))?;
+    assert_eq!(
+        memory,
+        ["ErasureContainmentUnavailable", "OperationMissing"].repeat(2)
+    );
+    let sqlite = assert_unfenced_forks_fail_closed_without_an_available_gate(|name| {
+        sqlite_store_at(&directory, name).map(|(store, _)| store)
+    })?;
+    assert_eq!(sqlite, memory);
+
+    let mut ungated = MemoryStore::new().without_erasure_gate();
+    let fixture = AdmittedForkFixture::open(&mut ungated, 235, true)?;
+    let parent = ungated.create_timeline("r3-ungated-parent")?;
+    let command = fixture.fork(&ungated, 236, parent.id(), "r3-ungated-child", u64::MAX)?;
+    assert_eq!(
+        fixture.execute(&mut ungated, &command),
+        Err(pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable)
+    );
+    let (sqlite_ungated, _) = sqlite_store_at(&directory, "r3-ungated.db")?;
+    let mut sqlite_ungated = sqlite_ungated.without_erasure_gate();
+    let fixture = AdmittedForkFixture::open(&mut sqlite_ungated, 237, true)?;
+    let parent = sqlite_ungated.create_timeline("r3-ungated-parent")?;
+    let command = fixture.fork(
+        &sqlite_ungated,
+        238,
+        parent.id(),
+        "r3-ungated-child",
+        u64::MAX,
+    )?;
+    assert_eq!(
+        fixture.execute(&mut sqlite_ungated, &command),
+        Err(pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn permit_requiring_stores_admit_forks_only_inside_a_verified_transition(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let (mut sqlite, path) = sqlite_store_at(&directory, "r3-permit.db")?;
+    let memory = assert_permit_requiring_store_contract(&mut MemoryStore::new())?;
+    assert_eq!(
+        memory,
+        [
+            "ErasureContainmentUnavailable",
+            "ErasureContainmentUnavailable",
+            "OperationMissing",
+            "InvalidRequest",
+            "fork",
+            "fork",
+            "ErasureContainmentUnavailable",
+        ]
+    );
+    assert_eq!(assert_permit_requiring_store_contract(&mut sqlite)?, memory);
+    let [timelines, far1, operations, _] = sqlite_graph_rows(&path)?;
+    assert_eq!((timelines, far1, operations), (2, 1, 1));
+    Ok(())
+}
+
+/// T6: the context must bind this FCC1, this gate and a bound store.
+fn assert_context_binds_this_fcc1<S: AdmittedForkStore>(
+    store: &mut S,
+    unbound: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    let foreign = ErasureContainmentGateV1::new_test_open();
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(store, 251, true)?;
+    let parent = store.create_timeline("r3-context-parent")?;
+    let other = store.create_timeline("r3-context-other")?;
+    let command = fixture.fork(store, 252, parent.id(), "r3-context-child", u64::MAX)?;
+    let operation = Hash::from_bytes([252; 32]);
+    let mut labels = Vec::new();
+    for (gate_pair, target) in [
+        (
+            (gate.as_ref(), gate.as_ref()),
+            (Hash::from_bytes([253; 32]), parent.id()),
+        ),
+        ((gate.as_ref(), gate.as_ref()), (operation, other.id())),
+        ((&foreign, &foreign), (operation, parent.id())),
+        ((gate.as_ref(), &foreign), (operation, parent.id())),
+    ] {
+        let (result, published) = fixture.in_transition(store, gate_pair, target, &command);
+        assert!(!published);
+        labels.push(admission_label(&result));
+    }
+    labels.push(admission_label(&fixture.recover(store, 252)?));
+    let unbound_fixture = AdmittedForkFixture::open(unbound, 254, true)?;
+    let unbound_parent = unbound.create_timeline("r3-context-unbound-parent")?;
+    let unbound_command = unbound_fixture.fork(
+        unbound,
+        255,
+        unbound_parent.id(),
+        "r3-unbound-child",
+        u64::MAX,
+    )?;
+    let target = (Hash::from_bytes([255; 32]), unbound_parent.id());
+    let (result, _) =
+        unbound_fixture.in_transition(unbound, (&foreign, &foreign), target, &unbound_command);
+    labels.push(admission_label(&result));
+    Ok(labels)
+}
+
+#[test]
+fn admitted_fork_context_binds_one_fcc1_on_both_adapters() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let memory = assert_context_binds_this_fcc1(&mut MemoryStore::new(), &mut MemoryStore::new())?;
+    assert_eq!(
+        memory,
+        [
+            "ErasureContainmentUnavailable",
+            "ErasureContainmentUnavailable",
+            "ErasureContainmentUnavailable",
+            "ErasureContainmentUnavailable",
+            "OperationMissing",
+            "ErasureContainmentUnavailable",
+        ]
+    );
+    let (mut sqlite, _) = sqlite_store_at(&directory, "r3-context.db")?;
+    let (mut sqlite_unbound, _) = sqlite_store_at(&directory, "r3-context-unbound.db")?;
+    assert_eq!(
+        assert_context_binds_this_fcc1(&mut sqlite, &mut sqlite_unbound)?,
+        memory
+    );
+    Ok(())
+}
+
+/// T10: under a frozen parent every earlier ADR-106 rule still wins.
+fn assert_containment_precedence_under_a_frozen_parent<S: AdmittedForkStore>(
+    store: &mut S,
+    unbound_owner: &mut S,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(store, 261, true)?;
+    let parent = store.create_timeline("r3-precedence-parent")?;
+    let stale = store.create_timeline("r3-precedence-stale")?;
+    store.append(
+        stale.id(),
+        &[EventDraft::new(
+            EntityId::new(),
+            Kind::new("fork.admission.coverage"),
+            CanonicalBytes::from_vec(b"advances the cut".to_vec()),
+        )],
+    )?;
+    let committed = fixture.fork(store, 262, parent.id(), "r3-precedence-child", u64::MAX)?;
+    let mut labels = vec![admission_label(&fixture.execute(store, &committed))];
+    gate.freeze_timeline_for_test(parent.id());
+    gate.freeze_timeline_for_test(stale.id());
+    for command in [
+        committed,
+        fixture.fork(store, 262, parent.id(), "r3-unequal-child", u64::MAX)?,
+        fixture.fork(store, 263, parent.id(), "r3-expired-child", 1)?,
+        fixture.fork(store, 264, stale.id(), "r3-stale-child", u64::MAX)?,
+    ] {
+        labels.push(admission_label(&fixture.execute(store, &command)));
+    }
+    let unbound_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    unbound_owner.bind_erasure_gate(Arc::clone(&unbound_gate))?;
+    let unbound = AdmittedForkFixture::open(unbound_owner, 265, false)?;
+    let unbound_parent = unbound_owner.create_timeline("r3-precedence-unbound")?;
+    unbound_gate.freeze_timeline_for_test(unbound_parent.id());
+    let missing_owner = unbound.fork(
+        unbound_owner,
+        266,
+        unbound_parent.id(),
+        "r3-unbound-child",
+        u64::MAX,
+    )?;
+    labels.push(admission_label(
+        &unbound.execute(unbound_owner, &missing_owner),
+    ));
+    Ok(labels)
+}
+
+#[test]
+fn containment_follows_every_earlier_rule_on_both_adapters() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let memory = assert_containment_precedence_under_a_frozen_parent(
+        &mut MemoryStore::new(),
+        &mut MemoryStore::new(),
+    )?;
+    assert_eq!(
+        memory,
+        [
+            "fork",
+            "fork",
+            "Conflict",
+            "Unauthenticated",
+            "ParentErasureContained",
+            "InvalidRequest",
+        ]
+    );
+    let (mut sqlite, _) = sqlite_store_at(&directory, "r3-precedence.db")?;
+    let (mut sqlite_unbound, _) = sqlite_store_at(&directory, "r3-precedence-unbound.db")?;
+    assert_eq!(
+        assert_containment_precedence_under_a_frozen_parent(&mut sqlite, &mut sqlite_unbound)?,
+        memory
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_committed_corruption_and_clock_rollback_precede_containment() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let (mut store, path) = sqlite_store_at(&directory, "r3-sqlite-precedence.db")?;
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(&mut store, 271, true)?;
+    let parent = store.create_timeline("r3-sqlite-precedence-parent")?;
+    let committed = fixture.fork(&store, 272, parent.id(), "r3-sqlite-child", u64::MAX)?;
+    assert!(matches!(
+        fixture.execute(&mut store, &committed),
+        Ok(ForkAdmissionOperationResultV1::Fork(_))
+    ));
+    gate.freeze_timeline_for_test(parent.id());
+    let connection = Connection::open(&path)?;
+    connection.execute("UPDATE fork_admissions SET far1_cbor = X'00'", [])?;
+    connection.execute(
+        "UPDATE fork_admission_authority SET last_authority_wall_time = ?1 WHERE singleton = 1",
+        params![i64::MAX],
+    )?;
+    drop(connection);
+    let before = sqlite_graph_rows(&path)?;
+    assert_eq!(
+        fixture.execute(&mut store, &committed),
+        Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    );
+    let later = fixture.fork(&store, 273, parent.id(), "r3-sqlite-later", u64::MAX)?;
+    assert_eq!(
+        fixture.execute(&mut store, &later),
+        Err(pos_core::ForkAdmissionErrorV1::ClockRollback)
+    );
+    assert_eq!(sqlite_graph_rows(&path)?, before);
+    Ok(())
+}
+
+/// T11: a busy write lock is reported without a partial graph, the gate
+/// fence is released, and the next transition admits the Fork.
+#[test]
+fn sqlite_admitted_fork_under_an_external_write_lock_releases_the_gate_fence(
+) -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let (mut store, path) = sqlite_store_at(&directory, "r3-lock.db")?;
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(&mut store, 281, true)?;
+    let parent = store.create_timeline("r3-locked-parent")?;
+    let command = fixture.fork(&store, 282, parent.id(), "r3-locked-child", u64::MAX)?;
+    let gate_pair = (gate.as_ref(), gate.as_ref());
+    let target = (Hash::from_bytes([282; 32]), parent.id());
+    let before = sqlite_graph_rows(&path)?;
+    let lock = Connection::open(&path)?;
+    lock.execute_batch("BEGIN IMMEDIATE")?;
+    let (locked, published) = fixture.in_transition(&mut store, gate_pair, target, &command);
+    assert_eq!(
+        locked,
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    assert!(!published);
+    assert_eq!(
+        fixture.execute(&mut store, &command),
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    lock.execute_batch("ROLLBACK")?;
+    drop(lock);
+    assert_eq!(sqlite_graph_rows(&path)?, before);
+    assert_eq!(
+        fixture.recover(&mut store, 282)?,
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    let (admitted, published) = fixture.in_transition(&mut store, gate_pair, target, &command);
+    assert!(matches!(
+        admitted,
+        Ok(ForkAdmissionOperationResultV1::Fork(_))
+    ));
+    assert!(published);
+    Ok(())
+}
+
+/// T12: a committed admitted Fork survives close, reopen and a later freeze.
+#[test]
+fn sqlite_admitted_fork_is_recovered_after_reopen_and_freeze() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let (mut store, path) = sqlite_store_at(&directory, "r3-reopen.db")?;
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
+    let fixture = AdmittedForkFixture::open(&mut store, 291, true)?;
+    let parent = store.create_timeline("r3-reopen-parent")?;
+    let command = fixture.fork(&store, 292, parent.id(), "r3-reopen-child", u64::MAX)?;
+    let target = (Hash::from_bytes([292; 32]), parent.id());
+    let (committed, _) =
+        fixture.in_transition(&mut store, (gate.as_ref(), gate.as_ref()), target, &command);
+    let Ok(ForkAdmissionOperationResultV1::Fork(receipt)) = committed else {
+        return Err("the admitted Fork did not commit".into());
+    };
+    drop(store);
+
+    let mut reopened = SqliteStore::open(&path)?;
+    let reopened_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    reopened.bind_erasure_gate(Arc::clone(&reopened_gate))?;
+    reopened_gate.freeze_timeline_for_test(parent.id());
+    let session = reopen_session(&mut reopened, &fixture.host, &fixture.policy)?;
+    let fixture = AdmittedForkFixture { session, ..fixture };
+    let before = sqlite_graph_rows(&path)?;
+    assert_eq!(
+        fixture.recover(&mut reopened, 292)?,
+        Ok(ForkAdmissionOperationResultV1::Fork(receipt))
+    );
+    let retry = fixture.fork(&reopened, 292, parent.id(), "r3-reopen-child", u64::MAX)?;
+    assert_eq!(
+        fixture.execute(&mut reopened, &retry),
+        Ok(ForkAdmissionOperationResultV1::Fork(receipt))
+    );
+    assert_eq!(sqlite_graph_rows(&path)?, before);
     Ok(())
 }
