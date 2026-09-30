@@ -38,18 +38,16 @@ use pos_core::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionRejected, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError, ConsentError,
-    ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1, ProposedAction,
+    ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1,
+    Plugin, PluginId, ProposedAction,
 };
 #[cfg(test)]
-use pos_core::{
-    geo_admission::GeoLocationAdmissionStore, store::EventStore, Capability, Plugin, PluginId,
-};
+use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
-#[cfg(test)]
-use pos_plugin_world::WorldPlugin;
 use pos_plugin_world::{
-    encode_actuator_pair_v1, ActionKindV1, WorldActionV1, EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
+    encode_actuator_pair_v1, ActionKindV1, WorldActionV1, WorldPlugin,
+    EVENT_TYPE_ACTION_V1 as EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
     ActionSubmissionError, ErasureExecutionHostV1, ErasureHostStatusV1, PluginRegistry,
@@ -66,6 +64,7 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
+#[cfg(test)]
 fn gateway_binding_error(
     plugin_name: &str,
     error: pos_runtime::OutputAdmissionErrorV1,
@@ -174,8 +173,9 @@ mod coverage_tests {
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Plugin, PluginId, Seq,
     };
     use pos_runtime::{
-        DomainImplementationKindV1, OutputAdmissionErrorV1, PluginAvailabilityV1,
-        PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError,
+        DomainImplementationKindV1, HostCatalogueEntryV1, InstalledPluginFactoryV1,
+        InstalledPluginProductV1, OutputAdmissionErrorV1, PluginAvailabilityV1, PluginIsolationV1,
+        PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use std::path::Path;
@@ -324,70 +324,289 @@ mod coverage_tests {
         assert!(registry.composition().plugins[0].pin.is_none());
         assert!(matches!(
             super::gateway_action_registry_builder(std::iter::empty(), None),
-            Err(RuntimeError::CapabilityMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn selected_gateway_catalogue_invokes_factory_once_before_closed_epf1() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        static FACTORY_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-        fn counted_factory(
-            configuration: &super::FrozenGatewayActionConfiguration,
-        ) -> (
-            GatewayActionPlugin,
-            Option<Box<dyn pos_core::Reducer>>,
-            super::GatewayWorldActionApprover,
-        ) {
-            FACTORY_CALLS.fetch_add(1, Ordering::SeqCst);
-            super::build_gateway_action_product(configuration)
-        }
-
-        FACTORY_CALLS.store(0, Ordering::SeqCst);
-        let selected = pos_runtime::HostCatalogueEntryV1::gateway(
-            super::frozen_gateway_details,
-            counted_factory,
-        );
-        let frozen = super::FrozenGatewayActionConfiguration { bodies: Vec::new() };
-        let mut registry = PluginRegistry::new().without_erasure_gate();
-        assert!(matches!(
-            registry.register_from_host_catalogue_entry(&selected, &frozen),
             Err(RuntimeError::OutputAdmission(
                 OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
             ))
         ));
-        assert_eq!(FACTORY_CALLS.load(Ordering::SeqCst), 1);
-        assert!(registry.composition().plugins.is_empty());
+    }
+
+    // Counts selected-factory invocations while delegating to the Gateway factory.
+    struct CountedGatewayConfiguration {
+        frozen: super::FrozenGatewayActionConfiguration,
+        builds: std::cell::Cell<usize>,
+    }
+
+    impl CountedGatewayConfiguration {
+        fn new(bodies: Vec<EntityId>) -> Self {
+            Self {
+                frozen: super::FrozenGatewayActionConfiguration::resolve(bodies).test_ok(),
+                builds: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl InstalledPluginFactoryV1 for CountedGatewayConfiguration {
+        type Configuration = Self;
+        type Plugin = GatewayActionPlugin;
+        type Approver = super::GatewayWorldActionApprover;
+
+        fn configuration_details(configuration: &Self) -> Vec<u8> {
+            GatewayActionPlugin::configuration_details(&configuration.frozen)
+        }
+
+        fn build(
+            configuration: &Self,
+        ) -> InstalledPluginProductV1<GatewayActionPlugin, super::GatewayWorldActionApprover>
+        {
+            configuration.builds.set(configuration.builds.get() + 1);
+            GatewayActionPlugin::build(&configuration.frozen)
+        }
+    }
+
+    // Supplies the Gateway Plugin with a foreign approver implementation.
+    struct ForeignApproverConfiguration;
+
+    struct ForeignWorldApprover(super::WorldPlugin);
+
+    impl pos_core::ActionApprover for ForeignWorldApprover {
+        fn approve(
+            &self,
+            proposal: &pos_core::ProposedAction,
+        ) -> Result<EventDraft, pos_core::ActionRejected> {
+            pos_core::ActionApprover::approve(&self.0, proposal)
+        }
+    }
+
+    impl InstalledPluginFactoryV1 for ForeignApproverConfiguration {
+        type Configuration = Self;
+        type Plugin = GatewayActionPlugin;
+        type Approver = ForeignWorldApprover;
+
+        fn configuration_details(_configuration: &Self) -> Vec<u8> {
+            Vec::new()
+        }
+
+        fn build(
+            _configuration: &Self,
+        ) -> InstalledPluginProductV1<GatewayActionPlugin, ForeignWorldApprover> {
+            InstalledPluginProductV1 {
+                plugin: GatewayActionPlugin {
+                    id: PluginId::new(),
+                },
+                reducer: None,
+                approver: ForeignWorldApprover(super::WorldPlugin::new()),
+            }
+        }
+    }
+
+    // Supplies the actual Gateway callbacks plus a Reducer the Plugin never declares.
+    struct ExtraReducerConfiguration;
+
+    struct ExtraReducer;
+
+    impl pos_core::Reducer for ExtraReducer {
+        fn initial(&self) -> pos_core::State {
+            pos_core::State::new()
+        }
+
+        fn apply(&self, _state: &mut pos_core::State, _event: &pos_core::Event) {}
+    }
+
+    impl InstalledPluginFactoryV1 for ExtraReducerConfiguration {
+        type Configuration = Self;
+        type Plugin = GatewayActionPlugin;
+        type Approver = super::GatewayWorldActionApprover;
+
+        fn configuration_details(_configuration: &Self) -> Vec<u8> {
+            Vec::new()
+        }
+
+        fn build(
+            _configuration: &Self,
+        ) -> InstalledPluginProductV1<GatewayActionPlugin, super::GatewayWorldActionApprover>
+        {
+            let product = GatewayActionPlugin::build(
+                &super::FrozenGatewayActionConfiguration::resolve(Vec::new()).test_ok(),
+            );
+            InstalledPluginProductV1 {
+                reducer: Some(Box::new(ExtraReducer)),
+                ..product
+            }
+        }
     }
 
     #[test]
-    fn gateway_frozen_bodies_change_configuration_and_policy_identity() {
-        let plugin = GatewayActionPlugin {
-            id: PluginId::new(),
-        };
-        let empty = super::FrozenGatewayActionConfiguration { bodies: Vec::new() };
-        let populated = super::FrozenGatewayActionConfiguration {
-            bodies: vec![EntityId::new()],
-        };
-        let empty_bytes = super::frozen_gateway_details(&empty);
-        let populated_bytes = super::frozen_gateway_details(&populated);
-        assert_ne!(empty_bytes, populated_bytes);
+    fn selected_gateway_entry_builds_once_and_fails_closed_at_installed_epf1() {
+        let configuration = CountedGatewayConfiguration::new(Vec::new());
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        let schemas_before = registry.composition().schemas.len();
+        assert!(matches!(
+            registry.register_from_host_catalogue_entry(
+                &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
+                &configuration,
+            ),
+            Err(RuntimeError::OutputAdmission(
+                OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+            ))
+        ));
+        assert_eq!(configuration.builds.get(), 1);
+        assert!(registry.is_empty());
+        assert_eq!(registry.composition().schemas.len(), schemas_before);
+    }
 
-        let binding = |details: &[u8]| {
-            pos_runtime::OutputPolicyBindingV1::from_installed_source(
-                &plugin,
-                pos_runtime::InstalledOutputPolicySourceV1::Generated,
-                details,
-                "deterministic-local-v1",
+    #[test]
+    fn nonproduction_gateway_entry_builds_once_without_pin_or_admitted_composition() {
+        let configuration = CountedGatewayConfiguration::new(vec![EntityId::new()]);
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        registry
+            .register_host_catalogue_fixture(
+                &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
+                &configuration,
             )
-            .test_ok()
+            .test_ok();
+        assert_eq!(configuration.builds.get(), 1);
+        let composition = registry.composition();
+        assert_eq!(composition.plugins.len(), 1);
+        let registered = &composition.plugins[0];
+        assert_eq!(registered.name, "gateway-world-actions");
+        assert!(registered.pin.is_none());
+        assert_eq!(registry.replay_policy_closures().count(), 1);
+        let pin = PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            pos_core::Hash::from_bytes([1; 32]),
+            vec!["gateway-role".to_owned()],
+        )
+        .test_ok();
+        let required_plugin =
+            pos_runtime::RequiredPluginV1::try_new(registered.id, registered.version.clone(), pin)
+                .test_ok();
+        let required = pos_runtime::RequiredPluginCompositionV1::try_new(
+            pos_runtime::PluginExecutionModeV1::Local,
+            vec![required_plugin],
+        )
+        .test_ok();
+        assert!(matches!(
+            registry.resolve_required_composition(&required),
+            Err(pos_runtime::PluginCompositionErrorV1::UnpinnedImplementation { .. })
+        ));
+    }
+
+    #[test]
+    fn gateway_entry_rejects_foreign_approver_and_extra_reducer_without_mutation() {
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        let schemas_before = registry.composition().schemas.len();
+        let foreign = HostCatalogueEntryV1::<ForeignApproverConfiguration>::gateway();
+        for result in [
+            registry.register_from_host_catalogue_entry(&foreign, &ForeignApproverConfiguration),
+            registry.register_host_catalogue_fixture(&foreign, &ForeignApproverConfiguration),
+        ] {
+            assert!(matches!(
+                result,
+                Err(RuntimeError::OutputAdmission(
+                    OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
+                ))
+            ));
+        }
+        assert!(matches!(
+            registry.register_host_catalogue_fixture(
+                &HostCatalogueEntryV1::<ExtraReducerConfiguration>::gateway(),
+                &ExtraReducerConfiguration,
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(registry.is_empty());
+        assert_eq!(registry.composition().schemas.len(), schemas_before);
+        assert_eq!(registry.replay_policy_closures().count(), 0);
+    }
+
+    #[test]
+    fn frozen_gateway_defaults_change_configuration_and_policy_identity() {
+        let resolved = || super::FrozenGatewayActionConfiguration::resolve(Vec::new()).test_ok();
+        let identity = |frozen: &super::FrozenGatewayActionConfiguration| {
+            let mut registry = PluginRegistry::new().without_erasure_gate();
+            registry
+                .register_host_catalogue_fixture(
+                    &HostCatalogueEntryV1::<GatewayActionPlugin>::gateway(),
+                    frozen,
+                )
+                .test_ok();
+            let identity = registry
+                .replay_policy_closure_identities()
+                .next()
+                .test_ok()
+                .1;
+            identity
         };
-        assert_ne!(
-            binding(&empty_bytes).policy().digest(),
-            binding(&populated_bytes).policy().digest()
+        let baseline = resolved();
+        let changes = [
+            super::FrozenGatewayActionConfiguration {
+                catalogue_version: 2,
+                ..resolved()
+            },
+            super::FrozenGatewayActionConfiguration {
+                allowed_action_kinds: vec!["impulse".to_owned()],
+                ..resolved()
+            },
+            super::FrozenGatewayActionConfiguration::resolve([EntityId::new()]).test_ok(),
+        ];
+        assert_eq!(identity(&baseline), identity(&resolved()));
+        for changed in &changes {
+            assert_ne!(
+                GatewayActionPlugin::configuration_details(&baseline),
+                GatewayActionPlugin::configuration_details(changed)
+            );
+            assert_ne!(identity(&baseline), identity(changed));
+        }
+    }
+
+    #[test]
+    fn gateway_fixture_routes_actions_to_the_frozen_world_approver() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let registry = super::gateway_action_registry_with_authority_and_erasure_gate(
+            [body],
+            None,
+            std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()),
         );
+        let submit = |body_entity_id, catalogue_version| {
+            let payload = super::WorldActionV1 {
+                actor_entity_id: actor,
+                body_entity_id,
+                action_kind: super::ActionKindV1::Impulse,
+                params_cbor: super::encode_actuator_pair_v1(1.0, 0.0).test_ok(),
+                action_scope: 0,
+                catalogue_version,
+                tick: 1,
+            }
+            .encode()
+            .test_ok();
+            registry.submit_action(
+                pos_core::TimelineId::new(),
+                &pos_core::ProposedAction::new(
+                    Kind::new(EVENT_TYPE_ACTION),
+                    actor,
+                    payload,
+                    Kind::new("world.action.v1.submit"),
+                ),
+            )
+        };
+        assert_eq!(
+            submit(body, 1).test_ok().event_type,
+            Kind::new(EVENT_TYPE_ACTION)
+        );
+        assert!(matches!(
+            submit(EntityId::new(), 1),
+            Err(pos_runtime::ActionSubmissionError::Rejected(
+                pos_core::ActionRejected::DomainValidationFailed(_)
+            ))
+        ));
+        assert!(matches!(
+            submit(body, 2),
+            Err(pos_runtime::ActionSubmissionError::Rejected(
+                pos_core::ActionRejected::DomainValidationFailed(_)
+            ))
+        ));
     }
 
     #[repr(transparent)]
@@ -913,12 +1132,16 @@ impl ActionPrincipal {
     }
 }
 
-#[cfg(test)]
+/// Action kinds admitted by the Gateway World approver.
+const GATEWAY_ALLOWED_ACTION_KINDS: [&str; 2] = ["impulse", "target_velocity"];
+
+/// Actuator catalogue version admitted by the Gateway World approver.
+const GATEWAY_CATALOGUE_VERSION: u32 = 1;
+
 struct GatewayActionPlugin {
     id: PluginId,
 }
 
-#[cfg(test)]
 impl Plugin for GatewayActionPlugin {
     fn id(&self) -> PluginId {
         self.id
@@ -936,14 +1159,98 @@ impl Plugin for GatewayActionPlugin {
     }
 }
 
-#[cfg(test)]
 struct GatewayWorldActionApprover(WorldPlugin);
 
-#[cfg(test)]
 impl pos_core::ActionApprover for GatewayWorldActionApprover {
     fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
         pos_core::ActionApprover::approve(&self.0, proposal)
     }
+}
+
+/// Gateway action configuration with every output-affecting default resolved.
+struct FrozenGatewayActionConfiguration {
+    bodies: Vec<EntityId>,
+    allowed_action_kinds: Vec<String>,
+    catalogue_version: u32,
+}
+
+impl FrozenGatewayActionConfiguration {
+    fn resolve(
+        bodies: impl IntoIterator<Item = EntityId>,
+    ) -> Result<Self, pos_runtime::RuntimeError> {
+        canonical_gateway_bodies(bodies).map(|bodies| Self {
+            bodies,
+            allowed_action_kinds: GATEWAY_ALLOWED_ACTION_KINDS.map(str::to_owned).into(),
+            catalogue_version: GATEWAY_CATALOGUE_VERSION,
+        })
+    }
+}
+
+// The Gateway action Plugin is built only by this factory, compiled into the
+// Gateway for its reviewed host catalogue entry.
+impl pos_runtime::InstalledPluginFactoryV1 for GatewayActionPlugin {
+    type Configuration = FrozenGatewayActionConfiguration;
+    type Plugin = GatewayActionPlugin;
+    type Approver = GatewayWorldActionApprover;
+
+    fn configuration_details(configuration: &FrozenGatewayActionConfiguration) -> Vec<u8> {
+        let mut details = Vec::new();
+        details.extend_from_slice(&configuration.catalogue_version.to_le_bytes());
+        details.extend_from_slice(&(configuration.allowed_action_kinds.len() as u64).to_le_bytes());
+        for kind in &configuration.allowed_action_kinds {
+            details.extend_from_slice(&(kind.len() as u64).to_le_bytes());
+            details.extend_from_slice(kind.as_bytes());
+        }
+        for body in &configuration.bodies {
+            details.extend_from_slice(&body.inner().to_bytes());
+        }
+        details
+    }
+
+    fn build(
+        configuration: &FrozenGatewayActionConfiguration,
+    ) -> pos_runtime::InstalledPluginProductV1<GatewayActionPlugin, GatewayWorldActionApprover>
+    {
+        pos_runtime::InstalledPluginProductV1 {
+            plugin: GatewayActionPlugin {
+                id: PluginId::new(),
+            },
+            reducer: None,
+            approver: GatewayWorldActionApprover(
+                WorldPlugin::new()
+                    .with_allowed_actions(configuration.allowed_action_kinds.clone())
+                    .with_catalogue_version(configuration.catalogue_version)
+                    .with_bodies(configuration.bodies.clone()),
+            ),
+        }
+    }
+}
+
+/// Registration operation applied to the selected Gateway catalogue entry.
+type GatewayCatalogueRegistration = fn(
+    &mut PluginRegistry,
+    &pos_runtime::HostCatalogueEntryV1<GatewayActionPlugin>,
+    &FrozenGatewayActionConfiguration,
+) -> Result<(), pos_runtime::RuntimeError>;
+
+// Resolve the frozen configuration and register the reviewed Gateway entry.
+// Production and nonproduction registries differ only in `register`.
+fn gateway_action_registry_with(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+    register: GatewayCatalogueRegistration,
+) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    let frozen = FrozenGatewayActionConfiguration::resolve(bodies)?;
+    let mut registry = PluginRegistry::new().without_erasure_gate();
+    register(
+        &mut registry,
+        &pos_runtime::HostCatalogueEntryV1::gateway(),
+        &frozen,
+    )?;
+    Ok(match authority {
+        Some(authority) => registry.with_consent_authority(authority),
+        None => registry,
+    })
 }
 
 #[cfg(test)]
@@ -966,57 +1273,26 @@ fn gateway_action_registry_with_authority(
     Arc::new(gateway_action_registry_builder_for_test(bodies, authority))
 }
 
-#[cfg(test)]
-fn gateway_configuration_details(bodies: &[EntityId]) -> Vec<u8> {
-    let mut configuration_details = Vec::with_capacity(bodies.len() * 16);
-    for body in bodies {
-        configuration_details.extend_from_slice(&body.inner().to_bytes());
-    }
-    configuration_details
-}
-
-#[cfg(test)]
-struct FrozenGatewayActionConfiguration {
-    bodies: Vec<EntityId>,
-}
-
-#[cfg(test)]
-fn frozen_gateway_details(configuration: &FrozenGatewayActionConfiguration) -> Vec<u8> {
-    gateway_configuration_details(&configuration.bodies)
-}
-
-#[cfg(test)]
-fn build_gateway_action_product(
-    configuration: &FrozenGatewayActionConfiguration,
-) -> (
-    GatewayActionPlugin,
-    Option<Box<dyn pos_core::Reducer>>,
-    GatewayWorldActionApprover,
-) {
-    (
-        GatewayActionPlugin {
-            id: PluginId::new(),
-        },
-        None,
-        GatewayWorldActionApprover(WorldPlugin::new().with_bodies(configuration.bodies.clone())),
-    )
-}
-
+// The production registry selects the reviewed Gateway entry with installed
+// evidence. Wave 8 has no installed Gateway EPF1, so it fails closed; #461
+// owns positive activation.
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
-    _authority: Option<ConsentAuthority>,
+    authority: Option<ConsentAuthority>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    let _ = canonical_gateway_bodies(bodies)?;
-    // Wave 8 has no installed Gateway EPF1; #461 owns positive activation.
-    Err(gateway_binding_error(
-        "gateway-world-actions",
-        pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" },
-    ))
+    gateway_action_registry_with(
+        bodies,
+        authority,
+        PluginRegistry::register_from_host_catalogue_entry::<GatewayActionPlugin>,
+    )
 }
 
 // Unit-test behavior fixtures have no installed profile, session pin, or
 // production registration authority. They never enter the release builder.
 /// Build a nonproduction Gateway registry without an installed profile or pin.
+///
+/// It selects the same reviewed catalogue entry, factory and registration
+/// step as production; only the evidence is the generated fixture source.
 ///
 /// # Errors
 /// Returns an error when canonical body validation or fixture registration fails.
@@ -1026,32 +1302,11 @@ fn fixture_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
-    let bodies = canonical_gateway_bodies(bodies)?;
-    let descriptor = GatewayActionPlugin {
-        id: PluginId::new(),
-    };
-    let configuration_details = gateway_configuration_details(&bodies);
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
-        &descriptor,
-        pos_runtime::InstalledOutputPolicySourceV1::Generated,
-        &configuration_details,
-        "deterministic-local-v1",
-    )?;
-    let mut registry = PluginRegistry::new().without_erasure_gate();
-    registry.register_with_verified_output_policy_and_approver(
-        &descriptor,
-        binding,
-        None,
-        None,
-        Some(Box::new(GatewayWorldActionApprover(
-            WorldPlugin::new().with_bodies(bodies),
-        ))),
-        [Kind::new(EVENT_TYPE_ACTION)],
-    )?;
-    if let Some(authority) = authority {
-        registry = registry.with_consent_authority(authority);
-    }
-    Ok(registry)
+    gateway_action_registry_with(
+        bodies,
+        authority,
+        PluginRegistry::register_host_catalogue_fixture::<GatewayActionPlugin>,
+    )
 }
 
 /// Build a nonproduction Gateway around a verified erasure host.
@@ -3901,7 +4156,7 @@ mod tests {
         let descriptor = GatewayActionPlugin {
             id: PluginId::new(),
         };
-        let configuration_details = gateway_configuration_details(&[]);
+        let configuration_details: Vec<u8> = Vec::new();
         assert!(matches!(
             super::gateway_output_binding(&descriptor, &configuration_details),
             Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })

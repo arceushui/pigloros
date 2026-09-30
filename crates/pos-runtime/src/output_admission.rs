@@ -5,18 +5,13 @@ use pos_core::{
     output_policy::{
         OutputFidelityV1, OutputPolicyV1, MAX_OUTPUT_DECLARATIONS_V1, MAX_OUTPUT_POLICY_BYTES_V1,
     },
-    plugin::PluginInstanceIdentity,
+    plugin::{PluginInstanceIdentity, PluginOwnerTokenV1},
     retention::{WorldRetentionPolicyV1, MAX_WORLD_RETENTION_RECORD_BYTES_V1},
     ActionApprover, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1,
     Hash, Plugin, PluginCpuReservationV1, PluginId, WorkloadProfileV1,
     MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
 };
 use std::{any::type_name, sync::Mutex};
-
-// Only fixture registration consumes owner tokens until installed
-// registration returns with Wave 9 (#467/#462).
-#[cfg(any(test, feature = "test-support"))]
-use pos_core::plugin::PluginOwnerTokenV1;
 
 use crate::driver::Driver;
 
@@ -411,7 +406,7 @@ impl InstalledOutputPolicySourceV1 {
             .find(|installed| installed.name == plugin_name)
     }
 
-    fn accepts_plugin<P: Plugin + ?Sized>(self, plugin: &P) -> bool {
+    pub(crate) fn accepts_plugin<P: Plugin + ?Sized>(self, plugin: &P) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
@@ -430,7 +425,7 @@ impl InstalledOutputPolicySourceV1 {
             .is_some_and(|installed| installed.driver_type == Some(type_name::<D>()))
     }
 
-    fn accepts_approver<A: ActionApprover + 'static>(self) -> bool {
+    pub(crate) fn accepts_approver<A: ActionApprover + 'static>(self) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
@@ -647,9 +642,6 @@ pub struct OutputPolicyBindingV1 {
     artifacts: OutputPolicyArtifactInputV1,
     source: InstalledOutputPolicySourceV1,
     plugin_name: &'static str,
-    /// Owner of the bound instance; only fixture registration consumes it
-    /// until installed registration returns with Wave 9 (#467/#462).
-    #[cfg(any(test, feature = "test-support"))]
     owner_token: PluginOwnerTokenV1,
     /// Validated installed callbacks. They stay inert until installed
     /// registration returns with Wave 9 (#467/#462); see
@@ -695,7 +687,6 @@ impl OutputPolicyBindingV1 {
             artifacts,
             source,
             plugin_name: plugin.name(),
-            #[cfg(any(test, feature = "test-support"))]
             owner_token: PluginInstanceIdentity::installed_owner_token(plugin),
             driver: None,
             approver: None,
@@ -781,13 +772,8 @@ impl OutputPolicyBindingV1 {
         Ok(self)
     }
 
-    #[cfg(test)]
-    pub(crate) fn take_action_approver(&mut self) -> Option<(Box<dyn ActionApprover>, Vec<Kind>)> {
-        self.approver.take()
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn verifies_erased_owner_instance(&self, plugin: &dyn Plugin) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
         if self.source == InstalledOutputPolicySourceV1::Generated {
             return self.owner_token == PluginInstanceIdentity::installed_owner_token(plugin);
         }
@@ -797,7 +783,6 @@ impl OutputPolicyBindingV1 {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -1312,7 +1297,6 @@ pub struct OutputAdmissionV1 {
     budget: ExecutableBudgetPolicyV1,
     usage: Mutex<AdmissionUsage>,
     closure: Option<OutputPolicyClosureV1>,
-    #[cfg(any(test, feature = "test-support"))]
     owner_token: Option<PluginOwnerTokenV1>,
 }
 
@@ -1343,7 +1327,6 @@ impl OutputAdmissionV1 {
     /// # Errors
     /// Returns an identity, artifact, or budget error when the closure does
     /// not describe the registered Plugin and its executable reservation.
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn try_new_verified(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -1356,7 +1339,6 @@ impl OutputAdmissionV1 {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn try_new_verified_inner(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -1371,7 +1353,6 @@ impl OutputAdmissionV1 {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn try_new_core(
         plugin_id: PluginId,
         plugin_version: &str,
@@ -1432,7 +1413,6 @@ impl OutputAdmissionV1 {
         self.closure.as_ref()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn owner_token(&self) -> Option<PluginOwnerTokenV1> {
         self.owner_token
     }
@@ -1801,6 +1781,21 @@ mod tests {
                 proposal.payload.clone(),
             ))
         }
+    }
+
+    #[test]
+    fn gateway_source_closure_retains_the_delegated_world_approver_source() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            name: "gateway-world-actions",
+            events: Vec::new(),
+        };
+        let artifact = InstalledOutputPolicySourceV1::Gateway.implementation_artifact(&plugin);
+        let delegated: &[u8] = include_bytes!("../../../plugins/world/src/lib.rs");
+        assert!(artifact
+            .windows(delegated.len())
+            .any(|window| window == delegated));
+        assert!(!InstalledOutputPolicySourceV1::Gateway.accepts_approver::<BindingTestApprover>());
     }
 
     #[test]

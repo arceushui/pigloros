@@ -7,14 +7,12 @@
 
 use indexmap::IndexMap;
 
-#[cfg(any(test, feature = "test-support"))]
-use pos_core::Capability;
 use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::{PluginId, TimelineId},
     manifest_owner_link::{ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1},
-    ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, ConsentAuthority,
+    ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, Capability, ConsentAuthority,
     ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentErrorV1,
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, KnowledgeSnapshotV1,
     PersistedAuthorityV1, Plugin, ProposedAction, Reducer, Timeline,
@@ -23,7 +21,7 @@ use pos_core::{
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
 #[cfg(any(test, feature = "test-support"))]
-use crate::output_admission::{draft_execution_profile_artifact_v1, OutputPolicyClosureV1};
+use crate::output_admission::draft_execution_profile_artifact_v1;
 use crate::{
     composition::{
         AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
@@ -37,7 +35,10 @@ use crate::{
         SnapshotAnchor, StepOutput, TimelineHistorySegment,
     },
     error::{ActionSubmissionError, RuntimeError},
-    output_admission::{InstalledOutputPolicySourceV1, OutputAdmissionV1, OutputPolicyBindingV1},
+    output_admission::{
+        InstalledOutputPolicySourceV1, OutputAdmissionV1, OutputPolicyBindingV1,
+        OutputPolicyClosureV1,
+    },
     recorder::{RunMode, RECORDER_EVENT_TYPE},
     schema::{EventTypeSchema, SchemaRegistry},
 };
@@ -51,33 +52,307 @@ fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-type CatalogueFactoryV1<C, P, A> = fn(&C) -> (P, Option<Box<dyn Reducer>>, A);
-type CatalogueProductV1<P> = (P, Option<Box<dyn Reducer>>, OutputPolicyBindingV1);
+/// Executable profile selected by every reviewed host catalogue entry.
+const CATALOGUE_PROFILE_ID_V1: &str = "deterministic-local-v1";
 
-/// One reviewed Gateway catalogue entry selected by the trusted composition root.
+/// Factory compiled into one application composition root for its reviewed
+/// host catalogue entry.
 ///
-/// Its functions receive the same frozen configuration. The factory cannot
-/// supply a policy, registration pin, or registry mutation capability.
-pub struct HostCatalogueEntryV1<C, P, A> {
-    configuration_details: fn(&C) -> Vec<u8>,
-    build: CatalogueFactoryV1<C, P, A>,
+/// The runtime derives canonical CFG1 from [`Self::configuration_details`]
+/// and invokes [`Self::build`] exactly once per registration, both with the
+/// same frozen configuration. The factory returns only the actual Plugin and
+/// callbacks: it cannot supply CFG1, EOP1, a registration pin, or any
+/// registry or catalogue capability.
+pub trait InstalledPluginFactoryV1 {
+    /// Immutable configuration with every default resolved by the host.
+    type Configuration;
+    /// Actual Plugin built by this factory.
+    type Plugin: Plugin;
+    /// Actual action approver built by this factory.
+    type Approver: ActionApprover + 'static;
+
+    /// Deterministic details of the complete frozen configuration.
+    fn configuration_details(configuration: &Self::Configuration) -> Vec<u8>;
+
+    /// Build the actual Plugin and callbacks from the frozen configuration.
+    fn build(
+        configuration: &Self::Configuration,
+    ) -> InstalledPluginProductV1<Self::Plugin, Self::Approver>;
 }
 
-impl<C, P, A> HostCatalogueEntryV1<C, P, A> {
-    /// Select the reviewed Gateway output entry.
+/// Actual Plugin and callbacks built by one catalogue factory invocation.
+pub struct InstalledPluginProductV1<P, A> {
+    /// Actual Plugin instance.
+    pub plugin: P,
+    /// Reducer, present exactly when the Plugin declares one.
+    pub reducer: Option<Box<dyn Reducer>>,
+    /// Action approver for the reviewed action route.
+    pub approver: A,
+}
+
+/// One reviewed entry of the runtime-owned closed host catalogue.
+///
+/// The entry fixes the reviewed output specification: accepted native Plugin
+/// and approver types, source closure, declarations, and executable budget.
+/// A composition root can only select [`Self::gateway`] for its compiled
+/// factory; there is no constructor that accepts callbacks or a specification.
+///
+/// ```compile_fail
+/// struct Foreign;
+/// let _entry = pos_runtime::HostCatalogueEntryV1::<Foreign> {
+///     spec: unimplemented!(),
+///     factory: std::marker::PhantomData,
+/// };
+/// ```
+pub struct HostCatalogueEntryV1<F> {
+    spec: InstalledOutputPolicySourceV1,
+    factory: std::marker::PhantomData<fn() -> F>,
+}
+
+impl<F: InstalledPluginFactoryV1> HostCatalogueEntryV1<F> {
+    /// Select the reviewed Gateway action entry for the Gateway factory.
     #[must_use]
-    pub const fn gateway(
-        configuration_details: fn(&C) -> Vec<u8>,
-        build: CatalogueFactoryV1<C, P, A>,
-    ) -> Self {
+    pub const fn gateway() -> Self {
         Self {
-            configuration_details,
-            build,
+            spec: InstalledOutputPolicySourceV1::Gateway,
+            factory: std::marker::PhantomData,
         }
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+/// EPF1 provenance used to seal one catalogue product.
+#[derive(Clone, Copy)]
+enum CatalogueEvidenceV1 {
+    /// Host-verified installed profile of the selected entry.
+    Installed,
+    /// Draft profile and generated source for nonproduction fixtures.
+    #[cfg(any(test, feature = "test-support"))]
+    Generated,
+}
+
+impl CatalogueEvidenceV1 {
+    /// The binding source and whether the checked candidate pin may be attached.
+    const fn binding_source(
+        self,
+        spec: InstalledOutputPolicySourceV1,
+    ) -> (InstalledOutputPolicySourceV1, bool) {
+        match self {
+            Self::Installed => (spec, true),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Generated => (InstalledOutputPolicySourceV1::Generated, false),
+        }
+    }
+}
+
+/// Runtime-private, single-use product sealed from one selected entry.
+///
+/// It is neither `Clone` nor serializable and has no constructor, extraction,
+/// or callback attachment outside this module. Registration consumes it.
+struct InstalledPluginBundleV1<P> {
+    plugin: Box<P>,
+    reducer: Option<Box<dyn Reducer>>,
+    approver: Box<dyn ActionApprover>,
+    route: Kind,
+    configuration: Vec<u8>,
+    binding: OutputPolicyBindingV1,
+    pin: crate::composition::PluginPinV1,
+    admits_pin: bool,
+}
+
+impl<P: Plugin> InstalledPluginBundleV1<P> {
+    fn links(&self) -> CatalogueLinksV1<'_> {
+        CatalogueLinksV1 {
+            plugin: &*self.plugin,
+            route: &self.route,
+            configuration: &self.configuration,
+            policy: self.binding.policy(),
+            budget: self.binding.budget(),
+            implementation: self.binding.implementation_artifact(),
+            bound_configuration: self.binding.configuration_artifact(),
+            execution_profile: self.binding.execution_profile_artifact(),
+            retention_policy: self.binding.retention_policy_artifact(),
+            pin: &self.pin,
+        }
+    }
+}
+
+/// Retained inputs whose exact identity links are checked before registration.
+#[derive(Clone, Copy)]
+struct CatalogueLinksV1<'a> {
+    plugin: &'a dyn Plugin,
+    route: &'a Kind,
+    configuration: &'a [u8],
+    policy: &'a pos_core::output_policy::OutputPolicyV1,
+    budget: &'a pos_core::ExecutableBudgetPolicyV1,
+    implementation: &'a [u8],
+    bound_configuration: &'a [u8],
+    execution_profile: &'a [u8],
+    retention_policy: &'a [u8],
+    pin: &'a crate::composition::PluginPinV1,
+}
+
+impl CatalogueLinksV1<'_> {
+    /// Check `PluginId`, version, declaration, EBP1, EPF1, RTP1, CFG1, source
+    /// and candidate pin links in that order.
+    fn validate(&self) -> Result<(), crate::OutputAdmissionErrorV1> {
+        let policy = self.policy.fields();
+        let budget = self.budget.fields();
+        let plugin_id = self.plugin.id();
+        let mut declared = policy
+            .output_declarations
+            .iter()
+            .map(pos_core::output_policy::OutputDeclarationV1::event_type)
+            .collect::<Vec<_>>();
+        declared.sort_unstable();
+        let capability = self.plugin.capability();
+        let mut owned = capability
+            .owned_event_types
+            .iter()
+            .map(Kind::as_str)
+            .collect::<Vec<_>>();
+        owned.sort_unstable();
+        let role = crate::installed_plugin_role_v1(self.plugin);
+        first_broken_link([
+            (
+                policy.plugin_id == plugin_id,
+                crate::OutputAdmissionErrorV1::PluginMismatch,
+            ),
+            (
+                policy.plugin_version == self.plugin.version(),
+                crate::OutputAdmissionErrorV1::PluginVersionMismatch,
+            ),
+            (
+                declared == owned && declared.contains(&self.route.as_str()),
+                crate::OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+                    kind: "declaration",
+                },
+            ),
+            (
+                policy.executable_profile_hash == self.budget.digest()
+                    && budget
+                        .plugin_cpu_reservations
+                        .iter()
+                        .any(|row| row.plugin_id == plugin_id),
+                crate::OutputAdmissionErrorV1::PolicyIdentityMismatch,
+            ),
+            (
+                budget.execution_profile_hash
+                    == crate::execution_profile_artifact_hash_v1(self.execution_profile),
+                crate::OutputAdmissionErrorV1::ArtifactIdentityMismatch { kind: "EPF1" },
+            ),
+            (
+                policy.retention_policy_hash
+                    == crate::host_artifact_hash_v1(
+                        b"pigloros.retention-policy.v1",
+                        self.retention_policy,
+                    ),
+                crate::OutputAdmissionErrorV1::ArtifactIdentityMismatch { kind: "RTP1" },
+            ),
+            (
+                self.bound_configuration == self.configuration
+                    && policy.base_configuration_digest
+                        == crate::host_artifact_hash_v1(
+                            b"pigloros.base-configuration.v1",
+                            self.configuration,
+                        ),
+                crate::OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+                    kind: "configuration",
+                },
+            ),
+            (
+                policy.implementation_hash
+                    == crate::implementation_artifact_hash_v1(self.implementation),
+                crate::OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+                    kind: "implementation",
+                },
+            ),
+            (
+                self.pin.configuration_digest() == self.policy.digest()
+                    && self.pin.roles() == std::slice::from_ref(&role),
+                crate::OutputAdmissionErrorV1::ArtifactIdentityMismatch { kind: "pin" },
+            ),
+        ])
+    }
+}
+
+/// Return the error of the first link that does not hold.
+fn first_broken_link<const N: usize>(
+    links: [(bool, crate::OutputAdmissionErrorV1); N],
+) -> Result<(), crate::OutputAdmissionErrorV1> {
+    links
+        .into_iter()
+        .find(|(held, _)| !held)
+        .map_or(Ok(()), |(_, error)| Err(error))
+}
+
+/// Invoke the selected factory once and seal its product with the evidence.
+///
+/// The selected entry's reviewed specification checks the actual Plugin and
+/// approver types whatever the evidence; only the EPF1/source provenance of
+/// the binding varies. Installed evidence resolves the host-verified EPF1,
+/// which is absent in Wave 8, so production sealing fails closed there.
+fn seal_catalogue_bundle<F: InstalledPluginFactoryV1>(
+    entry: &HostCatalogueEntryV1<F>,
+    frozen_configuration: &F::Configuration,
+    evidence: CatalogueEvidenceV1,
+) -> Result<InstalledPluginBundleV1<F::Plugin>, RuntimeError> {
+    let (source, admits_pin) = evidence.binding_source(entry.spec);
+    let details = F::configuration_details(frozen_configuration);
+    let product = F::build(frozen_configuration);
+    let plugin = Box::new(product.plugin);
+    let resolved = first_broken_link([
+        (
+            entry.spec.accepts_plugin(&*plugin),
+            crate::OutputAdmissionErrorV1::PluginMismatch,
+        ),
+        (
+            entry.spec.accepts_approver::<F::Approver>(),
+            crate::OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" },
+        ),
+    ])
+    .and_then(|()| {
+        crate::canonical_plugin_configuration_v1(&*plugin, &details).map_err(|_| {
+            crate::OutputAdmissionErrorV1::ArtifactInvalid {
+                kind: "configuration",
+            }
+        })
+    })
+    .and_then(|configuration| {
+        OutputPolicyBindingV1::from_installed_source(
+            &*plugin,
+            source,
+            &details,
+            CATALOGUE_PROFILE_ID_V1,
+        )
+        .map(|binding| (configuration, binding))
+    })
+    .map_err(RuntimeError::from)
+    .and_then(|(configuration, binding)| {
+        crate::composition::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            binding.policy().digest(),
+            vec![crate::installed_plugin_role_v1(&*plugin)],
+        )
+        .map(|pin| (configuration, binding, pin))
+        .map_err(RuntimeError::from)
+    });
+    resolved.and_then(|(configuration, binding, pin)| {
+        let bundle = InstalledPluginBundleV1 {
+            plugin,
+            reducer: product.reducer,
+            approver: Box::new(product.approver),
+            route: Kind::new(crate::output_admission::WORLD_ACTION_EVENT_TYPE_V1),
+            configuration,
+            binding,
+            pin,
+            admits_pin,
+        };
+        let validated = bundle.links().validate();
+        validated.map(|()| bundle).map_err(RuntimeError::from)
+    })
+}
+
 struct PendingRegistrationCallbacksV1<I> {
     driver: Option<Box<dyn Driver>>,
     approver: Option<Box<dyn ActionApprover>>,
@@ -1058,7 +1333,6 @@ impl Plugin for GeneratedDriverPlugin {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
@@ -1066,10 +1340,10 @@ struct RegistrationOptions {
 }
 
 /// How a registered reducer is keyed in the projection registry.
-#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy)]
 enum ReducerSlotV1 {
     /// Name-keyed slot used by plain generated fixtures.
+    #[cfg(any(test, feature = "test-support"))]
     ByName,
     /// Slot keyed by the registering `PluginId`, so same-name reducers coexist.
     ByPluginId,
@@ -3230,66 +3504,93 @@ impl PluginRegistry {
         )
     }
 
-    /// Build the selected Gateway catalogue entry as one product and register it.
+    /// Register the product of one selected host catalogue entry.
     ///
-    /// The trusted composition root owns `entry` and passes a frozen
-    /// configuration. Runtime invokes the selected factory once, keeps the
-    /// product private, and derives the binding from its actual Plugin. No
-    /// installed Gateway EPF1 exists in Wave 8, so this entry fails closed
-    /// before any registry mutation; installed registration arrives with
-    /// Wave 9 (#467/#462).
+    /// This is the sole production Plugin registration operation. The
+    /// trusted composition root selects `entry` and passes a frozen
+    /// configuration; runtime invokes the entry's factory once, checks the
+    /// actual Plugin and approver against the reviewed specification, freezes
+    /// CFG1, resolves the host-verified EPF1, checks every retained link, and
+    /// commits atomically. No installed Gateway EPF1 exists in Wave 8, so
+    /// registration fails closed before any registry mutation; positive
+    /// installed registration arrives with Wave 9 (#460/#462/#461).
     ///
     /// # Errors
-    /// Rejects a foreign Plugin, foreign callback, or invalid artifact link,
-    /// and otherwise returns the closed EPF1 error, without changing the
-    /// registry.
-    pub fn register_from_host_catalogue_entry<C, P, A>(
+    /// Rejects a foreign Plugin or approver, invalid configuration, an
+    /// unavailable installed EPF1, a broken artifact link, or a registration
+    /// conflict, without changing the registry.
+    pub fn register_from_host_catalogue_entry<F: InstalledPluginFactoryV1>(
         &mut self,
-        entry: &HostCatalogueEntryV1<C, P, A>,
-        frozen_configuration: &C,
-    ) -> Result<(), RuntimeError>
-    where
-        P: Plugin,
-        A: ActionApprover + 'static,
-    {
-        let closed: Result<(), RuntimeError> =
-            Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into());
-        Self::build_host_catalogue_product(
-            entry,
-            frozen_configuration,
-            InstalledOutputPolicySourceV1::Gateway,
-        )
-        .and(closed)
+        entry: &HostCatalogueEntryV1<F>,
+        frozen_configuration: &F::Configuration,
+    ) -> Result<(), RuntimeError> {
+        self.register_catalogue_entry(entry, frozen_configuration, CatalogueEvidenceV1::Installed)
     }
 
-    // Invoke the selected factory exactly once with the frozen configuration
-    // and derive its output binding, with the selected approver attached.
-    fn build_host_catalogue_product<C, P, A>(
-        entry: &HostCatalogueEntryV1<C, P, A>,
-        frozen_configuration: &C,
-        source: InstalledOutputPolicySourceV1,
-    ) -> Result<CatalogueProductV1<P>, RuntimeError>
-    where
-        P: Plugin,
-        A: ActionApprover + 'static,
-    {
-        let configuration_details = (entry.configuration_details)(frozen_configuration);
-        let (plugin, reducer, approver) = (entry.build)(frozen_configuration);
-        let binding = OutputPolicyBindingV1::from_installed_source(
-            &plugin,
-            source,
-            &configuration_details,
-            "deterministic-local-v1",
+    /// Register a selected catalogue entry with nonproduction evidence.
+    ///
+    /// The factory, reviewed specification checks, link checks and atomic
+    /// commit are those of [`Self::register_from_host_catalogue_entry`]; only
+    /// the evidence differs. Generated source and draft EPF1 bytes never
+    /// yield a registration pin, admitted composition, or append permission.
+    ///
+    /// # Errors
+    /// Returns the same closed errors as the production operation.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn register_host_catalogue_fixture<F: InstalledPluginFactoryV1>(
+        &mut self,
+        entry: &HostCatalogueEntryV1<F>,
+        frozen_configuration: &F::Configuration,
+    ) -> Result<(), RuntimeError> {
+        self.register_catalogue_entry(entry, frozen_configuration, CatalogueEvidenceV1::Generated)
+    }
+
+    fn register_catalogue_entry<F: InstalledPluginFactoryV1>(
+        &mut self,
+        entry: &HostCatalogueEntryV1<F>,
+        frozen_configuration: &F::Configuration,
+        evidence: CatalogueEvidenceV1,
+    ) -> Result<(), RuntimeError> {
+        seal_catalogue_bundle(entry, frozen_configuration, evidence)
+            .and_then(|bundle| self.commit_catalogue_bundle(bundle))
+    }
+
+    // Consume the sealed bundle in one atomic registration. Only installed
+    // evidence attaches the checked candidate pin.
+    fn commit_catalogue_bundle<P: Plugin>(
+        &mut self,
+        bundle: InstalledPluginBundleV1<P>,
+    ) -> Result<(), RuntimeError> {
+        let InstalledPluginBundleV1 {
+            plugin,
+            reducer,
+            approver,
+            route,
+            configuration: _,
+            binding,
+            pin,
+            admits_pin,
+        } = bundle;
+        let registration = admits_pin.then_some(PluginRegistrationV1::new(
+            pin,
+            PluginAvailabilityV1::Available,
+        ));
+        self.register_with_verified_output_policy_inner(
+            &*plugin,
+            binding,
+            reducer,
+            PendingRegistrationCallbacksV1 {
+                driver: None,
+                approver: Some(approver),
+                approver_event_types: [route],
+            },
+            RegistrationOptions {
+                registration,
+                output_admission: None,
+                reducer_slot: ReducerSlotV1::ByPluginId,
+            },
         )
-        .and_then(|binding| {
-            binding.with_installed_action_approver(
-                approver,
-                [Kind::new(
-                    crate::output_admission::WORLD_ACTION_EVENT_TYPE_V1,
-                )],
-            )
-        })?;
-        Ok((plugin, reducer, binding))
     }
 
     /// Register one installed Plugin with its verified callbacks and exact
@@ -3335,7 +3636,6 @@ impl PluginRegistry {
         Err(crate::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn register_with_verified_output_policy_inner<I: IntoIterator<Item = Kind>>(
         &mut self,
         plugin: &dyn Plugin,
@@ -3429,7 +3729,6 @@ impl PluginRegistry {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn registration_context(
         &self,
         plugin: &dyn Plugin,
@@ -3444,7 +3743,6 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,
@@ -3462,7 +3760,6 @@ impl PluginRegistry {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn validate_reserved_owned_event_types(
         name: &str,
         cap: &Capability,
@@ -3490,7 +3787,6 @@ impl PluginRegistry {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn install_reducer(
         &mut self,
         id: PluginId,
@@ -3510,13 +3806,13 @@ impl PluginRegistry {
                             reason: format!("installed projection slot rejected: {error:?}"),
                         })?;
                 }
+                #[cfg(any(test, feature = "test-support"))]
                 ReducerSlotV1::ByName => self.projections.register(name, reducer),
             }
         }
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn register_with_approver_slice(
         &mut self,
         plugin: &dyn Plugin,
@@ -5732,118 +6028,182 @@ mod tests {
         }
     }
 
-    // Nonproduction registration of a selected catalogue entry. It shares the
-    // production build step but uses the generated source and never mints a pin.
-    fn register_catalogue_fixture<C, P, A>(
-        registry: &mut PluginRegistry,
-        entry: &HostCatalogueEntryV1<C, P, A>,
-        frozen_configuration: &C,
-    ) -> Result<(), RuntimeError>
-    where
-        P: Plugin,
-        A: ActionApprover + 'static,
-    {
-        let (plugin, reducer, mut binding) = PluginRegistry::build_host_catalogue_product(
-            entry,
-            frozen_configuration,
-            InstalledOutputPolicySourceV1::Generated,
-        )?;
-        let (approver, approver_event_types) = binding.take_action_approver().test_ok();
-        registry.register_with_verified_output_policy_inner(
-            &plugin,
-            binding,
-            reducer,
-            PendingRegistrationCallbacksV1 {
-                driver: None,
-                approver: Some(approver),
-                approver_event_types,
-            },
-            RegistrationOptions {
-                registration: None,
-                output_admission: None,
-                reducer_slot: ReducerSlotV1::ByPluginId,
-            },
-        )
-    }
-
     struct CatalogueFixtureConfiguration {
         plugin_id: PluginId,
         details: Vec<u8>,
+        declares_reducer: bool,
+        supplies_reducer: bool,
+        builds: std::cell::Cell<usize>,
     }
 
-    fn catalogue_fixture_details(configuration: &CatalogueFixtureConfiguration) -> Vec<u8> {
-        configuration.details.clone()
+    fn catalogue_configuration(
+        plugin_id: PluginId,
+        details: &[u8],
+    ) -> CatalogueFixtureConfiguration {
+        CatalogueFixtureConfiguration {
+            plugin_id,
+            details: details.to_vec(),
+            declares_reducer: false,
+            supplies_reducer: false,
+            builds: std::cell::Cell::new(0),
+        }
     }
 
-    fn build_catalogue_fixture(
-        configuration: &CatalogueFixtureConfiguration,
-    ) -> (TestPlugin, Option<Box<dyn Reducer>>, MockActionApprover) {
-        (
-            TestPlugin {
-                id: configuration.plugin_id,
-                name: "catalogue-fixture",
-                cap: Capability {
-                    owned_event_types: vec![Kind::new("world.action.v1")],
-                    ..Capability::default()
+    fn reducer_catalogue_configuration(
+        declares_reducer: bool,
+        supplies_reducer: bool,
+    ) -> CatalogueFixtureConfiguration {
+        CatalogueFixtureConfiguration {
+            declares_reducer,
+            supplies_reducer,
+            ..catalogue_configuration(PluginId::new(), &[])
+        }
+    }
+
+    // Nonproduction factory for catalogue mechanics; runtime tests cannot
+    // build the Gateway's native Plugin.
+    impl InstalledPluginFactoryV1 for TestPlugin {
+        type Configuration = CatalogueFixtureConfiguration;
+        type Plugin = TestPlugin;
+        type Approver = MockActionApprover;
+
+        fn configuration_details(configuration: &CatalogueFixtureConfiguration) -> Vec<u8> {
+            configuration.details.clone()
+        }
+
+        fn build(
+            configuration: &CatalogueFixtureConfiguration,
+        ) -> InstalledPluginProductV1<TestPlugin, MockActionApprover> {
+            configuration.builds.set(configuration.builds.get() + 1);
+            let reducer: Option<Box<dyn Reducer>> = if configuration.supplies_reducer {
+                Some(Box::new(CountReducer))
+            } else {
+                None
+            };
+            InstalledPluginProductV1 {
+                plugin: TestPlugin {
+                    id: configuration.plugin_id,
+                    name: "catalogue-fixture",
+                    cap: Capability {
+                        owned_event_types: vec![Kind::new("world.action.v1")],
+                        has_reducer: configuration.declares_reducer,
+                        ..Capability::default()
+                    },
                 },
-            },
-            None,
-            MockActionApprover,
-        )
+                reducer,
+                approver: MockActionApprover,
+            }
+        }
     }
 
-    fn build_catalogue_reducer_fixture(
-        configuration: &CatalogueFixtureConfiguration,
-    ) -> (TestPlugin, Option<Box<dyn Reducer>>, MockActionApprover) {
-        let (mut plugin, _, approver) = build_catalogue_fixture(configuration);
-        plugin.cap.has_reducer = true;
-        (plugin, Some(Box::new(CountReducer)), approver)
+    // The nonproduction specification is constructible only inside this crate's tests.
+    const fn fixture_catalogue_entry() -> HostCatalogueEntryV1<TestPlugin> {
+        HostCatalogueEntryV1 {
+            spec: InstalledOutputPolicySourceV1::Generated,
+            factory: std::marker::PhantomData,
+        }
     }
 
-    fn build_catalogue_missing_reducer_fixture(
-        configuration: &CatalogueFixtureConfiguration,
-    ) -> (TestPlugin, Option<Box<dyn Reducer>>, MockActionApprover) {
-        let (mut plugin, _, approver) = build_catalogue_fixture(configuration);
-        plugin.cap.has_reducer = true;
-        (plugin, None, approver)
+    struct RevisedCatalogueFixturePlugin {
+        id: PluginId,
+    }
+
+    impl Plugin for RevisedCatalogueFixturePlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "catalogue-fixture"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: vec![Kind::new("world.action.v1")],
+                ..Capability::default()
+            }
+        }
+
+        fn version(&self) -> &'static str {
+            "99.0.0"
+        }
+    }
+
+    fn catalogue_event(event_type: &str, entity: EntityId, seq: u64) -> Event {
+        Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(event_type),
+            payload: CanonicalBytes::from_static(b"existing"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        }
+    }
+
+    fn owned_policy_digests(registry: &PluginRegistry) -> Vec<(String, Hash)> {
+        registry
+            .output_policy_digests()
+            .map(|(name, digest)| (name.to_owned(), digest))
+            .collect()
+    }
+
+    fn reducer_count(
+        registry: &PluginRegistry,
+        timeline: TimelineId,
+        id: PluginId,
+        entity: &EntityId,
+    ) -> Option<u64> {
+        registry
+            .projections
+            .state_for_plugin(timeline, id, entity)
+            .test_ok()
+            .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64))
     }
 
     #[test]
-    fn catalogue_production_entry_fails_closed_before_registry_mutation() {
-        let selected =
-            HostCatalogueEntryV1::gateway(catalogue_fixture_details, build_catalogue_fixture);
+    fn gateway_catalogue_entry_rejects_a_foreign_product_for_every_evidence() {
+        let selected = HostCatalogueEntryV1::<TestPlugin>::gateway();
+        let configuration = catalogue_configuration(PluginId::new(), &[]);
         let mut registry = gated_registry();
         assert!(matches!(
-            registry.register_from_host_catalogue_entry(
-                &selected,
-                &CatalogueFixtureConfiguration {
-                    plugin_id: PluginId::new(),
-                    details: Vec::new(),
-                },
-            ),
+            registry.register_from_host_catalogue_entry(&selected, &configuration),
             Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::PluginMismatch
             ))
         ));
-        assert!(registry.composition().plugins.is_empty());
+        assert!(matches!(
+            registry.register_host_catalogue_fixture(&selected, &configuration),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::PluginMismatch
+            ))
+        ));
+        assert_eq!(configuration.builds.get(), 2);
+        assert!(registry.is_empty());
+        assert!(registry.approver_map.is_empty());
+        assert_eq!(registry.projections.reducer_names().len(), 0);
     }
 
     #[test]
-    fn catalogue_fixture_registers_without_installed_pin_or_append_gate() {
-        let selected =
-            HostCatalogueEntryV1::gateway(catalogue_fixture_details, build_catalogue_fixture);
+    fn catalogue_fixture_builds_once_without_pin_or_append_permission() {
+        let configuration = catalogue_configuration(PluginId::new(), &[]);
         let mut registry = PluginRegistry::new().without_erasure_gate();
-        register_catalogue_fixture(
-            &mut registry,
-            &selected,
-            &CatalogueFixtureConfiguration {
-                plugin_id: PluginId::new(),
-                details: Vec::new(),
-            },
-        )
-        .test_ok();
+        registry
+            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .test_ok();
+        assert_eq!(configuration.builds.get(), 1);
         assert_eq!(registry.composition().plugins.len(), 1);
         assert!(registry.composition().plugins[0].pin.is_none());
+        assert_eq!(
+            registry.approver_map.get(&Kind::new("world.action.v1")),
+            Some(&configuration.plugin_id)
+        );
         let proposal = ProposedAction::new(
             Kind::new("world.action.v1"),
             EntityId::new(),
@@ -5857,11 +6217,129 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_fixture_wires_the_selected_reducer_without_a_production_pin() {
-        let selected = HostCatalogueEntryV1::gateway(
-            catalogue_fixture_details,
-            build_catalogue_reducer_fixture,
+    fn catalogue_fixture_rejects_oversized_configuration_before_mutation() {
+        let configuration = CatalogueFixtureConfiguration {
+            details: vec![0; crate::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 + 1],
+            ..catalogue_configuration(PluginId::new(), &[])
+        };
+        let mut registry = gated_registry();
+        assert!(matches!(
+            registry.register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration),
+            Err(RuntimeError::OutputAdmission(
+                crate::OutputAdmissionErrorV1::ArtifactInvalid {
+                    kind: "configuration"
+                }
+            ))
+        ));
+        assert_eq!(configuration.builds.get(), 1);
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn catalogue_links_reject_each_broken_link() {
+        let configuration = catalogue_configuration(PluginId::new(), b"frozen");
+        let bundle = seal_catalogue_bundle(
+            &fixture_catalogue_entry(),
+            &configuration,
+            CatalogueEvidenceV1::Generated,
+        )
+        .test_ok();
+        let foreign_configuration = catalogue_configuration(PluginId::new(), b"frozen");
+        let foreign = seal_catalogue_bundle(
+            &fixture_catalogue_entry(),
+            &foreign_configuration,
+            CatalogueEvidenceV1::Generated,
+        )
+        .test_ok();
+        assert!(!bundle.admits_pin);
+        let links = bundle.links();
+        assert_eq!(links.validate(), Ok(()));
+        let identity = |kind: &'static str| -> Result<(), crate::OutputAdmissionErrorV1> {
+            Err(crate::OutputAdmissionErrorV1::ArtifactIdentityMismatch { kind })
+        };
+
+        let other_plugin =
+            plugin_with_caps("catalogue-fixture", &["world.action.v1"], false, false);
+        assert_eq!(
+            CatalogueLinksV1 {
+                plugin: &other_plugin,
+                ..links
+            }
+            .validate(),
+            Err(crate::OutputAdmissionErrorV1::PluginMismatch)
         );
+        let revised = RevisedCatalogueFixturePlugin {
+            id: configuration.plugin_id,
+        };
+        assert_eq!(
+            CatalogueLinksV1 {
+                plugin: &revised,
+                ..links
+            }
+            .validate(),
+            Err(crate::OutputAdmissionErrorV1::PluginVersionMismatch)
+        );
+        let undeclared = Kind::new("world.undeclared.v1");
+        assert_eq!(
+            CatalogueLinksV1 {
+                route: &undeclared,
+                ..links
+            }
+            .validate(),
+            identity("declaration")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                budget: foreign.binding.budget(),
+                ..links
+            }
+            .validate(),
+            Err(crate::OutputAdmissionErrorV1::PolicyIdentityMismatch)
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                execution_profile: b"EPF1-corrupt",
+                ..links
+            }
+            .validate(),
+            identity("EPF1")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                retention_policy: b"RTP1-corrupt",
+                ..links
+            }
+            .validate(),
+            identity("RTP1")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                configuration: b"CFG1-corrupt",
+                ..links
+            }
+            .validate(),
+            identity("configuration")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                implementation: b"source-corrupt",
+                ..links
+            }
+            .validate(),
+            identity("implementation")
+        );
+        assert_eq!(
+            CatalogueLinksV1 {
+                pin: &foreign.pin,
+                ..links
+            }
+            .validate(),
+            identity("pin")
+        );
+    }
+
+    #[test]
+    fn catalogue_fixture_wires_the_selected_reducer_without_a_production_pin() {
         let mut registry = gated_registry();
         let first = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
         let pin = crate::PluginPinV1::try_new(
@@ -5880,59 +6358,40 @@ mod tests {
             )
             .test_ok();
         let entity = EntityId::new();
-        let mut event = Event {
-            id: EventId::new(),
-            entity,
-            event_type: Kind::new("first.output"),
-            payload: CanonicalBytes::from_static(b"existing"),
-            wall_time: WallTime::from_micros(1),
-            seq: Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: SchemaVersion::V1,
-            signature: None,
-            signature_identity: None,
-            origin: None,
-            payload_hash: Hash::from_bytes([0; 32]),
-        };
         let timeline = TimelineId::new();
-        registry.projections.apply_event(timeline, &event);
-        let second_id = PluginId::new();
-        register_catalogue_fixture(
-            &mut registry,
-            &selected,
-            &CatalogueFixtureConfiguration {
-                plugin_id: second_id,
-                details: Vec::new(),
-            },
-        )
-        .test_ok();
-        let count = |registry: &PluginRegistry, id| {
-            registry
-                .projections
-                .state_for_plugin(timeline, id, &entity)
-                .test_ok()
-                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64))
-        };
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("first.output", entity, 1));
+        let configuration = reducer_catalogue_configuration(true, true);
+        registry
+            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .test_ok();
+        let second_id = configuration.plugin_id;
         assert_eq!(
             registry.projections.reducer_names(),
             vec!["catalogue-fixture"; 2]
         );
-        assert_eq!(count(&registry, first.id()), Some(1));
-        assert_eq!(count(&registry, second_id), None);
+        assert_eq!(
+            reducer_count(&registry, timeline, first.id(), &entity),
+            Some(1)
+        );
+        assert_eq!(reducer_count(&registry, timeline, second_id, &entity), None);
         assert!(registry.composition().plugins[1].pin.is_none());
-        event.seq = Seq::from_u64(2);
-        registry.projections.apply_event(timeline, &event);
-        assert_eq!(count(&registry, first.id()), Some(2));
-        assert_eq!(count(&registry, second_id), Some(1));
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("first.output", entity, 2));
+        assert_eq!(
+            reducer_count(&registry, timeline, first.id(), &entity),
+            Some(2)
+        );
+        assert_eq!(
+            reducer_count(&registry, timeline, second_id, &entity),
+            Some(1)
+        );
     }
 
     #[test]
-    fn catalogue_rejects_missing_reducer_without_partial_visibility() {
-        let selected = HostCatalogueEntryV1::gateway(
-            catalogue_fixture_details,
-            build_catalogue_missing_reducer_fixture,
-        );
+    fn catalogue_rejects_missing_or_extra_reducer_without_partial_visibility() {
         let mut registry = gated_registry();
         let existing = plugin_with_caps("catalogue-fixture", &["first.output"], false, true);
         registry
@@ -5940,36 +6399,20 @@ mod tests {
             .test_ok();
         let entity = EntityId::new();
         let timeline = TimelineId::new();
-        registry.projections.apply_event(
-            timeline,
-            &Event {
-                id: EventId::new(),
-                entity,
-                event_type: Kind::new("first.output"),
-                payload: CanonicalBytes::from_static(b"existing"),
-                wall_time: WallTime::from_micros(1),
-                seq: Seq::from_u64(1),
-                causation_id: None,
-                correlation_id: None,
-                schema_version: SchemaVersion::V1,
-                signature: None,
-                signature_identity: None,
-                origin: None,
-                payload_hash: Hash::from_bytes([0; 32]),
-            },
-        );
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("first.output", entity, 1));
         let schemas_before = registry.schemas.len();
-        assert!(matches!(
-            register_catalogue_fixture(
-                &mut registry,
-                &selected,
-                &CatalogueFixtureConfiguration {
-                    plugin_id: PluginId::new(),
-                    details: Vec::new(),
-                },
-            ),
-            Err(RuntimeError::CapabilityMismatch { .. })
-        ));
+        let policies_before = owned_policy_digests(&registry);
+        for (declares_reducer, supplies_reducer) in [(true, false), (false, true)] {
+            assert!(matches!(
+                registry.register_host_catalogue_fixture(
+                    &fixture_catalogue_entry(),
+                    &reducer_catalogue_configuration(declares_reducer, supplies_reducer),
+                ),
+                Err(RuntimeError::CapabilityMismatch { .. })
+            ));
+        }
         assert_eq!(registry.len(), 1);
         assert!(registry.contains(&existing.id()));
         assert_eq!(
@@ -5986,37 +6429,64 @@ mod tests {
         );
         assert_eq!(registry.schemas.len(), schemas_before);
         assert!(registry.approver_map.is_empty());
-        assert_eq!(registry.output_policy_digests().count(), 1);
+        assert_eq!(owned_policy_digests(&registry), policies_before);
+    }
+
+    #[test]
+    fn catalogue_same_name_reducer_collision_preserves_state_and_routes() {
+        let mut registry = gated_registry();
+        let configuration = reducer_catalogue_configuration(true, true);
+        registry
+            .register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration)
+            .test_ok();
+        let entity = EntityId::new();
+        let timeline = TimelineId::new();
+        registry
+            .projections
+            .apply_event(timeline, &catalogue_event("world.action.v1", entity, 1));
+        let schemas_before = registry.schemas.len();
+        let policies_before = owned_policy_digests(&registry);
+        let routes_before = registry.approver_map.clone();
+        let revision_before = registry.registration_revision;
+        assert!(matches!(
+            registry.register_host_catalogue_fixture(&fixture_catalogue_entry(), &configuration),
+            Err(RuntimeError::DuplicatePlugin { .. })
+        ));
+        assert_eq!(configuration.builds.get(), 2);
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry.projections.reducer_names(),
+            vec!["catalogue-fixture"]
+        );
+        assert_eq!(
+            reducer_count(&registry, timeline, configuration.plugin_id, &entity),
+            Some(1)
+        );
+        assert_eq!(registry.schemas.len(), schemas_before);
+        assert_eq!(registry.approver_map, routes_before);
+        assert_eq!(registry.registration_revision, revision_before);
+        assert_eq!(owned_policy_digests(&registry), policies_before);
     }
 
     #[test]
     fn frozen_catalogue_configuration_changes_policy_identity() {
-        let selected =
-            HostCatalogueEntryV1::gateway(catalogue_fixture_details, build_catalogue_fixture);
-        let plugin_id = PluginId::new();
-        let mut first = PluginRegistry::new().without_erasure_gate();
-        register_catalogue_fixture(
-            &mut first,
-            &selected,
-            &CatalogueFixtureConfiguration {
-                plugin_id,
-                details: b"first".to_vec(),
-            },
-        )
-        .test_ok();
-        let mut second = PluginRegistry::new().without_erasure_gate();
-        register_catalogue_fixture(
-            &mut second,
-            &selected,
-            &CatalogueFixtureConfiguration {
-                plugin_id,
-                details: b"second".to_vec(),
-            },
-        )
-        .test_ok();
-        let first_digest = first.output_policy_digests().next().test_ok().1;
-        let second_digest = second.output_policy_digests().next().test_ok().1;
-        assert_ne!(first_digest, second_digest);
+        let identity = |details: &[u8]| {
+            let mut registry = PluginRegistry::new().without_erasure_gate();
+            registry
+                .register_host_catalogue_fixture(
+                    &fixture_catalogue_entry(),
+                    &catalogue_configuration(PluginId::new(), details),
+                )
+                .test_ok();
+            let identity = registry
+                .replay_policy_closure_identities()
+                .next()
+                .test_ok()
+                .1;
+            identity
+        };
+        assert_eq!(identity(b"first"), identity(b"first"));
+        assert_ne!(identity(b"first"), identity(b"second"));
     }
 
     struct CountReducer;
