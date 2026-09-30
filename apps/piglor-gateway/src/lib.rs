@@ -11,6 +11,15 @@ pub mod authorization;
 pub mod executor;
 mod http;
 pub mod ledger_config;
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "#450 connects the private Fork authority producer"
+    )
+)]
+pub mod local_fork_authentication;
 pub mod owntracks;
 pub mod owntracks_http;
 

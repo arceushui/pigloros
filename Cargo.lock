@@ -4249,8 +4249,10 @@ dependencies = [
  "axum",
  "blake3",
  "ciborium",
+ "libc",
  "piglor-ledger",
  "pos-core",
+ "pos-crypto",
  "pos-experiment",
  "pos-plugin-agent",
  "pos-plugin-geo",
@@ -4262,6 +4264,7 @@ dependencies = [
  "pos-store",
  "rand 0.10.3",
  "rusqlite",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "tempfile",
@@ -4270,6 +4273,7 @@ dependencies = [
  "toml",
  "tower",
  "ulid",
+ "zeroize",
 ]
 
 [[package]]
