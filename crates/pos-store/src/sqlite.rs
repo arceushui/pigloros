@@ -11961,6 +11961,11 @@ mod tests {
         );
 
         let stale = sqlite_permit_claim(&mut store, &session, 112)?;
+        // The command must name the stale claim's operation, or the tuple check
+        // answers Conflict before the write boundary and its Pending fence.
+        let stale_command = sqlite_fork_command(
+            &store, &host, &adapter, &policy, &session, [112; 32], parent,
+        )?;
         deny_transaction_step(&store, |action| {
             matches!(
                 action,
@@ -11977,7 +11982,7 @@ mod tests {
             ..stale
         };
         assert_eq!(
-            sqlite_permit_delivery(&mut store, &gate, keys, (fenced, &command, parent)),
+            sqlite_permit_delivery(&mut store, &gate, keys, (fenced, &stale_command, parent)),
             (Err(ForkDeliveryJournalErrorV1::StorageIndeterminate), false)
         );
         store
