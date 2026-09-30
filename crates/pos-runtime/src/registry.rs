@@ -3021,7 +3021,9 @@ impl PluginRegistry {
         registration: Option<PluginRegistrationV1>,
     ) -> Result<(), RuntimeError> {
         let context = self.registration_context(plugin)?;
-        if binding.owner_token() != plugin.installed_owner_token() {
+        if binding.owner_token()
+            != pos_core::plugin::PluginInstanceIdentity::installed_owner_token(plugin)
+        {
             return Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::PluginMismatch,
             ));

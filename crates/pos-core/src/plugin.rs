@@ -22,7 +22,10 @@ pub struct Capability {
 
 /// Minimal plugin descriptor. The runtime (piglor-runtime) implements full registration.
 /// The kernel only carries this as a type — no I/O, no execution here.
-pub trait Plugin: Send + Sync {
+///
+/// Every Plugin also carries [`PluginInstanceIdentity`] through a kernel-owned
+/// blanket implementation, so a Plugin cannot supply its own owner token.
+pub trait Plugin: PluginInstanceIdentity + Send + Sync {
     fn id(&self) -> PluginId;
     fn name(&self) -> &'static str;
     fn capability(&self) -> Capability;
@@ -30,22 +33,35 @@ pub trait Plugin: Send + Sync {
     fn version(&self) -> &'static str {
         "0.1.0"
     }
+}
 
-    /// Return the opaque host-issued owner token for this concrete instance.
-    ///
-    /// The default implementation is deliberately defined in the kernel: a
-    /// caller cannot construct or rewrite the token fields. The runtime
-    /// verifies both the concrete type and the instance address before it
-    /// accepts an installed output-policy source.
+/// Kernel-derived instance identity for a concrete Plugin value.
+///
+/// The only implementation is the blanket implementation below, so coherence
+/// rejects any Plugin-specific implementation and a Plugin cannot override
+/// the derivation (for example, to replay a token captured from another
+/// instance). Calls through `&dyn Plugin` dispatch to the blanket
+/// implementation of the concrete type.
+pub trait PluginInstanceIdentity {
+    /// Return the host-derived owner token for this concrete instance.
+    fn installed_owner_token(&self) -> PluginOwnerTokenV1;
+}
+
+impl<T> PluginInstanceIdentity for T {
     fn installed_owner_token(&self) -> PluginOwnerTokenV1 {
         PluginOwnerTokenV1::for_instance(self)
     }
 }
 
-/// Opaque identity issued by the kernel for one concrete Plugin instance.
+/// Kernel-derived identity for one concrete Plugin instance.
 ///
-/// Consumers can only ask the token to verify its instance; there is no public
-/// constructor or field accessor that permits a caller to mint an owner claim.
+/// The token has no public constructor or field accessor, and a Plugin cannot
+/// override its derivation. It binds instance identity only as the concrete
+/// type name plus the instance address, which has known limits: zero-sized
+/// Plugin values may share one address, and an address may be reused by a new
+/// instance of the same type after the original is dropped. It is therefore
+/// not an authenticated owner proof; authenticated owner proof is deferred to
+/// Redmine #396 and #395.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PluginOwnerTokenV1 {
     type_name: &'static str,
@@ -60,7 +76,7 @@ impl PluginOwnerTokenV1 {
         }
     }
 
-    /// Verify that this opaque token belongs to the supplied concrete instance
+    /// Verify that this token was derived for the supplied concrete instance
     /// and the expected installed source type.
     #[must_use]
     pub fn verifies_instance<P: ?Sized>(&self, plugin: &P, expected_type_name: &str) -> bool {

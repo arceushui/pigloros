@@ -3,7 +3,7 @@
 use pos_core::{
     event::EventDraft,
     output_policy::{OutputFidelityV1, OutputPolicyV1, MAX_OUTPUT_POLICY_BYTES_V1},
-    plugin::PluginOwnerTokenV1,
+    plugin::{PluginInstanceIdentity, PluginOwnerTokenV1},
     retention::{WorldRetentionPolicyV1, MAX_WORLD_RETENTION_RECORD_BYTES_V1},
     ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash, Plugin,
     PluginCpuReservationV1, PluginId, WorkloadProfileV1, MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1,
@@ -160,7 +160,7 @@ impl InstalledOutputPolicySourceV1 {
         if matches!(self, Self::Generated) {
             return true;
         }
-        let owner = plugin.installed_owner_token();
+        let owner = PluginInstanceIdentity::installed_owner_token(plugin);
         self.native_plugin_type_names()
             .iter()
             .any(|expected| owner.verifies_instance(plugin, expected))
@@ -529,7 +529,7 @@ impl OutputPolicyBindingV1 {
             budget,
             artifacts,
             source,
-            owner_token: plugin.installed_owner_token(),
+            owner_token: PluginInstanceIdentity::installed_owner_token(plugin),
         })
     }
 
@@ -551,7 +551,7 @@ impl OutputPolicyBindingV1 {
             budget,
             artifacts,
             source,
-            owner_token: plugin.installed_owner_token(),
+            owner_token: PluginInstanceIdentity::installed_owner_token(plugin),
         })
     }
 
