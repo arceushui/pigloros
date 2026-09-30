@@ -531,12 +531,8 @@ mod coverage_tests {
                     frozen,
                 )
                 .test_ok();
-            let identity = registry
-                .replay_policy_closure_identities()
-                .next()
-                .test_ok()
-                .1;
-            identity
+            let mut identities = registry.replay_policy_closure_identities();
+            identities.next().test_ok().1
         };
         let baseline = resolved();
         let changes = [

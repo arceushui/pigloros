@@ -6478,12 +6478,8 @@ mod tests {
                     &catalogue_configuration(PluginId::new(), details),
                 )
                 .test_ok();
-            let identity = registry
-                .replay_policy_closure_identities()
-                .next()
-                .test_ok()
-                .1;
-            identity
+            let mut identities = registry.replay_policy_closure_identities();
+            identities.next().test_ok().1
         };
         assert_eq!(identity(b"first"), identity(b"first"));
         assert_ne!(identity(b"first"), identity(b"second"));
