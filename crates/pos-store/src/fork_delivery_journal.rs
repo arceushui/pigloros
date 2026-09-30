@@ -171,7 +171,7 @@ pub(crate) fn fork_delivery_execution(
 /// store topology, so the adapter's captured inventory generation must be
 /// re-established (ADR-109 revision 9, Decision 2 step 6).
 pub(crate) const fn fork_delivery_may_have_changed_topology(
-    result: &Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1>,
+    result: Result<&ForkDeliveryExecutionV1, &ForkDeliveryJournalErrorV1>,
 ) -> bool {
     matches!(
         result,

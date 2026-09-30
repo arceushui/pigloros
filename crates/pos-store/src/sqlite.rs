@@ -7963,7 +7963,7 @@ impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
             command,
             containment,
         );
-        if fork_delivery_may_have_changed_topology(&result) && !context.nothing_written() {
+        if fork_delivery_may_have_changed_topology(result.as_ref()) && !context.nothing_written() {
             self.erasure_inventory_generation = None;
         }
         result

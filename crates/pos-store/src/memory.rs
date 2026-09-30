@@ -1748,11 +1748,15 @@ impl ForkAdmissionDeliveryJournalPortV1 for MemoryStore {
                 context.roll_back_write_boundary(|| Ok::<(), std::convert::Infallible>(()));
         }
         self.record_fork_delivery_disposition(claim, &execution);
-        let result = Ok(execution);
-        if fork_delivery_may_have_changed_topology(&result) {
+        // As in this adapter's r3 permit method, a possible topology change
+        // alone invalidates the captured generation: the exclusive borrow
+        // applies a FAC1 only when it commits, so no outcome here can have
+        // opened and rolled back a partial write that `nothing_written` would
+        // need to rule out.
+        if fork_delivery_may_have_changed_topology(Ok(&execution)) {
             self.erasure_inventory_generation = None;
         }
-        result
+        Ok(execution)
     }
 
     fn recover_fork_delivery(
