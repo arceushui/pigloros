@@ -701,6 +701,12 @@ impl ProofRegistrationSink for pos_runtime::PluginRegistry {
 /// Wave 8 has no installed EPF1, so resolution fails closed before any
 /// registration can mutate a target.
 fn installed_proof_admission(topology: &ProofTopology, profile_id: &str) -> RuntimeError {
+    let agent_binding = proof_agent_output_binding(
+        &topology.agent_plugin,
+        topology.input.agent_response_threshold,
+        profile_id,
+    );
+    let society_binding = proof_society_output_binding(&topology.society_plugin, profile_id);
     world_driver(&topology.input, topology.body, topology.config_entity)
         .and_then(|driver| {
             world_output_binding(
@@ -710,15 +716,8 @@ fn installed_proof_admission(topology: &ProofTopology, profile_id: &str) -> Runt
                 profile_id,
             )
         })
-        .and(proof_agent_output_binding(
-            &topology.agent_plugin,
-            topology.input.agent_response_threshold,
-            profile_id,
-        ))
-        .and(proof_society_output_binding(
-            &topology.society_plugin,
-            profile_id,
-        ))
+        .and(agent_binding)
+        .and(society_binding)
         .err()
         .unwrap_or_else(installed_registration_closed)
 }
@@ -1903,18 +1902,19 @@ fn installed_failure_probe_admission(
     let plugin = FailureProbePlugin {
         id: PluginId::new(),
     };
+    let probe_binding = reviewed_output_binding(
+        &plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        profile_id,
+        &failure_details,
+    );
     reviewed_output_binding(
         &sibling_plugin,
         pos_runtime::InstalledOutputPolicySourceV1::Experiment,
         profile_id,
         b"successful-sibling:v1",
     )
-    .and(reviewed_output_binding(
-        &plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
-        profile_id,
-        &failure_details,
-    ))
+    .and(probe_binding)
     .err()
     .unwrap_or_else(installed_registration_closed)
 }

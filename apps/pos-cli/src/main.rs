@@ -609,6 +609,12 @@ fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::E
     // bindings would leave the serialization error, the post-binding
     // continuations and the final closed error as unreachable LLVM regions.
     // `and` evaluates both bindings eagerly, so both are exercised either way.
+    let obs_binding = builtin_output_binding(
+        &obs_plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+        &obs_configuration,
+        "deterministic-local-v1",
+    );
     Err(serde_json::to_vec(agent_plugin.actions())
         .map_err(Into::into)
         .and_then(|agent_configuration| {
@@ -619,12 +625,7 @@ fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::E
                 "deterministic-local-v1",
             )
         })
-        .and(builtin_output_binding(
-            &obs_plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
-            &obs_configuration,
-            "deterministic-local-v1",
-        ))
+        .and(obs_binding)
         .err()
         .unwrap_or_else(installed_registration_closed))
 }
