@@ -1246,27 +1246,14 @@ impl PluginRegistry {
         row: &ManifestAdmissionCatalogRowV1,
         entry: &PluginEntry,
     ) -> Result<(), ManifestRegistrationErrorV1> {
-        Self::validate_manifest_facts(
-            row,
-            &entry.name,
-            &entry.version,
-            entry.registration.as_ref(),
-            entry.output_admission.as_ref(),
-            entry.manifest_slot.as_deref(),
-        )
-    }
-
-    fn validate_manifest_facts(
-        row: &ManifestAdmissionCatalogRowV1,
-        name: &str,
-        version: &str,
-        registration: Option<&PluginRegistrationV1>,
-        admission: Option<&OutputAdmissionV1>,
-        stable_slot: Option<&str>,
-    ) -> Result<(), ManifestRegistrationErrorV1> {
-        let registration =
-            registration.ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
-        let admission = admission.ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+        let registration = entry
+            .registration
+            .as_ref()
+            .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+        let admission = entry
+            .output_admission
+            .as_ref()
+            .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
         let Some(closure) = admission.closure() else {
             return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
         };
@@ -1278,11 +1265,11 @@ impl PluginRegistry {
         {
             return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
         }
-        if stable_slot != Some(row.stable_slot.as_str()) {
+        if entry.manifest_slot.as_deref() != Some(row.stable_slot.as_str()) {
             return Err(ManifestRegistrationErrorV1::SlotMismatch);
         }
-        if name != row.plugin_name
-            || version != row.plugin_version
+        if entry.name != row.plugin_name
+            || entry.version != row.plugin_version
             || admission.plugin_id() != row.plugin_id
             || admission.policy().fields().implementation_hash != row.implementation_hash
             || admission.policy_digest() != row.eop1_native_digest
@@ -5412,29 +5399,49 @@ mod tests {
         ));
     }
 
+    /// Catalogs that differ from `catalog` only by owner, or only by one row.
+    fn changed_manifest_catalogs(
+        catalog: &ManifestAdmissionCatalogV1,
+    ) -> (ManifestAdmissionCatalogV1, ManifestAdmissionCatalogV1) {
+        let mut changed_owner = catalog.as_input().clone();
+        changed_owner.owner_id = [0x42; 32];
+        let mut changed_row = catalog.as_input().clone();
+        changed_row.rows[0].plugin_version.push('x');
+        (
+            ManifestAdmissionCatalogV1::new(changed_owner).test_ok(),
+            ManifestAdmissionCatalogV1::new(changed_row).test_ok(),
+        )
+    }
+
     #[test]
-    fn synthetic_manifest_fixture_exercises_private_capability_lifecycle() {
+    fn manifest_admission_without_prepared_batch_is_batch_state() {
+        assert!(matches!(
+            PluginRegistry::new().admit_complete_manifest_registration(),
+            Err(ManifestRegistrationErrorV1::BatchState)
+        ));
+    }
+
+    #[test]
+    fn synthetic_manifest_fixture_admits_for_its_own_generation_and_registry() {
         // The fixture edits private fields and is not an installed-source proof.
-        let (mut registry, id, catalog) = manifest_validation_fixture();
+        let (registry, _, catalog) = manifest_validation_fixture();
         let admitted = registry.admit_complete_manifest_registration().test_ok();
         assert_eq!(admitted.catalog(), &catalog);
         assert!(registry.is_admitted_composition_current_for_generation(&admitted, 1));
         assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 2));
         assert!(!PluginRegistry::new().is_admitted_composition_current_for_generation(&admitted, 1));
+    }
 
-        let mut changed_owner = catalog.as_input().clone();
-        changed_owner.owner_id = [0x42; 32];
-        let changed_owner = ManifestAdmissionCatalogV1::new(changed_owner).test_ok();
+    #[test]
+    fn synthetic_manifest_fixture_revalidates_only_the_unchanged_batch() {
+        let (registry, _, catalog) = manifest_validation_fixture();
+        let (changed_owner, changed_row) = changed_manifest_catalogs(&catalog);
         assert!(matches!(
-            registry.revalidate_manifest_registration(changed_owner.clone()),
+            registry.revalidate_manifest_registration(changed_owner),
             Err(ManifestRegistrationErrorV1::IncompleteBatch)
         ));
-
-        let mut changed_row = catalog.as_input().clone();
-        changed_row.rows[0].plugin_version.push('x');
-        let changed_row = ManifestAdmissionCatalogV1::new(changed_row).test_ok();
         assert!(matches!(
-            registry.revalidate_manifest_registration(changed_row.clone()),
+            registry.revalidate_manifest_registration(changed_row),
             Err(ManifestRegistrationErrorV1::IncompleteBatch)
         ));
 
@@ -5442,6 +5449,13 @@ mod tests {
             .revalidate_manifest_registration(catalog.clone())
             .test_ok();
         assert_eq!(revalidated.catalog(), &catalog);
+    }
+
+    #[test]
+    fn synthetic_manifest_fixture_capability_expires_on_registry_change() {
+        let (mut registry, id, catalog) = manifest_validation_fixture();
+        let admitted = registry.admit_complete_manifest_registration().test_ok();
+        let (changed_owner, changed_row) = changed_manifest_catalogs(&catalog);
         registry.registration_revision += 1;
         assert!(!registry.is_admitted_composition_current_for_generation(&admitted, 1));
         registry.registration_revision -= 1;
