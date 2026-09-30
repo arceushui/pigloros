@@ -22,6 +22,7 @@ pub mod erasure;
 pub mod error;
 pub mod event;
 pub mod executable_budget;
+pub mod fork_admission_authority;
 pub mod fork_attribution;
 pub mod fork_authentication;
 pub mod geo_access;
@@ -184,6 +185,12 @@ pub use executable_budget::{
     ExecutableBudgetErrorV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
     FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1, MAX_PLUGIN_CPU_RESERVATIONS_V1,
+};
+pub use fork_admission_authority::{
+    ForkAdmissionAuthorityCodecErrorV1, ForkAdmissionHostRecordV1,
+    ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
+    MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1, MAX_FORK_ADMISSION_INITIALIZE_CHALLENGE_BYTES_V1,
+    MAX_FORK_ADMISSION_OPEN_CHALLENGE_BYTES_V1,
 };
 pub use fork_attribution::{
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,

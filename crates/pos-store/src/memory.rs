@@ -51,9 +51,17 @@ use pos_core::{
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
     ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
-    ErasureVerifiedInventoryV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, StoredErasureManifestV1,
-    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureVerifiedInventoryV1, ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1,
+    ForkAdmissionOpenChallengeV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
+    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PublicKey, Signature,
+    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
+};
+
+use crate::fork_admission_authority::{
+    advance_wall_fence, begin_initialize, begin_open, finalize_initialize, finalize_open,
+    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
+    ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityStateV1,
 };
 
 #[cfg(test)]
@@ -190,6 +198,10 @@ pub struct MemoryStore {
     authority_state: AuthorityPersistenceStateV1,
     /// Opaque trusted-host capability bound to authority mutations.
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
+    /// ADR-106 bootstrap root, one-use challenges, session, and rollback fence.
+    fork_admission_authority: ForkAdmissionAuthorityStateV1,
+    /// Public custom admission clocks are never Fork-authority clocks.
+    fork_admission_authority_enabled: bool,
     /// Current raw ERCRP1 envelope per request.
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
@@ -530,6 +542,8 @@ impl MemoryStore {
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
             authority_persistence_binding: None,
+            fork_admission_authority: ForkAdmissionAuthorityStateV1::default(),
+            fork_admission_authority_enabled: true,
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
@@ -556,6 +570,7 @@ impl MemoryStore {
     pub fn with_clock(clock: Box<dyn AdmissionClock>) -> Self {
         let mut store = Self::new();
         store.clock = clock;
+        store.fork_admission_authority_enabled = false;
         store
     }
 
@@ -1371,6 +1386,79 @@ impl MemoryStore {
         self.timelines
             .insert(child.id(), TimelineState::new(child.clone(), fork_hash));
         Ok(child)
+    }
+}
+
+impl ForkAdmissionAuthorityBootstrapPortV1 for MemoryStore {
+    fn begin_fork_admission_initialize(
+        &mut self,
+        host_key: PublicKey,
+        policy_digest: Hash,
+    ) -> Result<ForkAdmissionInitializeChallengeV1, ForkAdmissionAuthorityErrorV1> {
+        begin_initialize(
+            &mut self.fork_admission_authority,
+            self.fork_admission_authority_enabled,
+            host_key,
+            policy_digest,
+        )
+    }
+
+    fn finalize_fork_admission_initialize(
+        &mut self,
+        challenge: &ForkAdmissionInitializeChallengeV1,
+        signature: &Signature,
+    ) -> Result<ForkAdmissionHostRecordV1, ForkAdmissionAuthorityErrorV1> {
+        finalize_initialize(
+            &mut self.fork_admission_authority,
+            self.fork_admission_authority_enabled,
+            challenge,
+            signature,
+        )
+    }
+
+    fn fork_admission_host_record(
+        &self,
+    ) -> Result<ForkAdmissionHostRecordV1, ForkAdmissionAuthorityErrorV1> {
+        self.fork_admission_authority
+            .host
+            .ok_or(ForkAdmissionAuthorityErrorV1::AuthorityUninitialized)
+    }
+
+    fn begin_fork_admission_open(
+        &mut self,
+        host_key: PublicKey,
+        policy_digest: Hash,
+    ) -> Result<ForkAdmissionOpenChallengeV1, ForkAdmissionAuthorityErrorV1> {
+        begin_open(
+            &mut self.fork_admission_authority,
+            self.fork_admission_authority_enabled,
+            host_key,
+            policy_digest,
+        )
+    }
+
+    fn finalize_fork_admission_open(
+        &mut self,
+        challenge: &ForkAdmissionOpenChallengeV1,
+        signature: &Signature,
+    ) -> Result<ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityErrorV1> {
+        finalize_open(
+            &mut self.fork_admission_authority,
+            self.fork_admission_authority_enabled,
+            challenge,
+            signature,
+        )
+    }
+
+    fn advance_fork_admission_wall_fence(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<(), ForkAdmissionAuthorityErrorV1> {
+        advance_wall_fence(
+            &mut self.fork_admission_authority,
+            self.fork_admission_authority_enabled,
+            session,
+        )
     }
 }
 

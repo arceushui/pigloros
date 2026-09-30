@@ -6,7 +6,9 @@
 //! Child reads stitch parent events up to `fork_seq` with child events.
 
 use rusqlite::{
-    params, types::ToSql, Connection, OpenFlags, OptionalExtension, TransactionBehavior,
+    params,
+    types::{ToSql, Value as SqlValue},
+    Connection, OpenFlags, OptionalExtension, TransactionBehavior,
 };
 use std::{
     collections::HashSet,
@@ -52,11 +54,18 @@ use pos_core::{
     ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
     ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
     ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
-    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, Hash, KeyDestructionOutcomeV1,
-    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, ForkAdmissionHostRecordV1,
+    ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1, Hash,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
+    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, PublicKey, Signature, StoredErasureManifestV1,
+    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+};
+
+use crate::fork_admission_authority::{
+    advance_wall_fence, begin_initialize, begin_open, finalize_initialize, finalize_open,
+    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
+    ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityStateV1,
 };
 
 #[cfg(test)]
@@ -163,6 +172,10 @@ pub struct SqliteStore {
     /// Opaque host-issued identity for this adapter's topology transitions.
     erasure_topology_store_binding: Option<ErasureTopologyStoreBindingV1>,
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
+    /// Public custom admission clocks are never Fork-authority clocks.
+    fork_admission_authority_enabled: bool,
+    /// Per-adapter `FAI1`/`FAO1`/session state. It never enters `SQLite`.
+    fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -800,6 +813,8 @@ impl SqliteStore {
             erasure_topology_requires_permit: false,
             erasure_topology_store_binding: None,
             authority_persistence_binding: None,
+            fork_admission_authority_enabled: true,
+            fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1::default(),
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
@@ -845,6 +860,7 @@ impl SqliteStore {
                 }
             })
             .and_then(|()| self.prepare_authority_schema())
+            .and_then(|()| self.prepare_fork_admission_authority_schema())
     }
 
     fn should_initialize_schema(&self, initialize: bool) -> Result<bool, CoreError> {
@@ -874,6 +890,7 @@ impl SqliteStore {
     pub fn open_with_clock(path: &str, clock: Box<dyn AdmissionClock>) -> Result<Self, CoreError> {
         let mut store = Self::open(path)?;
         store.clock = clock;
+        store.fork_admission_authority_enabled = false;
         Ok(store)
     }
 
@@ -1107,6 +1124,20 @@ impl SqliteStore {
                     .map(|_| ())
                     .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
             })
+    }
+
+    fn prepare_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS fork_admission_authority (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     fah1_cbor BLOB,
+                     last_authority_wall_time INTEGER NOT NULL DEFAULT 0
+                 );
+                 COMMIT;",
+            )
+            .map_err(Self::into_storage_error)
     }
 
     fn validate_authority_schema(&self) -> Result<(), CoreError> {
@@ -6804,6 +6835,80 @@ fn read_authority_state(
     })
 }
 
+fn read_fork_admission_authority_state(
+    conn: &Connection,
+) -> Result<ForkAdmissionAuthorityStateV1, ForkAdmissionAuthorityErrorV1> {
+    conn.query_row(
+        "SELECT fah1_cbor, last_authority_wall_time
+         FROM fork_admission_authority WHERE singleton = 1",
+        [],
+        |row| {
+            row.get::<_, SqlValue>(0)
+                .and_then(|host| row.get::<_, SqlValue>(1).map(|fence| (host, fence)))
+        },
+    )
+    .optional()
+    .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate)
+    .and_then(|record| {
+        record.map_or_else(
+            || Ok(ForkAdmissionAuthorityStateV1::default()),
+            decode_fork_admission_authority_row,
+        )
+    })
+}
+
+/// A present singleton row must hold a canonical FAH1 BLOB and a nonnegative
+/// INTEGER fence; any other storage class, including a NULL FAH1, is corrupt.
+fn decode_fork_admission_authority_row(
+    row: (SqlValue, SqlValue),
+) -> Result<ForkAdmissionAuthorityStateV1, ForkAdmissionAuthorityErrorV1> {
+    match row {
+        (SqlValue::Blob(host), SqlValue::Integer(fence)) => {
+            ForkAdmissionHostRecordV1::from_canonical_cbor(&host)
+                .ok()
+                .zip(u64::try_from(fence).ok())
+                .map(|(host, fence)| ForkAdmissionAuthorityStateV1 {
+                    host: Some(host),
+                    last_authority_wall_time: fence,
+                    ..ForkAdmissionAuthorityStateV1::default()
+                })
+                .ok_or(ForkAdmissionAuthorityErrorV1::CorruptAuthority)
+        }
+        _ => Err(ForkAdmissionAuthorityErrorV1::CorruptAuthority),
+    }
+}
+
+/// Persist the immutable FAH1 exactly once; the row never exists beforehand.
+fn insert_fork_admission_host_record(
+    conn: &Connection,
+    host: ForkAdmissionHostRecordV1,
+) -> Result<(), ForkAdmissionAuthorityErrorV1> {
+    conn.execute(
+        "INSERT INTO fork_admission_authority (singleton, fah1_cbor) VALUES (1, ?1)",
+        params![host.canonical_bytes()],
+    )
+    .map(|_| ())
+    .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate)
+}
+
+/// Advance only the rollback fence; FAH1 is never rewritten after insertion.
+fn write_fork_admission_wall_fence(
+    conn: &Connection,
+    fence: u64,
+) -> Result<(), ForkAdmissionAuthorityErrorV1> {
+    i64::try_from(fence)
+        .map_err(|_| ForkAdmissionAuthorityErrorV1::CorruptAuthority)
+        .and_then(|fence| {
+            conn.execute(
+                "UPDATE fork_admission_authority SET last_authority_wall_time = ?1
+                 WHERE singleton = 1",
+                params![fence],
+            )
+            .map(|_| ())
+            .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate)
+        })
+}
+
 fn write_authority_state(
     conn: &Connection,
     state: &AuthorityPersistenceStateV1,
@@ -6820,6 +6925,118 @@ fn write_authority_state(
         .map(|_| ())
         .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
     })
+}
+
+impl SqliteStore {
+    /// Run one ADR-106 core step on the per-handle runtime state after
+    /// refreshing its durable FAH1 and fence inside one immediate transaction.
+    fn with_fork_authority_runtime<T>(
+        &mut self,
+        operation: impl FnOnce(
+            &Connection,
+            &mut ForkAdmissionAuthorityStateV1,
+            bool,
+        ) -> Result<T, ForkAdmissionAuthorityErrorV1>,
+    ) -> Result<T, ForkAdmissionAuthorityErrorV1> {
+        let conn = &self.conn;
+        let runtime = &mut self.fork_admission_authority_runtime;
+        let enabled = self.fork_admission_authority_enabled;
+        with_fork_authority_transaction(conn, || {
+            read_fork_admission_authority_state(conn).and_then(|durable| {
+                runtime.host = durable.host;
+                runtime.last_authority_wall_time = durable.last_authority_wall_time;
+                operation(conn, runtime, enabled)
+            })
+        })
+    }
+}
+
+impl ForkAdmissionAuthorityBootstrapPortV1 for SqliteStore {
+    fn begin_fork_admission_initialize(
+        &mut self,
+        host_key: PublicKey,
+        policy_digest: Hash,
+    ) -> Result<ForkAdmissionInitializeChallengeV1, ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|_, runtime, enabled| {
+            begin_initialize(runtime, enabled, host_key, policy_digest)
+        })
+    }
+
+    fn finalize_fork_admission_initialize(
+        &mut self,
+        challenge: &ForkAdmissionInitializeChallengeV1,
+        signature: &Signature,
+    ) -> Result<ForkAdmissionHostRecordV1, ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|conn, runtime, enabled| {
+            finalize_initialize(runtime, enabled, challenge, signature)
+                .and_then(|record| insert_fork_admission_host_record(conn, record).map(|()| record))
+        })
+    }
+
+    fn fork_admission_host_record(
+        &self,
+    ) -> Result<ForkAdmissionHostRecordV1, ForkAdmissionAuthorityErrorV1> {
+        read_fork_admission_authority_state(&self.conn)?
+            .host
+            .ok_or(ForkAdmissionAuthorityErrorV1::AuthorityUninitialized)
+    }
+
+    fn begin_fork_admission_open(
+        &mut self,
+        host_key: PublicKey,
+        policy_digest: Hash,
+    ) -> Result<ForkAdmissionOpenChallengeV1, ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|_, runtime, enabled| {
+            begin_open(runtime, enabled, host_key, policy_digest)
+        })
+    }
+
+    fn finalize_fork_admission_open(
+        &mut self,
+        challenge: &ForkAdmissionOpenChallengeV1,
+        signature: &Signature,
+    ) -> Result<ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|_, runtime, enabled| {
+            finalize_open(runtime, enabled, challenge, signature)
+        })
+    }
+
+    fn advance_fork_admission_wall_fence(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<(), ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|conn, runtime, enabled| {
+            advance_wall_fence(runtime, enabled, session).and_then(|()| {
+                write_fork_admission_wall_fence(conn, runtime.last_authority_wall_time)
+            })
+        })
+    }
+}
+
+fn finish_fork_authority_transaction<T>(
+    conn: &Connection,
+    result: Result<T, ForkAdmissionAuthorityErrorV1>,
+) -> Result<T, ForkAdmissionAuthorityErrorV1> {
+    match result {
+        Ok(value) => conn
+            .execute_batch("COMMIT")
+            .map(|()| value)
+            .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate),
+        // A failed ROLLBACK leaves the outcome unknown; otherwise keep the cause.
+        Err(error) => conn.execute_batch("ROLLBACK").map_or(
+            Err(ForkAdmissionAuthorityErrorV1::StorageIndeterminate),
+            |()| Err(error),
+        ),
+    }
+}
+
+fn with_fork_authority_transaction<T>(
+    conn: &Connection,
+    operation: impl FnOnce() -> Result<T, ForkAdmissionAuthorityErrorV1>,
+) -> Result<T, ForkAdmissionAuthorityErrorV1> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate)?;
+    finish_fork_authority_transaction(conn, operation())
 }
 
 impl AuthorityPersistencePortV1 for SqliteStore {
@@ -7312,6 +7529,15 @@ mod tests {
         assert!(sqlite_origin_seq(i64::MAX.unsigned_abs(), Seq::from_u64(1)).is_err());
         assert!(sqlite_origin_seq(u64::MAX, Seq::from_u64(1)).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn sqlite_authority_state_rejects_a_wall_fence_outside_sqlite_range() {
+        let store = tests::new_store();
+        assert_eq!(
+            write_fork_admission_wall_fence(&store.conn, u64::MAX),
+            Err(ForkAdmissionAuthorityErrorV1::CorruptAuthority)
+        );
     }
 
     #[test]
