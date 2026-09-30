@@ -59,7 +59,7 @@ use pos_core::{
     ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
     ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1,
     ForkInterventionAdmissionV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1, PersistedAuthorityV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, PersistedAuthorityV1,
     PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
     PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PublicKey, Signature,
     StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
