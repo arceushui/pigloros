@@ -94,11 +94,11 @@ enum ProofAdmission {
 
 fn reviewed_output_binding<P: Plugin>(
     plugin: &P,
-    source: pos_runtime::InstalledOutputPolicySourceV1,
+    source: pos_runtime::OutputPolicySourceV1,
     profile_id: &str,
     configuration_details: &[u8],
 ) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
-    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    pos_runtime::OutputPolicyBindingV1::from_source(
         plugin,
         source,
         configuration_details,
@@ -131,7 +131,7 @@ fn world_output_binding(
     details.extend_from_slice(&body.inner().to_bytes());
     reviewed_output_binding(
         plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::World,
+        pos_runtime::OutputPolicySourceV1::World,
         profile_id,
         &details,
     )
@@ -145,7 +145,7 @@ fn proof_agent_output_binding(
     let configuration_details = threshold.to_bits().to_be_bytes();
     reviewed_output_binding(
         plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        pos_runtime::OutputPolicySourceV1::Experiment,
         profile_id,
         &configuration_details,
     )
@@ -159,9 +159,9 @@ fn proof_society_output_binding(
         .iter()
         .flat_map(|dimension| dimension.as_str().as_bytes().iter().copied().chain([0]))
         .collect::<Vec<_>>();
-    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    pos_runtime::OutputPolicyBindingV1::from_source(
         plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        pos_runtime::OutputPolicySourceV1::Experiment,
         &configuration_details,
         profile_id,
     )
@@ -1916,13 +1916,13 @@ fn installed_failure_probe_admission(
     };
     let probe_binding = reviewed_output_binding(
         &plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        pos_runtime::OutputPolicySourceV1::Experiment,
         profile_id,
         &failure_details,
     );
     reviewed_output_binding(
         &sibling_plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        pos_runtime::OutputPolicySourceV1::Experiment,
         profile_id,
         b"successful-sibling:v1",
     )
@@ -2551,14 +2551,14 @@ mod tests {
         let plugin = ProofAgentPlugin::new();
         assert!(reviewed_output_binding(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+            pos_runtime::OutputPolicySourceV1::Experiment,
             "unknown-profile",
             &[],
         )
         .is_err());
         assert!(reviewed_output_binding(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::World,
+            pos_runtime::OutputPolicySourceV1::World,
             "deterministic-local-v1",
             &[],
         )
@@ -2566,7 +2566,7 @@ mod tests {
 
         assert!(reviewed_output_binding(
             &InvalidVersionPlugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+            pos_runtime::OutputPolicySourceV1::Experiment,
             "deterministic-local-v1",
             &[],
         )
