@@ -1600,6 +1600,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn binding_attaches_one_driver_and_checks_the_owner_instance() {
+        let plugin = FixturePlugin {
+            id: PluginId::new(),
+            name: "fixture",
+            events: vec![Kind::new("plugin.output")],
+        };
+        let generated = || {
+            OutputPolicyBindingV1::from_installed_source(
+                &plugin,
+                InstalledOutputPolicySourceV1::Generated,
+                &[],
+                "deterministic-local-v1",
+            )
+            .or_resume()
+        };
+        let driven = generated()
+            .with_installed_driver(SourceProbeDriver)
+            .or_resume();
+        assert!(matches!(
+            driven.with_installed_driver(SourceProbeDriver),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "driver" })
+        ));
+
+        let cloned_plugin = plugin.clone();
+        let mut owned = generated();
+        assert!(owned.verifies_erased_owner_instance(&plugin));
+        assert!(!owned.verifies_erased_owner_instance(&cloned_plugin));
+        // An installed source checks the owner against its descriptor types,
+        // which a fixture Plugin never matches.
+        owned.source = InstalledOutputPolicySourceV1::Gateway;
+        assert!(!owned.verifies_erased_owner_instance(&plugin));
+    }
+
     fn budget(
         plugin_id: PluginId,
         max_event_bytes: u32,

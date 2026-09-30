@@ -13,8 +13,8 @@ use pos_conformance::{
     ExecutionModeV1, FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1,
     FixturePrincipalRefV1, HostClosureAuditV1, InputDependencyV1, InterventionV1,
     InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
-    NonInterferenceExecutionStatusV1, ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1,
-    PluginFailureV1, ProjectionEvidenceV1, RecomputationFrontierV1, ReplayClaimV1, ReproManifestV1,
+    NonInterferenceExecutionStatusV1, ParticipantEventV1, ParticipantViewV1, PluginFailureV1,
+    ProjectionEvidenceV1, RecomputationFrontierV1, ReplayClaimV1, ReproManifestV1,
     ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
     SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1,
     Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
@@ -23,20 +23,32 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
 };
-use pos_plugin_society::{draft_signal, SocietyDimension, SocietyReducer, SocietySignal};
+use pos_plugin_society::SocietyDimension;
 use pos_plugin_world::{
     encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldConfigV1,
-    WorldDriver, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY, EVENT_TYPE_ACTION_V1,
-    EVENT_TYPE_CONFIG_V1, EVENT_TYPE_OBSERVATION_V1,
+    WorldDriver, WorldPlugin, ACTION_SCOPE_SINGLE_BODY, EVENT_TYPE_ACTION_V1, EVENT_TYPE_CONFIG_V1,
+    EVENT_TYPE_OBSERVATION_V1,
 };
-use pos_runtime::{
-    Driver, DriverRecoveryEvidence, HostWorldProfileV1, ObservationView, RecoveryEventHeader,
-    RuntimeError, StepOutput, WorldInstallationErrorV1,
-};
+use pos_runtime::{HostWorldProfileV1, RuntimeError, WorldInstallationErrorV1};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+// Proof callbacks run only through generated fixture registration until
+// installed registration returns with Wave 9 (#467/#462).
+#[cfg(test)]
+use pos_conformance::PluginFailureClassV1;
+#[cfg(test)]
+use pos_core::state::{Reducer, State};
+#[cfg(test)]
+use pos_plugin_society::{draft_signal, SocietyReducer, SocietySignal};
+#[cfg(test)]
+use pos_plugin_world::WorldReducer;
+#[cfg(test)]
+use pos_runtime::{
+    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, StepOutput,
+};
+#[cfg(test)]
 use std::sync::{atomic::AtomicU64, Arc};
 
 // Keep fallible proof orchestration linear without the compiler-generated
@@ -87,11 +99,11 @@ fn reviewed_output_binding<P: Plugin>(
     .map_err(Into::into)
 }
 
-fn reviewed_output_registration<P: Plugin>(
-    plugin: &P,
-    binding: &pos_runtime::OutputPolicyBindingV1,
-) -> Result<pos_runtime::PluginRegistrationV1, RuntimeError> {
-    pos_runtime::installed_plugin_registration_v1(plugin, binding).map_err(Into::into)
+/// Wave 8 has no installed EPF1, so installed registration fails closed even
+/// if an installed binding were resolved. #467/#462 restore installed proof
+/// registration together with a real installed EPF1.
+fn installed_registration_closed() -> RuntimeError {
+    pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into()
 }
 
 fn world_output_binding(
@@ -265,7 +277,7 @@ impl MoatProofRun {
             })
             .with_fork_registry_factory(registry_factory)
             .with_resource_limit(input.resource_limit);
-            register_plugins_for_admission(&mut experiment, &topology, profile_id, admission).map_err(MoatProofError::from) => |()|;
+            experiment.register_proof_plugins(&topology, profile_id, admission).map_err(MoatProofError::from) => |()|;
             experiment.start().map_err(MoatProofError::from) => |mut parent|;
             parent.step_tick().map_err(MoatProofError::from) => |_|;
             parent.source_events_with_control().map_err(MoatProofError::from) => |events|;
@@ -575,27 +587,25 @@ impl ProofTopology {
     }
 }
 
-trait ProofRegistrationSink {
-    fn register_world(
+// Proof Plugin registration targets. Installed registration has no sink
+// until Wave 9 (#467/#462) supplies an installed EPF1.
+trait ProofRegistrationSink: Sized {
+    /// Register the proof Plugins under one admission mode.
+    ///
+    /// Installed admission fails closed while resolving its bindings, before
+    /// the target is mutated.
+    fn register_proof_plugins(
         &mut self,
-        plugin: &WorldPlugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-    ) -> Result<(), RuntimeError>;
-
-    fn register_agent(
-        &mut self,
-        plugin: &ProofAgentPlugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-    ) -> Result<(), RuntimeError>;
-
-    fn register_society(
-        &mut self,
-        plugin: &ProofSocietyPlugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-    ) -> Result<(), RuntimeError>;
+        topology: &ProofTopology,
+        profile_id: &str,
+        admission: ProofAdmission,
+    ) -> Result<(), RuntimeError> {
+        match admission {
+            ProofAdmission::Installed => Err(installed_proof_admission(topology, profile_id)),
+            #[cfg(test)]
+            ProofAdmission::GeneratedFixture => register_plugins_fixture(self, topology),
+        }
+    }
 
     #[cfg(test)]
     fn register_fixture_generated(
@@ -645,43 +655,6 @@ impl ProofRegistrationSink for Experiment {
             event_types,
         )
     }
-
-    fn register_world(
-        &mut self,
-        plugin: &WorldPlugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-    ) -> Result<(), RuntimeError> {
-        self.register_installed_output(plugin, binding, registration, Some(Box::new(WorldReducer)))
-    }
-
-    fn register_agent(
-        &mut self,
-        plugin: &ProofAgentPlugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-    ) -> Result<(), RuntimeError> {
-        self.register_installed_output(
-            plugin,
-            binding,
-            registration,
-            Some(Box::new(ProofAgentReducer)),
-        )
-    }
-
-    fn register_society(
-        &mut self,
-        plugin: &ProofSocietyPlugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-    ) -> Result<(), RuntimeError> {
-        self.register_installed_output(
-            plugin,
-            binding,
-            registration,
-            Some(Box::new(SocietyReducer)),
-        )
-    }
 }
 
 impl ProofRegistrationSink for pos_runtime::PluginRegistry {
@@ -713,154 +686,33 @@ impl ProofRegistrationSink for pos_runtime::PluginRegistry {
             event_types,
         )
     }
-
-    fn register_world(
-        &mut self,
-        plugin: &WorldPlugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-    ) -> Result<(), RuntimeError> {
-        self.register_installed_output(plugin, binding, registration, Some(Box::new(WorldReducer)))
-    }
-
-    fn register_agent(
-        &mut self,
-        plugin: &ProofAgentPlugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-    ) -> Result<(), RuntimeError> {
-        self.register_installed_output(
-            plugin,
-            binding,
-            registration,
-            Some(Box::new(ProofAgentReducer)),
-        )
-    }
-
-    fn register_society(
-        &mut self,
-        plugin: &ProofSocietyPlugin,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-    ) -> Result<(), RuntimeError> {
-        self.register_installed_output(
-            plugin,
-            binding,
-            registration,
-            Some(Box::new(SocietyReducer)),
-        )
-    }
 }
 
-fn installed_world_registration(
-    topology: &ProofTopology,
-    profile_id: &str,
-) -> Result<
-    (
-        pos_runtime::OutputPolicyBindingV1,
-        pos_runtime::PluginRegistrationV1,
-    ),
-    RuntimeError,
-> {
-    result_pipeline! {
-        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
-        world_output_binding(
-            &topology.world_plugin,
-            driver.configuration(),
-            topology.body,
-            profile_id,
-        ) => |binding|;
-        binding.with_installed_driver(driver).map_err(Into::into) => |binding|;
-        reviewed_output_registration(&topology.world_plugin, &binding) => |registration|;
-        Ok((binding, registration))
-    }
-}
-
-fn installed_agent_registration(
-    topology: &ProofTopology,
-    profile_id: &str,
-) -> Result<
-    (
-        pos_runtime::OutputPolicyBindingV1,
-        pos_runtime::PluginRegistrationV1,
-    ),
-    RuntimeError,
-> {
-    result_pipeline! {
-        proof_agent_output_binding(
+/// Resolve the proof's installed World, agent and Society bindings.
+///
+/// Wave 8 has no installed EPF1, so resolution fails closed before any
+/// registration can mutate a target.
+fn installed_proof_admission(topology: &ProofTopology, profile_id: &str) -> RuntimeError {
+    world_driver(&topology.input, topology.body, topology.config_entity)
+        .and_then(|driver| {
+            world_output_binding(
+                &topology.world_plugin,
+                driver.configuration(),
+                topology.body,
+                profile_id,
+            )
+        })
+        .and(proof_agent_output_binding(
             &topology.agent_plugin,
             topology.input.agent_response_threshold,
             profile_id,
-        ) => |binding|;
-        binding.with_installed_driver(ProofAgentDriver::new(
-            topology.agent,
-            topology.input.agent_response_threshold,
-        )).map_err(Into::into) => |binding|;
-        reviewed_output_registration(&topology.agent_plugin, &binding) => |registration|;
-        Ok((binding, registration))
-    }
-}
-
-fn installed_society_registration(
-    topology: &ProofTopology,
-    profile_id: &str,
-) -> Result<
-    (
-        pos_runtime::OutputPolicyBindingV1,
-        pos_runtime::PluginRegistrationV1,
-    ),
-    RuntimeError,
-> {
-    result_pipeline! {
-        proof_society_output_binding(&topology.society_plugin, profile_id) => |binding|;
-        binding.with_installed_driver(ProofSocietyDriver::new(topology.society))
-            .map_err(Into::into) => |binding|;
-        reviewed_output_registration(&topology.society_plugin, &binding) => |registration|;
-        Ok((binding, registration))
-    }
-}
-
-fn register_plugins_for_profile(
-    target: &mut impl ProofRegistrationSink,
-    topology: &ProofTopology,
-    profile_id: &str,
-) -> Result<(), RuntimeError> {
-    result_pipeline! {
-        installed_world_registration(topology, profile_id)
-            => |(world_closure, world_registration)|;
-        installed_agent_registration(topology, profile_id)
-            => |(agent_closure, agent_registration)|;
-        installed_society_registration(topology, profile_id)
-            => |(society_closure, society_registration)|;
-        target.register_world(
-            &topology.world_plugin,
-            world_closure,
-            world_registration,
-        ) => |()|;
-        target.register_agent(
-            &topology.agent_plugin,
-            agent_closure,
-            agent_registration,
-        ) => |()|;
-        target.register_society(
+        ))
+        .and(proof_society_output_binding(
             &topology.society_plugin,
-            society_closure,
-            society_registration,
-        )
-    }
-}
-
-fn register_plugins_for_admission(
-    target: &mut impl ProofRegistrationSink,
-    topology: &ProofTopology,
-    profile_id: &str,
-    admission: ProofAdmission,
-) -> Result<(), RuntimeError> {
-    match admission {
-        ProofAdmission::Installed => register_plugins_for_profile(target, topology, profile_id),
-        #[cfg(test)]
-        ProofAdmission::GeneratedFixture => register_plugins_fixture(target, topology),
-    }
+            profile_id,
+        ))
+        .err()
+        .unwrap_or_else(installed_registration_closed)
 }
 
 #[cfg(test)]
@@ -908,7 +760,8 @@ fn build_registry_for_admission(
 ) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
     let mut registry =
         pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
-    register_plugins_for_admission(&mut registry, topology, profile_id, admission)
+    registry
+        .register_proof_plugins(topology, profile_id, admission)
         .map(|()| registry)
 }
 
@@ -2013,85 +1866,49 @@ fn failure_probe(
     profile_id: &str,
     admission: ProofAdmission,
 ) -> Result<PluginFailureV1, MoatProofError> {
-    #[cfg(test)]
-    if matches!(admission, ProofAdmission::GeneratedFixture) {
-        return failure_probe_fixture(class, resource_limit);
+    match admission {
+        ProofAdmission::Installed => Err(MoatProofError::from(installed_failure_probe_admission(
+            class,
+            resource_limit,
+            profile_id,
+        ))),
+        #[cfg(test)]
+        ProofAdmission::GeneratedFixture => failure_probe_fixture(class, resource_limit),
     }
-    let _ = admission;
-    let sibling_steps = Arc::new(AtomicU64::new(0));
+}
+
+/// Resolve the installed sibling and failure-probe bindings.
+///
+/// Wave 8 has no installed EPF1, so the probe fails closed before any
+/// Experiment or registration exists.
+fn installed_failure_probe_admission(
+    class: &str,
+    resource_limit: u64,
+    profile_id: &str,
+) -> RuntimeError {
+    let mut failure_details = class.as_bytes().to_vec();
+    failure_details.push(0);
+    failure_details.extend_from_slice(&resource_limit.to_be_bytes());
     let sibling_plugin = SiblingProbePlugin {
         id: PluginId::new(),
     };
     let plugin = FailureProbePlugin {
         id: PluginId::new(),
     };
-    let mut experiment = Experiment::new(ExperimentConfig {
-        name: format!("wave8-failure-{class}"),
-        stop: StopCondition::MaxTicks(1),
-        store_config: pos_store::StoreConfig::Memory,
-    })
-    .with_resource_limit(resource_limit);
-    let mut failure_details = class.as_bytes().to_vec();
-    failure_details.push(0);
-    failure_details.extend_from_slice(&resource_limit.to_be_bytes());
-    result_pipeline! {
-        reviewed_output_binding(
-            &sibling_plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
-            profile_id,
-            b"successful-sibling:v1",
-        ).map_err(MoatProofError::from) => |sibling_closure|;
-        reviewed_output_binding(
-            &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
-            profile_id,
-            &failure_details,
-        ).map_err(MoatProofError::from) => |failure_closure|;
-        sibling_closure.with_installed_driver(SiblingProbeDriver {
-            steps: Arc::clone(&sibling_steps),
-        }).map_err(RuntimeError::from).map_err(MoatProofError::from)
-            => |sibling_closure|;
-        failure_closure.with_installed_driver(FailureProbeDriver {
-            class,
-            resource_limit,
-        }).map_err(RuntimeError::from).map_err(MoatProofError::from)
-            => |failure_closure|;
-        reviewed_output_registration(&sibling_plugin, &sibling_closure)
-            .map_err(MoatProofError::from) => |sibling_registration|;
-        reviewed_output_registration(&plugin, &failure_closure)
-            .map_err(MoatProofError::from) => |failure_registration|;
-        experiment.register_installed_output(
-            &sibling_plugin,
-            sibling_closure,
-            sibling_registration,
-            None,
-        ).map_err(MoatProofError::from) => |()|;
-        experiment.register_installed_output(
-            &plugin,
-            failure_closure,
-            failure_registration,
-            None,
-        ).map_err(MoatProofError::from) => |()|;
-        experiment.start().map_err(MoatProofError::from) => |mut session|;
-        session.source_events_with_control().map_err(MoatProofError::from) => |before|;
-        let step_failed = session.step_tick().is_err();
-        session.source_events_with_control().map_err(MoatProofError::from) => |after|;
-        let failure_class = match class {
-            "resource_exhaustion" => PluginFailureClassV1::ResourceExhaustion,
-            _ => PluginFailureClassV1::PluginCrash,
-        };
-        Ok(PluginFailureV1 {
-            plugin: "failure-probe".to_owned(),
-            class: failure_class,
-            tick: 0,
-            committed: !step_failed || before != after,
-            staged_event_count: 0,
-            committed_event_count: u64::try_from(after.len()).unwrap_or(u64::MAX),
-            state_digest_before: serialized_digest(&before),
-            state_digest_after: serialized_digest(&after),
-            sibling_step_count: sibling_steps.load(std::sync::atomic::Ordering::SeqCst),
-        })
-    }
+    reviewed_output_binding(
+        &sibling_plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        profile_id,
+        b"successful-sibling:v1",
+    )
+    .and(reviewed_output_binding(
+        &plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        profile_id,
+        &failure_details,
+    ))
+    .err()
+    .unwrap_or_else(installed_registration_closed)
 }
 
 #[cfg(test)]
@@ -2224,10 +2041,12 @@ impl Plugin for SiblingProbePlugin {
     }
 }
 
+#[cfg(test)]
 struct SiblingProbeDriver {
     steps: Arc<AtomicU64>,
 }
 
+#[cfg(test)]
 impl Driver for SiblingProbeDriver {
     fn name(&self) -> &'static str {
         "successful-sibling-driver"
@@ -2262,11 +2081,13 @@ impl Plugin for FailureProbePlugin {
     }
 }
 
+#[cfg(test)]
 struct FailureProbeDriver {
     class: &'static str,
     resource_limit: u64,
 }
 
+#[cfg(test)]
 impl Driver for FailureProbeDriver {
     fn name(&self) -> &'static str {
         "failure-probe-driver"
@@ -2366,6 +2187,7 @@ struct AgentReaction {
     observed_x: f64,
 }
 
+#[cfg(test)]
 struct ProofAgentDriver {
     entity: EntityId,
     threshold: f64,
@@ -2373,6 +2195,7 @@ struct ProofAgentDriver {
     staged_tick: Option<u64>,
 }
 
+#[cfg(test)]
 impl ProofAgentDriver {
     const fn new(entity: EntityId, threshold: f64) -> Self {
         Self {
@@ -2384,6 +2207,7 @@ impl ProofAgentDriver {
     }
 }
 
+#[cfg(test)]
 impl Driver for ProofAgentDriver {
     fn name(&self) -> &'static str {
         "proof-agent-driver"
@@ -2496,8 +2320,10 @@ impl Driver for ProofAgentDriver {
     }
 }
 
+#[cfg(test)]
 struct ProofAgentReducer;
 
+#[cfg(test)]
 impl Reducer for ProofAgentReducer {
     fn initial(&self) -> State {
         let mut state = State::new();
@@ -2523,11 +2349,13 @@ impl Reducer for ProofAgentReducer {
     }
 }
 
+#[cfg(test)]
 struct ProofSocietyDriver {
     entity: EntityId,
     staged: bool,
 }
 
+#[cfg(test)]
 impl ProofSocietyDriver {
     const fn new(entity: EntityId) -> Self {
         Self {
@@ -2537,6 +2365,7 @@ impl ProofSocietyDriver {
     }
 }
 
+#[cfg(test)]
 impl Driver for ProofSocietyDriver {
     fn name(&self) -> &'static str {
         "proof-society-driver"
@@ -2792,12 +2621,30 @@ mod tests {
             .is_err());
         assert!(run_local_and_air_gapped(input()).is_err());
         let topology = ProofTopology::new(input()).test_ok();
+        let closed_epf1 = |error: &RuntimeError| {
+            matches!(
+                error,
+                RuntimeError::OutputAdmission(
+                    pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+                )
+            )
+        };
         assert!(build_registry_for_admission(
             &topology,
             "deterministic-local-v1",
             ProofAdmission::Installed,
         )
-        .is_err());
+        .is_err_and(|error| closed_epf1(&error)));
+        assert!(closed_epf1(&installed_proof_admission(
+            &topology,
+            "deterministic-air-gapped-v1",
+        )));
+        assert!(closed_epf1(&installed_failure_probe_admission(
+            "plugin_crash",
+            3,
+            "deterministic-local-v1",
+        )));
+        assert!(closed_epf1(&installed_registration_closed()));
     }
 
     #[test]

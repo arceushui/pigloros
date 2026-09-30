@@ -1031,9 +1031,10 @@ fn gateway_action_registry_with_authority_and_erasure_gate_checked(
     authority: Option<ConsentAuthority>,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<Arc<PluginRegistry>, pos_runtime::RuntimeError> {
-    let mut registry = gateway_action_registry_builder(bodies, authority)?;
-    registry.bind_erasure_gate(gate);
-    Ok(Arc::new(registry))
+    gateway_action_registry_builder(bodies, authority).map(|mut registry| {
+        registry.bind_erasure_gate(gate);
+        Arc::new(registry)
+    })
 }
 
 fn gateway_empty_action_registry(
@@ -3604,6 +3605,23 @@ mod tests {
         ));
         gateway.shutdown().await.test_ok();
         drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn action_capable_host_gateway_fails_closed_without_installed_epf1() {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        assert!(matches!(
+            Gateway::new_with_erasure_host_and_authorization(
+                host,
+                [EntityId::new()],
+                crate::authorization::test_authorization_for(EntityId::new()),
+            ),
+            Err(GatewayError::ActionRegistry(_))
+        ));
     }
 
     #[test]
