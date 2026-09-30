@@ -77,6 +77,14 @@ const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.determinist
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
 
+/// Selects how the proof admits its Plugins.
+///
+/// Release builds have only [`Self::Installed`], which fails closed until
+/// installed registration returns with Wave 9 (#467/#462). The enum is still
+/// threaded through the proof signatures so that the fixture proof and the
+/// installed proof share one code path: tests run every stage with the
+/// generated fixture and differ from the installed path only at the
+/// admission step, instead of maintaining a parallel fixture-only pipeline.
 #[derive(Clone, Copy)]
 enum ProofAdmission {
     Installed,

@@ -603,6 +603,12 @@ fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::E
     let agent_plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
     let obs_plugin = pos_plugin_synthetic_obs::SyntheticObsPlugin::new();
     let obs_configuration = 1.0_f64.to_be_bytes();
+    // Report the first binding error, or the closed installed-registration
+    // error if both bindings resolve. This stays one combinator chain on
+    // purpose: in Wave 8 every installed binding fails, so `let ... ?;`
+    // bindings would leave the serialization error, the post-binding
+    // continuations and the final closed error as unreachable LLVM regions.
+    // `and` evaluates both bindings eagerly, so both are exercised either way.
     Err(serde_json::to_vec(agent_plugin.actions())
         .map_err(Into::into)
         .and_then(|agent_configuration| {

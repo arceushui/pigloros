@@ -651,6 +651,9 @@ pub struct OutputPolicyBindingV1 {
     /// until installed registration returns with Wave 9 (#467/#462).
     #[cfg(any(test, feature = "test-support"))]
     owner_token: PluginOwnerTokenV1,
+    /// Validated installed callbacks. They stay inert until installed
+    /// registration returns with Wave 9 (#467/#462); see
+    /// [`Self::with_installed_driver`].
     driver: Option<Box<dyn Driver>>,
     approver: Option<(Box<dyn ActionApprover>, Vec<Kind>)>,
 }
@@ -726,6 +729,13 @@ impl OutputPolicyBindingV1 {
 
     /// Attach only the concrete Driver compiled into this installed source.
     ///
+    /// The attached Driver stays inert until installed registration returns
+    /// with Wave 9 (#467/#462): no Wave 8 path consumes a binding's callbacks,
+    /// because installed registration fails closed. The method still checks
+    /// the Driver against the reviewed source descriptor now, so a foreign
+    /// or duplicate callback can never be bound to an installed source and
+    /// the Wave 9 consumer inherits an already-validated binding.
+    ///
     /// # Errors
     /// Rejects a foreign or duplicate Driver before registration can mutate state.
     pub fn with_installed_driver<D: Driver + 'static>(
@@ -740,6 +750,12 @@ impl OutputPolicyBindingV1 {
     }
 
     /// Attach only the concrete `ActionApprover` compiled into this installed source.
+    ///
+    /// Like [`Self::with_installed_driver`], the approver and its routes stay
+    /// inert until installed registration returns with Wave 9 (#467/#462).
+    /// The reviewed approver type and the route bound are validated now so
+    /// that a foreign, duplicate, or unbounded approver is rejected at the
+    /// binding boundary rather than at a later consumer.
     ///
     /// # Errors
     /// Rejects a foreign or duplicate approver before registration can mutate state.

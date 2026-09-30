@@ -5,8 +5,10 @@ use pos_core::{
     Capability, Plugin, PluginId,
 };
 use pos_runtime::{
-    validate_output_policy_artifacts_v1, Driver, InstalledOutputPolicySourceV1, ObservationView,
-    OutputAdmissionErrorV1, PluginRegistry, RuntimeError, StepOutput, TickScheduler,
+    installed_plugin_role_v1, validate_output_policy_artifacts_v1, DomainImplementationKindV1,
+    Driver, InstalledOutputPolicySourceV1, ObservationView, OutputAdmissionErrorV1,
+    PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
+    RuntimeError, StepOutput, TickScheduler,
 };
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -434,6 +436,69 @@ fn verified_binding_rejects_a_foreign_plugin_instance() -> TestResult {
             OutputAdmissionErrorV1::PluginMismatch
         ))
     ));
+    Ok(())
+}
+
+#[test]
+fn unknown_or_changed_execution_profile_fails_before_registry_mutation() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ));
+
+    // An unknown profile resolves no EPF1 bytes, so no binding can exist.
+    assert!(matches!(
+        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            InstalledOutputPolicySourceV1::Generated,
+            b"fixture-configuration",
+            "unknown-profile-v1",
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+    ));
+
+    // A binding resolved under another draft profile carries changed EPF1
+    // bytes and still cannot enter installed registration.
+    let local = verified_binding(&plugin)?;
+    let changed = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        &plugin,
+        InstalledOutputPolicySourceV1::Generated,
+        b"fixture-configuration",
+        "deterministic-air-gapped-v1",
+    )?;
+    assert_ne!(
+        changed.execution_profile_artifact(),
+        local.profile_artifact.as_slice()
+    );
+    let pin = PluginPinV1::try_new(
+        DomainImplementationKindV1::Plugin,
+        PluginIsolationV1::OperatorTrustedNative,
+        changed.policy().digest(),
+        vec![installed_plugin_role_v1(&plugin)],
+    )?;
+    assert!(matches!(
+        registry.register_installed_output(
+            &plugin,
+            changed,
+            PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available),
+            None,
+        ),
+        Err(RuntimeError::OutputAdmission(
+            OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+        ))
+    ));
+    assert!(registry.is_empty());
+
+    // The rejected attempts left no residue: the same Plugin still registers.
+    registry.register_with_verified_output_policy(
+        &plugin,
+        local.binding,
+        None,
+        Some(Box::new(FixtureDriver)),
+    )?;
+    assert_eq!(registry.len(), 1);
     Ok(())
 }
 

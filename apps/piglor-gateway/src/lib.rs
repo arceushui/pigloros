@@ -836,7 +836,6 @@ impl ActionPrincipal {
         }
     }
 
-    #[cfg(test)]
     fn authorizes(&self, proposal: &ProposedAction) -> Result<(), ActionRejected> {
         if proposal.actor_entity_id != self.entity_id {
             return Err(ActionRejected::InvalidActorEntityId);
@@ -2071,8 +2070,6 @@ impl Gateway {
     ///
     /// # Errors
     /// Returns a bounded executor or store error when ingress cannot run.
-    ///
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn admit_owntracks_ingress(
         &self,
         basic_handle: [u8; 32],
