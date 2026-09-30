@@ -5854,7 +5854,7 @@ fn assert_containment_precedence_under_a_frozen_parent<S: AdmittedForkStore>(
 ) -> Result<Vec<String>, Box<dyn Error>> {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     store.bind_erasure_gate(Arc::clone(&gate))?;
-    let fixture = AdmittedForkFixture::open(store, 261, true)?;
+    let fixture = AdmittedForkFixture::open(store, 194, true)?;
     let parent = store.create_timeline("r3-precedence-parent")?;
     let stale = store.create_timeline("r3-precedence-stale")?;
     store.append(
@@ -5865,7 +5865,7 @@ fn assert_containment_precedence_under_a_frozen_parent<S: AdmittedForkStore>(
             CanonicalBytes::from_vec(b"advances the cut".to_vec()),
         )],
     )?;
-    let committed = fixture.fork(store, 262, parent.id(), "r3-precedence-child", u64::MAX)?;
+    let committed = fixture.fork(store, 197, parent.id(), "r3-precedence-child", u64::MAX)?;
     let mut labels = vec![admission_label(&fixture.execute(store, &committed))];
     gate.freeze_timeline_for_test(parent.id());
     gate.freeze_timeline_for_test(stale.id());
@@ -5874,9 +5874,9 @@ fn assert_containment_precedence_under_a_frozen_parent<S: AdmittedForkStore>(
     // method; every rejection leaves the gate's inventory unpublished.
     let gate_pair = (gate.as_ref(), gate.as_ref());
     for (operation, target, child, expires_at) in [
-        (262, parent.id(), "r3-unequal-child", u64::MAX),
-        (263, parent.id(), "r3-expired-child", 1),
-        (264, stale.id(), "r3-stale-child", u64::MAX),
+        (197, parent.id(), "r3-unequal-child", u64::MAX),
+        (198, parent.id(), "r3-expired-child", 1),
+        (199, stale.id(), "r3-stale-child", u64::MAX),
     ] {
         let command = fixture.fork(store, operation, target, child, expires_at)?;
         labels.push(admission_label(&fixture.execute(store, &command)));
@@ -5887,12 +5887,12 @@ fn assert_containment_precedence_under_a_frozen_parent<S: AdmittedForkStore>(
     }
     let unbound_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     unbound_owner.bind_erasure_gate(Arc::clone(&unbound_gate))?;
-    let unbound = AdmittedForkFixture::open(unbound_owner, 265, false)?;
+    let unbound = AdmittedForkFixture::open(unbound_owner, 204, false)?;
     let unbound_parent = unbound_owner.create_timeline("r3-precedence-unbound")?;
     unbound_gate.freeze_timeline_for_test(unbound_parent.id());
     let missing_owner = unbound.fork(
         unbound_owner,
-        266,
+        207,
         unbound_parent.id(),
         "r3-unbound-child",
         u64::MAX,
@@ -5940,9 +5940,9 @@ fn sqlite_committed_corruption_and_clock_rollback_precede_containment() -> Resul
     let (mut store, path) = sqlite_store_at(&directory, "r3-sqlite-precedence.db")?;
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     store.bind_erasure_gate(Arc::clone(&gate))?;
-    let fixture = AdmittedForkFixture::open(&mut store, 271, true)?;
+    let fixture = AdmittedForkFixture::open(&mut store, 215, true)?;
     let parent = store.create_timeline("r3-sqlite-precedence-parent")?;
-    let committed = fixture.fork(&store, 272, parent.id(), "r3-sqlite-child", u64::MAX)?;
+    let committed = fixture.fork(&store, 218, parent.id(), "r3-sqlite-child", u64::MAX)?;
     assert!(matches!(
         fixture.execute(&mut store, &committed),
         Ok(ForkAdmissionOperationResultV1::Fork(_))
@@ -5960,7 +5960,7 @@ fn sqlite_committed_corruption_and_clock_rollback_precede_containment() -> Resul
         fixture.execute(&mut store, &committed),
         Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
     );
-    let later = fixture.fork(&store, 273, parent.id(), "r3-sqlite-later", u64::MAX)?;
+    let later = fixture.fork(&store, 219, parent.id(), "r3-sqlite-later", u64::MAX)?;
     assert_eq!(
         fixture.execute(&mut store, &later),
         Err(pos_core::ForkAdmissionErrorV1::ClockRollback)
@@ -5978,11 +5978,11 @@ fn sqlite_admitted_fork_under_an_external_write_lock_releases_the_gate_fence(
     let (mut store, path) = sqlite_store_at(&directory, "r3-lock.db")?;
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     store.bind_erasure_gate(Arc::clone(&gate))?;
-    let fixture = AdmittedForkFixture::open(&mut store, 281, true)?;
+    let fixture = AdmittedForkFixture::open(&mut store, 224, true)?;
     let parent = store.create_timeline("r3-locked-parent")?;
-    let command = fixture.fork(&store, 282, parent.id(), "r3-locked-child", u64::MAX)?;
+    let command = fixture.fork(&store, 227, parent.id(), "r3-locked-child", u64::MAX)?;
     let gate_pair = (gate.as_ref(), gate.as_ref());
-    let target = (Hash::from_bytes([282; 32]), parent.id());
+    let target = (Hash::from_bytes([227; 32]), parent.id());
     let before = sqlite_graph_rows(&path)?;
     let lock = Connection::open(&path)?;
     lock.execute_batch("BEGIN IMMEDIATE")?;
@@ -6000,7 +6000,7 @@ fn sqlite_admitted_fork_under_an_external_write_lock_releases_the_gate_fence(
     drop(lock);
     assert_eq!(sqlite_graph_rows(&path)?, before);
     assert_eq!(
-        fixture.recover(&mut store, 282)?,
+        fixture.recover(&mut store, 227)?,
         Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
     );
     let (admitted, published) = fixture.in_transition(&mut store, gate_pair, target, &command);
@@ -6019,10 +6019,10 @@ fn sqlite_admitted_fork_is_recovered_after_reopen_and_freeze() -> Result<(), Box
     let (mut store, path) = sqlite_store_at(&directory, "r3-reopen.db")?;
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     store.bind_erasure_gate(Arc::clone(&gate))?;
-    let fixture = AdmittedForkFixture::open(&mut store, 291, true)?;
+    let fixture = AdmittedForkFixture::open(&mut store, 245, true)?;
     let parent = store.create_timeline("r3-reopen-parent")?;
-    let command = fixture.fork(&store, 292, parent.id(), "r3-reopen-child", u64::MAX)?;
-    let target = (Hash::from_bytes([292; 32]), parent.id());
+    let command = fixture.fork(&store, 248, parent.id(), "r3-reopen-child", u64::MAX)?;
+    let target = (Hash::from_bytes([248; 32]), parent.id());
     let (committed, _) =
         fixture.in_transition(&mut store, (gate.as_ref(), gate.as_ref()), target, &command);
     let Ok(ForkAdmissionOperationResultV1::Fork(receipt)) = committed else {
@@ -6038,10 +6038,10 @@ fn sqlite_admitted_fork_is_recovered_after_reopen_and_freeze() -> Result<(), Box
     let fixture = AdmittedForkFixture { session, ..fixture };
     let before = sqlite_graph_rows(&path)?;
     assert_eq!(
-        fixture.recover(&mut reopened, 292)?,
+        fixture.recover(&mut reopened, 248)?,
         Ok(ForkAdmissionOperationResultV1::Fork(receipt))
     );
-    let retry = fixture.fork(&reopened, 292, parent.id(), "r3-reopen-child", u64::MAX)?;
+    let retry = fixture.fork(&reopened, 248, parent.id(), "r3-reopen-child", u64::MAX)?;
     assert_eq!(
         fixture.execute(&mut reopened, &retry),
         Ok(ForkAdmissionOperationResultV1::Fork(receipt))
