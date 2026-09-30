@@ -179,7 +179,7 @@ impl Reader<'_> {
                 0x19 => self.cursor.number::<2>(),
                 0x1a => self.cursor.number::<4>(),
                 0x1b => self.cursor.number::<8>(),
-                _ => return Err(crate::CborReadError::InvalidEncoding),
+                _ => Err(crate::CborReadError::InvalidEncoding),
             })
             .map_err(|_| WorldReplayHandleErrorV1::InvalidEncoding)
     }
