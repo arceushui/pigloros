@@ -1227,19 +1227,18 @@ fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult 
 }
 
 #[test]
-fn verified_binding_rejects_an_undeclared_execution_profile() {
+fn generated_binding_keeps_an_undeclared_profile_metadata_only() {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
-    assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_source(
-            &plugin,
-            OutputPolicySourceV1::Generated,
-            b"fixture-configuration",
-            "undeclared-profile-v1",
-        ),
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    ));
+    let binding = pos_runtime::OutputPolicyBindingV1::from_source(
+        &plugin,
+        OutputPolicySourceV1::Generated,
+        b"fixture-configuration",
+        "undeclared-profile-v1",
+    )
+    .expect("Generated binds local metadata without an EPF1 artifact");
+    assert!(binding.execution_profile_artifact().is_empty());
 }
 
 struct UpgradingPlugin {
