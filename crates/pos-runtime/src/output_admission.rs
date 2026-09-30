@@ -823,11 +823,8 @@ impl OutputPolicyBindingV1 {
         })
     }
 
-    pub(crate) const fn requires_action_approver(&self) -> bool {
-        matches!(
-            self.source,
-            InstalledOutputPolicySourceV1::Gateway | InstalledOutputPolicySourceV1::World
-        )
+    pub(crate) fn requires_action_approver(&self) -> bool {
+        self.source.descriptor().approver_type.is_some()
     }
 
     pub(crate) fn has_action_approver_route(&self) -> bool {
