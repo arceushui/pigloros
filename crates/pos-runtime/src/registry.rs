@@ -7,11 +7,13 @@
 
 use indexmap::IndexMap;
 
+#[cfg(any(test, feature = "test-support"))]
+use pos_core::Capability;
 use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::{PluginId, TimelineId},
-    ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, Capability, ConsentAuthority,
+    ActionApprover, ActionRejected, AuthorityRegistrySnapshotV1, ConsentAuthority,
     ConsentCapabilityToken, ConsentError, ConsentGate, ErasureContainmentErrorV1,
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, KnowledgeSnapshotV1,
     PersistedAuthorityV1, Plugin, ProposedAction, Reducer, Timeline,
