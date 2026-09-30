@@ -29,6 +29,7 @@ use pos_core::{
     },
     hasher::Hasher,
     ids::{EventId, TimelineId},
+    inspect_artifact_registration_graph_v1,
     owntracks_enrollment::{
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
@@ -42,10 +43,13 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
+    validate_artifact_registration_catalog_graph_v1, ArtifactRegistrationCatalogRowV1,
+    ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationGraphNodeV1,
+    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
+    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureArtifactClassV1,
+    ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
     ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
     ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
@@ -61,11 +65,11 @@ use pos_core::{
     ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1,
     ForkPublicationArtifactV1, ForkPublicationBindingV1, ForkPublicationOperationV1,
     ForkPublicationReceiptV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, PersistedAuthorityV1,
-    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
-    PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PublicKey, Signature,
-    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, OwnerIdV1, PersistedAuthorityV1,
+    PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
+    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 use crate::fork_admission_authority::{
@@ -270,6 +274,12 @@ pub struct MemoryStore {
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
     erasure_evidence: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    /// Exact immutable artifact bytes and ARD1 rows visible in each local owner catalog.
+    artifact_registrations: BTreeMap<Hash, ArtifactRegistrationCatalogRowV1>,
+    /// Unique immutable identity index for `(owner, class, artifact digest)`.
+    artifact_registration_identities: BTreeMap<(OwnerIdV1, ErasureArtifactClassV1, Hash), Hash>,
+    /// Immutable `(owner, MRM1 operation ID) -> root registration` index.
+    artifact_registration_operations: BTreeMap<(OwnerIdV1, Hash), Hash>,
     /// Canonical ERS1 history needed to validate predecessor links after restart.
     erasure_states: BTreeMap<ErasureReferenceV1, Vec<u8>>,
     erasure_attempt_pages: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
@@ -628,6 +638,9 @@ impl MemoryStore {
             fork_publication_artifacts: HashMap::new(),
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
+            artifact_registrations: BTreeMap::new(),
+            artifact_registration_identities: BTreeMap::new(),
+            artifact_registration_operations: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
             erasure_attempt_pages: BTreeMap::new(),
             erasure_scope_nodes: BTreeMap::new(),
@@ -4769,6 +4782,31 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
 }
 
 impl EventStore for MemoryStore {
+    fn commit_artifact_registration_batch(
+        &mut self,
+        batch: pos_core::PreparedArtifactRegistrationBatchV1,
+    ) -> Result<
+        pos_core::ArtifactRegistrationCommitOutcomeV1,
+        pos_core::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        ArtifactRegistrationPersistencePortV1::commit_artifact_registration_batch(self, batch)
+    }
+
+    fn read_artifact_registration(
+        &self,
+        owner_id: &pos_core::OwnerIdV1,
+        registration_address: Hash,
+    ) -> Result<
+        Option<pos_core::ArtifactRegistrationCatalogRowV1>,
+        pos_core::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        ArtifactRegistrationPersistencePortV1::read_artifact_registration(
+            self,
+            owner_id,
+            registration_address,
+        )
+    }
+
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         self.bind_erasure_gate_impl(gate)
     }
@@ -10635,6 +10673,223 @@ mod tests {
         let mut encoded = serde_json::to_value(draft).test_ok();
         encoded["schema_version"] = serde_json::json!(2);
         assert!(serde_json::from_value::<EventDraft>(encoded).is_err());
+    }
+}
+
+impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
+    fn commit_artifact_registration_batch(
+        &mut self,
+        batch: PreparedArtifactRegistrationBatchV1,
+    ) -> Result<ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1> {
+        if batch.records().is_empty()
+            || !batch.records().iter().any(|record| {
+                record.owner_id() == batch.owner_id()
+                    && record.registration_address() == batch.root_registration_address()
+            })
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure);
+        }
+
+        let operation_key = (*batch.owner_id(), batch.root_operation_id());
+        let mut rows = Vec::with_capacity(batch.records().len());
+        let mut has_new_rows = false;
+        for record in batch.records() {
+            let row = ArtifactRegistrationCatalogRowV1::from_persisted(
+                *record.owner_id(),
+                record.artifact_class(),
+                record.artifact_digest(),
+                record.registration_address(),
+                record.artifact_bytes().to_vec(),
+                record.registration().canonical_cbor(),
+            )?;
+            let address_key = row.registration_address();
+            let identity_key = (*row.owner_id(), row.artifact_class(), row.artifact_digest());
+            match (
+                self.artifact_registrations.get(&address_key),
+                self.artifact_registration_identities.get(&identity_key),
+            ) {
+                (None, None) => has_new_rows = true,
+                (Some(existing), Some(address))
+                    if existing == &row && *address == row.registration_address() => {}
+                (None, Some(_)) | (Some(_), None) | (Some(_), Some(_)) => {
+                    return Err(ArtifactRegistrationPersistenceErrorV1::Conflict);
+                }
+            }
+            rows.push((address_key, identity_key, row));
+        }
+
+        let graph_nodes: Vec<_> = rows
+            .iter()
+            .map(|(address, _, row)| ArtifactRegistrationGraphNodeV1 {
+                address: *address,
+                owner_id: *row.owner_id(),
+                artifact_class: row.artifact_class(),
+                artifact_digest: row.artifact_digest(),
+                registration: row.registration().clone(),
+            })
+            .collect();
+        inspect_artifact_registration_graph_v1(batch.root_registration_address(), &graph_nodes)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+
+        let root_row = rows
+            .iter()
+            .find(|(address, _, _)| *address == batch.root_registration_address())
+            .map(|(_, _, row)| row)
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        let root = ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if root.as_input().run_operation_id != batch.root_operation_id()
+            || root_row.owner_id() != batch.owner_id()
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+
+        self.check_artifact_registration_operation(
+            operation_key,
+            batch.root_registration_address(),
+        )?;
+
+        for (address_key, identity_key, row) in rows {
+            self.artifact_registrations
+                .entry(address_key)
+                .or_insert(row);
+            self.artifact_registration_identities
+                .entry(identity_key)
+                .or_insert(address_key);
+        }
+        self.artifact_registration_operations
+            .entry(operation_key)
+            .or_insert(batch.root_registration_address());
+        Ok(if has_new_rows {
+            ArtifactRegistrationCommitOutcomeV1::Applied
+        } else {
+            ArtifactRegistrationCommitOutcomeV1::ExactRetry
+        })
+    }
+
+    fn read_artifact_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        registration_address: Hash,
+    ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>
+    {
+        let Some(row) = self.artifact_registrations.get(&registration_address) else {
+            let indexed_without_row = self.artifact_registration_identities.iter().any(
+                |((stored_owner, _, _), address)| {
+                    stored_owner == owner_id && *address == registration_address
+                },
+            ) || self.artifact_registration_operations.iter().any(
+                |((stored_owner, _), address)| {
+                    stored_owner == owner_id && *address == registration_address
+                },
+            );
+            return if indexed_without_row {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            } else {
+                Ok(None)
+            };
+        };
+        if row.owner_id() != owner_id {
+            return Ok(None);
+        }
+        self.validate_artifact_registration_closure(registration_address)?;
+        Ok(Some(row.clone()))
+    }
+}
+
+impl MemoryStore {
+    fn check_artifact_registration_operation(
+        &self,
+        operation_key: (OwnerIdV1, Hash),
+        root_address: Hash,
+    ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+        let operation_root = self.artifact_registration_operations.get(&operation_key);
+        let mut root_operations = self
+            .artifact_registration_operations
+            .iter()
+            .filter(|((owner_id, _), address)| {
+                owner_id == &operation_key.0 && **address == root_address
+            })
+            .map(|((_, operation_id), _)| *operation_id);
+        let root_operation = root_operations.next();
+        if root_operations.next().is_some() {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        let root_row = self.artifact_registrations.get(&root_address);
+
+        match (operation_root, root_operation, root_row) {
+            (None, None, None) => Ok(()),
+            (Some(existing_root), Some(existing_operation), Some(row))
+                if *existing_root == root_address
+                    && existing_operation == &operation_key.1
+                    && row.owner_id() == &operation_key.0 =>
+            {
+                Ok(())
+            }
+            (Some(existing_root), _, _) if *existing_root != root_address => {
+                Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
+            }
+            (Some(_), Some(_), Some(_)) => {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            }
+            (Some(_), Some(_), None) => Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
+            (None, None, Some(_)) | (Some(_), None, _) | (None, Some(_), _) => {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            }
+            _ => Err(ArtifactRegistrationPersistenceErrorV1::Conflict),
+        }
+    }
+
+    fn validate_artifact_registration_closure(
+        &self,
+        root: Hash,
+    ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+        let mut pending = vec![root];
+        let mut seen = BTreeSet::new();
+        let mut catalog_rows = Vec::new();
+        while let Some(address) = pending.pop() {
+            if !seen.insert(address) {
+                continue;
+            }
+            let row = self
+                .artifact_registrations
+                .get(&address)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            let identity_key = (*row.owner_id(), row.artifact_class(), row.artifact_digest());
+            if self.artifact_registration_identities.get(&identity_key) != Some(&address)
+                || row.registration_address() != address
+            {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+            catalog_rows.push(row.clone());
+            pending.extend(
+                row.registration()
+                    .fields()
+                    .child_artifacts
+                    .iter()
+                    .map(|edge| edge.registration_address),
+            );
+        }
+        validate_artifact_registration_catalog_graph_v1(root, &catalog_rows)?;
+        let root_row = self
+            .artifact_registrations
+            .get(&root)
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
+            && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
+        {
+            let root_record =
+                ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
+                    .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if self.artifact_registration_operations.get(&(
+                *root_row.owner_id(),
+                root_record.as_input().run_operation_id,
+            )) != Some(&root)
+            {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+        }
+        Ok(())
     }
 }
 
