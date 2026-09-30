@@ -97,16 +97,21 @@ impl PluginOwnerTokenV1 {
 
     /// Verify a type-erased Plugin instance against a source type selected by
     /// the host rather than an overridable Plugin method.
+    ///
+    /// The presented token is derived through the kernel-owned blanket
+    /// implementation of the concrete type behind `plugin`, so this check is
+    /// as strong as [`Self::verifies_instance`] for that concrete type.
     #[must_use]
     pub fn verifies_erased_instance(&self, plugin: &dyn Plugin, expected_type_name: &str) -> bool {
         self.type_name == expected_type_name
-            && self.instance_address == std::ptr::from_ref(plugin).cast::<()>() as usize
+            && *self == PluginInstanceIdentity::installed_owner_token(plugin)
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod owner_token_tests {
-    use super::{Capability, Plugin, PluginId};
+    use super::{Capability, Plugin, PluginId, PluginInstanceIdentity};
 
     struct TokenFixture {
         _marker: u8,
@@ -129,10 +134,7 @@ mod owner_token_tests {
     #[test]
     fn erased_owner_token_verifies_the_selected_instance() {
         let plugin = TokenFixture { _marker: 0 };
-        let _id = plugin.id();
-        assert_eq!(plugin.name(), "token-fixture");
-        assert_eq!(plugin.capability(), Capability::default());
-        let owner = plugin.installed_owner_token();
+        let owner = PluginInstanceIdentity::installed_owner_token(&plugin);
         let erased: &dyn Plugin = &plugin;
         let foreign = TokenFixture { _marker: 1 };
 
