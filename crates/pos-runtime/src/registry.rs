@@ -3547,7 +3547,10 @@ impl PluginRegistry {
     /// Register a driver without an output declaration.
     ///
     /// Drivers registered here can process empty steps; any proposed Event is rejected
-    /// by the output-admission gate. Production Plugins use a verified policy binding.
+    /// by the output-admission gate. The entry is unpinned, so this seam exists only for
+    /// tests and explicit `test-support` builds; production Plugins use a verified policy
+    /// binding.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
         self.restored_binding = None;
         let plugin_id = PluginId::new();
