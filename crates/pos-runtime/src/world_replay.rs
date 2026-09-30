@@ -7,7 +7,8 @@
 
 use pos_core::{
     store::{EventReadBounds, SeqRange},
-    ErasureProtectedOperationV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash, TimelineId,
+    world_consumer_set::{validate_consumer_id_selection, validate_optional_view_selection},
+    ErasureProtectedOperationV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash, Seq, TimelineId,
     WorldReplayClosureV1,
 };
 
@@ -39,11 +40,17 @@ pub enum WorldReplayVerificationErrorV1 {
 }
 
 /// Exact protected use presented to the installed World Replay verifier.
+///
+/// The use binds the exact logical head its reads must observe. The installed
+/// verifier must reject the use unless the closure's source head identifies
+/// the Timeline at that logical head, and protected reads fail closed when
+/// the Timeline's logical head no longer equals it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorldReplayUseV1 {
     timeline_id: TimelineId,
     operation: ErasureProtectedOperationV1,
     range: SeqRange,
+    source_logical_head: Seq,
     consumer_ids: Vec<String>,
     requested_optional_view_roots: Vec<Hash>,
 }
@@ -52,44 +59,38 @@ impl WorldReplayUseV1 {
     /// Construct a bounded request with canonical consumer and optional-view selections.
     ///
     /// # Errors
-    /// Returns [`WorldReplayVerificationErrorV1::RequestMismatch`] for an
-    /// invalid consumer selection or optional-view root set.
+    /// Returns [`WorldReplayVerificationErrorV1::RequestMismatch`] for a range
+    /// that is inverted or ends after `source_logical_head`, or for a consumer
+    /// selection or optional-view root set that violates the WCS1 selection
+    /// rules.
     pub fn new(
         timeline_id: TimelineId,
         operation: ErasureProtectedOperationV1,
         range: SeqRange,
+        source_logical_head: Seq,
         mut consumer_ids: Vec<String>,
         mut requested_optional_view_roots: Vec<Hash>,
     ) -> Result<Self, WorldReplayVerificationErrorV1> {
         consumer_ids.sort_unstable();
         requested_optional_view_roots.sort_unstable_by_key(|root| *root.as_bytes());
-        let invalid = range.to.is_some_and(|to| to < range.from)
-            || consumer_ids.is_empty()
-            || consumer_ids.len() > pos_core::world_consumer_set::WORLD_CONSUMER_SET_MAX_CONSUMERS
-            || requested_optional_view_roots.len()
-                > pos_core::world_consumer_set::WORLD_CONSUMER_SET_MAX_PRODUCERS_OR_VIEWS
-            || requested_optional_view_roots
-                .iter()
-                .any(|root| *root == Hash::zero())
-            || requested_optional_view_roots
-                .windows(2)
-                .any(|pair| pair[0] == pair[1])
-            || consumer_ids.iter().any(|id| {
-                id.is_empty()
-                    || id.len()
-                        > pos_core::world_consumer_set::WORLD_CONSUMER_SET_MAX_CONSUMER_ID_BYTES
+        let range_within_head = range
+            .to
+            .is_none_or(|to| range.from <= to && to <= source_logical_head);
+        let consumers_canonical = validate_consumer_id_selection(&consumer_ids).is_ok();
+        let views_canonical =
+            validate_optional_view_selection(&requested_optional_view_roots).is_ok();
+        if range_within_head && consumers_canonical && views_canonical {
+            Ok(Self {
+                timeline_id,
+                operation,
+                range,
+                source_logical_head,
+                consumer_ids,
+                requested_optional_view_roots,
             })
-            || consumer_ids.windows(2).any(|pair| pair[0] == pair[1]);
-        if invalid {
-            return Err(WorldReplayVerificationErrorV1::RequestMismatch);
+        } else {
+            Err(WorldReplayVerificationErrorV1::RequestMismatch)
         }
-        Ok(Self {
-            timeline_id,
-            operation,
-            range,
-            consumer_ids,
-            requested_optional_view_roots,
-        })
     }
 
     /// Return the requested Timeline.
@@ -110,6 +111,12 @@ impl WorldReplayUseV1 {
         self.range
     }
 
+    /// Return the exact logical head every protected read must observe.
+    #[must_use]
+    pub const fn source_logical_head(&self) -> Seq {
+        self.source_logical_head
+    }
+
     /// Return the canonical requested consumer identifiers.
     #[must_use]
     pub fn consumer_ids(&self) -> &[String] {
@@ -122,6 +129,14 @@ impl WorldReplayUseV1 {
         &self.requested_optional_view_roots
     }
 
+    /// Check the selections a structural closure records.
+    ///
+    /// A closure records its Timeline, consumers, and optional-view roots, but
+    /// no protected operation or logical sequence coordinate: its operation
+    /// identity names the recording operation and its source head is a hash
+    /// label. The requested operation, range, and logical head are instead
+    /// bound by the installed verifier, whose result must echo this exact use,
+    /// and by protected reads, which require the logical head to be unchanged.
     pub(crate) fn is_covered_by(&self, closure: &WorldReplayClosureV1) -> bool {
         self.timeline_id == closure.timeline_id()
             && self.consumer_ids.iter().all(|requested| {
@@ -326,6 +341,19 @@ pub fn test_verified_world_replay_with_authorized_views(
 /// that feature must not be enabled in a deployment. Until a deployment
 /// installs the approved native owners, the closed composition rejects the
 /// request.
+///
+/// Every implementation must honour this contract before it issues a result:
+/// - bind the closure's source head to
+///   [`WorldReplayUseV1::source_logical_head`] and reject any other head;
+/// - read the trusted evaluation time and one native observation per leaf
+///   (verified content identity and current retention, lease, or erasure
+///   state) from the installed owners; and
+/// - derive the claim and the optional-view roots it authorizes only through
+///   [`WorldReplayClosureV1::evaluate`], never by relabelling a degraded
+///   claim as Exact.
+///
+/// The concrete native verifier and its minting path are owned by Redmine
+/// #396 and #397.
 pub trait WorldReplayVerifierV1: Send + Sync {
     /// Verify the complete native closure against the installed generation.
     ///
@@ -367,6 +395,7 @@ mod tests {
             closure.timeline_id(),
             ErasureProtectedOperationV1::Read,
             SeqRange::all(),
+            Seq::ZERO,
             vec!["count".to_owned()],
             Vec::new(),
         )
@@ -424,6 +453,7 @@ mod tests {
                     timeline,
                     ErasureProtectedOperationV1::Read,
                     SeqRange::all(),
+                    Seq::ZERO,
                     consumers,
                     Vec::new(),
                 ),
@@ -434,12 +464,51 @@ mod tests {
             WorldReplayUseV1::new(
                 timeline,
                 ErasureProtectedOperationV1::Read,
-                SeqRange::bounded(pos_core::Seq::from_u64(2), pos_core::Seq::from_u64(1)),
+                SeqRange::bounded(Seq::from_u64(2), Seq::from_u64(1)),
+                Seq::from_u64(2),
                 vec!["count".to_owned()],
                 Vec::new(),
             ),
             Err(WorldReplayVerificationErrorV1::RequestMismatch)
         );
+    }
+
+    #[test]
+    fn requested_use_binds_a_range_within_its_source_logical_head() {
+        let timeline = TimelineId::new();
+        let head = Seq::from_u64(2);
+        let at_head = WorldReplayUseV1::new(
+            timeline,
+            ErasureProtectedOperationV1::Read,
+            SeqRange::bounded(Seq::ZERO, head),
+            head,
+            vec!["count".to_owned()],
+            Vec::new(),
+        )
+        .test_ok();
+        assert_eq!(at_head.source_logical_head(), head);
+        assert_eq!(at_head.range(), SeqRange::bounded(Seq::ZERO, head));
+        assert_eq!(
+            WorldReplayUseV1::new(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                SeqRange::bounded(Seq::ZERO, Seq::from_u64(3)),
+                head,
+                vec!["count".to_owned()],
+                Vec::new(),
+            ),
+            Err(WorldReplayVerificationErrorV1::RequestMismatch)
+        );
+        let open = WorldReplayUseV1::new(
+            timeline,
+            ErasureProtectedOperationV1::Read,
+            SeqRange::from_seq(Seq::from_u64(3)),
+            head,
+            vec!["count".to_owned()],
+            Vec::new(),
+        )
+        .test_ok();
+        assert_eq!(open.source_logical_head(), head);
     }
 
     #[test]
@@ -451,6 +520,7 @@ mod tests {
             closure.timeline_id(),
             ErasureProtectedOperationV1::Read,
             SeqRange::all(),
+            Seq::ZERO,
             vec!["count".to_owned()],
             vec![root],
         )
@@ -493,6 +563,7 @@ mod tests {
                     closure.timeline_id(),
                     ErasureProtectedOperationV1::Read,
                     SeqRange::all(),
+                    Seq::ZERO,
                     vec!["count".to_owned()],
                     roots,
                 ),
@@ -503,6 +574,7 @@ mod tests {
             closure.timeline_id(),
             ErasureProtectedOperationV1::Read,
             SeqRange::all(),
+            Seq::ZERO,
             vec!["count".to_owned()],
             vec![Hash::from_bytes([54; 32])],
         )

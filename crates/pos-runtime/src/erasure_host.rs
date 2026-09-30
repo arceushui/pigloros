@@ -3611,17 +3611,21 @@ impl ErasureReadSenderV1<'_> {
     /// protected-use result.
     ///
     /// # Errors
-    /// Returns a payload-free host error when the verifier is absent, rejects
-    /// the closure, or observes a stale generation.
+    /// Returns [`ErasureHostErrorV1::StaleGeneration`] when the closure was
+    /// recorded against another inventory generation, so the caller can
+    /// re-record it and retry; otherwise a payload-free host error when the
+    /// request is not covered by the closure, or the verifier is absent,
+    /// rejects the closure, or observes a stale generation.
     pub fn admit_world_replay(
         &mut self,
         closure: &WorldReplayClosureV1,
         requested_use: &WorldReplayUseV1,
     ) -> Result<VerifiedWorldReplayV1, ErasureHostErrorV1> {
         self.host.ensure_generation(self.generation)?;
-        if closure.inventory_generation() != Hash::from_bytes(self.generation.digest())
-            || !requested_use.is_covered_by(closure)
-        {
+        if closure.inventory_generation() != Hash::from_bytes(self.generation.digest()) {
+            return Err(ErasureHostErrorV1::StaleGeneration);
+        }
+        if !requested_use.is_covered_by(closure) {
             return Err(ErasureHostErrorV1::Conflict);
         }
         let verification_owner = self
@@ -4152,6 +4156,7 @@ mod tests {
                         requested_use.timeline_id(),
                         ErasureProtectedOperationV1::Snapshot,
                         requested_use.range(),
+                        requested_use.source_logical_head(),
                         requested_use.consumer_ids().to_vec(),
                         Vec::new(),
                     ));
@@ -4182,6 +4187,7 @@ mod tests {
             closure.timeline_id(),
             ErasureProtectedOperationV1::Read,
             pos_core::store::SeqRange::all(),
+            pos_core::Seq::ZERO,
             vec!["count".to_owned()],
             Vec::new(),
         ))
@@ -4276,6 +4282,7 @@ mod tests {
             TimelineId::new(),
             ErasureProtectedOperationV1::Read,
             pos_core::store::SeqRange::all(),
+            pos_core::Seq::ZERO,
             vec!["count".to_owned()],
             Vec::new(),
         ));
@@ -4287,6 +4294,7 @@ mod tests {
             closure.timeline_id(),
             ErasureProtectedOperationV1::Read,
             pos_core::store::SeqRange::all(),
+            pos_core::Seq::ZERO,
             vec!["unknown".to_owned()],
             Vec::new(),
         ));
@@ -4300,7 +4308,7 @@ mod tests {
         );
         assert_eq!(
             reads.admit_world_replay(&bad_generation, &replay_use(&bad_generation)),
-            Err(ErasureHostErrorV1::Conflict)
+            Err(ErasureHostErrorV1::StaleGeneration)
         );
 
         for mode in [

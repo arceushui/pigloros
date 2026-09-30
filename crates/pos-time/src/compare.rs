@@ -54,40 +54,22 @@ pub fn compare(
     }
     let [a, b] = timelines;
     let [registry_a, registry_b] = registries;
-    let [requested_a, requested_b] = comparison_use(a, registry_a).and_then(|requested_a| {
-        comparison_use(b, registry_b).map(|requested_b| [requested_a, requested_b])
-    })?;
-    let requested_uses = [&requested_a, &requested_b];
+    let consumer_ids = crate::consumer_selection(registry_a)
+        .and_then(|ids_a| crate::consumer_selection(registry_b).map(|ids_b| [ids_a, ids_b]))?;
     registry_a.try_with_state_transaction(|candidate_a| {
         registry_b.try_with_state_transaction(|candidate_b| {
             let mut comparison_outcome = Err(CoreError::ArtifactUnavailable);
             let mut second_timeline_fence_result = Err(CoreError::ArtifactUnavailable);
             let mut first_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
                 let mut second_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-                    comparison_outcome =
-                        require_comparison_artifacts(sender, closures, requested_uses).and_then(
-                            |read_bounds| {
-                                compare_with_sender(
-                                    sender,
-                                    a,
-                                    b,
-                                    fork_seq,
-                                    candidate_a,
-                                    candidate_b,
-                                    read_bounds,
-                                )
-                                .and_then(|diff| {
-                                    require_comparison_artifacts(sender, closures, requested_uses)
-                                        .and_then(|final_bounds| {
-                                            if final_bounds == read_bounds {
-                                                Ok(diff)
-                                            } else {
-                                                Err(CoreError::ArtifactUnavailable)
-                                            }
-                                        })
-                                })
-                            },
-                        );
+                    comparison_outcome = compare_in_fences(
+                        sender,
+                        [a, b],
+                        fork_seq,
+                        [&mut *candidate_a, &mut *candidate_b],
+                        closures,
+                        &consumer_ids,
+                    );
                 };
                 second_timeline_fence_result = sender
                     .with_protected_effect_fence(
@@ -110,6 +92,37 @@ pub fn compare(
     })
 }
 
+/// Bind, verify, read, compare, and re-verify both Timelines inside their fences.
+fn compare_in_fences(
+    sender: &mut ErasureReadSenderV1<'_>,
+    timelines: [TimelineId; 2],
+    fork_seq: Seq,
+    registries: [&mut ProjectionRegistry; 2],
+    closures: [&WorldReplayClosureV1; 2],
+    consumer_ids: &[Vec<String>; 2],
+) -> Result<ForkDiff, CoreError> {
+    let [a, b] = timelines;
+    comparison_use(sender, a, &consumer_ids[0]).and_then(|requested_a| {
+        comparison_use(sender, b, &consumer_ids[1]).and_then(|requested_b| {
+            let requested_uses = [&requested_a, &requested_b];
+            require_comparison_artifacts(sender, closures, requested_uses).and_then(|read_bounds| {
+                compare_with_sender(sender, requested_uses, fork_seq, registries, read_bounds)
+                    .and_then(|diff| {
+                        require_comparison_artifacts(sender, closures, requested_uses).and_then(
+                            |final_bounds| {
+                                if final_bounds == read_bounds {
+                                    Ok(diff)
+                                } else {
+                                    Err(CoreError::ArtifactUnavailable)
+                                }
+                            },
+                        )
+                    })
+            })
+        })
+    })
+}
+
 fn require_comparison_artifacts(
     sender: &mut ErasureReadSenderV1<'_>,
     closures: [&WorldReplayClosureV1; 2],
@@ -124,41 +137,43 @@ fn require_comparison_artifacts(
 }
 
 fn comparison_use(
+    sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
-    registry: &ProjectionRegistry,
+    consumer_ids: &[String],
 ) -> Result<WorldReplayUseV1, CoreError> {
-    WorldReplayUseV1::new(
+    crate::observed_world_replay_use(
+        sender,
         timeline,
         ErasureProtectedOperationV1::Export,
         SeqRange::all(),
-        registry
-            .reducer_names()
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        Vec::new(),
+        consumer_ids,
     )
-    .map_err(|_| CoreError::ArtifactUnavailable)
 }
 
 fn compare_with_sender(
     sender: &mut ErasureReadSenderV1<'_>,
-    a: TimelineId,
-    b: TimelineId,
+    requested_uses: [&WorldReplayUseV1; 2],
     fork_seq: Seq,
-    registry_a: &mut ProjectionRegistry,
-    registry_b: &mut ProjectionRegistry,
+    registries: [&mut ProjectionRegistry; 2],
     read_bounds: [EventReadBounds; 2],
 ) -> Result<ForkDiff, CoreError> {
-    crate::read_complete_world_replay(sender, a, SeqRange::all(), read_bounds[0]).and_then(
-        |events_a| {
-            crate::read_complete_world_replay(sender, b, SeqRange::all(), read_bounds[1]).and_then(
-                |events_b| {
-                    compare_events(a, b, fork_seq, registry_a, registry_b, events_a, events_b)
-                },
-            )
-        },
-    )
+    let [requested_a, requested_b] = requested_uses;
+    let [registry_a, registry_b] = registries;
+    crate::read_complete_world_replay(sender, requested_a, read_bounds[0]).and_then(|events_a| {
+        crate::read_complete_world_replay(sender, requested_b, read_bounds[1]).and_then(
+            |events_b| {
+                compare_events(
+                    requested_a.timeline_id(),
+                    requested_b.timeline_id(),
+                    fork_seq,
+                    registry_a,
+                    registry_b,
+                    events_a,
+                    events_b,
+                )
+            },
+        )
+    })
 }
 
 fn compare_events(

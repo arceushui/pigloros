@@ -56,13 +56,12 @@ fn run_verified_snapshot_transaction(
     registry: &mut ProjectionRegistry,
     closure: &WorldReplayClosureV1,
 ) -> Result<Snapshot, CoreError> {
-    let requested_use =
-        snapshot_use(timeline, registry).map_err(|_| CoreError::ArtifactUnavailable)?;
+    let consumer_ids = crate::consumer_selection(registry)?;
     registry.try_with_state_transaction(|candidate| {
         let mut outcome = Err(CoreError::ArtifactUnavailable);
         let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
             outcome =
-                snapshot_effect_with_rechecks(sender, timeline, candidate, closure, &requested_use);
+                snapshot_effect_with_rechecks(sender, timeline, candidate, closure, &consumer_ids);
         };
         with_snapshot_fence(sender, timeline, &mut effect).and(outcome)
     })
@@ -83,10 +82,22 @@ fn snapshot_effect_with_rechecks(
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
     closure: &WorldReplayClosureV1,
+    consumer_ids: &[String],
+) -> Result<Snapshot, CoreError> {
+    snapshot_use(sender, timeline, consumer_ids).and_then(|requested_use| {
+        snapshot_with_use(sender, timeline, registry, closure, &requested_use)
+    })
+}
+
+fn snapshot_with_use(
+    sender: &mut ErasureReadSenderV1<'_>,
+    timeline: TimelineId,
+    registry: &mut ProjectionRegistry,
+    closure: &WorldReplayClosureV1,
     requested_use: &WorldReplayUseV1,
 ) -> Result<Snapshot, CoreError> {
     let read_bounds = crate::require_world_replay(sender, closure, requested_use)?;
-    let events = crate::read_complete_world_replay(sender, timeline, SeqRange::all(), read_bounds)?;
+    let events = crate::read_complete_world_replay(sender, requested_use, read_bounds)?;
     let snapshot = snapshot_from_events(
         timeline,
         registry,
@@ -174,18 +185,21 @@ fn run_verified_snapshot_consistency_transaction(
     registry: &mut ProjectionRegistry,
     closure: &WorldReplayClosureV1,
 ) -> Result<(), SnapshotError> {
-    let requested_use =
-        snapshot_use(snap.timeline, registry).map_err(|_| SnapshotError::ArtifactUnavailable)?;
+    let consumer_ids = crate::consumer_selection(registry).map_err(SnapshotError::from)?;
     registry.try_with_state_transaction(|candidate| {
         let mut outcome = Err(SnapshotError::ArtifactUnavailable);
         let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-            outcome = verify_snapshot_effect_with_rechecks(
-                sender,
-                snap,
-                candidate,
-                closure,
-                &requested_use,
-            );
+            outcome = snapshot_use(sender, snap.timeline, &consumer_ids)
+                .map_err(SnapshotError::from)
+                .and_then(|requested_use| {
+                    verify_snapshot_effect_with_rechecks(
+                        sender,
+                        snap,
+                        candidate,
+                        closure,
+                        &requested_use,
+                    )
+                });
         };
         with_snapshot_fence(sender, snap.timeline, &mut effect)
             .map_err(SnapshotError::from)
@@ -205,16 +219,11 @@ fn verify_snapshot_effect_with_rechecks(
     if snap.inventory_generation != *closure.inventory_generation().as_bytes() {
         return Err(SnapshotError::StaleGeneration);
     }
-    let logical_head = sender
-        .logical_head(snap.timeline)
-        .map_err(crate::host_error_to_core)
-        .map_err(SnapshotError::from)?;
-    if snap.at_seq > logical_head {
+    if snap.at_seq > requested_use.source_logical_head() {
         return Err(SnapshotError::SequenceBeyondHead);
     }
-    let all_events =
-        crate::read_complete_world_replay(sender, snap.timeline, SeqRange::all(), read_bounds)
-            .map_err(SnapshotError::from)?;
+    let all_events = crate::read_complete_world_replay(sender, requested_use, read_bounds)
+        .map_err(SnapshotError::from)?;
     let tail_start = all_events.partition_point(|event| event.seq <= snap.at_seq);
     verify_snapshot_event_sets(
         snap,
@@ -243,19 +252,16 @@ const fn snapshot_host_error(error: pos_core::ErasureHostErrorV1) -> SnapshotErr
 }
 
 fn snapshot_use(
+    sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
-    registry: &ProjectionRegistry,
-) -> Result<WorldReplayUseV1, pos_runtime::WorldReplayVerificationErrorV1> {
-    WorldReplayUseV1::new(
+    consumer_ids: &[String],
+) -> Result<WorldReplayUseV1, CoreError> {
+    crate::observed_world_replay_use(
+        sender,
         timeline,
         ErasureProtectedOperationV1::Snapshot,
         SeqRange::all(),
-        registry
-            .reducer_names()
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        Vec::new(),
+        consumer_ids,
     )
 }
 
@@ -899,8 +905,24 @@ mod tests {
         registry.register("count", Box::new(CountReducer));
         let mut reads = host.read_sender().test_ok();
         assert!(super::snapshot(&mut reads, timeline, &mut registry, &closure).is_err());
-        let requested_use = super::snapshot_use(timeline, &registry).test_ok();
         assert!(super::snapshot_effect_with_rechecks(
+            &mut reads,
+            timeline,
+            &mut registry,
+            &closure,
+            &["count".to_owned()],
+        )
+        .is_err());
+        let requested_use = super::WorldReplayUseV1::new(
+            timeline,
+            ErasureProtectedOperationV1::Snapshot,
+            SeqRange::all(),
+            Seq::ZERO,
+            vec!["count".to_owned()],
+            Vec::new(),
+        )
+        .test_ok();
+        assert!(super::snapshot_with_use(
             &mut reads,
             timeline,
             &mut registry,

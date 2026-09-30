@@ -288,15 +288,60 @@ const fn validate_consumer_id(id: &str) -> Result<(), WorldConsumerSetErrorV1> {
 }
 
 fn validate_consumers(consumers: &[WorldConsumerV1]) -> Result<(), WorldConsumerSetErrorV1> {
-    if consumers.is_empty() || consumers.len() > WORLD_CONSUMER_SET_MAX_CONSUMERS {
+    validate_consumer_order(
+        consumers.len(),
+        consumers
+            .windows(2)
+            .map(|pair| [pair[0].consumer_id(), pair[1].consumer_id()]),
+    )
+}
+
+fn validate_consumer_order<'a>(
+    count: usize,
+    mut pairs: impl Iterator<Item = [&'a str; 2]>,
+) -> Result<(), WorldConsumerSetErrorV1> {
+    if count == 0 || count > WORLD_CONSUMER_SET_MAX_CONSUMERS {
         return Err(WorldConsumerSetErrorV1::FieldOutOfBounds);
     }
-    for pair in consumers.windows(2) {
-        if pair[0].consumer_id.as_bytes() >= pair[1].consumer_id.as_bytes() {
-            return Err(WorldConsumerSetErrorV1::NonCanonicalOrder);
-        }
+    if pairs.any(|[left, right]| left.as_bytes() >= right.as_bytes()) {
+        return Err(WorldConsumerSetErrorV1::NonCanonicalOrder);
     }
     Ok(())
+}
+
+/// Validate one canonical selection of WCS1 consumer identifiers.
+///
+/// The selection obeys the same rules as a WCS1 consumer set: it is
+/// non-empty, within the consumer bound, each identifier is within its byte
+/// bound, and identifiers are strictly sorted by raw bytes.
+///
+/// # Errors
+/// Returns [`WorldConsumerSetErrorV1::FieldOutOfBounds`] for a bound
+/// violation or [`WorldConsumerSetErrorV1::NonCanonicalOrder`] for an
+/// unsorted or duplicate identifier.
+pub fn validate_consumer_id_selection(ids: &[String]) -> Result<(), WorldConsumerSetErrorV1> {
+    ids.iter()
+        .try_for_each(|id| validate_consumer_id(id))
+        .and_then(|()| {
+            validate_consumer_order(
+                ids.len(),
+                ids.windows(2)
+                    .map(|pair| [pair[0].as_str(), pair[1].as_str()]),
+            )
+        })
+}
+
+/// Validate one canonical selection of WCS1 optional-view roots.
+///
+/// The selection obeys the same rules as WCS1 optional-view roots: bounded,
+/// non-zero, and strictly sorted by raw bytes.
+///
+/// # Errors
+/// Returns [`WorldConsumerSetErrorV1::FieldOutOfBounds`],
+/// [`WorldConsumerSetErrorV1::ZeroContentAddress`], or
+/// [`WorldConsumerSetErrorV1::NonCanonicalOrder`].
+pub fn validate_optional_view_selection(roots: &[Hash]) -> Result<(), WorldConsumerSetErrorV1> {
+    validate_views(roots)
 }
 
 fn validate_producers(producers: &[WorldProducerV1]) -> Result<(), WorldConsumerSetErrorV1> {
