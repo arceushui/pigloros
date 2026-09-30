@@ -1069,12 +1069,8 @@ fn verified_step_rejects_output_one_byte_over_the_event_limit_before_append() ->
             limit: recorded,
         })) if event_type == "plugin.output" && requested == requested_bytes && recorded == limit
     ));
-    assert_rejected_output_is_not_persisted(
-        &mut registry,
-        store.as_mut(),
-        timeline,
-        &sized_draft("plugin.output", requested_bytes),
-    )
+    let draft = sized_draft("plugin.output", requested_bytes);
+    assert_rejected_output_is_not_persisted(&mut registry, store.as_mut(), timeline, &draft)
 }
 
 #[test]
@@ -1092,12 +1088,8 @@ fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult 
             ref event_type,
         })) if event_type == "plugin.undeclared"
     ));
-    assert_rejected_output_is_not_persisted(
-        &mut registry,
-        store.as_mut(),
-        timeline,
-        &sized_draft("plugin.undeclared", 1),
-    )
+    let draft = sized_draft("plugin.undeclared", 1);
+    assert_rejected_output_is_not_persisted(&mut registry, store.as_mut(), timeline, &draft)
 }
 
 #[test]
