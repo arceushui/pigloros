@@ -288,6 +288,20 @@ mod coverage_tests {
             ),
             Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
         ));
+        assert!(matches!(
+            pos_runtime::OutputPolicyBindingV1::from_installed_source(
+                &plugin,
+                pos_runtime::InstalledOutputPolicySourceV1::Generated,
+                &[],
+                "deterministic-local-v1",
+            )
+            .test_ok()
+            .with_installed_action_approver(
+                super::GatewayWorldActionApprover(super::WorldPlugin::new()),
+                std::iter::repeat(Kind::new(EVENT_TYPE_ACTION)),
+            ),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+        ));
     }
 
     #[test]
