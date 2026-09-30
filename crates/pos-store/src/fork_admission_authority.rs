@@ -8,11 +8,12 @@ use pos_core::{
     fork_authentication::{
         principal_digest_v1, AuthenticatedPrincipalEvidenceV1, ForkAuthenticationPolicyV1,
     },
-    ForkAdmissionCommandFactsV1, ForkAdmissionHostCommandV1, ForkAdmissionHostRecordV1,
-    ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1, ForkAdmissionOperationKindV1,
-    ForkAdmissionOperationResultV1, ForkAdmissionRecordV1, ForkAdmissionRecoveryProofV1,
-    ForkCreateCommitmentInputV1, Hash, PrincipalOwnerBindingV1, PrincipalOwnerCommitmentInputV1,
-    PublicKey, Signature, TimelineId,
+    ErasureAdmittedForkContextV1, ErasureContainmentErrorV1, ErasureContainmentGateV1,
+    ErasureProtectedOperationV1, ErasureTopologyStoreBindingV1, ForkAdmissionCommandFactsV1,
+    ForkAdmissionHostCommandV1, ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1,
+    ForkAdmissionOpenChallengeV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
+    ForkAdmissionRecordV1, ForkAdmissionRecoveryProofV1, ForkCreateCommitmentInputV1, Hash,
+    PrincipalOwnerBindingV1, PrincipalOwnerCommitmentInputV1, PublicKey, Signature, TimelineId,
 };
 use pos_crypto::fork_authentication::{
     verify_authenticated_principal_evidence_v1, verify_fork_admission_host_command_v1,
@@ -181,6 +182,99 @@ impl VerifiedForkAdmissionCommandV1 {
             } => *evidence_digest,
         }
     }
+
+    /// Return the FCC1 operation ID and parent, or `None` for a POC1 (which
+    /// the permit-bearing method rejects as `InvalidRequest`).
+    pub(crate) const fn fork_target(&self) -> Option<(Hash, TimelineId)> {
+        match self {
+            Self::PrincipalOwner { .. } => None,
+            Self::Fork {
+                operation_id,
+                parent_id,
+                ..
+            } => Some((*operation_id, *parent_id)),
+        }
+    }
+}
+
+/// ADR-106 r3 closed meaning of a payload-free erasure containment decision.
+pub(crate) const fn containment_admission_error(
+    error: ErasureContainmentErrorV1,
+) -> pos_core::ForkAdmissionErrorV1 {
+    match error {
+        ErasureContainmentErrorV1::AccessFrozen => {
+            pos_core::ForkAdmissionErrorV1::ParentErasureContained
+        }
+        ErasureContainmentErrorV1::RecoveryUnavailable => {
+            pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable
+        }
+    }
+}
+
+/// Whether an FCC1 outcome may have added a child to the store topology, so
+/// the adapter's captured inventory generation must be re-established.
+pub(crate) const fn admitted_fork_may_have_changed_topology<T>(
+    result: &Result<T, pos_core::ForkAdmissionErrorV1>,
+) -> bool {
+    matches!(
+        result,
+        Ok(_) | Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    )
+}
+
+/// Resolve the ADR-106 r3 containment decision of the permit-bearing
+/// method for one FCC1 `target`.
+///
+/// The adapter applies the returned decision only on the absent-operation
+/// branch, after the parent-visibility check. `gate` is the adapter's
+/// validated gate, and `binding` its host-issued topology binding.
+pub(crate) fn admitted_fork_context_containment(
+    context: &ErasureAdmittedForkContextV1<'_>,
+    gate: Option<&ErasureContainmentGateV1>,
+    binding: Option<&ErasureTopologyStoreBindingV1>,
+    (operation_id, parent): (Hash, TimelineId),
+) -> Result<(), pos_core::ForkAdmissionErrorV1> {
+    gate.zip(binding).map_or(
+        Err(pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable),
+        |(gate, binding)| {
+            context
+                .authorize_admitted_fork(gate, binding, operation_id, parent)
+                .map_err(containment_admission_error)
+        },
+    )
+}
+
+/// Run one FAC1 under the ADR-106 r3 rules of the unfenced method.
+///
+/// A POC1 runs unchanged. A new FCC1 on a store whose binding requires
+/// topology permits is `ErasureContainmentUnavailable`; on any other store it
+/// runs inside `with_fence(parent, Fork)` exactly as `LedgerStore::fork`, so
+/// the gate fence is taken before the adapter write boundary. When the fence
+/// refuses the parent, `run` still executes lookup-only: an exact committed
+/// operation returns its result and an absent one receives the containment
+/// rejection after the parent-visibility check.
+pub(crate) fn with_unfenced_fork_containment<T>(
+    command: &VerifiedForkAdmissionCommandV1,
+    requires_permit: bool,
+    gate: Result<std::sync::Arc<ErasureContainmentGateV1>, pos_core::CoreError>,
+    mut run: impl FnMut(Result<(), pos_core::ForkAdmissionErrorV1>) -> T,
+) -> T {
+    let Some((_, parent)) = command.fork_target() else {
+        return run(Ok(()));
+    };
+    if requires_permit {
+        return run(Err(
+            pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable,
+        ));
+    }
+    // The fence either runs the admission and returns its value, or refuses
+    // before it ran; a refusal is applied on the lookup-only path.
+    gate.map_err(|_| pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable)
+        .and_then(|gate| {
+            gate.with_fence_value(parent, ErasureProtectedOperationV1::Fork, || run(Ok(())))
+                .map_err(containment_admission_error)
+        })
+        .unwrap_or_else(|rejection| run(Err(rejection)))
 }
 
 /// A current-session, host-proven lookup key decoded from FRP1.
@@ -689,7 +783,13 @@ pub trait ForkAdmissionAuthorityBootstrapPortV1 {
 /// host proof before opening a write transaction, then own all exact-graph,
 /// expiry, rollback-fence, and atomic-persistence decisions.
 pub trait ForkAdmissionAuthorityPortV1 {
-    /// Execute one authenticated FAC1 operation.
+    /// Execute one authenticated FAC1 operation without a topology permit.
+    ///
+    /// A POC1 is unchanged and an exact committed FCC1 returns its original
+    /// result. A new FCC1 on a store whose erasure binding requires topology
+    /// permits is `ErasureContainmentUnavailable`. On any other store the
+    /// parent must be generically visible and pass the erasure fence for
+    /// `Fork`, as for `LedgerStore::fork` (ADR-106 revision 3).
     ///
     /// # Errors
     /// Returns a closed authority error without exposing partial POB1, child,
@@ -710,6 +810,32 @@ pub trait ForkAdmissionAuthorityPortV1 {
         &mut self,
         session: &ForkAdmissionAuthoritySessionV1,
         proof: &ForkAdmissionRecoveryProofV1,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>;
+
+    /// Execute one authenticated FCC1 inside the erasure host's gate topology
+    /// transition (ADR-106 revision 3).
+    ///
+    /// The host builds `context` inside the transition callback. After the
+    /// same pre-transaction verification as
+    /// [`Self::execute_fork_admission_command`], the adapter claims the
+    /// context's permit, requires the context to name this FCC1's operation
+    /// ID and parent, and evaluates its parent verdict before taking its
+    /// write boundary. An exact committed operation returns its original
+    /// result without applying that verdict; otherwise the verdict is applied
+    /// after the parent-visibility check.
+    ///
+    /// # Errors
+    /// Returns `InvalidRequest` for a POC1, `ParentErasureContained` or
+    /// `ErasureContainmentUnavailable` for a contained or unbindable new Fork,
+    /// and otherwise the same closed errors as
+    /// [`Self::execute_fork_admission_command`], never leaving a partial
+    /// child, FAR1, operation row, or wall-fence advance.
+    fn execute_fork_admission_command_in_topology_transition(
+        &mut self,
+        context: &ErasureAdmittedForkContextV1<'_>,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &ForkAuthenticationPolicyV1,
+        command: &ForkAdmissionHostCommandV1,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>;
 }
 

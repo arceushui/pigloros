@@ -4687,10 +4687,13 @@ name = "pos-runtime"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ciborium",
  "indexmap",
  "pos-core",
+ "pos-crypto",
  "pos-state",
  "pos-store",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",

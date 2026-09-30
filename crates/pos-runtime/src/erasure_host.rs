@@ -28,13 +28,17 @@ use pos_core::{
     ErasureStateTransitionV1, ErasureStateV1, ErasureTopologyTransitionPermitV1,
     ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
     ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
-    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, Hash,
-    KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyRegistryStateV1, OwnTracksIngressInputV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1,
-    Timeline, TimelineId, TimelineMeta, TimelineMode, WallTime,
+    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, ForkAdmissionErrorV1,
+    ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
+    ForkAuthenticationPolicyV1, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
+    KeyDestructionRequestV1, KeyRegistryStateV1, OwnTracksIngressInputV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq,
+    StoredErasureManifestV1, Timeline, TimelineId, TimelineMeta, TimelineMode, WallTime,
 };
-use pos_store::StoreConfig;
+use pos_store::{
+    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
+    ForkAdmissionAuthoritySessionV1, StoreConfig,
+};
 use std::num::NonZeroUsize;
 
 #[cfg(test)]
@@ -90,6 +94,15 @@ struct IdentifiedForkTransitionInput<'a> {
 
 struct SingleUseVerifiedInventoryQueryV1(Option<ErasureVerifiedInventoryV1>);
 
+/// How an admitted Fork transition recomputes its successor inventory.
+struct AdmittedForkSuccessorSourceV1 {
+    maximum_requests: usize,
+    /// `None` when no request is active: the verified-empty topology query.
+    coordinator: Option<(Arc<dyn ErasureCoordinatorAuthorityV1>, ErasureReferenceV1)>,
+}
+
+type AdmittedForkResultV1 = Result<ForkAdmissionOperationResultV1, ForkAdmissionErrorV1>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UnaffectedTopologyTransitionError {
     Host(ErasureHostErrorV1),
@@ -144,6 +157,8 @@ trait ErasureHostStore:
     + ErasureInventoryPersistencePortV1
     + ErasureForkPersistencePortV1
     + ErasurePersistencePortV1
+    + ForkAdmissionAuthorityBootstrapPortV1
+    + ForkAdmissionAuthorityPortV1
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -158,7 +173,9 @@ where
     T: pos_core::store::EventStore
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1
-        + ErasurePersistencePortV1,
+        + ErasurePersistencePortV1
+        + ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1,
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -1328,6 +1345,202 @@ impl ErasureExecutionHostV1 {
     #[cfg(test)]
     pub(crate) fn freeze_timeline_for_test(&self, timeline: TimelineId) {
         self.gate.freeze_timeline_for_test(timeline);
+    }
+
+    /// Borrow the owned store's ADR-106 bootstrap port.
+    ///
+    /// The composition root provisions FAH1 and opens the one
+    /// Fork-admission session of this host's adapter through it. The port
+    /// cannot read or change Timelines, Events, or erasure state.
+    pub fn fork_admission_bootstrap(&mut self) -> &mut dyn ForkAdmissionAuthorityBootstrapPortV1 {
+        self.store.host_store()
+    }
+
+    /// Execute one authenticated ADR-106 FAC1 against the owned store
+    /// (ADR-106 revision 3).
+    ///
+    /// While this host is Ready, an FCC1 runs inside the gate topology
+    /// transition. The store receives an opaque context that binds the
+    /// transition permit, the installed generation, the FCC1 operation ID and
+    /// parent, and a parent verdict computed under the held fence. The
+    /// successor inventory that classifies the child is published before the
+    /// receipt returns. A POC1, or an FCC1 while the host cannot enter a
+    /// transition, uses the store's unfenced method, which returns only an
+    /// exact committed result or a definite `ErasureContainmentUnavailable`
+    /// for a new Fork.
+    ///
+    /// # Errors
+    /// Returns a closed ADR-106 error. A definite rejection leaves the host
+    /// and its installed inventory unchanged. An uncertain commit or a failed
+    /// successor publication poisons the host and returns
+    /// `StorageIndeterminate`; FRP1 then recovers the exact result.
+    pub fn execute_fork_admission_command(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &ForkAuthenticationPolicyV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> AdmittedForkResultV1 {
+        let transition = command
+            .validated_command_facts()
+            .fork_target()
+            .zip(self.admitted_fork_successor_source())
+            .and_then(|(target, source)| {
+                self.execute_admitted_fork_transition(target, &source, session, policy, command)
+            });
+        // A POC1, a host that is not Ready, or a gate that refused to start
+        // the transition uses the unfenced method: only an exact committed
+        // result or a definite rejection.
+        transition.unwrap_or_else(|| {
+            self.store
+                .host_store()
+                .execute_fork_admission_command(session, policy, command)
+        })
+    }
+
+    /// Reconcile one lookup-only FRP1 against the owned store.
+    ///
+    /// FRP1 needs no gate, permit, context, or visibility check (ADR-106
+    /// revision 3), so it stays available while this host is closed or
+    /// poisoned, including after a post-commit publication failure.
+    ///
+    /// # Errors
+    /// Returns the store's closed FRP1 error, such as `OperationMissing`.
+    pub fn recover_fork_admission_command(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+    ) -> AdmittedForkResultV1 {
+        self.store
+            .host_store()
+            .recover_fork_admission_command(session, proof)
+    }
+
+    /// Return how an admitted Fork transition would publish its successor,
+    /// or `None` when this host cannot enter a topology transition.
+    fn admitted_fork_successor_source(&self) -> Option<AdmittedForkSuccessorSourceV1> {
+        let (_, maximum_requests, inventory) = self.ready_state().ok()?;
+        if inventory.request_count() == 0 {
+            return Some(AdmittedForkSuccessorSourceV1 {
+                maximum_requests,
+                coordinator: None,
+            });
+        }
+        self.authority
+            .clone()
+            .zip(self.coordinator)
+            .map(|coordinator| AdmittedForkSuccessorSourceV1 {
+                maximum_requests,
+                coordinator: Some(coordinator),
+            })
+    }
+
+    /// Run one FCC1 inside the gate topology transition, or return `None`
+    /// when the gate refuses to start it (nothing ran).
+    fn execute_admitted_fork_transition(
+        &mut self,
+        (operation_id, parent): (Hash, TimelineId),
+        source: &AdmittedForkSuccessorSourceV1,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &ForkAuthenticationPolicyV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Option<AdmittedForkResultV1> {
+        let gate = Arc::clone(&self.gate);
+        let limits = self.recovery_limits;
+        let mut outcome = None;
+        let publication = {
+            let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+                let context = gate.admitted_fork_context(permit, operation_id, parent);
+                let result = self
+                    .store
+                    .host_store()
+                    .execute_fork_admission_command_in_topology_transition(
+                        &context, session, policy, command,
+                    );
+                // A definite rejection fails the callback, so the gate keeps
+                // its installed inventory and the host stays Ready.
+                let successor = if let Ok(ForkAdmissionOperationResultV1::Fork(receipt)) = &result {
+                    self.admitted_fork_successor(permit, source, receipt.child_id, limits)
+                } else {
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                };
+                outcome = Some((result, context.nothing_written()));
+                successor.map(|inventory| (inventory, ()))
+            };
+            gate.install_from_verified_inventory_transition(&mut transition)
+        };
+        outcome.map(|(result, nothing_written)| {
+            self.finish_admitted_fork(
+                result,
+                publication,
+                (source.maximum_requests, limits),
+                nothing_written,
+            )
+        })
+    }
+
+    /// Recompute the verified successor inventory after the adapter commit,
+    /// so the child is classified before the gate publishes it.
+    fn admitted_fork_successor(
+        &mut self,
+        permit: &ErasureTopologyTransitionPermitV1,
+        source: &AdmittedForkSuccessorSourceV1,
+        child: TimelineId,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<ErasureVerifiedInventoryV1, ErasureErrorV1> {
+        let Some((authority, coordinator)) = source.coordinator.as_ref() else {
+            return self
+                .store
+                .host_store()
+                .complete_erasure_inventory_snapshot_with_limits(limits)
+                .and_then(|snapshot| {
+                    ErasureVerifiedEmptyInventoryQueryV1::new(snapshot)
+                        .verified_inventory_with_limits(limits)
+                });
+        };
+        self.store
+            .host_store()
+            .get_timeline_for_host_transition(permit, child)
+            .ok()
+            .flatten()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|child| {
+                let port =
+                    HostedCoordinatorPortV1::new(self.store.host_store(), authority.as_ref())
+                        .with_topology_candidate(&child.meta);
+                ErasureCoordinatorStateMachineV1::new(port, *coordinator)
+                    .verified_inventory_with_limits(limits)
+            })
+    }
+
+    /// Publish the verified successor of a committed admitted Fork.
+    ///
+    /// Only an uncertain commit or publication poisons the host. A definite
+    /// rejection, including an indeterminate storage error after which the
+    /// adapter's write boundary never opened or was rolled back
+    /// (`nothing_written`), leaves it Ready with its installed inventory. A failed gate
+    /// publication and a failed post-publication verification are one
+    /// uncertain-publication outcome.
+    fn finish_admitted_fork(
+        &mut self,
+        result: AdmittedForkResultV1,
+        publication: Result<(ErasureVerifiedInventoryV1, ()), pos_core::ErasureContainmentErrorV1>,
+        (maximum_requests, limits): (usize, ErasureRecoveryLimitsV1),
+        nothing_written: bool,
+    ) -> AdmittedForkResultV1 {
+        let finished = result.and_then(|result| {
+            publication
+                .map_err(ErasureHostErrorV1::from)
+                .and_then(|(inventory, ())| self.verify_published_inventory(inventory, limits))
+                .map(|inventory| {
+                    self.install_ready_inventory(inventory, maximum_requests);
+                    result
+                })
+                .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)
+        });
+        if matches!(finished, Err(ForkAdmissionErrorV1::StorageIndeterminate)) && !nothing_written {
+            self.poison();
+        }
+        finished
     }
 
     /// Bind the independently owned consent authority before Gateway commands
@@ -4318,6 +4531,97 @@ mod tests {
                 self.inner
                     .recover_fork_admission(operation, successor_inventory)
             }
+        }
+    }
+
+    impl ForkAdmissionAuthorityBootstrapPortV1 for FaultStoreV1 {
+        fn begin_fork_admission_initialize(
+            &mut self,
+            host_key: pos_core::PublicKey,
+            policy_digest: Hash,
+        ) -> Result<
+            pos_core::ForkAdmissionInitializeChallengeV1,
+            pos_store::ForkAdmissionAuthorityErrorV1,
+        > {
+            self.inner
+                .begin_fork_admission_initialize(host_key, policy_digest)
+        }
+
+        fn finalize_fork_admission_initialize(
+            &mut self,
+            challenge: &pos_core::ForkAdmissionInitializeChallengeV1,
+            signature: &pos_core::Signature,
+        ) -> Result<pos_core::ForkAdmissionHostRecordV1, pos_store::ForkAdmissionAuthorityErrorV1>
+        {
+            self.inner
+                .finalize_fork_admission_initialize(challenge, signature)
+        }
+
+        fn fork_admission_host_record(
+            &self,
+        ) -> Result<pos_core::ForkAdmissionHostRecordV1, pos_store::ForkAdmissionAuthorityErrorV1>
+        {
+            self.inner.fork_admission_host_record()
+        }
+
+        fn begin_fork_admission_open(
+            &mut self,
+            host_key: pos_core::PublicKey,
+            policy_digest: Hash,
+        ) -> Result<pos_core::ForkAdmissionOpenChallengeV1, pos_store::ForkAdmissionAuthorityErrorV1>
+        {
+            self.inner
+                .begin_fork_admission_open(host_key, policy_digest)
+        }
+
+        fn finalize_fork_admission_open(
+            &mut self,
+            challenge: &pos_core::ForkAdmissionOpenChallengeV1,
+            signature: &pos_core::Signature,
+        ) -> Result<ForkAdmissionAuthoritySessionV1, pos_store::ForkAdmissionAuthorityErrorV1>
+        {
+            self.inner
+                .finalize_fork_admission_open(challenge, signature)
+        }
+
+        fn advance_fork_admission_wall_fence(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+        ) -> Result<(), pos_store::ForkAdmissionAuthorityErrorV1> {
+            self.inner.advance_fork_admission_wall_fence(session)
+        }
+    }
+
+    impl ForkAdmissionAuthorityPortV1 for FaultStoreV1 {
+        fn execute_fork_admission_command(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            policy: &ForkAuthenticationPolicyV1,
+            command: &ForkAdmissionHostCommandV1,
+        ) -> AdmittedForkResultV1 {
+            self.inner
+                .execute_fork_admission_command(session, policy, command)
+        }
+
+        fn recover_fork_admission_command(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            proof: &ForkAdmissionRecoveryProofV1,
+        ) -> AdmittedForkResultV1 {
+            self.inner.recover_fork_admission_command(session, proof)
+        }
+
+        fn execute_fork_admission_command_in_topology_transition(
+            &mut self,
+            context: &pos_core::ErasureAdmittedForkContextV1<'_>,
+            session: &ForkAdmissionAuthoritySessionV1,
+            policy: &ForkAuthenticationPolicyV1,
+            command: &ForkAdmissionHostCommandV1,
+        ) -> AdmittedForkResultV1 {
+            self.inner
+                .execute_fork_admission_command_in_topology_transition(
+                    context, session, policy, command,
+                )
         }
     }
 

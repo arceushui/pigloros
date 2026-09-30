@@ -81,6 +81,19 @@ pub enum ForkAdmissionCommandFactsV1 {
 }
 
 impl ForkAdmissionCommandFactsV1 {
+    /// Return the FCC1 operation ID and parent, or `None` for a POC1.
+    #[must_use]
+    pub const fn fork_target(&self) -> Option<(Hash, TimelineId)> {
+        match self {
+            Self::PrincipalOwner { .. } => None,
+            Self::Fork {
+                operation_id,
+                parent_id,
+                ..
+            } => Some((*operation_id, *parent_id)),
+        }
+    }
+
     /// Return the durable ADR-106 operation commitment for these facts.
     ///
     /// The session identity is excluded, so the value survives reopen.

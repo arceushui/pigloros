@@ -68,6 +68,15 @@ pub enum ForkAdmissionErrorV1 {
     /// Operating-system entropy was unavailable.
     #[error("Fork admission entropy is unavailable")]
     EntropyUnavailable,
+    /// The visible parent is in a frozen erasure scope or is not positively
+    /// proven unaffected by every active erasure request.
+    #[error("the parent Timeline is contained by erasure")]
+    ParentErasureContained,
+    /// Erasure containment authority cannot admit this Fork: the gate or its
+    /// verified inventory is unavailable, the parent is unclassified, or the
+    /// topology permit or its context does not bind this exact FCC1.
+    #[error("erasure containment is unavailable")]
+    ErasureContainmentUnavailable,
 }
 
 /// One durable operation graph root.

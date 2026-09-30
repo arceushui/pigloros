@@ -70,11 +70,12 @@ use pos_core::{
 };
 
 use crate::fork_admission_authority::{
-    advance_wall_fence, begin_initialize, begin_open, finalize_initialize, finalize_open,
-    fork_commitment, principal_owner_commitment, validate_live_session, verify_command,
-    verify_recovery_proof, ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
-    ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityStateV1,
-    ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
+    admitted_fork_context_containment, admitted_fork_may_have_changed_topology, advance_wall_fence,
+    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment,
+    principal_owner_commitment, validate_live_session, verify_command, verify_recovery_proof,
+    with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
+    ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
+    ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
 use crate::fork_delivery_journal::{
     fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
@@ -7741,37 +7742,56 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
         policy: &pos_core::fork_authentication::ForkAuthenticationPolicyV1,
         command: &ForkAdmissionHostCommandV1,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
-        let host = self
-            .fork_admission_host_record()
-            .map_err(pos_core::ForkAdmissionErrorV1::from)?;
-        if !policy
-            .digest()
-            .is_ok_and(|digest| host.authentication_policy_digest() == digest)
-        {
-            return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
-        }
-        let command = verify_command(
+        let (host, command) = self.verify_fork_admission_command(session, policy, command)?;
+        // ADR-106 r3 lock order: any gate fence is taken before BEGIN IMMEDIATE.
+        with_unfenced_fork_containment(
+            &command,
+            self.erasure_topology_requires_permit,
+            self.validated_erasure_gate(),
+            |containment| {
+                self.execute_fork_admission_transaction(
+                    session,
+                    host,
+                    command.clone(),
+                    containment,
+                    None,
+                )
+            },
+        )
+    }
+
+    fn execute_fork_admission_command_in_topology_transition(
+        &mut self,
+        context: &pos_core::ErasureAdmittedForkContextV1<'_>,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        let (host, command) = self.verify_fork_admission_command(session, policy, command)?;
+        let target = command
+            .fork_target()
+            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)?;
+        // The erasure host already holds the gate fence for this whole call,
+        // so BEGIN IMMEDIATE is always the inner lock.
+        let containment = admitted_fork_context_containment(
+            context,
+            self.validated_erasure_gate().ok().as_deref(),
+            self.erasure_topology_store_binding.as_ref(),
+            target,
+        );
+        // The context observes a write boundary that failed to open or was
+        // rolled back, so the host poisons only on uncertain outcomes.
+        let result = self.execute_fork_admission_transaction(
             session,
-            self.fork_admission_authority_runtime.session_identity,
             host,
-            policy,
             command,
-        )?;
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?;
-        let result = self.execute_fork_admission_in_transaction(session, host, command);
-        match result {
-            Ok(value) => self
-                .conn
-                .execute_batch("COMMIT")
-                .map(|()| value)
-                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
-            Err(error) => self.conn.execute_batch("ROLLBACK").map(|()| error).map_or(
-                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
-                Err,
-            ),
+            containment,
+            Some(context),
+        );
+        if admitted_fork_may_have_changed_topology(&result) && !context.nothing_written() {
+            self.erasure_inventory_generation = None;
         }
+        result
     }
 
     fn recover_fork_admission_command(
@@ -7880,42 +7900,22 @@ impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
             return Err(ForkDeliveryJournalErrorV1::Conflict);
         }
         let owner_fence = sqlite_owner_fence(claim.owner_fence)?;
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
-        let result = (|| {
-            sqlite_fork_delivery_row(&self.conn, claim.tuple.host_request_id)?
-                .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Pending))
-                .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
-            let execution = fork_delivery_execution(
-                self.execute_fork_admission_in_transaction(session, host, command),
-            );
-            match &execution {
-                ForkDeliveryExecutionV1::Committed(_) => sqlite_set_fork_delivery_state(
-                    &self.conn,
-                    claim.tuple,
+        // ADR-106 r3 lock order: any gate fence is taken before BEGIN IMMEDIATE.
+        with_unfenced_fork_containment(
+            &command,
+            self.erasure_topology_requires_permit,
+            self.validated_erasure_gate(),
+            |containment| {
+                self.execute_claimed_fork_delivery_transaction(
+                    session,
+                    host,
+                    claim,
                     owner_fence,
-                    ForkDeliveryStateV1::Uncertain,
-                    ForkDeliveryStateV1::Pending,
-                )?,
-                ForkDeliveryExecutionV1::Rejected(_) => {
-                    sqlite_delete_pending_fork_delivery(&self.conn, claim.tuple, owner_fence)?;
-                }
-                // Never commit a transaction whose authority write failed.
-                // Uncertain is recorded in a fresh transaction only after
-                // this complete transaction has rolled back.
-                ForkDeliveryExecutionV1::Uncertain => {
-                    return Err(ForkDeliveryJournalErrorV1::StorageIndeterminate);
-                }
-            }
-            Ok(execution)
-        })();
-        match result {
-            Err(ForkDeliveryJournalErrorV1::StorageIndeterminate) => {
-                sqlite_record_uncertain_after_rollback(&self.conn, claim.tuple, owner_fence)
-            }
-            result => finish_fork_delivery_transaction(&self.conn, result),
-        }
+                    command.clone(),
+                    containment,
+                )
+            },
+        )
     }
 
     fn recover_fork_delivery(
@@ -8194,11 +8194,130 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
 }
 
 impl SqliteStore {
+    /// Verify FAC1 against the pinned FAH1 policy before the write boundary.
+    fn verify_fork_admission_command(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<
+        (ForkAdmissionHostRecordV1, VerifiedForkAdmissionCommandV1),
+        pos_core::ForkAdmissionErrorV1,
+    > {
+        let host = self
+            .fork_admission_host_record()
+            .map_err(pos_core::ForkAdmissionErrorV1::from)?;
+        if !policy
+            .digest()
+            .is_ok_and(|digest| host.authentication_policy_digest() == digest)
+        {
+            return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
+        }
+        verify_command(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            policy,
+            command,
+        )
+        .map(|command| (host, command))
+    }
+
+    /// Execute one claimed FAC1 and its journal transition in one
+    /// `BEGIN IMMEDIATE` transaction.
+    fn execute_claimed_fork_delivery_transaction(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        host: ForkAdmissionHostRecordV1,
+        claim: ForkDeliveryClaimV1,
+        owner_fence: i64,
+        command: VerifiedForkAdmissionCommandV1,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+    ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let result =
+            (|| {
+                sqlite_fork_delivery_row(&self.conn, claim.tuple.host_request_id)?
+                    .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Pending))
+                    .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
+                let execution = fork_delivery_execution(
+                    self.execute_fork_admission_in_transaction(session, host, command, containment),
+                );
+                match &execution {
+                    ForkDeliveryExecutionV1::Committed(_) => sqlite_set_fork_delivery_state(
+                        &self.conn,
+                        claim.tuple,
+                        owner_fence,
+                        ForkDeliveryStateV1::Uncertain,
+                        ForkDeliveryStateV1::Pending,
+                    )?,
+                    ForkDeliveryExecutionV1::Rejected(_) => {
+                        sqlite_delete_pending_fork_delivery(&self.conn, claim.tuple, owner_fence)?;
+                    }
+                    // Never commit a transaction whose authority write failed.
+                    // Uncertain is recorded in a fresh transaction only after
+                    // this complete transaction has rolled back.
+                    ForkDeliveryExecutionV1::Uncertain => {
+                        return Err(ForkDeliveryJournalErrorV1::StorageIndeterminate);
+                    }
+                }
+                Ok(execution)
+            })();
+        match result {
+            Err(ForkDeliveryJournalErrorV1::StorageIndeterminate) => {
+                sqlite_record_uncertain_after_rollback(&self.conn, claim.tuple, owner_fence)
+            }
+            result => finish_fork_delivery_transaction(&self.conn, result),
+        }
+    }
+
+    /// Run one verified FAC1 in its own `BEGIN IMMEDIATE` transaction.
+    ///
+    /// On the permit path `context` opens and rolls back the write boundary,
+    /// so it can tell the erasure host when nothing was written.
+    fn execute_fork_admission_transaction(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        host: ForkAdmissionHostRecordV1,
+        command: VerifiedForkAdmissionCommandV1,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+        context: Option<&pos_core::ErasureAdmittedForkContextV1<'_>>,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        let begin = || self.conn.execute_batch("BEGIN IMMEDIATE");
+        context
+            .map_or_else(begin, |context| context.open_write_boundary(begin))
+            .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?;
+        let result =
+            self.execute_fork_admission_in_transaction(session, host, command, containment);
+        match result {
+            Ok(value) => self
+                .conn
+                .execute_batch("COMMIT")
+                .map(|()| value)
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            Err(error) => {
+                let rollback = || self.conn.execute_batch("ROLLBACK");
+                context
+                    .map_or_else(rollback, |context| {
+                        context.roll_back_write_boundary(rollback)
+                    })
+                    .map(|()| error)
+                    .map_or(
+                        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+                        Err,
+                    )
+            }
+        }
+    }
+
     fn execute_fork_admission_in_transaction(
         &self,
         session: &ForkAdmissionAuthoritySessionV1,
         host: ForkAdmissionHostRecordV1,
         command: VerifiedForkAdmissionCommandV1,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
         // ADR-106: FAH1 was read before the write boundary for proof
         // verification. Re-read it under BEGIN IMMEDIATE and require the exact
@@ -8288,6 +8407,7 @@ impl SqliteStore {
                 attribution_required,
                 child_name,
                 commitment,
+                containment,
             }),
         };
         result.and_then(|value| {
@@ -8350,6 +8470,46 @@ impl SqliteStore {
         Ok(ForkAdmissionOperationResultV1::PrincipalOwner(binding))
     }
 
+    /// ADR-106 r3 steps 5 to 7 in order: the committed POB1 (`InvalidRequest`
+    /// when absent), parent visibility, then erasure containment.
+    fn admitted_fork_binding(
+        &self,
+        principal_digest: Hash,
+        parent: TimelineId,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+    ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+        let binding = sqlite_principal_owner_binding(&self.conn, principal_digest)?
+            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)?;
+        self.admitted_fork_parent_visibility(parent)?;
+        containment?;
+        Ok(binding)
+    }
+
+    /// ADR-106 r3 step 6: an absent or geographic parent is indistinguishable
+    /// from a changed one, while an unreadable marker is indeterminate.
+    fn admitted_fork_parent_visibility(
+        &self,
+        parent: TimelineId,
+    ) -> Result<(), pos_core::ForkAdmissionErrorV1> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM timelines WHERE id = ?1)",
+                params![parent.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .ok()
+            .zip(self.timeline_contains_geographic_evidence(parent).ok())
+            .map(|(exists, geographic)| exists && !geographic)
+            .ok_or(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+            .and_then(|visible| {
+                if visible {
+                    Ok(())
+                } else {
+                    Err(pos_core::ForkAdmissionErrorV1::ParentChanged)
+                }
+            })
+    }
+
     fn insert_fork_operation(
         &self,
         command: SqliteForkAdmissionOperation,
@@ -8365,9 +8525,9 @@ impl SqliteStore {
             attribution_required,
             child_name,
             commitment,
+            containment,
         } = command;
-        let binding = sqlite_principal_owner_binding(&self.conn, principal_digest)?
-            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)?;
+        let binding = self.admitted_fork_binding(principal_digest, parent_id, containment)?;
         let chain_head = Self::logical_head_unchecked_on(&self.conn, parent_id)
             .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)
             .and_then(|head| {
@@ -8441,6 +8601,8 @@ struct SqliteForkAdmissionOperation {
     attribution_required: bool,
     child_name: String,
     commitment: Hash,
+    /// ADR-106 r3 erasure decision applied after the visibility check.
+    containment: Result<(), pos_core::ForkAdmissionErrorV1>,
 }
 
 fn sqlite_hash(bytes: Vec<u8>) -> Result<Hash, pos_core::ForkAdmissionErrorV1> {
@@ -11237,7 +11399,8 @@ mod tests {
             store.execute_fork_admission_in_transaction(
                 &session,
                 replaced_host,
-                command(hash(87), hash(88))
+                command(hash(87), hash(88)),
+                Ok(()),
             ),
             Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
         );
@@ -11245,7 +11408,8 @@ mod tests {
             store.execute_fork_admission_in_transaction(
                 &session,
                 host,
-                command(hash(87), hash(88))
+                command(hash(87), hash(88)),
+                Ok(()),
             ),
             Err(pos_core::ForkAdmissionErrorV1::InvalidRequest)
         );
@@ -11270,7 +11434,8 @@ mod tests {
             store.execute_fork_admission_in_transaction(
                 &session,
                 host,
-                command(hash(91), hash(90))
+                command(hash(91), hash(90)),
+                Ok(()),
             ),
             Err(pos_core::ForkAdmissionErrorV1::ParentChanged)
         );
