@@ -142,246 +142,334 @@ impl OutputPolicyArtifactInputV1 {
     }
 }
 
+/// One native Plugin type compiled into an installed source.
+///
+/// Callback and Plugin ownership compare `std::any::type_name` strings rather
+/// than `TypeId`: the runtime cannot depend on the Plugin crates that own
+/// these types, so it cannot name them. `type_name` output is not guaranteed
+/// to be unique or stable across compiler versions, so this check is a
+/// same-build composition guard, not an authenticated identity; authenticated
+/// owner proof is deferred to Redmine #396 and #395.
+struct InstalledPluginV1 {
+    /// Name reported by the installed Plugin type.
+    name: &'static str,
+    /// Concrete Plugin type observed at the composition boundary.
+    type_name: &'static str,
+    /// Output Event types declared for this Plugin.
+    event_types: &'static [&'static str],
+    /// Concrete Driver type compiled for this Plugin, if any.
+    driver_type: Option<&'static str>,
+}
+
+/// Complete native data for one installed source, so adding a source is one
+/// descriptor plus its enum variant.
+struct InstalledSourceDescriptorV1 {
+    plugins: &'static [InstalledPluginV1],
+    /// Concrete `ActionApprover` type accepted from this source, if any.
+    approver_type: Option<&'static str>,
+    workload_profile: WorkloadProfileV1,
+    /// Source files bundled into the implementation artifact.
+    source_files: &'static [(&'static str, &'static [u8])],
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static GENERATED_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+    plugins: &[],
+    approver_type: None,
+    workload_profile: WorkloadProfileV1::Interactive,
+    source_files: &[],
+};
+
+static GATEWAY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+    plugins: &[InstalledPluginV1 {
+        name: "gateway-world-actions",
+        type_name: "piglor_gateway::GatewayActionPlugin",
+        event_types: &[WORLD_ACTION_EVENT_TYPE_V1],
+        driver_type: None,
+    }],
+    approver_type: Some("piglor_gateway::GatewayWorldActionApprover"),
+    workload_profile: WorkloadProfileV1::Interactive,
+    source_files: &[
+        (
+            "src/lib.rs",
+            include_bytes!("../../../apps/piglor-gateway/src/lib.rs"),
+        ),
+        (
+            "src/authorization.rs",
+            include_bytes!("../../../apps/piglor-gateway/src/authorization.rs"),
+        ),
+        (
+            "src/executor.rs",
+            include_bytes!("../../../apps/piglor-gateway/src/executor.rs"),
+        ),
+        (
+            "src/http.rs",
+            include_bytes!("../../../apps/piglor-gateway/src/http.rs"),
+        ),
+        (
+            "src/ledger_config.rs",
+            include_bytes!("../../../apps/piglor-gateway/src/ledger_config.rs"),
+        ),
+        (
+            "src/owntracks.rs",
+            include_bytes!("../../../apps/piglor-gateway/src/owntracks.rs"),
+        ),
+        (
+            "src/owntracks_http.rs",
+            include_bytes!("../../../apps/piglor-gateway/src/owntracks_http.rs"),
+        ),
+        (
+            "src/main.rs",
+            include_bytes!("../../../apps/piglor-gateway/src/main.rs"),
+        ),
+        (
+            "plugins/world/src/lib.rs",
+            include_bytes!("../../../plugins/world/src/lib.rs"),
+        ),
+    ],
+};
+
+static WORLD_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+    plugins: &[InstalledPluginV1 {
+        name: "world",
+        type_name: "pos_plugin_world::WorldPlugin",
+        event_types: &[
+            WORLD_ACTION_EVENT_TYPE_V1,
+            "world.observation.v1",
+            "world.config.v1",
+        ],
+        driver_type: Some("pos_plugin_world::WorldDriver"),
+    }],
+    approver_type: Some("pos_plugin_world::WorldPlugin"),
+    workload_profile: WorkloadProfileV1::Fork,
+    source_files: &[(
+        "src/lib.rs",
+        include_bytes!("../../../plugins/world/src/lib.rs"),
+    )],
+};
+
+static RULE_AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+    plugins: &[InstalledPluginV1 {
+        name: "rule-agent",
+        type_name: "pos_plugin_rule_agent::RuleAgentPlugin",
+        event_types: &["agent.decision"],
+        driver_type: Some("pos_plugin_rule_agent::RuleAgentDriver"),
+    }],
+    approver_type: None,
+    workload_profile: WorkloadProfileV1::Research,
+    source_files: &[(
+        "src/lib.rs",
+        include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
+    )],
+};
+
+static AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+    plugins: &[InstalledPluginV1 {
+        name: "agent",
+        type_name: "pos_plugin_agent::AgentPlugin",
+        event_types: &["agent.action", "runtime.recorded_output"],
+        driver_type: None,
+    }],
+    approver_type: None,
+    workload_profile: WorkloadProfileV1::Interactive,
+    source_files: &[
+        (
+            "src/lib.rs",
+            include_bytes!("../../../plugins/agent/src/lib.rs"),
+        ),
+        (
+            "src/protocol.rs",
+            include_bytes!("../../../plugins/agent/src/protocol.rs"),
+        ),
+        (
+            "src/provider.rs",
+            include_bytes!("../../../plugins/agent/src/provider.rs"),
+        ),
+        (
+            "src/provider_driver.rs",
+            include_bytes!("../../../plugins/agent/src/provider_driver.rs"),
+        ),
+        (
+            "src/replay.rs",
+            include_bytes!("../../../plugins/agent/src/replay.rs"),
+        ),
+    ],
+};
+
+static SYNTHETIC_OBSERVATION_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+    plugins: &[InstalledPluginV1 {
+        name: "synthetic-obs",
+        type_name: "pos_plugin_synthetic_obs::SyntheticObsPlugin",
+        event_types: &["obs.synthetic"],
+        driver_type: Some("pos_plugin_synthetic_obs::SyntheticDriver"),
+    }],
+    approver_type: None,
+    workload_profile: WorkloadProfileV1::Research,
+    source_files: &[(
+        "src/lib.rs",
+        include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
+    )],
+};
+
+static SOCIETY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+    plugins: &[
+        InstalledPluginV1 {
+            name: "society",
+            type_name: "pos_plugin_society::SocietyPlugin",
+            event_types: &["society.signal"],
+            driver_type: None,
+        },
+        InstalledPluginV1 {
+            name: "society-signal-projection",
+            type_name: "pos_plugin_society::SocietySignalProjectionPlugin",
+            event_types: &[],
+            driver_type: None,
+        },
+    ],
+    approver_type: None,
+    workload_profile: WorkloadProfileV1::Fork,
+    source_files: &[(
+        "src/lib.rs",
+        include_bytes!("../../../plugins/society/src/lib.rs"),
+    )],
+};
+
+static EXPERIMENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+    plugins: &[
+        InstalledPluginV1 {
+            name: "successful-sibling",
+            type_name: "pos_experiment::moat_proof::SiblingProbePlugin",
+            event_types: &["proof.failure.sibling"],
+            driver_type: Some("pos_experiment::moat_proof::SiblingProbeDriver"),
+        },
+        InstalledPluginV1 {
+            name: "failure-probe",
+            type_name: "pos_experiment::moat_proof::FailureProbePlugin",
+            event_types: &["proof.failure.probe"],
+            driver_type: Some("pos_experiment::moat_proof::FailureProbeDriver"),
+        },
+        InstalledPluginV1 {
+            name: "proof-agent",
+            type_name: "pos_experiment::moat_proof::ProofAgentPlugin",
+            event_types: &["proof.agent.reaction.v1"],
+            driver_type: Some("pos_experiment::moat_proof::ProofAgentDriver"),
+        },
+        InstalledPluginV1 {
+            name: "society",
+            type_name: "pos_experiment::moat_proof::ProofSocietyPlugin",
+            event_types: &["society.signal"],
+            driver_type: Some("pos_experiment::moat_proof::ProofSocietyDriver"),
+        },
+    ],
+    approver_type: None,
+    workload_profile: WorkloadProfileV1::Fork,
+    source_files: &[
+        (
+            "src/lib.rs",
+            include_bytes!("../../../apps/pos-experiment/src/lib.rs"),
+        ),
+        (
+            "src/moat_proof.rs",
+            include_bytes!("../../../apps/pos-experiment/src/moat_proof.rs"),
+        ),
+        (
+            "plugins/world/src/lib.rs",
+            include_bytes!("../../../plugins/world/src/lib.rs"),
+        ),
+        (
+            "plugins/society/src/lib.rs",
+            include_bytes!("../../../plugins/society/src/lib.rs"),
+        ),
+    ],
+};
+
 impl InstalledOutputPolicySourceV1 {
-    fn accepts_plugin<P: Plugin + ?Sized>(self, plugin: &P) -> bool {
-        let name_matches = match self {
+    /// Return the complete native data compiled into this source.
+    fn descriptor(self) -> &'static InstalledSourceDescriptorV1 {
+        match self {
             #[cfg(any(test, feature = "test-support"))]
-            Self::Generated => true,
-            Self::Gateway => plugin.name() == "gateway-world-actions",
-            Self::World => plugin.name() == "world",
-            Self::RuleAgent => plugin.name() == "rule-agent",
-            Self::Agent => plugin.name() == "agent",
-            Self::SyntheticObservation => plugin.name() == "synthetic-obs",
-            Self::Society => matches!(plugin.name(), "society" | "society-signal-projection"),
-            Self::Experiment => matches!(
-                plugin.name(),
-                "proof-agent"
-                    | "proof-society"
-                    | "society"
-                    | "successful-sibling"
-                    | "failure-probe"
-            ),
-        };
-        if !name_matches {
-            return false;
+            Self::Generated => &GENERATED_SOURCE,
+            Self::Gateway => &GATEWAY_SOURCE,
+            Self::World => &WORLD_SOURCE,
+            Self::RuleAgent => &RULE_AGENT_SOURCE,
+            Self::Agent => &AGENT_SOURCE,
+            Self::SyntheticObservation => &SYNTHETIC_OBSERVATION_SOURCE,
+            Self::Society => &SOCIETY_SOURCE,
+            Self::Experiment => &EXPERIMENT_SOURCE,
         }
+    }
+
+    fn installed_plugin(self, plugin_name: &str) -> Option<&'static InstalledPluginV1> {
+        self.descriptor()
+            .plugins
+            .iter()
+            .find(|installed| installed.name == plugin_name)
+    }
+
+    fn accepts_plugin<P: Plugin + ?Sized>(self, plugin: &P) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
         }
         let owner = PluginInstanceIdentity::installed_owner_token(plugin);
-        self.native_plugin_type_names()
-            .iter()
-            .any(|expected| owner.verifies_instance(plugin, expected))
-    }
-
-    const fn native_plugin_type_names(self) -> &'static [&'static str] {
-        match self {
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Generated => &[],
-            Self::Gateway => &["piglor_gateway::GatewayActionPlugin"],
-            Self::World => &["pos_plugin_world::WorldPlugin"],
-            Self::RuleAgent => &["pos_plugin_rule_agent::RuleAgentPlugin"],
-            Self::Agent => &["pos_plugin_agent::AgentPlugin"],
-            Self::SyntheticObservation => &["pos_plugin_synthetic_obs::SyntheticObsPlugin"],
-            Self::Society => &[
-                "pos_plugin_society::SocietyPlugin",
-                "pos_plugin_society::SocietySignalProjectionPlugin",
-            ],
-            Self::Experiment => &[
-                "pos_experiment::moat_proof::SiblingProbePlugin",
-                "pos_experiment::moat_proof::FailureProbePlugin",
-                "pos_experiment::moat_proof::ProofAgentPlugin",
-                "pos_experiment::moat_proof::ProofSocietyPlugin",
-            ],
-        }
+        self.installed_plugin(plugin.name())
+            .is_some_and(|installed| owner.verifies_instance(plugin, installed.type_name))
     }
 
     fn accepts_driver<D: Driver + 'static>(self, plugin_name: &str) -> bool {
-        let actual = type_name::<D>();
-        match self {
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Generated => true,
-            Self::Gateway | Self::Agent | Self::Society => false,
-            Self::World => actual == "pos_plugin_world::WorldDriver",
-            Self::RuleAgent => actual == "pos_plugin_rule_agent::RuleAgentDriver",
-            Self::SyntheticObservation => actual == "pos_plugin_synthetic_obs::SyntheticDriver",
-            Self::Experiment => match plugin_name {
-                "successful-sibling" => actual == "pos_experiment::moat_proof::SiblingProbeDriver",
-                "failure-probe" => actual == "pos_experiment::moat_proof::FailureProbeDriver",
-                "proof-agent" => actual == "pos_experiment::moat_proof::ProofAgentDriver",
-                "society" => actual == "pos_experiment::moat_proof::ProofSocietyDriver",
-                _ => false,
-            },
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(self, Self::Generated) {
+            return true;
         }
+        self.installed_plugin(plugin_name)
+            .is_some_and(|installed| installed.driver_type == Some(type_name::<D>()))
     }
 
     fn accepts_approver<A: ActionApprover + 'static>(self) -> bool {
-        let actual = type_name::<A>();
-        match self {
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Generated => true,
-            Self::Gateway => actual == "piglor_gateway::GatewayWorldActionApprover",
-            Self::World => actual == "pos_plugin_world::WorldPlugin",
-            Self::RuleAgent
-            | Self::Agent
-            | Self::SyntheticObservation
-            | Self::Society
-            | Self::Experiment => false,
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(self, Self::Generated) {
+            return true;
         }
+        self.descriptor().approver_type == Some(type_name::<A>())
     }
 
     fn implementation_artifact<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<u8> {
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(self, Self::Generated) {
+            return generated_implementation_artifact_v1(plugin);
+        }
         #[cfg(not(any(test, feature = "test-support")))]
         let _ = plugin;
-        match self {
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Generated => generated_implementation_artifact_v1(plugin),
-            Self::Gateway => source_artifact_bundle(&[
-                (
-                    "src/lib.rs",
-                    include_bytes!("../../../apps/piglor-gateway/src/lib.rs"),
-                ),
-                (
-                    "src/authorization.rs",
-                    include_bytes!("../../../apps/piglor-gateway/src/authorization.rs"),
-                ),
-                (
-                    "src/executor.rs",
-                    include_bytes!("../../../apps/piglor-gateway/src/executor.rs"),
-                ),
-                (
-                    "src/http.rs",
-                    include_bytes!("../../../apps/piglor-gateway/src/http.rs"),
-                ),
-                (
-                    "src/ledger_config.rs",
-                    include_bytes!("../../../apps/piglor-gateway/src/ledger_config.rs"),
-                ),
-                (
-                    "src/owntracks.rs",
-                    include_bytes!("../../../apps/piglor-gateway/src/owntracks.rs"),
-                ),
-                (
-                    "src/owntracks_http.rs",
-                    include_bytes!("../../../apps/piglor-gateway/src/owntracks_http.rs"),
-                ),
-                (
-                    "src/main.rs",
-                    include_bytes!("../../../apps/piglor-gateway/src/main.rs"),
-                ),
-                (
-                    "plugins/world/src/lib.rs",
-                    include_bytes!("../../../plugins/world/src/lib.rs"),
-                ),
-            ]),
-            Self::World => source_artifact_bundle(&[(
-                "src/lib.rs",
-                include_bytes!("../../../plugins/world/src/lib.rs"),
-            )]),
-            Self::RuleAgent => source_artifact_bundle(&[(
-                "src/lib.rs",
-                include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
-            )]),
-            Self::Agent => source_artifact_bundle(&[
-                (
-                    "src/lib.rs",
-                    include_bytes!("../../../plugins/agent/src/lib.rs"),
-                ),
-                (
-                    "src/protocol.rs",
-                    include_bytes!("../../../plugins/agent/src/protocol.rs"),
-                ),
-                (
-                    "src/provider.rs",
-                    include_bytes!("../../../plugins/agent/src/provider.rs"),
-                ),
-                (
-                    "src/provider_driver.rs",
-                    include_bytes!("../../../plugins/agent/src/provider_driver.rs"),
-                ),
-                (
-                    "src/replay.rs",
-                    include_bytes!("../../../plugins/agent/src/replay.rs"),
-                ),
-            ]),
-            Self::SyntheticObservation => source_artifact_bundle(&[(
-                "src/lib.rs",
-                include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
-            )]),
-            Self::Society => source_artifact_bundle(&[(
-                "src/lib.rs",
-                include_bytes!("../../../plugins/society/src/lib.rs"),
-            )]),
-            Self::Experiment => source_artifact_bundle(&[
-                (
-                    "src/lib.rs",
-                    include_bytes!("../../../apps/pos-experiment/src/lib.rs"),
-                ),
-                (
-                    "src/moat_proof.rs",
-                    include_bytes!("../../../apps/pos-experiment/src/moat_proof.rs"),
-                ),
-                (
-                    "plugins/world/src/lib.rs",
-                    include_bytes!("../../../plugins/world/src/lib.rs"),
-                ),
-                (
-                    "plugins/society/src/lib.rs",
-                    include_bytes!("../../../plugins/society/src/lib.rs"),
-                ),
-            ]),
-        }
+        source_artifact_bundle(self.descriptor().source_files)
     }
 
     fn event_types<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<String> {
-        let mut event_types = match self {
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Generated => plugin
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(self, Self::Generated) {
+            let mut event_types = plugin
                 .capability()
                 .owned_event_types
                 .into_iter()
                 .map(|kind| kind.as_str().to_owned())
-                .collect::<Vec<_>>(),
-            Self::Gateway => vec![WORLD_ACTION_EVENT_TYPE_V1.to_owned()],
-            Self::World => vec![
-                WORLD_ACTION_EVENT_TYPE_V1.to_owned(),
-                "world.observation.v1".to_owned(),
-                "world.config.v1".to_owned(),
-            ],
-            Self::RuleAgent => vec!["agent.decision".to_owned()],
-            Self::Agent => vec![
-                "agent.action".to_owned(),
-                "runtime.recorded_output".to_owned(),
-            ],
-            Self::SyntheticObservation => vec!["obs.synthetic".to_owned()],
-            Self::Society => {
-                if plugin.name() == "society-signal-projection" {
-                    Vec::new()
-                } else {
-                    vec!["society.signal".to_owned()]
-                }
-            }
-            Self::Experiment => match plugin.name() {
-                "proof-agent" => vec!["proof.agent.reaction.v1".to_owned()],
-                "proof-society" | "society" => vec!["society.signal".to_owned()],
-                "successful-sibling" => vec!["proof.failure.sibling".to_owned()],
-                "failure-probe" => vec!["proof.failure.probe".to_owned()],
-                _ => Vec::new(),
-            },
-        };
+                .collect::<Vec<_>>();
+            event_types.sort_unstable();
+            return event_types;
+        }
+        let mut event_types =
+            self.installed_plugin(plugin.name())
+                .map_or_else(Vec::new, |installed| {
+                    installed
+                        .event_types
+                        .iter()
+                        .map(|event_type| (*event_type).to_owned())
+                        .collect()
+                });
         event_types.sort_unstable();
         event_types
     }
 
-    const fn workload_profile(self) -> WorkloadProfileV1 {
-        match self {
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Generated => WorkloadProfileV1::Interactive,
-            Self::Gateway | Self::Agent => WorkloadProfileV1::Interactive,
-            Self::RuleAgent | Self::SyntheticObservation => WorkloadProfileV1::Research,
-            Self::World | Self::Society | Self::Experiment => WorkloadProfileV1::Fork,
-        }
+    fn workload_profile(self) -> WorkloadProfileV1 {
+        self.descriptor().workload_profile
     }
 
     fn build_budget(
@@ -698,12 +786,17 @@ impl OutputPolicyBindingV1 {
         {
             return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
         }
-        let routes: Vec<_> = event_types.into_iter().take(2).collect();
-        if routes.len() != 1 || routes[0].as_str() != WORLD_ACTION_EVENT_TYPE_V1 {
+        // Accept exactly one route, the World action type. The second `next`
+        // only proves that no further route exists; the rest is not consumed.
+        let mut routes = event_types.into_iter();
+        let (Some(route), None) = (routes.next(), routes.next()) else {
+            return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
+        };
+        if route.as_str() != WORLD_ACTION_EVENT_TYPE_V1 {
             return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
         }
         self.approver = Some(Box::new(plugin.clone()));
-        self.approver_event_types = routes;
+        self.approver_event_types = vec![route];
         Ok(self)
     }
 
@@ -716,14 +809,7 @@ impl OutputPolicyBindingV1 {
     }
 
     pub(crate) fn verifies_owner_instance<P: Plugin>(&self, plugin: &P) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
-        if self.source == InstalledOutputPolicySourceV1::Generated {
-            return self.owner_token == PluginInstanceIdentity::installed_owner_token(plugin);
-        }
-        self.source
-            .native_plugin_type_names()
-            .iter()
-            .any(|expected| self.owner_token.verifies_instance(plugin, expected))
+        self.verifies_erased_owner_instance(plugin)
     }
 
     pub(crate) fn verifies_erased_owner_instance(&self, plugin: &dyn Plugin) -> bool {
@@ -731,10 +817,10 @@ impl OutputPolicyBindingV1 {
         if self.source == InstalledOutputPolicySourceV1::Generated {
             return self.owner_token == PluginInstanceIdentity::installed_owner_token(plugin);
         }
-        self.source
-            .native_plugin_type_names()
-            .iter()
-            .any(|expected| self.owner_token.verifies_erased_instance(plugin, expected))
+        self.source.descriptor().plugins.iter().any(|installed| {
+            self.owner_token
+                .verifies_erased_instance(plugin, installed.type_name)
+        })
     }
 
     pub(crate) const fn requires_action_approver(&self) -> bool {
@@ -1884,7 +1970,13 @@ mod tests {
                     "pos_experiment::moat_proof::ProofSocietyPlugin",
                 ],
             };
-            assert_eq!(source.native_plugin_type_names(), expected_native_types);
+            let native_types = source
+                .descriptor()
+                .plugins
+                .iter()
+                .map(|installed| installed.type_name)
+                .collect::<Vec<_>>();
+            assert_eq!(native_types, expected_native_types);
             assert!(!source.implementation_artifact(&plugin).is_empty());
             let expected_event_types: &[&str] = match source {
                 InstalledOutputPolicySourceV1::Generated => &["fixture.output"],
@@ -1898,14 +1990,24 @@ mod tests {
                 }
                 InstalledOutputPolicySourceV1::SyntheticObservation => &["obs.synthetic"],
                 InstalledOutputPolicySourceV1::Society => &["society.signal"],
-                InstalledOutputPolicySourceV1::Experiment => &[],
+                InstalledOutputPolicySourceV1::Experiment => &["proof.failure.sibling"],
             };
             let mut expected_event_types = expected_event_types
                 .iter()
                 .map(|event_type| (*event_type).to_owned())
                 .collect::<Vec<_>>();
             expected_event_types.sort_unstable();
-            assert_eq!(source.event_types(&plugin), expected_event_types);
+            let installed_name = source
+                .descriptor()
+                .plugins
+                .first()
+                .map_or(plugin.name, |installed| installed.name);
+            let named = FixturePlugin {
+                id: plugin.id,
+                name: installed_name,
+                events: vec![Kind::new("fixture.output")],
+            };
+            assert_eq!(source.event_types(&named), expected_event_types);
             let expected_profile = match source {
                 InstalledOutputPolicySourceV1::Generated
                 | InstalledOutputPolicySourceV1::Gateway
@@ -1960,7 +2062,7 @@ mod tests {
             };
             let expected_event_types = match name {
                 "proof-agent" => vec!["proof.agent.reaction.v1".to_owned()],
-                "proof-society" | "society" => vec!["society.signal".to_owned()],
+                "society" => vec!["society.signal".to_owned()],
                 "successful-sibling" => vec!["proof.failure.sibling".to_owned()],
                 "failure-probe" => vec!["proof.failure.probe".to_owned()],
                 _ => Vec::new(),
