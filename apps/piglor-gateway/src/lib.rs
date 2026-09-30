@@ -1025,12 +1025,11 @@ fn gateway_action_registry_builder_for_test(
     })
 }
 
-fn gateway_action_registry_with_authority_and_erasure_gate_checked(
-    bodies: impl IntoIterator<Item = EntityId>,
-    authority: Option<ConsentAuthority>,
+fn bind_action_registry_erasure_gate(
+    registry: Result<PluginRegistry, pos_runtime::RuntimeError>,
     gate: Arc<dyn ErasureGate>,
 ) -> Result<Arc<PluginRegistry>, pos_runtime::RuntimeError> {
-    gateway_action_registry_builder(bodies, authority).map(|mut registry| {
+    registry.map(|mut registry| {
         registry.bind_erasure_gate(gate);
         Arc::new(registry)
     })
@@ -1703,9 +1702,8 @@ impl Gateway {
             broadcast::channel(EVENT_BUS_CAPACITY).0,
             GatewayLimits::LOCAL_DEFAULT,
             false,
-            gateway_action_registry_with_authority_and_erasure_gate_checked(
-                bodies,
-                Some(consent_authority.clone()),
+            bind_action_registry_erasure_gate(
+                gateway_action_registry_builder(bodies, Some(consent_authority.clone())),
                 gate,
             ),
             consent_authority,
@@ -3787,6 +3785,15 @@ mod tests {
     fn gateway_action_registry_exposes_the_host_action_schema() {
         let registry = gateway_action_registry();
         assert!(registry.schemas.contains(EVENT_TYPE_ACTION));
+    }
+
+    #[test]
+    fn action_registry_erasure_gate_binds_a_built_registry() {
+        let gate: Arc<dyn ErasureGate> =
+            Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
+        let bound =
+            bind_action_registry_erasure_gate(fixture_action_registry_builder([], None), gate);
+        assert!(bound.is_ok_and(|registry| registry.schemas.contains(EVENT_TYPE_ACTION)));
     }
 
     #[test]
