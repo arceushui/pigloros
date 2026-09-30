@@ -5,6 +5,7 @@
 
 use crate::{
     adapter_admission::{valid_adapter_identity, AdapterContractKey},
+    adapter_codec::{encode_bytes, encode_hash, hash_bytes, length_hash},
     encode_head, public_adapter_schema_digest_v1, AdapterAdmissionV1, Hash, PluginId,
     WorldReplayHandleV1,
 };
@@ -146,7 +147,9 @@ impl AdapterInvocationV1 {
         if bytes.len() > MAX_ADAPTER_CALL_BYTES_V1 {
             return Err(AdapterTranscriptErrorV1::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader {
+            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+        };
         reader.fixed(&[0x8b, 0x44, b'A', b'I', b'R', b'1', 1])?;
         let input = AdapterInvocationInputV1 {
             adapter_id: reader.identity()?,
@@ -159,7 +162,7 @@ impl AdapterInvocationV1 {
             global_call_index: reader.head(0)?,
             exact_request_payload: reader.bounded_bytes(2, MAX_ADAPTER_CALL_BYTES_V1)?.to_vec(),
         };
-        if reader.offset != bytes.len() {
+        if !reader.cursor.is_finished() {
             return Err(AdapterTranscriptErrorV1::NonCanonical);
         }
         let invocation = Self::new(input)?;
@@ -335,7 +338,9 @@ impl AdapterTranscriptV1 {
         if bytes.len() > MAX_ADAPTER_TRANSCRIPT_BYTES_V1 {
             return Err(AdapterTranscriptErrorV1::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader {
+            cursor: crate::cbor_cursor::CborCursor::new(bytes),
+        };
         reader.fixed(&[0x87, 0x44, b'M', b'A', b'T', b'1', 1])?;
         let owner_reference = reader.hash()?;
         let handle_bytes = reader.bounded_bytes(2, 256)?;
@@ -373,7 +378,7 @@ impl AdapterTranscriptV1 {
                 recorded_wall_time_micros,
             });
         }
-        if reader.offset != bytes.len() {
+        if !reader.cursor.is_finished() {
             return Err(AdapterTranscriptErrorV1::NonCanonical);
         }
         let transcript = Self::new(AdapterTranscriptInputV1 {
@@ -394,21 +399,6 @@ impl AdapterTranscriptV1 {
 #[must_use]
 pub fn adapter_output_digest_v1(bytes: &[u8]) -> Hash {
     length_hash(b"pigloros.repro.adapter-output.v1\0", bytes)
-}
-
-fn length_hash(domain: &[u8], bytes: &[u8]) -> Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(&(bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-    Hash::from_bytes(*hasher.finalize().as_bytes())
-}
-
-fn hash_bytes(domain: &[u8], bytes: &[u8]) -> Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(bytes);
-    Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 fn invocation_size(input: &AdapterInvocationInputV1) -> usize {
@@ -440,28 +430,15 @@ const fn head_size(value: u64) -> usize {
     }
 }
 
-fn encode_hash(out: &mut Vec<u8>, hash: Hash) {
-    out.extend_from_slice(&[0x58, 0x20]);
-    out.extend_from_slice(hash.as_bytes());
-}
-
-fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8], major: u8) {
-    encode_head(out, major, bytes.len() as u64);
-    out.extend_from_slice(bytes);
-}
-
 struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
+    cursor: crate::cbor_cursor::CborCursor<'a>,
 }
 
 impl Reader<'_> {
     fn fixed(&mut self, expected: &[u8]) -> Result<(), AdapterTranscriptErrorV1> {
-        if self.take(expected.len())? == expected {
-            Ok(())
-        } else {
-            Err(AdapterTranscriptErrorV1::InvalidEncoding)
-        }
+        self.cursor
+            .fixed(expected)
+            .map_err(|_| AdapterTranscriptErrorV1::InvalidEncoding)
     }
 
     fn hash(&mut self) -> Result<Hash, AdapterTranscriptErrorV1> {
@@ -496,34 +473,14 @@ impl Reader<'_> {
     }
 
     fn head(&mut self, major: u8) -> Result<u64, AdapterTranscriptErrorV1> {
-        let tag = self.take(1)?[0];
-        if tag >> 5 != major {
-            return Err(AdapterTranscriptErrorV1::InvalidEncoding);
-        }
-        match tag & 0x1f {
-            small @ 0..=23 => Ok(u64::from(small)),
-            24 => self.number::<1>(),
-            25 => self.number::<2>(),
-            26 => self.number::<4>(),
-            27 => self.number::<8>(),
-            _ => Err(AdapterTranscriptErrorV1::InvalidEncoding),
-        }
-    }
-
-    fn number<const N: usize>(&mut self) -> Result<u64, AdapterTranscriptErrorV1> {
-        Ok(self
-            .take(N)?
-            .iter()
-            .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte)))
+        self.cursor
+            .head(major)
+            .map_err(|_| AdapterTranscriptErrorV1::InvalidEncoding)
     }
 
     fn take(&mut self, length: usize) -> Result<&[u8], AdapterTranscriptErrorV1> {
-        let end = self.offset.saturating_add(length);
-        let value = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(AdapterTranscriptErrorV1::InvalidEncoding)?;
-        self.offset = end;
-        Ok(value)
+        self.cursor
+            .take(length)
+            .map_err(|_| AdapterTranscriptErrorV1::InvalidEncoding)
     }
 }
