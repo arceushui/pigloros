@@ -4084,6 +4084,9 @@ mod tests {
         ErasureVerifiedEmptyInventoryQueryV1::new(snapshot).verified_inventory(maximum_requests)
     }
 
+    const FOREIGN_CLOSURE_DIGEST: Hash = Hash::from_bytes([1; 32]);
+    const FOREIGN_SOURCE_HEAD: Hash = Hash::from_bytes([2; 32]);
+
     #[derive(Clone, Copy)]
     enum WorldReplayVerifierModeV1 {
         Exact,
@@ -4113,7 +4116,7 @@ mod tests {
                 Self::Reject(error) => Err(*error),
                 Self::WrongDigest => {
                     Ok(crate::world_replay::test_verified_world_replay_with_fields(
-                        Hash::from_bytes([1; 32]),
+                        FOREIGN_CLOSURE_DIGEST,
                         closure.timeline_id(),
                         closure.source_head(),
                         requested_use.clone(),
@@ -4135,7 +4138,7 @@ mod tests {
                     Ok(crate::world_replay::test_verified_world_replay_with_fields(
                         closure.digest(),
                         closure.timeline_id(),
-                        Hash::from_bytes([2; 32]),
+                        FOREIGN_SOURCE_HEAD,
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,

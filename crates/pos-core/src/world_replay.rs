@@ -820,6 +820,11 @@ impl WorldReplayAdmissionV1 {
             .iter()
             .filter(|artifact| artifact.optionality() == crate::ArtifactOptionalityV1::Required)
             .all(crate::EvaluatedArtifactClaimV1::authoritative_use_permitted);
+        // Matching an evaluated artifact by native digest alone is exact:
+        // every World leaf is registered as `TimelineReplay` keyed by its
+        // native digest, and `ReplayClaimEvaluatorV1::evaluate` rejects any
+        // duplicate (class, digest) pair, so leaves of different kinds cannot
+        // share a native digest in an admitted closure.
         if required_members_authorized
             && requested_view_roots.iter().all(|root| {
                 self.optional_views.iter().any(|(node, native)| {
