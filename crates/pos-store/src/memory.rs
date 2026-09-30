@@ -65,13 +65,12 @@ use pos_core::{
 };
 
 use crate::fork_admission_authority::{
-    admitted_fork_context_containment, admitted_fork_may_have_changed_topology,
-    admitted_fork_target, advance_wall_fence, begin_initialize, begin_open, finalize_initialize,
-    finalize_open, fork_commitment, principal_owner_commitment, validate_live_session,
-    verify_command, verify_recovery_proof, with_unfenced_fork_containment,
-    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
-    ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityStateV1,
-    ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
+    admitted_fork_context_containment, admitted_fork_may_have_changed_topology, advance_wall_fence,
+    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment,
+    principal_owner_commitment, validate_live_session, verify_command, verify_recovery_proof,
+    with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
+    ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
+    ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
 use crate::fork_delivery_journal::{
     fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
@@ -1556,7 +1555,9 @@ impl ForkAdmissionAuthorityPortV1 for MemoryStore {
         command: &ForkAdmissionHostCommandV1,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
         let verified = self.verify_fork_admission_command(session, policy, command)?;
-        let target = admitted_fork_target(&verified)?;
+        let target = verified
+            .fork_target()
+            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)?;
         let containment = admitted_fork_context_containment(
             context,
             self.validated_erasure_gate().ok().as_deref(),
@@ -2508,15 +2509,7 @@ impl MemoryStore {
             child_name,
             commitment,
         } = command;
-        let binding = self
-            .fork_principal_owner_bindings
-            .get(&principal_digest)
-            .cloned()
-            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)
-            .and_then(|binding| {
-                self.admitted_fork_parent_gate(parent_id, containment)
-                    .map(|()| binding)
-            })?;
+        let binding = self.admitted_fork_binding(principal_digest, parent_id, containment)?;
         let head = self
             .logical_head_unchecked(parent_id)
             .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)?;
@@ -2568,6 +2561,23 @@ impl MemoryStore {
             );
             ForkAdmissionOperationResultV1::Fork(receipt)
         })
+    }
+
+    /// ADR-106 r3 steps 5 to 7 in order: the committed POB1 (`InvalidRequest`
+    /// when absent), parent visibility, then erasure containment.
+    fn admitted_fork_binding(
+        &self,
+        principal_digest: Hash,
+        parent: TimelineId,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+    ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+        let binding = self
+            .fork_principal_owner_bindings
+            .get(&principal_digest)
+            .cloned()
+            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)?;
+        self.admitted_fork_parent_gate(parent, containment)?;
+        Ok(binding)
     }
 
     /// ADR-106 r3 steps 6 and 7: an absent or geographic parent is

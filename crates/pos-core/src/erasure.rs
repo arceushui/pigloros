@@ -526,8 +526,10 @@ pub struct ErasureAdmittedForkContextV1<'permit> {
     operation_id: crate::Hash,
     parent: TimelineId,
     verdict: Result<(), ErasureContainmentErrorV1>,
-    /// Set by the adapter when its write boundary could not be opened.
-    write_boundary_unopened: AtomicBool,
+    /// Set only through [`Self::open_write_boundary`] or
+    /// [`Self::roll_back_write_boundary`] when the adapter's write boundary
+    /// failed to open or was rolled back, so nothing was written.
+    nothing_written: AtomicBool,
 }
 
 impl ErasureAdmittedForkContextV1<'_> {
@@ -565,22 +567,39 @@ impl ErasureAdmittedForkContextV1<'_> {
         }
     }
 
-    /// Record that the adapter could not open its write boundary for this
-    /// FCC1, so it made no write.
+    /// Open the adapter's write boundary for this FCC1 through `open`.
     ///
-    /// This is an in-process channel from the adapter to the erasure host,
-    /// not a wire or error value. The host may then treat an indeterminate
-    /// storage error as a definite pre-write failure instead of an
-    /// uncertain commit.
-    pub fn record_unopened_write_boundary(&self) {
-        self.write_boundary_unopened
-            .store(true, AtomicOrdering::Release);
+    /// When `open` fails, nothing was written; the context records that
+    /// for the erasure host. This in-process channel is not a wire or error
+    /// value: the host may then treat an indeterminate storage error as a
+    /// definite pre-write failure instead of an uncertain commit.
+    ///
+    /// # Errors
+    /// Returns the error of `open` unchanged.
+    pub fn open_write_boundary<E>(&self, open: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
+        open().inspect_err(|_| self.nothing_written.store(true, AtomicOrdering::Release))
     }
 
-    /// Whether the adapter reported that its write boundary never opened.
+    /// Roll back the adapter's opened write boundary through `rollback`.
+    ///
+    /// A successful rollback discards every write of the boundary, so the
+    /// context records that nothing was written.
+    ///
+    /// # Errors
+    /// Returns the error of `rollback` unchanged; the outcome then stays
+    /// uncertain.
+    pub fn roll_back_write_boundary<E>(
+        &self,
+        rollback: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        rollback().inspect(|()| self.nothing_written.store(true, AtomicOrdering::Release))
+    }
+
+    /// Whether the adapter's write boundary failed to open or was rolled
+    /// back, so this FCC1 wrote nothing.
     #[must_use]
-    pub fn write_boundary_unopened(&self) -> bool {
-        self.write_boundary_unopened.load(AtomicOrdering::Acquire)
+    pub fn nothing_written(&self) -> bool {
+        self.nothing_written.load(AtomicOrdering::Acquire)
     }
 }
 
@@ -1140,7 +1159,7 @@ impl ErasureContainmentGateV1 {
             operation_id,
             parent,
             verdict,
-            write_boundary_unopened: AtomicBool::new(false),
+            nothing_written: AtomicBool::new(false),
         }
     }
 
@@ -1386,6 +1405,37 @@ impl ErasureGate for ErasureContainmentGateV1 {
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(),
     ) -> Result<(), ErasureContainmentErrorV1> {
+        self.fence_then(timeline, operation, effect)
+            .and_then(|()| self.ensure_available())
+    }
+}
+
+impl ErasureContainmentGateV1 {
+    /// Serialize one protected effect with its decision and return the
+    /// effect's value.
+    ///
+    /// Unlike [`ErasureGate::with_fence`], the error case means only that the
+    /// fence refused the operation before the effect ran; once the effect
+    /// has run, its value is always returned.
+    ///
+    /// # Errors
+    /// Returns the payload-free containment error that refused the
+    /// operation.
+    pub fn with_fence_value<T>(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: impl FnOnce() -> T,
+    ) -> Result<T, ErasureContainmentErrorV1> {
+        self.fence_then(timeline, operation, effect)
+    }
+
+    fn fence_then<T>(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: impl FnOnce() -> T,
+    ) -> Result<T, ErasureContainmentErrorV1> {
         if self.is_fence_active() {
             self.ensure_available()?;
             let authority = self
@@ -1394,8 +1444,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
                 .map_err(containment_recovery_failure)?
                 .clone();
             self.authorize_state(timeline, operation, &authority)?;
-            effect();
-            return self.ensure_available();
+            return Ok(effect());
         }
         let _fence = self
             .fence_lock
@@ -1411,8 +1460,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
         let identity = Arc::clone(&self.topology_binding_id);
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
         let _active = ActiveContainmentFence;
-        effect();
-        self.ensure_available()
+        Ok(effect())
     }
 }
 

@@ -28,13 +28,12 @@ use pos_core::{
     ErasureStateTransitionV1, ErasureStateV1, ErasureTopologyTransitionPermitV1,
     ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
     ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
-    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, ForkAdmissionCommandFactsV1,
-    ForkAdmissionErrorV1, ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1,
-    ForkAdmissionRecoveryProofV1, ForkAuthenticationPolicyV1, Hash, KeyDestructionBeginOutcomeV1,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyRegistryStateV1, OwnTracksIngressInputV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
-    PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1, Timeline, TimelineId, TimelineMeta,
-    TimelineMode, WallTime,
+    ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, ForkAdmissionErrorV1,
+    ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
+    ForkAuthenticationPolicyV1, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
+    KeyDestructionRequestV1, KeyRegistryStateV1, OwnTracksIngressInputV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq,
+    StoredErasureManifestV1, Timeline, TimelineId, TimelineMeta, TimelineMode, WallTime,
 };
 use pos_store::{
     ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
@@ -103,18 +102,6 @@ struct AdmittedForkSuccessorSourceV1 {
 }
 
 type AdmittedForkResultV1 = Result<ForkAdmissionOperationResultV1, ForkAdmissionErrorV1>;
-
-/// Return the FCC1 operation ID and parent, or `None` for a POC1.
-const fn admitted_fork_target(command: &ForkAdmissionHostCommandV1) -> Option<(Hash, TimelineId)> {
-    match command.validated_command_facts() {
-        ForkAdmissionCommandFactsV1::Fork {
-            operation_id,
-            parent_id,
-            ..
-        } => Some((*operation_id, *parent_id)),
-        ForkAdmissionCommandFactsV1::PrincipalOwner { .. } => None,
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UnaffectedTopologyTransitionError {
@@ -1393,7 +1380,9 @@ impl ErasureExecutionHostV1 {
         policy: &ForkAuthenticationPolicyV1,
         command: &ForkAdmissionHostCommandV1,
     ) -> AdmittedForkResultV1 {
-        let transition = admitted_fork_target(command)
+        let transition = command
+            .validated_command_facts()
+            .fork_target()
             .zip(self.admitted_fork_successor_source())
             .and_then(|(target, source)| {
                 self.execute_admitted_fork_transition(target, &source, session, policy, command)
@@ -1474,17 +1463,17 @@ impl ErasureExecutionHostV1 {
                 } else {
                     Err(ErasureErrorV1::ProvenanceMissing)
                 };
-                outcome = Some((result, context.write_boundary_unopened()));
+                outcome = Some((result, context.nothing_written()));
                 successor.map(|inventory| (inventory, ()))
             };
             gate.install_from_verified_inventory_transition(&mut transition)
         };
-        outcome.map(|(result, write_boundary_unopened)| {
+        outcome.map(|(result, nothing_written)| {
             self.finish_admitted_fork(
                 result,
                 publication,
                 (source.maximum_requests, limits),
-                write_boundary_unopened,
+                nothing_written,
             )
         })
     }
@@ -1526,8 +1515,9 @@ impl ErasureExecutionHostV1 {
     /// Publish the verified successor of a committed admitted Fork.
     ///
     /// Only an uncertain commit or publication poisons the host. A definite
-    /// rejection, including an adapter write boundary that never opened,
-    /// leaves it Ready with its installed inventory. A failed gate
+    /// rejection, including an indeterminate storage error after which the
+    /// adapter's write boundary never opened or was rolled back
+    /// (`nothing_written`), leaves it Ready with its installed inventory. A failed gate
     /// publication and a failed post-publication verification are one
     /// uncertain-publication outcome.
     fn finish_admitted_fork(
@@ -1535,7 +1525,7 @@ impl ErasureExecutionHostV1 {
         result: AdmittedForkResultV1,
         publication: Result<(ErasureVerifiedInventoryV1, ()), pos_core::ErasureContainmentErrorV1>,
         (maximum_requests, limits): (usize, ErasureRecoveryLimitsV1),
-        write_boundary_unopened: bool,
+        nothing_written: bool,
     ) -> AdmittedForkResultV1 {
         let finished = result.and_then(|result| {
             publication
@@ -1547,9 +1537,7 @@ impl ErasureExecutionHostV1 {
                 })
                 .map_err(|_| ForkAdmissionErrorV1::StorageIndeterminate)
         });
-        if matches!(finished, Err(ForkAdmissionErrorV1::StorageIndeterminate))
-            && !write_boundary_unopened
-        {
+        if matches!(finished, Err(ForkAdmissionErrorV1::StorageIndeterminate)) && !nothing_written {
             self.poison();
         }
         finished

@@ -183,7 +183,8 @@ impl VerifiedForkAdmissionCommandV1 {
         }
     }
 
-    /// Return the FCC1 operation ID and parent, or `None` for a POC1.
+    /// Return the FCC1 operation ID and parent, or `None` for a POC1 (which
+    /// the permit-bearing method rejects as `InvalidRequest`).
     pub(crate) const fn fork_target(&self) -> Option<(Hash, TimelineId)> {
         match self {
             Self::PrincipalOwner { .. } => None,
@@ -219,17 +220,6 @@ pub(crate) const fn admitted_fork_may_have_changed_topology<T>(
         result,
         Ok(_) | Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
     )
-}
-
-/// The FCC1 operation ID and parent the permit-bearing method may admit.
-///
-/// A POC1 is not a topology mutation and is `InvalidRequest` there.
-pub(crate) fn admitted_fork_target(
-    command: &VerifiedForkAdmissionCommandV1,
-) -> Result<(Hash, TimelineId), pos_core::ForkAdmissionErrorV1> {
-    command
-        .fork_target()
-        .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)
 }
 
 /// Resolve the ADR-106 r3 containment decision of the permit-bearing
@@ -277,29 +267,14 @@ pub(crate) fn with_unfenced_fork_containment<T>(
             pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable,
         ));
     }
-    let mut outcome = None;
-    let fenced = gate
-        .map_err(|_| pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable)
+    // The fence either runs the admission and returns its value, or refuses
+    // before it ran; a refusal is applied on the lookup-only path.
+    gate.map_err(|_| pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable)
         .and_then(|gate| {
-            pos_core::ErasureGate::with_fence(
-                gate.as_ref(),
-                parent,
-                ErasureProtectedOperationV1::Fork,
-                &mut || {
-                    outcome = Some(run(Ok(())));
-                },
-            )
-            .map_err(containment_admission_error)
-        });
-    outcome.unwrap_or_else(|| {
-        // `with_fence` runs its effect exactly when it authorizes, so a fence
-        // that ran nothing carries its rejection; any other shape fails
-        // closed as unavailable.
-        let rejection = fenced
-            .err()
-            .unwrap_or(pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable);
-        run(Err(rejection))
-    })
+            gate.with_fence_value(parent, ErasureProtectedOperationV1::Fork, || run(Ok(())))
+                .map_err(containment_admission_error)
+        })
+        .unwrap_or_else(|rejection| run(Err(rejection)))
 }
 
 /// A current-session, host-proven lookup key decoded from FRP1.

@@ -70,13 +70,12 @@ use pos_core::{
 };
 
 use crate::fork_admission_authority::{
-    admitted_fork_context_containment, admitted_fork_may_have_changed_topology,
-    admitted_fork_target, advance_wall_fence, begin_initialize, begin_open, finalize_initialize,
-    finalize_open, fork_commitment, principal_owner_commitment, validate_live_session,
-    verify_command, verify_recovery_proof, with_unfenced_fork_containment,
-    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
-    ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityStateV1,
-    ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
+    admitted_fork_context_containment, admitted_fork_may_have_changed_topology, advance_wall_fence,
+    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment,
+    principal_owner_commitment, validate_live_session, verify_command, verify_recovery_proof,
+    with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
+    ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
+    ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
 use crate::fork_delivery_journal::{
     fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
@@ -7755,7 +7754,7 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
                     host,
                     command.clone(),
                     containment,
-                    || {},
+                    None,
                 )
             },
         )
@@ -7769,7 +7768,9 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
         command: &ForkAdmissionHostCommandV1,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
         let (host, command) = self.verify_fork_admission_command(session, policy, command)?;
-        let target = admitted_fork_target(&command)?;
+        let target = command
+            .fork_target()
+            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)?;
         // The erasure host already holds the gate fence for this whole call,
         // so BEGIN IMMEDIATE is always the inner lock.
         let containment = admitted_fork_context_containment(
@@ -7778,13 +7779,16 @@ impl ForkAdmissionAuthorityPortV1 for SqliteStore {
             self.erasure_topology_store_binding.as_ref(),
             target,
         );
-        // A write boundary that never opened is a definite pre-write failure;
-        // report it to the host so only uncertain outcomes poison it.
-        let result =
-            self.execute_fork_admission_transaction(session, host, command, containment, || {
-                context.record_unopened_write_boundary();
-            });
-        if admitted_fork_may_have_changed_topology(&result) && !context.write_boundary_unopened() {
+        // The context observes a write boundary that failed to open or was
+        // rolled back, so the host poisons only on uncertain outcomes.
+        let result = self.execute_fork_admission_transaction(
+            session,
+            host,
+            command,
+            containment,
+            Some(context),
+        );
+        if admitted_fork_may_have_changed_topology(&result) && !context.nothing_written() {
             self.erasure_inventory_generation = None;
         }
         result
@@ -8270,20 +8274,21 @@ impl SqliteStore {
     }
 
     /// Run one verified FAC1 in its own `BEGIN IMMEDIATE` transaction.
-    /// `on_unopened` runs when that write boundary cannot be opened, before
-    /// any write.
+    ///
+    /// On the permit path `context` opens and rolls back the write boundary,
+    /// so it can tell the erasure host when nothing was written.
     fn execute_fork_admission_transaction(
         &self,
         session: &ForkAdmissionAuthoritySessionV1,
         host: ForkAdmissionHostRecordV1,
         command: VerifiedForkAdmissionCommandV1,
         containment: Result<(), pos_core::ForkAdmissionErrorV1>,
-        on_unopened: impl FnOnce(),
+        context: Option<&pos_core::ErasureAdmittedForkContextV1<'_>>,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
-        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(|_| {
-            on_unopened();
-            pos_core::ForkAdmissionErrorV1::StorageIndeterminate
-        })?;
+        let begin = || self.conn.execute_batch("BEGIN IMMEDIATE");
+        context
+            .map_or_else(begin, |context| context.open_write_boundary(begin))
+            .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?;
         let result =
             self.execute_fork_admission_in_transaction(session, host, command, containment);
         match result {
@@ -8292,10 +8297,18 @@ impl SqliteStore {
                 .execute_batch("COMMIT")
                 .map(|()| value)
                 .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
-            Err(error) => self.conn.execute_batch("ROLLBACK").map(|()| error).map_or(
-                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
-                Err,
-            ),
+            Err(error) => {
+                let rollback = || self.conn.execute_batch("ROLLBACK");
+                context
+                    .map_or_else(rollback, |context| {
+                        context.roll_back_write_boundary(rollback)
+                    })
+                    .map(|()| error)
+                    .map_or(
+                        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+                        Err,
+                    )
+            }
         }
     }
 
@@ -8457,6 +8470,21 @@ impl SqliteStore {
         Ok(ForkAdmissionOperationResultV1::PrincipalOwner(binding))
     }
 
+    /// ADR-106 r3 steps 5 to 7 in order: the committed POB1 (`InvalidRequest`
+    /// when absent), parent visibility, then erasure containment.
+    fn admitted_fork_binding(
+        &self,
+        principal_digest: Hash,
+        parent: TimelineId,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+    ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+        let binding = sqlite_principal_owner_binding(&self.conn, principal_digest)?
+            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)?;
+        self.admitted_fork_parent_visibility(parent)?;
+        containment?;
+        Ok(binding)
+    }
+
     /// ADR-106 r3 step 6: an absent or geographic parent is indistinguishable
     /// from a changed one, while an unreadable marker is indeterminate.
     fn admitted_fork_parent_visibility(
@@ -8499,13 +8527,7 @@ impl SqliteStore {
             commitment,
             containment,
         } = command;
-        let binding = sqlite_principal_owner_binding(&self.conn, principal_digest)?
-            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)
-            .and_then(|binding| {
-                self.admitted_fork_parent_visibility(parent_id)
-                    .and(containment)
-                    .map(|()| binding)
-            })?;
+        let binding = self.admitted_fork_binding(principal_digest, parent_id, containment)?;
         let chain_head = Self::logical_head_unchecked_on(&self.conn, parent_id)
             .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)
             .and_then(|head| {
