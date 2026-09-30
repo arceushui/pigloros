@@ -11912,8 +11912,11 @@ mod tests {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
         let (mut store, host, adapter, policy, session) = sqlite_authority_public_fixture()?;
-        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        store.bind_erasure_gate(Arc::clone(&gate))?;
+        // `new_store` already binds a test-open gate; drive transitions on it.
+        let gate = store
+            .erasure_gate
+            .clone()
+            .ok_or("fixture store has no bound erasure gate")?;
         let parent = store.create_timeline("permit-delivery-parent")?.id();
         let keys = (&session, &policy);
         // No POB1 is bound yet, so every FCC1 below is a definite
@@ -11994,8 +11997,11 @@ mod tests {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
         let (mut store, host, adapter, policy, session) = sqlite_authority_public_fixture()?;
-        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        store.bind_erasure_gate(Arc::clone(&gate))?;
+        // `new_store` already binds a test-open gate; drive transitions on it.
+        let gate = store
+            .erasure_gate
+            .clone()
+            .ok_or("fixture store has no bound erasure gate")?;
         let owner =
             sqlite_principal_command(&store, &host, &adapter, &policy, &session, [120; 32])?;
         store.execute_fork_admission_command(&session, &policy, &owner)?;
