@@ -2034,6 +2034,7 @@ mod tests {
             entries: Vec::new(),
         })
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let schema_digest = crate::public_adapter_schema_digest_v1();
         let session = crate::AdapterRecordingSessionV1::new(
             owner_reference,
             world_handle,
@@ -2046,8 +2047,8 @@ mod tests {
             provider_id: "provider".to_owned(),
             operation_id: "read".to_owned(),
             protocol_version: 1,
-            request_schema_digest: Hash::from_bytes([7; 32]),
-            response_schema_digest: Hash::from_bytes([8; 32]),
+            request_schema_digest: schema_digest,
+            response_schema_digest: schema_digest,
             configuration_digest: Hash::from_bytes([9; 32]),
             global_call_index: 0,
             exact_request_payload: Vec::new(),
@@ -2135,6 +2136,7 @@ mod tests {
             entries: Vec::new(),
         })
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let schema_digest = crate::public_adapter_schema_digest_v1();
         let session = crate::AdapterRecordingSessionV1::new(
             owner_reference,
             world_handle,
@@ -2147,8 +2149,8 @@ mod tests {
             provider_id: "provider".to_owned(),
             operation_id: "read".to_owned(),
             protocol_version: 1,
-            request_schema_digest: Hash::from_bytes([7; 32]),
-            response_schema_digest: Hash::from_bytes([8; 32]),
+            request_schema_digest: schema_digest,
+            response_schema_digest: schema_digest,
             configuration_digest: Hash::from_bytes([9; 32]),
             global_call_index: 0,
             exact_request_payload: Vec::new(),
