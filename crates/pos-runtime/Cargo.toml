@@ -10,6 +10,7 @@ publish.workspace = true
 # Enables downstream fixture registration and draft-profile seam tests only.
 # Never enable this feature in a deployable build: draft policy artifacts are not
 # backed by installed profile authority.
+# Enforced by scripts/check_test_support_features.py in CI.
 test-support = []
 
 [dependencies]

@@ -1093,6 +1093,10 @@ jobs:
         run: |
           python scripts/test_check_cargo_crap_ci_policy.py
           python scripts/test_check_cargo_crap_report.py
+      - name: Check test-support feature policy
+        run: |
+          python scripts/check_test_support_features.py
+          python scripts/test_check_test_support_features.py
 
   modules-structure:
     name: modules-structure (reports only)
