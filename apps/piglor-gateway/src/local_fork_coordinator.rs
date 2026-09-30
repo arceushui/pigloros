@@ -1151,17 +1151,21 @@ mod tests {
         Ok(())
     }
 
-    /// ADR-106 r3 T13: both containment rejections are wire code 5 and, as
+    /// ADR-106 r3 T13: `ForkAdmissionErrorV1::ParentErasureContained` (frozen
+    /// parent) and `ForkAdmissionErrorV1::ErasureContainmentUnavailable`
+    /// (store without an available bound gate) are both wire code 5 and, as
     /// definite pre-commit rejections, delete their Pending tuple.
     #[test]
     #[cfg(target_os = "linux")]
-    fn coordinator_rejects_contained_and_ungated_forks_with_code_five(
+    fn coordinator_maps_parent_erasure_contained_and_erasure_containment_unavailable_to_code_five(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let gate = std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
         let mut gated = MemoryStore::new();
         gated.bind_erasure_gate(std::sync::Arc::clone(&gate))?;
         for (mut coordinator, frozen) in [
+            // ForkAdmissionErrorV1::ParentErasureContained
             (coordinator_over(gated)?, true),
+            // ForkAdmissionErrorV1::ErasureContainmentUnavailable
             (coordinator_over(MemoryStore::new())?, false),
         ] {
             let bind = coordinator.handle(completed_bind(&coordinator.credentials, 26, 26)?);

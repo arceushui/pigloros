@@ -4257,3 +4257,35 @@ fn sqlite_host_stays_ready_when_a_write_lock_blocks_an_admitted_fork(
     assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     Ok(())
 }
+
+/// A definite pre-write failure inside the admitted-Fork transaction: the
+/// geographic-marker read fails before any write and the transaction rolls
+/// back, so the host reports `StorageIndeterminate` without poisoning.
+#[test]
+fn sqlite_host_stays_ready_after_a_rolled_back_marker_read_failure(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("admitted-fork-marker.db")
+        .to_string_lossy()
+        .into_owned();
+    let mut fixture = admitted_fork_host(StoreConfig::Sqlite { path: path.clone() })?;
+    let AdmittedForkHostV1 {
+        host, forks, other, ..
+    } = &mut fixture;
+    let command = forks.command(22, Some(*other))?;
+    let before = admitted_fork_rows(&path)?;
+    rusqlite::Connection::open(&path)?.execute_batch("DROP TABLE geographic_presence")?;
+    assert_eq!(
+        forks.execute(host, &command),
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    assert_eq!(admitted_fork_rows(&path)?, before);
+    assert_eq!(
+        forks.recover(host, 22)?,
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    Ok(())
+}
