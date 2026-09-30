@@ -1186,7 +1186,7 @@ impl FrozenGatewayActionConfiguration {
 // Gateway for its reviewed host catalogue entry.
 impl pos_runtime::InstalledPluginFactoryV1 for GatewayActionPlugin {
     type Configuration = FrozenGatewayActionConfiguration;
-    type Plugin = GatewayActionPlugin;
+    type Plugin = Self;
     type Approver = GatewayWorldActionApprover;
 
     fn configuration_details(configuration: &FrozenGatewayActionConfiguration) -> Vec<u8> {
@@ -1205,10 +1205,9 @@ impl pos_runtime::InstalledPluginFactoryV1 for GatewayActionPlugin {
 
     fn build(
         configuration: &FrozenGatewayActionConfiguration,
-    ) -> pos_runtime::InstalledPluginProductV1<GatewayActionPlugin, GatewayWorldActionApprover>
-    {
+    ) -> pos_runtime::InstalledPluginProductV1<Self, GatewayWorldActionApprover> {
         pos_runtime::InstalledPluginProductV1 {
-            plugin: GatewayActionPlugin {
+            plugin: Self {
                 id: PluginId::new(),
             },
             reducer: None,
