@@ -102,9 +102,9 @@ pub struct LocalAdapterProviderResponseV1 {
 }
 
 impl LocalAdapterProviderResponseV1 {
-    /// Return a response from a read-only provider without an idempotency ack.
+    /// Return a response without an idempotency acknowledgement.
     #[must_use]
-    pub fn read_only(output_bytes: Vec<u8>) -> Self {
+    pub fn unacknowledged(output_bytes: Vec<u8>) -> Self {
         Self {
             output_bytes,
             idempotency_acknowledgement: None,
@@ -130,7 +130,7 @@ impl LocalAdapterProviderResponseV1 {
 /// at its side-effect boundary for the owner/run/global-call key, then return
 /// that same key in its response. The runtime retains only the exact public
 /// request and response bytes returned through this callback.
-pub trait LocalAdapterProviderV1: Send + Sync {
+pub trait LocalAdapterProviderV1: Send {
     /// Assert that this provider enforces deduplication for every supplied key.
     ///
     /// The default denies externally idempotent registration. Implementations
