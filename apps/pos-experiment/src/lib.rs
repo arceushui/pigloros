@@ -1280,21 +1280,6 @@ impl Experiment {
             )
     }
 
-    /// Register an installed Plugin with its verified callbacks and exact pin.
-    ///
-    /// # Errors
-    /// Returns the runtime registration or output-admission error before mutation.
-    pub fn register_installed_output<P: pos_core::Plugin>(
-        &mut self,
-        plugin: &P,
-        binding: pos_runtime::OutputPolicyBindingV1,
-        registration: pos_runtime::PluginRegistrationV1,
-        reducer: Option<Box<dyn pos_core::Reducer>>,
-    ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry
-            .register_installed_output(plugin, binding, registration, reducer)
-    }
-
     /// Register a plugin with an optional action approver.
     ///
     /// # Errors
