@@ -433,9 +433,6 @@ mod tests {
             + ForkAdmissionAuthorityPortV1
             + ForkEventProvenanceAuthorityPortV1,
     {
-        store.bind_erasure_gate(std::sync::Arc::new(
-            pos_core::ErasureContainmentGateV1::new_test_open(),
-        ))?;
         let fixture = create_lifecycle(store)?;
         assert!(matches!(
             store.append(fixture.fork.child_id, &[draft(b"unclassified-fork-event")]),
@@ -455,6 +452,10 @@ mod tests {
             + ForkAdmissionAuthorityPortV1
             + ForkEventProvenanceAuthorityPortV1,
     {
+        // ADR-106 r3: an admitted Fork needs an available bound erasure gate.
+        store.bind_erasure_gate(std::sync::Arc::new(
+            pos_core::ErasureContainmentGateV1::new_test_open(),
+        ))?;
         let host = ForkHostSigningKeyV1::from_seed([41; 32])?;
         let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([42; 32])?;
         let policy = policy(&adapter)?;

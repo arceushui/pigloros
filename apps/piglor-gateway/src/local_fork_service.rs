@@ -97,6 +97,17 @@ fn start_with_credentials(
     socket_path: &Path,
 ) -> io::Result<LocalForkAdmissionListenerV1> {
     let store = SqliteStore::open(sqlite_path).map_err(io::Error::other)?;
+    start_with_store(store, credentials, socket_path)
+}
+
+/// Start the listener over an already opened store. The store's erasure
+/// binding decides ADR-106 r3 containment: an unbound store fails every new
+/// admitted Fork closed with `ErasureContainmentUnavailable` (code 5).
+fn start_with_store(
+    store: SqliteStore,
+    credentials: LocalForkAuthenticationCredentialsV1,
+    socket_path: &Path,
+) -> io::Result<LocalForkAdmissionListenerV1> {
     let mut coordinator = LocalForkAdmissionCoordinatorV1::open(store, credentials)
         .and_then(|mut coordinator| coordinator.reconcile_startup().map(|()| coordinator))
         .map_err(io::Error::other)?;
@@ -612,11 +623,11 @@ mod tests {
             &database.display().to_string(),
             &current_peer_credentials([7; 32], [8; 32])?,
         )?;
-        let listener = start_with_credentials(
-            &database.display().to_string(),
-            current_peer_credentials([7; 32], [8; 32])?,
-            &socket,
-        )?;
+        // ADR-106 r3: admitted Forks need an available bound erasure gate.
+        let mut store = SqliteStore::open(&database.display().to_string())?;
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))?;
+        let listener =
+            start_with_store(store, current_peer_credentials([7; 32], [8; 32])?, &socket)?;
 
         let bind = request(&socket, &bind_payload(5), false)?;
         assert_eq!(
@@ -630,6 +641,45 @@ mod tests {
         assert_ne!(first.1, [0; 32]);
         assert_eq!(first, retry);
         assert_eq!(fork_operation_count(&database)?, 1);
+        listener.stop()?;
+        assert!(!socket.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn production_listener_fails_new_forks_closed_without_an_erasure_gate(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        let runtime = tempfile::tempdir()?;
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o750))?;
+        let database = directory.path().join("gateway.db");
+        let socket = runtime.path().join("fork-admission.sock");
+        let parent = {
+            let mut store = SqliteStore::open(&database.display().to_string())?;
+            store.create_timeline("ungated Fork parent")?
+        };
+        provision_with_credentials(
+            &database.display().to_string(),
+            &current_peer_credentials([7; 32], [8; 32])?,
+        )?;
+        let listener = start_with_credentials(
+            &database.display().to_string(),
+            current_peer_credentials([7; 32], [8; 32])?,
+            &socket,
+        )?;
+        let bind = request(&socket, &bind_payload(9), false)?;
+        assert_eq!(
+            &bind[..10],
+            &[0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
+        );
+        // ErasureContainmentUnavailable is a definite rejection (code 5): the
+        // Pending tuple is deleted, so the retry is answered, not Busy.
+        let payload = fork_payload(parent.id())?;
+        let rejected = vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 5, 0xf6];
+        assert_eq!(request(&socket, &payload, false)?, rejected);
+        assert_eq!(request(&socket, &payload, false)?, rejected);
+        assert_eq!(fork_operation_count(&database)?, 0);
         listener.stop()?;
         assert!(!socket.exists());
         Ok(())

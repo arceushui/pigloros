@@ -16,7 +16,9 @@ thiserror = { workspace = true }
 indexmap = { workspace = true }
 
 [dev-dependencies]
+ciborium = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
+pos-crypto = { path = "../pos-crypto" }
 tempfile = { workspace = true }
 
 [lints]

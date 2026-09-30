@@ -423,7 +423,9 @@ const fn authority_code(error: ForkAdmissionErrorV1) -> LocalForkAdmissionCodeV1
         | ForkAdmissionErrorV1::ClockRollback
         | ForkAdmissionErrorV1::AuthorityUninitialized
         | ForkAdmissionErrorV1::AuthorityAlreadyInitialized
-        | ForkAdmissionErrorV1::EntropyUnavailable => {
+        | ForkAdmissionErrorV1::EntropyUnavailable
+        | ForkAdmissionErrorV1::ParentErasureContained
+        | ForkAdmissionErrorV1::ErasureContainmentUnavailable => {
             LocalForkAdmissionCodeV1::AuthorityUnavailable
         }
         ForkAdmissionErrorV1::StorageIndeterminate | ForkAdmissionErrorV1::OperationMissing => {
@@ -719,10 +721,21 @@ mod tests {
         }
     }
 
+    /// ADR-106 r3: admitted Forks need an available bound erasure gate, so
+    /// the default fixture binds the open test gate.
     fn coordinator(
     ) -> Result<LocalForkAdmissionCoordinatorV1<MemoryStore>, Box<dyn std::error::Error>> {
-        let credentials = crate::local_fork_authentication::test_credentials_for_current_peer()?;
         let mut store = MemoryStore::new();
+        store.bind_erasure_gate(std::sync::Arc::new(
+            pos_core::ErasureContainmentGateV1::new_test_open(),
+        ))?;
+        coordinator_over(store)
+    }
+
+    fn coordinator_over(
+        mut store: MemoryStore,
+    ) -> Result<LocalForkAdmissionCoordinatorV1<MemoryStore>, Box<dyn std::error::Error>> {
+        let credentials = crate::local_fork_authentication::test_credentials_for_current_peer()?;
         credentials.provision_authority(&mut store)?;
         let mut coordinator = LocalForkAdmissionCoordinatorV1::open(store, credentials)?;
         coordinator.reconcile_startup()?;
@@ -1138,6 +1151,41 @@ mod tests {
         Ok(())
     }
 
+    /// ADR-106 r3 T13: both containment rejections are wire code 5 and, as
+    /// definite pre-commit rejections, delete their Pending tuple.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn coordinator_rejects_contained_and_ungated_forks_with_code_five(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let gate = std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
+        let mut gated = MemoryStore::new();
+        gated.bind_erasure_gate(std::sync::Arc::clone(&gate))?;
+        for (mut coordinator, frozen) in [
+            (coordinator_over(gated)?, true),
+            (coordinator_over(MemoryStore::new())?, false),
+        ] {
+            let bind = coordinator.handle(completed_bind(&coordinator.credentials, 26, 26)?);
+            assert_eq!(response_code(&bind), 0);
+            let parent = coordinator.store.create_timeline("contained Fork parent")?;
+            if frozen {
+                gate.freeze_timeline_for_test(parent.id());
+            }
+            let request = fork_request(27, parent.id(), 28, 29, "contained-child");
+            for _ in 0..2 {
+                let rejected = coordinator.handle(CompletedLocalForkAdmissionV1 {
+                    peer: current_peer(&coordinator.credentials)?,
+                    request: request.clone(),
+                    host_request_id: Hash::from_bytes([30; 32]),
+                });
+                assert_eq!(
+                    rejected.response.to_canonical_cbor(),
+                    vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 5, 0xf6]
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
     fn coordinator_reconciles_a_retained_delivery_before_serving_a_retry(
@@ -1381,6 +1429,14 @@ mod tests {
             ),
             (
                 ForkAdmissionErrorV1::EntropyUnavailable,
+                LocalForkAdmissionCodeV1::AuthorityUnavailable,
+            ),
+            (
+                ForkAdmissionErrorV1::ParentErasureContained,
+                LocalForkAdmissionCodeV1::AuthorityUnavailable,
+            ),
+            (
+                ForkAdmissionErrorV1::ErasureContainmentUnavailable,
                 LocalForkAdmissionCodeV1::AuthorityUnavailable,
             ),
             (
