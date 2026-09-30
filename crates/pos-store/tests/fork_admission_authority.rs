@@ -6173,6 +6173,7 @@ fn assert_permit_delivery_rejections<S: AdmittedDeliveryStore>(
     (frozen, open): (TimelineId, TimelineId),
 ) -> Result<Vec<String>, Box<dyn Error>> {
     let fork = pos_core::ForkAdmissionOperationKindV1::Fork;
+    let absent = TimelineId::new();
     let mut labels = Vec::new();
     for (operation, parent, target) in [
         // T1: a frozen parent is contained.
@@ -6181,6 +6182,8 @@ fn assert_permit_delivery_rejections<S: AdmittedDeliveryStore>(
         (163, open, (Hash::from_bytes([200; 32]), open)),
         // The context was minted for another parent.
         (164, open, (Hash::from_bytes([164; 32]), frozen)),
+        // T3: an absent parent is ParentChanged before any erasure decision.
+        (167, absent, (Hash::from_bytes([167; 32]), absent)),
     ] {
         let claim = fixture.claim_delivery(store, fork, operation)?;
         let command = fixture.fork(store, operation, parent, "r9-rejected-child", u64::MAX)?;
@@ -6287,6 +6290,9 @@ fn permit_bearing_delivery_has_adapter_parity() -> Result<(), Box<dyn Error>> {
             "absent",
             "OperationMissing",
             "rejected-ErasureContainmentUnavailable",
+            "absent",
+            "OperationMissing",
+            "rejected-ParentChanged",
             "absent",
             "OperationMissing",
             "Conflict",
