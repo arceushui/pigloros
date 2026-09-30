@@ -163,7 +163,7 @@ struct InstalledPluginV1 {
 
 /// Complete native data for one installed source, so adding a source is one
 /// descriptor plus its enum variant.
-struct InstalledSourceDescriptorV1 {
+struct OutputPolicySourceDescriptorV1 {
     plugins: &'static [InstalledPluginV1],
     /// Concrete `ActionApprover` type accepted from this source, if any.
     approver_type: Option<&'static str>,
@@ -172,14 +172,14 @@ struct InstalledSourceDescriptorV1 {
     source_files: &'static [(&'static str, &'static [u8])],
 }
 
-static GENERATED_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static GENERATED_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[],
     approver_type: None,
     workload_profile: WorkloadProfileV1::Interactive,
     source_files: &[],
 };
 
-static GATEWAY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static GATEWAY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "gateway-world-actions",
         type_name: "piglor_gateway::GatewayActionPlugin",
@@ -228,7 +228,7 @@ static GATEWAY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1
     ],
 };
 
-static WORLD_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static WORLD_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "world",
         type_name: "pos_plugin_world::WorldPlugin",
@@ -247,7 +247,7 @@ static WORLD_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
     )],
 };
 
-static RULE_AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static RULE_AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "rule-agent",
         type_name: "pos_plugin_rule_agent::RuleAgentPlugin",
@@ -262,7 +262,7 @@ static RULE_AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescripto
     )],
 };
 
-static AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "agent",
         type_name: "pos_plugin_agent::AgentPlugin",
@@ -295,22 +295,23 @@ static AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
     ],
 };
 
-static SYNTHETIC_OBSERVATION_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
-    plugins: &[InstalledPluginV1 {
-        name: "synthetic-obs",
-        type_name: "pos_plugin_synthetic_obs::SyntheticObsPlugin",
-        event_types: &["obs.synthetic"],
-        driver_type: Some("pos_plugin_synthetic_obs::SyntheticDriver"),
-    }],
-    approver_type: None,
-    workload_profile: WorkloadProfileV1::Research,
-    source_files: &[(
-        "src/lib.rs",
-        include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
-    )],
-};
+static SYNTHETIC_OBSERVATION_SOURCE: OutputPolicySourceDescriptorV1 =
+    OutputPolicySourceDescriptorV1 {
+        plugins: &[InstalledPluginV1 {
+            name: "synthetic-obs",
+            type_name: "pos_plugin_synthetic_obs::SyntheticObsPlugin",
+            event_types: &["obs.synthetic"],
+            driver_type: Some("pos_plugin_synthetic_obs::SyntheticDriver"),
+        }],
+        approver_type: None,
+        workload_profile: WorkloadProfileV1::Research,
+        source_files: &[(
+            "src/lib.rs",
+            include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
+        )],
+    };
 
-static SOCIETY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static SOCIETY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[
         InstalledPluginV1 {
             name: "society",
@@ -333,7 +334,7 @@ static SOCIETY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1
     )],
 };
 
-static EXPERIMENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static EXPERIMENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[
         InstalledPluginV1 {
             name: "successful-sibling",
@@ -384,7 +385,7 @@ static EXPERIMENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescripto
 
 impl OutputPolicySourceV1 {
     /// Return the complete native data compiled into this source.
-    fn descriptor(self) -> &'static InstalledSourceDescriptorV1 {
+    fn descriptor(self) -> &'static OutputPolicySourceDescriptorV1 {
         match self {
             Self::Generated => &GENERATED_SOURCE,
             Self::Gateway => &GATEWAY_SOURCE,
