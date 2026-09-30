@@ -401,8 +401,6 @@ fn recovery_proof(
         .and_then(|command| credentials.sign_recovery(&command))
 }
 
-/// FARL1 code of a Fork-admission command that produced no store result
-/// (ADR-109 revision 9, Decision 1 item 6).
 /// What the coordinator does with one execute submission outcome.
 enum ExecuteDisposition {
     /// FAC1 committed; release the result for delivery.
@@ -446,6 +444,8 @@ fn execute_disposition(
     }
 }
 
+/// FARL1 code of a Fork-admission command that produced no store result
+/// (ADR-109 revision 9, Decision 1 item 6).
 const fn submission_code(error: ForkAdmissionSubmissionErrorV1) -> LocalForkAdmissionCodeV1 {
     match error {
         ForkAdmissionSubmissionErrorV1::Busy | ForkAdmissionSubmissionErrorV1::Lost => {

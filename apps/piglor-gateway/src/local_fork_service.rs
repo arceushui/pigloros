@@ -59,9 +59,12 @@ pub(super) struct LocalForkAdmissionListenerV1 {
 }
 
 /// How long shutdown waits for the listener thread to finish its in-flight
-/// request (ADR-109 revision 9, Decision 1 item 8 step 2): the executor's own
-/// shutdown deadline.
-const LISTENER_STOP_DEADLINE: Duration = crate::executor::SHUTDOWN_DEADLINE;
+/// request (ADR-109 revision 9, Decision 1 item 8 step 2).
+///
+/// It covers one worst-case request so a legitimate one is not truncated: the
+/// 5 s frame read, up to four 5 s executor admission waits (claim, execute,
+/// cancel or recover, mark), and the 5 s response write.
+const LISTENER_STOP_DEADLINE: Duration = Duration::from_secs(30);
 
 impl LocalForkAdmissionListenerV1 {
     /// Stop accepting new local admission requests, join the worker, and
@@ -82,6 +85,10 @@ impl LocalForkAdmissionListenerV1 {
         self.stopping.store(true, Ordering::Release);
         let worker = self.worker.take();
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        // The joiner is detached on purpose: if the worker is wedged past the
+        // deadline, the joiner stays blocked on it until process exit rather
+        // than holding up shutdown. A late send to the dropped receiver is
+        // ignored.
         drop(thread::spawn(move || {
             drop(sender.send(join_listener_worker(worker)));
         }));
@@ -97,15 +104,6 @@ impl LocalForkAdmissionListenerV1 {
         let unlinked = self.socket_path.take().map_or(Ok(()), fs::remove_file);
         joined.and(unlinked)
     }
-
-    /// Idempotent: the worker is joined and the pathname removed at most once.
-    /// The worker owns the bound listener, so its fd is closed before unlink.
-    fn shutdown(&mut self) -> io::Result<()> {
-        self.stopping.store(true, Ordering::Release);
-        let joined = join_listener_worker(self.worker.take());
-        let unlinked = self.socket_path.take().map_or(Ok(()), fs::remove_file);
-        joined.and(unlinked)
-    }
 }
 
 fn join_listener_worker(worker: Option<JoinHandle<()>>) -> io::Result<()> {
@@ -117,8 +115,14 @@ fn join_listener_worker(worker: Option<JoinHandle<()>>) -> io::Result<()> {
 }
 
 impl Drop for LocalForkAdmissionListenerV1 {
+    /// Never blocks: a listener dropped without `stop` (a cancelled
+    /// serve future or an unwinding panic) signals stop, detaches a worker
+    /// that is still running (it exits after its in-flight request), and
+    /// removes the pathname at most once. After `stop` both are already gone.
     fn drop(&mut self) {
-        drop(self.shutdown());
+        self.stopping.store(true, Ordering::Release);
+        drop(self.worker.take());
+        drop(self.socket_path.take().map(fs::remove_file));
     }
 }
 
