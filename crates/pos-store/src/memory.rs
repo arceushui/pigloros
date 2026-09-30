@@ -5720,7 +5720,7 @@ mod tests {
         Ok(ForkAdmissionHostCommandV1::from_canonical_cbor(&fac1)?)
     }
 
-    /// ADR-106 r3 T10/T14 on MemoryStore: committed corruption and a clock
+    /// ADR-106 r3 T10/T14 on `MemoryStore`: committed corruption and a clock
     /// rollback still precede containment of a frozen parent.
     #[test]
     fn fork_admission_memory_corruption_and_clock_rollback_precede_containment(
