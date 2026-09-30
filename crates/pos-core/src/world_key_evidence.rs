@@ -4,7 +4,9 @@
 //! authorize use. The installed owner must compare these bytes with its
 //! immutable registration and live or tombstoned row under the release fence.
 
-use crate::{encode_head, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey};
+use crate::{
+    encode_bytes, encode_hash, encode_head, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey,
+};
 
 /// Maximum preferred-CBOR size of one WKE1 record.
 pub const MAX_WORLD_KEY_EVIDENCE_BYTES_V1: usize = 256;
@@ -78,16 +80,14 @@ impl WorldKeyEvidenceV1 {
         encode_owner(&mut bytes, self.0.identity.owner_id);
         bytes.push(self.0.identity.role.code());
         encode_head(&mut bytes, 0, self.0.identity.epoch);
-        bytes.extend_from_slice(&[0x58, 0x20]);
-        bytes.extend_from_slice(self.0.private_material_digest.as_bytes());
+        encode_hash(&mut bytes, self.0.private_material_digest);
         bytes.push(if self.0.private_material_required {
             0xf5
         } else {
             0xf4
         });
         if let Some(key) = self.0.public_verification_key {
-            bytes.extend_from_slice(&[0x58, 0x20]);
-            bytes.extend_from_slice(key.as_bytes());
+            encode_bytes(&mut bytes, key.as_bytes(), 2);
         } else {
             bytes.push(0xf6);
         }

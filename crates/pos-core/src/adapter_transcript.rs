@@ -4,12 +4,9 @@
 //! MAA1 policy, actual `PublicRecord` provenance, or protected-use authority.
 
 use crate::{
-    adapter_admission::{
-        encode_bytes, encode_hash, hash_bytes, length_hash, valid_adapter_identity,
-        AdapterContractKey,
-    },
-    encode_head, public_adapter_schema_digest_v1, AdapterAdmissionV1, Hash, PluginId,
-    WorldReplayHandleV1,
+    adapter_admission::{hash_bytes, length_hash, valid_adapter_identity, AdapterContractKey},
+    encode_bytes, encode_hash, encode_head, public_adapter_schema_digest_v1, AdapterAdmissionV1,
+    Hash, PluginId, WorldReplayHandleV1,
 };
 use std::collections::BTreeMap;
 use ulid::Ulid;
