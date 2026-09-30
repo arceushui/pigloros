@@ -6413,12 +6413,13 @@ impl ArtifactRegistrationPersistencePortV1 for SqliteStore {
         &mut self,
         batch: PreparedArtifactRegistrationBatchV1,
     ) -> Result<ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1> {
-        if batch.records().is_empty()
-            || !batch.records().iter().any(|record| {
-                record.owner_id() == batch.owner_id()
-                    && record.registration_address() == batch.root_registration_address()
-            })
-        {
+        let root_registration_address = batch.root_registration_address();
+        let has_root_record = batch.records().iter().any(|record| {
+            let same_owner = record.owner_id() == batch.owner_id();
+            let same_address = record.registration_address() == root_registration_address;
+            same_owner && same_address
+        });
+        if batch.records().is_empty() || !has_root_record {
             return Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure);
         }
         sqlite_artifact_registration_schema_exists(&self.conn)
@@ -6542,137 +6543,14 @@ impl AdapterRecordingStoreV1 for SqliteStore {
         reservation: AdapterCallReservationV1,
     ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
         sqlite_require_adapter_recording_schema(&self.conn)?;
-        let global_index = reservation.invocation().as_input().global_call_index;
-        let global_index_sql =
-            i64::try_from(global_index).map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
-        let per_plugin_index_sql = i64::try_from(reservation.per_plugin_call_index())
-            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
-        let reserved_at_sql = i64::try_from(reservation.reserved_at_micros())
-            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
-        let maximum_call_count = u64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)
-            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
-        let maximum_call_count_sql = i64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)
-            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
-        if global_index >= maximum_call_count {
-            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
-        }
-        let plugin_id = reservation.plugin_id().inner().to_bytes();
-        let invocation_bytes = reservation.invocation().to_canonical_cbor();
-        let idempotency_key = reservation.idempotency_key();
         let scope = begin_immediate_scope(&self.conn)
             .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
-        let result = (|| {
-            let session_state =
-                sqlite_adapter_recording_state(&self.conn, owner_reference, run_operation_id)?
-                    .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
-            if session_state != 0 {
-                return Err(AdapterRecordingStoreErrorV1::InvalidState);
-            }
-            let existing = self
-                .conn
-                .query_row(
-                    "SELECT plugin_id, per_plugin_call_index, invocation_cbor,
-                            idempotency_key, reserved_at_micros, output_bytes
-                     FROM adapter_recording_calls
-                     WHERE owner_reference = ?1 AND run_operation_id = ?2
-                       AND global_call_index = ?3",
-                    params![
-                        owner_reference.as_bytes().as_slice(),
-                        run_operation_id.as_bytes().as_slice(),
-                        global_index_sql
-                    ],
-                    |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                            row.get::<_, Vec<u8>>(3)?,
-                            row.get::<_, i64>(4)?,
-                            row.get::<_, Option<Vec<u8>>>(5)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
-            if let Some((
-                stored_plugin,
-                stored_per_plugin_index,
-                stored_invocation,
-                stored_idempotency_key,
-                stored_reserved_at,
-                output_bytes,
-            )) = existing
-            {
-                if stored_plugin.as_slice() != plugin_id.as_slice()
-                    || stored_per_plugin_index != per_plugin_index_sql
-                    || stored_invocation != invocation_bytes
-                    || stored_idempotency_key.as_slice() != idempotency_key.as_bytes().as_slice()
-                {
-                    return Err(AdapterRecordingStoreErrorV1::InvalidCall);
-                }
-                let reserved_at_micros = u64::try_from(stored_reserved_at)
-                    .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
-                return Ok(match output_bytes {
-                    Some(output_bytes) => AdapterCallReservationOutcomeV1::Completed {
-                        output_bytes,
-                        reserved_at_micros,
-                    },
-                    None => AdapterCallReservationOutcomeV1::Reserved { reserved_at_micros },
-                });
-            }
-            let global_count: i64 = self
-                .conn
-                .query_row(
-                    "SELECT COUNT(*) FROM adapter_recording_calls
-                     WHERE owner_reference = ?1 AND run_operation_id = ?2",
-                    params![
-                        owner_reference.as_bytes().as_slice(),
-                        run_operation_id.as_bytes().as_slice()
-                    ],
-                    |row| row.get(0),
-                )
-                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
-            if global_count != global_index_sql || global_count >= maximum_call_count_sql {
-                return Err(AdapterRecordingStoreErrorV1::InvalidCall);
-            }
-            let plugin_count: i64 = self
-                .conn
-                .query_row(
-                    "SELECT COUNT(*) FROM adapter_recording_calls
-                     WHERE owner_reference = ?1 AND run_operation_id = ?2 AND plugin_id = ?3",
-                    params![
-                        owner_reference.as_bytes().as_slice(),
-                        run_operation_id.as_bytes().as_slice(),
-                        plugin_id.as_slice()
-                    ],
-                    |row| row.get(0),
-                )
-                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
-            if plugin_count != per_plugin_index_sql {
-                return Err(AdapterRecordingStoreErrorV1::InvalidCall);
-            }
-            self.conn
-                .execute(
-                    "INSERT INTO adapter_recording_calls
-                     (owner_reference, run_operation_id, global_call_index, plugin_id,
-                      per_plugin_call_index, invocation_cbor, idempotency_key, reserved_at_micros)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        owner_reference.as_bytes().as_slice(),
-                        run_operation_id.as_bytes().as_slice(),
-                        global_index_sql,
-                        plugin_id.as_slice(),
-                        per_plugin_index_sql,
-                        invocation_bytes,
-                        idempotency_key.as_bytes().as_slice(),
-                        reserved_at_sql,
-                    ],
-                )
-                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
-            Ok(AdapterCallReservationOutcomeV1::Reserved {
-                reserved_at_micros: reservation.reserved_at_micros(),
-            })
-        })();
+        let result = sqlite_reserve_adapter_call_in_scope(
+            &self.conn,
+            owner_reference,
+            run_operation_id,
+            reservation,
+        );
         finish_adapter_recording_scope(&self.conn, scope, result)
     }
 
@@ -6751,12 +6629,17 @@ impl AdapterRecordingStoreV1 for SqliteStore {
         let scope = begin_immediate_scope(&self.conn)
             .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
         let result = (|| {
-            let (session, state, transcript) = sqlite_load_adapter_recording_session(
+            let loaded = sqlite_load_adapter_recording_session(
                 &self.conn,
                 owner_reference,
                 run_operation_id,
             )?
             .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+            let SqliteLoadedAdapterRecordingSessionV1 {
+                session,
+                state,
+                transcript_bytes: transcript,
+            } = loaded;
             if state == 1 {
                 let transcript_bytes =
                     transcript.ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
@@ -6807,11 +6690,16 @@ impl AdapterRecordingStoreV1 for SqliteStore {
         run_operation_id: Hash,
     ) -> Result<Option<Vec<u8>>, AdapterRecordingStoreErrorV1> {
         sqlite_require_adapter_recording_schema(&self.conn)?;
-        let Some((session, state, transcript)) =
+        let Some(loaded) =
             sqlite_load_adapter_recording_session(&self.conn, owner_reference, run_operation_id)?
         else {
             return Ok(None);
         };
+        let SqliteLoadedAdapterRecordingSessionV1 {
+            session,
+            state,
+            transcript_bytes: transcript,
+        } = loaded;
         if state != 1 {
             return Ok(None);
         }
@@ -6879,6 +6767,194 @@ fn sqlite_require_adapter_recording_schema(
     }
 }
 
+struct SqliteAdapterRecordingCallRowV1 {
+    plugin_id: Vec<u8>,
+    per_plugin_call_index: i64,
+    invocation_cbor: Vec<u8>,
+    idempotency_key: Vec<u8>,
+    reserved_at_micros: i64,
+    output_bytes: Option<Vec<u8>>,
+}
+
+fn sqlite_reserve_adapter_call_in_scope(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+    reservation: AdapterCallReservationV1,
+) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+    let global_index = reservation.invocation().as_input().global_call_index;
+    let global_index_sql =
+        i64::try_from(global_index).map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    let per_plugin_index_sql = i64::try_from(reservation.per_plugin_call_index())
+        .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    let reserved_at_sql = i64::try_from(reservation.reserved_at_micros())
+        .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    let maximum_call_count = u64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)
+        .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    let maximum_call_count_sql = i64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)
+        .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    if global_index >= maximum_call_count {
+        return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+    }
+
+    let plugin_id = reservation.plugin_id().inner().to_bytes();
+    let invocation_bytes = reservation.invocation().to_canonical_cbor();
+    let idempotency_key = reservation.idempotency_key();
+    let session_state =
+        sqlite_adapter_recording_state(connection, owner_reference, run_operation_id)?
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+    if session_state != 0 {
+        return Err(AdapterRecordingStoreErrorV1::InvalidState);
+    }
+    let existing = sqlite_load_adapter_recording_call(
+        connection,
+        owner_reference,
+        run_operation_id,
+        global_index_sql,
+    )?;
+    if let Some(outcome) = sqlite_existing_adapter_call_outcome(
+        existing,
+        &plugin_id,
+        per_plugin_index_sql,
+        &invocation_bytes,
+        idempotency_key,
+    )? {
+        return Ok(outcome);
+    }
+    sqlite_require_next_adapter_call(
+        connection,
+        owner_reference,
+        run_operation_id,
+        global_index_sql,
+        per_plugin_index_sql,
+        maximum_call_count_sql,
+        &plugin_id,
+    )?;
+    connection
+        .execute(
+            "INSERT INTO adapter_recording_calls
+             (owner_reference, run_operation_id, global_call_index, plugin_id,
+              per_plugin_call_index, invocation_cbor, idempotency_key, reserved_at_micros)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+                global_index_sql,
+                plugin_id.as_slice(),
+                per_plugin_index_sql,
+                invocation_bytes,
+                idempotency_key.as_bytes().as_slice(),
+                reserved_at_sql,
+            ],
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    Ok(AdapterCallReservationOutcomeV1::Reserved {
+        reserved_at_micros: reservation.reserved_at_micros(),
+    })
+}
+
+fn sqlite_load_adapter_recording_call(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+    global_index_sql: i64,
+) -> Result<Option<SqliteAdapterRecordingCallRowV1>, AdapterRecordingStoreErrorV1> {
+    connection
+        .query_row(
+            "SELECT plugin_id, per_plugin_call_index, invocation_cbor,
+                    idempotency_key, reserved_at_micros, output_bytes
+             FROM adapter_recording_calls
+             WHERE owner_reference = ?1 AND run_operation_id = ?2
+               AND global_call_index = ?3",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+                global_index_sql,
+            ],
+            |row| {
+                Ok(SqliteAdapterRecordingCallRowV1 {
+                    plugin_id: row.get(0)?,
+                    per_plugin_call_index: row.get(1)?,
+                    invocation_cbor: row.get(2)?,
+                    idempotency_key: row.get(3)?,
+                    reserved_at_micros: row.get(4)?,
+                    output_bytes: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)
+}
+
+fn sqlite_existing_adapter_call_outcome(
+    existing: Option<SqliteAdapterRecordingCallRowV1>,
+    plugin_id: &[u8],
+    per_plugin_index_sql: i64,
+    invocation_bytes: &[u8],
+    idempotency_key: Hash,
+) -> Result<Option<AdapterCallReservationOutcomeV1>, AdapterRecordingStoreErrorV1> {
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    if existing.plugin_id.as_slice() != plugin_id
+        || existing.per_plugin_call_index != per_plugin_index_sql
+        || existing.invocation_cbor.as_slice() != invocation_bytes
+        || existing.idempotency_key.as_slice() != idempotency_key.as_bytes().as_slice()
+    {
+        return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+    }
+    let reserved_at_micros = u64::try_from(existing.reserved_at_micros)
+        .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+    Ok(Some(existing.output_bytes.map_or(
+        AdapterCallReservationOutcomeV1::Reserved { reserved_at_micros },
+        |output_bytes| AdapterCallReservationOutcomeV1::Completed {
+            output_bytes,
+            reserved_at_micros,
+        },
+    )))
+}
+
+fn sqlite_require_next_adapter_call(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+    global_index_sql: i64,
+    per_plugin_index_sql: i64,
+    maximum_call_count_sql: i64,
+    plugin_id: &[u8],
+) -> Result<(), AdapterRecordingStoreErrorV1> {
+    let global_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM adapter_recording_calls
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    if global_count != global_index_sql || global_count >= maximum_call_count_sql {
+        return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+    }
+    let plugin_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM adapter_recording_calls
+             WHERE owner_reference = ?1 AND run_operation_id = ?2 AND plugin_id = ?3",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+                plugin_id,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    if plugin_count != per_plugin_index_sql {
+        return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+    }
+    Ok(())
+}
+
 fn sqlite_adapter_recording_state(
     connection: &Connection,
     owner_reference: Hash,
@@ -6898,12 +6974,17 @@ fn sqlite_adapter_recording_state(
         .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)
 }
 
+struct SqliteLoadedAdapterRecordingSessionV1 {
+    session: AdapterRecordingSessionV1,
+    state: i64,
+    transcript_bytes: Option<Vec<u8>>,
+}
+
 fn sqlite_load_adapter_recording_session(
     connection: &Connection,
     owner_reference: Hash,
     run_operation_id: Hash,
-) -> Result<Option<(AdapterRecordingSessionV1, i64, Option<Vec<u8>>)>, AdapterRecordingStoreErrorV1>
-{
+) -> Result<Option<SqliteLoadedAdapterRecordingSessionV1>, AdapterRecordingStoreErrorV1> {
     let stored = connection
         .query_row(
             "SELECT world_handle_cbor, admission_cbor, state, transcript_cbor
@@ -6945,7 +7026,11 @@ fn sqlite_load_adapter_recording_session(
     if let Some(bytes) = transcript_bytes.as_deref() {
         validate_closed_adapter_recording_v1(&session, bytes)?;
     }
-    Ok(Some((session, state, transcript_bytes)))
+    Ok(Some(SqliteLoadedAdapterRecordingSessionV1 {
+        session,
+        state,
+        transcript_bytes,
+    }))
 }
 
 fn sqlite_adapter_recording_transcript(
@@ -7122,7 +7207,7 @@ fn commit_sqlite_artifact_registration_record(
             }
             Ok(true)
         }
-        (Some(_), None) | (None, Some(_)) | (Some(_), Some(_)) => {
+        (Some(_), None | Some(_)) | (None, Some(_)) => {
             Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
         }
     }
@@ -7336,13 +7421,18 @@ fn sqlite_validate_root_adapter_recording(
     transcript_bytes: &[u8],
 ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
     let root_input = root.as_input();
-    let (session, state, stored_transcript) = sqlite_load_adapter_recording_session(
+    let loaded = sqlite_load_adapter_recording_session(
         connection,
         root_input.owner_reference,
         root_input.run_operation_id,
     )
     .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?
     .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+    let SqliteLoadedAdapterRecordingSessionV1 {
+        session,
+        state,
+        transcript_bytes: stored_transcript,
+    } = loaded;
     if state != 1
         || session.world_handle() != root_input.world_handle
         || session.admission().as_input().scope_digest != root_input.plugin_roster_digest
@@ -7448,10 +7538,10 @@ fn sqlite_check_artifact_registration_operation(
                 owner_id,
                 existing_manifest.as_input().run_operation_id,
             )?;
-            if existing_operation != Some(existing_root) {
-                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
-            } else {
+            if existing_operation == Some(existing_root) {
                 Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
+            } else {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
             }
         }
         (None, None, Some(_)) | (Some(_), None, _) | (None, Some(_), _) => {
@@ -7494,7 +7584,7 @@ fn sqlite_commit_artifact_registration_operation(
     }
 }
 
-fn artifact_class_code(class: ErasureArtifactClassV1) -> i64 {
+const fn artifact_class_code(class: ErasureArtifactClassV1) -> i64 {
     match class {
         ErasureArtifactClassV1::TimelineReplay => 0,
         ErasureArtifactClassV1::ReproManifest => 1,
@@ -7506,7 +7596,7 @@ fn artifact_class_code(class: ErasureArtifactClassV1) -> i64 {
     }
 }
 
-fn artifact_class_from_code(code: i64) -> Option<ErasureArtifactClassV1> {
+const fn artifact_class_from_code(code: i64) -> Option<ErasureArtifactClassV1> {
     match code {
         0 => Some(ErasureArtifactClassV1::TimelineReplay),
         1 => Some(ErasureArtifactClassV1::ReproManifest),
