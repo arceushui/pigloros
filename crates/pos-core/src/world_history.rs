@@ -4,7 +4,8 @@
 //! Events, source chains, Fork lineage, native dependencies, or Replay use.
 
 use crate::{
-    CanonicalBytes, CorrelationId, EntityId, EventId, Hash, SchemaVersion, Signature, TimelineId,
+    encode_head, CanonicalBytes, CorrelationId, EntityId, EventId, Hash, SchemaVersion, Signature,
+    TimelineId,
 };
 use ulid::Ulid;
 
@@ -751,29 +752,6 @@ fn encode_text(output: &mut Vec<u8>, value: &str) {
 
 fn encode_unsigned(output: &mut Vec<u8>, value: u64) {
     encode_head(output, 0, value);
-}
-
-fn encode_head(output: &mut Vec<u8>, major_type: u8, value: u64) {
-    let bytes = value.to_be_bytes();
-    let prefix = major_type << 5;
-    match value {
-        0..=23 => output.push(prefix | bytes[7]),
-        24..=0xff => {
-            output.extend_from_slice(&[prefix | 0x18, bytes[7]]);
-        }
-        0x100..=0xffff => {
-            output.push(prefix | 0x19);
-            output.extend_from_slice(&bytes[6..]);
-        }
-        0x1_0000..=0xffff_ffff => {
-            output.push(prefix | 0x1a);
-            output.extend_from_slice(&bytes[4..]);
-        }
-        _ => {
-            output.push(prefix | 0x1b);
-            output.extend_from_slice(&bytes);
-        }
-    }
 }
 
 fn digest(domain: &[u8], bytes: &[u8]) -> Hash {
