@@ -4,7 +4,7 @@
 //! capability. Only the installed cut owner can resolve it against its actual
 //! visible receipt, catalog and protected-use fence.
 
-use crate::{Hash, TimelineId};
+use crate::{encode_head, Hash, TimelineId};
 use ulid::Ulid;
 
 /// Maximum accepted preferred-CBOR length of one WRH1 handle.
@@ -84,10 +84,10 @@ impl WorldReplayHandleV1 {
         encode_hash(&mut bytes, self.0.owner_reference);
         bytes.push(0x50);
         bytes.extend_from_slice(&u128::from(self.0.timeline_id.inner()).to_be_bytes());
-        encode_unsigned(&mut bytes, self.0.cut_id);
+        encode_head(&mut bytes, 0, self.0.cut_id);
         encode_hash(&mut bytes, self.0.commit_receipt_digest);
         encode_hash(&mut bytes, self.0.recording_receipt_digest);
-        encode_unsigned(&mut bytes, self.0.logical_head);
+        encode_head(&mut bytes, 0, self.0.logical_head);
         encode_hash(&mut bytes, self.0.stitched_head_hash);
         bytes
     }
@@ -118,26 +118,6 @@ impl WorldReplayHandleV1 {
 fn encode_hash(bytes: &mut Vec<u8>, hash: Hash) {
     bytes.extend_from_slice(&[0x58, 0x20]);
     bytes.extend_from_slice(hash.as_bytes());
-}
-
-fn encode_unsigned(bytes: &mut Vec<u8>, value: u64) {
-    let full = value.to_be_bytes();
-    match value {
-        0..=23 => bytes.push(full[7]),
-        24..=0xff => bytes.extend_from_slice(&[0x18, full[7]]),
-        0x100..=0xffff => {
-            bytes.push(0x19);
-            bytes.extend_from_slice(&full[6..]);
-        }
-        0x1_0000..=0xffff_ffff => {
-            bytes.push(0x1a);
-            bytes.extend_from_slice(&full[4..]);
-        }
-        _ => {
-            bytes.push(0x1b);
-            bytes.extend_from_slice(&full);
-        }
-    }
 }
 
 struct Reader<'a> {
