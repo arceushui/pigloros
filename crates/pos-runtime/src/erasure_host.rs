@@ -30,16 +30,19 @@ use pos_core::{
     ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1,
     ErasureVerifiedTopologyObservationV1, Event, EventDraft, EventId, ForkAdmissionErrorV1,
     ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
-    ForkAuthenticationPolicyV1, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
-    KeyDestructionRequestV1, KeyRegistryStateV1, OwnTracksIngressInputV1, PersistedAuthorityV1,
-    PreparedErasureCasV1, PreparedErasureRecoveryErrorV1, PreparedOwnTracksIngressV1, Seq,
-    StoredErasureManifestV1, Timeline, TimelineId, TimelineMeta, TimelineMode, WallTime,
+    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, KeyDestructionBeginOutcomeV1,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyRegistryStateV1, OwnTracksIngressInputV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureRecoveryErrorV1,
+    PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1, Timeline, TimelineId, TimelineMeta,
+    TimelineMode, WallTime,
 };
 use pos_store::{
     ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
     ForkAdmissionAuthoritySessionV1, ForkAdmissionDeliveryJournalPortV1,
-    ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1, ForkDeliveryExecutionV1,
-    ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1, ForkDeliveryTupleV1, StoreConfig,
+    ForkClassifierRegistrationReceiptV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
+    ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1,
+    ForkDeliveryTupleV1, ForkEventAuthorityErrorV1, ForkEventPermitIssuerPortV1,
+    ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1, StoreConfig,
 };
 use std::num::NonZeroUsize;
 
@@ -169,6 +172,8 @@ trait ErasureHostStore:
     + ForkAdmissionAuthorityBootstrapPortV1
     + ForkAdmissionAuthorityPortV1
     + ForkAdmissionDeliveryJournalPortV1
+    + ForkEventPermitIssuerPortV1
+    + ForkEventProvenanceAuthorityPortV1
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -186,7 +191,9 @@ where
         + ErasurePersistencePortV1
         + ForkAdmissionAuthorityBootstrapPortV1
         + ForkAdmissionAuthorityPortV1
-        + ForkAdmissionDeliveryJournalPortV1,
+        + ForkAdmissionDeliveryJournalPortV1
+        + ForkEventPermitIssuerPortV1
+        + ForkEventProvenanceAuthorityPortV1,
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -1399,6 +1406,62 @@ impl ErasureExecutionHostV1 {
     /// cannot read or change Timelines, Events, or erasure state.
     pub fn fork_admission_bootstrap(&mut self) -> &mut dyn ForkAdmissionAuthorityBootstrapPortV1 {
         self.store.host_store()
+    }
+
+    /// Run the read-only ADR-099 revision 11 FCP1 preflight on the owned
+    /// store: every durable FCS1 of the fixed registrar must be exactly one
+    /// of `profile_sources` (ADR-109 revision 12, startup step 2a).
+    ///
+    /// It writes no record and needs no gate.
+    ///
+    /// # Errors
+    /// Returns `CorruptAuthority` for a malformed or mis-keyed durable FCS1,
+    /// `Conflict` when a durable FCS1 is not exactly one profile row, and
+    /// `StorageIndeterminate` when the store cannot be read.
+    pub fn preflight_fork_classifier_profile(
+        &mut self,
+        profile_sources: &[ForkClassifierSourceV1],
+    ) -> Result<(), ForkEventAuthorityErrorV1> {
+        self.store
+            .host_store()
+            .preflight_fork_classifier_profile(profile_sources)
+    }
+
+    /// Register the profile-selected classifier of one committed admitted
+    /// Fork through the store's private permit bridge (ADR-099 revision 11
+    /// section 3; ADR-109 revision 12).
+    ///
+    /// The store rereads the validated FAR1 of `child_timeline_id`; `select`
+    /// maps its room revision descriptor hash to the one activation-profile
+    /// FCS1, and an absent row fails with no fallback. The registrar permit
+    /// is issued by `issuer` for `session` and consumed at once; it never
+    /// leaves this call. Registration writes only classifier authority
+    /// records, so it runs on the owned adapter without the gate fence.
+    ///
+    /// # Errors
+    /// Returns `Unauthenticated` when no profile row is selected or the
+    /// issuer, session, or FAR1 does not authorize the permit, and the store's
+    /// closed authority error otherwise.
+    pub fn register_fork_classifier(
+        &mut self,
+        (issuer, session): (&ForkEventPermitIssuerV1, &ForkAdmissionAuthoritySessionV1),
+        operation_id: Hash,
+        child_timeline_id: TimelineId,
+        select: impl FnOnce(Hash) -> Option<ForkClassifierSourceV1>,
+    ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
+        let store = self.store.host_store();
+        store
+            .read_validated_local_fork_admission(child_timeline_id)
+            .and_then(|admission| {
+                select(admission.input().room_revision_descriptor_hash)
+                    .ok_or(ForkEventAuthorityErrorV1::Unauthenticated)
+            })
+            .and_then(|source| {
+                store.issue_classifier_registrar_permit(issuer, session, child_timeline_id, source)
+            })
+            .and_then(|permit| {
+                store.register_classifier(session, &permit, operation_id, child_timeline_id)
+            })
     }
 
     /// Execute one authenticated ADR-106 FAC1 against the owned store
@@ -5392,6 +5455,96 @@ mod tests {
                 )
         }
     }
+
+    impl ForkEventPermitIssuerPortV1 for FaultStoreV1 {
+        fn read_validated_local_fork_admission(
+            &self,
+            child: TimelineId,
+        ) -> Result<pos_core::ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
+            self.inner.read_validated_local_fork_admission(child)
+        }
+
+        fn preflight_fork_classifier_profile(
+            &self,
+            sources: &[ForkClassifierSourceV1],
+        ) -> Result<(), ForkEventAuthorityErrorV1> {
+            self.inner.preflight_fork_classifier_profile(sources)
+        }
+
+        fn issue_classifier_registrar_permit(
+            &self,
+            issuer: &ForkEventPermitIssuerV1,
+            session: &ForkAdmissionAuthoritySessionV1,
+            child: TimelineId,
+            source: ForkClassifierSourceV1,
+        ) -> Result<pos_store::ForkClassifierRegistrarPermitV1, ForkEventAuthorityErrorV1> {
+            self.inner
+                .issue_classifier_registrar_permit(issuer, session, child, source)
+        }
+
+        fn issue_append_source_permit(
+            &self,
+            issuer: &ForkEventPermitIssuerV1,
+            session: &ForkAdmissionAuthoritySessionV1,
+            child: TimelineId,
+            selected: &ForkClassifierSourceV1,
+            source: pos_core::ForkAppendSourceIdentityV1,
+        ) -> Result<pos_store::ForkAppendSourcePermitV1, ForkEventAuthorityErrorV1> {
+            self.inner
+                .issue_append_source_permit(issuer, session, child, selected, source)
+        }
+    }
+
+    impl ForkEventProvenanceAuthorityPortV1 for FaultStoreV1 {
+        fn register_classifier(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            permit: &pos_store::ForkClassifierRegistrarPermitV1,
+            operation: Hash,
+            child: TimelineId,
+        ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
+            self.inner
+                .register_classifier(session, permit, operation, child)
+        }
+
+        fn append_classified(
+            &mut self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            permit: &pos_store::ForkAppendSourcePermitV1,
+            operation: Hash,
+            draft: EventDraft,
+        ) -> Result<pos_store::ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1> {
+            self.inner
+                .append_classified(session, permit, operation, draft)
+        }
+
+        fn recover_classified_append(
+            &self,
+            session: &ForkAdmissionAuthoritySessionV1,
+            permit: &pos_store::ForkAppendSourcePermitV1,
+            operation: Hash,
+            draft: &EventDraft,
+        ) -> Result<Option<pos_store::ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1>
+        {
+            self.inner
+                .recover_classified_append(session, permit, operation, draft)
+        }
+
+        fn read_fork_event_suffix(
+            &self,
+            child: TimelineId,
+            from: u64,
+        ) -> Result<FaultSuffixV1, ForkEventAuthorityErrorV1> {
+            self.inner.read_fork_event_suffix(child, from)
+        }
+    }
+
+    /// The validated child suffix shape of the provenance port.
+    type FaultSuffixV1 = Vec<(
+        pos_core::EventOriginRecordV1,
+        Option<pos_core::ForkInterventionAdmissionV1>,
+        pos_core::ForkAppendOperationV1,
+    )>;
 
     impl ForkAdmissionDeliveryJournalPortV1 for FaultStoreV1 {
         fn claim_fork_delivery(

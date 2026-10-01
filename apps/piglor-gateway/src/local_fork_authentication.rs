@@ -44,6 +44,10 @@ use rustix::rand::{getrandom, GetRandomFlags};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::local_fork_classifier_profile::{
+    ForkClassifierProfileV1, CLASSIFIER_PROFILE_CREDENTIAL_NAME, MAX_CLASSIFIER_PROFILE_BYTES,
+};
+
 const AUTH_CREDENTIAL_NAME: &str = "pigloros.fork-admission-auth";
 const HOST_CREDENTIAL_NAME: &str = "pigloros.fork-admission-host-signer";
 const FAHK1_BYTES: usize = 42;
@@ -82,7 +86,8 @@ pub(super) struct LocalForkAuthenticationCredentialsV1 {
 }
 
 impl LocalForkAuthenticationCredentialsV1 {
-    /// Load exactly the two systemd credential names from one protected directory.
+    /// Load exactly the two provisioning credential names (FACR1 and FAHK1)
+    /// from one protected directory; the managed service uses `load_managed`.
     ///
     /// The directory is opened once without following symlinks. Its names and
     /// children are read relative to that descriptor, and children are opened
@@ -104,6 +109,40 @@ impl LocalForkAuthenticationCredentialsV1 {
             service_uid,
         )?);
         parse_credentials(&auth_bytes, &host_bytes, service_uid)
+    }
+
+    /// Load the ADR-107 r6 managed-service inputs: exactly FACR1, FAHK1, and
+    /// the ADR-099 r11 FCP1 classifier profile from one protected directory.
+    ///
+    /// All three files pass the same descriptor-relative custody checks, and
+    /// FACR1/FAHK1 are validated before FCP1 is strictly decoded. The profile
+    /// plaintext is zeroized after parsing; only the immutable parsed profile
+    /// is returned, for the protected coordinator alone.
+    pub(super) fn load_managed(
+        directory: &Path,
+        service_uid: u32,
+    ) -> Result<(Self, ForkClassifierProfileV1), LocalForkAuthenticationErrorV1> {
+        let directory = open_credential_directory(directory, service_uid)?;
+        managed_credential_names(&directory)?;
+        let auth_bytes = Zeroizing::new(read_credential(
+            &directory,
+            AUTH_CREDENTIAL_NAME,
+            service_uid,
+        )?);
+        let host_bytes = Zeroizing::new(read_credential(
+            &directory,
+            HOST_CREDENTIAL_NAME,
+            service_uid,
+        )?);
+        let profile_bytes = Zeroizing::new(read_bounded_credential(
+            &directory,
+            CLASSIFIER_PROFILE_CREDENTIAL_NAME,
+            service_uid,
+            MAX_CLASSIFIER_PROFILE_BYTES,
+        )?);
+        let credentials = parse_credentials(&auth_bytes, &host_bytes, service_uid)?;
+        ForkClassifierProfileV1::from_canonical_cbor(&profile_bytes)
+            .map(|profile| (credentials, profile))
     }
 
     #[must_use]
@@ -657,6 +696,35 @@ fn open_credential_directory(
 }
 
 fn credential_names(directory: &File) -> Result<(), LocalForkAuthenticationErrorV1> {
+    sorted_credential_names(directory).and_then(|names| match names.as_slice() {
+        [] => Err(LocalForkAuthenticationErrorV1::CredentialUnavailable),
+        [name] if name == AUTH_CREDENTIAL_NAME || name == HOST_CREDENTIAL_NAME => {
+            Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        }
+        [auth, host] if auth == AUTH_CREDENTIAL_NAME && host == HOST_CREDENTIAL_NAME => Ok(()),
+        _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
+    })
+}
+
+/// ADR-107 r6 managed service: exactly the FACR1, FAHK1, and FCP1 names.
+/// A missing, fourth, or swapped-in name rejects before any file is read.
+fn managed_credential_names(directory: &File) -> Result<(), LocalForkAuthenticationErrorV1> {
+    sorted_credential_names(directory).and_then(|names| {
+        (names
+            == [
+                AUTH_CREDENTIAL_NAME,
+                HOST_CREDENTIAL_NAME,
+                CLASSIFIER_PROFILE_CREDENTIAL_NAME,
+            ])
+        .then_some(())
+        .ok_or(LocalForkAuthenticationErrorV1::CredentialInvalid)
+    })
+}
+
+/// List the credential directory's child names, sorted, by its descriptor.
+fn sorted_credential_names(
+    directory: &File,
+) -> Result<Vec<String>, LocalForkAuthenticationErrorV1> {
     openat(
         directory,
         ".",
@@ -679,16 +747,9 @@ fn credential_names(directory: &File) -> Result<(), LocalForkAuthenticationError
             .filter(|name| !matches!(name.as_deref(), Ok("." | "..")))
             .collect::<Result<Vec<_>, _>>()
     })
-    .and_then(|mut names| {
+    .map(|mut names| {
         names.sort_unstable();
-        match names.as_slice() {
-            [] => Err(LocalForkAuthenticationErrorV1::CredentialUnavailable),
-            [name] if name == AUTH_CREDENTIAL_NAME || name == HOST_CREDENTIAL_NAME => {
-                Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-            }
-            [auth, host] if auth == AUTH_CREDENTIAL_NAME && host == HOST_CREDENTIAL_NAME => Ok(()),
-            _ => Err(LocalForkAuthenticationErrorV1::CredentialInvalid),
-        }
+        names
     })
 }
 
@@ -696,6 +757,21 @@ fn read_credential(
     directory: &File,
     name: &str,
     service_uid: u32,
+) -> Result<Vec<u8>, LocalForkAuthenticationErrorV1> {
+    read_bounded_credential(
+        directory,
+        name,
+        service_uid,
+        MAX_FORK_AUTH_CREDENTIAL_BYTES_V1,
+    )
+}
+
+/// Read one credential child, never following a symlink, within `maximum`.
+fn read_bounded_credential(
+    directory: &File,
+    name: &str,
+    service_uid: u32,
+    maximum: usize,
 ) -> Result<Vec<u8>, LocalForkAuthenticationErrorV1> {
     openat(
         directory,
@@ -718,10 +794,10 @@ fn read_credential(
                 usize::try_from(metadata.len())
                     .map_err(|_| LocalForkAuthenticationErrorV1::CredentialInvalid)
                     .and_then(|size| {
-                        if size > MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 {
+                        if size > maximum {
                             return Err(LocalForkAuthenticationErrorV1::CredentialInvalid);
                         }
-                        finish_credential_read(&mut file, size)
+                        finish_credential_read(&mut file, size, maximum)
                     })
             })
     })
@@ -734,10 +810,11 @@ const fn errno_unavailable(_: rustix::io::Errno) -> LocalForkAuthenticationError
 fn finish_credential_read(
     reader: &mut impl Read,
     size: usize,
+    maximum: usize,
 ) -> Result<Vec<u8>, LocalForkAuthenticationErrorV1> {
     let mut bytes = Vec::with_capacity(size);
     if reader
-        .take(u64::try_from(MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 + 1).unwrap_or(u64::MAX))
+        .take(u64::try_from(maximum + 1).unwrap_or(u64::MAX))
         .read_to_end(&mut bytes)
         .is_err()
     {
@@ -1894,14 +1971,22 @@ mod tests {
         }
 
         let mut short = &b"short"[..];
-        expect_invalid(finish_credential_read(&mut short, 6));
+        expect_invalid(finish_credential_read(
+            &mut short,
+            6,
+            MAX_FORK_AUTH_CREDENTIAL_BYTES_V1,
+        ));
         let grown = vec![0; MAX_FORK_AUTH_CREDENTIAL_BYTES_V1 + 100];
         let mut grown = grown.as_slice();
-        expect_invalid(finish_credential_read(&mut grown, 1));
+        expect_invalid(finish_credential_read(
+            &mut grown,
+            1,
+            MAX_FORK_AUTH_CREDENTIAL_BYTES_V1,
+        ));
         assert_eq!(grown.len(), 99);
         let mut failing = FailingReader;
         assert_eq!(
-            finish_credential_read(&mut failing, 1),
+            finish_credential_read(&mut failing, 1, MAX_FORK_AUTH_CREDENTIAL_BYTES_V1),
             Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
         );
         expect_invalid(write_canonical_array(

@@ -68,13 +68,13 @@ use pos_core::{
     ForkAdmissionHostCommandV1, ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1,
     ForkAdmissionOpenChallengeV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
     ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
-    ForkAdmissionRecoveryProofV1, ForkAppendOperationV1, ForkAttributionOriginV1,
-    ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
-    ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
-    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    ForkAdmissionRecoveryProofV1, ForkAppendOperationV1, ForkAppendSourceIdentityV1,
+    ForkAttributionOriginV1, ForkAuthorityOriginV1, ForkClassifiedEventV1,
+    ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
+    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1,
+    ForkInterventionAdmissionV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1,
+    KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
     PublicKey, Signature, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
     GEOGRAPHIC_EVENT_TYPE,
@@ -94,7 +94,9 @@ use crate::fork_delivery_journal::{
     ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryRowV1,
     ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
-use crate::fork_event_authority::fork_append_request;
+use crate::fork_event_authority::{
+    fork_append_request, permitted_fork_admission, preflight_classifier_sources,
+};
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
     ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1,
@@ -954,14 +956,20 @@ impl SqliteStore {
         session: &ForkAdmissionAuthoritySessionV1,
         operation_id: Hash,
         child_id: TimelineId,
+        permitted_admission_digest: Hash,
         source: &ForkClassifierSourceV1,
     ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
         self.conn
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
             .and_then(|()| {
-                let result =
-                    self.register_fork_classifier_locked(session, operation_id, child_id, source);
+                let result = self.register_fork_classifier_locked(
+                    session,
+                    operation_id,
+                    child_id,
+                    permitted_admission_digest,
+                    source,
+                );
                 finish_fork_event_transaction(&self.conn, result)
             })
     }
@@ -972,10 +980,14 @@ impl SqliteStore {
         session: &ForkAdmissionAuthoritySessionV1,
         operation_id: Hash,
         child_id: TimelineId,
+        permitted_admission_digest: Hash,
         source: &ForkClassifierSourceV1,
     ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
         self.require_live_fork_event_session(session)?;
-        let admission = sqlite_local_fork_admission(&self.conn, self.hasher.as_ref(), child_id)?;
+        let admission = sqlite_local_fork_admission(&self.conn, self.hasher.as_ref(), child_id)
+            .and_then(|admission| {
+                permitted_fork_admission(permitted_admission_digest, admission)
+            })?;
         if admission.input().room_revision_descriptor_hash
             != source.input().room_revision_descriptor_hash
         {
@@ -1149,7 +1161,7 @@ impl SqliteStore {
         for row in rows {
             let (event_id, logical_seq, operation) = sqlite_decode_fork_suffix_row(prefix, row)
                 .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-            let (admission, table) = graph.as_ref().map_err(|error| *error)?;
+            let (admission, table, _) = graph.as_ref().map_err(|error| *error)?;
             if operation.input().child_timeline_id != child_timeline_id
                 || operation.input().fork_admission_digest != admission.digest()
                 || operation.input().classifier_revision_digest != table.digest()
@@ -8256,17 +8268,15 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
         operation_id: Hash,
         child_timeline_id: TimelineId,
     ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
-        let source = permit.source();
-        if permit.store_id() != session.store_id()
-            || permit.registrar_identifier() != source.input().registrar_identifier
-        {
+        if !permit.authorizes(session, child_timeline_id) {
             return Err(ForkEventAuthorityErrorV1::Unauthenticated);
         }
         self.register_fork_classifier_in_transaction(
             session,
             operation_id,
             child_timeline_id,
-            source,
+            permit.fork_admission_digest(),
+            permit.source(),
         )
     }
 
@@ -8277,7 +8287,7 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
         operation_id: Hash,
         draft: EventDraft,
     ) -> Result<ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1> {
-        if permit.store_id() != session.store_id() {
+        if !permit.is_live_for(session) {
             return Err(ForkEventAuthorityErrorV1::Unauthenticated);
         }
         self.require_live_fork_event_session(session)
@@ -8301,7 +8311,7 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
     ) -> Result<Option<ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1> {
         let source = permit.source();
         let child_timeline_id = permit.child_timeline_id();
-        if permit.store_id() != session.store_id() {
+        if !permit.is_live_for(session) {
             return Err(ForkEventAuthorityErrorV1::Unauthenticated);
         }
         self.require_live_fork_event_session(session)?;
@@ -8349,6 +8359,105 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
                 finish_fork_event_transaction(&self.conn, result)
             })
     }
+}
+
+impl crate::fork_event_authority::ForkEventPermitIssuerPortV1 for SqliteStore {
+    fn read_validated_local_fork_admission(
+        &self,
+        child_timeline_id: TimelineId,
+    ) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
+        sqlite_local_fork_admission(&self.conn, self.hasher.as_ref(), child_timeline_id)
+    }
+
+    fn preflight_fork_classifier_profile(
+        &self,
+        profile_sources: &[ForkClassifierSourceV1],
+    ) -> Result<(), ForkEventAuthorityErrorV1> {
+        sqlite_durable_classifier_sources(&self.conn)
+            .and_then(|durable| preflight_classifier_sources(&durable, profile_sources))
+    }
+
+    fn issue_classifier_registrar_permit(
+        &self,
+        issuer: &crate::fork_event_authority::ForkEventPermitIssuerV1,
+        session: &ForkAdmissionAuthoritySessionV1,
+        child_timeline_id: TimelineId,
+        source: ForkClassifierSourceV1,
+    ) -> Result<ForkClassifierRegistrarPermitV1, ForkEventAuthorityErrorV1> {
+        issuer
+            .authorize(session, || self.require_live_fork_event_session(session))
+            .and_then(|()| {
+                sqlite_local_fork_admission(&self.conn, self.hasher.as_ref(), child_timeline_id)
+            })
+            .and_then(|admission| issuer.registrar_permit(&admission, source))
+    }
+
+    fn issue_append_source_permit(
+        &self,
+        issuer: &crate::fork_event_authority::ForkEventPermitIssuerV1,
+        session: &ForkAdmissionAuthoritySessionV1,
+        child_timeline_id: TimelineId,
+        selected_source: &ForkClassifierSourceV1,
+        source: ForkAppendSourceIdentityV1,
+    ) -> Result<ForkAppendSourcePermitV1, ForkEventAuthorityErrorV1> {
+        issuer
+            .authorize(session, || self.require_live_fork_event_session(session))
+            .and_then(|()| issuer.live_source_scope(&source))
+            .and_then(|scope| {
+                sqlite_classified_authority_graph(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    child_timeline_id,
+                )
+                .and_then(|graph| issuer.append_permit(scope, graph, selected_source, source))
+            })
+    }
+}
+
+/// Read and strictly decode every durable FCS1 for the read-only FCP1
+/// preflight. A row whose key columns do not select its own canonical bytes
+/// is malformed authority.
+fn sqlite_durable_classifier_sources(
+    conn: &Connection,
+) -> Result<Vec<ForkClassifierSourceV1>, ForkEventAuthorityErrorV1> {
+    conn.prepare("SELECT fcs1_cbor FROM fork_classifier_sources")
+        .and_then(|mut statement| -> rusqlite::Result<Vec<Vec<u8>>> {
+            statement
+                .query_map([], |row| row.get(0))
+                .and_then(Iterator::collect)
+        })
+        .map_err(sqlite_fork_event_storage_error)
+        .and_then(|rows| {
+            rows.iter()
+                .map(|bytes| sqlite_keyed_classifier_source(conn, bytes))
+                .collect()
+        })
+}
+
+/// Decode one durable FCS1 row and require its own key to select it.
+fn sqlite_keyed_classifier_source(
+    conn: &Connection,
+    bytes: &[u8],
+) -> Result<ForkClassifierSourceV1, ForkEventAuthorityErrorV1> {
+    ForkClassifierSourceV1::from_canonical_cbor(bytes)
+        .ok()
+        .filter(|source| {
+            sqlite_fork_classifier_source(
+                conn,
+                source.input().room_revision_descriptor_hash,
+                &source.input().registrar_identifier,
+            )
+            .ok()
+            .flatten()
+            .as_ref()
+                == Some(source)
+        })
+        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+}
+
+/// An `SQLite` failure before any Fork Event authority decision.
+fn sqlite_fork_event_storage_error(_error: rusqlite::Error) -> ForkEventAuthorityErrorV1 {
+    ForkEventAuthorityErrorV1::StorageIndeterminate
 }
 
 impl SqliteStore {
@@ -9182,10 +9291,9 @@ fn sqlite_validate_classified_permit(
     permit: &ForkAppendSourcePermitV1,
 ) -> Result<ForkClassifierTableV1, ForkEventAuthorityErrorV1> {
     sqlite_classified_authority_graph(conn, hasher, permit.child_timeline_id()).and_then(
-        |(admission, table)| {
-            (permit.fork_admission_digest() == admission.digest()
-                && permit.classifier_revision_digest() == table.digest()
-                && permit.registrar_identifier() == table.input().registrar_identifier)
+        |(admission, table, registration)| {
+            permit
+                .names_scope(&admission, &table, &registration)
                 .then_some(table)
                 .ok_or(ForkEventAuthorityErrorV1::Unauthenticated)
         },
@@ -9308,7 +9416,14 @@ fn sqlite_classified_authority_graph(
     conn: &Connection,
     hasher: &dyn Hasher,
     child_id: TimelineId,
-) -> Result<(ForkAdmissionRecordV1, ForkClassifierTableV1), ForkEventAuthorityErrorV1> {
+) -> Result<
+    (
+        ForkAdmissionRecordV1,
+        ForkClassifierTableV1,
+        ForkClassifierRegistrationV1,
+    ),
+    ForkEventAuthorityErrorV1,
+> {
     let admission = sqlite_local_fork_admission(conn, hasher, child_id)?;
     let table = sqlite_fork_classifier_table(conn, child_id)
         .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
@@ -9345,7 +9460,7 @@ fn sqlite_classified_authority_graph(
         && registration.input().room_revision_descriptor_hash
             == admission.input().room_revision_descriptor_hash
         && registration.input().classifier_revision_digest == table.digest())
-    .then_some((admission, table))
+    .then_some((admission, table, registration))
     .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
 }
 
@@ -9357,7 +9472,7 @@ fn sqlite_validate_classified_authority_graph(
     fork_admission_digest: Hash,
     classifier_revision_digest: Hash,
 ) -> Result<(ForkAdmissionRecordV1, ForkClassifierTableV1), ForkEventAuthorityErrorV1> {
-    sqlite_classified_authority_graph(conn, hasher, child_id).and_then(|(admission, table)| {
+    sqlite_classified_authority_graph(conn, hasher, child_id).and_then(|(admission, table, _)| {
         (admission.digest() == fork_admission_digest
             && table.digest() == classifier_revision_digest)
             .then_some((admission, table))
@@ -10775,6 +10890,7 @@ mod tests {
                 &session,
                 Hash::from_bytes([82; 32]),
                 fork.child_id,
+                fork.admission_digest,
                 &mismatched_source,
             ),
             Err(ForkEventAuthorityErrorV1::Conflict)
@@ -10783,6 +10899,7 @@ mod tests {
             &session,
             Hash::from_bytes([77; 32]),
             fork.child_id,
+            fork.admission_digest,
             &source,
         )?;
         assert_eq!(receipt.child_timeline_id, fork.child_id);
@@ -10793,6 +10910,7 @@ mod tests {
                 &session,
                 Hash::from_bytes([77; 32]),
                 fork.child_id,
+                fork.admission_digest,
                 &source,
             )
             .is_ok());
@@ -10809,6 +10927,7 @@ mod tests {
                 &session,
                 Hash::from_bytes([78; 32]),
                 fork.child_id,
+                fork.admission_digest,
                 &source,
             ),
             Err(ForkEventAuthorityErrorV1::Conflict)
@@ -10829,6 +10948,7 @@ mod tests {
                 &session,
                 Hash::from_bytes([79; 32]),
                 fork.child_id,
+                fork.admission_digest,
                 &source,
             ),
             Err(ForkEventAuthorityErrorV1::CorruptAuthority)
@@ -10859,6 +10979,7 @@ mod tests {
                 &session,
                 Hash::from_bytes([80; 32]),
                 fork.child_id,
+                fork.admission_digest,
                 &source,
             ),
             Err(ForkEventAuthorityErrorV1::StorageIndeterminate)
@@ -10876,6 +10997,7 @@ mod tests {
                 &session,
                 Hash::from_bytes([83; 32]),
                 fork.child_id,
+                fork.admission_digest,
                 &source,
             ),
             Err(ForkEventAuthorityErrorV1::StorageIndeterminate)
@@ -10906,6 +11028,7 @@ mod tests {
                 &session,
                 Hash::from_bytes([84; 32]),
                 fork.child_id,
+                fork.admission_digest,
                 &source,
             ),
             Err(ForkEventAuthorityErrorV1::StorageIndeterminate)
@@ -10934,6 +11057,7 @@ mod tests {
                 &session,
                 Hash::from_bytes([86; 32]),
                 fork.child_id,
+                fork.admission_digest,
                 &source,
             ),
             Err(ForkEventAuthorityErrorV1::Conflict)

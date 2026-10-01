@@ -4,7 +4,9 @@
 //! The coordinator holds no store adapter. It keeps the ADR-107 credentials,
 //! the FAH1 record and the session identity digest on the listener thread,
 //! builds and signs every FAC1 and FRP1 there, and submits the five private
-//! journal commands to the `StoreExecutor` that owns the host.
+//! journal commands to the `StoreExecutor` that owns the host. A committed or
+//! recovered Fork is released only after a sixth command registers its
+//! profile-selected classifier in that executor (ADR-109 revision 12).
 
 use std::{
     io,
@@ -16,7 +18,7 @@ use pos_core::{
     ForkAdmissionCommandCodecErrorV1, ForkAdmissionErrorV1, ForkAdmissionHostCommandV1,
     ForkAdmissionHostRecordV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
     ForkAdmissionRecoveryCommandV1, ForkAdmissionRecoveryProofV1, ForkCreateCommandV1, Hash,
-    PrincipalOwnerCommandV1,
+    PrincipalOwnerCommandV1, TimelineId,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_store::{
@@ -28,7 +30,7 @@ use pos_store::{
 use crate::{
     executor::{
         ForkAdmissionSubmissionErrorV1, ForkAdmissionSubmissionV1, ForkAdmissionSubmitterV1,
-        ForkDeliveryMarkV1,
+        ForkClassifierRegistrationV1, ForkDeliveryMarkV1,
     },
     local_fork_authentication::{
         LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1,
@@ -41,8 +43,9 @@ use crate::{
     },
 };
 
-/// The five private journal commands the listener thread submits to the
-/// executor that owns the host (ADR-109 revision 9, Decision 1 item 4).
+/// The private commands the listener thread submits to the executor that
+/// owns the host: the five journal commands of ADR-109 revision 9, Decision 1
+/// item 4, and the classifier registration of revision 12.
 pub(super) trait LocalForkDeliveryJournalV1: Send {
     fn claim(
         &mut self,
@@ -69,6 +72,12 @@ pub(super) trait LocalForkDeliveryJournalV1: Send {
         claim: ForkDeliveryClaimV1,
         mark: ForkDeliveryMarkV1,
     ) -> ForkAdmissionSubmissionV1<()>;
+
+    fn register(
+        &mut self,
+        child: TimelineId,
+        admission_digest: Hash,
+    ) -> ForkAdmissionSubmissionV1<ForkClassifierRegistrationV1>;
 }
 
 impl LocalForkDeliveryJournalV1 for ForkAdmissionSubmitterV1 {
@@ -106,6 +115,14 @@ impl LocalForkDeliveryJournalV1 for ForkAdmissionSubmitterV1 {
         mark: ForkDeliveryMarkV1,
     ) -> ForkAdmissionSubmissionV1<()> {
         self.mark_fork_delivery(claim, mark)
+    }
+
+    fn register(
+        &mut self,
+        child: TimelineId,
+        admission_digest: Hash,
+    ) -> ForkAdmissionSubmissionV1<ForkClassifierRegistrationV1> {
+        self.register_fork_classifier(child, admission_digest)
     }
 }
 
@@ -255,9 +272,7 @@ impl LocalForkAdmissionCoordinatorV1 {
             Err(error) => return self.cancel_pending(claim, authentication_code(error)),
         };
         match execute_disposition(self.journal.execute(claim, &command)) {
-            ExecuteDisposition::Release(result) => {
-                PreparedDeliveryV1::release(claim, &result, true)
-            }
+            ExecuteDisposition::Release(result) => self.release_registered(claim, &result, true),
             ExecuteDisposition::Answer(code) => PreparedDeliveryV1::plain(reject(code)),
             ExecuteDisposition::CancelThenAnswer(code) => self.cancel_pending(claim, code),
         }
@@ -306,13 +321,39 @@ impl LocalForkAdmissionCoordinatorV1 {
             .map_or_else(
                 || PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate)),
                 |result| {
-                    PreparedDeliveryV1::release(
-                        claim,
-                        &result,
-                        state != ForkDeliveryStateV1::Delivered,
-                    )
+                    self.release_registered(claim, &result, state != ForkDeliveryStateV1::Delivered)
                 },
             )
+    }
+
+    /// Release a committed or recovered result only after a Fork has its
+    /// profile-selected classifier registered in the executor (ADR-099
+    /// revision 11 section 3; ADR-109 revision 12).
+    ///
+    /// Any registration failure, including a descriptor with no profile row
+    /// or a command that did not run, answers code 6 and leaves the claim
+    /// unmarked: the committed FAR1 stays retained, and a same-operation
+    /// retry recovers it through FRP1 and retries the same registration. It
+    /// is never a rejection.
+    fn release_registered(
+        &mut self,
+        claim: ForkDeliveryClaimV1,
+        result: &ForkAdmissionOperationResultV1,
+        mark_after_write: bool,
+    ) -> PreparedDeliveryV1 {
+        let registered = match result {
+            ForkAdmissionOperationResultV1::Fork(receipt) => matches!(
+                self.journal
+                    .register(receipt.child_id, receipt.admission_digest),
+                Ok(Ok(Ok(())))
+            ),
+            ForkAdmissionOperationResultV1::PrincipalOwner(_) => true,
+        };
+        if registered {
+            PreparedDeliveryV1::release(claim, result, mark_after_write)
+        } else {
+            PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate))
+        }
     }
 
     fn command(
@@ -591,13 +632,73 @@ mod tests {
     };
 
     use super::*;
-    use pos_core::{EventStore as _, ForkAuthenticationPolicyV1, Hash, TimelineId};
+    use crate::local_fork_classifier_profile::test_profile_source;
+    use pos_core::{
+        EventStore as _, ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, TimelineId,
+    };
     use pos_store::{
-        memory::MemoryStore, ForkAdmissionAuthorityBootstrapPortV1 as _,
-        ForkAdmissionDeliveryJournalPortV1 as _,
+        memory::MemoryStore, ForkAdmissionAuthorityBootstrapPortV1,
+        ForkAdmissionDeliveryJournalPortV1, ForkEventAuthorityErrorV1, ForkEventPermitIssuerPortV1,
+        ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1,
     };
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    /// Every port the executor's Fork-admission commands and the classified
+    /// fixtures use, for the Memory and `SQLite` adapters alike.
+    trait AcceptanceStore:
+        pos_core::EventStore
+        + ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionDeliveryJournalPortV1
+        + ForkEventPermitIssuerPortV1
+        + ForkEventProvenanceAuthorityPortV1
+        + Send
+        + 'static
+    {
+    }
+
+    impl<T> AcceptanceStore for T where
+        T: pos_core::EventStore
+            + ForkAdmissionAuthorityBootstrapPortV1
+            + ForkAdmissionDeliveryJournalPortV1
+            + ForkEventPermitIssuerPortV1
+            + ForkEventProvenanceAuthorityPortV1
+            + Send
+            + 'static
+    {
+    }
+
+    /// The executor slot's ADR-109 r12 classifier authority: the session's
+    /// take-once issuer and the activation FCP1 rows.
+    struct ClassifierAuthority {
+        issuer: ForkEventPermitIssuerV1,
+        profile: Vec<ForkClassifierSourceV1>,
+    }
+
+    impl ClassifierAuthority {
+        fn source_for(&self, descriptor: Hash) -> Option<ForkClassifierSourceV1> {
+            self.profile
+                .iter()
+                .find(|source| source.input().room_revision_descriptor_hash == descriptor)
+                .cloned()
+        }
+    }
+
+    /// FCP1 rows, one per descriptor byte, each admitting `routes`.
+    fn profile_rows(
+        descriptors: &[u8],
+        routes: &[pos_core::ForkExternalInputRouteV1],
+    ) -> TestResult<Vec<ForkClassifierSourceV1>> {
+        Ok(descriptors
+            .iter()
+            .map(|descriptor| test_profile_source(*descriptor, routes.to_vec()))
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// FCP1 rows for every descriptor the journal fixtures commit.
+    fn default_profile() -> TestResult<Vec<ForkClassifierSourceV1>> {
+        profile_rows(&[18, 22], &[])
+    }
 
     /// Journal outcomes the coordinator must map without a live executor.
     #[derive(Clone, Copy, Eq, PartialEq)]
@@ -614,6 +715,7 @@ mod tests {
         Recover,
         MarkDelivered,
         MarkUncertain,
+        RegisterNotRun(ForkAdmissionSubmissionErrorV1),
     }
 
     /// A journal row whose zero operation identity no FRC1 can carry.
@@ -625,19 +727,20 @@ mod tests {
         }
     }
 
-    fn lock(store: &Mutex<MemoryStore>) -> MutexGuard<'_, MemoryStore> {
-        store.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
+        value.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The executor's journal commands run directly on one shared store.
-    struct StoreJournal {
-        store: Arc<Mutex<MemoryStore>>,
+    /// The executor's commands run directly on one shared store.
+    struct StoreJournal<S> {
+        store: Arc<Mutex<S>>,
         session: Arc<ForkAdmissionAuthoritySessionV1>,
         policy: ForkAuthenticationPolicyV1,
+        classifier: Arc<Mutex<ClassifierAuthority>>,
         fault: JournalFault,
     }
 
-    impl LocalForkDeliveryJournalV1 for StoreJournal {
+    impl<S: AcceptanceStore> LocalForkDeliveryJournalV1 for StoreJournal<S> {
         fn claim(
             &mut self,
             tuple: ForkDeliveryTupleV1,
@@ -716,37 +819,95 @@ mod tests {
                 }
             }
         }
+
+        /// The executor slot's registration (ADR-109 r12) over the shared
+        /// store: select by durable FAR1, issue, and register.
+        fn register(
+            &mut self,
+            child: TimelineId,
+            admission_digest: Hash,
+        ) -> ForkAdmissionSubmissionV1<ForkClassifierRegistrationV1> {
+            if let JournalFault::RegisterNotRun(error) = self.fault {
+                return Err(error);
+            }
+            let classifier = lock(&self.classifier);
+            let mut store = lock(&self.store);
+            Ok(Ok(store
+                .read_validated_local_fork_admission(child)
+                .and_then(|admission| {
+                    classifier
+                        .source_for(admission.input().room_revision_descriptor_hash)
+                        .ok_or(ForkEventAuthorityErrorV1::Unauthenticated)
+                })
+                .and_then(|source| {
+                    store.issue_classifier_registrar_permit(
+                        &classifier.issuer,
+                        &self.session,
+                        child,
+                        source,
+                    )
+                })
+                .and_then(|permit| {
+                    store.register_classifier(
+                        &self.session,
+                        &permit,
+                        crate::executor::classifier_registration_operation_id(
+                            child,
+                            admission_digest,
+                        ),
+                        child,
+                    )
+                })
+                .map(|_| ())))
+        }
     }
 
-    struct Fixture {
+    struct Fixture<S = MemoryStore> {
         coordinator: LocalForkAdmissionCoordinatorV1,
-        store: Arc<Mutex<MemoryStore>>,
+        store: Arc<Mutex<S>>,
         session: Arc<ForkAdmissionAuthoritySessionV1>,
+        classifier: Arc<Mutex<ClassifierAuthority>>,
     }
 
-    fn fixture_over(mut store: MemoryStore, fault: JournalFault) -> TestResult<Fixture> {
+    fn fixture_over(store: MemoryStore, fault: JournalFault) -> TestResult<Fixture> {
+        fixture_profiled(store, fault, default_profile()?)
+    }
+
+    /// Provision `store`, open its session, and install `profile` with the
+    /// session's issuer, as startup steps 3 and 5 do.
+    fn fixture_profiled<S: AcceptanceStore>(
+        mut store: S,
+        fault: JournalFault,
+        profile: Vec<ForkClassifierSourceV1>,
+    ) -> TestResult<Fixture<S>> {
         let credentials = crate::local_fork_authentication::test_credentials_for_current_peer()?;
         credentials.provision_authority(&mut store)?;
         let session = credentials.open_authority(&mut store)?;
         let host = store.fork_admission_host_record()?;
-        Ok(fixture_with(credentials, host, (store, session), fault))
+        fixture_with(credentials, host, (store, session), fault, profile)
     }
 
-    fn fixture_with(
+    fn fixture_with<S: AcceptanceStore>(
         credentials: LocalForkAuthenticationCredentialsV1,
         host: ForkAdmissionHostRecordV1,
-        (store, session): (MemoryStore, ForkAdmissionAuthoritySessionV1),
+        (store, mut session): (S, ForkAdmissionAuthoritySessionV1),
         fault: JournalFault,
-    ) -> Fixture {
+        profile: Vec<ForkClassifierSourceV1>,
+    ) -> TestResult<Fixture<S>> {
+        let issuer = session
+            .take_event_permit_issuer()
+            .ok_or("a newly opened session must yield its issuer")?;
         let store = Arc::new(Mutex::new(store));
         let session = Arc::new(session);
+        let classifier = Arc::new(Mutex::new(ClassifierAuthority { issuer, profile }));
         let journal = StoreJournal {
             store: Arc::clone(&store),
             session: Arc::clone(&session),
             policy: credentials.policy().clone(),
+            classifier: Arc::clone(&classifier),
             fault,
         };
-        Fixture {
+        Ok(Fixture {
             coordinator: LocalForkAdmissionCoordinatorV1::new(
                 credentials,
                 host,
@@ -755,7 +916,8 @@ mod tests {
             ),
             store,
             session,
-        }
+            classifier,
+        })
     }
 
     /// ADR-106 r3: admitted Forks need an available bound erasure gate, so
@@ -1317,7 +1479,8 @@ mod tests {
             host,
             (store, session),
             JournalFault::Passthrough,
-        );
+            default_profile()?,
+        )?;
         let retry = restarted
             .coordinator
             .handle(completed(&restarted.coordinator, request, 27)?);
@@ -1558,5 +1721,501 @@ mod tests {
         ] {
             assert_eq!(submission_code(error), expected);
         }
+    }
+
+    /// ADR-109 r12: a committed Fork whose classifier cannot be registered,
+    /// because its descriptor has no profile row or the registration command
+    /// did not run, answers code 6 on delivery and on same-operation
+    /// recovery; it is never a rejection and never falls back to a row.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn coordinator_holds_a_committed_fork_until_its_classifier_registers() -> TestResult {
+        for (fault, descriptor) in [
+            (JournalFault::Passthrough, 40),
+            (
+                JournalFault::RegisterNotRun(ForkAdmissionSubmissionErrorV1::Lost),
+                18,
+            ),
+        ] {
+            let mut fixture = fixture(fault)?;
+            assert_eq!(response_code(&fixture.submit(bind_request(41), 41)?), 0);
+            let parent = lock(&fixture.store).create_timeline("held Fork parent")?;
+            let request = fork_request(42, parent.id(), descriptor, 43, "held-child");
+            for _ in 0..2 {
+                assert_eq!(response_code(&fixture.submit(request.clone(), 44)?), 6);
+            }
+        }
+        Ok(())
+    }
+
+    /// The descriptor every acceptance profile selects.
+    const ACCEPTED_DESCRIPTOR: u8 = 70;
+    /// A descriptor that only the restarted acceptance profile adds.
+    const LATE_DESCRIPTOR: u8 = 71;
+
+    fn adapter_route() -> TestResult<pos_core::ForkEventSourceDescriptorV1> {
+        Ok(pos_core::ForkEventSourceDescriptorV1::new(
+            "gateway.action.v1",
+            Hash::from_bytes([72; 32]),
+        )?)
+    }
+
+    fn adapter_routes() -> TestResult<Vec<pos_core::ForkExternalInputRouteV1>> {
+        Ok(vec![pos_core::ForkExternalInputRouteV1::new(
+            adapter_route()?,
+            true,
+        )])
+    }
+
+    fn adapter_source(adapter: &str) -> TestResult<pos_core::ForkAppendSourceIdentityV1> {
+        Ok(pos_core::ForkAppendSourceIdentityV1::ExternalInput {
+            adapter_identifier: adapter.to_owned(),
+            source: adapter_route()?,
+        })
+    }
+
+    fn classified_draft(payload: &[u8]) -> pos_core::EventDraft {
+        pos_core::EventDraft::new(
+            pos_core::EntityId::new(),
+            pos_core::Kind::new("fork.event.gateway"),
+            pos_core::CanonicalBytes::from_vec(payload.to_vec()),
+        )
+        .with_wall_time(pos_core::WallTime::from_micros(10))
+    }
+
+    /// The child of a released FARL1 Fork result.
+    fn fork_child(prepared: &PreparedDeliveryV1) -> TestResult<TimelineId> {
+        let bytes = prepared.response.to_canonical_cbor();
+        if bytes.get(..10) != Some(&[0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x83][..]) {
+            return Err("the coordinator did not release a committed Fork".into());
+        }
+        let child: [u8; 16] = bytes.get(12..28).ok_or("short Fork result")?.try_into()?;
+        Ok(TimelineId::from_ulid(ulid::Ulid::from_bytes(child)))
+    }
+
+    /// The deferred (Wave 9 #479) classified-append host seam, as a fixture
+    /// over the shared store: every permit is issued by the store bridge from
+    /// the slot's issuer and the profile row selected by durable FAR1.
+    impl<S: AcceptanceStore> Fixture<S> {
+        /// Submit one completed request and deliver its response.
+        fn submit(
+            &mut self,
+            request: LocalForkAdmissionRequestV1,
+            host_request: u8,
+        ) -> TestResult<PreparedDeliveryV1> {
+            let prepared =
+                self.coordinator
+                    .handle(completed(&self.coordinator, request, host_request)?);
+            let (mut writer, _reader) = UnixStream::pair()?;
+            self.coordinator.write_prepared(&mut writer, &prepared)?;
+            Ok(prepared)
+        }
+
+        /// Activate a host-assigned adapter only for a route an FCP1 row
+        /// admits.
+        fn activate_external_adapter(
+            &self,
+            adapter_identifier: &str,
+            source: pos_core::ForkEventSourceDescriptorV1,
+        ) -> bool {
+            let mut classifier = lock(&self.classifier);
+            let admitted = classifier
+                .profile
+                .iter()
+                .flat_map(|row| row.input().routes.iter())
+                .any(|route| route.source() == &source);
+            if admitted {
+                classifier.issuer.trust_external_source(
+                    pos_core::ForkAppendSourceIdentityV1::ExternalInput {
+                        adapter_identifier: adapter_identifier.to_owned(),
+                        source,
+                    },
+                );
+            }
+            drop(classifier);
+            admitted
+        }
+
+        /// Deregister an adapter; every permit issued for it stops
+        /// authorizing.
+        fn deregister_external_adapter(&self, adapter_identifier: &str) {
+            lock(&self.classifier)
+                .issuer
+                .revoke_external_adapter(adapter_identifier);
+        }
+
+        /// Issue a fresh permit after selecting the profile row by FAR1.
+        fn append_permit(
+            &self,
+            child: TimelineId,
+            source: pos_core::ForkAppendSourceIdentityV1,
+        ) -> Result<pos_store::ForkAppendSourcePermitV1, ForkEventAuthorityErrorV1> {
+            let classifier = lock(&self.classifier);
+            let store = lock(&self.store);
+            store
+                .read_validated_local_fork_admission(child)
+                .and_then(|admission| {
+                    classifier
+                        .source_for(admission.input().room_revision_descriptor_hash)
+                        .ok_or(ForkEventAuthorityErrorV1::Unauthenticated)
+                })
+                .and_then(|selected| {
+                    store.issue_append_source_permit(
+                        &classifier.issuer,
+                        &self.session,
+                        child,
+                        &selected,
+                        source,
+                    )
+                })
+        }
+
+        /// Append one classified Event with a permit issued for it.
+        fn append_classified_event(
+            &self,
+            child: TimelineId,
+            source: pos_core::ForkAppendSourceIdentityV1,
+            operation_id: Hash,
+            draft: pos_core::EventDraft,
+        ) -> Result<pos_store::ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1> {
+            let permit = self.append_permit(child, source)?;
+            let mut store = lock(&self.store);
+            store.append_classified(&self.session, &permit, operation_id, draft)
+        }
+
+        /// Recover one stable append operation with a reissued permit.
+        fn recover_classified_event(
+            &self,
+            child: TimelineId,
+            source: pos_core::ForkAppendSourceIdentityV1,
+            operation_id: Hash,
+            draft: &pos_core::EventDraft,
+        ) -> Result<Option<pos_store::ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1>
+        {
+            let permit = self.append_permit(child, source)?;
+            let store = lock(&self.store);
+            store.recover_classified_append(&self.session, &permit, operation_id, draft)
+        }
+
+        /// Stop this process: drop the coordinator, session, issuer, profile,
+        /// adapter registry, and every permit, keeping only the store.
+        fn into_store(
+            self,
+        ) -> TestResult<(
+            LocalForkAuthenticationCredentialsV1,
+            ForkAdmissionHostRecordV1,
+            S,
+        )> {
+            let Self {
+                coordinator, store, ..
+            } = self;
+            let LocalForkAdmissionCoordinatorV1 {
+                credentials,
+                host,
+                journal,
+                ..
+            } = coordinator;
+            drop(journal);
+            let store = Arc::try_unwrap(store)
+                .map_err(|_| "the stopped journal still shares its store")?
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner);
+            Ok((credentials, host, store))
+        }
+
+        /// Restart on the same database with a newly read `profile`, in the
+        /// ADR-109 r12 startup order: preflight, FAO1, reconciliation, slot.
+        fn restart(
+            self,
+            reopen: impl FnOnce(S) -> TestResult<S>,
+            profile: Vec<ForkClassifierSourceV1>,
+        ) -> TestResult<Self> {
+            let (credentials, host, store) = self.into_store()?;
+            let mut store = reopen(store)?;
+            store.preflight_fork_classifier_profile(&profile)?;
+            let session = credentials.open_authority(&mut store)?;
+            let tuples = store.reconcile_fork_delivery_journal(&session);
+            reconcile_startup(
+                &credentials,
+                (host, session.identity()),
+                tuples,
+                |tuple, proof| store.reconcile_fork_delivery_startup(&session, tuple, proof),
+            )?;
+            fixture_with(
+                credentials,
+                host,
+                (store, session),
+                JournalFault::Passthrough,
+                profile,
+            )
+        }
+    }
+
+    /// Bind the Principal and commit one profile-registered Fork.
+    fn registered_fixture<S: AcceptanceStore>(
+        store: S,
+    ) -> TestResult<(Fixture<S>, TimelineId, TimelineId)> {
+        let mut fixture = fixture_profiled(
+            store,
+            JournalFault::Passthrough,
+            profile_rows(&[ACCEPTED_DESCRIPTOR], &adapter_routes()?)?,
+        )?;
+        assert_eq!(response_code(&fixture.submit(bind_request(60), 60)?), 0);
+        let parent = lock(&fixture.store)
+            .create_timeline("classified parent")?
+            .id();
+        let request = fork_request(61, parent, ACCEPTED_DESCRIPTOR, 62, "classified-child");
+        let child = fork_child(&fixture.submit(request, 61)?)?;
+        Ok((fixture, parent, child))
+    }
+
+    /// Committed classified appends, plus a permit held into the restart.
+    struct LiveScopeEvidence {
+        committed: pos_store::ForkClassifiedAppendReceiptV1,
+        host: pos_store::ForkClassifiedAppendReceiptV1,
+        stale: pos_store::ForkAppendSourcePermitV1,
+    }
+
+    /// Exact configured adapter scopes admit appends; foreign, deregistered,
+    /// and generic appends fail before Event insertion.
+    fn assert_live_adapter_scopes<S: AcceptanceStore>(
+        fixture: &Fixture<S>,
+        child: TimelineId,
+    ) -> TestResult<LiveScopeEvidence> {
+        let foreign_route = pos_core::ForkEventSourceDescriptorV1::new(
+            "gateway.other.v1",
+            Hash::from_bytes([73; 32]),
+        )?;
+        assert!(!fixture.activate_external_adapter("gateway.adapter", foreign_route));
+        assert!(fixture.activate_external_adapter("gateway.adapter", adapter_route()?));
+        let external = adapter_source("gateway.adapter")?;
+        let committed = fixture.append_classified_event(
+            child,
+            external.clone(),
+            Hash::from_bytes([65; 32]),
+            classified_draft(b"external"),
+        )?;
+        let host = fixture.append_classified_event(
+            child,
+            pos_core::ForkAppendSourceIdentityV1::HostInternal,
+            Hash::from_bytes([66; 32]),
+            classified_draft(b"host"),
+        )?;
+        assert_eq!(
+            fixture
+                .append_classified_event(
+                    child,
+                    adapter_source("foreign.adapter")?,
+                    Hash::from_bytes([67; 32]),
+                    classified_draft(b"foreign"),
+                )
+                .err(),
+            Some(ForkEventAuthorityErrorV1::Unauthenticated)
+        );
+        assert!(lock(&fixture.store)
+            .append(child, &[classified_draft(b"generic")])
+            .is_err());
+
+        // Deregistration revokes a permit that was issued before it.
+        let held = fixture.append_permit(child, external.clone())?;
+        fixture.deregister_external_adapter("gateway.adapter");
+        assert_eq!(
+            lock(&fixture.store)
+                .append_classified(
+                    &fixture.session,
+                    &held,
+                    Hash::from_bytes([68; 32]),
+                    classified_draft(b"revoked"),
+                )
+                .err(),
+            Some(ForkEventAuthorityErrorV1::Unauthenticated)
+        );
+        assert_eq!(
+            fixture
+                .append_classified_event(
+                    child,
+                    external.clone(),
+                    Hash::from_bytes([69; 32]),
+                    classified_draft(b"deregistered"),
+                )
+                .err(),
+            Some(ForkEventAuthorityErrorV1::Unauthenticated)
+        );
+        assert_eq!(
+            lock(&fixture.store).read_fork_event_suffix(child, 1)?.len(),
+            2
+        );
+        assert!(fixture.activate_external_adapter("gateway.adapter", adapter_route()?));
+        let stale = fixture.append_permit(child, external)?;
+        Ok(LiveScopeEvidence {
+            committed,
+            host,
+            stale,
+        })
+    }
+
+    /// After a restart, old permits and adapter scopes are gone; a renewed
+    /// scope reissues a permit that recovers the exact FOP1 operation.
+    fn assert_restart_reissues_for_recovery<S: AcceptanceStore>(
+        fixture: &Fixture<S>,
+        child: TimelineId,
+        evidence: &LiveScopeEvidence,
+    ) -> TestResult {
+        assert_eq!(
+            lock(&fixture.store)
+                .append_classified(
+                    &fixture.session,
+                    &evidence.stale,
+                    Hash::from_bytes([70; 32]),
+                    classified_draft(b"stale"),
+                )
+                .err(),
+            Some(ForkEventAuthorityErrorV1::Unauthenticated)
+        );
+        let external = adapter_source("gateway.adapter")?;
+        let operation = Hash::from_bytes([65; 32]);
+        // Same-operation recovery requires the exact committed request,
+        // including its Entity.
+        let committed_draft = pos_core::EventDraft {
+            entity: evidence.committed.event.entity,
+            ..classified_draft(b"external")
+        };
+        assert_eq!(
+            fixture
+                .recover_classified_event(child, external.clone(), operation, &committed_draft)
+                .err(),
+            Some(ForkEventAuthorityErrorV1::Unauthenticated)
+        );
+        assert!(fixture.activate_external_adapter("gateway.adapter", adapter_route()?));
+        assert_eq!(
+            fixture.recover_classified_event(
+                child,
+                external.clone(),
+                operation,
+                &committed_draft
+            )?,
+            Some(evidence.committed.clone())
+        );
+        assert_eq!(
+            fixture.append_classified_event(child, external, operation, committed_draft)?,
+            evidence.committed
+        );
+        Ok(())
+    }
+
+    /// ADR-099 r11 section 4 over the Gateway's executor commands: only the
+    /// profile-selected FCS1 registers, an unprofiled Fork is held at code 6
+    /// until a restarted profile adds its row, live adapter scopes gate every
+    /// append, a restart discards permits and the adapter registry, a
+    /// reissued permit recovers the same FOP1 operation, and Replay needs no
+    /// FCP1.
+    fn assert_classified_host_composition<S: AcceptanceStore>(
+        store: S,
+        reopen: impl Fn(S) -> TestResult<S>,
+    ) -> TestResult {
+        let (mut fixture, parent, child) = registered_fixture(store)?;
+        let late = fork_request(63, parent, LATE_DESCRIPTOR, 64, "late-child");
+        for _ in 0..2 {
+            assert_eq!(response_code(&fixture.submit(late.clone(), 63)?), 6);
+        }
+        let evidence = assert_live_adapter_scopes(&fixture, child)?;
+
+        // Restart: a new activation rereads FCP1, which may add a row.
+        let mut fixture = fixture.restart(
+            &reopen,
+            profile_rows(&[ACCEPTED_DESCRIPTOR, LATE_DESCRIPTOR], &adapter_routes()?)?,
+        )?;
+        assert_restart_reissues_for_recovery(&fixture, child, &evidence)?;
+        let late_child = fork_child(&fixture.submit(late, 63)?)?;
+        fixture.append_classified_event(
+            late_child,
+            pos_core::ForkAppendSourceIdentityV1::HostInternal,
+            Hash::from_bytes([71; 32]),
+            classified_draft(b"late-host"),
+        )?;
+
+        // Replay verifies durable authority with no FCP1, session, or adapter.
+        let (_, _, store) = fixture.into_store()?;
+        let store = reopen(store)?;
+        let suffix = store.read_fork_event_suffix(child, 1)?;
+        assert_eq!(
+            suffix
+                .iter()
+                .map(|(_, _, operation)| operation.clone())
+                .collect::<Vec<_>>(),
+            vec![evidence.committed.operation, evidence.host.operation]
+        );
+        assert_eq!(store.read_fork_event_suffix(late_child, 1)?.len(), 1);
+        Ok(())
+    }
+
+    /// A restart whose FCP1 changes or drops a durable FCS1 row fails the
+    /// read-only preflight that precedes the FAO1 open proof.
+    fn assert_changed_profile_fails_preflight<S: AcceptanceStore>(
+        new_store: impl Fn() -> TestResult<S>,
+    ) -> TestResult {
+        for changed in [
+            profile_rows(&[ACCEPTED_DESCRIPTOR], &[])?,
+            profile_rows(&[LATE_DESCRIPTOR], &adapter_routes()?)?,
+        ] {
+            let (fixture, _, _) = registered_fixture(new_store()?)?;
+            let (_, _, store) = fixture.into_store()?;
+            assert_eq!(
+                store.preflight_fork_classifier_profile(&changed).err(),
+                Some(ForkEventAuthorityErrorV1::Conflict)
+            );
+        }
+        Ok(())
+    }
+
+    fn gated_memory_store() -> TestResult<MemoryStore> {
+        let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))?;
+        Ok(store)
+    }
+
+    fn gated_sqlite_store(path: &std::path::Path) -> TestResult<pos_store::sqlite::SqliteStore> {
+        let mut store =
+            pos_store::sqlite::SqliteStore::open(path.to_str().ok_or("non-UTF-8 path")?)?;
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))?;
+        Ok(store)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_gateway_composition_registers_appends_and_recovers_classified_events() -> TestResult {
+        assert_classified_host_composition(gated_memory_store()?, Ok)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn sqlite_gateway_composition_registers_appends_and_recovers_classified_events() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("classified-gateway.sqlite");
+        assert_classified_host_composition(gated_sqlite_store(&path)?, |store| {
+            drop(store);
+            gated_sqlite_store(&path)
+        })
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_gateway_restart_rejects_a_changed_or_missing_profile_row() -> TestResult {
+        assert_changed_profile_fails_preflight(gated_memory_store)
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn sqlite_gateway_restart_rejects_a_changed_or_missing_profile_row() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let counter = std::cell::Cell::new(0_u8);
+        assert_changed_profile_fails_preflight(|| {
+            counter.set(counter.get() + 1);
+            gated_sqlite_store(
+                &directory
+                    .path()
+                    .join(format!("changed-profile-{}.sqlite", counter.get())),
+            )
+        })
     }
 }
