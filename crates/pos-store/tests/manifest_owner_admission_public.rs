@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pos_core::{
     manifest_owner_admission_intent_digest_v1,
@@ -35,7 +35,7 @@ fn timeline(byte: u8) -> TimelineId {
 struct FixtureOwner {
     expected_timelines: Vec<TimelineId>,
     expected_operation: Hash,
-    signatures_issued: Cell<usize>,
+    signatures_issued: AtomicUsize,
     coordinator_evidence: Hash,
     signature_byte: u8,
 }
@@ -45,7 +45,7 @@ impl FixtureOwner {
         Self {
             expected_timelines,
             expected_operation,
-            signatures_issued: Cell::new(0),
+            signatures_issued: AtomicUsize::new(0),
             coordinator_evidence: hash(90),
             signature_byte: 0x5a,
         }
@@ -115,8 +115,7 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
     ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
-        self.signatures_issued
-            .set(self.signatures_issued.get().saturating_add(1));
+        self.signatures_issued.fetch_add(1, Ordering::SeqCst);
         draft
             .with_evidence_and_signature(self.coordinator_evidence, [self.signature_byte; 64])
             .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
@@ -369,7 +368,7 @@ fn preparation_rejects_duplicate_timelines_and_missing_zero_output_copy() -> Tes
         prepare_manifest_owner_admission_v1(missing_copy, &owner, None),
         Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
     );
-    assert_eq!(owner.signatures_issued.get(), 0);
+    assert_eq!(owner.signatures_issued.load(Ordering::SeqCst), 0);
     Ok(())
 }
 
@@ -399,7 +398,7 @@ fn preparation_bounds_total_native_copies() -> TestResult {
         prepare_manifest_owner_admission_v1(oversized, &owner, None),
         Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
     );
-    assert_eq!(owner.signatures_issued.get(), 0);
+    assert_eq!(owner.signatures_issued.load(Ordering::SeqCst), 0);
     Ok(())
 }
 
@@ -443,7 +442,7 @@ fn preparation_rejects_malformed_opc1_envelopes_before_signing() -> TestResult {
             prepare_manifest_owner_admission_v1(malformed_input, &owner, None),
             Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
         );
-        assert_eq!(owner.signatures_issued.get(), 0);
+        assert_eq!(owner.signatures_issued.load(Ordering::SeqCst), 0);
     }
     Ok(())
 }
@@ -467,7 +466,7 @@ fn memory_owner_admission_resolves_retries_conflicts_and_historical_rows() -> Te
     let genesis_owner = FixtureOwner::new(first_timelines.clone(), hash(41));
     let prepared =
         prepare_manifest_owner_admission_v1(genesis_request.clone(), &genesis_owner, None)?;
-    assert_eq!(genesis_owner.signatures_issued.get(), 2);
+    assert_eq!(genesis_owner.signatures_issued.load(Ordering::SeqCst), 2);
     let mut store = MemoryStore::new();
     let applied = store.commit_manifest_owner_admission_v1(prepared)?;
     assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
@@ -494,7 +493,7 @@ fn memory_owner_admission_resolves_retries_conflicts_and_historical_rows() -> Te
         Err(ManifestOwnerAdmissionErrorV1::Conflict)
     );
 
-    let signatures_before_conflict = genesis_owner.signatures_issued.get();
+    let signatures_before_conflict = genesis_owner.signatures_issued.load(Ordering::SeqCst);
     let competing_genesis = request(
         AdmissionTransition {
             owner_id,
@@ -517,7 +516,7 @@ fn memory_owner_admission_resolves_retries_conflicts_and_historical_rows() -> Te
         Err(ManifestOwnerAdmissionErrorV1::Conflict)
     );
     assert_eq!(
-        genesis_owner.signatures_issued.get(),
+        genesis_owner.signatures_issued.load(Ordering::SeqCst),
         signatures_before_conflict
     );
 
@@ -692,7 +691,7 @@ fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reope
         .ok_or("SQLite native admission is missing after reopen")?;
     assert_eq!(snapshot.timeline.policy_copies.len(), 2);
     assert_eq!(snapshot.timeline.wcs1.producers().len(), 1);
-    let signatures_before_retry = owner.signatures_issued.get();
+    let signatures_before_retry = owner.signatures_issued.load(Ordering::SeqCst);
     let retry = reopened
         .resolve_manifest_owner_admission_retry_v1(
             owner_id,
@@ -702,7 +701,10 @@ fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reope
         .ok_or("SQLite should resolve the persisted operation before signing")?;
     assert_eq!(retry.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
     assert_eq!(retry.receipt_hashes, applied.receipt_hashes);
-    assert_eq!(owner.signatures_issued.get(), signatures_before_retry);
+    assert_eq!(
+        owner.signatures_issued.load(Ordering::SeqCst),
+        signatures_before_retry
+    );
     let mut conflicting_input = input.clone();
     conflicting_input.resulting_inventory_generation = hash(112);
     assert_eq!(
