@@ -1,0 +1,33 @@
+name: Temporary Rebase Wave 8 Upstack
+on:
+  push:
+    branches:
+      - automation/rebase-wave8-upstack-20261002
+permissions:
+  contents: write
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rebase #278 and #281 onto their updated parents
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin \
+            redmine/432-ard1-registration \
+            redmine/418-scoped-owner-admission \
+            redmine/419-local-cut-owner
+          git checkout -B rebase-418 origin/redmine/418-scoped-owner-admission
+          git rebase --onto origin/redmine/432-ard1-registration f53326d2eabcd6cd76d7cbf85d7bb438bf9dcabb
+          git push origin HEAD:refs/heads/redmine/418-scoped-owner-admission \
+            --force-with-lease=refs/heads/redmine/418-scoped-owner-admission:ba1fb23ba9a319ffd077ceae960ca8237ae7ab71
+          git fetch origin redmine/418-scoped-owner-admission
+          git checkout -B rebase-419 origin/redmine/419-local-cut-owner
+          git rebase --onto origin/redmine/418-scoped-owner-admission ba1fb23ba9a319ffd077ceae960ca8237ae7ab71
+          git push origin HEAD:refs/heads/redmine/419-local-cut-owner \
+            --force-with-lease=refs/heads/redmine/419-local-cut-owner:46e8ac9fa88548970652ca41fba82fed38a9e6e7
