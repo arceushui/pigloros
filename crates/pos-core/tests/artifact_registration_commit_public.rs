@@ -1326,7 +1326,8 @@ fn registration_preparation_rejects_missing_and_duplicate_native_dependencies(
     );
 
     let mut duplicate_transcript = inputs;
-    duplicate_transcript.push(fixture_input(&duplicate_transcript, b"MAT1")?);
+    let repeated_transcript = fixture_input(&duplicate_transcript, b"MAT1")?;
+    duplicate_transcript.push(repeated_transcript);
     assert_preparation_error(
         owner_id,
         root,
