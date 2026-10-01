@@ -1,14 +1,15 @@
 use std::fmt::Write as _;
 
 use pos_core::{
-    adapter_configuration_digest_v1, extract_adapter_admission_registration_v1,
-    extract_adapter_transcript_registration_v1, extract_repro_manifest_root_registration_v1,
-    prepare_artifact_registration_batch_v1, public_adapter_schema_digest_v1, store::EventStore,
-    validate_artifact_registration_catalog_graph_v1, AdapterAdmissionEntryV1,
-    AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterCallReservationOutcomeV1,
-    AdapterCallReservationV1, AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationInputV1,
-    AdapterInvocationV1, AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1,
-    AdapterRecordingStoreV1, AdapterTranscriptInputV1, AdapterTranscriptV1, ArtifactDataClassV1,
+    adapter_configuration_digest_v1, close_adapter_recording_v1,
+    extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
+    extract_repro_manifest_root_registration_v1, prepare_artifact_registration_batch_v1,
+    public_adapter_schema_digest_v1, validate_artifact_registration_catalog_graph_v1,
+    validate_closed_adapter_recording_v1, AdapterAdmissionEntryV1, AdapterAdmissionInputV1,
+    AdapterAdmissionV1, AdapterCallReservationOutcomeV1, AdapterCallReservationV1,
+    AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationInputV1, AdapterInvocationV1,
+    AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1,
+    AdapterTranscriptCallV1, AdapterTranscriptInputV1, AdapterTranscriptV1, ArtifactDataClassV1,
     ArtifactRegistrationCatalogRowV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
     ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
     ArtifactRegistrationV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, Hash, OwnerIdV1,
@@ -227,7 +228,7 @@ fn adapter_recording_fixture(
     run_operation_id: Hash,
 ) -> Result<(AdapterRecordingSessionV1, AdapterCallReservationV1), Box<dyn std::error::Error>> {
     let owner_reference = Hash::from_bytes([0x71; 32]);
-    let plugin_id = pos_core::PluginId::new();
+    let plugin_id = pos_core::PluginId::from_ulid(Ulid::from_bytes([0x71; 16]));
     let configuration = b"adapter-store-test-config".to_vec();
     let schema_digest = public_adapter_schema_digest_v1();
     let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
@@ -276,12 +277,58 @@ fn adapter_recording_fixture(
     Ok((session, reservation))
 }
 
-fn exercise_event_store_adapter_recording<S: EventStore>(
+fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
     store: &mut S,
     run_operation_id: Hash,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use pos_core::store::EventStore;
+
     let (session, reservation) = adapter_recording_fixture(run_operation_id)?;
     let owner_reference = session.owner_reference();
+    assert_eq!(
+        AdapterCallReservationV1::new(
+            reservation.plugin_id(),
+            reservation.per_plugin_call_index(),
+            reservation.invocation().clone(),
+            Hash::zero(),
+            reservation.reserved_at_micros(),
+        ),
+        Err(AdapterRecordingStoreErrorV1::InvalidCall)
+    );
+    let invalid_order_call = AdapterTranscriptCallV1 {
+        plugin_id: reservation.plugin_id(),
+        per_plugin_call_index: 1,
+        input: reservation.invocation().clone(),
+        exact_output_bytes: b"response".to_vec(),
+        recorded_wall_time_micros: reservation.reserved_at_micros(),
+    };
+    assert_eq!(
+        close_adapter_recording_v1(&session, vec![invalid_order_call]),
+        Err(AdapterRecordingStoreErrorV1::CorruptState)
+    );
+    let mismatched_contract_call = AdapterTranscriptCallV1 {
+        plugin_id: pos_core::PluginId::from_ulid(Ulid::from_bytes([0x72; 16])),
+        per_plugin_call_index: 0,
+        input: reservation.invocation().clone(),
+        exact_output_bytes: b"response".to_vec(),
+        recorded_wall_time_micros: reservation.reserved_at_micros(),
+    };
+    let mismatched_transcript = AdapterTranscriptV1::new(AdapterTranscriptInputV1 {
+        owner_reference,
+        world_handle: session.world_handle(),
+        run_operation_id,
+        adapter_admission_digest: session.admission().digest(),
+        calls: vec![mismatched_contract_call.clone()],
+    })?;
+    let mismatched_transcript_bytes = mismatched_transcript.to_canonical_cbor();
+    assert_eq!(
+        validate_closed_adapter_recording_v1(&session, &mismatched_transcript_bytes),
+        Err(AdapterRecordingStoreErrorV1::CorruptState)
+    );
+    assert_eq!(
+        close_adapter_recording_v1(&session, vec![mismatched_contract_call]),
+        Err(AdapterRecordingStoreErrorV1::CorruptState)
+    );
     assert_eq!(
         store.adapter_recording_close_session(owner_reference, run_operation_id),
         Err(AdapterRecordingStoreErrorV1::InvalidState)
