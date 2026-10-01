@@ -58,12 +58,14 @@ use pos_core::{
     ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkAttributionOriginV1,
     ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
     ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
-    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, KeyIdentityV1,
-    KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PublicKey, Signature, StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS,
-    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1,
+    ForkPublicationArtifactV1, ForkPublicationBindingV1, ForkPublicationOperationV1,
+    ForkPublicationReceiptV1, KeyIdentityV1, KeyRegistryErrorV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
+    PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PublicKey, Signature,
+    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 use crate::fork_admission_authority::{
@@ -83,10 +85,16 @@ use crate::fork_delivery_journal::{
 use crate::fork_event_authority::{
     fork_append_request, permitted_fork_admission, preflight_classifier_sources,
 };
+use crate::fork_manifest_publication::{
+    publication_sources, recovered_publication_receipt, sign_publication,
+    trusted_committed_manifest, validate_publication_request, CommittedPublicationSourcesV1,
+    PublicationSourcesV1,
+};
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
     ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1,
-    ForkEventProvenanceAuthorityPortV1,
+    ForkEventProvenanceAuthorityPortV1, ForkManifestPublicationErrorV1,
+    ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
 mod pipeline_admission;
@@ -253,6 +261,9 @@ pub struct MemoryStore {
     fork_append_operations: HashMap<Hash, (ForkAppendOperationV1, Event)>,
     fork_event_origins: HashMap<EventId, EventOriginRecordV1>,
     fork_intervention_admissions: HashMap<EventId, ForkInterventionAdmissionV1>,
+    fork_publication_operations: HashMap<Hash, ForkPublicationOperationV1>,
+    fork_publication_bindings: HashMap<(TimelineId, u64), ForkPublicationBindingV1>,
+    fork_publication_artifacts: HashMap<Hash, ForkPublicationArtifactV1>,
     /// Current raw ERCRP1 envelope per request.
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
@@ -610,6 +621,9 @@ impl MemoryStore {
             fork_append_operations: HashMap::new(),
             fork_event_origins: HashMap::new(),
             fork_intervention_admissions: HashMap::new(),
+            fork_publication_operations: HashMap::new(),
+            fork_publication_bindings: HashMap::new(),
+            fork_publication_artifacts: HashMap::new(),
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
@@ -2472,6 +2486,109 @@ impl MemoryStore {
         validate_live_session(&self.fork_admission_authority, session)
             .then_some(())
             .ok_or(ForkEventAuthorityErrorV1::Unauthenticated)
+    }
+}
+
+impl MemoryStore {
+    /// Read the authoritative ADR-099 publication sources for one request.
+    fn fork_publication_sources(
+        &self,
+        request: &ForkManifestPublicationRequestV1,
+    ) -> Result<PublicationSourcesV1, ForkManifestPublicationErrorV1> {
+        let child = request.child_timeline_id;
+        let admission = self.fork_admissions.get(&child).cloned();
+        let suffix = admission.as_ref().and_then(|admission| {
+            self.read_fork_event_suffix(
+                child,
+                admission.input().parent_logical_head.saturating_add(1),
+            )
+            .ok()
+        });
+        let head_and_chain = self.logical_head_unchecked(child).ok().and_then(|head| {
+            self.compute_chain_hash_at_unchecked(child, head)
+                .ok()
+                .map(|chain| (head.as_u64(), chain))
+        });
+        publication_sources(
+            request,
+            self.key_registry.clone(),
+            admission,
+            head_and_chain,
+            suffix,
+        )
+    }
+}
+
+impl ForkManifestPublicationPortV1 for MemoryStore {
+    fn commit_authorized<E, F>(
+        &mut self,
+        request: ForkManifestPublicationRequestV1,
+        sign: F,
+    ) -> Result<ForkPublicationReceiptV1, ForkManifestPublicationErrorV1>
+    where
+        F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>,
+    {
+        validate_publication_request(&request)?;
+        if let Some(operation) = self.fork_publication_operations.get(&request.operation_id) {
+            let input = operation.input();
+            let committed = self.read_committed(input.child_timeline_id, input.final_logical_head);
+            return recovered_publication_receipt(operation, &request, committed);
+        }
+        let key = (
+            request.child_timeline_id,
+            request.expected_final_logical_head,
+        );
+        if self.fork_publication_bindings.contains_key(&key) {
+            return Err(ForkManifestPublicationErrorV1::Conflict);
+        }
+        let graph = sign_publication(&request, self.fork_publication_sources(&request)?, sign)?;
+        self.fork_publication_artifacts
+            .insert(graph.receipt.signed_manifest_record_id, graph.artifact);
+        self.fork_publication_operations
+            .insert(request.operation_id, graph.operation);
+        self.fork_publication_bindings.insert(key, graph.binding);
+        Ok(graph.receipt)
+    }
+
+    fn read_committed(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+    ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
+        let binding = *self
+            .fork_publication_bindings
+            .get(&(child_timeline_id, final_logical_head))
+            .ok_or(ForkManifestPublicationErrorV1::PublicationMissing)?;
+        let operation = self
+            .fork_publication_operations
+            .get(&binding.input().operation_id)
+            .cloned();
+        let artifact = self
+            .fork_publication_artifacts
+            .get(&binding.input().signed_manifest_record_id)
+            .cloned();
+        let admission = self.fork_admissions.get(&child_timeline_id);
+        let chain = self
+            .compute_chain_hash_at_unchecked(child_timeline_id, Seq::from_u64(final_logical_head))
+            .ok();
+        operation
+            .zip(artifact)
+            .zip(admission.zip(chain))
+            .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
+            .and_then(
+                |((operation, artifact), (admission, final_chain_head_hash))| {
+                    trusted_committed_manifest(&CommittedPublicationSourcesV1 {
+                        child_timeline_id,
+                        final_logical_head,
+                        binding,
+                        operation,
+                        artifact,
+                        admission,
+                        final_chain_head_hash,
+                        registry: self.key_registry.as_ref(),
+                    })
+                },
+            )
     }
 }
 
