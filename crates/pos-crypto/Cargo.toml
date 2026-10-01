@@ -29,5 +29,11 @@ thiserror = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 
+# Release-query tests need the unchecked PMF1 projection fixture; tests that
+# need no fixture live in `plugin_trust_public` and run without features.
+[[test]]
+name = "plugin_release_query_public"
+required-features = ["test-support"]
+
 [lints]
 workspace = true
