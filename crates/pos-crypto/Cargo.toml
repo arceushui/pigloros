@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Exposes unchecked PMF1 release-projection fixtures for public-seam tests only.
+# Never enable in deployable builds; fixtures do not establish release authority.
+# Enforced by scripts/check_test_support_features.py in CI.
+test-support = []
+
 [dependencies]
 pos-core = { path = "../pos-core" }
 serde = { workspace = true }

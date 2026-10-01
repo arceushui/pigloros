@@ -66,6 +66,24 @@ pub enum PluginTrustErrorV1 {
     /// A cumulative revocation set cannot grow beyond 4096 entries.
     #[error("Plugin revocation capacity exhausted")]
     RevocationCapacityExhausted,
+    /// The PMF1 projection is not a complete, canonical V1 projection.
+    #[error("Plugin manifest projection is incomplete or invalid")]
+    IncompleteManifestProjection,
+    /// The PMF1 validity interval does not contain the evidence UTC second.
+    #[error("Plugin manifest is expired or not yet valid")]
+    ManifestExpired,
+    /// The terminal PTR1 names no publisher key for the PMF1 owner/role/epoch.
+    #[error("Plugin manifest publisher key is unknown")]
+    UnknownPublisherKey,
+    /// The terminal PTR1 grants the exact PMF1 Plugin ID to no matching owner.
+    #[error("Plugin manifest Plugin ID is not granted to its publisher")]
+    PluginIdNotGranted,
+    /// The resolved publisher key is effectively revoked at the evidence Tick.
+    #[error("Plugin manifest publisher key is revoked")]
+    PublisherKeyRevoked,
+    /// The release digest or a descriptor digest is effectively revoked.
+    #[error("Plugin manifest artifact is revoked")]
+    ArtifactRevoked,
 }
 
 /// A caller-pinned genesis digest and exact policy scope. #424 authenticates its source.
@@ -236,21 +254,6 @@ impl VerifiedPluginTrustEvidenceV1 {
         self.root_keys.iter().map(|key| (key.id, key.public))
     }
 
-    /// Publisher records in the verified terminal PTR1. This is a fact for
-    /// #401's complete-PMF1 query, not a release admission decision.
-    pub fn publisher_keys(&self) -> impl Iterator<Item = (OwnerIdV1, u64, [u8; 32])> + '_ {
-        self.publishers
-            .iter()
-            .map(|key| (key.owner, key.epoch, key.public))
-    }
-
-    /// Exact Plugin ID grants in the verified terminal PTR1.
-    pub fn exact_grants(&self) -> impl Iterator<Item = (&str, OwnerIdV1)> + '_ {
-        self.grants
-            .iter()
-            .map(|grant| (grant.plugin_id.as_str(), grant.owner))
-    }
-
     /// Effective publisher-key denials at the bound Tick.
     pub fn effective_key_revocations(
         &self,
@@ -265,17 +268,203 @@ impl VerifiedPluginTrustEvidenceV1 {
         self.revoked_artifacts.iter().copied()
     }
 
-    /// Exact entry counts in the terminal cumulative PRV1 collections,
-    /// including entries that become effective after the bound Tick.
+    /// Resolve one complete PMF1 projection against this terminal evidence.
     ///
-    /// #401 must fail closed before admitting a new release when either count
-    /// is 4096, because V1 cannot represent a successor with another entry.
+    /// ADR-103 makes this the only release query. It succeeds only when the
+    /// terminal PTR1 has exactly one publisher key for the PMF1 owner, role 3,
+    /// and epoch; exactly one exact Plugin-ID grant to that owner; the PMF1
+    /// interval contains the bound UTC second; and neither that key, the
+    /// release digest, nor any descriptor digest is effective at the bound
+    /// Tick. PTR1 decoding already rejects duplicate publisher identities and
+    /// duplicate Plugin IDs, so a single match is the exactly-one match.
+    ///
+    /// The returned fact resolves the key for #401's PMF1 signature check. It
+    /// does not verify that signature, authenticate TPS1, persist a floor,
+    /// admit a release, or activate a Plugin.
+    ///
+    /// # Errors
+    /// Returns `RevocationCapacityExhausted` when either terminal cumulative
+    /// PRV1 collection is full (including future-effective entries), because
+    /// V1 cannot represent another denial;
+    /// `IncompleteManifestProjection`, `ManifestExpired`,
+    /// `UnknownPublisherKey`, `PluginIdNotGranted`, `PublisherKeyRevoked`, or
+    /// `ArtifactRevoked` for the corresponding failed release check.
+    pub fn authorize_release(
+        &self,
+        manifest: &ValidatedPluginManifestProjectionV1,
+    ) -> Result<ResolvedPluginTrustAuthorizationV1, PluginTrustErrorV1> {
+        if self.terminal_revoked_key_count == MAX_REVOCATION_ENTRIES
+            || self.terminal_revoked_artifact_count == MAX_REVOCATION_ENTRIES
+        {
+            return Err(PluginTrustErrorV1::RevocationCapacityExhausted);
+        }
+        if !manifest.is_complete() {
+            return Err(PluginTrustErrorV1::IncompleteManifestProjection);
+        }
+        if self.evaluation_utc_second < manifest.not_before
+            || self.evaluation_utc_second >= manifest.not_after
+        {
+            return Err(PluginTrustErrorV1::ManifestExpired);
+        }
+        let publisher = self
+            .publishers
+            .iter()
+            .find(|key| key.owner == manifest.owner && key.epoch == manifest.epoch)
+            .ok_or(PluginTrustErrorV1::UnknownPublisherKey)?;
+        if !self
+            .grants
+            .iter()
+            .any(|grant| grant.plugin_id == manifest.plugin_id && grant.owner == manifest.owner)
+        {
+            return Err(PluginTrustErrorV1::PluginIdNotGranted);
+        }
+        if self.revoked_keys.contains(publisher) {
+            return Err(PluginTrustErrorV1::PublisherKeyRevoked);
+        }
+        if std::iter::once(&manifest.release_digest)
+            .chain(&manifest.descriptor_digests)
+            .any(|digest| self.revoked_artifacts.contains(digest))
+        {
+            return Err(PluginTrustErrorV1::ArtifactRevoked);
+        }
+        Ok(ResolvedPluginTrustAuthorizationV1 {
+            public_key: publisher.public,
+            pmf1_digest: manifest.pmf1_digest,
+            terminal_root: (self.root_version, self.root_digest),
+            terminal_revocation: (self.policy_epoch, self.revocation_digest),
+            evaluation_utc_second: self.evaluation_utc_second,
+            evaluation_tick: self.evaluation_tick,
+        })
+    }
+}
+
+/// The complete ADR-103 release projection of one canonical PMF1 manifest.
+///
+/// Only #401's complete canonical PMF1 parser may construct this value, after
+/// digest validation and after proving from the PMF1 structure that the
+/// descriptor list contains every digest-bearing descriptor reachable from
+/// PMF1 fields 9-20. Its fields are private and this crate exposes no
+/// production constructor, so callers cannot supply an arbitrary interval or
+/// a partial digest list; until #401 lands, release authorization fails closed
+/// because no projection exists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedPluginManifestProjectionV1 {
+    pmf1_digest: [u8; 32],
+    plugin_id: String,
+    owner: OwnerIdV1,
+    role: u64,
+    epoch: u64,
+    not_before: i64,
+    not_after: i64,
+    release_digest: [u8; 32],
+    descriptor_digests: Vec<[u8; 32]>,
+}
+
+impl ValidatedPluginManifestProjectionV1 {
+    fn is_complete(&self) -> bool {
+        self.role == 3
+            && self.epoch != 0
+            && self.not_before < self.not_after
+            && validate_plugin_id(&self.plugin_id).is_ok()
+            && self
+                .descriptor_digests
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+    }
+}
+
+/// Raw, unchecked projection fields for public-seam test fixtures only.
+///
+/// This type exists only with the `test-support` feature, which
+/// `scripts/check_test_support_features.py` keeps out of deployable dependency
+/// graphs. It lets tests reach every release-query branch, including the
+/// incomplete-projection checks; it is not a PMF1 parser and establishes no
+/// release authority.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginManifestProjectionFixtureV1 {
+    /// BLAKE3-256 of the complete canonical PMF1 bytes.
+    pub pmf1_digest: [u8; 32],
+    /// Exact PMF1 field 2 Plugin ID text.
+    pub plugin_id: String,
+    /// PMF1 publisher owner.
+    pub owner: OwnerIdV1,
+    /// PMF1 publisher role code; V1 requires 3.
+    pub role: u64,
+    /// PMF1 publisher key epoch.
+    pub epoch: u64,
+    /// First UTC second at which the release is valid.
+    pub not_before: i64,
+    /// First UTC second at which the release is no longer valid.
+    pub not_after: i64,
+    /// PMF1 release digest.
+    pub release_digest: [u8; 32],
+    /// Every reachable descriptor digest, strictly sorted.
+    pub descriptor_digests: Vec<[u8; 32]>,
+}
+
+#[cfg(feature = "test-support")]
+impl From<PluginManifestProjectionFixtureV1> for ValidatedPluginManifestProjectionV1 {
+    fn from(fixture: PluginManifestProjectionFixtureV1) -> Self {
+        Self {
+            pmf1_digest: fixture.pmf1_digest,
+            plugin_id: fixture.plugin_id,
+            owner: fixture.owner,
+            role: fixture.role,
+            epoch: fixture.epoch,
+            not_before: fixture.not_before,
+            not_after: fixture.not_after,
+            release_digest: fixture.release_digest,
+            descriptor_digests: fixture.descriptor_digests,
+        }
+    }
+}
+
+/// The ADR-103 trust-authorization fact for one complete PMF1 projection.
+///
+/// It binds the resolved publisher key to the complete-PMF1 digest, the
+/// terminal PTR1/PRV1 coordinates, and the evaluation UTC second and Tick of
+/// the evidence that produced it. It is not a PMF1 signature verification,
+/// TPS1 authentication, release admission, or activation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedPluginTrustAuthorizationV1 {
+    public_key: [u8; 32],
+    pmf1_digest: [u8; 32],
+    terminal_root: (u64, [u8; 32]),
+    terminal_revocation: (u64, [u8; 32]),
+    evaluation_utc_second: i64,
+    evaluation_tick: u64,
+}
+
+impl ResolvedPluginTrustAuthorizationV1 {
+    /// The exact terminal PTR1 publisher key #401 uses to verify PMF1.
     #[must_use]
-    pub const fn terminal_revocation_entry_counts(&self) -> (usize, usize) {
-        (
-            self.terminal_revoked_key_count,
-            self.terminal_revoked_artifact_count,
-        )
+    pub const fn resolved_public_key(&self) -> [u8; 32] {
+        self.public_key
+    }
+
+    /// BLAKE3-256 of the complete canonical PMF1 bytes bound to this fact.
+    #[must_use]
+    pub const fn pmf1_digest(&self) -> [u8; 32] {
+        self.pmf1_digest
+    }
+
+    /// Terminal PTR1 version and complete-record digest of the evidence.
+    #[must_use]
+    pub const fn terminal_root(&self) -> (u64, [u8; 32]) {
+        self.terminal_root
+    }
+
+    /// Terminal PRV1 epoch and complete-record digest of the evidence.
+    #[must_use]
+    pub const fn terminal_revocation(&self) -> (u64, [u8; 32]) {
+        self.terminal_revocation
+    }
+
+    /// The evidence UTC second and host Tick bound to this fact.
+    #[must_use]
+    pub const fn evaluation_coordinates(&self) -> (i64, u64) {
+        (self.evaluation_utc_second, self.evaluation_tick)
     }
 }
 
@@ -1325,18 +1514,6 @@ mod tests {
         assert_eq!(evidence.terminal_root(), (42, expected_ptr1_digest));
         assert_eq!(evidence.terminal_revocation(), (7, expected_prv1_digest));
         assert_eq!(
-            evidence.publisher_keys().collect::<Vec<_>>(),
-            vec![(
-                OwnerIdV1::new("publisher")?,
-                9,
-                [
-                    0xa0, 0x9a, 0xa5, 0xf4, 0x7a, 0x67, 0x59, 0x80, 0x2f, 0xf9, 0x55, 0xf8, 0xdc,
-                    0x2d, 0x2a, 0x14, 0xa5, 0xc9, 0x9d, 0x23, 0xbe, 0x97, 0xf8, 0x64, 0x12, 0x7f,
-                    0xf9, 0x38, 0x34, 0x55, 0xa4, 0xf0,
-                ],
-            )]
-        );
-        assert_eq!(
             evidence.effective_key_revocations().collect::<Vec<_>>(),
             vec![(
                 OwnerIdV1::new("publisher")?,
@@ -1362,89 +1539,9 @@ mod tests {
     }
 
     #[test]
-    fn verifier_keeps_terminal_artifact_capacity_when_entries_are_future_effective(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (signer, _, root, _) = fixture()?;
-        let root_digest = *blake3::hash(&root).as_bytes();
-        let anchor = TrustedPluginRootAnchorV1::new("scope", root_digest)?;
-        let artifacts = (0..4096_u32)
-            .map(|index| {
-                let mut digest = [0; 32];
-                digest[..4].copy_from_slice(&index.to_be_bytes());
-                revoked_artifact(digest, 10)
-            })
-            .collect();
-        let mut fields = revocation_fields(root_digest, 1, None, artifacts);
-        fields[8] = unsigned(10);
-        let revocation = signed_record(fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
-
-        let evidence = verify_plugin_trust_v1(&anchor, &[&root], &[&revocation], 50, 5)?;
-        assert_eq!(evidence.effective_artifact_revocations().count(), 0);
-        assert_eq!(evidence.terminal_revocation_entry_counts(), (0, 4096));
-        Ok(())
-    }
-
-    #[test]
-    fn verifier_keeps_terminal_key_capacity_when_entries_are_future_effective(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let signer = SigningKey::from_bytes(&[7; 32]);
-        let mut roots = Vec::new();
-        let mut revoked_keys = Vec::new();
-        let mut previous = None;
-
-        // A PTR1 can name 256 publisher keys. Sixteen linked PTR1 records
-        // therefore make all 4096 distinct future-effective PRV1 entries
-        // known to the verifier without making any of them effective at Tick 5.
-        for root_index in 0_u16..16 {
-            let mut publishers = Vec::new();
-            for publisher_index in 0_u16..256 {
-                let mut seed = [0; 32];
-                seed[..2].copy_from_slice(&root_index.to_be_bytes());
-                seed[2..4].copy_from_slice(&publisher_index.to_be_bytes());
-                seed[31] = 1;
-                let public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-                let owner = format!("owner-{root_index:02}-{publisher_index:03}");
-                publishers.push(Value::Array(vec![
-                    Value::Text(owner.clone()),
-                    unsigned(3),
-                    unsigned(1),
-                    bytes(public),
-                ]));
-                revoked_keys.push(Value::Array(vec![
-                    Value::Text(owner),
-                    unsigned(3),
-                    unsigned(1),
-                    bytes(public),
-                    unsigned(10),
-                    unsigned(1),
-                    Value::Null,
-                ]));
-            }
-            let mut fields = root_fields(&signer, [0; 32], u64::from(root_index) + 1, previous);
-            fields[9] = Value::Array(publishers);
-            fields[10] = Value::Array(Vec::new());
-            let root = signed_record(fields, ROOT_SIGNATURE_DOMAIN, &[&signer])?;
-            previous = Some(*blake3::hash(&root).as_bytes());
-            roots.push(root);
-        }
-        let terminal_root_digest = *blake3::hash(&roots[15]).as_bytes();
-        let anchor = TrustedPluginRootAnchorV1::new("scope", *blake3::hash(&roots[0]).as_bytes())?;
-        let mut fields = revocation_fields(terminal_root_digest, 1, None, Vec::new());
-        fields[8] = unsigned(10);
-        fields[9] = Value::Array(revoked_keys);
-        let revocation = signed_record(fields, REVOCATION_SIGNATURE_DOMAIN, &[&signer])?;
-        let root_references = roots.iter().map(Vec::as_slice).collect::<Vec<_>>();
-
-        let evidence = verify_plugin_trust_v1(&anchor, &root_references, &[&revocation], 50, 5)?;
-        assert_eq!(evidence.effective_key_revocations().count(), 0);
-        assert_eq!(evidence.terminal_revocation_entry_counts(), (4096, 0));
-        Ok(())
-    }
-
-    #[test]
     fn pinned_genesis_and_empty_revocation_produce_bound_facts(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (signer, publisher, root, revocation) = fixture()?;
+        let (signer, _, root, revocation) = fixture()?;
         let root_digest = *blake3::hash(&root).as_bytes();
         let revocation_digest = *blake3::hash(&revocation).as_bytes();
         let anchor = TrustedPluginRootAnchorV1::new("scope", root_digest)?;
@@ -1458,14 +1555,6 @@ mod tests {
         assert_eq!(
             evidence.terminal_root_keys().collect::<Vec<_>>(),
             vec![(root_key_id(root_public), root_public)]
-        );
-        assert_eq!(
-            evidence.publisher_keys().collect::<Vec<_>>(),
-            vec![(OwnerIdV1::new("publisher")?, 1, publisher)]
-        );
-        assert_eq!(
-            evidence.exact_grants().collect::<Vec<_>>(),
-            vec![("plugin-a", OwnerIdV1::new("publisher")?)]
         );
         assert_eq!(evidence.effective_key_revocations().count(), 0);
         assert_eq!(evidence.effective_artifact_revocations().count(), 0);
