@@ -567,7 +567,10 @@ mod tests {
         ForkHostSigningKeyV1, VerifiedAuthenticatedPrincipalEvidenceV1,
     };
     use pos_crypto::{
-        key_roles::{destroy_registered_signing_key, sign_for_registered_role, SigningKeyMaterial},
+        key_roles::{
+            destroy_registered_signing_key, sign_for_registered_role, KeyDestructionPersistence,
+            SigningKeyMaterial,
+        },
         signing::generate_keypair,
     };
     #[cfg(feature = "sqlite")]
@@ -1196,6 +1199,33 @@ mod tests {
         Ok(())
     }
 
+    /// Drives key destruction through the store's durable two-phase registry
+    /// transition, as an owned-material adapter does in production.
+    struct StoreKeyDestruction<'a, S: ?Sized>(&'a mut S);
+
+    impl<S: EventStore + ?Sized> KeyDestructionPersistence for StoreKeyDestruction<'_, S> {
+        type Error = pos_core::CoreError;
+
+        fn begin(
+            &mut self,
+            request: KeyDestructionRequestV1,
+        ) -> Result<pos_core::KeyDestructionBeginOutcomeV1, Self::Error> {
+            self.0
+                .begin_key_registry_destruction(request)
+                .map(|(outcome, _)| outcome)
+        }
+
+        fn complete(
+            &mut self,
+            request: KeyDestructionRequestV1,
+            deletion_receipt: Hash,
+        ) -> Result<pos_core::KeyDestructionOutcomeV1, Self::Error> {
+            self.0
+                .complete_key_registry_destruction(request, deletion_receipt)
+                .map(|(outcome, _)| outcome)
+        }
+    }
+
     trait PublicationTestStoreV1:
         EventStore
         + ForkAdmissionAuthorityBootstrapPortV1
@@ -1465,13 +1495,14 @@ mod tests {
             fixture.material.material_digest(),
             Hash::from_bytes([94; 32]),
         );
-        let mut destroyed_registry = fixture.registry.clone();
+        // Destruction is persisted in two phases (pending, then tombstone):
+        // the registry rejects any replacement that drops private material
+        // whose destruction was not already durably pending.
         destroy_registered_signing_key(
             &mut fixture.material,
             destruction,
-            &mut destroyed_registry,
+            &mut StoreKeyDestruction(store),
         )?;
-        store.save_key_registry(&destroyed_registry)?;
         assert_eq!(
             store.read_committed(lifecycle.fork.child_id, 1)?.receipt,
             receipt
@@ -1496,7 +1527,7 @@ mod tests {
         )
     }
 
-    /// Publish once in a durable SQLite file and return its committed request.
+    /// Publish once in a durable `SQLite` file and return its committed request.
     #[cfg(feature = "sqlite")]
     fn durable_publication(
         path: &Path,
