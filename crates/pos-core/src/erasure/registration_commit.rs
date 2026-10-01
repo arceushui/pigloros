@@ -4,8 +4,9 @@ use super::{
     extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
     extract_repro_manifest_root_registration_v1, inspect_artifact_registration_graph_v1,
     ArtifactDataClassV1, ArtifactRegistrationGraphErrorV1, ArtifactRegistrationGraphNodeV1,
-    ArtifactRegistrationV1, ErasureArtifactClassV1, ReproManifestRootRegistrationInputV1,
-    MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1, MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
+    ArtifactRegistrationV1, ErasureArtifactClassV1, ReproManifestArtifactRegistrationErrorV1,
+    ReproManifestRootRegistrationInputV1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
+    MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
 };
 use crate::{
     AdapterAdmissionV1, AdapterTranscriptV1, Hash, OwnerIdV1, ReproManifestRootV1,
@@ -800,7 +801,20 @@ fn derive_expected_registration(
                 owner_id,
                 label_data_class,
             })
-            .map_err(|_| ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)
+            .map_err(|error| match error {
+                ReproManifestArtifactRegistrationErrorV1::InvalidLabelClassification => {
+                    ArtifactRegistrationPreparationErrorV1::OwnerRejected
+                }
+                ReproManifestArtifactRegistrationErrorV1::InvalidManifestRoot
+                | ReproManifestArtifactRegistrationErrorV1::InvalidRecordingReceipt
+                | ReproManifestArtifactRegistrationErrorV1::InvalidTranscript
+                | ReproManifestArtifactRegistrationErrorV1::InvalidAdmission
+                | ReproManifestArtifactRegistrationErrorV1::RecordingRegistrationMismatch
+                | ReproManifestArtifactRegistrationErrorV1::TranscriptRegistrationMismatch
+                | ReproManifestArtifactRegistrationErrorV1::ManifestBindingMismatch => {
+                    ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact
+                }
+            })
         }
     }
 }
