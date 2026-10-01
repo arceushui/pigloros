@@ -2,10 +2,7 @@ use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginTrustErrorV1, PluginTrustRootRecordV1, TrustedPluginRootAnchorV1,
 };
 
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/support/plugin_trust_records.rs"
-));
+include!("support/plugin_trust_records.rs");
 
 #[test]
 fn public_verifier_distinguishes_unknown_root_key_from_invalid_signature() -> TestResult {
