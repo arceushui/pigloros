@@ -638,8 +638,7 @@ impl ForkPublicationOperationV1 {
         let final_logical_head = wire.uint()?;
         let final_chain_head_hash = wire.hash()?;
         let admission_digest = wire.hash()?;
-        let owner_id = OwnerIdV1::new(wire.text(128)?)
-            .map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)?;
+        let owner_id = wire.owner()?;
         let role = KeyRoleV1::from_code(
             u8::try_from(wire.uint()?).map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)?,
         )
@@ -999,6 +998,16 @@ impl<'a> Reader<'a> {
             return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
         }
         self.take(length)
+    }
+    /// Read an owner whose emptiness is judged by `OwnerIdV1` itself.
+    fn owner(&mut self) -> Result<OwnerIdV1, ForkAttributionCodecErrorV1> {
+        let length = usize::try_from(self.head(3)?).unwrap_or(usize::MAX);
+        if length > 128 {
+            return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
+        }
+        let value = std::str::from_utf8(self.take(length)?)
+            .map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)?;
+        OwnerIdV1::new(value).map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)
     }
     fn text(&mut self, maximum: usize) -> Result<&'a str, ForkAttributionCodecErrorV1> {
         let length = usize::try_from(self.head(3)?)

@@ -1074,7 +1074,8 @@ fn every_truncated_publication_record_fails_closed() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn fpo1_decoder_rejects_empty_and_oversized_owner() -> Result<(), Box<dyn std::error::Error>> {
+fn fpo1_decoder_rejects_empty_oversized_and_invalid_utf8_owner(
+) -> Result<(), Box<dyn std::error::Error>> {
     let admission = admission()?;
     let (operation, _binding, _artifact) = publication_records(&admission)?;
     let canonical = operation.to_canonical_cbor();
@@ -1090,11 +1091,17 @@ fn fpo1_decoder_rejects_empty_and_oversized_owner() -> Result<(), Box<dyn std::e
         ForkPublicationOperationV1::from_canonical_cbor(&empty_owner),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
     );
-    let mut oversized_owner = canonical;
+    let mut oversized_owner = canonical.clone();
     oversized_owner.splice(owner_at - 1..owner_at, [0x79, 0x00, 0x81]);
     assert_eq!(
         ForkPublicationOperationV1::from_canonical_cbor(&oversized_owner),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut invalid_utf8_owner = canonical;
+    invalid_utf8_owner[owner_at] = 0xff;
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&invalid_utf8_owner),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
     );
     Ok(())
 }
