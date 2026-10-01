@@ -825,9 +825,17 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
         "create parent timeline",
         commands.create_timeline("host-coordinator-freeze"),
     )?;
+    let unaffected = test_stage(
+        "create unaffected timeline",
+        commands.create_timeline("host-coordinator-unaffected"),
+    )?;
     test_stage(
         "publish authority topology",
         authority.set_timeline(timeline.id()),
+    )?;
+    test_stage(
+        "publish unaffected authority topology",
+        authority.set_timeline_unaffected(unaffected.id()),
     )?;
     let request = test_stage("construct erasure request", persistence_request())?;
     let request_reference = request.reference();
@@ -887,6 +895,16 @@ fn assert_atomic_freeze_parity(config: StoreConfig) -> Result<(), Box<dyn std::e
     assert_frozen_fork_retries(&mut commands, &authority, timeline.id(), child.id())?;
     let mut reader = test_stage("open read sender", host.read_sender())?;
     assert_eq!(reader.key_registry(), Ok(None));
+    let visible = test_stage("list after durable freeze", reader.timelines())?;
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id(), unaffected.id());
+    assert_eq!(
+        test_stage(
+            "count visible roots after durable freeze",
+            reader.root_timeline_count_bounded(2),
+        )?,
+        1
+    );
     Ok(())
 }
 
@@ -3780,4 +3798,494 @@ fn sqlite_exact_fork_retry_survives_later_request_including_child(
         StoreConfig::SqliteInMemory,
         LaterRequestChildMembership::Included,
     )
+}
+
+// ---------------------------------------------------------------------------
+// ADR-106 revision 3: admitted Forks run inside the host topology transition.
+// ---------------------------------------------------------------------------
+
+type AdmissionResult =
+    Result<pos_core::ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1>;
+
+/// Host-side FAC1 and FRP1 signer bound to one opened ADR-106 session.
+struct HostForkAuthority {
+    signer: pos_crypto::fork_authentication::ForkHostSigningKeyV1,
+    adapter: pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1,
+    policy: pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+    session: pos_store::ForkAdmissionAuthoritySessionV1,
+    store_id: pos_core::Hash,
+}
+
+fn cbor(value: &ciborium::value::Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)?;
+    Ok(bytes)
+}
+
+impl HostForkAuthority {
+    /// Provision FAH1 through the host's bootstrap port and open a session.
+    fn provision(host: &mut ErasureExecutionHostV1) -> Result<Self, Box<dyn std::error::Error>> {
+        let signer = pos_crypto::fork_authentication::ForkHostSigningKeyV1::from_seed([71; 32])?;
+        let adapter =
+            pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1::from_seed(
+                [72; 32],
+            )?;
+        let policy = pos_core::fork_authentication::ForkAuthenticationPolicyV1::new(vec![
+            pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1 {
+                adapter_id: "test-adapter".to_owned(),
+                verifying_key: adapter.public_key(),
+                minimum_assurance: 1,
+                registry_bindings: vec![pos_core::Hash::from_bytes([3; 32])],
+            },
+        ])?;
+        let bootstrap = host.fork_admission_bootstrap();
+        let key = pos_core::PublicKey::from_bytes(signer.public_key());
+        let initialize = bootstrap.begin_fork_admission_initialize(key, policy.digest()?)?;
+        bootstrap.finalize_fork_admission_initialize(
+            &initialize,
+            &signer.sign_initialize(&initialize.to_canonical_cbor()?)?,
+        )?;
+        Self::open(host, signer, adapter, policy)
+    }
+
+    /// Open a fresh session for an already provisioned FAH1.
+    fn open(
+        host: &mut ErasureExecutionHostV1,
+        signer: pos_crypto::fork_authentication::ForkHostSigningKeyV1,
+        adapter: pos_crypto::fork_authentication::ForkAuthenticationAdapterSigningKeyV1,
+        policy: pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let bootstrap = host.fork_admission_bootstrap();
+        let key = pos_core::PublicKey::from_bytes(signer.public_key());
+        let open = bootstrap.begin_fork_admission_open(key, policy.digest()?)?;
+        let session = bootstrap
+            .finalize_fork_admission_open(&open, &signer.sign_open(&open.to_canonical_cbor()?)?)?;
+        let store_id = bootstrap.fork_admission_host_record()?.store_id();
+        Ok(Self {
+            signer,
+            adapter,
+            policy,
+            session,
+            store_id,
+        })
+    }
+
+    fn reopen(self, host: &mut ErasureExecutionHostV1) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open(host, self.signer, self.adapter, self.policy)
+    }
+
+    /// A POC1 when `parent` is `None`, otherwise an FCC1 at cut zero.
+    fn command(
+        &self,
+        operation: u8,
+        parent: Option<TimelineId>,
+    ) -> Result<pos_core::ForkAdmissionHostCommandV1, Box<dyn std::error::Error>> {
+        use ciborium::value::Value;
+        let evidence = self.adapter.sign_authenticated_principal(
+            pos_core::fork_authentication::AuthenticatedPrincipalRecordV1 {
+                principal: pos_core::PrincipalRefV1::try_new([4; 16], "test.local")?,
+                adapter_id: "test-adapter".to_owned(),
+                assurance: 1,
+                issued_at: 0,
+                expires_at: u64::MAX,
+                registry_binding: pos_core::Hash::from_bytes([3; 32]),
+                operation_nonce: [5; 32],
+            },
+        )?;
+        let verified = pos_crypto::fork_authentication::verify_authenticated_principal_evidence_v1(
+            &self.policy,
+            evidence,
+        )?;
+        let principal = pos_core::fork_authentication::principal_digest_v1(
+            &verified.evidence().record().principal,
+        )?;
+        let mut fields = vec![
+            Value::Text(if parent.is_some() { "FCC1" } else { "POC1" }.to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(self.store_id.as_bytes().to_vec()),
+            Value::Bytes(self.session.identity().as_bytes().to_vec()),
+            Value::Bytes(vec![operation; 32]),
+            Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+            Value::Bytes(principal.as_bytes().to_vec()),
+        ];
+        fields.extend(parent.map_or_else(
+            || vec![Value::Text("owner".to_owned())],
+            |parent| {
+                vec![
+                    Value::Bytes(parent.inner().to_bytes().to_vec()),
+                    Value::Integer(0.into()),
+                    Value::Integer(0.into()),
+                    Value::Bytes(vec![8; 32]),
+                    Value::Bytes(vec![9; 32]),
+                    Value::Integer(1.into()),
+                    Value::Text(format!("host-admitted-child-{operation}")),
+                ]
+            },
+        ));
+        let inner = cbor(&Value::Array(fields))?;
+        let signature = self.signer.sign_command(&inner, &verified)?;
+        Ok(pos_core::ForkAdmissionHostCommandV1::from_canonical_cbor(
+            &cbor(&Value::Array(vec![
+                Value::Text("FAC1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Bytes(inner),
+                Value::Bytes(verified.evidence().to_canonical_cbor()?),
+                Value::Bytes(signature.as_bytes().to_vec()),
+            ]))?,
+        )?)
+    }
+
+    fn execute(
+        &self,
+        host: &mut ErasureExecutionHostV1,
+        command: &pos_core::ForkAdmissionHostCommandV1,
+    ) -> AdmissionResult {
+        host.execute_fork_admission_command(&self.session, &self.policy, command)
+    }
+
+    /// Reconcile one FCC1 through the host's lookup-only FRP1 path.
+    fn recover(
+        &self,
+        host: &mut ErasureExecutionHostV1,
+        operation: u8,
+    ) -> Result<AdmissionResult, Box<dyn std::error::Error>> {
+        use ciborium::value::Value;
+        let recovery = cbor(&Value::Array(vec![
+            Value::Text("FRC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(self.store_id.as_bytes().to_vec()),
+            Value::Bytes(self.session.identity().as_bytes().to_vec()),
+            Value::Integer(2.into()),
+            Value::Bytes(vec![operation; 32]),
+        ]))?;
+        let proof = pos_core::ForkAdmissionRecoveryProofV1::from_canonical_cbor(&cbor(
+            &Value::Array(vec![
+                Value::Text("FRP1".to_owned()),
+                Value::Integer(1.into()),
+                Value::Bytes(recovery.clone()),
+                Value::Bytes(self.signer.sign_recovery(&recovery)?.as_bytes().to_vec()),
+            ]),
+        )?)?;
+        Ok(host.recover_fork_admission_command(&self.session, &proof))
+    }
+}
+
+fn admitted_receipt(
+    result: AdmissionResult,
+) -> Result<pos_core::ForkAdmissionReceiptV1, Box<dyn std::error::Error>> {
+    match result {
+        Ok(pos_core::ForkAdmissionOperationResultV1::Fork(receipt)) => Ok(receipt),
+        other => Err(format!("expected an admitted Fork receipt, got {other:?}").into()),
+    }
+}
+
+/// An authority-composed host with a bound Owner, a parent in the scope of
+/// one authorized request, and an unaffected root.
+struct AdmittedForkHostV1 {
+    host: ErasureExecutionHostV1,
+    authority: Arc<TestAuthority>,
+    forks: HostForkAuthority,
+    parent: TimelineId,
+    other: TimelineId,
+    request: ErasureReferenceV1,
+}
+
+fn admitted_fork_host(
+    config: StoreConfig,
+) -> Result<AdmittedForkHostV1, Box<dyn std::error::Error>> {
+    let authority = Arc::new(TestAuthority::default());
+    let plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority.clone();
+    let mut host = test_stage(
+        "open admitted Fork host",
+        open_with_authority(
+            config,
+            plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    let forks = HostForkAuthority::provision(&mut host)?;
+    // T5: POC1 is not a topology mutation and commits without a transition.
+    assert!(matches!(
+        forks.execute(&mut host, &forks.command(1, None)?),
+        Ok(pos_core::ForkAdmissionOperationResultV1::PrincipalOwner(_))
+    ));
+    let mut commands = test_stage("open admitted Fork sender", host.command_sender())?;
+    let parent = test_stage("create parent", commands.create_timeline("admitted-parent"))?;
+    let other = test_stage(
+        "create other root",
+        commands.create_timeline("admitted-other"),
+    )?;
+    test_stage("classify parent", authority.set_timeline(parent.id()))?;
+    test_stage(
+        "classify other",
+        authority.set_timeline_unaffected(other.id()),
+    )?;
+    let request = test_stage("construct request", persistence_request())?;
+    let request_reference = request.reference();
+    let provenance = request.provenance();
+    test_stage(
+        "submit request",
+        commands.submit_erasure_request(request, provenance),
+    )?;
+    test_stage(
+        "authorize request",
+        commands.authorize_erasure_request(request_reference, reference(32)),
+    )?;
+    Ok(AdmittedForkHostV1 {
+        host,
+        authority,
+        forks,
+        parent: parent.id(),
+        other: other.id(),
+        request: request_reference,
+    })
+}
+
+/// T1, T4, T7, T8 and T9 through the erasure host.
+fn assert_host_admitted_fork_contract(
+    config: StoreConfig,
+) -> Result<(AdmittedForkHostV1, pos_core::ForkAdmissionReceiptV1), Box<dyn std::error::Error>> {
+    let mut fixture = admitted_fork_host(config)?;
+    let AdmittedForkHostV1 {
+        host,
+        authority,
+        forks,
+        parent,
+        other,
+        request,
+    } = &mut fixture;
+    // T7: the child is classified and published before the receipt returns.
+    let admitted = forks.command(2, Some(*parent))?;
+    let receipt = admitted_receipt(forks.execute(host, &admitted))?;
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    test_stage(
+        "classify child",
+        authority.set_timeline_unaffected(receipt.child_id),
+    )?;
+    let mut commands = test_stage("open freeze sender", host.command_sender())?;
+    assert!(test_stage("read admitted child", commands.timeline(receipt.child_id))?.is_some());
+    test_stage(
+        "freeze request",
+        commands.freeze_access(*request, &freeze_transition()),
+    )?;
+    // T2 (affected but not yet frozen) cannot be reached from durable
+    // coordinator state: a request's scope is committed by its access freeze,
+    // so every included classification a host recovers is already frozen.
+    // The pos-core gate/context tests build that inventory directly.
+    // T1: a frozen parent is contained without a write or a poisoned host.
+    let contained = forks.command(3, Some(*parent))?;
+    assert_eq!(
+        forks.execute(host, &contained),
+        Err(pos_core::ForkAdmissionErrorV1::ParentErasureContained)
+    );
+    assert_eq!(
+        forks.recover(host, 3)?,
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    // T8: exact FAC1 retry and FRP1 after the later freeze.
+    let original = Ok(pos_core::ForkAdmissionOperationResultV1::Fork(receipt));
+    assert_eq!(forks.execute(host, &admitted), original);
+    assert_eq!(forks.recover(host, 2)?, original);
+    // T9: the commit succeeds but its successor publication fails.
+    authority.deny_topology.store(true, Ordering::Release);
+    assert_eq!(
+        forks.execute(host, &forks.command(4, Some(*other))?),
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    let recovered = admitted_receipt(forks.recover(host, 4)?)?;
+    // T4: a poisoned host falls back to the unfenced method.
+    assert_eq!(forks.execute(host, &admitted), original);
+    assert_eq!(
+        forks.execute(host, &forks.command(5, Some(*other))?),
+        Err(pos_core::ForkAdmissionErrorV1::ErasureContainmentUnavailable)
+    );
+    authority.deny_topology.store(false, Ordering::Release);
+    test_stage(
+        "classify recovered child",
+        authority.set_timeline_unaffected(recovered.child_id),
+    )?;
+    Ok((fixture, recovered))
+}
+
+#[test]
+fn memory_host_admits_forks_in_the_transition_and_fails_closed_after_publication_failure(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_host_admitted_fork_contract(StoreConfig::Memory).map(|_| ())
+}
+
+#[test]
+fn sqlite_host_recovers_an_admitted_fork_after_publication_failure_and_restart(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("admitted-fork-host.db")
+        .to_string_lossy()
+        .into_owned();
+    let (fixture, recovered) =
+        assert_host_admitted_fork_contract(StoreConfig::Sqlite { path: path.clone() })?;
+    let AdmittedForkHostV1 {
+        host,
+        authority,
+        forks,
+        other,
+        ..
+    } = fixture;
+    drop(host);
+    let plugin: Arc<dyn ErasureCoordinatorAuthorityV1> = authority;
+    let mut restarted = test_stage(
+        "restart admitted Fork host",
+        open_with_authority(
+            StoreConfig::Sqlite { path },
+            plugin,
+            reference(30),
+            ERASURE_MAX_INVENTORY_REQUESTS,
+        ),
+    )?;
+    assert_eq!(restarted.status(), ErasureHostStatusV1::Ready);
+    let forks = forks.reopen(&mut restarted)?;
+    let original = Ok(pos_core::ForkAdmissionOperationResultV1::Fork(recovered));
+    assert_eq!(forks.recover(&mut restarted, 4)?, original);
+    assert_eq!(
+        forks.execute(&mut restarted, &forks.command(4, Some(other))?),
+        original
+    );
+    assert_eq!(restarted.status(), ErasureHostStatusV1::Ready);
+    Ok(())
+}
+
+/// T7 with no active request: the verified-empty successor classifies the
+/// child before the receipt returns.
+fn assert_verified_empty_host_admits_a_fork(
+    config: StoreConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let limits = ErasureRecoveryLimitsV1::from_maximum_requests(ERASURE_MAX_INVENTORY_REQUESTS)?;
+    let mut host = test_stage(
+        "open verified-empty host",
+        ErasureExecutionHostV1::open_verified_empty(config, limits),
+    )?;
+    let forks = HostForkAuthority::provision(&mut host)?;
+    assert!(matches!(
+        forks.execute(&mut host, &forks.command(11, None)?),
+        Ok(pos_core::ForkAdmissionOperationResultV1::PrincipalOwner(_))
+    ));
+    let parent = test_stage(
+        "create verified-empty parent",
+        host.command_sender()
+            .and_then(|mut commands| commands.create_timeline("verified-empty-parent")),
+    )?;
+    let receipt =
+        admitted_receipt(forks.execute(&mut host, &forks.command(12, Some(parent.id()))?))?;
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    let child = test_stage(
+        "read verified-empty child",
+        host.command_sender()
+            .and_then(|mut commands| commands.timeline(receipt.child_id)),
+    )?;
+    assert_eq!(child.map(|timeline| timeline.id()), Some(receipt.child_id));
+    Ok(())
+}
+
+#[test]
+fn verified_empty_hosts_admit_forks_on_both_adapters() -> Result<(), Box<dyn std::error::Error>> {
+    assert_verified_empty_host_admits_a_fork(StoreConfig::Memory)?;
+    assert_verified_empty_host_admits_a_fork(StoreConfig::SqliteInMemory)
+}
+
+/// Timelines and FAR1 rows read through an independent `SQLite` connection.
+fn admitted_fork_rows(path: &str) -> Result<(i64, i64), Box<dyn std::error::Error>> {
+    let connection = rusqlite::Connection::open(path)?;
+    let count = |query: &str| connection.query_row(query, [], |row| row.get::<_, i64>(0));
+    Ok((
+        count("SELECT COUNT(*) FROM timelines")?,
+        count("SELECT COUNT(*) FROM fork_admissions")?,
+    ))
+}
+
+/// T11 through the erasure host: a write lock held by another connection is
+/// a definite pre-write failure. Nothing is written, the host stays Ready,
+/// and the next freeze transition succeeds.
+#[test]
+fn sqlite_host_stays_ready_when_a_write_lock_blocks_an_admitted_fork(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("admitted-fork-lock.db")
+        .to_string_lossy()
+        .into_owned();
+    let mut fixture = admitted_fork_host(StoreConfig::Sqlite { path: path.clone() })?;
+    let AdmittedForkHostV1 {
+        host,
+        forks,
+        other,
+        request,
+        ..
+    } = &mut fixture;
+    let command = forks.command(21, Some(*other))?;
+    let before = admitted_fork_rows(&path)?;
+    let lock = rusqlite::Connection::open(&path)?;
+    lock.execute_batch("BEGIN IMMEDIATE")?;
+    assert_eq!(
+        forks.execute(host, &command),
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    lock.execute_batch("ROLLBACK")?;
+    drop(lock);
+    assert_eq!(admitted_fork_rows(&path)?, before);
+    assert_eq!(
+        forks.recover(host, 21)?,
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    let mut commands = test_stage("open post-lock sender", host.command_sender())?;
+    assert_eq!(
+        test_stage(
+            "freeze after the lock",
+            commands.freeze_access(*request, &freeze_transition()),
+        )?
+        .lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    assert!(matches!(
+        forks.execute(host, &command),
+        Ok(pos_core::ForkAdmissionOperationResultV1::Fork(_))
+    ));
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    Ok(())
+}
+
+/// A definite pre-write failure inside the admitted-Fork transaction: the
+/// geographic-marker read fails before any write and the transaction rolls
+/// back, so the host reports `StorageIndeterminate` without poisoning.
+#[test]
+fn sqlite_host_stays_ready_after_a_rolled_back_marker_read_failure(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory
+        .path()
+        .join("admitted-fork-marker.db")
+        .to_string_lossy()
+        .into_owned();
+    let mut fixture = admitted_fork_host(StoreConfig::Sqlite { path: path.clone() })?;
+    let AdmittedForkHostV1 {
+        host, forks, other, ..
+    } = &mut fixture;
+    let command = forks.command(22, Some(*other))?;
+    let before = admitted_fork_rows(&path)?;
+    rusqlite::Connection::open(&path)?.execute_batch("DROP TABLE geographic_presence")?;
+    assert_eq!(
+        forks.execute(host, &command),
+        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    );
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    assert_eq!(admitted_fork_rows(&path)?, before);
+    assert_eq!(
+        forks.recover(host, 22)?,
+        Err(pos_core::ForkAdmissionErrorV1::OperationMissing)
+    );
+    Ok(())
 }

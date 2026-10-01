@@ -11,11 +11,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(unix)]
 #[doc(hidden)]
 pub mod control_framing;
 
 mod non_interference_report;
+
+// A public test-only module keeps crate-scoped helpers compatible with both
+// unreachable_pub and redundant_pub_crate, like the test fixtures below.
+#[cfg(all(test, unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod image_read_fault;
 
 pub use non_interference_report::{
     verify_non_interference_report_v1, IndependentNonInterferenceReportErrorV1,
@@ -26,6 +32,8 @@ pub mod evaluator;
 pub mod evaluator_build_identity;
 pub mod evaluator_protocol;
 pub mod profile;
+#[cfg(unix)]
+pub mod provider_admission;
 // Public module reachability keeps crate-only sibling access compatible with
 // both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
 #[cfg(unix)]

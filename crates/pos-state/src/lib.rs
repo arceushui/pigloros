@@ -12,254 +12,17 @@
 //! No I/O, no async.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use pos_core::{
-    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1,
-    AuthorizationRequestV1, CanonicalBytes, ConsentEvidenceV1, ConsentRevocationFoldListener,
-    ConsentRevokedV1, EntityId, ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1,
-    ErasureReferenceV1, Event, Hash, ObservationArtifactV1, ObservationRecordDraftV1,
-    ObservationRecordV1, ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1,
-    PersistedAuthorityV1, Reducer, Relationship, Seq, State, StateRegistry, TimelineId, WallTime,
+    AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
+    CanonicalBytes, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
+    ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1, Event,
+    Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
+    PluginId, Reducer, Relationship, Seq, State, StateRegistry, TimelineId,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
-
-// ---------------------------------------------------------------------------
-// AuthorizationCacheV1
-// ---------------------------------------------------------------------------
-
-/// Exact invalidation identity for one cached active authorization decision.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct AuthorizationCacheKeyV1 {
-    request_digest: Hash,
-    authority_timeline: TimelineId,
-    grant_chain_bindings: Vec<Hash>,
-    consent_policy_revision: Hash,
-    capability_policy_revision: Hash,
-    revocation_epoch: u64,
-    inventory_generation: [u8; 32],
-}
-
-impl AuthorizationCacheKeyV1 {
-    #[must_use]
-    pub fn from_decision(
-        decision: &AuthorizationDecisionV1,
-        revocation_epoch: u64,
-        inventory_generation: ErasureReferenceV1,
-    ) -> Self {
-        Self {
-            request_digest: decision.request_digest(),
-            authority_timeline: decision.authority_timeline(),
-            grant_chain_bindings: decision.grant_chain_bindings().to_vec(),
-            consent_policy_revision: decision.consent_policy_revision(),
-            capability_policy_revision: decision.capability_policy_revision(),
-            revocation_epoch,
-            inventory_generation: inventory_generation.digest(),
-        }
-    }
-
-    #[must_use]
-    pub const fn authority_timeline(&self) -> TimelineId {
-        self.authority_timeline
-    }
-
-    #[must_use]
-    pub const fn revocation_epoch(&self) -> u64 {
-        self.revocation_epoch
-    }
-
-    #[must_use]
-    pub const fn inventory_generation(&self) -> ErasureReferenceV1 {
-        ErasureReferenceV1::from_digest(self.inventory_generation)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct AuthorizationCacheEntryV1 {
-    decision: AuthorizationDecisionV1,
-    expires_at: WallTime,
-    valid_until_position: Seq,
-    grant_ids: BTreeSet<Hash>,
-    consent_references: BTreeSet<Hash>,
-    inventory_generation: ErasureReferenceV1,
-}
-
-impl AuthorizationCacheEntryV1 {
-    fn is_current(
-        &self,
-        at_time: WallTime,
-        at_position: Seq,
-        inventory_generation: ErasureReferenceV1,
-    ) -> bool {
-        at_time < self.expires_at
-            && at_position < self.valid_until_position
-            && self.inventory_generation == inventory_generation
-    }
-}
-
-/// Current authorized-decision projection with explicit expiry and revocation indexes.
-///
-/// Only active decisions are admitted. Every lookup supplies the current wall-time and
-/// Timeline position, so an entry cannot outlive the shorter of its consent/grant wall
-/// expiry and logical-position expiry. Parent and consent indexes make revocation
-/// invalidation independent of which chain member was the leaf.
-#[derive(Clone, Debug, Default)]
-pub struct AuthorizationCacheV1 {
-    entries: HashMap<AuthorizationCacheKeyV1, AuthorizationCacheEntryV1>,
-}
-
-impl AuthorizationCacheV1 {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Cache an active decision until its derived shortest expiry, bound to
-    /// the exact installed erasure inventory generation.
-    ///
-    /// Returns the exact cache key, or `None` when the decision differs from
-    /// a fresh evaluation of the supplied authority and registry, is denied,
-    /// is expired, or has no capability chain.
-    pub fn insert_active(
-        &mut self,
-        decision: AuthorizationDecisionV1,
-        request: &AuthorizationRequestV1,
-        authority: &PersistedAuthorityV1,
-        registry: &AuthorityRegistrySnapshotV1,
-        inventory_generation: ErasureReferenceV1,
-    ) -> Option<AuthorizationCacheKeyV1> {
-        let grants = authority.chain().grants();
-        let grant_ids = grants
-            .iter()
-            .map(pos_core::CapabilityGrantV1::grant_id)
-            .collect::<BTreeSet<_>>();
-        let consent_references = grants
-            .iter()
-            .flat_map(|grant| grant.consent_references().iter().copied())
-            .collect::<BTreeSet<_>>();
-        let first_grant = &grants[0];
-        let valid_until_position = grants
-            .iter()
-            .skip(1)
-            .fold(first_grant.valid_until_position(), |shortest, grant| {
-                shortest.min(grant.valid_until_position())
-            });
-        let authentication_expiry = request.authenticated().expires_at();
-        let expires_at = match request.consent() {
-            ConsentEvidenceV1::Resolved { grants } => {
-                grants.iter().fold(authentication_expiry, |expiry, grant| {
-                    expiry.min(grant.valid_until())
-                })
-            }
-            _ => authentication_expiry,
-        };
-        let current_decision =
-            AuthorityEvaluatorV1::authorize(request, authority.chain(), registry);
-        if !decision.is_allowed()
-            || decision != current_decision
-            || authority.revocation_epoch() != request.revocation_epoch()
-            || request.at_time() >= expires_at
-            || valid_until_position <= decision.at_position()
-            || grant_ids.is_empty()
-        {
-            return None;
-        }
-        let key = AuthorizationCacheKeyV1::from_decision(
-            &decision,
-            authority.revocation_epoch(),
-            inventory_generation,
-        );
-        self.entries.insert(
-            key.clone(),
-            AuthorizationCacheEntryV1 {
-                decision,
-                expires_at,
-                valid_until_position,
-                grant_ids,
-                consent_references,
-                inventory_generation,
-            },
-        );
-        Some(key)
-    }
-
-    /// Read an unexpired decision only when current authority and registry
-    /// evidence reproduces the same active decision for this generation.
-    /// Stale or denied entries are evicted before their decision is returned.
-    pub fn get(
-        &mut self,
-        key: &AuthorizationCacheKeyV1,
-        at_time: WallTime,
-        at_position: Seq,
-        request: &AuthorizationRequestV1,
-        authority: &PersistedAuthorityV1,
-        registry: &AuthorityRegistrySnapshotV1,
-        inventory_generation: ErasureReferenceV1,
-    ) -> Option<&AuthorizationDecisionV1> {
-        let should_evict = self.entries.get(key).is_some_and(|entry| {
-            let current_decision =
-                AuthorityEvaluatorV1::authorize(request, authority.chain(), registry);
-            key.inventory_generation() != inventory_generation
-                || !entry.is_current(at_time, at_position, inventory_generation)
-                || authority.revocation_epoch() != key.revocation_epoch()
-                || request.revocation_epoch() != key.revocation_epoch()
-                || !current_decision.is_allowed()
-                || current_decision != entry.decision
-        });
-        if should_evict {
-            self.entries.remove(key);
-            None
-        } else {
-            self.entries.get(key).map(|entry| &entry.decision)
-        }
-    }
-
-    /// Invalidate every leaf decision derived from this grant or any parent grant.
-    pub fn invalidate_grant(&mut self, grant_id: Hash) -> usize {
-        self.retain_counted(|entry| !entry.grant_ids.contains(&grant_id))
-    }
-
-    /// Invalidate every decision derived from one revoked consent reference.
-    pub fn invalidate_consent(&mut self, consent_reference: Hash) -> usize {
-        self.retain_counted(|entry| !entry.consent_references.contains(&consent_reference))
-    }
-
-    /// Drop stale epochs for one authority Timeline while leaving unrelated Timelines intact.
-    pub fn retain_revocation_epoch(
-        &mut self,
-        authority_timeline: TimelineId,
-        current_epoch: u64,
-    ) -> usize {
-        let before = self.entries.len();
-        self.entries.retain(|key, _| {
-            key.authority_timeline() != authority_timeline
-                || key.revocation_epoch() == current_epoch
-        });
-        before.saturating_sub(self.entries.len())
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    fn retain_counted(
-        &mut self,
-        mut keep: impl FnMut(&AuthorizationCacheEntryV1) -> bool,
-    ) -> usize {
-        let before = self.entries.len();
-        self.entries.retain(|_, entry| keep(entry));
-        before.saturating_sub(self.entries.len())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // EntityStateProjection
@@ -297,8 +60,18 @@ impl Reducer for EntityStateProjection {
 // ProjectionRegistry
 // ---------------------------------------------------------------------------
 
+/// Rejection before an installed reducer slot is mutated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionSlotErrorV1 {
+    /// A display name is empty or exceeds the canonical text bound.
+    InvalidName,
+    /// The stable Plugin identity already owns a slot.
+    DuplicatePluginId { plugin_id: PluginId },
+}
+
 /// One named slot inside the registry.
 struct Slot {
+    plugin_id: Option<PluginId>,
     reducer: Box<dyn Reducer>,
     registry: StateRegistry,
     observation_policy: Option<ProjectionObservationPolicyV1>,
@@ -316,6 +89,14 @@ pub struct ProjectionRegistry {
     /// Whether the current gate was supplied by the host composition root.
     /// The constructor's fail-closed gate can be replaced exactly once.
     erasure_gate_bound: bool,
+    source_timeline: Option<TimelineId>,
+    source_generation: Option<ErasureReferenceV1>,
+    mixed_sources: bool,
+    /// Nesting depth for state transactions, used to retain privacy effects
+    /// when a later protected-use check rolls ordinary state back.
+    state_transaction_depth: usize,
+    /// Consent revocations observed by active state transactions.
+    transaction_revocations: Vec<EntityId>,
 }
 
 impl Default for ProjectionRegistry {
@@ -324,6 +105,11 @@ impl Default for ProjectionRegistry {
             slots: Vec::new(),
             erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
             erasure_gate_bound: false,
+            source_timeline: None,
+            source_generation: None,
+            mixed_sources: false,
+            state_transaction_depth: 0,
+            transaction_revocations: Vec::new(),
         }
     }
 }
@@ -386,20 +172,53 @@ impl ProjectionRegistry {
         let gate = self
             .erasure_gate
             .as_ref()
+            .filter(|_| self.source_matches_timeline(timeline))
             .ok_or(AuthorityErrorV1::SourceUnavailable)?;
         let mut result = Err(AuthorityErrorV1::SourceUnavailable);
         let mut run = || {
-            result = effect(self);
+            result = self.apply_if_current_generation(gate.as_ref(), &mut effect);
         };
         gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut run)
             .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
         result
     }
 
+    fn source_matches_timeline(&self, timeline: TimelineId) -> bool {
+        !self.mixed_sources && self.source_timeline.is_none_or(|source| source == timeline)
+    }
+
+    fn source_generation_is_current(&self, gate: &dyn ErasureGate) -> bool {
+        self.source_timeline.is_none() || self.source_generation == gate.inventory_generation().ok()
+    }
+
+    fn apply_if_current_generation<T>(
+        &self,
+        gate: &dyn ErasureGate,
+        effect: &mut impl FnMut(&Self) -> Result<T, AuthorityErrorV1>,
+    ) -> Result<T, AuthorityErrorV1> {
+        if self.source_generation_is_current(gate) {
+            effect(self)
+        } else {
+            Err(AuthorityErrorV1::SourceUnavailable)
+        }
+    }
+
+    /// Verify that accumulated state still belongs to this Timeline and the
+    /// currently installed inventory generation before a Fork can inherit it.
+    ///
+    /// # Errors
+    /// Returns a closed source error for a stale, mixed, or unavailable source.
+    pub fn validate_fork_source(&self, timeline: TimelineId) -> Result<(), AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |_| Ok(()))
+    }
+
     /// Register a named reducer.
     ///
-    /// If a reducer with the same name was already registered it is replaced and
-    /// its accumulated state is cleared.
+    /// If a legacy reducer with the same name was already registered it is
+    /// replaced and its accumulated state is cleared. Installed slots are keyed
+    /// by `PluginId` and are never evicted by a legacy name registration; a
+    /// shared name then makes name-based reads, snapshot, restore, and diff
+    /// fail closed as ambiguous.
     pub fn register(&mut self, name: &str, reducer: Box<dyn Reducer>) {
         self.register_with_policy(name, reducer, None);
     }
@@ -428,10 +247,12 @@ impl ProjectionRegistry {
         reducer: Box<dyn Reducer>,
         observation_policy: Option<ProjectionObservationPolicyV1>,
     ) {
-        self.slots.retain(|(registered, _)| registered != name);
+        self.slots
+            .retain(|(registered, slot)| registered != name || slot.plugin_id.is_some());
         self.slots.push((
             name.to_owned(),
             Slot {
+                plugin_id: None,
                 reducer,
                 registry: StateRegistry::new(),
                 observation_policy,
@@ -439,8 +260,49 @@ impl ProjectionRegistry {
         ));
     }
 
-    /// Apply a single event to every registered reducer.
-    pub fn apply_event(&mut self, event: &Event) {
+    /// Register an installed reducer under its stable Plugin identity.
+    /// Display names may coincide; they are never used as installed slot keys.
+    ///
+    /// # Errors
+    /// Rejects an invalid name or duplicate Plugin identity before mutation.
+    pub fn register_installed_reducer(
+        &mut self,
+        plugin_id: PluginId,
+        name: &str,
+        reducer: Box<dyn Reducer>,
+    ) -> Result<(), ProjectionSlotErrorV1> {
+        if name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES {
+            return Err(ProjectionSlotErrorV1::InvalidName);
+        }
+        if self
+            .slots
+            .iter()
+            .any(|(_, slot)| slot.plugin_id == Some(plugin_id))
+        {
+            return Err(ProjectionSlotErrorV1::DuplicatePluginId { plugin_id });
+        }
+        self.slots.push((
+            name.to_owned(),
+            Slot {
+                plugin_id: Some(plugin_id),
+                reducer,
+                registry: StateRegistry::new(),
+                observation_policy: None,
+            },
+        ));
+        Ok(())
+    }
+
+    /// Apply one Event from its host-identified Timeline to every registered
+    /// reducer. Mixing Timelines invalidates accumulated state until reset.
+    pub fn apply_event(&mut self, timeline: TimelineId, event: &Event) {
+        if !self.bind_event_source(timeline) {
+            return;
+        }
+        self.apply_bound_event(event);
+    }
+
+    fn apply_bound_event(&mut self, event: &Event) {
         if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
             if let Ok(revocation) = ConsentRevokedV1::decode(&event.payload) {
                 self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
@@ -460,31 +322,165 @@ impl ProjectionRegistry {
         }
     }
 
-    /// Batch-fold a slice of events into every registered reducer.
-    pub fn fold_events(&mut self, events: &[Event]) {
+    fn bind_event_source(&mut self, timeline: TimelineId) -> bool {
+        if self.mixed_sources {
+            return false;
+        }
+        let generation = self
+            .erasure_gate
+            .as_ref()
+            .and_then(|gate| gate.inventory_generation().ok());
+        if self.source_timeline.is_some() && self.source_generation != generation {
+            self.clear_state();
+            self.mixed_sources = true;
+            return false;
+        }
+        match self.source_timeline {
+            Some(source) if source != timeline => {
+                self.clear_state();
+                self.mixed_sources = true;
+                return false;
+            }
+            None => {
+                self.source_timeline = Some(timeline);
+                self.source_generation = generation;
+            }
+            Some(_) => {}
+        }
+        true
+    }
+
+    /// Batch-fold Events from one host-identified Timeline into every reducer.
+    pub fn fold_events(&mut self, timeline: TimelineId, events: &[Event]) {
         for event in events {
-            self.apply_event(event);
+            self.apply_event(timeline, event);
         }
     }
 
-    /// Return the state for a given entity from the **first** registered reducer.
+    /// Rebuild state from one host-captured Timeline prefix under its current
+    /// containment fence after the inventory generation changes.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the Timeline cannot be authorized.
+    pub fn refold_events(
+        &mut self,
+        timeline: TimelineId,
+        events: &[Event],
+        expected_generation: Option<ErasureReferenceV1>,
+    ) -> Result<(), AuthorityErrorV1> {
+        let gate = self
+            .erasure_gate
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)?;
+        let mut refolded = false;
+        let mut refold = || {
+            if gate.inventory_generation().ok() == expected_generation {
+                self.clear_state();
+                self.fold_events(timeline, events);
+                refolded = !self.mixed_sources;
+            }
+        };
+        gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut refold)
+            .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        refolded
+            .then_some(())
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
+    }
+
+    /// Rebind a restored parent projection only after its child Fork has been
+    /// committed and installed by the host. The child containment proof is
+    /// checked before the inherited state can be exposed under that identity.
+    ///
+    /// # Errors
+    /// Returns a closed source error for mixed or mismatched input or when the
+    /// committed child is not available in the current host gate.
+    pub fn adopt_committed_fork(
+        &mut self,
+        parent: TimelineId,
+        child: TimelineId,
+    ) -> Result<(), AuthorityErrorV1> {
+        if self.mixed_sources || self.source_timeline.is_some_and(|source| source != parent) {
+            return Err(AuthorityErrorV1::SourceUnavailable);
+        }
+        self.erasure_gate
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
+            .and_then(|gate| {
+                let mut bind = || {
+                    self.source_timeline = Some(child);
+                    self.source_generation = gate.inventory_generation().ok();
+                };
+                gate.with_fence(child, ErasureProtectedOperationV1::Fork, &mut bind)
+                    .map_err(|_| AuthorityErrorV1::SourceUnavailable)
+            })
+    }
+
+    /// Return owned state for an entity from the **first** registered reducer
+    /// while the current Timeline fence is held.
     ///
     /// Returns `None` if no reducers have been registered or the entity is unknown.
     /// To query a specific reducer use [`Self::state_for_reducer`].
-    #[must_use]
-    pub fn state_for(&self, entity: &EntityId) -> Option<&State> {
-        self.slots
-            .first()
-            .and_then(|(_, slot)| slot.registry.get(entity))
+    /// # Errors
+    /// Returns a closed source error when the Timeline has no verified access.
+    pub fn state_for(
+        &self,
+        timeline: TimelineId,
+        entity: &EntityId,
+    ) -> Result<Option<State>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| {
+            Ok(registry
+                .slots
+                .first()
+                .and_then(|(_, slot)| slot.registry.get(entity))
+                .cloned())
+        })
     }
 
-    /// Return the state for a given entity from the reducer identified by `name`.
-    #[must_use]
-    pub fn state_for_reducer(&self, name: &str, entity: &EntityId) -> Option<&State> {
-        self.slots
-            .iter()
-            .find(|(n, _)| n == name)
-            .and_then(|(_, slot)| slot.registry.get(entity))
+    /// Return owned state for an entity from the named reducer while the
+    /// current Timeline fence is held.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the Timeline has no verified access
+    /// or, as for snapshot, restore, and diff, when more than one reducer slot
+    /// shares `name`.
+    pub fn state_for_reducer(
+        &self,
+        timeline: TimelineId,
+        name: &str,
+        entity: &EntityId,
+    ) -> Result<Option<State>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| {
+            let mut matches = registry.slots.iter().filter(|(n, _)| n == name);
+            match (matches.next(), matches.next()) {
+                (_, Some(_)) => Err(AuthorityErrorV1::SourceUnavailable),
+                (first, None) => Ok(first
+                    .and_then(|(_, slot)| slot.registry.get(entity))
+                    .cloned()),
+            }
+        })
+    }
+
+    /// Return owned state from one installed Plugin's reducer slot under the
+    /// current Timeline fence.
+    ///
+    /// # Errors
+    /// Returns a closed source error when Timeline access is unverified.
+    pub fn state_for_plugin(
+        &self,
+        timeline: TimelineId,
+        plugin_id: PluginId,
+        entity: &EntityId,
+    ) -> Result<Option<State>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| {
+            Ok(registry
+                .slots
+                .iter()
+                .find(|(_, slot)| slot.plugin_id == Some(plugin_id))
+                .and_then(|(_, slot)| slot.registry.get(entity))
+                .cloned())
+        })
     }
 
     /// Materialize exactly one host-authorized participant observation.
@@ -530,6 +526,16 @@ impl ProjectionRegistry {
         })
     }
 
+    fn unique_observation_slot_for_plugin(&self, name: &str, plugin_id: PluginId) -> Option<&Slot> {
+        let mut matches = self.slots.iter().filter(|(registered, slot)| {
+            registered == name && slot.plugin_id.is_none_or(|id| id == plugin_id)
+        });
+        matches
+            .next()
+            .filter(|_| matches.next().is_none())
+            .map(|(_, slot)| slot)
+    }
+
     fn materialize_authorized_projection(
         &self,
         request: &AuthorizationRequestV1,
@@ -553,10 +559,7 @@ impl ProjectionRegistry {
         else {
             return Err(AuthorityErrorV1::UnauthorizedSource);
         };
-        let Some(slot) = self
-            .slots
-            .iter()
-            .find_map(|(name, slot)| (name == &context.reducer).then_some(slot))
+        let Some(slot) = self.unique_observation_slot_for_plugin(&context.reducer, plugin_id)
         else {
             return Err(AuthorityErrorV1::SourceUnavailable);
         };
@@ -651,6 +654,70 @@ impl ProjectionRegistry {
         for (_, slot) in &mut self.slots {
             slot.registry = StateRegistry::new();
         }
+        self.source_timeline = None;
+        self.source_generation = None;
+        self.mixed_sources = false;
+    }
+
+    /// Run an operation, restoring accumulated state maps when it fails.
+    ///
+    /// This does not isolate protected Replay or Snapshot candidates. Reducer
+    /// registrations, reducer internals, policies, and external effects are not
+    /// rolled back; an owner-controlled private candidate is still required
+    /// before releasing protected results.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error produced by `operation` after restoring the original
+    /// accumulated state.
+    pub fn try_with_state_transaction<T, E>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mut before: HashMap<(String, Option<PluginId>), StateRegistry> = self
+            .slots
+            .iter()
+            .map(|(name, slot)| ((name.clone(), slot.plugin_id), slot.registry.clone()))
+            .collect();
+        let before_source = (
+            self.source_timeline,
+            self.source_generation,
+            self.mixed_sources,
+        );
+        let revocation_checkpoint = self.transaction_revocations.len();
+        let outermost = self.state_transaction_depth == 0;
+        self.state_transaction_depth += 1;
+        let outcome = operation(self);
+        self.state_transaction_depth -= 1;
+        match outcome {
+            Ok(value) => {
+                if outermost {
+                    self.transaction_revocations.clear();
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let revoked_subjects =
+                    self.transaction_revocations[revocation_checkpoint..].to_vec();
+                for (name, slot) in &mut self.slots {
+                    slot.registry = before
+                        .remove(&(name.clone(), slot.plugin_id))
+                        .unwrap_or_default();
+                }
+                (
+                    self.source_timeline,
+                    self.source_generation,
+                    self.mixed_sources,
+                ) = before_source;
+                for subject in revoked_subjects {
+                    self.forget_subject(&subject);
+                }
+                if outermost {
+                    self.transaction_revocations.clear();
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Retain only one subject's accumulated state in every reducer.
@@ -660,26 +727,59 @@ impl ProjectionRegistry {
         }
     }
 
+    fn forget_subject(&mut self, subject: &EntityId) {
+        for (_, slot) in &mut self.slots {
+            slot.registry.remove(subject);
+        }
+    }
+
     /// Restore accumulated state from a previously captured snapshot map.
     ///
-    /// Resets all accumulated state first (via [`Self::clear_state`]), then
-    /// loads the corresponding [`StateRegistry`] for each reducer name found in
-    /// `snapshot`. Reducer names present in `snapshot` but not registered are
-    /// ignored; registered reducers with no entry in `snapshot` remain empty.
+    /// Replaces each registered reducer's accumulated state with its matching
+    /// [`StateRegistry`] from `snapshot`, or an empty registry when absent.
+    /// Snapshot entries for unregistered reducers are ignored.
     ///
     /// This is the counterpart of [`Self::state_snapshot`] and is used by
     /// `pos-time` snapshot consistency verification to seed the incremental path.
+    /// The caller must preserve the source Timeline and captured generation
+    /// from the host-held snapshot. State is installed only while that exact
+    /// generation is current and the Timeline snapshot fence is held.
+    ///
+    /// # Errors
+    /// Returns a closed source error when the generation is stale or the
+    /// Timeline snapshot fence is unavailable or reducer names are ambiguous.
     pub fn restore_from_snapshot(
         &mut self,
+        timeline: TimelineId,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
-    ) {
-        self.clear_state();
-        for (name, slot) in &mut self.slots {
-            // Missing snapshot entries stay empty after `clear_state`.
-            if let Some(restored) = snapshot.get(name) {
-                slot.registry = restored.clone();
+        expected_generation: Option<ErasureReferenceV1>,
+    ) -> Result<(), AuthorityErrorV1> {
+        let gate = self.unambiguous_snapshot_gate()?;
+        let mut restored = false;
+        let mut install = || {
+            let current_generation = gate.inventory_generation().ok();
+            if current_generation == expected_generation {
+                self.clear_state();
+                self.source_timeline = Some(timeline);
+                self.source_generation = current_generation;
+                for (name, slot) in &mut self.slots {
+                    // Missing snapshot entries stay empty after `clear_state`.
+                    if let Some(state) = snapshot.get(name) {
+                        slot.registry = state.clone();
+                    }
+                }
+                restored = true;
             }
-        }
+        };
+        gate.with_fence(
+            timeline,
+            ErasureProtectedOperationV1::Snapshot,
+            &mut install,
+        )
+        .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        restored
+            .then_some(())
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
     }
 
     /// Materialize a snapshot of all per-reducer state inside the current
@@ -696,7 +796,27 @@ impl ProjectionRegistry {
         &self,
         timeline: TimelineId,
     ) -> Result<std::collections::HashMap<String, StateRegistry>, AuthorityErrorV1> {
-        self.with_erasure_fence(timeline, |registry| Ok(registry.snapshot_unfenced()))
+        self.with_erasure_fence(timeline, |registry| {
+            if registry.has_duplicate_names() {
+                return Err(AuthorityErrorV1::SourceUnavailable);
+            }
+            Ok(registry.snapshot_unfenced())
+        })
+    }
+
+    fn has_duplicate_names(&self) -> bool {
+        let mut names = std::collections::HashSet::new();
+        self.slots.iter().any(|(name, _)| !names.insert(name))
+    }
+
+    fn unambiguous_snapshot_gate(&self) -> Result<Arc<dyn ErasureGate>, AuthorityErrorV1> {
+        if self.has_duplicate_names() {
+            return Err(AuthorityErrorV1::SourceUnavailable);
+        }
+        self.erasure_gate
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
     }
 
     fn snapshot_unfenced(&self) -> std::collections::HashMap<String, StateRegistry> {
@@ -712,21 +832,30 @@ impl ProjectionRegistry {
     ///
     /// Returns the first differing `(reducer_name, entity_id)` pair, or `None`
     /// when the states are identical.
-    #[must_use]
+    ///
+    /// # Errors
+    /// Returns a closed source error when Timeline access is unverified or
+    /// reducer names are ambiguous.
     pub fn diff_against_snapshot(
         &self,
+        timeline: TimelineId,
         snapshot: &std::collections::HashMap<String, StateRegistry>,
         all_entities: &[EntityId],
-    ) -> Option<(String, EntityId)> {
-        for (name, slot) in &self.slots {
-            let snap_reg = snapshot.get(name).cloned().unwrap_or_default();
-            for entity in all_entities {
-                if slot.registry.get_or_default(entity) != snap_reg.get_or_default(entity) {
-                    return Some((name.clone(), *entity));
+    ) -> Result<Option<(String, EntityId)>, AuthorityErrorV1> {
+        self.with_erasure_fence(timeline, |registry| {
+            if registry.has_duplicate_names() {
+                return Err(AuthorityErrorV1::SourceUnavailable);
+            }
+            for (name, slot) in &registry.slots {
+                let snap_reg = snapshot.get(name).cloned().unwrap_or_default();
+                for entity in all_entities {
+                    if slot.registry.get_or_default(entity) != snap_reg.get_or_default(entity) {
+                        return Ok(Some((name.clone(), *entity)));
+                    }
                 }
             }
-        }
-        None
+            Ok(None)
+        })
     }
 }
 
@@ -1005,9 +1134,10 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
 
 impl ConsentRevocationFoldListener for ProjectionRegistry {
     fn on_consent_revoked(&mut self, subject_id: EntityId, _fence_seq: u64) {
-        for (_, slot) in &mut self.slots {
-            slot.registry.remove(&subject_id);
+        if self.state_transaction_depth > 0 {
+            self.transaction_revocations.push(subject_id);
         }
+        self.forget_subject(&subject_id);
     }
 }
 
@@ -1099,10 +1229,34 @@ mod tests {
         AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
         AuthorizationRequestDraftV1, AuthorizationRequestV1, CapabilityGrantDraftV1,
         CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
-        ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1,
-        DelegationChainV1, PrincipalRefV1, DELEGATE_ACTION_V1,
+        DelegateClassV1, DelegationChainV1, PrincipalRefV1, DELEGATE_ACTION_V1,
     };
     use proptest::prelude::*;
+
+    fn open_projection_registry() -> ProjectionRegistry {
+        ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn test_timeline() -> TimelineId {
+        static TIMELINE: std::sync::OnceLock<TimelineId> = std::sync::OnceLock::new();
+        *TIMELINE.get_or_init(TimelineId::new)
+    }
+
+    trait ProjectionTestReads {
+        fn state_for_test(&self, entity: &EntityId) -> Option<State>;
+        fn state_for_reducer_test(&self, name: &str, entity: &EntityId) -> Option<State>;
+    }
+
+    impl ProjectionTestReads for ProjectionRegistry {
+        fn state_for_test(&self, entity: &EntityId) -> Option<State> {
+            test_ok(self.state_for(test_timeline(), entity))
+        }
+
+        fn state_for_reducer_test(&self, name: &str, entity: &EntityId) -> Option<State> {
+            test_ok(self.state_for_reducer(test_timeline(), name, entity))
+        }
+    }
 
     // ------------------------------------------------------------------
     // Helpers
@@ -1140,17 +1294,10 @@ mod tests {
         Hash::from_bytes([value; 32])
     }
 
-    const fn cache_generation(value: u8) -> ErasureReferenceV1 {
-        ErasureReferenceV1::from_digest([value; 32])
-    }
-
     struct CacheFixture {
         decision: AuthorizationDecisionV1,
-        registry: AuthorityRegistrySnapshotV1,
         request: AuthorizationRequestV1,
         authority: PersistedAuthorityV1,
-        parent_grant_id: Hash,
-        consent_reference: Hash,
     }
 
     fn active_decision(authority_timeline: TimelineId) -> CacheFixture {
@@ -1282,29 +1429,6 @@ mod tests {
         ))
     }
 
-    fn cache_consent_grant(valid_until: u64) -> ConsentGrantRefV1 {
-        test_ok(ConsentGrantRefV1::try_from_draft(ConsentGrantRefDraftV1 {
-            consent_id: test_hash(61),
-            subject_id: EntityId::new(),
-            grantee_id: EntityId::new(),
-            data_categories: vec!["private".to_owned()],
-            purposes: vec!["planning".to_owned()],
-            audiences: vec!["local-host".to_owned()],
-            action_classes: vec!["read".to_owned()],
-            valid_from: WallTime::from_micros(1),
-            valid_until: WallTime::from_micros(valid_until),
-            withdrawal_retention_policy: "erase".to_owned(),
-            policy_revision: test_hash(62),
-            issuer: test_ok(PrincipalRefV1::try_new([63; 16], "local.test")),
-            issuer_evidence: test_hash(64),
-            consent_timeline: TimelineId::new(),
-            grant_position: Seq::from_u64(1),
-            status: ConsentGrantStatusV1::Active,
-            revocation_fence: None,
-            authority_registry_digest: test_hash(65),
-        }))
-    }
-
     fn decision_with_capability_trust(
         authority_timeline: TimelineId,
         grant_id: Hash,
@@ -1392,11 +1516,8 @@ mod tests {
         test_ok(state.issue_grant(test_ok(host.authorize_grant(&child)), child));
         CacheFixture {
             decision,
-            registry,
             request,
             authority: test_ok(state.resolve(grant_id)),
-            parent_grant_id,
-            consent_reference,
         }
     }
 
@@ -1407,22 +1528,20 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_applies_to_all_reducers() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("a", Box::new(EntityStateProjection));
         registry.register("b", Box::new(EntityStateProjection));
 
         let entity = EntityId::new();
-        registry.apply_event(&make_event(entity));
+        registry.apply_event(test_timeline(), &make_event(entity));
 
         let count_a = registry
-            .state_for_reducer("a", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("a", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         let count_b = registry
-            .state_for_reducer("b", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("b", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count_a, 1, "reducer 'a' should have seen 1 event");
         assert_eq!(count_b, 1, "reducer 'b' should have seen 1 event");
@@ -1431,35 +1550,37 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_retain_subject_filters_every_reducer() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("a", Box::new(EntityStateProjection));
         registry.register("b", Box::new(EntityStateProjection));
         let subject = EntityId::new();
         let unrelated = EntityId::new();
-        registry.fold_events(&[make_event(subject), make_event(unrelated)]);
+        registry.fold_events(
+            test_timeline(),
+            &[make_event(subject), make_event(unrelated)],
+        );
 
         registry.retain_subject(&subject);
 
         for name in ["a", "b"] {
-            assert!(registry.state_for_reducer(name, &subject).is_some());
-            assert!(registry.state_for_reducer(name, &unrelated).is_none());
+            assert!(registry.state_for_reducer_test(name, &subject).is_some());
+            assert!(registry.state_for_reducer_test(name, &unrelated).is_none());
         }
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_fold_events() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("main", Box::new(EntityStateProjection));
 
         let entity = EntityId::new();
         let events: Vec<Event> = (0..5).map(|_| make_event(entity)).collect();
-        registry.fold_events(&events);
+        registry.fold_events(test_timeline(), &events);
 
         let count = registry
-            .state_for_reducer("main", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("main", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or_else(|| {
                 std::panic::resume_unwind(Box::new("event_count should be present"))
             });
@@ -1469,13 +1590,13 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn valid_consent_revocation_evicts_each_subject_projection_cache() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("a", Box::new(EntityStateProjection));
         registry.register("b", Box::new(EntityStateProjection));
         let subject = EntityId::new();
         let other = EntityId::new();
-        registry.apply_event(&make_event(subject));
-        registry.apply_event(&make_event(other));
+        registry.apply_event(test_timeline(), &make_event(subject));
+        registry.apply_event(test_timeline(), &make_event(other));
 
         let revocation = ConsentRevokedV1 {
             subject_id: subject,
@@ -1487,31 +1608,104 @@ mod tests {
         event.payload = revocation.encode().unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
         });
-        registry.apply_event(&event);
+        registry.apply_event(test_timeline(), &event);
 
-        assert!(registry.state_for(&subject).is_none());
-        assert!(registry.state_for_reducer("b", &subject).is_none());
-        assert!(registry.state_for(&other).is_some());
+        assert!(registry.state_for_test(&subject).is_none());
+        assert!(registry.state_for_reducer_test("b", &subject).is_none());
+        assert!(registry.state_for_test(&other).is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn failed_state_transaction_does_not_restore_revoked_subject_projection() {
+        let mut registry = open_projection_registry();
+        registry.register("events", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        let other = EntityId::new();
+        registry.apply_event(test_timeline(), &make_event(subject));
+        registry.apply_event(test_timeline(), &make_event(other));
+
+        let revocation = ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
+            fence_seq: 2,
+        };
+        let mut event = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
+        event.payload = revocation.encode().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
+        });
+
+        let result = registry.try_with_state_transaction(|candidate| {
+            candidate.apply_event(test_timeline(), &event);
+            Err::<(), _>(())
+        });
+
+        assert_eq!(result, Err(()));
+        assert!(registry.state_for_test(&subject).is_none());
+        assert!(registry.state_for_test(&other).is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn outer_state_transaction_retains_nested_revocation_after_failure() {
+        let mut registry = open_projection_registry();
+        registry.register("events", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        registry.apply_event(test_timeline(), &make_event(subject));
+        let revocation = ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
+            fence_seq: 2,
+        };
+        let mut event = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
+        event.payload = revocation.encode().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
+        });
+
+        let result = registry.try_with_state_transaction(|candidate| {
+            let nested = candidate.try_with_state_transaction(|inner| {
+                inner.apply_event(test_timeline(), &event);
+                Err::<(), _>(())
+            });
+            assert_eq!(nested, Err(()));
+            Ok::<(), ()>(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert!(registry.state_for_test(&subject).is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn successful_nested_state_transaction_keeps_outer_transaction_open() {
+        let mut registry = ProjectionRegistry::new();
+        let result = registry.try_with_state_transaction(|outer| {
+            outer.try_with_state_transaction(|_inner| Ok::<(), ()>(()))
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(registry.state_transaction_depth, 0);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn malformed_consent_revocation_does_not_evict_projection_cache() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         let subject = EntityId::new();
-        registry.apply_event(&make_event(subject));
+        registry.apply_event(test_timeline(), &make_event(subject));
 
         let malformed = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
-        registry.apply_event(&malformed);
+        registry.apply_event(test_timeline(), &malformed);
 
-        assert!(registry.state_for(&subject).is_some());
+        assert!(registry.state_for_test(&subject).is_some());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn reducers_never_observe_reserved_consent_namespace_events() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         let entity = EntityId::new();
         let consent_event = Event {
@@ -1529,22 +1723,22 @@ mod tests {
             origin: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
-        registry.apply_event(&consent_event);
-        assert!(registry.state_for(&entity).is_none());
+        registry.apply_event(test_timeline(), &consent_event);
+        assert!(registry.state_for_test(&entity).is_none());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_state_for_returns_first_reducers_view() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("first", Box::new(EntityStateProjection));
         registry.register("second", Box::new(EntityStateProjection));
 
         let entity = EntityId::new();
-        registry.apply_event(&make_event(entity));
+        registry.apply_event(test_timeline(), &make_event(entity));
 
         let state = registry
-            .state_for(&entity)
+            .state_for_test(&entity)
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("state should exist")));
         let count = state
             .get("event_count")
@@ -1556,303 +1750,87 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_state_for_returns_none_when_empty() {
-        let registry = ProjectionRegistry::new();
+        let registry = open_projection_registry();
         let entity = EntityId::new();
-        assert!(registry.state_for(&entity).is_none());
+        assert!(registry.state_for_test(&entity).is_none());
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn authorization_cache_expires_at_the_shortest_time_or_position() {
-        let fixture = active_decision(TimelineId::new());
-        let mut by_time = AuthorizationCacheV1::new();
-        let key = by_time
-            .insert_active(
-                fixture.decision.clone(),
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
-        assert!(by_time
-            .get(
-                &key,
-                WallTime::from_micros(99),
-                Seq::from_u64(79),
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_some());
-        assert!(by_time
-            .get(
-                &key,
-                WallTime::from_micros(100),
-                Seq::from_u64(79),
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_none());
-        assert!(by_time.is_empty());
-
-        let mut by_position = AuthorizationCacheV1::new();
-        let key = by_position
-            .insert_active(
-                fixture.decision,
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
-        assert!(by_position
-            .get(
-                &key,
-                WallTime::from_micros(99),
-                Seq::from_u64(80),
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_none());
-    }
-
-    #[test]
-    fn authorization_cache_uses_resolved_consent_expiry() {
-        let fixture = active_decision(TimelineId::new());
-        let request = projection_request(
-            &fixture.request,
-            Some(EntityId::new()),
-            Some(EntityId::new()),
-            None,
-            ConsentEvidenceV1::Resolved {
-                grants: vec![cache_consent_grant(50)],
-            },
-        );
-        let mut cache = AuthorizationCacheV1::new();
-        assert!(cache
-            .insert_active(
-                fixture.decision,
-                &request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_none());
-    }
-
-    #[test]
-    fn authorization_cache_rejects_a_pre_freeze_generation_hit() {
-        let fixture = active_decision(TimelineId::new());
-        let installed = cache_generation(1);
-        let successor = cache_generation(2);
-        let mut cache = AuthorizationCacheV1::new();
-        let key = cache
-            .insert_active(
-                fixture.decision,
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                installed,
-            )
-            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
-
-        assert_eq!(key.inventory_generation(), installed);
-        assert!(cache
-            .get(
-                &key,
-                WallTime::from_micros(99),
-                Seq::from_u64(79),
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                successor,
-            )
-            .is_none());
-        assert!(cache.is_empty());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn authorization_cache_invalidates_parent_consent_and_stale_epoch() {
+    fn public_projection_reads_close_after_timeline_freeze() {
         let timeline = TimelineId::new();
-        let other_timeline = TimelineId::new();
-        let fixture = active_decision(timeline);
-        let other = active_decision(other_timeline);
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        registry.register("events", Box::new(EntityStateProjection));
+        registry.apply_event(timeline, &make_event(entity));
+        let snapshot = test_ok(registry.state_snapshot(timeline));
+        assert!(test_ok(registry.state_for(timeline, &entity)).is_some());
+        assert!(test_ok(registry.state_for_reducer(timeline, "events", &entity)).is_some());
+        assert!(test_ok(registry.diff_against_snapshot(timeline, &snapshot, &[entity])).is_none());
 
-        let mut grant_cache = AuthorizationCacheV1::new();
-        assert!(grant_cache
-            .insert_active(
-                fixture.decision.clone(),
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_some());
-        assert_eq!(grant_cache.invalidate_grant(fixture.parent_grant_id), 1);
-        assert!(grant_cache.is_empty());
-
-        let mut consent_cache = AuthorizationCacheV1::new();
-        assert!(consent_cache
-            .insert_active(
-                fixture.decision.clone(),
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_some());
+        gate.freeze_timeline_for_test(timeline);
         assert_eq!(
-            consent_cache.invalidate_consent(fixture.consent_reference),
-            1
+            registry.state_for(timeline, &entity).map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
         );
-
-        let mut epoch_cache = AuthorizationCacheV1::new();
-        assert!(epoch_cache
-            .insert_active(
-                fixture.decision,
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_some());
-        assert!(epoch_cache
-            .insert_active(
-                other.decision,
-                &other.request,
-                &other.authority,
-                &other.registry,
-                cache_generation(1),
-            )
-            .is_some());
-        assert_eq!(epoch_cache.len(), 2);
-        assert_eq!(epoch_cache.retain_revocation_epoch(timeline, 1), 1);
-        assert_eq!(epoch_cache.len(), 1);
+        assert_eq!(
+            registry
+                .state_for_reducer(timeline, "events", &entity)
+                .map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(
+            registry
+                .diff_against_snapshot(timeline, &snapshot, &[entity])
+                .map(|_| ()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn authorization_cache_rejects_mismatched_or_denied_entries() {
-        let timeline = TimelineId::new();
-        let fixture = active_decision(timeline);
-        let mismatched = active_decision(TimelineId::new());
-        let mismatched_chain = decision_with_capability_trust(timeline, test_hash(15), true);
-        let mut cache = AuthorizationCacheV1::new();
-        assert!(cache
-            .insert_active(
-                fixture.decision.clone(),
-                &mismatched.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_none());
-        assert!(cache
-            .insert_active(
-                fixture.decision.clone(),
-                &fixture.request,
-                &mismatched_chain.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_none());
-
-        let denied = decision_with_capability_trust(timeline, test_hash(5), false);
-        assert!(!denied.decision.is_allowed());
-        assert!(cache
-            .insert_active(
-                denied.decision,
-                &denied.request,
-                &denied.authority,
-                &denied.registry,
-                cache_generation(1),
-            )
-            .is_none());
-    }
-
-    #[test]
-    fn authorization_cache_rechecks_current_authority_before_exposure() {
-        let timeline = TimelineId::new();
-        let fixture = active_decision(timeline);
-        let changed = decision_with_capability_trust(timeline, test_hash(15), true);
-        let denied = decision_with_capability_trust(timeline, test_hash(5), false);
-        let mut cache = AuthorizationCacheV1::new();
-        let key = cache
-            .insert_active(
-                fixture.decision.clone(),
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
-        assert!(cache
-            .get(
-                &key,
-                WallTime::from_micros(99),
-                Seq::from_u64(79),
-                &fixture.request,
-                &changed.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .is_none());
-        assert!(cache.is_empty());
-        let key = cache
-            .insert_active(
-                fixture.decision.clone(),
-                &fixture.request,
-                &fixture.authority,
-                &fixture.registry,
-                cache_generation(1),
-            )
-            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("active decision rejected")));
-        assert!(cache
-            .get(
-                &key,
-                WallTime::from_micros(99),
-                Seq::from_u64(79),
-                &fixture.request,
-                &fixture.authority,
-                &denied.registry,
-                cache_generation(1),
-            )
-            .is_none());
-        assert!(cache.is_empty());
-        assert!(cache
-            .insert_active(
-                fixture.decision,
-                &fixture.request,
-                &fixture.authority,
-                &denied.registry,
-                cache_generation(1),
-            )
-            .is_none());
+    fn projection_state_cannot_be_read_through_another_timeline_fence() {
+        let source = TimelineId::new();
+        let unrelated = TimelineId::new();
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("events", Box::new(EntityStateProjection));
+        registry.apply_event(source, &make_event(entity));
+        assert!(test_ok(registry.state_for(source, &entity)).is_some());
+        assert_eq!(
+            registry.state_for(unrelated, &entity),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        registry.apply_event(unrelated, &make_event(entity));
+        assert_eq!(
+            registry.state_for(source, &entity),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        registry.apply_event(source, &make_event(entity));
+        assert_eq!(
+            registry.state_for(unrelated, &entity),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        registry.clear_state();
+        registry.apply_event(unrelated, &make_event(entity));
+        assert!(test_ok(registry.state_for(unrelated, &entity)).is_some());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_restore_from_snapshot_skips_unknown_reducers() {
-        let mut registry = ProjectionRegistry::new();
+        let mut registry = open_projection_registry();
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
-        registry.apply_event(&make_event(entity));
+        registry.apply_event(test_timeline(), &make_event(entity));
 
         let mut snapshot = std::collections::HashMap::new();
         snapshot.insert("other".to_owned(), StateRegistry::new());
-        registry.restore_from_snapshot(&snapshot);
+        test_ok(registry.restore_from_snapshot(test_timeline(), &snapshot, None));
 
         let count = registry
-            .state_for_reducer("registered", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("registered", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count, 0);
     }
@@ -1860,24 +1838,109 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_restore_from_snapshot_loads_matching_reducer() {
-        let timeline = TimelineId::new();
-        let mut registry = ProjectionRegistry::new()
-            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        let timeline = test_timeline();
+        let mut registry = open_projection_registry();
         registry.register("registered", Box::new(EntityStateProjection));
         let entity = EntityId::new();
-        registry.apply_event(&make_event(entity));
+        registry.apply_event(test_timeline(), &make_event(entity));
         let snapshot = test_ok(registry.state_snapshot(timeline));
 
-        let mut restored = ProjectionRegistry::new();
+        let mut restored = open_projection_registry();
         restored.register("registered", Box::new(EntityStateProjection));
-        restored.restore_from_snapshot(&snapshot);
+        test_ok(restored.restore_from_snapshot(timeline, &snapshot, None));
 
         let count = restored
-            .state_for_reducer("registered", &entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer_test("registered", &entity)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn projection_registry_restore_rejects_stale_generation_and_blocked_timeline() {
+        let timeline = TimelineId::new();
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut source = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        source.register("events", Box::new(EntityStateProjection));
+        source.apply_event(timeline, &make_event(entity));
+        let snapshot = test_ok(source.state_snapshot(timeline));
+
+        let mut restored = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        restored.register("events", Box::new(EntityStateProjection));
+        assert_eq!(
+            restored.restore_from_snapshot(
+                timeline,
+                &snapshot,
+                Some(ErasureReferenceV1::from_digest([7; 32])),
+            ),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert!(test_ok(restored.state_for(timeline, &entity)).is_none());
+
+        gate.block_timeline(timeline);
+        assert_eq!(
+            restored.restore_from_snapshot(timeline, &snapshot, None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(
+            ProjectionRegistry::new().restore_from_snapshot(timeline, &snapshot, None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+
+    #[test]
+    fn projection_refold_replaces_state_only_at_the_captured_generation() {
+        let timeline = TimelineId::new();
+        let entity = EntityId::new();
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate.clone());
+        registry.register("events", Box::new(EntityStateProjection));
+        let event = make_event(entity);
+        registry.fold_events(timeline, &[event.clone(), event.clone()]);
+
+        assert_eq!(
+            registry.refold_events(
+                timeline,
+                std::slice::from_ref(&event),
+                Some(ErasureReferenceV1::from_digest([3; 32])),
+            ),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        let count = |registry: &ProjectionRegistry| {
+            test_ok(registry.state_for_reducer(timeline, "events", &entity))
+                .and_then(|state| state.get("event_count").and_then(serde_json::Value::as_u64))
+        };
+        assert_eq!(count(&registry), Some(2));
+
+        test_ok(registry.refold_events(timeline, std::slice::from_ref(&event), None));
+        assert_eq!(count(&registry), Some(1));
+
+        gate.block_timeline(timeline);
+        assert_eq!(
+            registry.refold_events(timeline, std::slice::from_ref(&event), None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(
+            ProjectionRegistry::new().refold_events(timeline, &[event], None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+    }
+
+    #[test]
+    fn committed_fork_rejects_a_different_projection_parent() {
+        let source = TimelineId::new();
+        let unrelated = TimelineId::new();
+        let child = TimelineId::new();
+        let entity = EntityId::new();
+        let mut registry = open_projection_registry();
+        registry.register("events", Box::new(EntityStateProjection));
+        registry.apply_event(source, &make_event(entity));
+        assert_eq!(
+            registry.adopt_committed_fork(unrelated, child),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert!(test_ok(registry.state_for(source, &entity)).is_some());
     }
 
     #[test]
@@ -1942,8 +2005,7 @@ mod tests {
 
         let count = state_reg
             .get(&entity)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or_else(|| {
                 std::panic::resume_unwind(Box::new("event_count should be present"))
             });
@@ -1964,13 +2026,11 @@ mod tests {
 
         let count_a = state_reg
             .get(&a)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         let count_b = state_reg
             .get(&b)
-            .and_then(|s| s.get("event_count"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(count_a, 2);
         assert_eq!(count_b, 1);
@@ -2072,23 +2132,21 @@ mod tests {
             let entity = EntityId::new();
             let events: Vec<Event> = (0..n_events).map(|_| make_event(entity)).collect();
 
-            let mut reg1 = ProjectionRegistry::new();
+            let mut reg1 = open_projection_registry();
             reg1.register("p", Box::new(EntityStateProjection));
-            reg1.fold_events(&events);
+            reg1.fold_events(test_timeline(), &events);
 
-            let mut reg2 = ProjectionRegistry::new();
+            let mut reg2 = open_projection_registry();
             reg2.register("p", Box::new(EntityStateProjection));
-            reg2.fold_events(&events);
+            reg2.fold_events(test_timeline(), &events);
 
             let count1 = reg1
-                .state_for_reducer("p", &entity)
-                .and_then(|s| s.get("event_count"))
-                .and_then(serde_json::Value::as_u64)
+                .state_for_reducer_test("p", &entity)
+                .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
                 .unwrap_or(0);
             let count2 = reg2
-                .state_for_reducer("p", &entity)
-                .and_then(|s| s.get("event_count"))
-                .and_then(serde_json::Value::as_u64)
+                .state_for_reducer_test("p", &entity)
+                .and_then(|s| s.get("event_count").and_then(serde_json::Value::as_u64))
                 .unwrap_or(0);
 
             prop_assert_eq!(count1, count2);
@@ -2168,7 +2226,7 @@ mod tests {
             reducer: "missing-reducer".to_owned(),
             prior_snapshot_digest: None,
         };
-        let registry = ProjectionRegistry::new();
+        let mut registry = ProjectionRegistry::new();
         let subject = EntityId::new();
         let participant = EntityId::new();
         let plugin = PluginId::new();
@@ -2220,6 +2278,37 @@ mod tests {
             ),
             Err(AuthorityErrorV1::UnauthorizedSource)
         );
+
+        let bound = projection_request(
+            &fixture.request,
+            Some(subject),
+            Some(participant),
+            Some((plugin, [1; 16])),
+            fixture.request.consent().clone(),
+        );
+        test_ok(registry.register_installed_reducer(
+            PluginId::new(),
+            "missing-reducer",
+            Box::new(EntityStateProjection),
+        ));
+        assert_eq!(
+            registry.materialize_authorized_projection(&bound, &fixture.decision, &context),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        test_ok(registry.register_installed_reducer(
+            plugin,
+            "missing-reducer",
+            Box::new(EntityStateProjection),
+        ));
+        assert_eq!(
+            registry.materialize_authorized_projection(&bound, &fixture.decision, &context),
+            Err(AuthorityErrorV1::UnauthorizedSource)
+        );
+        registry.register("missing-reducer", Box::new(EntityStateProjection));
+        assert_eq!(
+            registry.materialize_authorized_projection(&bound, &fixture.decision, &context),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
     }
 }
 
@@ -2253,6 +2342,23 @@ mod wave3_tests {
     };
 
     struct TR;
+
+    fn open_projection_registry() -> ProjectionRegistry {
+        ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn test_timeline() -> TimelineId {
+        static TIMELINE: std::sync::OnceLock<TimelineId> = std::sync::OnceLock::new();
+        *TIMELINE.get_or_init(TimelineId::new)
+    }
+
+    fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+        })
+    }
+
     impl Reducer for TR {
         fn initial(&self) -> State {
             State::new()
@@ -2297,15 +2403,116 @@ mod wave3_tests {
     }
 
     #[test]
+    fn installed_same_name_reducers_keep_independent_state_and_rollback() {
+        let first = PluginId::new();
+        let second = PluginId::new();
+        let entity = EntityId::new();
+        let timeline = TimelineId::new();
+        let mut registry = ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        assert!(registry
+            .register_installed_reducer(first, "same", Box::new(EntityStateProjection))
+            .is_ok());
+        registry.apply_event(timeline, &ev(entity));
+        let single_slot_snapshot = test_ok(registry.state_snapshot(timeline));
+        assert!(registry
+            .register_installed_reducer(second, "same", Box::new(EntityStateProjection))
+            .is_ok());
+        let count = |registry: &ProjectionRegistry, id| {
+            registry
+                .state_for_plugin(timeline, id, &entity)
+                .ok()
+                .flatten()
+                .and_then(|state| state.get("event_count").and_then(serde_json::Value::as_u64))
+        };
+        assert_eq!(count(&registry, first), Some(1));
+        assert_eq!(count(&registry, second), None);
+        assert_eq!(
+            registry.state_for_reducer(timeline, "same", &entity),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert!(test_ok(registry.state_for(timeline, &entity)).is_some());
+        assert!(matches!(
+            registry.state_snapshot(timeline),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        ));
+        assert_eq!(
+            registry.restore_from_snapshot(timeline, &single_slot_snapshot, None),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(count(&registry, first), Some(1));
+        assert_eq!(count(&registry, second), None);
+        assert_eq!(
+            registry.diff_against_snapshot(timeline, &single_slot_snapshot, &[entity]),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert!(matches!(
+            registry.register_installed_reducer(first, "other", Box::new(EntityStateProjection)),
+            Err(ProjectionSlotErrorV1::DuplicatePluginId { .. })
+        ));
+        assert_eq!(
+            registry.register_installed_reducer(
+                PluginId::new(),
+                "",
+                Box::new(EntityStateProjection),
+            ),
+            Err(ProjectionSlotErrorV1::InvalidName)
+        );
+        assert_eq!(
+            registry.register_installed_reducer(
+                PluginId::new(),
+                &"x".repeat(pos_core::MAX_AUTHORITY_TEXT_BYTES + 1),
+                Box::new(EntityStateProjection),
+            ),
+            Err(ProjectionSlotErrorV1::InvalidName)
+        );
+        let denied: Result<(), &str> = registry.try_with_state_transaction(|candidate| {
+            candidate.apply_event(timeline, &ev(entity));
+            Err("denied")
+        });
+        assert_eq!(denied, Err("denied"));
+        assert_eq!(count(&registry, first), Some(1));
+        assert_eq!(count(&registry, second), None);
+    }
+
+    #[test]
+    fn failed_state_transaction_restores_by_slot_after_registration_reorders_slots() {
+        let entity = EntityId::new();
+        let mut registry = open_projection_registry();
+        registry.register("first", Box::new(EntityStateProjection));
+        registry.apply_event(test_timeline(), &ev(entity));
+        registry.register("second", Box::new(EntityStateProjection));
+        registry.apply_event(test_timeline(), &ev(entity));
+        let count = |registry: &ProjectionRegistry, name| {
+            test_ok(registry.state_for_reducer(test_timeline(), name, &entity))
+                .and_then(|state| state.get("event_count").and_then(serde_json::Value::as_u64))
+        };
+        assert_eq!(count(&registry, "first"), Some(2));
+        assert_eq!(count(&registry, "second"), Some(1));
+
+        let denied: Result<(), &str> = registry.try_with_state_transaction(|candidate| {
+            candidate.register("first", Box::new(EntityStateProjection));
+            candidate.register("third", Box::new(EntityStateProjection));
+            candidate.apply_event(test_timeline(), &ev(entity));
+            Err("denied")
+        });
+
+        assert_eq!(denied, Err("denied"));
+        assert_eq!(count(&registry, "first"), Some(2));
+        assert_eq!(count(&registry, "second"), Some(1));
+        assert_eq!(count(&registry, "third"), None);
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn diff_against_snapshot_identical_returns_none() {
         let entity = EntityId::new();
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = open_projection_registry();
         reg.register("r", Box::new(TR));
-        reg.apply_event(&ev(entity));
+        reg.apply_event(test_timeline(), &ev(entity));
 
         let snap = reg.snapshot_unfenced();
-        let diff = reg.diff_against_snapshot(&snap, &[entity]);
+        let diff = test_ok(reg.diff_against_snapshot(test_timeline(), &snap, &[entity]));
         assert!(diff.is_none());
     }
 
@@ -2313,14 +2520,14 @@ mod wave3_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn diff_against_snapshot_diverged_returns_some() {
         let entity = EntityId::new();
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = open_projection_registry();
         reg.register("r", Box::new(TR));
-        reg.apply_event(&ev(entity));
+        reg.apply_event(test_timeline(), &ev(entity));
 
         let snap = reg.snapshot_unfenced();
         // Apply another event — now reg diverges from the snapshot
-        reg.apply_event(&ev(entity));
-        let diff = reg.diff_against_snapshot(&snap, &[entity]);
+        reg.apply_event(test_timeline(), &ev(entity));
+        let diff = test_ok(reg.diff_against_snapshot(test_timeline(), &snap, &[entity]));
         assert!(diff.is_some());
         let (name, eid) =
             diff.unwrap_or_else(|| std::panic::resume_unwind(Box::new("diff should be present")));
@@ -2332,12 +2539,12 @@ mod wave3_tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn diff_against_empty_snapshot_returns_some_when_reg_has_state() {
         let entity = EntityId::new();
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = open_projection_registry();
         reg.register("r", Box::new(TR));
-        reg.apply_event(&ev(entity));
+        reg.apply_event(test_timeline(), &ev(entity));
 
         let empty_snap = std::collections::HashMap::new();
-        let diff = reg.diff_against_snapshot(&empty_snap, &[entity]);
+        let diff = test_ok(reg.diff_against_snapshot(test_timeline(), &empty_snap, &[entity]));
         assert!(diff.is_some());
     }
 

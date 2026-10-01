@@ -41,11 +41,23 @@ mod tests {
     use super::*;
     use crate::driver::{Driver, StepOutput};
     use pos_core::{
+        crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind},
-        ids::EntityId,
+        ids::{EntityId, PluginId},
+        output_policy::{
+            OutputAuthorityV1, OutputDeclarationV1, OutputFidelityV1, OutputPolicyInputV1,
+            OutputPolicyV1,
+        },
+        ErasureContainmentGateV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+        FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     };
     use pos_store::{open_store, StoreConfig};
+    use std::sync::Arc;
     use std::time::Duration;
+
+    fn gated_registry() -> PluginRegistry {
+        PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -67,6 +79,74 @@ mod tests {
                 std::panic::resume_unwind(Box::new("missing scheduler fixture value"))
             })
         }
+    }
+
+    fn register_output_driver(
+        registry: &mut PluginRegistry,
+        event_type: &str,
+        driver: Box<dyn Driver>,
+    ) {
+        let plugin_id = PluginId::new();
+        let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                FidelityBudgetV1 {
+                    level: 0,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 500_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 1,
+                    max_events: 1_000,
+                    max_bytes: 64 * 1024 * 1024,
+                    max_cpu_us: 250_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+                FidelityBudgetV1 {
+                    level: 2,
+                    max_events: 1_000,
+                    max_bytes: 16 * 1024 * 1024,
+                    max_cpu_us: 50_000,
+                    shared_host_cpu_reservation_us: 0,
+                },
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([0x41; 32]),
+            max_pass_wall_duration_us: 1_000,
+        })
+        .test_ok();
+        let declaration = OutputDeclarationV1::new(
+            event_type.to_owned(),
+            OutputAuthorityV1::Authoritative,
+            OutputFidelityV1::L0,
+            4_096,
+            None,
+            None,
+        )
+        .test_ok();
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "test".to_owned(),
+            implementation_hash: Hash::from_bytes([0x42; 32]),
+            base_configuration_digest: Hash::from_bytes([0x43; 32]),
+            executable_profile_hash: budget.digest(),
+            retention_policy_hash: Hash::from_bytes([0x44; 32]),
+            policy_revision: 1,
+            output_declarations: vec![declaration],
+        })
+        .test_ok();
+        registry
+            .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
+            .test_ok();
     }
 
     struct SlowDriver {
@@ -146,9 +226,13 @@ mod tests {
     fn all_drivers_fire_on_first_tick() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
-        let mut reg = PluginRegistry::new();
-        reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(1))));
-        reg.register_driver(Box::new(FastDriver::new()));
+        let mut reg = gated_registry();
+        register_output_driver(
+            &mut reg,
+            "slow.tick",
+            Box::new(SlowDriver::new(Duration::from_secs(1))),
+        );
+        register_output_driver(&mut reg, "fast.tick", Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
         let drafts = sched.tick(tl.id(), 0).test_ok();
         assert_eq!(drafts.len(), 2);
@@ -159,9 +243,13 @@ mod tests {
     fn slow_driver_skipped_when_interval_not_elapsed() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
-        let mut reg = PluginRegistry::new();
-        reg.register_driver(Box::new(SlowDriver::new(Duration::from_secs(10))));
-        reg.register_driver(Box::new(FastDriver::new()));
+        let mut reg = gated_registry();
+        register_output_driver(
+            &mut reg,
+            "slow.tick",
+            Box::new(SlowDriver::new(Duration::from_secs(10))),
+        );
+        register_output_driver(&mut reg, "fast.tick", Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
         sched.tick(tl.id(), 0).test_ok();
         let drafts = sched.tick(tl.id(), 1).test_ok();
@@ -173,9 +261,13 @@ mod tests {
     fn slow_driver_fires_after_interval_elapsed() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
-        let mut reg = PluginRegistry::new();
-        reg.register_driver(Box::new(SlowDriver::new(Duration::from_millis(100))));
-        reg.register_driver(Box::new(FastDriver::new()));
+        let mut reg = gated_registry();
+        register_output_driver(
+            &mut reg,
+            "slow.tick",
+            Box::new(SlowDriver::new(Duration::from_millis(100))),
+        );
+        register_output_driver(&mut reg, "fast.tick", Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
         sched.tick(tl.id(), 0).test_ok();
         let d = sched.tick(tl.id(), 50_000_000).test_ok();
@@ -189,7 +281,7 @@ mod tests {
     fn empty_registry_returns_empty() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
-        let reg = PluginRegistry::new();
+        let reg = gated_registry();
         let mut sched = TickScheduler::new(reg);
         let drafts = sched.tick(tl.id(), 0).test_ok();
         assert!(drafts.is_empty());

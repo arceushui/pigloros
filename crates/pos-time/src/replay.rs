@@ -3,8 +3,8 @@
 //! Replay is projection-only. It has no `PluginRegistry` or action-approval
 //! authority, so replay cannot submit new human actions.
 
-use pos_core::store::{EventReadBounds, SeqRange};
-use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId};
+use pos_core::store::SeqRange;
+use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId, WorldReplayClosureV1};
 use pos_runtime::ErasureReadSenderV1;
 use pos_state::ProjectionRegistry;
 
@@ -16,23 +16,17 @@ use pos_state::ProjectionRegistry;
 /// Returns the events that were replayed so callers do not need a second read.
 ///
 /// # Errors
-/// Returns [`CoreError::ArtifactUnavailable`] when the Timeline Replay is no
-/// longer authoritative; otherwise propagates [`CoreError`] from the store.
+/// Fails closed when protected Replay authority or complete reads are
+/// unavailable. Host failures map to [`CoreError::ArtifactUnavailable`],
+/// [`CoreError::ErasureAccessFrozen`], or
+/// [`CoreError::ErasureContainmentUnavailable`].
 pub fn replay(
     sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<Vec<pos_core::Event>, CoreError> {
-    replay_range(
-        sender,
-        timeline,
-        SeqRange::all(),
-        registry,
-        artifact_digest,
-        evaluation,
-    )
+    replay_range(sender, timeline, SeqRange::all(), registry, closure)
 }
 
 /// Replay events up to and **including** `at_seq` on `timeline`.
@@ -40,23 +34,23 @@ pub fn replay(
 /// Reads [`SeqRange::bounded`](`Seq::ZERO`, `at_seq`) and folds through `registry`.
 ///
 /// # Errors
-/// Returns [`CoreError::ArtifactUnavailable`] when the Timeline Replay is no
-/// longer authoritative; otherwise propagates [`CoreError`] from the store.
+/// Fails closed when protected Replay authority or complete reads are
+/// unavailable. Host failures map to [`CoreError::ArtifactUnavailable`],
+/// [`CoreError::ErasureAccessFrozen`], or
+/// [`CoreError::ErasureContainmentUnavailable`].
 pub fn replay_at(
     sender: &mut ErasureReadSenderV1<'_>,
     timeline: TimelineId,
     at_seq: Seq,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<(), CoreError> {
     replay_range(
         sender,
         timeline,
         SeqRange::bounded(Seq::ZERO, at_seq),
         registry,
-        artifact_digest,
-        evaluation,
+        closure,
     )
     .map(|_| ())
 }
@@ -66,32 +60,47 @@ fn replay_range(
     timeline: TimelineId,
     range: SeqRange,
     registry: &mut ProjectionRegistry,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    closure: &WorldReplayClosureV1,
 ) -> Result<Vec<pos_core::Event>, CoreError> {
-    let mut outcome = Err(CoreError::ArtifactUnavailable);
-    let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        outcome = evaluation
-            .require_authoritative_use(
-                pos_core::ErasureArtifactClassV1::TimelineReplay,
-                artifact_digest,
-            )
-            .map_err(|_| CoreError::ArtifactUnavailable)
-            .and_then(|()| {
-                sender
-                    .read_bounded(
-                        timeline,
-                        range,
-                        EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
-                    )
-                    .map_err(crate::host_error_to_core)
-            })
-            .inspect(|events| registry.fold_events(events));
-    };
-    sender
-        .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
-        .map_err(crate::host_error_to_core)?;
-    outcome
+    let consumer_ids = crate::consumer_selection(registry)?;
+    registry.try_with_state_transaction(|candidate| {
+        let mut outcome = Err(CoreError::ArtifactUnavailable);
+        let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
+            outcome = replay_in_fence(sender, timeline, range, candidate, closure, &consumer_ids);
+        };
+        sender
+            .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
+            .map_err(crate::host_error_to_core)
+            .and(outcome)
+    })
+}
+
+/// Verify, read, fold, and re-verify one Replay inside its protected fence.
+fn replay_in_fence(
+    sender: &mut ErasureReadSenderV1<'_>,
+    timeline: TimelineId,
+    range: SeqRange,
+    registry: &mut ProjectionRegistry,
+    closure: &WorldReplayClosureV1,
+    consumer_ids: &[String],
+) -> Result<Vec<pos_core::Event>, CoreError> {
+    let requested_use = crate::observed_world_replay_use(
+        sender,
+        timeline,
+        ErasureProtectedOperationV1::Read,
+        range,
+        consumer_ids,
+    )?;
+    let read_bounds = crate::require_world_replay(sender, closure, &requested_use)?;
+    let events = crate::read_complete_world_replay(sender, &requested_use, read_bounds)?;
+    registry.fold_events(timeline, &events);
+    crate::require_world_replay(sender, closure, &requested_use).and_then(|final_bounds| {
+        if final_bounds == read_bounds {
+            Ok(events)
+        } else {
+            Err(CoreError::ArtifactUnavailable)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -144,16 +153,23 @@ mod tests {
     use pos_plugin_world::{
         encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldDriver,
         WorldObservationV1, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY,
-        EVENT_TYPE_ACTION_V1, EVENT_TYPE_OBSERVATION_V1,
+        EVENT_TYPE_ACTION_V1, EVENT_TYPE_CONFIG_V1, EVENT_TYPE_OBSERVATION_V1,
     };
     use pos_runtime::{PluginRegistry, TimelineHistorySegment};
     use pos_state::ProjectionRegistry;
     use pos_store::{open_store, StoreConfig};
     use proptest::prelude::*;
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([43; 32]);
+    const ONE_EVENT_READ_BOUNDS: pos_core::store::EventReadBounds =
+        pos_core::store::EventReadBounds::new_with_total_bytes_and_elapsed(
+            65_536, 128, 8, 1, 65_536, 30_000_000,
+        );
 
     fn replay_evaluation(state: pos_core::ArtifactStateV1) -> pos_core::ReplayClaimEvaluationV1 {
         pos_core::ReplayClaimEvaluatorV1::evaluate(
@@ -203,7 +219,7 @@ mod tests {
             )
             .map_err(|_| CoreError::ArtifactUnavailable)
             .and_then(|()| store.read(timeline, SeqRange::all()))
-            .inspect(|events| registry.fold_events(events))
+            .inspect(|events| registry.fold_events(timeline, events))
     }
 
     fn open_test_store() -> Box<dyn EventStore> {
@@ -227,7 +243,7 @@ mod tests {
             )
             .map_err(|_| CoreError::ArtifactUnavailable)
             .and_then(|()| store.read(timeline, SeqRange::bounded(Seq::ZERO, at_seq)))
-            .map(|events| registry.fold_events(&events))
+            .map(|events| registry.fold_events(timeline, &events))
     }
 
     #[test]
@@ -249,55 +265,34 @@ mod tests {
     }
 
     #[test]
-    fn public_replay_commands_hold_the_host_generation_fence() {
+    fn public_replay_commands_fail_closed_without_installed_world_verifier() {
         let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
         let gate = host.containment_gate();
-        let (timeline, entity, third_seq) = {
+        let timeline = {
             let mut commands = host.command_sender().test_ok();
             let timeline = commands.create_timeline("hosted-replay").test_ok();
             let entity = EntityId::new();
-            let events = commands
+            commands
                 .append(
                     timeline.id(),
                     &[draft(entity), draft(entity), draft(entity)],
                 )
                 .test_ok();
-            (timeline.id(), entity, events[2].seq)
+            timeline.id()
         };
 
-        let mut complete = ProjectionRegistry::new().with_erasure_gate(gate.clone());
-        complete.register("count", Box::new(CountReducer));
-        let mut partial = ProjectionRegistry::new().with_erasure_gate(gate);
-        partial.register("count", Box::new(CountReducer));
-        let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let mut reads = host.read_sender().test_ok();
-        assert_eq!(
-            super::replay(
-                &mut reads,
-                timeline,
-                &mut complete,
-                REPLAY_DIGEST,
-                &evaluation,
-            )
-            .test_ok()
-            .len(),
-            3
-        );
-        super::replay_at(
-            &mut reads,
-            timeline,
-            third_seq,
-            &mut partial,
-            REPLAY_DIGEST,
-            &evaluation,
-        )
-        .test_ok();
-        assert_eq!(count_for(&complete, &entity), 3);
-        assert_eq!(count_for(&partial, &entity), 3);
+        assert!(matches!(
+            super::replay(&mut reads, timeline, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
     }
 
     fn committed_world_step() -> (
@@ -307,11 +302,7 @@ mod tests {
         Event,
         Vec<Event>,
     ) {
-        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
-            StoreConfig::Memory,
-            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )
-        .test_ok();
+        let mut host = crate::test_support::open_exact_host();
         let mut bodies = [EntityId::new(), EntityId::new()];
         bodies.sort_unstable();
         let driver = WorldDriver::new_live(
@@ -366,7 +357,7 @@ mod tests {
                 .remove(0);
             let mut registry = PluginRegistry::new().with_erasure_gate(gate);
             registry
-                .register(
+                .register_generated(
                     &WorldPlugin::new().with_bodies(bodies),
                     Some(Box::new(WorldReducer)),
                     Some(Box::new(driver)),
@@ -393,6 +384,33 @@ mod tests {
         registry
     }
 
+    fn assert_committed_world_step_shape(committed: &[Event]) {
+        assert_eq!(committed.len(), 3);
+        assert_eq!(
+            committed
+                .iter()
+                .filter(|event| event.event_type.as_str() == EVENT_TYPE_CONFIG_V1)
+                .count(),
+            1
+        );
+    }
+
+    fn assert_world_states(
+        registry: &ProjectionRegistry,
+        timeline: TimelineId,
+        bodies: &[EntityId],
+        expected: &[State],
+    ) {
+        for (body, state) in bodies.iter().zip(expected) {
+            assert_eq!(
+                registry
+                    .state_for_reducer(timeline, "world", body)
+                    .test_ok(),
+                Some(state.clone())
+            );
+        }
+    }
+
     #[test]
     fn world_live_observations_replay_without_backend_at_exact_seq_boundaries() {
         let (mut host, timeline, bodies, action, committed) = committed_world_step();
@@ -402,6 +420,7 @@ mod tests {
             .iter()
             .filter(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .collect();
+        assert_committed_world_step_shape(&committed);
         assert_eq!(observations.len(), 2);
         assert_eq!(observations[0].entity, bodies[0]);
         assert_eq!(observations[1].entity, bodies[1]);
@@ -418,54 +437,54 @@ mod tests {
         );
 
         let mut live = world_registry(gate.clone());
-        live.apply_event(&action);
-        live.fold_events(&committed);
+        live.apply_event(timeline, &action);
+        live.fold_events(timeline, &committed);
         let expected: Vec<_> = bodies
             .iter()
-            .map(|body| live.state_for_reducer("world", body).test_ok().clone())
+            .map(|body| {
+                live.state_for_reducer(timeline, "world", body)
+                    .test_ok()
+                    .test_ok()
+            })
             .collect();
 
-        let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
+        let closure = crate::test_support::closure_for_host_consumer(&mut host, timeline, "world");
         let mut before = world_registry(gate.clone());
         let mut first = world_registry(gate.clone());
         let mut complete = world_registry(gate.clone());
+        let count_only = crate::test_support::closure_for_host(&mut host, timeline);
         let mut reads = host.read_sender().test_ok();
-        super::replay_at(
-            &mut reads,
-            timeline,
-            action.seq,
-            &mut before,
-            REPLAY_DIGEST,
-            &evaluation,
-        )
-        .test_ok();
-        assert!(before.state_for_reducer("world", &bodies[0]).is_none());
-        assert!(before.state_for_reducer("world", &bodies[1]).is_none());
+        assert!(matches!(
+            super::replay_at(&mut reads, timeline, action.seq, &mut before, &count_only),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        super::replay_at(&mut reads, timeline, action.seq, &mut before, &closure).test_ok();
+        for body in &bodies {
+            assert!(before
+                .state_for_reducer(timeline, "world", body)
+                .test_ok()
+                .is_none());
+        }
         super::replay_at(
             &mut reads,
             timeline,
             observations[0].seq,
             &mut first,
-            REPLAY_DIGEST,
-            &evaluation,
+            &closure,
         )
         .test_ok();
         assert_eq!(
-            first.state_for_reducer("world", &bodies[0]),
-            Some(&expected[0])
+            first
+                .state_for_reducer(timeline, "world", &bodies[0])
+                .test_ok(),
+            Some(expected[0].clone())
         );
-        assert!(first.state_for_reducer("world", &bodies[1]).is_none());
-        super::replay(
-            &mut reads,
-            timeline,
-            &mut complete,
-            REPLAY_DIGEST,
-            &evaluation,
-        )
-        .test_ok();
-        for (body, state) in bodies.iter().zip(&expected) {
-            assert_eq!(complete.state_for_reducer("world", body), Some(state));
-        }
+        assert!(first
+            .state_for_reducer(timeline, "world", &bodies[1])
+            .test_ok()
+            .is_none());
+        super::replay(&mut reads, timeline, &mut complete, &closure).test_ok();
+        assert_world_states(&complete, timeline, &bodies, &expected);
 
         let telemetry = EventDraft::new(
             bodies[0],
@@ -476,18 +495,16 @@ mod tests {
             .test_ok()
             .append(timeline, &[telemetry])
             .test_ok();
+        let closure = crate::test_support::closure_for_host_consumer(&mut host, timeline, "world");
         let mut with_telemetry = world_registry(gate);
         super::replay(
             &mut host.read_sender().test_ok(),
             timeline,
             &mut with_telemetry,
-            REPLAY_DIGEST,
-            &evaluation,
+            &closure,
         )
         .test_ok();
-        for (body, state) in bodies.iter().zip(&expected) {
-            assert_eq!(with_telemetry.state_for_reducer("world", body), Some(state));
-        }
+        assert_world_states(&with_telemetry, timeline, &bodies, &expected);
     }
 
     #[test]
@@ -539,7 +556,7 @@ mod tests {
             .append(timeline, &invalid)
             .test_ok();
 
-        let evaluation = replay_evaluation(pos_core::ArtifactStateV1::Retained);
+        let closure = crate::test_support::closure_for_host_consumer(&mut host, timeline, "world");
         let mut accepted = world_registry(gate.clone());
         let mut after_invalid = world_registry(gate);
         let mut reads = host.read_sender().test_ok();
@@ -548,27 +565,316 @@ mod tests {
             timeline,
             last_observation_seq,
             &mut accepted,
-            REPLAY_DIGEST,
-            &evaluation,
+            &closure,
         )
         .test_ok();
-        super::replay(
-            &mut reads,
-            timeline,
-            &mut after_invalid,
-            REPLAY_DIGEST,
-            &evaluation,
-        )
-        .test_ok();
+        super::replay(&mut reads, timeline, &mut after_invalid, &closure).test_ok();
         for body in bodies {
             assert_eq!(
-                after_invalid.state_for_reducer("world", &body),
-                accepted.state_for_reducer("world", &body)
+                after_invalid
+                    .state_for_reducer(timeline, "world", &body)
+                    .test_ok(),
+                accepted
+                    .state_for_reducer(timeline, "world", &body)
+                    .test_ok()
             );
         }
         for entity in invalid_entities {
-            assert!(after_invalid.state_for_reducer("world", &entity).is_none());
+            assert!(after_invalid
+                .state_for_reducer(timeline, "world", &entity)
+                .test_ok()
+                .is_none());
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_replay_commands_use_an_installed_world_verifier() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("verified-replay").test_ok();
+            let entity = EntityId::new();
+            commands
+                .append(
+                    timeline.id(),
+                    &[draft(entity), draft(entity), draft(entity)],
+                )
+                .test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        let events = super::replay(&mut reads, timeline, &mut registry, &closure).test_ok();
+        assert_eq!(events.len(), 3);
+        assert_eq!(count_for(&registry, timeline, &entity), 3);
+
+        let mut bounded_registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        bounded_registry.register("count", Box::new(CountReducer));
+        super::replay_at(
+            &mut reads,
+            timeline,
+            events[1].seq,
+            &mut bounded_registry,
+            &closure,
+        )
+        .test_ok();
+        assert_eq!(count_for(&bounded_registry, timeline, &entity), 2);
+    }
+
+    #[test]
+    fn public_replay_rejects_cross_timeline_closures() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (authorized, requested) = {
+            let mut commands = host.command_sender().test_ok();
+            let authorized = commands.create_timeline("authorized-replay").test_ok();
+            let requested = commands.create_timeline("requested-replay").test_ok();
+            commands
+                .append(requested.id(), &[draft(EntityId::new())])
+                .test_ok();
+            (authorized.id(), requested.id())
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, authorized);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::replay(&mut reads, requested, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+    }
+
+    #[test]
+    fn public_replay_reads_a_complete_fork_in_timeline_order() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (fork, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let parent = commands.create_timeline("replay-parent").test_ok();
+            let entity = EntityId::new();
+            let shared = commands
+                .append(parent.id(), &[draft(entity), draft(entity)])
+                .test_ok();
+            let fork = commands
+                .fork_timeline(parent.id(), shared[1].seq, "replay-fork")
+                .test_ok();
+            commands.append(fork.id(), &[draft(entity)]).test_ok();
+            (fork.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, fork);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+
+        let events = super::replay(&mut reads, fork, &mut registry, &closure).test_ok();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[2].seq, Seq::from_u64(3));
+        assert_eq!(count_for(&registry, fork, &entity), 3);
+    }
+
+    #[test]
+    fn public_replay_rolls_back_when_final_verification_fails() {
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(ChangeBoundsOnSecondVerification {
+                calls: AtomicUsize::new(0),
+            }));
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("rollback-replay").test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::replay(&mut reads, timeline, &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert_eq!(
+            registry
+                .state_for_reducer(timeline, "count", &entity)
+                .test_ok(),
+            None
+        );
+    }
+
+    #[test]
+    fn public_replay_rejects_empty_consumer_selection() {
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let mut reads = host.read_sender().test_ok();
+        let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
+        let mut registry = ProjectionRegistry::new();
+        assert!(matches!(
+            super::replay(&mut reads, TimelineId::new(), &mut registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+    }
+
+    #[test]
+    fn public_replay_enforces_verified_read_bounds() {
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(OneEventWorldReplayVerifier));
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("bounded-replay").test_ok();
+            let entity = EntityId::new();
+            commands
+                .append(timeline.id(), &[draft(entity), draft(entity)])
+                .test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+
+        let replay_result = super::replay(&mut reads, timeline, &mut registry, &closure);
+        assert!(
+            matches!(&replay_result, Err(CoreError::ArtifactUnavailable)),
+            "expected an over-bound Replay to fail closed, got {replay_result:?}"
+        );
+        assert_eq!(
+            registry
+                .state_for_reducer(timeline, "count", &entity)
+                .test_ok(),
+            None
+        );
+    }
+
+    #[test]
+    fn public_replay_rejects_requested_range_past_logical_head() {
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("range-past-head").test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        let result = super::replay_at(
+            &mut reads,
+            timeline,
+            Seq::from_u64(2),
+            &mut registry,
+            &closure,
+        );
+        assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
+        assert_eq!(
+            registry
+                .state_for_reducer(timeline, "count", &entity)
+                .test_ok(),
+            None
+        );
+    }
+
+    /// Mirrors the installed-verifier contract: a closure's source head is
+    /// accepted only for the logical head at which the closure was recorded.
+    struct RecordedHeadVerifier {
+        recorded_head: Seq,
+    }
+
+    impl pos_runtime::WorldReplayVerifierV1 for RecordedHeadVerifier {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            if requested_use.source_logical_head() == self.recorded_head {
+                Ok(pos_runtime::world_replay::test_verified_world_replay(
+                    closure,
+                    requested_use,
+                    inventory_generation,
+                    pos_core::ErasureReplayClaimV1::Exact,
+                ))
+            } else {
+                Err(pos_runtime::WorldReplayVerificationErrorV1::EvidenceUnavailable)
+            }
+        }
+    }
+
+    #[test]
+    fn public_replay_rejects_events_appended_after_the_closure_head() {
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(RecordedHeadVerifier {
+                recorded_head: Seq::from_u64(2),
+            }));
+        let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Memory,
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("closure-head").test_ok();
+            let entity = EntityId::new();
+            commands
+                .append(timeline.id(), &[draft(entity), draft(entity)])
+                .test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut exact_registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
+        exact_registry.register("count", Box::new(CountReducer));
+        {
+            let mut reads = host.read_sender().test_ok();
+            let events =
+                super::replay(&mut reads, timeline, &mut exact_registry, &closure).test_ok();
+            assert_eq!(events.len(), 2);
+        }
+        assert_eq!(count_for(&exact_registry, timeline, &entity), 2);
+
+        host.command_sender()
+            .test_ok()
+            .append(timeline, &[draft(entity)])
+            .test_ok();
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut appended_registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        appended_registry.register("count", Box::new(CountReducer));
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            super::replay(&mut reads, timeline, &mut appended_registry, &closure),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert_eq!(
+            appended_registry
+                .state_for_reducer(timeline, "count", &entity)
+                .test_ok(),
+            None
+        );
     }
 
     struct ReadFailStore;
@@ -617,6 +923,65 @@ mod tests {
 
     struct CountReducer;
 
+    struct ChangeBoundsOnSecondVerification {
+        calls: AtomicUsize,
+    }
+
+    struct OneEventWorldReplayVerifier;
+
+    impl pos_runtime::WorldReplayVerifierV1 for OneEventWorldReplayVerifier {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            Ok(
+                pos_runtime::world_replay::test_verified_world_replay_with_fields_and_bounds(
+                    closure.digest(),
+                    closure.timeline_id(),
+                    closure.source_head(),
+                    requested_use.clone(),
+                    inventory_generation,
+                    pos_core::ErasureReplayClaimV1::Exact,
+                    ONE_EVENT_READ_BOUNDS,
+                ),
+            )
+        }
+    }
+
+    impl pos_runtime::WorldReplayVerifierV1 for ChangeBoundsOnSecondVerification {
+        fn verify(
+            &self,
+            closure: &pos_core::WorldReplayClosureV1,
+            requested_use: &pos_runtime::WorldReplayUseV1,
+            inventory_generation: pos_core::ErasureReferenceV1,
+        ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
+        {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(pos_runtime::world_replay::test_verified_world_replay(
+                    closure,
+                    requested_use,
+                    inventory_generation,
+                    pos_core::ErasureReplayClaimV1::Exact,
+                ))
+            } else {
+                Ok(
+                    pos_runtime::world_replay::test_verified_world_replay_with_fields_and_bounds(
+                        closure.digest(),
+                        closure.timeline_id(),
+                        closure.source_head(),
+                        requested_use.clone(),
+                        inventory_generation,
+                        pos_core::ErasureReplayClaimV1::Exact,
+                        ONE_EVENT_READ_BOUNDS,
+                    ),
+                )
+            }
+        }
+    }
+
     impl Reducer for CountReducer {
         fn initial(&self) -> State {
             let mut s = State::new();
@@ -659,10 +1024,15 @@ mod tests {
         }
     }
 
-    fn count_for(reg: &ProjectionRegistry, entity: &EntityId) -> u64 {
-        reg.state_for(entity)
-            .and_then(|s| s.get("n"))
-            .and_then(serde_json::Value::as_u64)
+    fn test_projection_registry() -> ProjectionRegistry {
+        ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+
+    fn count_for(reg: &ProjectionRegistry, timeline: TimelineId, entity: &EntityId) -> u64 {
+        reg.state_for(timeline, entity)
+            .test_ok()
+            .and_then(|s| s.get("n").and_then(serde_json::Value::as_u64))
             .unwrap_or(0)
     }
 
@@ -673,14 +1043,14 @@ mod tests {
     fn replay_empty_timeline_is_noop() {
         let mut store = open_test_store();
         let tl = store.create_timeline("empty").test_ok();
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
 
         replay(store.as_ref(), tl.id(), &mut reg).test_ok();
 
         // No entities seen — state_for returns None (count is zero).
         let entity = EntityId::new();
-        assert_eq!(count_for(&reg, &entity), 0);
+        assert_eq!(count_for(&reg, tl.id(), &entity), 0);
     }
 
     #[test]
@@ -693,11 +1063,11 @@ mod tests {
         let drafts: Vec<EventDraft> = (0..5).map(|_| draft(entity)).collect();
         store.append(tl.id(), &drafts).test_ok();
 
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
         replay(store.as_ref(), tl.id(), &mut reg).test_ok();
 
-        assert_eq!(count_for(&reg, &entity), 5);
+        assert_eq!(count_for(&reg, tl.id(), &entity), 5);
     }
 
     #[test]
@@ -713,31 +1083,32 @@ mod tests {
         // seq of the 3rd event (0-indexed = 2, but seqs are 1-based in MemoryStore)
         let third_seq = committed[2].seq;
 
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
         replay_at(store.as_ref(), tl.id(), third_seq, &mut reg).test_ok();
 
-        assert_eq!(count_for(&reg, &entity), 3);
+        assert_eq!(count_for(&reg, tl.id(), &entity), 3);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_read_err_propagates() {
         let store = ReadFailStore;
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
         let entity = EntityId::new();
-        reg.apply_event(&make_event(entity, 1));
-        let err = replay(&store, TimelineId::new(), &mut reg).test_err();
+        let timeline = TimelineId::new();
+        reg.apply_event(timeline, &make_event(entity, 1));
+        let err = replay(&store, timeline, &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
-        assert_eq!(count_for(&reg, &entity), 1);
+        assert_eq!(count_for(&reg, timeline, &entity), 1);
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn replay_at_read_err_propagates() {
         let store = ReadFailStore;
-        let mut reg = ProjectionRegistry::new();
+        let mut reg = test_projection_registry();
         reg.register("count", Box::new(CountReducer));
         let err = replay_at(&store, TimelineId::new(), Seq::from_u64(1), &mut reg).test_err();
         assert!(matches!(err, CoreError::Storage(_)));
@@ -757,16 +1128,16 @@ mod tests {
                 .collect();
 
             // We build a registry using the raw events directly (avoids store borrow issues).
-            let mut reg1 = ProjectionRegistry::new();
+            let mut reg1 = test_projection_registry();
             reg1.register("count", Box::new(CountReducer));
-            reg1.fold_events(&events);
+            reg1.fold_events(tl.id(), &events);
 
-            let mut reg2 = ProjectionRegistry::new();
+            let mut reg2 = test_projection_registry();
             reg2.register("count", Box::new(CountReducer));
-            reg2.fold_events(&events);
+            reg2.fold_events(tl.id(), &events);
 
-            let c1 = count_for(&reg1, &entity);
-            let c2 = count_for(&reg2, &entity);
+            let c1 = count_for(&reg1, tl.id(), &entity);
+            let c2 = count_for(&reg2, tl.id(), &entity);
             prop_assert_eq!(c1, c2);
             prop_assert_eq!(c1, event_count as u64);
 
@@ -775,10 +1146,10 @@ mod tests {
             if !drafts.is_empty() {
                 store.append(tl.id(), &drafts).test_ok();
             }
-            let mut reg3 = ProjectionRegistry::new();
+            let mut reg3 = test_projection_registry();
             reg3.register("count", Box::new(CountReducer));
             replay(store.as_ref(), tl.id(), &mut reg3).test_ok();
-            prop_assert_eq!(count_for(&reg3, &entity), event_count as u64);
+            prop_assert_eq!(count_for(&reg3, tl.id(), &entity), event_count as u64);
         }
     }
 }

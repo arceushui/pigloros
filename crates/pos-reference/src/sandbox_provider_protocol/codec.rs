@@ -8,7 +8,7 @@ use super::SandboxProviderProtocolError;
 pub(super) const MAX_INPUT_BYTES_U64: u64 = 128 * 1024 * 1024;
 pub(super) const MAX_SAFE_DETAIL_BYTES: usize = 256;
 
-const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 pub(super) const MAX_LIST_ENTRIES: usize = 256;
 pub(super) const MAX_CBOR_COLLECTION_ENTRIES: usize = 512;
@@ -74,7 +74,7 @@ pub(super) fn record_digest(
     digest_with_domain(&domain, unsigned)
 }
 
-fn digest_with_domain(
+pub(super) fn digest_with_domain(
     domain: &[u8],
     unsigned: &Value,
 ) -> Result<[u8; 32], SandboxProviderProtocolError> {

@@ -241,6 +241,13 @@ pub struct NetworkExchangePlan {
     pub plan_digest: [u8; 32],
 }
 
+impl NetworkExchangePlan {
+    pub(super) fn validate(&self) -> Result<(), SandboxProviderProtocolError> {
+        identifier(&text_value(&self.capability_id))
+            .and_then(|_| validate_network_plan(self, &network_plan_value(self)))
+    }
+}
+
 /// Named fifteen-digest authority block carried by SPX1.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecuteAuthority {

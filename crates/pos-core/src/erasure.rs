@@ -384,6 +384,13 @@ mod erasure_gate_sealed {
 /// trait is sealed: it shares the host-issued gate as an object-safe interface
 /// and is not an extension point for caller-supplied authorization policies.
 pub trait ErasureGate: erasure_gate_sealed::Sealed + Send + Sync {
+    /// Return the generation of the currently installed complete inventory.
+    /// Call within [`Self::with_fence`] when binding a protected effect to it.
+    ///
+    /// # Errors
+    /// Returns a containment error when no verified inventory is available.
+    fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1>;
+
     /// Authorize one protected operation at its current host boundary.
     ///
     /// # Errors
@@ -492,6 +499,107 @@ impl ErasureTopologyTransitionPermitV1 {
             *claimed_store_identity = Some(Arc::clone(&binding.store_identity));
         }
         true
+    }
+}
+
+/// Opaque ADR-106 revision 3 context for one admitted Fork inside a gate
+/// topology transition.
+///
+/// There is no public constructor. Only
+/// [`ErasureContainmentGateV1::admitted_fork_context`] builds one, and it
+/// needs a transition permit, which exists only inside the callback passed to
+/// [`ErasureContainmentGateV1::install_from_verified_inventory_transition`].
+/// The context binds that permit (and so its gate), the installed inventory
+/// generation, the FCC1 operation ID and parent, and a data-only parent
+/// verdict computed under the held fence. It is in-process only and never
+/// serialized.
+#[derive(Debug)]
+pub struct ErasureAdmittedForkContextV1<'permit> {
+    permit: &'permit ErasureTopologyTransitionPermitV1,
+    /// The gate's installed generation when the context was minted. "No
+    /// verified inventory" and "generation unreadable" share one
+    /// fail-closed error value: authorization needs the gate to report the
+    /// identical result again, and the verdict is computed from the same
+    /// installed state, so neither case can authorize a different
+    /// generation.
+    generation: Result<ErasureReferenceV1, ErasureContainmentErrorV1>,
+    operation_id: crate::Hash,
+    parent: TimelineId,
+    verdict: Result<(), ErasureContainmentErrorV1>,
+    /// Set only through [`Self::open_write_boundary`] or
+    /// [`Self::roll_back_write_boundary`] when the adapter's write boundary
+    /// failed to open or was rolled back, so nothing was written.
+    nothing_written: AtomicBool,
+}
+
+impl ErasureAdmittedForkContextV1<'_> {
+    /// Claim this context's permit for one store and authorize exactly one
+    /// FCC1 against the verdict computed under the transition fence.
+    ///
+    /// Store adapters evaluate this before their exact-operation lookup but
+    /// apply the result only when no operation of that kind and ID is
+    /// committed, after the parent-visibility check; an exact committed
+    /// operation returns its original result whatever the verdict.
+    ///
+    /// # Errors
+    /// Returns [`ErasureContainmentErrorV1::RecoveryUnavailable`] when the
+    /// permit belongs to another gate or is already claimed by another store,
+    /// the gate's installed generation changed, or the operation ID or parent
+    /// differs from this context. Otherwise returns the parent verdict:
+    /// [`ErasureContainmentErrorV1::AccessFrozen`] for a frozen parent or one
+    /// not positively proven unaffected, and `RecoveryUnavailable` for an
+    /// unclassified parent.
+    pub fn authorize_admitted_fork(
+        &self,
+        gate: &ErasureContainmentGateV1,
+        binding: &ErasureTopologyStoreBindingV1,
+        operation_id: crate::Hash,
+        parent: TimelineId,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        let bound = self.permit.claim_for_store(gate, binding)
+            && gate.inventory_generation() == self.generation
+            && self.operation_id == operation_id
+            && self.parent == parent;
+        if bound {
+            self.verdict
+        } else {
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        }
+    }
+
+    /// Open the adapter's write boundary for this FCC1 through `open`.
+    ///
+    /// When `open` fails, nothing was written; the context records that
+    /// for the erasure host. This in-process channel is not a wire or error
+    /// value: the host may then treat an indeterminate storage error as a
+    /// definite pre-write failure instead of an uncertain commit.
+    ///
+    /// # Errors
+    /// Returns the error of `open` unchanged.
+    pub fn open_write_boundary<E>(&self, open: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
+        open().inspect_err(|_| self.nothing_written.store(true, AtomicOrdering::Release))
+    }
+
+    /// Roll back the adapter's opened write boundary through `rollback`.
+    ///
+    /// A successful rollback discards every write of the boundary, so the
+    /// context records that nothing was written.
+    ///
+    /// # Errors
+    /// Returns the error of `rollback` unchanged; the outcome then stays
+    /// uncertain.
+    pub fn roll_back_write_boundary<E>(
+        &self,
+        rollback: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        rollback().inspect(|()| self.nothing_written.store(true, AtomicOrdering::Release))
+    }
+
+    /// Whether the adapter's write boundary failed to open or was rolled
+    /// back, so this FCC1 wrote nothing.
+    #[must_use]
+    pub fn nothing_written(&self) -> bool {
+        self.nothing_written.load(AtomicOrdering::Acquire)
     }
 }
 
@@ -1025,6 +1133,62 @@ impl ErasureContainmentGateV1 {
         Ok((candidate, result))
     }
 
+    /// Build the opaque context for one admitted Fork inside this gate's
+    /// topology transition.
+    ///
+    /// The parent verdict is computed now, under the fence held by the
+    /// transition: the parent must pass the frozen check and, when an
+    /// inventory is installed, be positively proven unaffected by every
+    /// active request. A permit minted by another gate yields a context that
+    /// can never authorize.
+    #[must_use]
+    pub fn admitted_fork_context<'permit>(
+        &self,
+        permit: &'permit ErasureTopologyTransitionPermitV1,
+        operation_id: crate::Hash,
+        parent: TimelineId,
+    ) -> ErasureAdmittedForkContextV1<'permit> {
+        let verdict = if Arc::ptr_eq(&permit.gate_identity, &self.topology_binding_id) {
+            self.admitted_fork_parent_verdict(parent)
+        } else {
+            Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+        };
+        ErasureAdmittedForkContextV1 {
+            permit,
+            generation: self.inventory_generation(),
+            operation_id,
+            parent,
+            verdict,
+            nothing_written: AtomicBool::new(false),
+        }
+    }
+
+    fn admitted_fork_parent_verdict(
+        &self,
+        parent: TimelineId,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        self.authority
+            .read()
+            .map_err(containment_recovery_failure)
+            .and_then(|authority| {
+                // `authorize_state` checks the frozen state first and proves
+                // the parent's classification complete, so the only
+                // remaining failure is an active request scope that includes
+                // the parent.
+                self.authorize_state(parent, ErasureProtectedOperationV1::Fork, &authority)
+                    .and_then(|()| {
+                        let unaffected = authority.inventory.as_ref().is_none_or(|inventory| {
+                            inventory.require_unaffected_topology(parent).is_ok()
+                        });
+                        if unaffected {
+                            Ok(())
+                        } else {
+                            Err(ErasureContainmentErrorV1::AccessFrozen)
+                        }
+                    })
+            })
+    }
+
     fn complete_inventory_transition<T>(
         &self,
         transition: &mut ErasureInventoryTransitionV1<'_, T>,
@@ -1223,6 +1387,10 @@ impl ErasureContainmentGateV1 {
 impl erasure_gate_sealed::Sealed for ErasureContainmentGateV1 {}
 
 impl ErasureGate for ErasureContainmentGateV1 {
+    fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        Self::inventory_generation(self)
+    }
+
     fn authorize(
         &self,
         timeline: TimelineId,
@@ -1237,6 +1405,37 @@ impl ErasureGate for ErasureContainmentGateV1 {
         operation: ErasureProtectedOperationV1,
         effect: &mut dyn FnMut(),
     ) -> Result<(), ErasureContainmentErrorV1> {
+        self.fence_then(timeline, operation, effect)
+            .and_then(|()| self.ensure_available())
+    }
+}
+
+impl ErasureContainmentGateV1 {
+    /// Serialize one protected effect with its decision and return the
+    /// effect's value.
+    ///
+    /// Unlike [`ErasureGate::with_fence`], the error case means only that the
+    /// fence refused the operation before the effect ran; once the effect
+    /// has run, its value is always returned.
+    ///
+    /// # Errors
+    /// Returns the payload-free containment error that refused the
+    /// operation.
+    pub fn with_fence_value<T>(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: impl FnOnce() -> T,
+    ) -> Result<T, ErasureContainmentErrorV1> {
+        self.fence_then(timeline, operation, effect)
+    }
+
+    fn fence_then<T>(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: impl FnOnce() -> T,
+    ) -> Result<T, ErasureContainmentErrorV1> {
         if self.is_fence_active() {
             self.ensure_available()?;
             let authority = self
@@ -1245,8 +1444,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
                 .map_err(containment_recovery_failure)?
                 .clone();
             self.authorize_state(timeline, operation, &authority)?;
-            effect();
-            return self.ensure_available();
+            return Ok(effect());
         }
         let _fence = self
             .fence_lock
@@ -1262,8 +1460,7 @@ impl ErasureGate for ErasureContainmentGateV1 {
         let identity = Arc::clone(&self.topology_binding_id);
         ACTIVE_CONTAINMENT_FENCES.with(|active| active.borrow_mut().push(identity));
         let _active = ActiveContainmentFence;
-        effect();
-        self.ensure_available()
+        Ok(effect())
     }
 }
 
@@ -6194,6 +6391,154 @@ mod coverage_paths {
         assert_eq!(
             current.validate_frozen_membership_successor(&changed_membership),
             Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    /// ADR-106 r3: one gate with an active, authorized (unfrozen) request
+    /// whose scope includes `affected` and excludes `unaffected`.
+    fn admitted_fork_gate(
+        affected: TimelineId,
+        unaffected: TimelineId,
+    ) -> Result<(ErasureContainmentGateV1, ErasureTopologyStoreBindingV1), ErasureErrorV1> {
+        let state = inventory_state_with_timelines(
+            reference(211),
+            reference(212),
+            reference(213),
+            ErasureLifecycleV1::Authorized,
+            vec![affected],
+        )?;
+        let proof = ErasureVerifiedTopologyProofV1::from_verified_recovery(
+            state.manifest_digest(),
+            vec![(affected, reference(213))],
+            vec![unaffected],
+        );
+        let inventory = ErasureVerifiedInventoryV1::from_verified_recovery(
+            vec![(state, proof)],
+            vec![affected, unaffected],
+            4,
+        )?;
+        let gate = ErasureContainmentGateV1::new_fail_closed();
+        let binding = gate
+            .issue_topology_store_binding()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        gate.install_verified_inventory(
+            Arc::new(inventory),
+            ErasureRecoveryLimitsV1::from_maximum_requests(4)?,
+        )
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        Ok((gate, binding))
+    }
+
+    #[test]
+    fn admitted_fork_context_binds_one_fcc1_and_its_fenced_parent_verdict(
+    ) -> Result<(), ErasureErrorV1> {
+        let affected = TimelineId::new();
+        let unaffected = TimelineId::new();
+        let unclassified = TimelineId::new();
+        let (gate, binding) = admitted_fork_gate(affected, unaffected)?;
+        let other_gate = ErasureContainmentGateV1::new_test_open();
+        let operation = crate::Hash::from_bytes([214; 32]);
+        let mut verdicts = Vec::new();
+        let mut transition = |permit: &ErasureTopologyTransitionPermitV1| {
+            let context = gate.admitted_fork_context(permit, operation, unaffected);
+            verdicts.extend([
+                // T7: an unfrozen parent positively proven unaffected.
+                context.authorize_admitted_fork(&gate, &binding, operation, unaffected),
+                // T2: affected by an active request that is not yet frozen.
+                gate.admitted_fork_context(permit, operation, affected)
+                    .authorize_admitted_fork(&gate, &binding, operation, affected),
+                // An unclassified parent has no positive proof.
+                gate.admitted_fork_context(permit, operation, unclassified)
+                    .authorize_admitted_fork(&gate, &binding, operation, unclassified),
+                // T6: the context names another operation or parent.
+                context.authorize_admitted_fork(
+                    &gate,
+                    &binding,
+                    crate::Hash::from_bytes([215; 32]),
+                    unaffected,
+                ),
+                context.authorize_admitted_fork(&gate, &binding, operation, affected),
+                // A context minted by a gate other than the permit's.
+                other_gate
+                    .admitted_fork_context(permit, operation, unaffected)
+                    .authorize_admitted_fork(&gate, &binding, operation, unaffected),
+            ]);
+            Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::ProvenanceMissing)
+        };
+        assert!(gate
+            .install_from_verified_inventory_transition(&mut transition)
+            .is_err());
+        assert_eq!(
+            verdicts,
+            vec![
+                Ok(()),
+                Err(ErasureContainmentErrorV1::AccessFrozen),
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable),
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable),
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable),
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn admitted_fork_context_fails_closed_for_frozen_foreign_and_unverified_gates(
+    ) -> Result<(), ErasureErrorV1> {
+        let affected = TimelineId::new();
+        let unaffected = TimelineId::new();
+        let (gate, binding) = admitted_fork_gate(affected, unaffected)?;
+        let other_gate = ErasureContainmentGateV1::new_test_open();
+        let unverified = ErasureContainmentGateV1::new_fail_closed();
+        let unverified_binding = unverified
+            .issue_topology_store_binding()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        let operation = crate::Hash::from_bytes([216; 32]);
+        let mut verdicts = Vec::new();
+        // T1: a frozen parent is contained before any inventory proof.
+        gate.freeze_timeline_for_test(unaffected);
+        let mut frozen = |permit: &ErasureTopologyTransitionPermitV1| {
+            verdicts.push(
+                gate.admitted_fork_context(permit, operation, unaffected)
+                    .authorize_admitted_fork(&gate, &binding, operation, unaffected),
+            );
+            Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::ProvenanceMissing)
+        };
+        assert!(gate
+            .install_from_verified_inventory_transition(&mut frozen)
+            .is_err());
+        // T6: a permit minted by another gate cannot be claimed for this one.
+        let mut foreign = |permit: &ErasureTopologyTransitionPermitV1| {
+            verdicts.push(
+                other_gate
+                    .admitted_fork_context(permit, operation, affected)
+                    .authorize_admitted_fork(&gate, &binding, operation, affected),
+            );
+            Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::ProvenanceMissing)
+        };
+        assert!(other_gate
+            .install_from_verified_inventory_transition(&mut foreign)
+            .is_err());
+        // T4: a fail-closed gate without a verified inventory.
+        let mut unavailable = |permit: &ErasureTopologyTransitionPermitV1| {
+            verdicts.push(
+                unverified
+                    .admitted_fork_context(permit, operation, affected)
+                    .authorize_admitted_fork(&unverified, &unverified_binding, operation, affected),
+            );
+            Err::<(ErasureVerifiedInventoryV1, ()), _>(ErasureErrorV1::ProvenanceMissing)
+        };
+        assert!(unverified
+            .install_from_verified_inventory_transition(&mut unavailable)
+            .is_err());
+        assert_eq!(
+            verdicts,
+            vec![
+                Err(ErasureContainmentErrorV1::AccessFrozen),
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable),
+                Err(ErasureContainmentErrorV1::RecoveryUnavailable),
+            ]
         );
         Ok(())
     }

@@ -17,10 +17,10 @@ use pos_core::{
     event::{EventDraft, Kind},
     ids::{EntityId, TimelineId},
     store::{EventReadBounds, EventStore, SeqRange},
-    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureHostErrorV1, Event,
-    ReproManifest, Seq, Timeline,
+    ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureContainmentGateV1,
+    ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event, ReproManifest, Seq,
+    Timeline,
 };
-use pos_core::{ErasureContainmentGateV1, ErasureGate};
 use pos_runtime::PluginRegistry;
 use pos_store::StoreConfig;
 use std::collections::HashSet;
@@ -406,19 +406,48 @@ impl RunResult {
                     .map_err(ExperimentError::from)
             })
             .and_then(|timeline_head| {
-                gate.authorize_projection(
-                    self.timeline_id,
-                    subject,
-                    timeline_head.as_u64(),
-                    now_secs,
-                    token,
-                )
-                .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))
-            })
-            .map(|()| {
                 self.projections
-                    .state_for_reducer(reducer, &subject)
-                    .cloned()
+                    .clone_erasure_gate()
+                    .ok_or(ExperimentError::Runtime(
+                        pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                    ))
+                    .and_then(|erasure_gate| {
+                        let mut result = Err(ExperimentError::Runtime(
+                            pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                        ));
+                        let mut read = || {
+                            result = gate
+                                .authorize_projection(
+                                    self.timeline_id,
+                                    subject,
+                                    timeline_head.as_u64(),
+                                    now_secs,
+                                    token,
+                                )
+                                .map_err(|error| {
+                                    map_runtime_error(pos_runtime::RuntimeError::Consent(error))
+                                })
+                                .and_then(|()| {
+                                    self.projections
+                                        .state_for_reducer(self.timeline_id, reducer, &subject)
+                                        .or(Err(ExperimentError::Runtime(
+                                            pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                                        )))
+                                });
+                        };
+                        erasure_gate
+                            .with_fence(
+                                self.timeline_id,
+                                ErasureProtectedOperationV1::Snapshot,
+                                &mut read,
+                            )
+                            .map_err(|_| {
+                                ExperimentError::Runtime(
+                                    pos_runtime::RuntimeError::ErasureOperationUnavailable,
+                                )
+                            })
+                            .and(result)
+                    })
             })
     }
 
@@ -784,9 +813,67 @@ fn fold_captured_range(
     registry: &mut PluginRegistry,
     captured: &CapturedRange,
 ) -> FoldedEventCount {
-    registry.fold_events(&captured.events);
+    registry.fold_events(captured.timeline.id(), &captured.events);
     boundary.folded_through = captured.through;
     FoldedEventCount(u64::try_from(captured.events.len()).unwrap_or(u64::MAX))
+}
+
+fn fold_host_captured_range(
+    store: &SharedEventStore,
+    boundary: &mut TickBoundaryCoordinator,
+    registry: &mut PluginRegistry,
+    captured: &CapturedRange,
+) -> Result<FoldedEventCount, ExperimentError> {
+    if registry
+        .validate_projection_source(captured.timeline.id())
+        .is_ok()
+    {
+        return Ok(fold_captured_range(boundary, registry, captured));
+    }
+    refold_host_projection_prefix(store, registry, captured.timeline.id(), captured.through)?;
+    boundary.folded_through = captured.through;
+    Ok(FoldedEventCount(
+        u64::try_from(captured.events.len()).unwrap_or(u64::MAX),
+    ))
+}
+
+fn refold_host_projection_prefix(
+    store: &SharedEventStore,
+    registry: &mut PluginRegistry,
+    timeline: TimelineId,
+    through: pos_core::clock::Seq,
+) -> Result<Vec<Event>, ExperimentError> {
+    let (events, generation) = lock_store(store).and_then(|store| {
+        let events = read_completed_prefix(store.as_ref(), timeline, through)?;
+        let generation = registry
+            .clone_erasure_gate()
+            .and_then(|gate| gate.inventory_generation().ok());
+        Ok((events, generation))
+    })?;
+    registry.refold_projection_events(timeline, &events, generation)?;
+    Ok(events)
+}
+
+fn authorized_result_projections(
+    store: &SharedEventStore,
+    mut registry: PluginRegistry,
+    timeline: TimelineId,
+    through: pos_core::clock::Seq,
+    token: Option<&ConsentCapabilityToken>,
+    public_events: &[Event],
+) -> Result<pos_state::ProjectionRegistry, ExperimentError> {
+    if registry.validate_projection_source(timeline).is_err() {
+        refold_host_projection_prefix(store, &mut registry, timeline, through)?;
+    }
+    registry
+        .into_authorized_projections(
+            timeline,
+            through,
+            current_now_secs(),
+            token,
+            Some(public_events),
+        )
+        .map_err(ExperimentError::Runtime)
 }
 
 fn append_driver_drafts(
@@ -806,16 +893,27 @@ fn append_driver_drafts(
             .map(|()| 0)
             .map_err(ExperimentError::from)
     } else {
-        store
-            .logical_head(timeline_id)
-            .map_err(ExperimentError::from)
-            .and_then(|head| {
-                registry
-                    .append_and_commit_step_at(store, head, 0, &drafts)
-                    .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
-                    .map_err(map_runtime_error)
-            })
+        append_nonempty_driver_drafts(store, timeline_id, registry, &drafts)
     }
+}
+
+fn append_nonempty_driver_drafts(
+    store: &mut dyn pos_core::store::EventStore,
+    timeline_id: pos_core::ids::TimelineId,
+    registry: &mut PluginRegistry,
+    drafts: &[EventDraft],
+) -> Result<u64, ExperimentError> {
+    let head = match store.logical_head(timeline_id) {
+        Ok(head) => head,
+        Err(error) => {
+            registry.abort_step();
+            return Err(error.into());
+        }
+    };
+    registry
+        .append_and_commit_step_at(store, head, 0, drafts)
+        .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
+        .map_err(map_runtime_error)
 }
 
 fn step_driver_with_completed_prefix(
@@ -964,8 +1062,12 @@ fn timeline_ancestry(
     Ok(reversed)
 }
 
-fn hydrate_projections(registry: &mut PluginRegistry, events: &[pos_core::Event]) {
-    registry.fold_events(events);
+fn hydrate_projections(
+    registry: &mut PluginRegistry,
+    timeline: TimelineId,
+    events: &[pos_core::Event],
+) {
+    registry.fold_events(timeline, events);
 }
 
 fn restore_inherited_eval_events(
@@ -1126,23 +1228,79 @@ impl Experiment {
     /// Register a plugin (wires schemas + reducer + driver).
     ///
     /// # Errors
-    /// Returns [`pos_runtime::RuntimeError::DuplicatePlugin`] if a plugin with the same id
-    /// is already registered.
-    pub fn register(
+    /// Returns registration, generated-policy, or output-admission errors.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn register_generated(
         &mut self,
         plugin: &dyn pos_core::Plugin,
         reducer: Option<Box<dyn pos_core::Reducer>>,
         driver: Option<Box<dyn pos_runtime::Driver>>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register(plugin, reducer, driver)
+        self.registry.register_generated(plugin, reducer, driver)
+    }
+
+    /// Register a Plugin with a complete host-authorized output binding.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or artifact-admission error.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn register_with_verified_output_policy(
+        &mut self,
+        plugin: &dyn pos_core::Plugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+        driver: Option<Box<dyn pos_runtime::Driver>>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry
+            .register_with_verified_output_policy(plugin, binding, reducer, driver)
+    }
+
+    /// Register a Plugin with an authorized binding and optional action approver.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or artifact-admission error.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn register_with_verified_output_policy_and_approver(
+        &mut self,
+        plugin: &dyn pos_core::Plugin,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+        driver: Option<Box<dyn pos_runtime::Driver>>,
+        approver: Option<Box<dyn pos_core::ActionApprover>>,
+        approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry
+            .register_with_verified_output_policy_and_approver(
+                plugin,
+                binding,
+                reducer,
+                driver,
+                approver,
+                approver_event_types,
+            )
+    }
+
+    /// Register an installed Plugin with its verified callbacks and exact pin.
+    ///
+    /// # Errors
+    /// Returns the runtime registration or output-admission error before mutation.
+    pub fn register_installed_output<P: pos_core::Plugin>(
+        &mut self,
+        plugin: &P,
+        binding: pos_runtime::OutputPolicyBindingV1,
+        registration: pos_runtime::PluginRegistrationV1,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry
+            .register_installed_output(plugin, binding, registration, reducer)
     }
 
     /// Register a plugin with an optional action approver.
     ///
     /// # Errors
-    /// Returns [`pos_runtime::RuntimeError::DuplicatePlugin`] if a plugin with the same id
-    /// is already registered.
-    pub fn register_with_approver(
+    /// Returns registration, generated-policy, or output-admission errors.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn register_generated_with_approver(
         &mut self,
         plugin: &dyn pos_core::Plugin,
         reducer: Option<Box<dyn pos_core::Reducer>>,
@@ -1150,7 +1308,7 @@ impl Experiment {
         approver: Option<Box<dyn pos_core::ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register_with_approver(
+        self.registry.register_generated_with_approver(
             plugin,
             reducer,
             driver,
@@ -1334,7 +1492,7 @@ impl Experiment {
         validate_captured_range(pos_core::clock::Seq::ZERO, folded_through, &events)?;
         let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
         self.registry.restore_driver_state(&ancestry, &events)?;
-        hydrate_projections(&mut self.registry, &events);
+        hydrate_projections(&mut self.registry, timeline_id, &events);
         let revoked_subjects = recovered_revoked_subjects(&events);
         let consent_revoked = events.iter().any(|event| {
             event.event_type.as_str() == EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
@@ -1670,9 +1828,17 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        fold_captured_range(&mut self.boundary, &mut self.registry, &after);
+        self.finish_append_after(&after, emitted.len())
+    }
+
+    fn finish_append_after(
+        &mut self,
+        after: &CapturedRange,
+        emitted_count: usize,
+    ) -> Result<u64, ExperimentError> {
+        self.fold_captured_range_or_fault(after)?;
         self.total_events = self.boundary.folded_through.as_u64();
-        Ok(u64::try_from(emitted.len()).unwrap_or(u64::MAX))
+        Ok(u64::try_from(emitted_count).unwrap_or(u64::MAX))
     }
 
     /// Submit one external action through the owning Plugin's authority seam.
@@ -1839,7 +2005,7 @@ impl ExperimentSession {
             return Ok(TickOutcome::Stopped);
         }
 
-        let (mut folded_events, committed_events) = self.prepare_tick()?;
+        let (folded_events, committed_events) = self.prepare_tick()?;
 
         let drafts = match self.select_step_drafts(request, &committed_events) {
             Ok(drafts) => drafts,
@@ -1856,11 +2022,14 @@ impl ExperimentSession {
             self.registry.abort_step();
             return Err(ExperimentError::ConsentRevokedV1);
         }
-        if let Err(error) = self.registry.schemas.validate_batch(&drafts) {
-            self.registry.abort_step();
-            self.health = SessionHealth::Faulted;
-            return Err(error.into());
-        }
+        self.registry
+            .schemas
+            .validate_batch(&drafts)
+            .map_err(ExperimentError::from)
+            .inspect_err(|_| {
+                self.registry.abort_step();
+                self.health = SessionHealth::Faulted;
+            })?;
         let emitted_events = if drafts.is_empty() {
             self.registry
                 .commit_step_at(self.boundary.folded_through, current_now_secs())?;
@@ -1884,6 +2053,7 @@ impl ExperimentSession {
             {
                 Ok(count) => count,
                 Err(error) => {
+                    self.registry.abort_step();
                     self.health = SessionHealth::Faulted;
                     return Err(error);
                 }
@@ -1903,8 +2073,17 @@ impl ExperimentSession {
                 return Err(error);
             }
         };
-        folded_events = folded_events
-            .saturating_add(fold_captured_range(&mut self.boundary, &mut self.registry, &after).0);
+        self.finish_step_boundary_after(after, folded_events, emitted_events)
+    }
+
+    fn finish_step_boundary_after(
+        &mut self,
+        after: CapturedRange,
+        mut folded_events: u64,
+        emitted_events: u64,
+    ) -> Result<TickOutcome, ExperimentError> {
+        let after_count = self.fold_captured_range_or_fault(&after)?;
+        folded_events = folded_events.saturating_add(after_count.0);
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events);
         self.ticks = self.ticks.saturating_add(1);
@@ -1981,7 +2160,16 @@ impl ExperimentSession {
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
             })?;
-        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &after);
+        self.finish_host_closure_after(after, subject, emitted_events)
+    }
+
+    fn finish_host_closure_after(
+        &mut self,
+        after: CapturedRange,
+        subject: Option<EntityId>,
+        emitted_events: u64,
+    ) -> Result<TickOutcome, ExperimentError> {
+        let folded_events = self.fold_captured_range_or_fault(&after)?;
         self.timeline = after.timeline;
         self.total_events = self.total_events.saturating_add(folded_events.0);
         self.ticks = self.ticks.saturating_add(1);
@@ -1997,6 +2185,24 @@ impl ExperimentSession {
         })
     }
 
+    fn fold_captured_range_or_fault(
+        &mut self,
+        captured: &CapturedRange,
+    ) -> Result<FoldedEventCount, ExperimentError> {
+        match fold_host_captured_range(
+            &self.store,
+            &mut self.boundary,
+            &mut self.registry,
+            captured,
+        ) {
+            Ok(count) => Ok(count),
+            Err(error) => {
+                self.health = SessionHealth::Faulted;
+                Err(error)
+            }
+        }
+    }
+
     fn prepare_tick(&mut self) -> Result<(u64, Vec<pos_core::Event>), ExperimentError> {
         let before = lock_store(&self.store).and_then(|store| {
             capture_pending_range(
@@ -2005,16 +2211,51 @@ impl ExperimentSession {
                 self.boundary.folded_through,
             )
         })?;
-        let mut committed_events = lock_store(&self.store).and_then(|store| {
-            read_completed_prefix_at(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )
-        })?;
-        committed_events.extend(before.events.iter().cloned());
-        let folded_events = fold_captured_range(&mut self.boundary, &mut self.registry, &before);
+        let (folded_events, committed_events) = self.prepare_projection_view(&before)?;
         Ok((folded_events.0, committed_events))
+    }
+
+    fn prepare_projection_view(
+        &mut self,
+        before: &CapturedRange,
+    ) -> Result<(FoldedEventCount, Vec<pos_core::Event>), ExperimentError> {
+        let (folded_events, committed_events) = if self
+            .registry
+            .validate_projection_source(self.timeline.id())
+            .is_ok()
+        {
+            let mut committed_events = lock_store(&self.store).and_then(|store| {
+                read_completed_prefix_at(
+                    store.as_ref(),
+                    self.timeline.id(),
+                    self.boundary.folded_through,
+                )
+            })?;
+            committed_events.extend(before.events.iter().cloned());
+            (
+                fold_captured_range(&mut self.boundary, &mut self.registry, before),
+                committed_events,
+            )
+        } else {
+            let committed_events = match refold_host_projection_prefix(
+                &self.store,
+                &mut self.registry,
+                self.timeline.id(),
+                before.through,
+            ) {
+                Ok(events) => events,
+                Err(error) => {
+                    self.health = SessionHealth::Faulted;
+                    return Err(error);
+                }
+            };
+            self.boundary.folded_through = before.through;
+            (
+                FoldedEventCount(u64::try_from(before.events.len()).unwrap_or(u64::MAX)),
+                committed_events,
+            )
+        };
+        Ok((folded_events, committed_events))
     }
 
     fn hydrate_fork_registry(
@@ -2027,7 +2268,7 @@ impl ExperimentSession {
         let Some(token) = self.operation_token.as_ref() else {
             reject_protected_events(events)?;
             registry.restore_driver_state(ancestry, events)?;
-            hydrate_projections(registry, events);
+            hydrate_projections(registry, self.timeline.id(), events);
             return Ok(());
         };
         let gate = self
@@ -2039,7 +2280,7 @@ impl ExperimentSession {
             if let Err(error) = registry.restore_driver_state(ancestry, events) {
                 hydration_error = Some(error);
             } else {
-                hydrate_projections(registry, events);
+                hydrate_projections(registry, self.timeline.id(), events);
             }
         };
         gate.with_token_fence(
@@ -2209,6 +2450,7 @@ impl ExperimentSession {
             .plugin_versions()
             .map(|(name, version)| (name.to_owned(), version.to_owned()))
             .collect();
+        let replay_policy_evidence = ReplayPolicyManifestEvidence::from_registry(&self.registry);
         let consent_gate = self
             .operation_token
             .as_ref()
@@ -2216,16 +2458,14 @@ impl ExperimentSession {
         let protected_token = self.operation_token;
         let public_events = lock_store(&self.store)
             .and_then(|store| read_completed_prefix(store.as_ref(), timeline_id, timeline_head))?;
-        let projections = self
-            .registry
-            .into_authorized_projections(
-                timeline_id,
-                timeline_head,
-                current_now_secs(),
-                protected_token.as_ref(),
-                Some(&public_events),
-            )
-            .map_err(ExperimentError::Runtime)?;
+        let projections = authorized_result_projections(
+            &self.store,
+            self.registry,
+            timeline_id,
+            timeline_head,
+            protected_token.as_ref(),
+            &public_events,
+        )?;
         let ticks = self.ticks;
         let total_events = self.total_events;
         let store_config = self.recovery_store_config;
@@ -2236,6 +2476,7 @@ impl ExperimentSession {
                 for (name, version) in &plugin_versions {
                     manifest = manifest.with_plugin_version(name, version.clone());
                 }
+                manifest = replay_policy_evidence.add_to_manifest(manifest);
                 manifest
                     .adapter_records
                     .push(pos_core::manifest::AdapterRecord {
@@ -2440,6 +2681,64 @@ fn compute_retained_calibration_report(
         .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))
 }
 
+struct ReplayPolicyManifestEvidence {
+    output_policy_digests: Vec<(String, Hash)>,
+    replay_policy_identities: Vec<(String, Hash)>,
+    replay_policy_closures: Vec<(String, Vec<u8>)>,
+    replay_policy_closure_identities: Vec<(String, Hash)>,
+}
+
+impl ReplayPolicyManifestEvidence {
+    fn from_registry(registry: &pos_runtime::PluginRegistry) -> Self {
+        Self {
+            output_policy_digests: registry
+                .output_policy_digests()
+                .map(|(name, digest)| (name.to_owned(), digest))
+                .collect(),
+            replay_policy_identities: registry
+                .replay_policy_identities()
+                .map(|(name, identity)| (name.to_owned(), identity))
+                .collect(),
+            replay_policy_closures: registry
+                .replay_policy_closures()
+                .map(|(name, closure)| (name.to_owned(), closure))
+                .collect(),
+            replay_policy_closure_identities: registry
+                .replay_policy_closure_identities()
+                .map(|(name, identity)| (name.to_owned(), identity))
+                .collect(),
+        }
+    }
+
+    fn add_to_manifest(self, mut manifest: ReproManifest) -> ReproManifest {
+        for (name, digest) in self.output_policy_digests {
+            manifest = manifest.with_output_policy_digest(name, digest);
+        }
+        for (name, identity) in self.replay_policy_identities {
+            manifest = manifest.with_replay_policy_identity(name, identity);
+        }
+        for (name, closure) in self.replay_policy_closures {
+            manifest = manifest.with_replay_policy_closure(name, closure);
+        }
+        for (name, identity) in self.replay_policy_closure_identities {
+            manifest = manifest.with_replay_policy_closure_identity(name, identity);
+        }
+        manifest
+    }
+}
+
+fn manifest_for_registry(
+    timeline_id: pos_core::ids::TimelineId,
+    chain_head: pos_core::Hash,
+    registry: &pos_runtime::PluginRegistry,
+) -> ReproManifest {
+    ReplayPolicyManifestEvidence::from_registry(registry).add_to_manifest(ReproManifest::new(
+        timeline_id,
+        chain_head,
+        WallTime::now(),
+    ))
+}
+
 impl BacktestRunner {
     /// Create a new backtest runner.
     ///
@@ -2548,7 +2847,7 @@ impl BacktestRunner {
             &mut eval_registry,
             erasure_gate,
         )?;
-        hydrate_projections(&mut eval_registry, &inherited);
+        hydrate_projections(&mut eval_registry, eval_tl_id, &inherited);
         let eval_stop = StopCondition::MaxTicks(self.config.eval_ticks);
         let (eval_ticks, eval_events, eval_chain_head) = run_experiment_on_store(
             store,
@@ -2565,8 +2864,8 @@ impl BacktestRunner {
             lift_vs_persistence,
         ) = backtest_metrics(train_ticks, train_events, eval_ticks, eval_events);
 
-        let train_manifest = ReproManifest::new(train_tl_id, train_chain_head, WallTime::now());
-        let eval_manifest = ReproManifest::new(eval_tl_id, eval_chain_head, WallTime::now());
+        let train_manifest = manifest_for_registry(train_tl_id, train_chain_head, &train_registry);
+        let eval_manifest = manifest_for_registry(eval_tl_id, eval_chain_head, &eval_registry);
         let eval_head_seq = store.logical_head(eval_tl_id)?;
         let train_result = build_backtest_run_result(
             store,
@@ -2611,7 +2910,7 @@ impl BacktestRunner {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
+pub mod tests {
     fn fail_test(message: String) -> ! {
         use std::io::Write as _;
 
@@ -2750,6 +3049,24 @@ mod tests {
         );
     }
 
+    fn run_result_projection_event(subject: EntityId) -> Event {
+        Event {
+            id: pos_core::EventId::new(),
+            entity: subject,
+            event_type: Kind::new("projection.event"),
+            payload: pos_core::CanonicalBytes::from_static(b"projection"),
+            wall_time: pos_core::clock::WallTime::from_micros(0),
+            seq: pos_core::clock::Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: pos_core::event::SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: pos_core::crypto::Hash::zero(),
+        }
+    }
+
     #[test]
     fn protected_run_result_enforces_fork_and_export_capabilities() {
         let database = tempfile::NamedTempFile::new().test_ok();
@@ -2776,6 +3093,7 @@ mod tests {
             },
         );
         let gate: Arc<dyn ConsentGate> = Arc::new(authority);
+        let erasure_gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut result = RunResult {
             timeline_id,
             ticks: 0,
@@ -2786,7 +3104,8 @@ mod tests {
                 pos_core::crypto::Hash::zero(),
                 pos_core::clock::WallTime::from_micros(0),
             ),
-            projections: pos_state::ProjectionRegistry::new(),
+            projections: pos_state::ProjectionRegistry::new()
+                .with_erasure_gate(erasure_gate.clone()),
             consent_gate: Some(Arc::clone(&gate)),
             protected_token: Some(token.clone()),
             store_config: Some(store_config),
@@ -2794,21 +3113,9 @@ mod tests {
         result
             .projections
             .register("projection", Box::new(CountReducer));
-        result.projections.apply_event(&Event {
-            id: pos_core::EventId::new(),
-            entity: subject_id,
-            event_type: Kind::new("projection.event"),
-            payload: pos_core::CanonicalBytes::from_static(b"projection"),
-            wall_time: pos_core::clock::WallTime::from_micros(0),
-            seq: pos_core::clock::Seq::from_u64(1),
-            causation_id: None,
-            correlation_id: None,
-            schema_version: pos_core::event::SchemaVersion::V1,
-            signature: None,
-            signature_identity: None,
-            origin: None,
-            payload_hash: pos_core::crypto::Hash::zero(),
-        });
+        result
+            .projections
+            .apply_event(timeline_id, &run_result_projection_event(subject_id));
         let projected = result
             .projection_state_for_reducer("projection", subject_id, &token, 0)
             .test_ok()
@@ -2822,9 +3129,22 @@ mod tests {
             .test_ok()
             .is_none());
         assert!(matches!(
+            result.projection_state_for_reducer("projection", EntityId::new(), &token, 0),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::Consent(pos_core::ConsentError::NoConsent)
+            ))
+        ));
+        assert!(matches!(
             result.branch("forbidden"),
             Err(ExperimentError::Runtime(
                 pos_runtime::RuntimeError::Consent(pos_core::ConsentError::ForkNotPermitted)
+            ))
+        ));
+        erasure_gate.freeze_timeline_for_test(timeline_id);
+        assert!(matches!(
+            result.projection_state_for_reducer("projection", subject_id, &token, 0),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::ErasureOperationUnavailable
             ))
         ));
         assert!(matches!(
@@ -3020,7 +3340,7 @@ mod tests {
         let mut registry = PluginRegistry::new();
         for spec in plugins {
             registry
-                .register(&CompositionPlugin(*spec), None, None)
+                .register_generated(&CompositionPlugin(*spec), None, None)
                 .test_ok();
         }
         registry
@@ -3064,7 +3384,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -3098,7 +3418,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -3134,7 +3454,7 @@ mod tests {
         });
         let mut registry = PluginRegistry::new().with_erasure_gate(gate.clone());
         registry
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -3190,7 +3510,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -3308,7 +3628,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -3341,7 +3661,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register_with_approver(
+            .register_generated_with_approver(
                 &plugin,
                 None,
                 None,
@@ -3354,8 +3674,8 @@ mod tests {
             Box::new(CaptureAwareStore {
                 base: Box::new(pos_store::memory::MemoryStore::new()),
                 state: Arc::new(Mutex::new(HostTransactionState::default())),
-                fail_append: true,
-                fail_post_step_capture: false,
+                failure_mode: CaptureFailureMode::Append,
+                erasure_gate: None,
             }),
         )
         .test_ok();
@@ -3394,22 +3714,22 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct HostTransactionState {
-        steps: usize,
-        commits: usize,
-        aborts: usize,
-        committed_tick: u64,
-        staged: bool,
-        anchors: Vec<pos_runtime::SnapshotAnchor>,
-        append_calls: Vec<(usize, usize)>,
-        capture_commits: Vec<usize>,
+    pub(super) struct HostTransactionState {
+        pub(super) steps: usize,
+        pub(super) commits: usize,
+        pub(super) aborts: usize,
+        pub(super) committed_tick: u64,
+        pub(super) staged: bool,
+        pub(super) anchors: Vec<pos_runtime::SnapshotAnchor>,
+        pub(super) append_calls: Vec<(usize, usize)>,
+        pub(super) capture_commits: Vec<usize>,
     }
 
-    struct HostTransactionalDriver {
-        entity: EntityId,
-        event_type: Option<Kind>,
-        state: Arc<Mutex<HostTransactionState>>,
-        fail_step: bool,
+    pub(super) struct HostTransactionalDriver {
+        pub(super) entity: EntityId,
+        pub(super) event_type: Option<Kind>,
+        pub(super) state: Arc<Mutex<HostTransactionState>>,
+        pub(super) fail_step: bool,
     }
 
     impl Driver for HostTransactionalDriver {
@@ -3468,11 +3788,20 @@ mod tests {
         }
     }
 
-    struct CaptureAwareStore {
-        base: Box<dyn EventStore>,
-        state: Arc<Mutex<HostTransactionState>>,
-        fail_append: bool,
-        fail_post_step_capture: bool,
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum CaptureFailureMode {
+        None,
+        Append,
+        PreAppendHead,
+        PostStepCapture,
+        PoisonAfterAppend,
+    }
+
+    pub(super) struct CaptureAwareStore {
+        pub(super) base: Box<dyn EventStore>,
+        pub(super) state: Arc<Mutex<HostTransactionState>>,
+        pub(super) failure_mode: CaptureFailureMode,
+        pub(super) erasure_gate: Option<Arc<pos_core::ErasureContainmentGateV1>>,
     }
 
     impl EventStore for CaptureAwareStore {
@@ -3480,6 +3809,7 @@ mod tests {
             &mut self,
             gate: Arc<pos_core::ErasureContainmentGateV1>,
         ) -> Result<(), CoreError> {
+            self.erasure_gate = Some(Arc::clone(&gate));
             self.base.bind_erasure_gate(gate)
         }
 
@@ -3496,10 +3826,16 @@ mod tests {
             let commits = state.commits;
             state.append_calls.push((drafts.len(), commits));
             drop(state);
-            if self.fail_append {
+            if self.failure_mode == CaptureFailureMode::Append {
                 Err(CoreError::Storage("injected append failure".to_owned()))
             } else {
-                self.base.append(timeline, drafts)
+                let events = self.base.append(timeline, drafts)?;
+                if self.failure_mode == CaptureFailureMode::PoisonAfterAppend {
+                    if let Some(gate) = &self.erasure_gate {
+                        gate.poison();
+                    }
+                }
+                Ok(events)
             }
         }
 
@@ -3535,18 +3871,23 @@ mod tests {
             &self,
             id: pos_core::ids::TimelineId,
         ) -> Result<pos_core::clock::Seq, CoreError> {
-            let state = self.state.lock().test_ok();
+            let mut state = self.state.lock().test_ok();
             if state.steps > 0 {
                 let post_step_capture = !state.append_calls.is_empty();
                 let commits = state.commits;
-                drop(state);
-                self.state.lock().test_ok().capture_commits.push(commits);
-                if self.fail_post_step_capture && post_step_capture {
+                state.capture_commits.push(commits);
+                if self.failure_mode == CaptureFailureMode::PreAppendHead && !post_step_capture {
+                    return Err(CoreError::Storage(
+                        "injected pre-append head failure".to_owned(),
+                    ));
+                }
+                if self.failure_mode == CaptureFailureMode::PostStepCapture && post_step_capture {
                     return Err(CoreError::Storage(
                         "injected post-step capture failure".to_owned(),
                     ));
                 }
             }
+            drop(state);
             self.base.logical_head(id)
         }
     }
@@ -3581,8 +3922,8 @@ mod tests {
         let mut store = CaptureAwareStore {
             base: Box::new(test_memory_store()),
             state: Arc::clone(&store_state),
-            fail_append: false,
-            fail_post_step_capture: false,
+            failure_mode: CaptureFailureMode::None,
+            erasure_gate: None,
         };
         let created = store.create_timeline("capture-aware-seam").test_ok();
         let draft = EventDraft::new(
@@ -3794,7 +4135,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(CountReducer)),
                 Some(Box::new(CadencedCountingDriver {
@@ -3823,6 +4164,48 @@ mod tests {
             session.ticks,
             session.total_events,
         )
+    }
+
+    struct PrefixDriver {
+        entity: EntityId,
+        observed: Arc<Mutex<Vec<Vec<u64>>>>,
+        event_types: Vec<Kind>,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Driver for PrefixDriver {
+        fn name(&self) -> &'static str {
+            "prefix-driver"
+        }
+
+        fn event_subscriptions(&self) -> &[Kind] {
+            &self.event_types
+        }
+
+        fn requires_verified_event_prefix(&self) -> bool {
+            true
+        }
+
+        fn step(
+            &mut self,
+            _: TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            let seqs = observations
+                .verified_prefix_events()
+                .ok_or(RuntimeError::InvalidRecoveryEvidence {
+                    reason: "missing verified Event prefix",
+                })?
+                .iter()
+                .map(|event| event.seq.as_u64())
+                .collect();
+            self.observed.lock().test_ok().push(seqs);
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.entity,
+                Kind::new("refresh.event"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )]))
+        }
     }
 
     struct RecordingDriver {
@@ -3951,7 +4334,7 @@ mod tests {
             stop: StopCondition::MaxTicks(5),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
 
         let result = exp.run().test_ok();
@@ -3972,7 +4355,7 @@ mod tests {
             stop: StopCondition::MaxEvents(6),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
 
         let result = exp.run().test_ok();
@@ -4004,7 +4387,7 @@ mod tests {
             stop: StopCondition::MaxTicks(1_000_000),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(IdleDriver)))
+        exp.register_generated(&plugin, None, Some(Box::new(IdleDriver)))
             .test_ok();
 
         // Should terminate quickly, not loop forever
@@ -4027,7 +4410,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register(
+            .register_generated(
                 &fast,
                 None,
                 Some(Box::new(CadencedCountingDriver {
@@ -4040,7 +4423,7 @@ mod tests {
             )
             .test_ok();
         experiment
-            .register(
+            .register_generated(
                 &slow,
                 None,
                 Some(Box::new(CadencedCountingDriver {
@@ -4206,7 +4589,7 @@ mod tests {
         })
         .with_fork_registry_factory(move || Ok(composition_registry(&[plugin])));
         experiment
-            .register(&CompositionPlugin(plugin), None, None)
+            .register_generated(&CompositionPlugin(plugin), None, None)
             .test_ok();
         let mut parent = experiment.start().test_ok();
         let parent_id = parent.timeline().id();
@@ -4236,7 +4619,7 @@ mod tests {
             store_config: StoreConfig::Sqlite { path },
         });
         recovery
-            .register(&CompositionPlugin(plugin), None, None)
+            .register_generated(&CompositionPlugin(plugin), None, None)
             .test_ok();
         let mut resumed = recovery.resume(parent_id).test_ok();
         assert_eq!(resumed.step_cadenced(0).test_ok(), TickOutcome::Quiescent);
@@ -4292,7 +4675,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(CountReducer)),
                 Some(Box::new(RecordingDriver::new(
@@ -4361,7 +4744,7 @@ mod tests {
             store_config: StoreConfig::Sqlite { path },
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(CountReducer)),
                 Some(Box::new(InterleavingDriver {
@@ -4395,11 +4778,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(1, 200), (2, 100)]
         );
-        let mut replayed = pos_state::ProjectionRegistry::new();
+        let mut replayed = pos_state::ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         replayed.register("interleaving", Box::new(CountReducer));
-        replayed.fold_events(&events);
+        replayed.fold_events(timeline, &events);
         drop(store);
-        assert!(replayed.state_for(&entity).is_some());
+        assert!(replayed.state_for(timeline, &entity).test_ok().is_some());
     }
 
     #[test]
@@ -4438,7 +4822,7 @@ mod tests {
             store_config: StoreConfig::Sqlite { path: path.clone() },
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(CountReducer)),
                 Some(Box::new(UnknownDraftDriver { entity })),
@@ -4459,7 +4843,9 @@ mod tests {
             .test_ok();
         assert!(matches!(
             session.step_tick(),
-            Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(_)))
+            Err(ExperimentError::Runtime(RuntimeError::OutputAdmission(
+                pos_runtime::OutputAdmissionErrorV1::MissingDeclaration { .. }
+            )))
         ));
         assert!(matches!(
             session.step_tick(),
@@ -4483,7 +4869,7 @@ mod tests {
             store_config: StoreConfig::Sqlite { path },
         });
         recovery
-            .register(
+            .register_generated(
                 &recovery_plugin,
                 Some(Box::new(CountReducer)),
                 Some(Box::new(RecordingDriver::new(
@@ -4875,7 +5261,7 @@ mod tests {
         let driver_timeline = driver_store.create_timeline("driver-failure").test_ok();
         let mut registry = test_registry();
         registry
-            .register(
+            .register_generated(
                 &make_plugin("capture-fail", &[]),
                 None,
                 Some(Box::new(CaptureFailDriver)),
@@ -4905,22 +5291,23 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
-    enum TransactionHostPath {
+    pub(super) enum TransactionHostPath {
         AdvanceTick,
         Session,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum TransactionCase {
+    pub(super) enum TransactionCase {
         NonEmpty,
         ZeroDraft,
         SchemaFailure,
         AppendFailure,
         PartialDriverFailure,
+        PreAppendHeadFailure,
         PostCaptureFailure,
     }
 
-    fn transaction_registry(
+    pub(super) fn transaction_registry(
         path: TransactionHostPath,
         case: TransactionCase,
         state: &Arc<Mutex<HostTransactionState>>,
@@ -4934,6 +5321,7 @@ mod tests {
             ),
             TransactionCase::NonEmpty
             | TransactionCase::AppendFailure
+            | TransactionCase::PreAppendHeadFailure
             | TransactionCase::PostCaptureFailure => {
                 (&["host.transaction"], Some("host.transaction"))
             }
@@ -4943,7 +5331,7 @@ mod tests {
             bind_test_erasure_gate(&mut registry);
         }
         registry
-            .register(
+            .register_generated(
                 &make_plugin("host-transaction", owned_event_types),
                 None,
                 Some(Box::new(HostTransactionalDriver {
@@ -4956,7 +5344,7 @@ mod tests {
             .test_ok();
         if case == TransactionCase::PartialDriverFailure {
             registry
-                .register(
+                .register_generated(
                     &make_plugin("host-failing", &[]),
                     None,
                     Some(Box::new(HostTransactionalDriver {
@@ -4992,8 +5380,13 @@ mod tests {
         CaptureAwareStore {
             base,
             state: Arc::clone(state),
-            fail_append: case == TransactionCase::AppendFailure,
-            fail_post_step_capture: case == TransactionCase::PostCaptureFailure,
+            failure_mode: match case {
+                TransactionCase::AppendFailure => CaptureFailureMode::Append,
+                TransactionCase::PreAppendHeadFailure => CaptureFailureMode::PreAppendHead,
+                TransactionCase::PostCaptureFailure => CaptureFailureMode::PostStepCapture,
+                _ => CaptureFailureMode::None,
+            },
+            erasure_gate: None,
         }
     }
 
@@ -5073,7 +5466,8 @@ mod tests {
             }
             TransactionCase::ZeroDraft
             | TransactionCase::SchemaFailure
-            | TransactionCase::PartialDriverFailure => {
+            | TransactionCase::PartialDriverFailure
+            | TransactionCase::PreAppendHeadFailure => {
                 assert!(state.append_calls.is_empty(), "{path:?} {case:?}");
             }
         }
@@ -5107,7 +5501,7 @@ mod tests {
                 assert_eq!(state.aborts, 1, "{path:?} {case:?}");
                 assert!(state.capture_commits.is_empty(), "{path:?} {case:?}");
             }
-            TransactionCase::AppendFailure => {
+            TransactionCase::AppendFailure | TransactionCase::PreAppendHeadFailure => {
                 assert!(result.is_err(), "{path:?} {case:?}");
                 assert_eq!(state.commits, 0, "{path:?} {case:?}");
                 assert_eq!(state.committed_tick, 0, "{path:?} {case:?}");
@@ -5155,6 +5549,7 @@ mod tests {
                 TransactionCase::SchemaFailure,
                 TransactionCase::AppendFailure,
                 TransactionCase::PartialDriverFailure,
+                TransactionCase::PreAppendHeadFailure,
                 TransactionCase::PostCaptureFailure,
             ] {
                 assert_host_transaction_case(path, case);
@@ -5230,7 +5625,7 @@ mod tests {
             stop: StopCondition::MaxTicks(5),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(BadDriver { entity })))
+        exp.register_generated(&plugin, None, Some(Box::new(BadDriver { entity })))
             .test_ok();
 
         let err = exp.run().test_err();
@@ -5249,7 +5644,7 @@ mod tests {
             stop: StopCondition::MaxTicks(3),
             store_config: StoreConfig::Memory,
         });
-        exp.register(
+        exp.register_generated(
             &plugin,
             Some(Box::new(CountReducer)),
             Some(Box::new(driver)),
@@ -5284,7 +5679,7 @@ mod tests {
             let driver = FixedDriver::new(entity, "session.event", 1);
             let mut registry = PluginRegistry::new();
             registry
-                .register(
+                .register_generated(
                     &plugin,
                     Some(Box::new(CountReducer)),
                     Some(Box::new(driver)),
@@ -5293,7 +5688,7 @@ mod tests {
             Ok(registry)
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(CountReducer)),
                 Some(Box::new(driver)),
@@ -5334,6 +5729,75 @@ mod tests {
         assert_eq!(result.total_events, 3);
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn parent_driver_observes_refreshed_prefix_after_fork() {
+        let entity = EntityId::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let plugin = make_plugin_with_reducer("refresh", &["refresh.event"]);
+        let plugin_id = plugin.id;
+        let make_driver = {
+            let observed = Arc::clone(&observed);
+            move || PrefixDriver {
+                entity,
+                observed: Arc::clone(&observed),
+                event_types: vec![Kind::new("refresh.event")],
+            }
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "refresh-after-fork".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory({
+            let make_driver = make_driver.clone();
+            move || {
+                let plugin = TestPlugin {
+                    id: plugin_id,
+                    name: "refresh",
+                    event_types: vec![Kind::new("refresh.event")],
+                    has_driver: true,
+                    has_reducer: true,
+                };
+                let mut registry = PluginRegistry::new();
+                registry
+                    .register_generated(
+                        &plugin,
+                        Some(Box::new(CountReducer)),
+                        Some(Box::new(make_driver())),
+                    )
+                    .test_ok();
+                Ok(registry)
+            }
+        });
+        experiment
+            .register_generated(
+                &plugin,
+                Some(Box::new(CountReducer)),
+                Some(Box::new(make_driver())),
+            )
+            .test_ok();
+
+        let mut parent = experiment.start().test_ok();
+        assert!(parent.step().test_ok());
+        let child = parent.fork("refresh-child").test_ok();
+        assert_eq!(
+            child.timeline().meta.fork_point.map(|(_, seq)| seq),
+            Some(Seq::from_u64(1))
+        );
+        assert!(parent.step().test_ok());
+        assert_eq!(&*observed.lock().test_ok(), &[vec![], vec![1]]);
+        let result = parent.run_to_completion().test_ok();
+        assert_eq!(
+            result
+                .projections
+                .state_for(result.timeline_id, &entity)
+                .test_ok()
+                .and_then(|state| state.get("n").and_then(serde_json::Value::as_u64)),
+            Some(2)
+        );
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_durable_revocation_fixture() -> (
         tempfile::NamedTempFile,
@@ -5356,7 +5820,7 @@ mod tests {
         let mut experiment =
             Experiment::new(config).with_consent_authority(ConsentAuthority::new());
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 None,
                 Some(Box::new(FixedDriver::new(entity, "experiment.tick", 1))),
@@ -5420,7 +5884,7 @@ mod tests {
             store_config,
         });
         recovery
-            .register(
+            .register_generated(
                 &resumed_plugin,
                 None,
                 Some(Box::new(FixedDriver::new(entity, "experiment.tick", 1))),
@@ -5480,7 +5944,7 @@ mod tests {
         })
         .with_fork_registry_factory(move || Ok(composition_registry(&[child])));
         experiment
-            .register(&CompositionPlugin(parent), None, None)
+            .register_generated(&CompositionPlugin(parent), None, None)
             .test_ok();
         assert_incompatible_fork(experiment.start().test_ok());
     }
@@ -5505,7 +5969,7 @@ mod tests {
         })
         .with_fork_registry_factory(move || Ok(composition_registry(&[child])));
         experiment
-            .register(&CompositionPlugin(parent), None, None)
+            .register_generated(&CompositionPlugin(parent), None, None)
             .test_ok();
         assert_incompatible_fork(experiment.start().test_ok());
     }
@@ -5532,10 +5996,10 @@ mod tests {
         })
         .with_fork_registry_factory(move || Ok(composition_registry(&[second, first])));
         experiment
-            .register(&CompositionPlugin(first), None, None)
+            .register_generated(&CompositionPlugin(first), None, None)
             .test_ok();
         experiment
-            .register(&CompositionPlugin(second), None, None)
+            .register_generated(&CompositionPlugin(second), None, None)
             .test_ok();
         assert_incompatible_fork(experiment.start().test_ok());
     }
@@ -5560,7 +6024,7 @@ mod tests {
         })
         .with_fork_registry_factory(move || Ok(composition_registry(&[child])));
         experiment
-            .register(&CompositionPlugin(parent), None, None)
+            .register_generated(&CompositionPlugin(parent), None, None)
             .test_ok();
         assert_incompatible_fork(experiment.start().test_ok());
     }
@@ -5590,7 +6054,7 @@ mod tests {
             Ok(composition_registry(&[plugin]))
         });
         experiment
-            .register(&CompositionPlugin(plugin), None, None)
+            .register_generated(&CompositionPlugin(plugin), None, None)
             .test_ok();
         let mut session = experiment.start().test_ok();
         *store.lock().test_ok() = Some(Arc::clone(&session.store));
@@ -5615,7 +6079,7 @@ mod tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 Some(Box::new(LockInspectingReducer {
                     store: Arc::clone(&store),
@@ -5666,11 +6130,11 @@ mod tests {
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
         .with_fork_registry_factory(move || {
             let mut registry = PluginRegistry::new().with_erasure_gate(foreign_gate.clone());
-            registry.register(&CompositionPlugin(plugin), None, None)?;
+            registry.register_generated(&CompositionPlugin(plugin), None, None)?;
             Ok(registry)
         });
         experiment
-            .register(&CompositionPlugin(plugin), None, None)
+            .register_generated(&CompositionPlugin(plugin), None, None)
             .test_ok();
 
         assert_incompatible_fork(
@@ -5791,7 +6255,7 @@ mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
         let result = exp.run().test_ok();
         assert_eq!(result.ticks, 2);
@@ -5807,7 +6271,7 @@ mod tests {
         let driver2 = FixedDriver::new(entity, "branch2.event", 1);
         let mut exp2_mut = exp2;
         exp2_mut
-            .register(&plugin2, None, Some(Box::new(driver2)))
+            .register_generated(&plugin2, None, Some(Box::new(driver2)))
             .test_ok();
 
         // Consume the experiment and get a store back via run, then re-use the
@@ -5988,7 +6452,7 @@ mod tests {
             stop: StopCondition::MaxTicks(5),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
         let result = exp.run().test_ok();
         // One emitting boundary plus one resumable quiescent boundary.
@@ -6007,7 +6471,7 @@ mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
 
         let result = exp.run().test_ok();
@@ -6027,7 +6491,7 @@ mod tests {
             stop: StopCondition::MaxTicks(3),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
 
         let result = exp.run().test_ok();
@@ -6061,7 +6525,7 @@ mod tests {
             stop: StopCondition::MaxTicks(3),
             store_config: StoreConfig::Memory,
         });
-        exp.register(
+        exp.register_generated(
             &plugin,
             Some(Box::new(CountReducer)),
             Some(Box::new(driver)),
@@ -6072,9 +6536,9 @@ mod tests {
         // state_for returns from the first reducer ("proj-plugin")
         let n = result
             .projections
-            .state_for(&entity)
-            .and_then(|s| s.get("n"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for(result.timeline_id, &entity)
+            .test_ok()
+            .and_then(|s| s.get("n").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(n, 3);
     }
@@ -6096,7 +6560,7 @@ mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Sqlite { path },
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
         let result = exp.run().test_ok();
         assert_eq!(result.ticks, 2);
@@ -6117,7 +6581,7 @@ mod tests {
             let plugin = make_plugin("nested-result", &["nested.result.event"]);
             let mut registry = PluginRegistry::new();
             registry
-                .register(
+                .register_generated(
                     &plugin,
                     None,
                     Some(Box::new(FixedDriver::new(
@@ -6192,7 +6656,7 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
         let result = exp.run().test_ok();
 
@@ -6269,7 +6733,7 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
         let result = exp.run().test_ok();
 
@@ -6297,7 +6761,7 @@ mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
         let result = exp.run().test_ok();
 
@@ -6324,7 +6788,7 @@ mod tests {
                 path: path.to_str().test_ok().to_owned(),
             },
         });
-        exp.register(&plugin, None, Some(Box::new(driver)))
+        exp.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
         let result = exp.run().test_ok();
 
@@ -6471,7 +6935,7 @@ mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config: store_config.clone(),
         });
-        experiment.register(&plugin, None, None).test_ok();
+        experiment.register_generated(&plugin, None, None).test_ok();
         let session = experiment.start().test_ok();
         let timeline_id = session.timeline().id();
         let subject = EntityId::new();
@@ -6534,7 +6998,7 @@ mod tests {
             store_config,
         });
         resumed_experiment
-            .register(&resumed_plugin, None, None)
+            .register_generated(&resumed_plugin, None, None)
             .test_ok();
         let resumed = resumed_experiment
             .with_consent_authority(authority)
@@ -6594,7 +7058,7 @@ mod tests {
                 let plugin = make_plugin("unit-backtest-plugin", &["unit.backtest.event"]);
                 let mut registry = PluginRegistry::new();
                 registry
-                    .register(
+                    .register_generated(
                         &plugin,
                         None,
                         Some(Box::new(FixedDriver::new(entity, "unit.backtest.event", 1))),
@@ -6614,9 +7078,13 @@ mod tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
+    use super::tests::{
+        transaction_registry, CaptureAwareStore, CaptureFailureMode, HostTransactionState,
+        TransactionCase, TransactionHostPath,
+    };
     use super::*;
     use pos_core::store::EventStore;
-    use pos_core::{Capability, ConsentGrantedV1, Plugin, PluginId};
+    use pos_core::{Capability, ConsentGrantedV1, Hash, Plugin, PluginId};
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 
     struct CoveragePlugin {
@@ -6639,6 +7107,110 @@ mod coverage_entrypoints {
                 ..Capability::default()
             }
         }
+    }
+
+    struct UnknownDraftDriver;
+
+    impl Driver for UnknownDraftDriver {
+        fn name(&self) -> &'static str {
+            "coverage-unknown-draft-driver"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput {
+                drafts: vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("coverage.unknown"),
+                    pos_core::CanonicalBytes::from_static(b"unknown"),
+                )],
+            })
+        }
+    }
+
+    struct OwnedUnknownDraftDriver;
+
+    impl Driver for OwnedUnknownDraftDriver {
+        fn name(&self) -> &'static str {
+            "coverage-owned-unknown-draft-driver"
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            _: ObservationView<'_>,
+        ) -> Result<StepOutput, RuntimeError> {
+            Ok(StepOutput {
+                drafts: vec![EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("coverage.unknown"),
+                    pos_core::CanonicalBytes::from_static(b"unknown"),
+                )],
+            })
+        }
+    }
+
+    struct OwnedSchemaPlugin {
+        id: PluginId,
+    }
+
+    impl Plugin for OwnedSchemaPlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "coverage-owned-schema-plugin"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: vec![Kind::new("coverage.unknown")],
+                has_driver: true,
+                ..Capability::default()
+            }
+        }
+    }
+
+    fn register_undeclared_output_driver(registry: &mut PluginRegistry) {
+        let plugin_id = PluginId::new();
+        let binding_plugin = CoveragePlugin { id: plugin_id };
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &binding_plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        registry
+            .register_test_driver_with_verified_output_policy(
+                plugin_id,
+                binding,
+                Box::new(UnknownDraftDriver),
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+    }
+
+    fn register_owned_schema_failure_driver(registry: &mut PluginRegistry) {
+        let plugin_id = PluginId::new();
+        let binding_plugin = OwnedSchemaPlugin { id: plugin_id };
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &binding_plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        registry
+            .register_test_driver_with_verified_output_policy(
+                plugin_id,
+                binding,
+                Box::new(OwnedUnknownDraftDriver),
+            )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
     }
 
     struct FailingDriver;
@@ -6756,7 +7328,7 @@ mod coverage_entrypoints {
         };
         let mut experiment =
             Experiment::new(config("coverage-driver-error", StopCondition::MaxTicks(1)));
-        ok(experiment.register(&plugin, None, Some(Box::new(FailingDriver))));
+        ok(experiment.register_generated(&plugin, None, Some(Box::new(FailingDriver))));
         let mut session = ok(experiment.start());
         assert!(matches!(
             session.step_tick(),
@@ -6773,7 +7345,7 @@ mod coverage_entrypoints {
         let mut experiment =
             Experiment::new(config("coverage-revoked-draft", StopCondition::MaxTicks(3)))
                 .with_consent_authority(ConsentAuthority::new());
-        ok(experiment.register(&plugin, None, Some(Box::new(SubjectDriver { subject }))));
+        ok(experiment.register_generated(&plugin, None, Some(Box::new(SubjectDriver { subject }))));
         let mut session = ok(experiment.start());
         session.close_subject_at_boundary(subject);
         let _ = ok(session.step_tick());
@@ -6790,7 +7362,7 @@ mod coverage_entrypoints {
             StopCondition::MaxTicks(2),
         ))
         .with_consent_authority(ConsentAuthority::new());
-        ok(failing.register(&failing_plugin, None, Some(Box::new(FailingDriver))));
+        ok(failing.register_generated(&failing_plugin, None, Some(Box::new(FailingDriver))));
         let mut faulted = ok(failing.start());
         let failed_step = faulted.step_tick();
         expect_err(&failed_step);
@@ -6828,6 +7400,34 @@ mod coverage_entrypoints {
             reason: "coverage-runtime",
         });
         assert!(matches!(generic, ExperimentError::Runtime(_)));
+    }
+
+    #[test]
+    fn debug_approver_registration_wrapper_reaches_registry_seam() {
+        let plugin = CoveragePlugin {
+            id: PluginId::new(),
+        };
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        let mut experiment = Experiment::new(config(
+            "coverage-approver-wrapper",
+            StopCondition::MaxTicks(1),
+        ));
+        ok(
+            experiment.register_with_verified_output_policy_and_approver(
+                &plugin,
+                binding,
+                None,
+                Some(Box::new(UnknownDraftDriver)),
+                None,
+                std::iter::empty(),
+            ),
+        );
     }
 
     #[test]
@@ -6977,7 +7577,7 @@ mod coverage_entrypoints {
             },
             move || {
                 let mut registry = PluginRegistry::new();
-                ok(registry.register(
+                ok(registry.register_generated(
                     &CoveragePlugin { id: plugin_id },
                     None,
                     Some(Box::new(BacktestDriver { entity })),
@@ -7161,47 +7761,110 @@ mod coverage_entrypoints {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_driver_drafts_propagates_head_failure() {
-        struct EmitDriver {
-            entity: EntityId,
-        }
-
-        impl Driver for EmitDriver {
-            fn name(&self) -> &'static str {
-                "coverage-head-fault-driver"
-            }
-
-            fn step(
-                &mut self,
-                _: pos_core::ids::TimelineId,
-                _: ObservationView<'_>,
-            ) -> Result<StepOutput, RuntimeError> {
-                Ok(StepOutput {
-                    drafts: vec![EventDraft::new(
-                        self.entity,
-                        Kind::new("coverage.failure"),
-                        pos_core::CanonicalBytes::from_static(b"head-fault"),
-                    )],
-                })
-            }
-        }
-
-        let mut head_fault_store = pos_store::memory::MemoryStore::new();
-        let entity = EntityId::new();
-        let mut registry = PluginRegistry::new();
-        ok(registry.register(
-            &CoveragePlugin {
-                id: PluginId::new(),
-            },
-            None,
-            Some(Box::new(EmitDriver { entity })),
-        ));
+        let state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let failing_state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let mut registry = transaction_registry(
+            TransactionHostPath::AdvanceTick,
+            TransactionCase::PreAppendHeadFailure,
+            &state,
+            &failing_state,
+        );
+        let mut base: Box<dyn EventStore> = Box::new(test_memory_store());
+        let timeline = ok(base.create_timeline("head-fault-after-stage"));
+        let mut store = CaptureAwareStore {
+            base,
+            state: Arc::clone(&state),
+            failure_mode: CaptureFailureMode::PreAppendHead,
+            erasure_gate: None,
+        };
         assert!(append_driver_drafts(
-            &mut head_fault_store,
-            pos_core::ids::TimelineId::new(),
+            &mut store,
+            timeline.id(),
             &mut registry,
             pos_core::clock::Seq::ZERO,
         )
         .is_err());
+        let state = ok(state.lock());
+        assert_eq!(state.steps, 1);
+        assert_eq!(state.commits, 0);
+        assert_eq!(state.aborts, 1);
+        assert!(!state.staged);
+        assert!(state.append_calls.is_empty());
+        drop(state);
+    }
+
+    #[test]
+    fn append_driver_drafts_aborts_on_undeclared_output() {
+        let mut store = test_memory_store();
+        let timeline = ok(store.create_timeline("coverage-undeclared-output"));
+        let mut registry = test_registry();
+        register_undeclared_output_driver(&mut registry);
+        let result = append_driver_drafts(
+            &mut store,
+            timeline.id(),
+            &mut registry,
+            pos_core::clock::Seq::ZERO,
+        );
+        assert!(matches!(
+            result,
+            Err(ExperimentError::Runtime(RuntimeError::OutputAdmission(
+                pos_runtime::OutputAdmissionErrorV1::MissingDeclaration { event_type }
+            ))) if event_type == "coverage.unknown"
+        ));
+    }
+
+    #[test]
+    fn session_step_boundary_aborts_on_undeclared_output() {
+        let mut session = ok(Experiment::new(config(
+            "coverage-session-undeclared-output",
+            StopCondition::MaxTicks(1),
+        ))
+        .start());
+        register_undeclared_output_driver(&mut session.registry);
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Runtime(RuntimeError::OutputAdmission(
+                pos_runtime::OutputAdmissionErrorV1::MissingDeclaration { event_type }
+            ))) if event_type == "coverage.unknown"
+        ));
+    }
+
+    #[test]
+    fn session_step_boundary_aborts_after_owned_schema_failure() {
+        let mut session = ok(Experiment::new(config(
+            "coverage-owned-session-schema-failure",
+            StopCondition::MaxTicks(1),
+        ))
+        .start());
+        register_owned_schema_failure_driver(&mut session.registry);
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(event_type)))
+                if event_type == "coverage.unknown"
+        ));
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
+    }
+
+    #[test]
+    fn append_driver_drafts_aborts_after_owned_schema_failure() {
+        let mut store = test_memory_store();
+        let timeline = ok(store.create_timeline("coverage-owned-schema-failure"));
+        let mut registry = test_registry();
+        register_owned_schema_failure_driver(&mut registry);
+        assert!(matches!(
+            append_driver_drafts(
+                &mut store,
+                timeline.id(),
+                &mut registry,
+                pos_core::clock::Seq::ZERO,
+            ),
+            Err(ExperimentError::Runtime(RuntimeError::UnknownEventType(event_type)))
+                if event_type == "coverage.unknown"
+        ));
+        assert_eq!(ok(store.logical_head(timeline.id())), Seq::ZERO);
     }
 
     #[test]
@@ -7253,14 +7916,14 @@ mod coverage_entrypoints {
                 .with_consent_authority(authority.clone())
                 .with_fork_registry_factory(move || {
                     let mut registry = PluginRegistry::new();
-                    registry.register(
+                    registry.register_generated(
                         &CoveragePlugin { id: factory_id },
                         None,
                         Some(Box::new(RestoreFailDriver)),
                     )?;
                     Ok(registry)
                 });
-        ok(experiment.register(&plugin, None, Some(Box::new(RestoreFailDriver))));
+        ok(experiment.register_generated(&plugin, None, Some(Box::new(RestoreFailDriver))));
         let session = ok(experiment.start());
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
@@ -8026,7 +8689,7 @@ mod integration_tests {
         let agent_plugin = RuleAgentPlugin::new();
         let agent_driver = RuleAgentDriver::new(agent_entity, agent_plugin.actions().to_vec());
         let agent_reducer = RuleAgentReducer;
-        exp.register(
+        exp.register_generated(
             &agent_plugin,
             Some(Box::new(agent_reducer)),
             Some(Box::new(agent_driver)),
@@ -8037,7 +8700,7 @@ mod integration_tests {
         let obs_plugin = SyntheticObsPlugin::new();
         let obs_driver = SyntheticDriver::new(obs_entity);
         let obs_reducer = SyntheticReducer;
-        exp.register(
+        exp.register_generated(
             &obs_plugin,
             Some(Box::new(obs_reducer)),
             Some(Box::new(obs_driver)),
@@ -8058,18 +8721,18 @@ mod integration_tests {
         // rule-agent is first registered reducer → state_for_reducer("rule-agent", ...)
         let decisions = result
             .projections
-            .state_for_reducer("rule-agent", &agent_entity)
-            .and_then(|s| s.get("decisions"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer(result.timeline_id, "rule-agent", &agent_entity)
+            .test_ok()
+            .and_then(|s| s.get("decisions").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(decisions, 5, "expected 5 decisions projected");
 
         // Verify obs state was projected (observation count should be 5)
         let obs_count = result
             .projections
-            .state_for_reducer("synthetic-obs", &obs_entity)
-            .and_then(|s| s.get("observations"))
-            .and_then(serde_json::Value::as_u64)
+            .state_for_reducer(result.timeline_id, "synthetic-obs", &obs_entity)
+            .test_ok()
+            .and_then(|s| s.get("observations").and_then(serde_json::Value::as_u64))
             .unwrap_or(0);
         assert_eq!(obs_count, 5, "expected 5 observations projected");
     }
@@ -8151,7 +8814,7 @@ mod backtest_tests {
         let tl_id = pos_core::ids::TimelineId::new();
         drop(driver.step(tl_id, pos_runtime::ObservationView::empty()));
         let mut reg = pos_runtime::PluginRegistry::new();
-        reg.register(&plugin, None, Some(Box::new(driver)))
+        reg.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
         reg
     }
@@ -8178,6 +8841,26 @@ mod backtest_tests {
             result.train_result.timeline_id,
             result.eval_result.timeline_id
         );
+        assert!(result
+            .train_result
+            .manifest
+            .output_policy_digests
+            .contains_key("bt-plugin"));
+        assert!(result
+            .train_result
+            .manifest
+            .replay_policy_identities
+            .contains_key("bt-plugin"));
+        assert!(result
+            .eval_result
+            .manifest
+            .output_policy_digests
+            .contains_key("bt-plugin"));
+        assert!(result
+            .eval_result
+            .manifest
+            .replay_policy_identities
+            .contains_key("bt-plugin"));
         // Lift metrics should be populated
         assert!(result.train_avg_events_per_tick > 0.0);
         assert!(result.eval_avg_events_per_tick > 0.0);
@@ -8235,7 +8918,7 @@ mod backtest_tests {
             };
             let mut registry = pos_runtime::PluginRegistry::new();
             registry
-                .register(&plugin, None, Some(Box::new(GoodBtDriver)))
+                .register_generated(&plugin, None, Some(Box::new(GoodBtDriver)))
                 .test_ok();
             registry
         });
@@ -8282,7 +8965,7 @@ mod backtest_tests {
                 id: pos_core::ids::PluginId::new(),
             };
             let mut reg = pos_runtime::PluginRegistry::new();
-            reg.register(&plugin, None, None).test_ok();
+            reg.register_generated(&plugin, None, None).test_ok();
             reg
         });
         let result = runner.run().test_ok();
@@ -8430,7 +9113,7 @@ mod backtest_tests {
                 id: pos_core::ids::PluginId::new(),
             };
             let mut reg = pos_runtime::PluginRegistry::new();
-            reg.register(&plugin, None, Some(Box::new(BadBtDriver { entity })))
+            reg.register_generated(&plugin, None, Some(Box::new(BadBtDriver { entity })))
                 .test_ok();
             reg
         });
@@ -8467,10 +9150,10 @@ mod backtest_tests {
             };
             let mut reg = pos_runtime::PluginRegistry::new();
             if n == 0 {
-                reg.register(&plugin, None, Some(Box::new(GoodBtDriver)))
+                reg.register_generated(&plugin, None, Some(Box::new(GoodBtDriver)))
                     .test_ok();
             } else {
-                reg.register(&plugin, None, Some(Box::new(BadEvalDriver { entity })))
+                reg.register_generated(&plugin, None, Some(Box::new(BadEvalDriver { entity })))
                     .test_ok();
             }
             reg
@@ -8501,6 +9184,9 @@ mod fault_injection_tests {
         }
     }
 
+    use super::tests::{
+        CaptureAwareStore, CaptureFailureMode, HostTransactionState, HostTransactionalDriver,
+    };
     use super::*;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -8766,7 +9452,7 @@ mod fault_injection_tests {
             event_type: event_type.clone(),
         };
         let mut reg = pos_runtime::PluginRegistry::new();
-        reg.register(
+        reg.register_generated(
             &plugin,
             None,
             Some(Box::new(EmitDriver { entity, event_type })),
@@ -9203,7 +9889,7 @@ mod fault_injection_tests {
                 path: path.to_str().test_ok().to_owned(),
             },
         });
-        exp.register(
+        exp.register_generated(
             &plugin,
             None,
             Some(Box::new(EmitDriver {
@@ -9232,7 +9918,7 @@ mod fault_injection_tests {
             store_config: StoreConfig::Memory,
         });
         experiment
-            .register(&plugin, None, Some(Box::new(FailStepDriver)))
+            .register_generated(&plugin, None, Some(Box::new(FailStepDriver)))
             .test_ok();
 
         assert!(matches!(
@@ -9258,7 +9944,7 @@ mod fault_injection_tests {
             },
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 None,
                 Some(Box::new(EmitDriver {
@@ -9393,7 +10079,7 @@ mod fault_injection_tests {
             },
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 None,
                 Some(Box::new(EmitDriver {
@@ -9435,6 +10121,59 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn live_session_faults_when_post_append_erasure_fence_fails() {
+        let event_type = Kind::new("session.post-append-erasure-fence");
+        let plugin = FaultPlugin {
+            id: PluginId::new(),
+            event_type: event_type.clone(),
+        };
+        let driver_state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "session-post-append-erasure-fence".to_owned(),
+            stop: StopCondition::MaxTicks(2),
+            store_config: StoreConfig::Memory,
+        });
+        experiment
+            .register_generated(
+                &plugin,
+                None,
+                Some(Box::new(HostTransactionalDriver {
+                    entity: EntityId::new(),
+                    event_type: Some(event_type),
+                    state: Arc::clone(&driver_state),
+                    fail_step: false,
+                })),
+            )
+            .test_ok();
+        let mut session = start_with_fixture_store(
+            experiment,
+            Box::new(CaptureAwareStore {
+                base: Box::new(pos_store::memory::MemoryStore::new()),
+                state: Arc::new(Mutex::new(HostTransactionState::default())),
+                failure_mode: CaptureFailureMode::PoisonAfterAppend,
+                erasure_gate: None,
+            }),
+        )
+        .test_ok();
+
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Runtime(
+                pos_runtime::RuntimeError::ErasureContainmentAfterCommit { event_count: 1, .. }
+            ))
+        ));
+        let driver_state = driver_state.lock().test_ok();
+        assert_eq!(driver_state.commits, 1);
+        assert_eq!(driver_state.aborts, 0);
+        drop(driver_state);
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::SessionFaulted)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_propagates_final_read_error() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("session-read.db");
@@ -9450,7 +10189,7 @@ mod fault_injection_tests {
             },
         });
         experiment
-            .register(
+            .register_generated(
                 &plugin,
                 None,
                 Some(Box::new(EmitDriver {
@@ -9532,7 +10271,7 @@ mod fault_injection_tests {
                 path: path.to_str().test_ok().to_owned(),
             },
         });
-        exp.register(
+        exp.register_generated(
             &plugin,
             None,
             Some(Box::new(EmitDriver {
@@ -9566,7 +10305,7 @@ mod fault_injection_tests {
                 path: path.to_str().test_ok().to_owned(),
             },
         });
-        exp.register(
+        exp.register_generated(
             &plugin,
             None,
             Some(Box::new(EmitDriver {
@@ -9599,7 +10338,7 @@ mod fault_injection_tests {
                 path: path.to_str().test_ok().to_owned(),
             },
         });
-        exp.register(
+        exp.register_generated(
             &plugin,
             None,
             Some(Box::new(EmitDriver {
@@ -9628,10 +10367,7 @@ mod fault_injection_tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn experiment_branch_fork_fails_on_readonly_database() {
-        if running_as_root() {
-            return;
-        }
+    fn experiment_branch_propagates_sqlite_fork_write_error() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("exp-branch.db");
         let entity = EntityId::new();
@@ -9646,7 +10382,7 @@ mod fault_injection_tests {
                 path: path.to_str().test_ok().to_owned(),
             },
         });
-        exp.register(
+        exp.register_generated(
             &plugin,
             None,
             Some(Box::new(EmitDriver {
@@ -9656,7 +10392,6 @@ mod fault_injection_tests {
         )
         .test_ok();
         let _ = exp.run().test_ok();
-        set_readonly(&path);
         let exp2 = Experiment::new(ExperimentConfig {
             name: "exp-branch-fault".to_owned(),
             stop: StopCondition::MaxTicks(1),
@@ -9668,9 +10403,16 @@ mod fault_injection_tests {
             path: path.to_str().test_ok().to_owned(),
         })
         .test_ok();
+        let conn = Connection::open(&path).test_ok();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_fork_insert BEFORE INSERT ON timelines
+             WHEN NEW.parent_id IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'forced fork failure'); END;",
+        )
+        .test_ok();
+        drop(conn);
         let err = exp2.branch("child", store.as_mut());
-        set_writable(&path);
-        assert!(err.is_err());
+        assert!(matches!(err, Err(ExperimentError::Store(_))));
     }
 
     #[test]

@@ -556,19 +556,13 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
     )?
     .success());
 
-    let loaded_executable = directory.path().join("loaded-evaluator");
     let executable = directory.path().join("running-evaluator");
     let replacement = directory.path().join("replacement-evaluator");
-    executable_test_io(
-        "stage loaded executable",
-        fs::copy(
-            env!("CARGO_BIN_EXE_pos-reference-evaluator"),
-            &loaded_executable,
-        ),
-    )?;
+    // Use the built inode directly: a fresh copy briefly opens it for writing,
+    // which a concurrent child can inherit until exec and cause ETXTBSY.
     executable_test_io(
         "create launcher symlink",
-        symlink(&loaded_executable, &executable),
+        symlink(env!("CARGO_BIN_EXE_pos-reference-evaluator"), &executable),
     )?;
     executable_test_io(
         "stage replacement bytes",
@@ -582,9 +576,10 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
     let mut child = executable_test_io("spawn loaded executable", command.spawn())?;
 
     // Opening the FIFO synchronizes with the evaluator after exec and before
-    // the launcher path is replaced. The launcher is a symlink, so replacing
-    // it does not touch the live executable inode.
+    // the launcher path is replaced. Remove the symlink before installing the
+    // replacement so filesystems that reject an overwrite with ETXTBSY pass.
     let mut request_writer = open_fifo_writer_after_child_ready(&request_path, &mut child)?;
+    executable_test_io("remove launcher symlink", fs::remove_file(&executable))?;
     executable_test_io(
         "replace launcher pathname",
         fs::rename(&replacement, &executable),

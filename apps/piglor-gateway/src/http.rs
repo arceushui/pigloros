@@ -81,6 +81,7 @@ mod coverage_tests {
                 page: crate::EventPage {
                     events: vec![event],
                     next_from_seq: None,
+                    next_cursor: None,
                 },
                 inventory_generation: None,
             },
@@ -544,7 +545,15 @@ const fn gateway_store_status(error: &CoreError) -> Option<StatusCode> {
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        let status = match &self {
+        let status = self.status_code();
+        let body = Json(json!({ "error": self.to_string() }));
+        (status, body).into_response()
+    }
+}
+
+impl GatewayError {
+    fn status_code(&self) -> StatusCode {
+        match self {
             Self::InvalidId(_)
             | Self::InvalidPageLimit { .. }
             | Self::InvalidEventsQuery(_)
@@ -578,6 +587,7 @@ impl IntoResponse for GatewayError {
             Self::Store(error) => {
                 gateway_store_status(error).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
             }
+            Self::ActionRegistry(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ActionAuthorizationUnavailable | Self::AuthorizationUnavailable => {
                 StatusCode::UNAUTHORIZED
             }
@@ -592,9 +602,7 @@ impl IntoResponse for GatewayError {
                 }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
-        };
-        let body = Json(json!({ "error": self.to_string() }));
-        (status, body).into_response()
+        }
     }
 }
 
@@ -1470,6 +1478,44 @@ osf_link = \"https://osf.io/example\"\n";
     }
 
     #[tokio::test]
+    async fn public_gateway_cursor_rejects_stale_generation_and_wrong_timeline() {
+        let (gateway, _, id, actor) = host_cursor_fixture("public-cursor-owner").await;
+        for marker in 1..=2 {
+            gateway
+                .append_action(
+                    &id,
+                    &actor,
+                    crate::EVENT_TYPE_ACTION,
+                    &json!({"marker": marker}),
+                )
+                .await
+                .test_ok();
+        }
+        let first = gateway.read_events_page(&id, 0, 1).await.test_ok();
+        let cursor = first.next_cursor.test_ok();
+        let second = gateway
+            .read_events_page_after(&id, cursor, 1)
+            .await
+            .test_ok();
+        assert_eq!(second.events[0].seq.as_u64(), 2);
+
+        let other = gateway
+            .create_timeline("public-cursor-other")
+            .await
+            .test_ok();
+        assert!(matches!(
+            gateway
+                .read_events_page_after(&other.id().to_string(), cursor, 1)
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway.read_events_page_after(&id, cursor, 1).await,
+            Err(GatewayError::StaleEventCursor)
+        ));
+    }
+
+    #[tokio::test]
     async fn host_cursor_tracks_the_response_byte_limit() {
         let (gateway, app, id, actor) = host_cursor_fixture("cursor-byte-limit").await;
         let payload = "x".repeat(240 * 1024);
@@ -2012,6 +2058,11 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         let r = GatewayError::AuthorizationDenied.into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(
+            "world.unknown".into(),
+        ))
+        .into_response();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let r = GatewayError::LedgerUnavailable.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::Ledger(pos_plugin_ledger::LedgerError::InvalidPrediction(

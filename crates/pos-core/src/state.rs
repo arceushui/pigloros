@@ -40,7 +40,7 @@ pub trait Reducer: Send + Sync {
 }
 
 /// Registry of per-entity state, produced by folding events through a Reducer.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateRegistry {
     states: HashMap<EntityId, State>,
 }
@@ -59,6 +59,11 @@ impl StateRegistry {
     #[must_use]
     pub fn get_or_default(&self, id: &EntityId) -> State {
         self.states.get(id).cloned().unwrap_or_default()
+    }
+
+    /// Return the entity identifiers with cached state.
+    pub fn entity_ids(&self) -> impl Iterator<Item = EntityId> + '_ {
+        self.states.keys().copied()
     }
 
     pub fn apply(&mut self, reducer: &dyn Reducer, event: &Event) {

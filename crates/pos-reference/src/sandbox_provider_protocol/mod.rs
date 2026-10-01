@@ -8,6 +8,7 @@ mod audit;
 mod authority;
 mod codec;
 mod execution;
+mod network;
 mod operations;
 mod policy;
 mod revocation;
@@ -34,6 +35,10 @@ pub(crate) const REQUIRED_HOST_FEATURES: [&str; 16] = [
     "uts-namespace",
 ];
 
+pub use network::{
+    NetworkExchangeFailure, NetworkExchangeReply, NetworkExchangeRequest,
+    NetworkExchangeTranscript, NetworkRetentionPolicy,
+};
 pub use policy::{SandboxAdministratorPolicy, SandboxPolicySelection};
 pub use revocation::{SandboxRevocationSnapshot, SandboxTrustError};
 pub use revocation_update::{
@@ -66,8 +71,9 @@ pub use trust::{SandboxTrustCertificate, SandboxTrustKey, SandboxTrustRole, Sand
 pub use admission::{
     AdmittedSandboxImage, AdmittedSandboxProvider, AuthenticatedAdmissionGrant,
     AuthenticatedSandboxProviderReceipt, AuthenticatedSandboxProviderResult, HostCapabilityProfile,
-    HostFeatureProof, ProviderConformanceReport, SandboxAdmissionError,
-    SandboxProviderAdmissionInputs, SelectorGrantCommitment,
+    HostFeatureProof, LocalNetworkAdmission, NetworkProxyLimits, ProviderConformanceReport,
+    SandboxAdmissionError, SandboxImageProofError, SandboxProviderAdmissionInputs,
+    SelectorGrantCommitment, VerifiedSandboxImageProof,
 };
 pub use audit::SandboxAuditRecord;
 pub use authority::{

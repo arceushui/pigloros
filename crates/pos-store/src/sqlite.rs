@@ -6,7 +6,9 @@
 //! Child reads stitch parent events up to `fork_seq` with child events.
 
 use rusqlite::{
-    params, types::ToSql, Connection, OpenFlags, OptionalExtension, TransactionBehavior,
+    params,
+    types::{ToSql, Value as SqlValue},
+    Connection, OpenFlags, OptionalExtension, TransactionBehavior,
 };
 use std::{
     collections::HashSet,
@@ -52,11 +54,39 @@ use pos_core::{
     ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
     ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
     ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
-    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, Hash, KeyDestructionOutcomeV1,
-    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
-    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
+    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, EventOriginRecordV1,
+    ForkAdmissionHostCommandV1, ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1,
+    ForkAdmissionOpenChallengeV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
+    ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
+    ForkAdmissionRecoveryProofV1, ForkAppendOperationV1, ForkAttributionOriginV1,
+    ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
+    ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
+    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
+    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
+    PublicKey, Signature, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
     GEOGRAPHIC_EVENT_TYPE,
+};
+
+use crate::fork_admission_authority::{
+    admitted_fork_context_containment, admitted_fork_may_have_changed_topology, advance_wall_fence,
+    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment,
+    principal_owner_commitment, validate_live_session, verify_command, verify_recovery_proof,
+    with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
+    ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
+    ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
+};
+use crate::fork_delivery_journal::{
+    fork_delivery_execution, ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1,
+    ForkDeliveryClaimV1, ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryRowV1,
+    ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
+};
+use crate::fork_event_authority::fork_append_request;
+use crate::{
+    ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
+    ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1,
+    ForkEventProvenanceAuthorityPortV1,
 };
 
 #[cfg(test)]
@@ -163,39 +193,43 @@ pub struct SqliteStore {
     /// Opaque host-issued identity for this adapter's topology transitions.
     erasure_topology_store_binding: Option<ErasureTopologyStoreBindingV1>,
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
+    /// Public custom admission clocks are never Fork-authority clocks.
+    fork_admission_authority_enabled: bool,
+    /// Per-adapter `FAI1`/`FAO1`/session state. It never enters `SQLite`.
+    fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
-struct ErasureSchemaColumn {
+struct SqliteSchemaColumn {
     name: &'static str,
     kind: &'static str,
     not_null: bool,
     primary_key: bool,
 }
 
-struct ErasureSchemaTable {
+struct SqliteSchemaTable {
     name: &'static str,
     columns_query: &'static str,
-    columns: &'static [ErasureSchemaColumn],
+    columns: &'static [SqliteSchemaColumn],
     constraints: &'static [&'static str],
 }
 
-const ERASURE_INDEX_COLUMNS: &[ErasureSchemaColumn] = &[
-    ErasureSchemaColumn {
+const ERASURE_INDEX_COLUMNS: &[SqliteSchemaColumn] = &[
+    SqliteSchemaColumn {
         name: "request_digest",
         kind: "BLOB",
         not_null: true,
         primary_key: true,
     },
-    ErasureSchemaColumn {
+    SqliteSchemaColumn {
         name: "ordinal",
         kind: "INTEGER",
         not_null: true,
         primary_key: true,
     },
-    ErasureSchemaColumn {
+    SqliteSchemaColumn {
         name: "reference_digest",
         kind: "BLOB",
         not_null: true,
@@ -203,78 +237,78 @@ const ERASURE_INDEX_COLUMNS: &[ErasureSchemaColumn] = &[
     },
 ];
 
-const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
-    ErasureSchemaTable {
+const ERASURE_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
+    SqliteSchemaTable {
         name: "erasure_fork_admissions",
         columns_query: "PRAGMA table_info(erasure_fork_admissions)",
         columns: &[
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "operation_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: true,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "binding_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "expected_generation",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "child_scope",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "child_id",
                 kind: "TEXT",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "child_name",
                 kind: "TEXT",
                 not_null: false,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "child_mode",
                 kind: "TEXT",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "parent_id",
                 kind: "TEXT",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "fork_seq",
                 kind: "INTEGER",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "owner_id",
                 kind: "TEXT",
                 not_null: false,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "successor_generation",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "receipt_digest",
                 kind: "BLOB",
                 not_null: true,
@@ -291,23 +325,23 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (fork_seq >= 0)",
         ],
     },
-    ErasureSchemaTable {
+    SqliteSchemaTable {
         name: "erasure_fork_recovery_proofs",
         columns_query: "PRAGMA table_info(erasure_fork_recovery_proofs)",
         columns: &[
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "operation_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: true,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "proof_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "proof_cbor",
                 kind: "BLOB",
                 not_null: true,
@@ -320,23 +354,23 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(proof_cbor) <= 16777216)",
         ],
     },
-    ErasureSchemaTable {
+    SqliteSchemaTable {
         name: "erasure_records",
         columns_query: "PRAGMA table_info(erasure_records)",
         columns: &[
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "request_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: true,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "manifest_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "manifest_cbor",
                 kind: "BLOB",
                 not_null: true,
@@ -349,17 +383,17 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(manifest_cbor) <= 1048576)",
         ],
     },
-    ErasureSchemaTable {
+    SqliteSchemaTable {
         name: "erasure_evidence",
         columns_query: "PRAGMA table_info(erasure_evidence)",
         columns: &[
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "reference_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: true,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "object_cbor",
                 kind: "BLOB",
                 not_null: true,
@@ -371,23 +405,23 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(object_cbor) <= 16777216)",
         ],
     },
-    ErasureSchemaTable {
+    SqliteSchemaTable {
         name: "erasure_states",
         columns_query: "PRAGMA table_info(erasure_states)",
         columns: &[
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "state_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: true,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "request_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "state_cbor",
                 kind: "BLOB",
                 not_null: true,
@@ -400,17 +434,17 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(state_cbor) <= 1048576)",
         ],
     },
-    ErasureSchemaTable {
+    SqliteSchemaTable {
         name: "erasure_recovery_errors",
         columns_query: "PRAGMA table_info(erasure_recovery_errors)",
         columns: &[
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "request_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: true,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "error_digest",
                 kind: "BLOB",
                 not_null: true,
@@ -422,7 +456,7 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(error_digest) = 32)",
         ],
     },
-    ErasureSchemaTable {
+    SqliteSchemaTable {
         name: "erasure_attempt_pages",
         columns_query: "PRAGMA table_info(erasure_attempt_pages)",
         columns: ERASURE_INDEX_COLUMNS,
@@ -432,7 +466,7 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(reference_digest) = 32)",
         ],
     },
-    ErasureSchemaTable {
+    SqliteSchemaTable {
         name: "erasure_scope_nodes",
         columns_query: "PRAGMA table_info(erasure_scope_nodes)",
         columns: ERASURE_INDEX_COLUMNS,
@@ -442,7 +476,7 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(reference_digest) = 32)",
         ],
     },
-    ErasureSchemaTable {
+    SqliteSchemaTable {
         name: "erasure_administrative_resolutions",
         columns_query: "PRAGMA table_info(erasure_administrative_resolutions)",
         columns: ERASURE_INDEX_COLUMNS,
@@ -452,29 +486,29 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "CHECK (length(reference_digest) = 32)",
         ],
     },
-    ErasureSchemaTable {
+    SqliteSchemaTable {
         name: "erasure_effects",
         columns_query: "PRAGMA table_info(erasure_effects)",
         columns: &[
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "manifest_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: true,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "effect_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "subject_digest",
                 kind: "BLOB",
                 not_null: false,
                 primary_key: false,
             },
-            ErasureSchemaColumn {
+            SqliteSchemaColumn {
                 name: "effect_cbor",
                 kind: "BLOB",
                 not_null: true,
@@ -491,10 +525,343 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
     },
 ];
 
+const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
+    SqliteSchemaTable {
+        name: "fork_delivery_fence_counter",
+        columns_query: "PRAGMA table_info(fork_delivery_fence_counter)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "id",
+                kind: "INTEGER",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "last_fence",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["CHECK (id = 1)", "CHECK (last_fence >= 0)"],
+    },
+    SqliteSchemaTable {
+        name: "fork_delivery_journal",
+        columns_query: "PRAGMA table_info(fork_delivery_journal)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "host_request_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "kind",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "operation_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "state",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "owner_fence",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(host_request_id) = 32)",
+            "CHECK (kind IN (1, 2))",
+            "CHECK (length(operation_id) = 32)",
+            "CHECK (state IN (1, 2, 3))",
+            "CHECK (owner_fence > 0)",
+            "UNIQUE (kind, operation_id)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_principal_owner_bindings",
+        columns_query: "PRAGMA table_info(fork_principal_owner_bindings)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "principal_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "pob1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(operation_id) = 32)",
+            "CHECK (length(principal_digest) = 32)",
+            "UNIQUE (principal_digest)",
+            "UNIQUE (pob1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_admissions",
+        columns_query: "PRAGMA table_info(fork_admissions)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "child_id",
+                kind: "TEXT",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "far1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["UNIQUE (far1_cbor)"],
+    },
+    SqliteSchemaTable {
+        name: "fork_admission_operations",
+        columns_query: "PRAGMA table_info(fork_admission_operations)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "kind",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "operation_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "evidence_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "commitment",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "result_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "child_id",
+                kind: "TEXT",
+                not_null: false,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (kind IN (1, 2))",
+            "CHECK (length(operation_id) = 32)",
+            "CHECK (length(evidence_digest) = 32)",
+            "CHECK (length(commitment) = 32)",
+            "CHECK (length(result_digest) = 32)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_classifier_sources",
+        columns_query: "PRAGMA table_info(fork_classifier_sources)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "descriptor_hash",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "registrar_identifier",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "fcs1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["CHECK (length(descriptor_hash) = 32)", "UNIQUE (fcs1_cbor)"],
+    },
+    SqliteSchemaTable {
+        name: "fork_classifier_tables",
+        columns_query: "PRAGMA table_info(fork_classifier_tables)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "child_id",
+                kind: "TEXT",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "fct1_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fct1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(fct1_digest) = 32)",
+            "UNIQUE (fct1_digest)",
+            "UNIQUE (fct1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_classifier_registrations",
+        columns_query: "PRAGMA table_info(fork_classifier_registrations)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "child_id",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fcr1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(operation_id) = 32)",
+            "UNIQUE (child_id)",
+            "UNIQUE (fcr1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_event_origins",
+        columns_query: "PRAGMA table_info(fork_event_origins)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "event_id",
+                kind: "TEXT",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "eor1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["UNIQUE (eor1_cbor)"],
+    },
+    SqliteSchemaTable {
+        name: "fork_intervention_admissions",
+        columns_query: "PRAGMA table_info(fork_intervention_admissions)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "event_id",
+                kind: "TEXT",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "fia1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["UNIQUE (fia1_cbor)"],
+    },
+    SqliteSchemaTable {
+        name: "fork_append_operations",
+        columns_query: "PRAGMA table_info(fork_append_operations)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "child_id",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "local_seq",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "event_id",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fop1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(operation_id) = 32)",
+            "UNIQUE (event_id)",
+            "UNIQUE (fop1_cbor)",
+            "UNIQUE (child_id, local_seq)",
+        ],
+    },
+];
+
 /// Build the current erasure schema from the same table and constraint
 /// declarations used by schema validation.
 fn erasure_schema_ddl() -> String {
-    ERASURE_SCHEMA_TABLES
+    sqlite_schema_ddl(ERASURE_SCHEMA_TABLES)
+}
+
+/// Build `CREATE TABLE IF NOT EXISTS` statements from the same table and
+/// constraint declarations used by schema validation.
+fn sqlite_schema_ddl(tables: &[SqliteSchemaTable]) -> String {
+    tables
         .iter()
         .map(|table| {
             let mut definitions = table
@@ -542,7 +909,318 @@ fn normalize_schema_sql(sql: &str) -> String {
         .collect()
 }
 
+/// Validated `(EOR1, optional FIA1, FOP1)` rows for one child suffix.
+type ForkEventSuffixV1 = Vec<(
+    EventOriginRecordV1,
+    Option<ForkInterventionAdmissionV1>,
+    ForkAppendOperationV1,
+)>;
+
+/// Canonical `EOR1` field 3 starts after the array, magic, version, and bstr heads.
+const EOR1_CHILD_TIMELINE_OFFSET: i64 = 9;
+/// Canonical `FIA1` field 4 follows its 32-byte operation ID.
+const FIA1_CHILD_TIMELINE_OFFSET: i64 = 43;
+
 impl SqliteStore {
+    pub(crate) fn require_live_fork_event_session(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<(), ForkEventAuthorityErrorV1> {
+        let mut state = read_fork_admission_authority_state(&self.conn)
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?;
+        state.session_identity = self.fork_admission_authority_runtime.session_identity;
+        validate_live_session(&state, session)
+            .then_some(())
+            .ok_or(ForkEventAuthorityErrorV1::Unauthenticated)
+    }
+
+    fn register_fork_classifier_in_transaction(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        operation_id: Hash,
+        child_id: TimelineId,
+        source: &ForkClassifierSourceV1,
+    ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            .and_then(|()| {
+                let result =
+                    self.register_fork_classifier_locked(session, operation_id, child_id, source);
+                finish_fork_event_transaction(&self.conn, result)
+            })
+    }
+
+    /// Register one classifier while holding the `SQLite` writer lock.
+    fn register_fork_classifier_locked(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        operation_id: Hash,
+        child_id: TimelineId,
+        source: &ForkClassifierSourceV1,
+    ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
+        self.require_live_fork_event_session(session)?;
+        let admission = sqlite_local_fork_admission(&self.conn, self.hasher.as_ref(), child_id)?;
+        if admission.input().room_revision_descriptor_hash
+            != source.input().room_revision_descriptor_hash
+        {
+            return Err(ForkEventAuthorityErrorV1::Conflict);
+        }
+        let table = ForkClassifierTableV1::for_admitted_source(&admission, source);
+        let registration = ForkClassifierRegistrationV1::new(ForkClassifierRegistrationInputV1 {
+            operation_id,
+            child_timeline_id: child_id,
+            fork_admission_digest: admission.digest(),
+            room_revision_descriptor_hash: admission.input().room_revision_descriptor_hash,
+            classifier_revision_digest: table.digest(),
+        })
+        .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)?;
+        if let Some(receipt) = self.existing_fork_classifier_registration(
+            operation_id,
+            child_id,
+            &admission,
+            &table,
+            &registration,
+        )? {
+            return Ok(receipt);
+        }
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE timeline_id = ?1)",
+                params![child_id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            .and_then(|events| {
+                if events {
+                    Err(ForkEventAuthorityErrorV1::Conflict)
+                } else {
+                    self.persist_fork_classifier_registration(
+                        source,
+                        child_id,
+                        &table,
+                        operation_id,
+                        &registration,
+                    )
+                }
+            })
+    }
+
+    fn existing_fork_classifier_registration(
+        &self,
+        operation_id: Hash,
+        child_id: TimelineId,
+        admission: &ForkAdmissionRecordV1,
+        table: &ForkClassifierTableV1,
+        registration: &ForkClassifierRegistrationV1,
+    ) -> Result<Option<ForkClassifierRegistrationReceiptV1>, ForkEventAuthorityErrorV1> {
+        sqlite_fork_classifier_registration(&self.conn, operation_id)
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            .and_then(|existing| match existing {
+                None => Ok(None),
+                Some(existing) if existing != *registration => {
+                    Err(ForkEventAuthorityErrorV1::Conflict)
+                }
+                Some(_) => sqlite_validate_classified_authority_graph(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    child_id,
+                    admission.digest(),
+                    table.digest(),
+                )
+                .map(|_| {
+                    Some(ForkClassifierRegistrationReceiptV1 {
+                        child_timeline_id: child_id,
+                        classifier_revision_digest: table.digest(),
+                        registration_digest: registration.digest(),
+                    })
+                }),
+            })
+    }
+
+    fn append_classified_in_transaction(
+        &self,
+        permit: &ForkAppendSourcePermitV1,
+        operation_id: Hash,
+        draft: EventDraft,
+    ) -> Result<ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1> {
+        let source = permit.source();
+        let child_timeline_id = permit.child_timeline_id();
+        let request = fork_append_request(operation_id, child_timeline_id, source, &draft)?;
+        let table = sqlite_validate_classified_permit(&self.conn, self.hasher.as_ref(), permit)?;
+        if let Some(receipt) = self.existing_classified_append(operation_id, request.digest())? {
+            return Ok(receipt);
+        }
+        let classification = ForkEventClassifierV1::from_table(&table)
+            .classify_identity(source)
+            .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
+        read_origin_prefix(&self.conn, child_timeline_id)
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+            .and_then(|prefix| {
+                Self::append_one_in_transaction(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    child_timeline_id,
+                    draft,
+                )
+                .and_then(|local_event| {
+                    let local_seq = local_event.seq;
+                    Self::logical_event(prefix, local_event).map(|event| (local_seq, event))
+                })
+                .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            })
+            .and_then(|(local_seq, event)| {
+                ForkClassifiedProvenanceV1::derive(
+                    &request,
+                    &table,
+                    classification,
+                    ForkClassifiedEventV1 {
+                        event_id: event.id,
+                        logical_seq: event.seq.as_u64(),
+                        wall_time: event.wall_time,
+                        payload_hash: event.payload_hash,
+                    },
+                )
+                .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
+                .and_then(|provenance| {
+                    persist_classified_append(&self.conn, local_seq, &provenance).map(|()| {
+                        ForkClassifiedAppendReceiptV1 {
+                            event,
+                            operation: provenance.operation,
+                        }
+                    })
+                })
+            })
+    }
+
+    fn existing_classified_append(
+        &self,
+        operation_id: Hash,
+        request_digest: Hash,
+    ) -> Result<Option<ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1> {
+        sqlite_fork_append_operation(&self.conn, operation_id)
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            .and_then(|operation| {
+                operation
+                    .map(|operation| {
+                        if operation.input().request_digest != request_digest {
+                            return Err(ForkEventAuthorityErrorV1::Conflict);
+                        }
+                        sqlite_validated_classified_event(
+                            &self.conn,
+                            self.hasher.as_ref(),
+                            &operation,
+                        )
+                        .map(|event| ForkClassifiedAppendReceiptV1 { event, operation })
+                    })
+                    .transpose()
+            })
+    }
+
+    /// Read one child suffix inside the caller's snapshot transaction.
+    fn read_fork_event_suffix_in_transaction(
+        &self,
+        child_timeline_id: TimelineId,
+        from_logical_seq: u64,
+    ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
+        let prefix = read_origin_prefix(&self.conn, child_timeline_id)
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        let rows = sqlite_fork_suffix_rows(&self.conn, child_timeline_id)?;
+        // The immutable authority graph is validated once; its error is
+        // surfaced only when the child actually has classified Events.
+        let graph =
+            sqlite_classified_authority_graph(&self.conn, self.hasher.as_ref(), child_timeline_id);
+        let mut result = Vec::new();
+        for row in rows {
+            let (event_id, logical_seq, operation) = sqlite_decode_fork_suffix_row(prefix, row)
+                .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
+            let (admission, table) = graph.as_ref().map_err(|error| *error)?;
+            if operation.input().child_timeline_id != child_timeline_id
+                || operation.input().fork_admission_digest != admission.digest()
+                || operation.input().classifier_revision_digest != table.digest()
+                || operation.input().event_id != event_id
+                || operation.input().logical_seq != logical_seq
+            {
+                return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
+            }
+            if logical_seq < from_logical_seq {
+                continue;
+            }
+            let (origin, intervention) =
+                sqlite_validate_classified_records(&self.conn, &operation, table)?;
+            result.push((origin, intervention, operation));
+        }
+        Ok(result)
+    }
+
+    fn persist_fork_classifier_registration(
+        &self,
+        source: &ForkClassifierSourceV1,
+        child_id: TimelineId,
+        table: &ForkClassifierTableV1,
+        operation_id: Hash,
+        registration: &ForkClassifierRegistrationV1,
+    ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
+        sqlite_fork_classifier_source(
+            &self.conn,
+            source.input().room_revision_descriptor_hash,
+            &source.input().registrar_identifier,
+        )
+        .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+        .and_then(|existing| match existing {
+            Some(existing) if existing != *source => Err(ForkEventAuthorityErrorV1::Conflict),
+            Some(_) => Ok(()),
+            None => self
+                .conn
+                .execute(
+                    "INSERT INTO fork_classifier_sources
+                     (descriptor_hash, registrar_identifier, fcs1_cbor)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        source
+                            .input()
+                            .room_revision_descriptor_hash
+                            .as_bytes()
+                            .as_slice(),
+                        source.input().registrar_identifier,
+                        source.to_canonical_cbor()
+                    ],
+                )
+                .map(|_| ())
+                .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate),
+        })
+        .and_then(|()| {
+            self.conn
+                .execute(
+                    "INSERT INTO fork_classifier_tables (child_id, fct1_digest, fct1_cbor)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        child_id.to_string(),
+                        table.digest().as_bytes().as_slice(),
+                        table.to_canonical_cbor()
+                    ],
+                )
+                .and_then(|_| {
+                    self.conn.execute(
+                        "INSERT INTO fork_classifier_registrations
+                         (operation_id, child_id, fcr1_cbor)
+                         VALUES (?1, ?2, ?3)",
+                        params![
+                            operation_id.as_bytes().as_slice(),
+                            child_id.to_string(),
+                            registration.to_canonical_cbor()
+                        ],
+                    )
+                })
+                .map_err(|error| fork_event_insert_error(&error))
+        })
+        .map(|_| ForkClassifierRegistrationReceiptV1 {
+            child_timeline_id: child_id,
+            classifier_revision_digest: table.digest(),
+            registration_digest: registration.digest(),
+        })
+    }
+
     /// Remove the containment gate. Protected operations then fail closed until
     /// a host binds its authoritative gate.
     #[must_use]
@@ -800,10 +1478,15 @@ impl SqliteStore {
             erasure_topology_requires_permit: false,
             erasure_topology_store_binding: None,
             authority_persistence_binding: None,
+            fork_admission_authority_enabled: true,
+            fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1::default(),
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
-        store.finish_open(initialize_schema)?;
+        store.finish_open(
+            initialize_schema,
+            flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY),
+        )?;
         Ok(store)
     }
 
@@ -824,8 +1507,8 @@ impl SqliteStore {
         }
     }
 
-    fn finish_open(&mut self, initialize_schema: bool) -> Result<(), CoreError> {
-        self.prepare_schema(initialize_schema)?;
+    fn finish_open(&mut self, initialize_schema: bool, read_only: bool) -> Result<(), CoreError> {
+        self.prepare_schema(initialize_schema, read_only)?;
         self.validate_event_signature_schema()?;
         self.validate_event_sequence_invariant()?;
         // WAL initialization may advance this connection's data_version. The
@@ -835,7 +1518,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    fn prepare_schema(&self, initialize: bool) -> Result<(), CoreError> {
+    fn prepare_schema(&self, initialize: bool, read_only: bool) -> Result<(), CoreError> {
         self.should_initialize_schema(initialize)
             .and_then(|should_initialize| {
                 if should_initialize {
@@ -844,7 +1527,15 @@ impl SqliteStore {
                     self.validate_erasure_schema()
                 }
             })
-            .and_then(|()| self.prepare_authority_schema())
+            .and_then(|()| {
+                if read_only {
+                    self.validate_authority_schema_and_state()
+                        .and_then(|()| self.validate_fork_admission_authority_schema())
+                } else {
+                    self.prepare_authority_schema()
+                        .and_then(|()| self.prepare_fork_admission_authority_schema())
+                }
+            })
     }
 
     fn should_initialize_schema(&self, initialize: bool) -> Result<bool, CoreError> {
@@ -874,6 +1565,7 @@ impl SqliteStore {
     pub fn open_with_clock(path: &str, clock: Box<dyn AdmissionClock>) -> Result<Self, CoreError> {
         let mut store = Self::open(path)?;
         store.clock = clock;
+        store.fork_admission_authority_enabled = false;
         Ok(store)
     }
 
@@ -1086,7 +1778,7 @@ impl SqliteStore {
     fn validate_erasure_schema(&self) -> Result<(), CoreError> {
         ERASURE_SCHEMA_TABLES
             .iter()
-            .try_for_each(|table| self.validate_erasure_schema_table(table))
+            .try_for_each(|table| self.validate_sqlite_schema_table(table))
     }
 
     fn prepare_authority_schema(&self) -> Result<(), CoreError> {
@@ -1101,12 +1793,39 @@ impl SqliteStore {
                  COMMIT;",
             )
             .map_err(Self::into_storage_error)
-            .and_then(|()| self.validate_authority_schema())
-            .and_then(|()| {
-                read_authority_state(&self.conn)
-                    .map(|_| ())
-                    .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
-            })
+            .and_then(|()| self.validate_authority_schema_and_state())
+    }
+
+    fn validate_authority_schema_and_state(&self) -> Result<(), CoreError> {
+        self.validate_authority_schema().and_then(|()| {
+            read_authority_state(&self.conn)
+                .map(|_| ())
+                .map_err(|_| CoreError::Storage("invalid persisted authority state".to_owned()))
+        })
+    }
+
+    fn prepare_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(&format!(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE IF NOT EXISTS fork_admission_authority (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     fah1_cbor BLOB,
+                     last_authority_wall_time INTEGER NOT NULL DEFAULT 0
+                 );
+                 {}
+                 INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);
+                 COMMIT;",
+                sqlite_schema_ddl(FORK_ADMISSION_SCHEMA_TABLES)
+            ))
+            .map_err(Self::into_storage_error)
+            .and_then(|()| self.validate_fork_admission_authority_schema())
+    }
+
+    fn validate_fork_admission_authority_schema(&self) -> Result<(), CoreError> {
+        FORK_ADMISSION_SCHEMA_TABLES
+            .iter()
+            .try_for_each(|table| self.validate_sqlite_schema_table(table))
     }
 
     fn validate_authority_schema(&self) -> Result<(), CoreError> {
@@ -1133,7 +1852,7 @@ impl SqliteStore {
         Ok(())
     }
 
-    fn validate_erasure_schema_table(&self, table: &ErasureSchemaTable) -> Result<(), CoreError> {
+    fn validate_sqlite_schema_table(&self, table: &SqliteSchemaTable) -> Result<(), CoreError> {
         let sql = self
             .conn
             .query_row(
@@ -2275,6 +2994,7 @@ impl SqliteStore {
             .validate_erasure_inventory_data_version()
             .and_then(|()| {
                 (|| {
+                    self.ensure_generic_fork_append_is_rejected(timeline)?;
                     let logical_prefix = self.logical_prefix(timeline)?;
                     let head_seq = self.get_head_seq(timeline)?.as_u64();
                     let existing = self.conn.query_row(
@@ -2556,6 +3276,7 @@ impl SqliteStore {
         let result = self
             .validate_erasure_inventory_data_version()
             .and_then(|()| {
+                self.ensure_generic_fork_append_is_rejected(timeline)?;
                 let logical_prefix = self.logical_prefix(timeline)?;
                 drafts
                     .iter()
@@ -2602,6 +3323,7 @@ impl SqliteStore {
         let scope = begin_immediate_scope(&self.conn)?;
         let result = self.validate_erasure_inventory_data_version().and_then(|()| {
             (|| {
+                self.ensure_generic_fork_append_is_rejected(timeline)?;
                 let (chain, owned_head) = Self::fork_chain_with_leaf_head_on(&self.conn, timeline)?;
                 let logical_prefix = chain.last().map_or(0, |(_, fork)| fork.as_u64());
                 let owner = if gateway_consent {
@@ -4085,6 +4807,7 @@ impl EventStore for SqliteStore {
     ) -> Result<Vec<Event>, CoreError> {
         self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
             crate::ensure_non_geographic_drafts(drafts, timeline)
+                .and_then(|()| store.ensure_generic_fork_append_is_rejected(timeline))
                 .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
                 .and_then(|()| store.append_visible(timeline, drafts))
         })
@@ -4881,6 +5604,7 @@ impl EventStore for SqliteStore {
         events: &[Event],
     ) -> Result<(), CoreError> {
         self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            store.ensure_generic_fork_append_is_rejected(timeline)?;
             if events.is_empty() {
                 let _ = store
                     .get_timeline(timeline)?
@@ -4944,8 +5668,11 @@ impl EventStore for SqliteStore {
                             .execute_batch(begin_immediate_sql())
                             .map_err(|e| CoreError::Storage(e.to_string()))?;
                     }
-                    let applied =
-                        store.write_committed_rows(timeline, head_seq, prev_hash, &ordered);
+                    let applied = store
+                        .ensure_generic_fork_append_is_rejected(timeline)
+                        .and_then(|()| {
+                            store.write_committed_rows(timeline, head_seq, prev_hash, &ordered)
+                        });
                     if own_tx {
                         match &applied {
                             Ok(()) => store
@@ -5118,6 +5845,32 @@ impl EventStore for SqliteStore {
                 }
             }
         })
+    }
+}
+
+impl SqliteStore {
+    /// ADR-099 reserves every admitted Fork's append boundary for its
+    /// classifier authority.  Generic callers never obtain a bypass.
+    fn ensure_generic_fork_append_is_rejected(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<(), CoreError> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM fork_admissions WHERE child_id = ?1)",
+                params![timeline.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(Self::into_storage_error)
+            .and_then(|admitted| {
+                if admitted {
+                    Err(CoreError::Storage(
+                        "admitted Fork Events require classified append authority".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
     }
 }
 
@@ -6804,6 +7557,80 @@ fn read_authority_state(
     })
 }
 
+fn read_fork_admission_authority_state(
+    conn: &Connection,
+) -> Result<ForkAdmissionAuthorityStateV1, ForkAdmissionAuthorityErrorV1> {
+    conn.query_row(
+        "SELECT fah1_cbor, last_authority_wall_time
+         FROM fork_admission_authority WHERE singleton = 1",
+        [],
+        |row| {
+            row.get::<_, SqlValue>(0)
+                .and_then(|host| row.get::<_, SqlValue>(1).map(|fence| (host, fence)))
+        },
+    )
+    .optional()
+    .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate)
+    .and_then(|record| {
+        record.map_or_else(
+            || Ok(ForkAdmissionAuthorityStateV1::default()),
+            decode_fork_admission_authority_row,
+        )
+    })
+}
+
+/// A present singleton row must hold a canonical FAH1 BLOB and a nonnegative
+/// INTEGER fence; any other storage class, including a NULL FAH1, is corrupt.
+fn decode_fork_admission_authority_row(
+    row: (SqlValue, SqlValue),
+) -> Result<ForkAdmissionAuthorityStateV1, ForkAdmissionAuthorityErrorV1> {
+    match row {
+        (SqlValue::Blob(host), SqlValue::Integer(fence)) => {
+            ForkAdmissionHostRecordV1::from_canonical_cbor(&host)
+                .ok()
+                .zip(u64::try_from(fence).ok())
+                .map(|(host, fence)| ForkAdmissionAuthorityStateV1 {
+                    host: Some(host),
+                    last_authority_wall_time: fence,
+                    ..ForkAdmissionAuthorityStateV1::default()
+                })
+                .ok_or(ForkAdmissionAuthorityErrorV1::CorruptAuthority)
+        }
+        _ => Err(ForkAdmissionAuthorityErrorV1::CorruptAuthority),
+    }
+}
+
+/// Persist the immutable FAH1 exactly once; the row never exists beforehand.
+fn insert_fork_admission_host_record(
+    conn: &Connection,
+    host: ForkAdmissionHostRecordV1,
+) -> Result<(), ForkAdmissionAuthorityErrorV1> {
+    conn.execute(
+        "INSERT INTO fork_admission_authority (singleton, fah1_cbor) VALUES (1, ?1)",
+        params![host.canonical_bytes()],
+    )
+    .map(|_| ())
+    .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate)
+}
+
+/// Advance only the rollback fence; FAH1 is never rewritten after insertion.
+fn write_fork_admission_wall_fence(
+    conn: &Connection,
+    fence: u64,
+) -> Result<(), ForkAdmissionAuthorityErrorV1> {
+    i64::try_from(fence)
+        .map_err(|_| ForkAdmissionAuthorityErrorV1::CorruptAuthority)
+        .and_then(|fence| {
+            conn.execute(
+                "UPDATE fork_admission_authority SET last_authority_wall_time = ?1
+                 WHERE singleton = 1",
+                params![fence],
+            )
+            .map(|_| ())
+            .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate)
+        })
+}
+
 fn write_authority_state(
     conn: &Connection,
     state: &AuthorityPersistenceStateV1,
@@ -6820,6 +7647,2105 @@ fn write_authority_state(
         .map(|_| ())
         .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
     })
+}
+
+impl SqliteStore {
+    /// Run one ADR-106 core step on the per-handle runtime state after
+    /// refreshing its durable FAH1 and fence inside one immediate transaction.
+    fn with_fork_authority_runtime<T>(
+        &mut self,
+        operation: impl FnOnce(
+            &Connection,
+            &mut ForkAdmissionAuthorityStateV1,
+            bool,
+        ) -> Result<T, ForkAdmissionAuthorityErrorV1>,
+    ) -> Result<T, ForkAdmissionAuthorityErrorV1> {
+        let conn = &self.conn;
+        let runtime = &mut self.fork_admission_authority_runtime;
+        let enabled = self.fork_admission_authority_enabled;
+        with_fork_authority_transaction(conn, || {
+            read_fork_admission_authority_state(conn).and_then(|durable| {
+                runtime.host = durable.host;
+                runtime.last_authority_wall_time = durable.last_authority_wall_time;
+                operation(conn, runtime, enabled)
+            })
+        })
+    }
+}
+
+impl ForkAdmissionAuthorityBootstrapPortV1 for SqliteStore {
+    fn begin_fork_admission_initialize(
+        &mut self,
+        host_key: PublicKey,
+        policy_digest: Hash,
+    ) -> Result<ForkAdmissionInitializeChallengeV1, ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|_, runtime, enabled| {
+            begin_initialize(runtime, enabled, host_key, policy_digest)
+        })
+    }
+
+    fn finalize_fork_admission_initialize(
+        &mut self,
+        challenge: &ForkAdmissionInitializeChallengeV1,
+        signature: &Signature,
+    ) -> Result<ForkAdmissionHostRecordV1, ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|conn, runtime, enabled| {
+            finalize_initialize(runtime, enabled, challenge, signature)
+                .and_then(|record| insert_fork_admission_host_record(conn, record).map(|()| record))
+        })
+    }
+
+    fn fork_admission_host_record(
+        &self,
+    ) -> Result<ForkAdmissionHostRecordV1, ForkAdmissionAuthorityErrorV1> {
+        read_fork_admission_authority_state(&self.conn)?
+            .host
+            .ok_or(ForkAdmissionAuthorityErrorV1::AuthorityUninitialized)
+    }
+
+    fn begin_fork_admission_open(
+        &mut self,
+        host_key: PublicKey,
+        policy_digest: Hash,
+    ) -> Result<ForkAdmissionOpenChallengeV1, ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|_, runtime, enabled| {
+            begin_open(runtime, enabled, host_key, policy_digest)
+        })
+    }
+
+    fn finalize_fork_admission_open(
+        &mut self,
+        challenge: &ForkAdmissionOpenChallengeV1,
+        signature: &Signature,
+    ) -> Result<ForkAdmissionAuthoritySessionV1, ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|_, runtime, enabled| {
+            finalize_open(runtime, enabled, challenge, signature)
+        })
+    }
+
+    fn advance_fork_admission_wall_fence(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<(), ForkAdmissionAuthorityErrorV1> {
+        self.with_fork_authority_runtime(|conn, runtime, enabled| {
+            advance_wall_fence(runtime, enabled, session).and_then(|()| {
+                write_fork_admission_wall_fence(conn, runtime.last_authority_wall_time)
+            })
+        })
+    }
+}
+
+impl ForkAdmissionAuthorityPortV1 for SqliteStore {
+    fn execute_fork_admission_command(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        let (host, command) = self.verify_fork_admission_command(session, policy, command)?;
+        // ADR-106 r3 lock order: any gate fence is taken before BEGIN IMMEDIATE.
+        with_unfenced_fork_containment(
+            &command,
+            self.erasure_topology_requires_permit,
+            self.validated_erasure_gate(),
+            |containment| {
+                self.execute_fork_admission_transaction(
+                    session,
+                    host,
+                    command.clone(),
+                    containment,
+                    None,
+                )
+            },
+        )
+    }
+
+    fn execute_fork_admission_command_in_topology_transition(
+        &mut self,
+        context: &pos_core::ErasureAdmittedForkContextV1<'_>,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        let (host, command) = self.verify_fork_admission_command(session, policy, command)?;
+        let target = command
+            .fork_target()
+            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)?;
+        // The erasure host already holds the gate fence for this whole call,
+        // so BEGIN IMMEDIATE is always the inner lock.
+        let containment = admitted_fork_context_containment(
+            context,
+            self.validated_erasure_gate().ok().as_deref(),
+            self.erasure_topology_store_binding.as_ref(),
+            target,
+        );
+        // The context observes a write boundary that failed to open or was
+        // rolled back, so the host poisons only on uncertain outcomes.
+        let result = self.execute_fork_admission_transaction(
+            session,
+            host,
+            command,
+            containment,
+            Some(context),
+        );
+        if admitted_fork_may_have_changed_topology(&result) && !context.nothing_written() {
+            self.erasure_inventory_generation = None;
+        }
+        result
+    }
+
+    fn recover_fork_admission_command(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        let host = self
+            .fork_admission_host_record()
+            .map_err(pos_core::ForkAdmissionErrorV1::from)?;
+        let query = verify_recovery_proof(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            proof,
+        )?;
+        with_fork_admission_recovery_transaction(&self.conn, || {
+            let row = sqlite_fork_admission_operation(&self.conn, query.kind, query.operation_id)?
+                .ok_or(pos_core::ForkAdmissionErrorV1::OperationMissing)?;
+            sqlite_fork_admission_result(&self.conn, self.hasher.as_ref(), &row)
+        })
+    }
+}
+
+impl ForkAdmissionDeliveryJournalPortV1 for SqliteStore {
+    fn claim_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+    ) -> Result<ForkDeliveryClaimOutcomeV1, ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        let tuple = tuple.revalidate()?;
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let result = (|| {
+            if let Some(row) = sqlite_fork_delivery_row(&self.conn, tuple.host_request_id)? {
+                if row.tuple != tuple {
+                    return Err(ForkDeliveryJournalErrorV1::Conflict);
+                }
+                let claim = ForkDeliveryClaimV1 {
+                    tuple,
+                    owner_fence: row.owner_fence,
+                };
+                return Ok(match row.state {
+                    ForkDeliveryStateV1::Pending => ForkDeliveryClaimOutcomeV1::Busy,
+                    state => ForkDeliveryClaimOutcomeV1::Reconcile(claim, state),
+                });
+            }
+            // The guarded UPDATE refuses a missing, exhausted, negative, or
+            // lagging counter, so no separate pre-read is needed.
+            let updated = self
+                .conn
+                .execute(FORK_DELIVERY_ALLOCATE_FENCE_SQL, [])
+                .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+            if updated != 1 {
+                return Err(ForkDeliveryJournalErrorV1::StorageIndeterminate);
+            }
+            let owner_fence = sqlite_fork_delivery_fence_counter(&self.conn)?;
+            sqlite_insert_pending_fork_delivery(&self.conn, tuple, owner_fence)?;
+            Ok(ForkDeliveryClaimOutcomeV1::Owner(ForkDeliveryClaimV1 {
+                tuple,
+                // The guarded UPDATE keeps the counter in 1..=i64::MAX.
+                owner_fence: owner_fence.unsigned_abs(),
+            }))
+        })();
+        finish_fork_delivery_transaction(&self.conn, result)
+    }
+
+    fn cancel_pending_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        let affected = sqlite_delete_pending_fork_delivery(
+            &self.conn,
+            claim.tuple,
+            sqlite_owner_fence(claim.owner_fence)?,
+        )?;
+        if affected == 1 {
+            Ok(())
+        } else {
+            Err(ForkDeliveryJournalErrorV1::Fenced)
+        }
+    }
+
+    fn execute_claimed_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::ForkAuthenticationPolicyV1,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+        let host = sqlite_validate_delivery_session(self, session)?;
+        let command = verify_command(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            policy,
+            command,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if command.kind() != claim.tuple.kind || command.operation_id() != claim.tuple.operation_id
+        {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        let owner_fence = sqlite_owner_fence(claim.owner_fence)?;
+        // ADR-106 r3 lock order: any gate fence is taken before BEGIN IMMEDIATE.
+        with_unfenced_fork_containment(
+            &command,
+            self.erasure_topology_requires_permit,
+            self.validated_erasure_gate(),
+            |containment| {
+                self.execute_claimed_fork_delivery_transaction(
+                    session,
+                    host,
+                    claim,
+                    owner_fence,
+                    command.clone(),
+                    containment,
+                )
+            },
+        )
+    }
+
+    fn recover_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+        current_principal_digest: Hash,
+    ) -> Result<ForkAdmissionOperationResultV1, ForkDeliveryJournalErrorV1> {
+        let host = sqlite_validate_delivery_session(self, session)?;
+        if current_principal_digest == Hash::zero() {
+            return Err(ForkDeliveryJournalErrorV1::InvalidTuple);
+        }
+        let row = sqlite_fork_delivery_row(&self.conn, tuple.host_request_id)?
+            .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+        if row.tuple != tuple {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        if row.state == ForkDeliveryStateV1::Pending {
+            return Err(ForkDeliveryJournalErrorV1::Fenced);
+        }
+        let query = verify_recovery_proof(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            proof,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if query.kind != tuple.kind || query.operation_id != tuple.operation_id {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        let result = self
+            .recover_fork_admission_command(session, proof)
+            .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        sqlite_delivery_result_matches_principal(
+            &self.conn,
+            self.hasher.as_ref(),
+            &result,
+            current_principal_digest,
+        )
+        .then_some(result)
+        .ok_or(ForkDeliveryJournalErrorV1::Corrupt)
+    }
+
+    fn mark_fork_delivery_uncertain(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        sqlite_set_fork_delivery_state(
+            &self.conn,
+            claim.tuple,
+            sqlite_owner_fence(claim.owner_fence)?,
+            ForkDeliveryStateV1::Uncertain,
+            ForkDeliveryStateV1::Uncertain,
+        )
+    }
+
+    fn mark_fork_delivery_delivered(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        claim: ForkDeliveryClaimV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        sqlite_set_fork_delivery_state(
+            &self.conn,
+            claim.tuple,
+            sqlite_owner_fence(claim.owner_fence)?,
+            ForkDeliveryStateV1::Delivered,
+            ForkDeliveryStateV1::Uncertain,
+        )
+    }
+
+    fn reconcile_fork_delivery_journal(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+    ) -> Result<Vec<ForkDeliveryTupleV1>, ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        let rows = sqlite_fork_delivery_scan(&self.conn)
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let mut retained = Vec::new();
+        for (request, kind, operation, state, owner_fence) in rows {
+            let decoded =
+                sqlite_decode_fork_delivery_row(request, kind, operation, state, owner_fence)?;
+            if decoded.state != ForkDeliveryStateV1::Delivered {
+                retained.push(decoded.tuple);
+            }
+        }
+        Ok(retained)
+    }
+
+    fn reconcile_fork_delivery_startup(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+    ) -> Result<ForkDeliveryStartupOutcomeV1, ForkDeliveryJournalErrorV1> {
+        let host = sqlite_validate_delivery_session(self, session)?;
+        let query = verify_recovery_proof(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            proof,
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+        if query.kind != tuple.kind || query.operation_id != tuple.operation_id {
+            return Err(ForkDeliveryJournalErrorV1::Conflict);
+        }
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let result = (|| {
+            let row = sqlite_fork_delivery_row(&self.conn, tuple.host_request_id)?
+                .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+            if row.tuple != tuple || row.state == ForkDeliveryStateV1::Delivered {
+                return Err(ForkDeliveryJournalErrorV1::Fenced);
+            }
+            // Decoded from a positive SQLite INTEGER, so this is lossless.
+            let owner_fence = row.owner_fence.cast_signed();
+            let operation =
+                sqlite_fork_admission_operation(&self.conn, tuple.kind, tuple.operation_id)
+                    .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+            match operation {
+                Some(operation) => {
+                    sqlite_fork_admission_result(&self.conn, self.hasher.as_ref(), &operation)
+                        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+                    sqlite_set_fork_delivery_state(
+                        &self.conn,
+                        tuple,
+                        owner_fence,
+                        ForkDeliveryStateV1::Uncertain,
+                        ForkDeliveryStateV1::Pending,
+                    )?;
+                    Ok(ForkDeliveryStartupOutcomeV1::RetainedUncertain)
+                }
+                None if row.state == ForkDeliveryStateV1::Pending => {
+                    if sqlite_delete_pending_fork_delivery(&self.conn, tuple, owner_fence)? != 1 {
+                        return Err(ForkDeliveryJournalErrorV1::Fenced);
+                    }
+                    Ok(ForkDeliveryStartupOutcomeV1::ReleasedPending)
+                }
+                None => Err(ForkDeliveryJournalErrorV1::Corrupt),
+            }
+        })();
+        finish_fork_delivery_transaction(&self.conn, result)
+    }
+
+    fn purge_expired_fork_delivery(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        tuple: ForkDeliveryTupleV1,
+    ) -> Result<(), ForkDeliveryJournalErrorV1> {
+        sqlite_validate_delivery_session(self, session)?;
+        let affected = self
+            .conn
+            .execute(
+                FORK_DELIVERY_DELETE_DELIVERED_SQL,
+                params![
+                    tuple.host_request_id.as_bytes().as_slice(),
+                    i64::from(tuple.kind.wire()),
+                    tuple.operation_id.as_bytes().as_slice(),
+                    i64::from(ForkDeliveryStateV1::Delivered.to_wire()),
+                ],
+            )
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        if affected == 1 {
+            Ok(())
+        } else {
+            Err(ForkDeliveryJournalErrorV1::Fenced)
+        }
+    }
+}
+
+impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
+    fn register_classifier(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        permit: &ForkClassifierRegistrarPermitV1,
+        operation_id: Hash,
+        child_timeline_id: TimelineId,
+    ) -> Result<ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1> {
+        let source = permit.source();
+        if permit.store_id() != session.store_id()
+            || permit.registrar_identifier() != source.input().registrar_identifier
+        {
+            return Err(ForkEventAuthorityErrorV1::Unauthenticated);
+        }
+        self.register_fork_classifier_in_transaction(
+            session,
+            operation_id,
+            child_timeline_id,
+            source,
+        )
+    }
+
+    fn append_classified(
+        &mut self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        permit: &ForkAppendSourcePermitV1,
+        operation_id: Hash,
+        draft: EventDraft,
+    ) -> Result<ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1> {
+        if permit.store_id() != session.store_id() {
+            return Err(ForkEventAuthorityErrorV1::Unauthenticated);
+        }
+        self.require_live_fork_event_session(session)
+            .and_then(|()| {
+                self.conn
+                    .execute_batch(begin_immediate_sql())
+                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            })
+            .and_then(|()| {
+                let result = self.append_classified_in_transaction(permit, operation_id, draft);
+                finish_fork_event_transaction(&self.conn, result)
+            })
+    }
+
+    fn recover_classified_append(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        permit: &ForkAppendSourcePermitV1,
+        operation_id: Hash,
+        draft: &EventDraft,
+    ) -> Result<Option<ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1> {
+        let source = permit.source();
+        let child_timeline_id = permit.child_timeline_id();
+        if permit.store_id() != session.store_id() {
+            return Err(ForkEventAuthorityErrorV1::Unauthenticated);
+        }
+        self.require_live_fork_event_session(session)?;
+        sqlite_validate_classified_permit(&self.conn, self.hasher.as_ref(), permit)?;
+        let Some(operation) = sqlite_fork_append_operation(&self.conn, operation_id)
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)?
+        else {
+            return Ok(None);
+        };
+        let request = fork_append_request(operation_id, child_timeline_id, source, draft)?;
+        if operation.input().request_digest != request.digest() {
+            return Err(ForkEventAuthorityErrorV1::Conflict);
+        }
+        sqlite_validated_classified_event(&self.conn, self.hasher.as_ref(), &operation).and_then(
+            |event| {
+                if event.entity != draft.entity
+                    || event.event_type != draft.event_type
+                    || event.payload != draft.payload
+                    || event.causation_id != draft.causation_id
+                    || event.correlation_id != draft.correlation_id
+                    || event.schema_version != draft.schema_version
+                    || event.signature.is_some()
+                    || event.payload_hash != operation.input().payload_hash
+                    || event.wall_time != operation.input().wall_time
+                {
+                    Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+                } else {
+                    Ok(Some(ForkClassifiedAppendReceiptV1 { event, operation }))
+                }
+            },
+        )
+    }
+
+    fn read_fork_event_suffix(
+        &self,
+        child_timeline_id: TimelineId,
+        from_logical_seq: u64,
+    ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
+        self.conn
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+            .and_then(|()| {
+                let result =
+                    self.read_fork_event_suffix_in_transaction(child_timeline_id, from_logical_seq);
+                finish_fork_event_transaction(&self.conn, result)
+            })
+    }
+}
+
+impl SqliteStore {
+    /// Verify FAC1 against the pinned FAH1 policy before the write boundary.
+    fn verify_fork_admission_command(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        policy: &pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> Result<
+        (ForkAdmissionHostRecordV1, VerifiedForkAdmissionCommandV1),
+        pos_core::ForkAdmissionErrorV1,
+    > {
+        let host = self
+            .fork_admission_host_record()
+            .map_err(pos_core::ForkAdmissionErrorV1::from)?;
+        if !policy
+            .digest()
+            .is_ok_and(|digest| host.authentication_policy_digest() == digest)
+        {
+            return Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch);
+        }
+        verify_command(
+            session,
+            self.fork_admission_authority_runtime.session_identity,
+            host,
+            policy,
+            command,
+        )
+        .map(|command| (host, command))
+    }
+
+    /// Execute one claimed FAC1 and its journal transition in one
+    /// `BEGIN IMMEDIATE` transaction.
+    fn execute_claimed_fork_delivery_transaction(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        host: ForkAdmissionHostRecordV1,
+        claim: ForkDeliveryClaimV1,
+        owner_fence: i64,
+        command: VerifiedForkAdmissionCommandV1,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+    ) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+        let result =
+            (|| {
+                sqlite_fork_delivery_row(&self.conn, claim.tuple.host_request_id)?
+                    .filter(|row| row.matches_claim(claim, ForkDeliveryStateV1::Pending))
+                    .ok_or(ForkDeliveryJournalErrorV1::Fenced)?;
+                let execution = fork_delivery_execution(
+                    self.execute_fork_admission_in_transaction(session, host, command, containment),
+                );
+                match &execution {
+                    ForkDeliveryExecutionV1::Committed(_) => sqlite_set_fork_delivery_state(
+                        &self.conn,
+                        claim.tuple,
+                        owner_fence,
+                        ForkDeliveryStateV1::Uncertain,
+                        ForkDeliveryStateV1::Pending,
+                    )?,
+                    ForkDeliveryExecutionV1::Rejected(_) => {
+                        sqlite_delete_pending_fork_delivery(&self.conn, claim.tuple, owner_fence)?;
+                    }
+                    // Never commit a transaction whose authority write failed.
+                    // Uncertain is recorded in a fresh transaction only after
+                    // this complete transaction has rolled back.
+                    ForkDeliveryExecutionV1::Uncertain => {
+                        return Err(ForkDeliveryJournalErrorV1::StorageIndeterminate);
+                    }
+                }
+                Ok(execution)
+            })();
+        match result {
+            Err(ForkDeliveryJournalErrorV1::StorageIndeterminate) => {
+                sqlite_record_uncertain_after_rollback(&self.conn, claim.tuple, owner_fence)
+            }
+            result => finish_fork_delivery_transaction(&self.conn, result),
+        }
+    }
+
+    /// Run one verified FAC1 in its own `BEGIN IMMEDIATE` transaction.
+    ///
+    /// On the permit path `context` opens and rolls back the write boundary,
+    /// so it can tell the erasure host when nothing was written.
+    fn execute_fork_admission_transaction(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        host: ForkAdmissionHostRecordV1,
+        command: VerifiedForkAdmissionCommandV1,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+        context: Option<&pos_core::ErasureAdmittedForkContextV1<'_>>,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        let begin = || self.conn.execute_batch("BEGIN IMMEDIATE");
+        context
+            .map_or_else(begin, |context| context.open_write_boundary(begin))
+            .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?;
+        let result =
+            self.execute_fork_admission_in_transaction(session, host, command, containment);
+        match result {
+            Ok(value) => self
+                .conn
+                .execute_batch("COMMIT")
+                .map(|()| value)
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            Err(error) => {
+                let rollback = || self.conn.execute_batch("ROLLBACK");
+                context
+                    .map_or_else(rollback, |context| {
+                        context.roll_back_write_boundary(rollback)
+                    })
+                    .map(|()| error)
+                    .map_or(
+                        Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+                        Err,
+                    )
+            }
+        }
+    }
+
+    fn execute_fork_admission_in_transaction(
+        &self,
+        session: &ForkAdmissionAuthoritySessionV1,
+        host: ForkAdmissionHostRecordV1,
+        command: VerifiedForkAdmissionCommandV1,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        // ADR-106: FAH1 was read before the write boundary for proof
+        // verification. Re-read it under BEGIN IMMEDIATE and require the exact
+        // host (key, store, and policy digest) that verified the command.
+        let mut authority = read_fork_admission_authority_state(&self.conn)
+            .map_err(pos_core::ForkAdmissionErrorV1::from)
+            .and_then(|state| {
+                (state.host == Some(host))
+                    .then_some(state)
+                    .ok_or(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+            })?;
+        let key_kind = command.kind();
+        let key_operation = command.operation_id();
+        if let Some(row) = sqlite_fork_admission_operation(&self.conn, key_kind, key_operation)? {
+            // ADR-106: committed corruption precedes Conflict, so the complete
+            // durable graph is validated before the presented intent is compared.
+            return sqlite_fork_admission_result(&self.conn, self.hasher.as_ref(), &row).and_then(
+                |result| {
+                    if row.commitment == command.commitment()
+                        && row.evidence_digest == command.evidence_digest()
+                    {
+                        Ok(result)
+                    } else {
+                        Err(pos_core::ForkAdmissionErrorV1::Conflict)
+                    }
+                },
+            );
+        }
+        authority.session_identity = self.fork_admission_authority_runtime.session_identity;
+        advance_wall_fence(
+            &mut authority,
+            self.fork_admission_authority_enabled,
+            session,
+        )
+        .map_err(pos_core::ForkAdmissionErrorV1::from)?;
+        let now = authority.last_authority_wall_time;
+        let (issued_at, expires_at) = match &command {
+            VerifiedForkAdmissionCommandV1::PrincipalOwner {
+                issued_at,
+                expires_at,
+                ..
+            }
+            | VerifiedForkAdmissionCommandV1::Fork {
+                issued_at,
+                expires_at,
+                ..
+            } => (*issued_at, *expires_at),
+        };
+        if issued_at > now || expires_at <= now {
+            return Err(pos_core::ForkAdmissionErrorV1::Unauthenticated);
+        }
+        let result = match command {
+            VerifiedForkAdmissionCommandV1::PrincipalOwner {
+                operation_id,
+                evidence_digest,
+                principal_digest,
+                owner,
+                commitment,
+                ..
+            } => self.insert_principal_owner_operation(
+                operation_id,
+                evidence_digest,
+                principal_digest,
+                owner,
+                commitment,
+            ),
+            VerifiedForkAdmissionCommandV1::Fork {
+                operation_id,
+                evidence_digest,
+                principal_digest,
+                parent_id,
+                cut,
+                descriptor_hash,
+                composition_hash,
+                attribution_required,
+                child_name,
+                commitment,
+                ..
+            } => self.insert_fork_operation(SqliteForkAdmissionOperation {
+                operation_id,
+                evidence_digest,
+                principal_digest,
+                parent_id,
+                cut,
+                descriptor_hash,
+                composition_hash,
+                attribution_required,
+                child_name,
+                commitment,
+                containment,
+            }),
+        };
+        result.and_then(|value| {
+            write_fork_admission_wall_fence(&self.conn, authority.last_authority_wall_time)
+                .map_err(pos_core::ForkAdmissionErrorV1::from)
+                .map(|()| value)
+        })
+    }
+
+    fn insert_principal_owner_operation(
+        &self,
+        operation_id: Hash,
+        evidence_digest: Hash,
+        principal_digest: Hash,
+        owner: OwnerIdV1,
+        commitment: Hash,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        // ADR-099: one Principal maps to exactly one immutable Owner. An equal
+        // Owner under a new operation ID resolves to the committed binding
+        // without writing; only an unequal Owner is a rebinding conflict.
+        if let Some(existing) = sqlite_principal_owner_binding(&self.conn, principal_digest)? {
+            return (existing.input().owner == owner)
+                .then_some(ForkAdmissionOperationResultV1::PrincipalOwner(existing))
+                .ok_or(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
+        }
+        // Verified POC1 facts carry nonzero operation and Principal digests,
+        // so construction cannot fail; any failure still fails closed.
+        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+            operation_id,
+            principal_digest,
+            owner,
+            origin: ForkAuthorityOriginV1::Local,
+        })
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        .and_then(|binding| {
+            self.conn
+                .execute(
+                    "INSERT INTO fork_principal_owner_bindings
+                     (operation_id, principal_digest, pob1_cbor)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        operation_id.as_bytes().as_slice(),
+                        principal_digest.as_bytes().as_slice(),
+                        binding.to_canonical_cbor(),
+                    ],
+                )
+                .map(|_| binding)
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        })?;
+        let result_digest = binding.digest();
+        let row = ForkAdmissionOperationRowV1 {
+            kind: ForkAdmissionOperationKindV1::PrincipalOwner,
+            operation_id,
+            evidence_digest,
+            commitment,
+            result_digest,
+            child_id: None,
+        };
+        sqlite_insert_fork_admission_operation(&self.conn, &row)?;
+        Ok(ForkAdmissionOperationResultV1::PrincipalOwner(binding))
+    }
+
+    /// ADR-106 r3 steps 5 to 7 in order: the committed POB1 (`InvalidRequest`
+    /// when absent), parent visibility, then erasure containment.
+    fn admitted_fork_binding(
+        &self,
+        principal_digest: Hash,
+        parent: TimelineId,
+        containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+    ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+        let binding = sqlite_principal_owner_binding(&self.conn, principal_digest)?
+            .ok_or(pos_core::ForkAdmissionErrorV1::InvalidRequest)?;
+        self.admitted_fork_parent_visibility(parent)?;
+        containment?;
+        Ok(binding)
+    }
+
+    /// ADR-106 r3 step 6: an absent or geographic parent is indistinguishable
+    /// from a changed one, while an unreadable marker is indeterminate.
+    fn admitted_fork_parent_visibility(
+        &self,
+        parent: TimelineId,
+    ) -> Result<(), pos_core::ForkAdmissionErrorV1> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM timelines WHERE id = ?1)",
+                params![parent.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .ok()
+            .zip(self.timeline_contains_geographic_evidence(parent).ok())
+            .map(|(exists, geographic)| exists && !geographic)
+            .ok_or(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+            .and_then(|visible| {
+                if visible {
+                    Ok(())
+                } else {
+                    Err(pos_core::ForkAdmissionErrorV1::ParentChanged)
+                }
+            })
+    }
+
+    fn insert_fork_operation(
+        &self,
+        command: SqliteForkAdmissionOperation,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        let SqliteForkAdmissionOperation {
+            operation_id,
+            evidence_digest,
+            principal_digest,
+            parent_id,
+            cut,
+            descriptor_hash,
+            composition_hash,
+            attribution_required,
+            child_name,
+            commitment,
+            containment,
+        } = command;
+        let binding = self.admitted_fork_binding(principal_digest, parent_id, containment)?;
+        let chain_head = Self::logical_head_unchecked_on(&self.conn, parent_id)
+            .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)
+            .and_then(|head| {
+                if head.as_u64() == cut {
+                    Self::compute_chain_hash_at_unchecked_on(
+                        &self.conn,
+                        self.hasher.as_ref(),
+                        parent_id,
+                        Seq::from_u64(cut),
+                    )
+                    .map_err(|_| pos_core::ForkAdmissionErrorV1::ParentChanged)
+                } else {
+                    Err(pos_core::ForkAdmissionErrorV1::StaleFoldBoundary)
+                }
+            })?;
+        let meta = TimelineMeta::forked_from(parent_id, Seq::from_u64(cut), child_name);
+        // Verified FCC1 facts and the fresh child ID satisfy every FAR1
+        // invariant; any construction failure still fails closed.
+        let admission =
+            Self::create_timeline_with_meta_in_transaction(&self.conn, self.hasher.as_ref(), &meta)
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+                .and_then(|child| {
+                    ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+                        operation_id,
+                        principal_owner_binding_digest: binding.digest(),
+                        creator: binding.input().owner,
+                        parent_timeline_id: parent_id,
+                        child_timeline_id: child.id(),
+                        room_revision_descriptor_hash: descriptor_hash,
+                        parent_logical_head: cut,
+                        parent_chain_head_hash: chain_head,
+                        completed_fold_cursor: cut,
+                        post_fold_tick_boundary: cut,
+                        plugin_composition_hash: composition_hash,
+                        attribution_required,
+                        origin: ForkAttributionOriginV1::Local,
+                    })
+                    .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+                })?;
+        let receipt = ForkAdmissionReceiptV1 {
+            child_id: admission.input().child_timeline_id,
+            admission_digest: admission.digest(),
+        };
+        self.conn
+            .execute(
+                "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, ?2)",
+                params![receipt.child_id.to_string(), admission.to_canonical_cbor()],
+            )
+            .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?;
+        let row = ForkAdmissionOperationRowV1 {
+            kind: ForkAdmissionOperationKindV1::Fork,
+            operation_id,
+            evidence_digest,
+            commitment,
+            result_digest: receipt.admission_digest,
+            child_id: Some(receipt.child_id),
+        };
+        sqlite_insert_fork_admission_operation(&self.conn, &row)?;
+        Ok(ForkAdmissionOperationResultV1::Fork(receipt))
+    }
+}
+
+struct SqliteForkAdmissionOperation {
+    operation_id: Hash,
+    evidence_digest: Hash,
+    principal_digest: Hash,
+    parent_id: TimelineId,
+    cut: u64,
+    descriptor_hash: Hash,
+    composition_hash: Hash,
+    attribution_required: bool,
+    child_name: String,
+    commitment: Hash,
+    /// ADR-106 r3 erasure decision applied after the visibility check.
+    containment: Result<(), pos_core::ForkAdmissionErrorV1>,
+}
+
+fn sqlite_hash(bytes: Vec<u8>) -> Result<Hash, pos_core::ForkAdmissionErrorV1> {
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+    Ok(Hash::from_bytes(bytes))
+}
+
+/// Read and strictly decode the one durable FCS1 selected for a room revision.
+pub(crate) fn sqlite_fork_classifier_source(
+    conn: &Connection,
+    descriptor_hash: Hash,
+    registrar_identifier: &str,
+) -> Result<Option<ForkClassifierSourceV1>, CoreError> {
+    conn.query_row(
+        "SELECT fcs1_cbor FROM fork_classifier_sources WHERE descriptor_hash = ?1 AND registrar_identifier = ?2",
+        params![descriptor_hash.as_bytes().as_slice(), registrar_identifier],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(SqliteStore::into_storage_error)
+    .and_then(|bytes| {
+        bytes
+            .map(|bytes| ForkClassifierSourceV1::from_canonical_cbor(&bytes)
+                .map_err(|_| CoreError::Storage("invalid persisted FCS1".to_owned())))
+            .transpose()
+    })
+}
+
+/// Read and strictly decode the one durable FCT1 selected for a child Fork.
+pub(crate) fn sqlite_fork_classifier_table(
+    conn: &Connection,
+    child_id: TimelineId,
+) -> Result<Option<ForkClassifierTableV1>, CoreError> {
+    conn.query_row(
+        "SELECT fct1_cbor FROM fork_classifier_tables WHERE child_id = ?1",
+        params![child_id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(SqliteStore::into_storage_error)
+    .and_then(|bytes| {
+        bytes
+            .map(|bytes| {
+                ForkClassifierTableV1::from_canonical_cbor(&bytes)
+                    .map_err(|_| CoreError::Storage("invalid persisted FCT1".to_owned()))
+            })
+            .transpose()
+    })
+}
+
+/// Read and strictly decode the FCR1 retained for one registration operation.
+pub(crate) fn sqlite_fork_classifier_registration(
+    conn: &Connection,
+    operation_id: Hash,
+) -> Result<Option<ForkClassifierRegistrationV1>, CoreError> {
+    conn.query_row(
+        "SELECT fcr1_cbor FROM fork_classifier_registrations WHERE operation_id = ?1",
+        params![operation_id.as_bytes().as_slice()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(SqliteStore::into_storage_error)
+    .and_then(|bytes| {
+        bytes
+            .map(|bytes| {
+                ForkClassifierRegistrationV1::from_canonical_cbor(&bytes)
+                    .map_err(|_| CoreError::Storage("invalid persisted FCR1".to_owned()))
+            })
+            .transpose()
+    })
+}
+
+/// Read and strictly decode one append-operation row by its stable operation ID.
+pub(crate) fn sqlite_fork_append_operation(
+    conn: &Connection,
+    operation_id: Hash,
+) -> Result<Option<ForkAppendOperationV1>, CoreError> {
+    conn.query_row(
+        "SELECT fop1_cbor FROM fork_append_operations WHERE operation_id = ?1",
+        params![operation_id.as_bytes().as_slice()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(SqliteStore::into_storage_error)
+    .and_then(|bytes| {
+        bytes
+            .map(|bytes| {
+                ForkAppendOperationV1::from_canonical_cbor(&bytes)
+                    .map_err(|_| CoreError::Storage("invalid persisted FOP1".to_owned()))
+            })
+            .transpose()
+    })
+}
+
+/// Strictly decode one EOR1 row linked to a committed Event ID.
+pub(crate) fn sqlite_event_origin(
+    conn: &Connection,
+    event_id: EventId,
+) -> Result<EventOriginRecordV1, CoreError> {
+    conn.query_row(
+        "SELECT eor1_cbor FROM fork_event_origins WHERE event_id = ?1",
+        params![event_id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .map_err(SqliteStore::into_storage_error)
+    .and_then(|bytes| {
+        EventOriginRecordV1::from_canonical_cbor(&bytes)
+            .map_err(|_| CoreError::Storage("invalid persisted EOR1".to_owned()))
+    })
+}
+
+/// Strictly decode the optional FIA1 row linked to a committed Event ID.
+pub(crate) fn sqlite_intervention_admission(
+    conn: &Connection,
+    event_id: EventId,
+) -> Result<Option<ForkInterventionAdmissionV1>, CoreError> {
+    conn.query_row(
+        "SELECT fia1_cbor FROM fork_intervention_admissions WHERE event_id = ?1",
+        params![event_id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(SqliteStore::into_storage_error)
+    .and_then(|bytes| {
+        bytes
+            .map(|bytes| {
+                ForkInterventionAdmissionV1::from_canonical_cbor(&bytes)
+                    .map_err(|_| CoreError::Storage("invalid persisted FIA1".to_owned()))
+            })
+            .transpose()
+    })
+}
+
+/// One child Event row joined to its optional committed `FOP1` bytes.
+type SqliteForkSuffixRowV1 = (String, i64, Option<Vec<u8>>);
+
+/// Read every child Event row with its optional `FOP1` after rejecting any
+/// orphaned `FOP1`, `EOR1`, or `FIA1`.
+///
+/// Every query failure inside the snapshot is corrupt authority, as is any
+/// row whose columns cannot be read.
+fn sqlite_fork_suffix_rows(
+    conn: &Connection,
+    child_timeline_id: TimelineId,
+) -> Result<Vec<SqliteForkSuffixRowV1>, ForkEventAuthorityErrorV1> {
+    let child = child_timeline_id.to_string();
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM fork_append_operations
+         LEFT JOIN events ON events.timeline_id = fork_append_operations.child_id
+            AND events.event_id = fork_append_operations.event_id
+         WHERE fork_append_operations.child_id = ?1 AND events.event_id IS NULL)",
+        params![child],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+    .and_then(|orphan_operation| {
+        sqlite_has_orphaned_fork_provenance(conn, child_timeline_id)
+            .map(|orphan_provenance| orphan_operation || orphan_provenance)
+    })
+    .and_then(|orphaned| {
+        if orphaned {
+            return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
+        }
+        conn.prepare(
+            "SELECT events.event_id, events.seq, fork_append_operations.fop1_cbor
+             FROM events LEFT JOIN fork_append_operations
+               ON fork_append_operations.child_id = events.timeline_id
+               AND fork_append_operations.event_id = events.event_id
+             WHERE events.timeline_id = ?1 ORDER BY events.seq",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![child], |row| {
+                    row.get::<_, String>(0).and_then(|event_id| {
+                        row.get::<_, i64>(1).and_then(|local_seq| {
+                            row.get::<_, Option<Vec<u8>>>(2)
+                                .map(|fop1| (event_id, local_seq, fop1))
+                        })
+                    })
+                })
+                .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
+        })
+        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+    })
+}
+
+/// Decode one joined suffix row into its Event ID, logical sequence, and `FOP1`.
+///
+/// A malformed Event ID, an out-of-range sequence, or an absent or
+/// noncanonical `FOP1` yields `None`, which the caller reports as corrupt.
+fn sqlite_decode_fork_suffix_row(
+    prefix: u64,
+    row: SqliteForkSuffixRowV1,
+) -> Option<(EventId, u64, ForkAppendOperationV1)> {
+    let (event_id, local_seq, fop1) = row;
+    event_id
+        .parse::<ulid::Ulid>()
+        .ok()
+        .zip(
+            u64::try_from(local_seq)
+                .ok()
+                .and_then(|local_seq| prefix.checked_add(local_seq)),
+        )
+        .zip(fop1.and_then(|bytes| ForkAppendOperationV1::from_canonical_cbor(&bytes).ok()))
+        .map(|((event_id, logical_seq), operation)| {
+            (EventId::from_ulid(event_id), logical_seq, operation)
+        })
+}
+
+/// Detect EOR1/FIA1 rows claiming this child whose Event is absent from it.
+///
+/// The child is read from each record's fixed canonical offset, so rows that
+/// belong to other children, including unrelated corrupt rows, are never decoded.
+fn sqlite_has_orphaned_fork_provenance(
+    conn: &Connection,
+    child_timeline_id: TimelineId,
+) -> Result<bool, ForkEventAuthorityErrorV1> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM fork_event_origins
+             LEFT JOIN events ON events.timeline_id = ?1
+                 AND events.event_id = fork_event_origins.event_id
+             WHERE substr(fork_event_origins.eor1_cbor, ?3, 16) = ?2
+                 AND events.event_id IS NULL
+         ) OR EXISTS(
+             SELECT 1 FROM fork_intervention_admissions
+             LEFT JOIN events ON events.timeline_id = ?1
+                 AND events.event_id = fork_intervention_admissions.event_id
+             WHERE substr(fork_intervention_admissions.fia1_cbor, ?4, 16) = ?2
+                 AND events.event_id IS NULL
+         )",
+        params![
+            child_timeline_id.to_string(),
+            child_timeline_id.inner().to_bytes().as_slice(),
+            EOR1_CHILD_TIMELINE_OFFSET,
+            FIA1_CHILD_TIMELINE_OFFSET
+        ],
+        |row| row.get(0),
+    )
+    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+}
+
+fn sqlite_local_fork_admission(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    child_timeline_id: TimelineId,
+) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
+    conn.query_row(
+        "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+        params![child_timeline_id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+    .and_then(|bytes| {
+        ForkAdmissionRecordV1::from_canonical_cbor(&bytes)
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+    })
+    .and_then(|admission| {
+        (admission.input().child_timeline_id == child_timeline_id
+            && admission.input().origin == ForkAttributionOriginV1::Local)
+            .then_some(admission)
+            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+    })
+    .and_then(|admission| {
+        // A missing or unreadable FCC1 row and a receipt naming another FAR1
+        // are all corrupt authority.
+        let expected = ForkAdmissionOperationResultV1::Fork(ForkAdmissionReceiptV1 {
+            child_id: child_timeline_id,
+            admission_digest: admission.digest(),
+        });
+        sqlite_fork_admission_operation(
+            conn,
+            ForkAdmissionOperationKindV1::Fork,
+            admission.input().operation_id,
+        )
+        .ok()
+        .flatten()
+        .and_then(|row| sqlite_fork_admission_result(conn, hasher, &row).ok())
+        .filter(|result| *result == expected)
+        .map(|_| admission)
+        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+    })
+}
+
+fn sqlite_classified_event(
+    conn: &Connection,
+    operation: &ForkAppendOperationV1,
+) -> Result<Event, ForkEventAuthorityErrorV1> {
+    let child_timeline_id = operation.input().child_timeline_id;
+    let logical_seq = operation.input().logical_seq;
+    // Any unreadable prefix or Event row, and any Event not exactly bound to
+    // this FOP1, is corrupt authority.
+    read_origin_prefix(conn, child_timeline_id)
+        .ok()
+        .and_then(|prefix| {
+            logical_seq.checked_sub(prefix).and_then(|local_seq| {
+                SqliteStore::read_own_events_limited_on(
+                    conn,
+                    child_timeline_id,
+                    Seq::from_u64(local_seq),
+                    Some(Seq::from_u64(local_seq)),
+                    Some(1),
+                    None,
+                    u64::MAX,
+                )
+                .ok()
+                .and_then(|mut events| events.pop())
+                .and_then(|event| SqliteStore::logical_event(prefix, event).ok())
+            })
+        })
+        .filter(|event| {
+            event.id == operation.input().event_id
+                && event.seq.as_u64() == logical_seq
+                && event.origin.is_some_and(|origin| {
+                    origin.origin_timeline_id == child_timeline_id
+                        && origin.origin_logical_seq.as_u64() == logical_seq
+                })
+        })
+        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+}
+
+/// Read the committed Event for one FOP1 and revalidate its full provenance.
+fn sqlite_validated_classified_event(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    operation: &ForkAppendOperationV1,
+) -> Result<Event, ForkEventAuthorityErrorV1> {
+    sqlite_classified_event(conn, operation).and_then(|event| {
+        sqlite_validate_classified_provenance(conn, hasher, operation).map(|()| event)
+    })
+}
+
+fn sqlite_validate_classified_permit(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    permit: &ForkAppendSourcePermitV1,
+) -> Result<ForkClassifierTableV1, ForkEventAuthorityErrorV1> {
+    sqlite_classified_authority_graph(conn, hasher, permit.child_timeline_id()).and_then(
+        |(admission, table)| {
+            (permit.fork_admission_digest() == admission.digest()
+                && permit.classifier_revision_digest() == table.digest()
+                && permit.registrar_identifier() == table.input().registrar_identifier)
+                .then_some(table)
+                .ok_or(ForkEventAuthorityErrorV1::Unauthenticated)
+        },
+    )
+}
+
+fn persist_classified_append(
+    conn: &Connection,
+    local_seq: Seq,
+    provenance: &ForkClassifiedProvenanceV1,
+) -> Result<(), ForkEventAuthorityErrorV1> {
+    let operation = provenance.operation.input();
+    let event_id = operation.event_id.to_string();
+    conn.execute(
+        "INSERT INTO fork_event_origins (event_id, eor1_cbor)
+         VALUES (?1, ?2)",
+        params![event_id, provenance.origin.to_canonical_cbor()],
+    )
+    .and_then(|_| {
+        provenance
+            .intervention
+            .as_ref()
+            .map_or(Ok(0), |intervention| {
+                conn.execute(
+                    "INSERT INTO fork_intervention_admissions (event_id, fia1_cbor)
+                     VALUES (?1, ?2)",
+                    params![event_id, intervention.to_canonical_cbor()],
+                )
+            })
+    })
+    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+    .and_then(|_| {
+        conn.execute(
+            "INSERT INTO fork_append_operations
+             (operation_id, child_id, local_seq, event_id, fop1_cbor)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                operation.operation_id.as_bytes().as_slice(),
+                operation.child_timeline_id.to_string(),
+                seq_as_i64(local_seq),
+                event_id,
+                provenance.operation.to_canonical_cbor(),
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| fork_event_insert_error(&error))
+    })
+}
+
+/// Map an INSERT failure: only a `SQLite` constraint rejection is a `Conflict`.
+fn fork_event_insert_error(error: &rusqlite::Error) -> ForkEventAuthorityErrorV1 {
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+        ForkEventAuthorityErrorV1::Conflict
+    } else {
+        ForkEventAuthorityErrorV1::StorageIndeterminate
+    }
+}
+
+fn sqlite_validate_classified_provenance(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    operation: &ForkAppendOperationV1,
+) -> Result<(), ForkEventAuthorityErrorV1> {
+    let input = operation.input();
+    sqlite_validate_classified_authority_graph(
+        conn,
+        hasher,
+        input.child_timeline_id,
+        input.fork_admission_digest,
+        input.classifier_revision_digest,
+    )
+    .and_then(|(_, table)| sqlite_validate_classified_records(conn, operation, &table))
+    .map(|_| ())
+}
+
+/// Require the committed Event, EOR1, and FIA1 exactly bound by one FOP1.
+fn sqlite_validate_classified_records(
+    conn: &Connection,
+    operation: &ForkAppendOperationV1,
+    table: &ForkClassifierTableV1,
+) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1> {
+    let input = operation.input();
+    sqlite_classified_event(conn, operation)
+        .and_then(|event| {
+            sqlite_event_origin(conn, input.event_id)
+                .and_then(|origin| {
+                    sqlite_intervention_admission(conn, input.event_id)
+                        .map(|intervention| (event, origin, intervention))
+                })
+                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+        })
+        .and_then(|(event, origin, intervention)| {
+            // An unclassifiable FOP1 source is corrupt authority, exactly like
+            // any record that differs from its expected provenance.
+            ForkEventClassifierV1::from_table(table)
+                .classify_identity(&input.source)
+                .ok()
+                .filter(|classification| {
+                    let (expected_origin, expected_intervention) =
+                        operation.expected_provenance(table, *classification);
+                    event.payload_hash == input.payload_hash
+                        && origin == expected_origin
+                        && origin.digest() == input.event_origin_digest
+                        && intervention == expected_intervention
+                        && intervention
+                            .as_ref()
+                            .map(ForkInterventionAdmissionV1::digest)
+                            == input.intervention_admission_digest
+                })
+                .map(|_| (origin, intervention))
+                .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+        })
+}
+
+/// Rebuild the complete immutable ADR-099 authority graph for one child.
+///
+/// `FOP1` digests are evidence, never a substitute for rereading the local
+/// FAR1/FCS1/FCT1/FCR1 authority closure.
+fn sqlite_classified_authority_graph(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    child_id: TimelineId,
+) -> Result<(ForkAdmissionRecordV1, ForkClassifierTableV1), ForkEventAuthorityErrorV1> {
+    let admission = sqlite_local_fork_admission(conn, hasher, child_id)?;
+    let table = sqlite_fork_classifier_table(conn, child_id)
+        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
+        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
+    let registration_bytes = conn
+        .query_row(
+            "SELECT fcr1_cbor FROM fork_classifier_registrations WHERE child_id = ?1",
+            params![child_id.to_string()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
+    let registration = ForkClassifierRegistrationV1::from_canonical_cbor(&registration_bytes)
+        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+    let source = sqlite_fork_classifier_source(
+        conn,
+        table.input().room_revision_descriptor_hash,
+        &table.input().registrar_identifier,
+    )
+    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
+    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
+    (table.input().fork_admission_digest == admission.digest()
+        && table.input().room_revision_descriptor_hash
+            == admission.input().room_revision_descriptor_hash
+        && source.input().room_revision_descriptor_hash
+            == table.input().room_revision_descriptor_hash
+        && source.input().registrar_identifier == table.input().registrar_identifier
+        && table.input().source_configuration_revision_digest == source.digest()
+        && table.input().routes == source.input().routes
+        && registration.input().child_timeline_id == child_id
+        && registration.input().fork_admission_digest == admission.digest()
+        && registration.input().room_revision_descriptor_hash
+            == admission.input().room_revision_descriptor_hash
+        && registration.input().classifier_revision_digest == table.digest())
+    .then_some((admission, table))
+    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+}
+
+/// Validate the child's authority closure against digests retained by evidence.
+fn sqlite_validate_classified_authority_graph(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    child_id: TimelineId,
+    fork_admission_digest: Hash,
+    classifier_revision_digest: Hash,
+) -> Result<(ForkAdmissionRecordV1, ForkClassifierTableV1), ForkEventAuthorityErrorV1> {
+    sqlite_classified_authority_graph(conn, hasher, child_id).and_then(|(admission, table)| {
+        (admission.digest() == fork_admission_digest
+            && table.digest() == classifier_revision_digest)
+            .then_some((admission, table))
+            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+    })
+}
+
+fn finish_fork_event_transaction<T>(
+    conn: &Connection,
+    result: Result<T, ForkEventAuthorityErrorV1>,
+) -> Result<T, ForkEventAuthorityErrorV1> {
+    match result {
+        Ok(value) => conn
+            .execute_batch("COMMIT")
+            .map(|()| value)
+            .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate),
+        Err(error) => conn
+            .execute_batch("ROLLBACK")
+            .map(|()| error)
+            .map_or(Err(ForkEventAuthorityErrorV1::StorageIndeterminate), Err),
+    }
+}
+
+/// Allocates the next never-reused owner fence, refusing a missing,
+/// exhausted, negative, or lagging counter.
+const FORK_DELIVERY_ALLOCATE_FENCE_SQL: &str = "UPDATE fork_delivery_fence_counter SET last_fence = last_fence + 1 WHERE id = 1 AND last_fence < 9223372036854775807 AND last_fence >= COALESCE((SELECT MAX(owner_fence) FROM fork_delivery_journal), 0)";
+const FORK_DELIVERY_READ_FENCE_SQL: &str =
+    "SELECT last_fence FROM fork_delivery_fence_counter WHERE id = 1";
+const FORK_DELIVERY_INSERT_SQL: &str = "INSERT INTO fork_delivery_journal (host_request_id, kind, operation_id, state, owner_fence) VALUES (?1, ?2, ?3, ?4, ?5)";
+/// Deletes one exact fenced row in state `?5`.
+const FORK_DELIVERY_DELETE_OWNED_SQL: &str = "DELETE FROM fork_delivery_journal WHERE host_request_id = ?1 AND kind = ?2 AND operation_id = ?3 AND owner_fence = ?4 AND state = ?5";
+/// Deletes one exact row in state `?4` regardless of owner.
+const FORK_DELIVERY_DELETE_DELIVERED_SQL: &str = "DELETE FROM fork_delivery_journal WHERE host_request_id = ?1 AND kind = ?2 AND operation_id = ?3 AND state = ?4";
+/// Moves one exact fenced row from state `?6` or `?7` to state `?1`.
+const FORK_DELIVERY_SET_STATE_SQL: &str = "UPDATE fork_delivery_journal SET state = ?1 WHERE host_request_id = ?2 AND kind = ?3 AND operation_id = ?4 AND owner_fence = ?5 AND state IN (?6, ?7)";
+
+/// Validates the live session against durable FAH1 and returns that host.
+/// An unreadable authority state and a stale session are both `Corrupt`.
+fn sqlite_validate_delivery_session(
+    store: &SqliteStore,
+    session: &ForkAdmissionAuthoritySessionV1,
+) -> Result<ForkAdmissionHostRecordV1, ForkDeliveryJournalErrorV1> {
+    read_fork_admission_authority_state(&store.conn)
+        .ok()
+        .and_then(|mut state| {
+            state.session_identity = store.fork_admission_authority_runtime.session_identity;
+            state
+                .host
+                .filter(|_| validate_live_session(&state, session))
+        })
+        .ok_or(ForkDeliveryJournalErrorV1::Corrupt)
+}
+
+/// One retained journal row as stored: request, kind, operation, state, fence.
+type SqliteForkDeliveryScanRowV1 = (Vec<u8>, i64, Vec<u8>, i64, i64);
+
+/// Reads every journal row with typed columns; any prepare, step, or column
+/// type failure is one `rusqlite` error for the caller to map.
+fn sqlite_fork_delivery_scan(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<SqliteForkDeliveryScanRowV1>> {
+    conn.prepare(
+        "SELECT host_request_id, kind, operation_id, state, owner_fence FROM fork_delivery_journal",
+    )
+    .and_then(|mut statement| {
+        let rows = statement
+            .query_map([], |row| SqliteForkDeliveryScanRowV1::try_from(row))
+            .and_then(Iterator::collect);
+        rows
+    })
+}
+
+fn finish_fork_delivery_transaction<T>(
+    conn: &Connection,
+    result: Result<T, ForkDeliveryJournalErrorV1>,
+) -> Result<T, ForkDeliveryJournalErrorV1> {
+    match result {
+        Ok(value) => conn
+            .execute_batch("COMMIT")
+            .map(|()| value)
+            .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate),
+        Err(error) => Err(conn
+            .execute_batch("ROLLBACK")
+            .map_or(ForkDeliveryJournalErrorV1::StorageIndeterminate, |()| error)),
+    }
+}
+
+/// Rolls back a failed FAC1 transaction, then records Uncertain in a fresh one.
+fn sqlite_record_uncertain_after_rollback(
+    conn: &Connection,
+    tuple: ForkDeliveryTupleV1,
+    owner_fence: i64,
+) -> Result<ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1> {
+    conn.execute_batch("ROLLBACK")
+        .and_then(|()| conn.execute_batch("BEGIN IMMEDIATE"))
+        .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)
+        .and_then(|()| {
+            let state = sqlite_set_fork_delivery_state(
+                conn,
+                tuple,
+                owner_fence,
+                ForkDeliveryStateV1::Uncertain,
+                ForkDeliveryStateV1::Pending,
+            );
+            finish_fork_delivery_transaction(conn, state)
+        })
+        .map(|()| ForkDeliveryExecutionV1::Uncertain)
+}
+
+fn sqlite_fork_delivery_tuple(
+    host_request_id: Vec<u8>,
+    kind: i64,
+    operation_id: Vec<u8>,
+) -> Result<ForkDeliveryTupleV1, ForkDeliveryJournalErrorV1> {
+    let kind = [
+        ForkAdmissionOperationKindV1::PrincipalOwner,
+        ForkAdmissionOperationKindV1::Fork,
+    ]
+    .into_iter()
+    .find(|candidate| i64::from(candidate.wire()) == kind)
+    .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+    let host_request_id =
+        sqlite_hash(host_request_id).map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+    let operation_id =
+        sqlite_hash(operation_id).map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+    ForkDeliveryTupleV1::new(host_request_id, kind, operation_id)
+        .map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)
+}
+
+fn sqlite_decode_fork_delivery_row(
+    host_request_id: Vec<u8>,
+    kind: i64,
+    operation_id: Vec<u8>,
+    state: i64,
+    owner_fence: i64,
+) -> Result<ForkDeliveryRowV1, ForkDeliveryJournalErrorV1> {
+    let tuple = sqlite_fork_delivery_tuple(host_request_id, kind, operation_id)?;
+    let state = u8::try_from(state)
+        .ok()
+        .and_then(ForkDeliveryStateV1::from_wire)
+        .ok_or(ForkDeliveryJournalErrorV1::Corrupt)?;
+    let owner_fence =
+        u64::try_from(owner_fence).map_err(|_| ForkDeliveryJournalErrorV1::Corrupt)?;
+    if owner_fence == 0 {
+        return Err(ForkDeliveryJournalErrorV1::Corrupt);
+    }
+    Ok(ForkDeliveryRowV1 {
+        tuple,
+        state,
+        owner_fence,
+    })
+}
+
+fn sqlite_fork_delivery_row(
+    conn: &Connection,
+    host_request_id: Hash,
+) -> Result<Option<ForkDeliveryRowV1>, ForkDeliveryJournalErrorV1> {
+    conn.query_row(
+        "SELECT kind, operation_id, state, owner_fence FROM fork_delivery_journal WHERE host_request_id = ?1",
+        params![host_request_id.as_bytes().as_slice()],
+        |row| <(i64, Vec<u8>, i64, i64)>::try_from(row),
+    )
+    .optional()
+    .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)
+    .and_then(|row| {
+        row.map_or(Ok(None), |(kind, operation_id, state, owner_fence)| {
+            sqlite_decode_fork_delivery_row(
+                host_request_id.as_bytes().to_vec(),
+                kind,
+                operation_id,
+                state,
+                owner_fence,
+            )
+            .map(Some)
+        })
+    })
+}
+
+fn sqlite_fork_delivery_fence_counter(
+    conn: &Connection,
+) -> Result<i64, ForkDeliveryJournalErrorV1> {
+    conn.query_row(FORK_DELIVERY_READ_FENCE_SQL, [], |row| row.get::<_, i64>(0))
+        .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)
+}
+
+/// Inserts a fresh Pending row. Only a UNIQUE/PRIMARY KEY violation is a
+/// tuple conflict; every other failure is an indeterminate write.
+fn sqlite_insert_pending_fork_delivery(
+    conn: &Connection,
+    tuple: ForkDeliveryTupleV1,
+    owner_fence: i64,
+) -> Result<(), ForkDeliveryJournalErrorV1> {
+    conn.execute(
+        FORK_DELIVERY_INSERT_SQL,
+        params![
+            tuple.host_request_id.as_bytes().as_slice(),
+            i64::from(tuple.kind.wire()),
+            tuple.operation_id.as_bytes().as_slice(),
+            i64::from(ForkDeliveryStateV1::Pending.to_wire()),
+            owner_fence,
+        ],
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        if matches!(
+            error.sqlite_error().map(|failure| failure.extended_code),
+            Some(
+                rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                    | rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+            )
+        ) {
+            ForkDeliveryJournalErrorV1::Conflict
+        } else {
+            ForkDeliveryJournalErrorV1::StorageIndeterminate
+        }
+    })
+}
+
+fn sqlite_delete_pending_fork_delivery(
+    conn: &Connection,
+    tuple: ForkDeliveryTupleV1,
+    owner_fence: i64,
+) -> Result<usize, ForkDeliveryJournalErrorV1> {
+    conn.execute(
+        FORK_DELIVERY_DELETE_OWNED_SQL,
+        params![
+            tuple.host_request_id.as_bytes().as_slice(),
+            i64::from(tuple.kind.wire()),
+            tuple.operation_id.as_bytes().as_slice(),
+            owner_fence,
+            i64::from(ForkDeliveryStateV1::Pending.to_wire()),
+        ],
+    )
+    .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)
+}
+
+fn sqlite_owner_fence(owner_fence: u64) -> Result<i64, ForkDeliveryJournalErrorV1> {
+    i64::try_from(owner_fence).map_err(|_| ForkDeliveryJournalErrorV1::Fenced)
+}
+
+/// Moves an exact fenced row to `state` from Uncertain or `also_from`.
+fn sqlite_set_fork_delivery_state(
+    conn: &Connection,
+    tuple: ForkDeliveryTupleV1,
+    owner_fence: i64,
+    state: ForkDeliveryStateV1,
+    also_from: ForkDeliveryStateV1,
+) -> Result<(), ForkDeliveryJournalErrorV1> {
+    let affected = conn
+        .execute(
+            FORK_DELIVERY_SET_STATE_SQL,
+            params![
+                i64::from(state.to_wire()),
+                tuple.host_request_id.as_bytes().as_slice(),
+                i64::from(tuple.kind.wire()),
+                tuple.operation_id.as_bytes().as_slice(),
+                owner_fence,
+                i64::from(ForkDeliveryStateV1::Uncertain.to_wire()),
+                i64::from(also_from.to_wire()),
+            ],
+        )
+        .map_err(|_| ForkDeliveryJournalErrorV1::StorageIndeterminate)?;
+    if affected == 1 {
+        Ok(())
+    } else {
+        Err(ForkDeliveryJournalErrorV1::Fenced)
+    }
+}
+
+fn sqlite_delivery_result_matches_principal(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    result: &ForkAdmissionOperationResultV1,
+    principal_digest: Hash,
+) -> bool {
+    match result {
+        ForkAdmissionOperationResultV1::PrincipalOwner(binding) => {
+            binding.input().principal_digest == principal_digest
+        }
+        ForkAdmissionOperationResultV1::Fork(receipt) => {
+            sqlite_local_fork_admission(conn, hasher, receipt.child_id)
+                .ok()
+                .and_then(|admission| {
+                    sqlite_fork_principal_owner_binding(
+                        conn,
+                        admission.input().principal_owner_binding_digest,
+                    )
+                    .ok()
+                })
+                .is_some_and(|binding| binding.input().principal_digest == principal_digest)
+        }
+    }
+}
+
+fn sqlite_fork_admission_operation(
+    conn: &Connection,
+    kind: ForkAdmissionOperationKindV1,
+    operation_id: Hash,
+) -> Result<Option<ForkAdmissionOperationRowV1>, pos_core::ForkAdmissionErrorV1> {
+    conn.query_row(
+        "SELECT evidence_digest, commitment, result_digest, child_id
+         FROM fork_admission_operations
+         WHERE kind = ?1 AND operation_id = ?2",
+        params![i64::from(kind.wire()), operation_id.as_bytes().as_slice()],
+        |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    .and_then(|record| {
+        record.map_or(
+            Ok(None),
+            |(evidence_digest, commitment, result_digest, child_id)| {
+                child_id
+                    .map(|id| {
+                        id.parse::<ulid::Ulid>()
+                            .map(TimelineId::from_ulid)
+                            .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+                    })
+                    .transpose()
+                    .and_then(|child_id| {
+                        Ok(Some(ForkAdmissionOperationRowV1 {
+                            kind,
+                            operation_id,
+                            evidence_digest: sqlite_hash(evidence_digest)?,
+                            commitment: sqlite_hash(commitment)?,
+                            result_digest: sqlite_hash(result_digest)?,
+                            child_id,
+                        }))
+                    })
+            },
+        )
+    })
+}
+
+fn sqlite_insert_fork_admission_operation(
+    conn: &Connection,
+    row: &ForkAdmissionOperationRowV1,
+) -> Result<(), pos_core::ForkAdmissionErrorV1> {
+    conn.execute(
+        "INSERT INTO fork_admission_operations
+         (kind, operation_id, evidence_digest, commitment, result_digest, child_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            i64::from(row.kind.wire()),
+            row.operation_id.as_bytes().as_slice(),
+            row.evidence_digest.as_bytes().as_slice(),
+            row.commitment.as_bytes().as_slice(),
+            row.result_digest.as_bytes().as_slice(),
+            row.child_id.map(|id| id.to_string()),
+        ],
+    )
+    .map(|_| ())
+    .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+}
+
+fn sqlite_principal_owner_binding(
+    conn: &Connection,
+    principal_digest: Hash,
+) -> Result<Option<PrincipalOwnerBindingV1>, pos_core::ForkAdmissionErrorV1> {
+    // The key column equals the queried digest, so only the other columns
+    // are read back from durable state.
+    conn.query_row(
+        "SELECT operation_id, pob1_cbor
+         FROM fork_principal_owner_bindings
+         WHERE principal_digest = ?1",
+        params![principal_digest.as_bytes().as_slice()],
+        |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                principal_digest.as_bytes().to_vec(),
+                row.get::<_, Vec<u8>>(1)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    .and_then(|bytes| bytes.map(sqlite_decode_principal_owner_binding).transpose())
+}
+
+fn sqlite_fork_admission_result(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    row: &ForkAdmissionOperationRowV1,
+) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+    let store_id = sqlite_fork_admission_store_id(conn)?;
+    match (row.kind, row.child_id) {
+        (ForkAdmissionOperationKindV1::PrincipalOwner, None) => {
+            sqlite_principal_owner_result(conn, store_id, row)
+                .map(ForkAdmissionOperationResultV1::PrincipalOwner)
+        }
+        (ForkAdmissionOperationKindV1::Fork, Some(child_id)) => {
+            let bytes = conn
+                .query_row(
+                    "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+                    params![child_id.to_string()],
+                    |record| record.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?
+                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            let admission = ForkAdmissionRecordV1::from_canonical_cbor(&bytes)
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            if admission.digest() != row.result_digest
+                || admission.input().operation_id != row.operation_id
+                || admission.input().child_timeline_id != child_id
+            {
+                return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
+            }
+            let binding = sqlite_fork_principal_owner_binding(
+                conn,
+                admission.input().principal_owner_binding_digest,
+            )?;
+            if binding.input().owner != admission.input().creator {
+                return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
+            }
+            let parent_chain_head = SqliteStore::compute_chain_hash_at_unchecked_on(
+                conn,
+                hasher,
+                admission.input().parent_timeline_id,
+                Seq::from_u64(admission.input().parent_logical_head),
+            )
+            .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            if parent_chain_head != admission.input().parent_chain_head_hash {
+                return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
+            }
+            let child_name = sqlite_fork_admission_child_name(conn, &admission)?
+                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            if fork_commitment(
+                store_id,
+                binding.input().principal_digest,
+                row.evidence_digest,
+                &admission,
+                &child_name,
+            ) != row.commitment
+            {
+                return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
+            }
+            Ok(ForkAdmissionOperationResultV1::Fork(
+                ForkAdmissionReceiptV1 {
+                    child_id,
+                    admission_digest: row.result_digest,
+                },
+            ))
+        }
+        _ => Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority),
+    }
+}
+
+/// Validate one POB1 operation row against its keyed binding and the
+/// reconstructed commitment.
+fn sqlite_principal_owner_result(
+    conn: &Connection,
+    store_id: Hash,
+    row: &ForkAdmissionOperationRowV1,
+) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+    // The key column equals the row's operation ID, so only the other
+    // columns are read back from durable state.
+    let binding = conn
+        .query_row(
+            "SELECT principal_digest, pob1_cbor
+             FROM fork_principal_owner_bindings
+             WHERE operation_id = ?1",
+            params![row.operation_id.as_bytes().as_slice()],
+            |record| {
+                Ok((
+                    row.operation_id.as_bytes().to_vec(),
+                    record.get::<_, Vec<u8>>(0)?,
+                    record.get::<_, Vec<u8>>(1)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?
+        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        .and_then(sqlite_decode_principal_owner_binding)?;
+    if binding.digest() != row.result_digest
+        || principal_owner_commitment(store_id, &binding, row.evidence_digest) != row.commitment
+    {
+        return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
+    }
+    Ok(binding)
+}
+
+/// Resolve the POB1 behind a FAR1 through its committed POB1 operation row.
+///
+/// The lookup is keyed by that row's result digest and the binding's
+/// operation ID, so an unrelated corrupt binding cannot fail it. A binding
+/// without its exact operation row is orphaned, corrupt authority.
+fn sqlite_fork_principal_owner_binding(
+    conn: &Connection,
+    binding_digest: Hash,
+) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+    conn.query_row(
+        "SELECT operation_id FROM fork_admission_operations
+         WHERE kind = 1 AND result_digest = ?1",
+        params![binding_digest.as_bytes().as_slice()],
+        |record| record.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    .and_then(|operation_id| operation_id.ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority))
+    .and_then(sqlite_hash)
+    .and_then(|operation_id| {
+        sqlite_fork_admission_operation(
+            conn,
+            ForkAdmissionOperationKindV1::PrincipalOwner,
+            operation_id,
+        )
+    })
+    .and_then(|binding_row| {
+        binding_row
+            .filter(|binding_row| binding_row.child_id.is_none())
+            .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+    })
+    .and_then(|binding_row| {
+        sqlite_fork_admission_store_id(conn)
+            .and_then(|store_id| sqlite_principal_owner_result(conn, store_id, &binding_row))
+    })
+}
+
+fn sqlite_fork_admission_store_id(
+    conn: &Connection,
+) -> Result<Hash, pos_core::ForkAdmissionErrorV1> {
+    read_fork_admission_authority_state(conn)
+        .map_err(pos_core::ForkAdmissionErrorV1::from)?
+        .host
+        .map(|host| host.store_id())
+        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+}
+
+fn sqlite_decode_principal_owner_binding(
+    record: (Vec<u8>, Vec<u8>, Vec<u8>),
+) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+    let (operation_id, principal_digest, bytes) = record;
+    let binding = PrincipalOwnerBindingV1::from_canonical_cbor(&bytes)
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+    // A key column of the wrong width can never equal a 32-byte digest.
+    if binding.input().operation_id.as_bytes().as_slice() != operation_id.as_slice()
+        || binding.input().principal_digest.as_bytes().as_slice() != principal_digest.as_slice()
+    {
+        return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
+    }
+    Ok(binding)
+}
+
+fn with_fork_admission_recovery_transaction<T>(
+    conn: &Connection,
+    operation: impl FnOnce() -> Result<T, pos_core::ForkAdmissionErrorV1>,
+) -> Result<T, pos_core::ForkAdmissionErrorV1> {
+    // Recovery takes the writer reservation so its multi-row graph read cannot
+    // interleave with a concurrent admission commit on another handle.
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?;
+    match operation() {
+        Ok(value) => conn
+            .execute_batch("ROLLBACK")
+            .map(|()| value)
+            .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+        Err(error) => conn.execute_batch("ROLLBACK").map(|()| error).map_or(
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            Err,
+        ),
+    }
+}
+
+fn sqlite_fork_admission_child_name(
+    conn: &Connection,
+    admission: &ForkAdmissionRecordV1,
+) -> Result<Option<String>, pos_core::ForkAdmissionErrorV1> {
+    let input = admission.input();
+    conn.query_row(
+        "SELECT name, parent_id, fork_seq FROM timelines WHERE id = ?1",
+        params![input.child_timeline_id.to_string()],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+    .map(|timeline| match timeline {
+        Some((name, parent_id, fork_seq))
+            if parent_id.as_deref() == Some(&input.parent_timeline_id.to_string())
+                && fork_seq
+                    .and_then(|seq| u64::try_from(seq).ok())
+                    .is_some_and(|seq| seq == input.parent_logical_head) =>
+        {
+            name
+        }
+        _ => None,
+    })
+}
+
+fn finish_fork_authority_transaction<T>(
+    conn: &Connection,
+    result: Result<T, ForkAdmissionAuthorityErrorV1>,
+) -> Result<T, ForkAdmissionAuthorityErrorV1> {
+    match result {
+        Ok(value) => conn
+            .execute_batch("COMMIT")
+            .map(|()| value)
+            .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate),
+        // A failed ROLLBACK leaves the outcome unknown; otherwise keep the cause.
+        Err(error) => conn.execute_batch("ROLLBACK").map_or(
+            Err(ForkAdmissionAuthorityErrorV1::StorageIndeterminate),
+            |()| Err(error),
+        ),
+    }
+}
+
+fn with_fork_authority_transaction<T>(
+    conn: &Connection,
+    operation: impl FnOnce() -> Result<T, ForkAdmissionAuthorityErrorV1>,
+) -> Result<T, ForkAdmissionAuthorityErrorV1> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|_| ForkAdmissionAuthorityErrorV1::StorageIndeterminate)?;
+    finish_fork_authority_transaction(conn, operation())
 }
 
 impl AuthorityPersistencePortV1 for SqliteStore {
@@ -7299,9 +10225,1440 @@ mod tests {
         ids::{EntityId, EventId},
         store::{EventReadBounds, SeqRange, TimelineExport},
         CoreError, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
-        ErasureVerifiedInventoryV1, KeyRegistrationV1, OwnTracksEnrollmentRequestV1,
+        ErasureVerifiedInventoryV1, EventOriginRecordInputV1, ForkEventOriginKindV1,
+        ForkInterventionAdmissionInputV1, KeyRegistrationV1, OwnTracksEnrollmentRequestV1,
         OwnTracksEnrollmentStatusV1, OwnTracksEnrollmentStore,
     };
+    use pos_crypto::fork_authentication::{
+        verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
+        ForkHostSigningKeyV1,
+    };
+
+    #[test]
+    fn fork_admission_error_mapping_and_incomplete_graph_fail_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let store = tests::new_store();
+        let row = ForkAdmissionOperationRowV1 {
+            kind: ForkAdmissionOperationKindV1::Fork,
+            operation_id: Hash::from_bytes([1; 32]),
+            evidence_digest: Hash::from_bytes([2; 32]),
+            commitment: Hash::from_bytes([3; 32]),
+            result_digest: Hash::from_bytes([4; 32]),
+            child_id: None,
+        };
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        assert_eq!(
+            sqlite_fork_admission_result(
+                &store.conn,
+                store.hasher.as_ref(),
+                &ForkAdmissionOperationRowV1 {
+                    kind: ForkAdmissionOperationKindV1::PrincipalOwner,
+                    operation_id: Hash::from_bytes([5; 32]),
+                    evidence_digest: Hash::from_bytes([6; 32]),
+                    commitment: Hash::from_bytes([7; 32]),
+                    result_digest: Hash::from_bytes([8; 32]),
+                    child_id: None,
+                },
+            ),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        assert_eq!(
+            sqlite_fork_admission_result(
+                &store.conn,
+                store.hasher.as_ref(),
+                &ForkAdmissionOperationRowV1 {
+                    kind: ForkAdmissionOperationKindV1::Fork,
+                    operation_id: Hash::from_bytes([9; 32]),
+                    evidence_digest: Hash::from_bytes([10; 32]),
+                    commitment: Hash::from_bytes([11; 32]),
+                    result_digest: Hash::from_bytes([12; 32]),
+                    child_id: Some(TimelineId::new()),
+                },
+            ),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        let operation_id = Hash::from_bytes([5; 32]);
+        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+            operation_id,
+            principal_digest: Hash::from_bytes([9; 32]),
+            owner: OwnerIdV1::new("owner")?,
+            origin: ForkAuthorityOriginV1::Local,
+        })?;
+        store.conn.execute(
+            "INSERT INTO fork_principal_owner_bindings (operation_id, principal_digest, pob1_cbor) VALUES (?1, ?2, ?3)",
+            params![operation_id.as_bytes().as_slice(), binding.input().principal_digest.as_bytes().as_slice(), binding.to_canonical_cbor()],
+        )?;
+        assert_eq!(
+            sqlite_fork_admission_result(
+                &store.conn,
+                store.hasher.as_ref(),
+                &ForkAdmissionOperationRowV1 {
+                    kind: ForkAdmissionOperationKindV1::PrincipalOwner,
+                    operation_id,
+                    evidence_digest: Hash::from_bytes([10; 32]),
+                    commitment: Hash::from_bytes([11; 32]),
+                    result_digest: Hash::zero(),
+                    child_id: None,
+                },
+            ),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classifier_evidence_readers_reject_missing_tables_and_malformed_rows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = Connection::open_in_memory()?;
+        let descriptor_hash = Hash::from_bytes([1; 32]);
+        let child_id = TimelineId::new();
+        let operation_id = Hash::from_bytes([2; 32]);
+        let event_id = EventId::new();
+        assert!(sqlite_fork_classifier_source(&conn, descriptor_hash, "registrar").is_err());
+        assert!(sqlite_fork_classifier_table(&conn, child_id).is_err());
+        assert!(sqlite_fork_classifier_registration(&conn, operation_id).is_err());
+        assert!(sqlite_event_origin(&conn, event_id).is_err());
+        assert!(sqlite_intervention_admission(&conn, event_id).is_err());
+
+        conn.execute_batch(
+            "CREATE TABLE fork_classifier_sources (
+                 descriptor_hash BLOB, registrar_identifier TEXT, fcs1_cbor BLOB
+             );
+             CREATE TABLE fork_classifier_tables (child_id TEXT, fct1_cbor BLOB);
+             CREATE TABLE fork_classifier_registrations (operation_id BLOB, fcr1_cbor BLOB);
+             CREATE TABLE fork_event_origins (event_id TEXT, eor1_cbor BLOB);
+             CREATE TABLE fork_intervention_admissions (event_id TEXT, fia1_cbor BLOB);",
+        )?;
+        conn.execute(
+            "INSERT INTO fork_classifier_sources VALUES (?1, ?2, ?3)",
+            params![
+                descriptor_hash.as_bytes().as_slice(),
+                "registrar",
+                vec![0_u8]
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO fork_classifier_tables VALUES (?1, ?2)",
+            params![child_id.to_string(), vec![0_u8]],
+        )?;
+        conn.execute(
+            "INSERT INTO fork_classifier_registrations VALUES (?1, ?2)",
+            params![operation_id.as_bytes().as_slice(), vec![0_u8]],
+        )?;
+        conn.execute(
+            "INSERT INTO fork_event_origins VALUES (?1, ?2)",
+            params![event_id.to_string(), vec![0_u8]],
+        )?;
+        conn.execute(
+            "INSERT INTO fork_intervention_admissions VALUES (?1, ?2)",
+            params![event_id.to_string(), vec![0_u8]],
+        )?;
+
+        assert!(sqlite_fork_classifier_source(&conn, descriptor_hash, "registrar").is_err());
+        assert!(sqlite_fork_classifier_table(&conn, child_id).is_err());
+        assert!(sqlite_fork_classifier_registration(&conn, operation_id).is_err());
+        assert!(sqlite_event_origin(&conn, event_id).is_err());
+        assert!(sqlite_intervention_admission(&conn, event_id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn orphaned_provenance_scan_is_scoped_to_the_requested_child(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for table in ["fork_event_origins", "fork_intervention_admissions"] {
+            let store = tests::new_store();
+            store.conn.execute_batch(&format!("DROP TABLE {table}"))?;
+            assert_eq!(
+                sqlite_has_orphaned_fork_provenance(&store.conn, TimelineId::new()),
+                Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+            );
+        }
+
+        // Unrelated malformed rows are never decoded by another child's read.
+        let store = tests::new_store();
+        store.conn.execute(
+            "INSERT INTO fork_event_origins (event_id, eor1_cbor) VALUES (?1, ?2)",
+            params![EventId::new().to_string(), vec![0_u8]],
+        )?;
+        store.conn.execute(
+            "INSERT INTO fork_intervention_admissions (event_id, fia1_cbor) VALUES (?1, ?2)",
+            params![EventId::new().to_string(), vec![0_u8]],
+        )?;
+        assert_eq!(
+            sqlite_has_orphaned_fork_provenance(&store.conn, TimelineId::new()),
+            Ok(false)
+        );
+
+        let child = TimelineId::new();
+        let origin = EventOriginRecordV1::new(EventOriginRecordInputV1 {
+            fork_timeline_id: child,
+            logical_seq: 1,
+            event_id: EventId::new(),
+            classification: pos_core::ForkEventClassificationV1::new(
+                ForkEventOriginKindV1::HostInternal,
+                false,
+            )?,
+            classifier_revision_digest: Hash::from_bytes([1; 32]),
+            fork_admission_digest: Hash::from_bytes([2; 32]),
+        })?;
+        store.conn.execute(
+            "INSERT INTO fork_event_origins (event_id, eor1_cbor) VALUES (?1, ?2)",
+            params![
+                origin.input().event_id.to_string(),
+                origin.to_canonical_cbor()
+            ],
+        )?;
+        assert_eq!(
+            sqlite_has_orphaned_fork_provenance(&store.conn, TimelineId::new()),
+            Ok(false)
+        );
+        assert_eq!(
+            sqlite_has_orphaned_fork_provenance(&store.conn, child),
+            Ok(true)
+        );
+        Ok(())
+    }
+
+    fn classified_registration_fixture() -> Result<
+        (
+            SqliteStore,
+            ForkAdmissionAuthoritySessionV1,
+            ForkAdmissionReceiptV1,
+            ForkClassifierSourceV1,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let (mut store, host, adapter, policy, session) = sqlite_authority_public_fixture()?;
+        let command =
+            sqlite_principal_command(&store, &host, &adapter, &policy, &session, [71; 32])?;
+        let _ = store.execute_fork_admission_command(&session, &policy, &command)?;
+        let parent = store.create_timeline("classified-registration-parent")?;
+        let command = sqlite_fork_command(
+            &store,
+            &host,
+            &adapter,
+            &policy,
+            &session,
+            [72; 32],
+            parent.id(),
+        )?;
+        let ForkAdmissionOperationResultV1::Fork(fork) =
+            store.execute_fork_admission_command(&session, &policy, &command)?
+        else {
+            return Err("Fork admission did not return a receipt".into());
+        };
+        let source = ForkClassifierSourceV1::new(pos_core::ForkClassifierSourceInputV1 {
+            room_revision_descriptor_hash: Hash::from_bytes([74; 32]),
+            registrar_identifier: "sqlite-classifier".to_owned(),
+            routes: Vec::new(),
+        })?;
+        Ok((store, session, fork, source))
+    }
+
+    #[test]
+    fn classified_registration_preserves_success_and_conflict_boundaries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, session, fork, source) = classified_registration_fixture()?;
+        let mismatched_source =
+            ForkClassifierSourceV1::new(pos_core::ForkClassifierSourceInputV1 {
+                room_revision_descriptor_hash: Hash::from_bytes([81; 32]),
+                registrar_identifier: source.input().registrar_identifier.clone(),
+                routes: Vec::new(),
+            })?;
+        assert_eq!(
+            store.register_fork_classifier_in_transaction(
+                &session,
+                Hash::from_bytes([82; 32]),
+                fork.child_id,
+                &mismatched_source,
+            ),
+            Err(ForkEventAuthorityErrorV1::Conflict)
+        );
+        let receipt = store.register_fork_classifier_in_transaction(
+            &session,
+            Hash::from_bytes([77; 32]),
+            fork.child_id,
+            &source,
+        )?;
+        assert_eq!(receipt.child_timeline_id, fork.child_id);
+        assert_ne!(receipt.classifier_revision_digest, Hash::zero());
+        assert_ne!(receipt.registration_digest, Hash::zero());
+        assert!(store
+            .register_fork_classifier_in_transaction(
+                &session,
+                Hash::from_bytes([77; 32]),
+                fork.child_id,
+                &source,
+            )
+            .is_ok());
+        store.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let _ = SqliteStore::append_one_in_transaction(
+            &store.conn,
+            store.hasher.as_ref(),
+            fork.child_id,
+            tests::make_draft(EntityId::new(), b"classified-registration-event"),
+        )?;
+        store.conn.execute_batch("COMMIT")?;
+        assert_eq!(
+            store.register_fork_classifier_in_transaction(
+                &session,
+                Hash::from_bytes([78; 32]),
+                fork.child_id,
+                &source,
+            ),
+            Err(ForkEventAuthorityErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classified_registration_rejects_malformed_admission_record(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, session, fork, source) = classified_registration_fixture()?;
+        store.conn.execute(
+            "UPDATE fork_admissions SET far1_cbor = ?1 WHERE child_id = ?2",
+            params![vec![0_u8], fork.child_id.to_string()],
+        )?;
+        assert_eq!(
+            store.register_fork_classifier_in_transaction(
+                &session,
+                Hash::from_bytes([79; 32]),
+                fork.child_id,
+                &source,
+            ),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classified_registration_maps_transaction_and_session_storage_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let (store, session, fork, source) = classified_registration_fixture()?;
+        store.conn.authorizer(Some(|context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Begin
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        assert_eq!(
+            store.register_fork_classifier_in_transaction(
+                &session,
+                Hash::from_bytes([80; 32]),
+                fork.child_id,
+                &source,
+            ),
+            Err(ForkEventAuthorityErrorV1::StorageIndeterminate)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+
+        let (store, session, fork, source) = classified_registration_fixture()?;
+        store
+            .conn
+            .execute_batch("DROP TABLE fork_admission_authority")?;
+        assert_eq!(
+            store.register_fork_classifier_in_transaction(
+                &session,
+                Hash::from_bytes([83; 32]),
+                fork.child_id,
+                &source,
+            ),
+            Err(ForkEventAuthorityErrorV1::StorageIndeterminate)
+        );
+        Ok(())
+    }
+
+    /// Make every INSERT into `table` fail with a non-constraint `SQLite` error.
+    fn inject_non_constraint_insert_failure(
+        conn: &Connection,
+        table: &str,
+    ) -> rusqlite::Result<()> {
+        conn.execute_batch(&format!(
+            "CREATE TABLE injected_insert_fault (value INTEGER);
+             CREATE TRIGGER inject_{table}_fault BEFORE INSERT ON {table}
+             BEGIN INSERT INTO injected_insert_fault VALUES (1); END;
+             DROP TABLE injected_insert_fault;"
+        ))
+    }
+
+    #[test]
+    fn classified_registration_maps_only_constraint_insert_failures_to_conflict(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, session, fork, source) = classified_registration_fixture()?;
+        inject_non_constraint_insert_failure(&store.conn, "fork_classifier_registrations")?;
+        assert_eq!(
+            store.register_fork_classifier_in_transaction(
+                &session,
+                Hash::from_bytes([84; 32]),
+                fork.child_id,
+                &source,
+            ),
+            Err(ForkEventAuthorityErrorV1::StorageIndeterminate)
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM fork_classifier_tables", [], |row| row
+                    .get::<_, i64>(0),)?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classified_registration_maps_table_constraint_failure_to_conflict(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, session, fork, source) = classified_registration_fixture()?;
+        store.conn.execute(
+            "INSERT INTO fork_classifier_tables (child_id, fct1_digest, fct1_cbor)
+             VALUES (?1, ?2, ?3)",
+            params![fork.child_id.to_string(), vec![85_u8; 32], vec![1_u8]],
+        )?;
+        assert_eq!(
+            store.register_fork_classifier_in_transaction(
+                &session,
+                Hash::from_bytes([86; 32]),
+                fork.child_id,
+                &source,
+            ),
+            Err(ForkEventAuthorityErrorV1::Conflict)
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM fork_classifier_sources", [], |row| {
+                    row.get::<_, i64>(0)
+                },)?,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fork_event_suffix_read_maps_snapshot_transaction_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let store = tests::new_store();
+        store.conn.authorizer(Some(|context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Begin
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        assert_eq!(
+            store.read_fork_event_suffix(TimelineId::new(), 1),
+            Err(ForkEventAuthorityErrorV1::StorageIndeterminate)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        assert_eq!(
+            store.read_fork_event_suffix(TimelineId::new(), 1),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        assert!(store.conn.is_autocommit());
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_admission_row_and_binding_decoders_cover_valid_and_corrupt_rows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let store = tests::new_store();
+        let operation_id = Hash::from_bytes([21; 32]);
+        let principal_digest = Hash::from_bytes([22; 32]);
+        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+            operation_id,
+            principal_digest,
+            owner: OwnerIdV1::new("owner")?,
+            origin: ForkAuthorityOriginV1::Local,
+        })?;
+        store.conn.execute(
+            "INSERT INTO fork_principal_owner_bindings (operation_id, principal_digest, pob1_cbor) VALUES (?1, ?2, ?3)",
+            params![operation_id.as_bytes().as_slice(), principal_digest.as_bytes().as_slice(), binding.to_canonical_cbor()],
+        )?;
+        assert_eq!(
+            sqlite_principal_owner_binding(&store.conn, principal_digest),
+            Ok(Some(binding))
+        );
+
+        let row = ForkAdmissionOperationRowV1 {
+            kind: ForkAdmissionOperationKindV1::PrincipalOwner,
+            operation_id,
+            evidence_digest: Hash::from_bytes([23; 32]),
+            commitment: Hash::from_bytes([24; 32]),
+            result_digest: Hash::from_bytes([25; 32]),
+            child_id: None,
+        };
+        assert_eq!(
+            sqlite_fork_admission_operation(&store.conn, row.kind, row.operation_id),
+            Ok(None)
+        );
+        sqlite_insert_fork_admission_operation(&store.conn, &row)?;
+        assert_eq!(
+            sqlite_fork_admission_operation(&store.conn, row.kind, row.operation_id),
+            Ok(Some(row))
+        );
+
+        let corrupt_operation = Hash::from_bytes([26; 32]);
+        store.conn.execute(
+            "INSERT INTO fork_admission_operations (kind, operation_id, evidence_digest, commitment, result_digest, child_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                i64::from(ForkAdmissionOperationKindV1::Fork.wire()),
+                corrupt_operation.as_bytes().as_slice(),
+                vec![1_u8; 32],
+                vec![2_u8; 32],
+                vec![3_u8; 32],
+                "not-a-timeline",
+            ],
+        )?;
+        assert_eq!(
+            sqlite_fork_admission_operation(
+                &store.conn,
+                ForkAdmissionOperationKindV1::Fork,
+                corrupt_operation,
+            ),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_admission_readers_reject_null_durable_columns(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE fork_admission_operations (
+                kind INTEGER, operation_id BLOB, evidence_digest BLOB,
+                commitment BLOB, result_digest BLOB, child_id TEXT
+            );",
+        )?;
+        let operation_id = Hash::from_bytes([31; 32]);
+        for (index, id) in [1_u8, 2, 3].into_iter().enumerate() {
+            let id = Hash::from_bytes([id; 32]);
+            let values = [
+                (index != 0).then_some(vec![1_u8; 32]),
+                (index != 1).then_some(vec![2_u8; 32]),
+                (index != 2).then_some(vec![3_u8; 32]),
+            ];
+            conn.execute(
+                "INSERT INTO fork_admission_operations VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    i64::from(ForkAdmissionOperationKindV1::PrincipalOwner.wire()),
+                    id.as_bytes().as_slice(),
+                    values[0],
+                    values[1],
+                    values[2],
+                    None::<String>
+                ],
+            )?;
+            assert_eq!(
+                sqlite_fork_admission_operation(
+                    &conn,
+                    ForkAdmissionOperationKindV1::PrincipalOwner,
+                    id,
+                ),
+                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+            );
+        }
+        for (index, id) in [7_u8, 8, 9].into_iter().enumerate() {
+            let id = Hash::from_bytes([id; 32]);
+            let values = [
+                if index == 0 {
+                    vec![1_u8; 31]
+                } else {
+                    vec![1_u8; 32]
+                },
+                if index == 1 {
+                    vec![2_u8; 31]
+                } else {
+                    vec![2_u8; 32]
+                },
+                if index == 2 {
+                    vec![3_u8; 31]
+                } else {
+                    vec![3_u8; 32]
+                },
+            ];
+            conn.execute(
+                "INSERT INTO fork_admission_operations VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+                params![
+                    i64::from(ForkAdmissionOperationKindV1::PrincipalOwner.wire()),
+                    id.as_bytes().as_slice(),
+                    values[0],
+                    values[1],
+                    values[2],
+                ],
+            )?;
+            assert_eq!(
+                sqlite_fork_admission_operation(
+                    &conn,
+                    ForkAdmissionOperationKindV1::PrincipalOwner,
+                    id,
+                ),
+                Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+            );
+        }
+        assert_eq!(
+            sqlite_fork_admission_operation(
+                &conn,
+                ForkAdmissionOperationKindV1::PrincipalOwner,
+                operation_id,
+            ),
+            Ok(None)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_principal_binding_reader_rejects_null_durable_columns(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE fork_principal_owner_bindings (
+                operation_id BLOB, principal_digest BLOB, pob1_cbor BLOB
+            );",
+        )?;
+        for (index, id) in [4_u8, 5, 6].into_iter().enumerate() {
+            let id = Hash::from_bytes([id; 32]);
+            let values = [
+                (index != 0).then_some(vec![4_u8; 32]),
+                (index != 1).then_some(vec![5_u8; 32]),
+                (index != 2).then_some(vec![6_u8; 32]),
+            ];
+            conn.execute(
+                "INSERT INTO fork_principal_owner_bindings VALUES (?1, ?2, ?3)",
+                params![values[0], values[1], values[2]],
+            )?;
+            assert_eq!(sqlite_principal_owner_binding(&conn, id), Ok(None));
+            conn.execute("DELETE FROM fork_principal_owner_bindings", [])?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_admission_operation_reader_rejects_typed_durable_columns(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE fork_admission_operations (
+                kind INTEGER, operation_id BLOB, evidence_digest BLOB,
+                commitment BLOB, result_digest BLOB, child_id TEXT
+            );",
+        )?;
+        let operation_id = Hash::from_bytes([41; 32]);
+        for (column, value) in [
+            ("evidence_digest", "'wrong-type'"),
+            ("commitment", "'wrong-type'"),
+            ("result_digest", "'wrong-type'"),
+            ("child_id", "X'01'"),
+        ] {
+            conn.execute(
+                "INSERT INTO fork_admission_operations VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    i64::from(ForkAdmissionOperationKindV1::PrincipalOwner.wire()),
+                    operation_id.as_bytes().as_slice(),
+                    vec![1_u8; 32],
+                    vec![2_u8; 32],
+                    vec![3_u8; 32],
+                    None::<String>,
+                ],
+            )?;
+            conn.execute_batch(&format!(
+                "UPDATE fork_admission_operations SET {column} = {value}"
+            ))?;
+            assert_eq!(
+                sqlite_fork_admission_operation(
+                    &conn,
+                    ForkAdmissionOperationKindV1::PrincipalOwner,
+                    operation_id,
+                ),
+                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+                "{column}"
+            );
+            conn.execute("DELETE FROM fork_admission_operations", [])?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_principal_binding_readers_reject_typed_durable_columns(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE fork_principal_owner_bindings (
+                operation_id BLOB, principal_digest BLOB, pob1_cbor BLOB
+            );",
+        )?;
+        let operation_id = Hash::from_bytes([42; 32]);
+        let principal_digest = Hash::from_bytes([43; 32]);
+        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+            operation_id,
+            principal_digest,
+            owner: OwnerIdV1::new("owner")?,
+            origin: ForkAuthorityOriginV1::Local,
+        })?;
+        for column in ["operation_id", "principal_digest", "pob1_cbor"] {
+            conn.execute(
+                "INSERT INTO fork_principal_owner_bindings VALUES (?1, ?2, ?3)",
+                params![
+                    operation_id.as_bytes().as_slice(),
+                    principal_digest.as_bytes().as_slice(),
+                    binding.to_canonical_cbor(),
+                ],
+            )?;
+            conn.execute_batch(&format!(
+                "UPDATE fork_principal_owner_bindings SET {column} = 'wrong-type'"
+            ))?;
+            let observed = if column == "principal_digest" {
+                sqlite_principal_owner_result(
+                    &conn,
+                    Hash::from_bytes([48; 32]),
+                    &ForkAdmissionOperationRowV1 {
+                        kind: ForkAdmissionOperationKindV1::PrincipalOwner,
+                        operation_id,
+                        evidence_digest: Hash::from_bytes([46; 32]),
+                        commitment: Hash::from_bytes([47; 32]),
+                        result_digest: binding.digest(),
+                        child_id: None,
+                    },
+                )
+                .map(|_| ())
+            } else {
+                sqlite_principal_owner_binding(&conn, principal_digest).map(|_| ())
+            };
+            assert_eq!(
+                observed,
+                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+                "{column}"
+            );
+            conn.execute("DELETE FROM fork_principal_owner_bindings", [])?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_principal_binding_decoder_rejects_mismatched_durable_hashes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let operation_id = Hash::from_bytes([44; 32]);
+        let principal_digest = Hash::from_bytes([45; 32]);
+        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+            operation_id,
+            principal_digest,
+            owner: OwnerIdV1::new("owner")?,
+            origin: ForkAuthorityOriginV1::Local,
+        })?;
+        assert_eq!(
+            sqlite_decode_principal_owner_binding((
+                Hash::zero().as_bytes().to_vec(),
+                principal_digest.as_bytes().to_vec(),
+                binding.to_canonical_cbor(),
+            )),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        assert_eq!(
+            sqlite_decode_principal_owner_binding((
+                operation_id.as_bytes().to_vec(),
+                Hash::zero().as_bytes().to_vec(),
+                binding.to_canonical_cbor(),
+            )),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_fork_admission_child_reader_rejects_typed_durable_columns(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (column, value) in [
+            ("name", "X'01'"),
+            ("parent_id", "X'01'"),
+            ("fork_seq", "X'01'"),
+        ] {
+            let (store, row) = sqlite_fork_admission_graph("owner")?;
+            let child_id = row
+                .child_id
+                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            let bytes = store.conn.query_row(
+                "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+                params![child_id.to_string()],
+                |record| record.get::<_, Vec<u8>>(0),
+            )?;
+            let admission = ForkAdmissionRecordV1::from_canonical_cbor(&bytes)?;
+            store.conn.execute_batch(&format!(
+                "UPDATE timelines SET {column} = {value} WHERE id = '{child_id}'"
+            ))?;
+            assert_eq!(
+                sqlite_fork_admission_child_name(&store.conn, &admission),
+                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+                "{column}"
+            );
+            assert_eq!(
+                sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+                "{column}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_fork_admission_recovery_rejects_mismatched_child_lineage(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for statement in [
+            "UPDATE timelines SET parent_id = '01ARZ3NDEKTSV4RRFFQ69G5FAV' WHERE id = ?1",
+            "UPDATE timelines SET fork_seq = 1 WHERE id = ?1",
+        ] {
+            let (store, row) = sqlite_fork_admission_graph("owner")?;
+            let child_id = row
+                .child_id
+                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            store
+                .conn
+                .execute(statement, params![child_id.to_string()])?;
+            assert_eq!(
+                sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+                Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_fork_admission_store_id_rejects_a_missing_authority_table(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let store = tests::new_store();
+        store
+            .conn
+            .execute_batch("DROP TABLE fork_admission_authority;")?;
+        assert_eq!(
+            sqlite_fork_admission_store_id(&store.conn),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_admission_recovery_transaction_rolls_back_success_and_error(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = Connection::open_in_memory()?;
+        assert_eq!(
+            with_fork_admission_recovery_transaction(&conn, || Ok::<
+                _,
+                pos_core::ForkAdmissionErrorV1,
+            >(7)),
+            Ok(7)
+        );
+        assert_eq!(
+            with_fork_admission_recovery_transaction(&conn, || {
+                Err::<(), _>(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+            }),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_admission_recovery_transaction_maps_rollback_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let conn = Connection::open_in_memory()?;
+        conn.authorizer(Some(|context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Rollback
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        assert_eq!(
+            with_fork_admission_recovery_transaction(&conn, || {
+                Ok::<_, pos_core::ForkAdmissionErrorV1>(())
+            }),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        );
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        conn.execute_batch("ROLLBACK")?;
+
+        conn.authorizer(Some(|context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Rollback
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        assert_eq!(
+            with_fork_admission_recovery_transaction(&conn, || {
+                Err::<(), _>(pos_core::ForkAdmissionErrorV1::OperationMissing)
+            }),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        );
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        conn.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
+    fn sqlite_fork_admission_graph(
+        creator: &str,
+    ) -> Result<(SqliteStore, ForkAdmissionOperationRowV1), Box<dyn std::error::Error>> {
+        let hash = |value| Hash::from_bytes([value; 32]);
+        let mut store = tests::new_store();
+        let host =
+            ForkAdmissionHostRecordV1::new(hash(71), PublicKey::from_bytes([72; 32]), hash(73))?;
+        insert_fork_admission_host_record(&store.conn, host)?;
+        let parent = store.create_timeline("parent")?;
+        let child = store.fork(parent.id(), Seq::ZERO, "child")?;
+        let parent_chain_head = store.hasher.genesis_hash();
+        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+            operation_id: hash(74),
+            principal_digest: hash(75),
+            owner: OwnerIdV1::new("owner")?,
+            origin: ForkAuthorityOriginV1::Local,
+        })?;
+        let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+            operation_id: hash(76),
+            principal_owner_binding_digest: binding.digest(),
+            creator: OwnerIdV1::new(creator)?,
+            parent_timeline_id: parent.id(),
+            child_timeline_id: child.id(),
+            room_revision_descriptor_hash: hash(77),
+            parent_logical_head: 0,
+            parent_chain_head_hash: parent_chain_head,
+            completed_fold_cursor: 0,
+            post_fold_tick_boundary: 0,
+            plugin_composition_hash: hash(79),
+            attribution_required: false,
+            origin: ForkAttributionOriginV1::Local,
+        })?;
+        let evidence_digest = hash(80);
+        let row = ForkAdmissionOperationRowV1 {
+            kind: ForkAdmissionOperationKindV1::Fork,
+            operation_id: admission.input().operation_id,
+            evidence_digest,
+            commitment: fork_commitment(
+                host.store_id(),
+                binding.input().principal_digest,
+                evidence_digest,
+                &admission,
+                "child",
+            ),
+            result_digest: admission.digest(),
+            child_id: Some(child.id()),
+        };
+        store.conn.execute(
+            "INSERT INTO fork_principal_owner_bindings
+             (operation_id, principal_digest, pob1_cbor)
+             VALUES (?1, ?2, ?3)",
+            params![
+                binding.input().operation_id.as_bytes().as_slice(),
+                binding.input().principal_digest.as_bytes().as_slice(),
+                binding.to_canonical_cbor(),
+            ],
+        )?;
+        sqlite_insert_fork_admission_operation(
+            &store.conn,
+            &ForkAdmissionOperationRowV1 {
+                kind: ForkAdmissionOperationKindV1::PrincipalOwner,
+                operation_id: binding.input().operation_id,
+                evidence_digest: hash(82),
+                commitment: principal_owner_commitment(host.store_id(), &binding, hash(82)),
+                result_digest: binding.digest(),
+                child_id: None,
+            },
+        )?;
+        store.conn.execute(
+            "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, ?2)",
+            params![child.id().to_string(), admission.to_canonical_cbor()],
+        )?;
+        Ok((store, row))
+    }
+
+    #[test]
+    fn sqlite_fork_admission_recovery_rejects_each_durable_graph_edge(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, row) = sqlite_fork_admission_graph("owner")?;
+        let _ = sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row)?;
+
+        let (store, row) = sqlite_fork_admission_graph("owner")?;
+        store.conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+        let child_id = row
+            .child_id
+            .ok_or_else(|| std::io::Error::other("missing child fixture"))?;
+        let parent_id: String = store.conn.query_row(
+            "SELECT parent_id FROM timelines WHERE id = ?1",
+            params![child_id.to_string()],
+            |record| record.get(0),
+        )?;
+        store
+            .conn
+            .execute("DELETE FROM timelines WHERE id = ?1", params![parent_id])?;
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+
+        let (store, mut row) = sqlite_fork_admission_graph("owner")?;
+        let child_id = row
+            .child_id
+            .ok_or_else(|| std::io::Error::other("missing child fixture"))?;
+        let bytes: Vec<u8> = store.conn.query_row(
+            "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+            params![child_id.to_string()],
+            |record| record.get(0),
+        )?;
+        let admission = ForkAdmissionRecordV1::from_canonical_cbor(&bytes)?;
+        let mut input = admission.input().clone();
+        input.parent_chain_head_hash = Hash::from_bytes([81; 32]);
+        let corrupt_admission = ForkAdmissionRecordV1::new(input)?;
+        store.conn.execute(
+            "UPDATE fork_admissions SET far1_cbor = ?1 WHERE child_id = ?2",
+            params![corrupt_admission.to_canonical_cbor(), child_id.to_string()],
+        )?;
+        let binding = sqlite_principal_owner_binding(&store.conn, Hash::from_bytes([75; 32]))?
+            .ok_or_else(|| std::io::Error::other("missing Principal-to-Owner fixture"))?;
+        row.result_digest = corrupt_admission.digest();
+        row.commitment = fork_commitment(
+            sqlite_fork_admission_store_id(&store.conn)?,
+            binding.input().principal_digest,
+            row.evidence_digest,
+            &corrupt_admission,
+            "child",
+        );
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+
+        let (store, row) = sqlite_fork_admission_graph("owner")?;
+        store.conn.execute("DELETE FROM fork_admissions", [])?;
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+
+        let (store, row) = sqlite_fork_admission_graph("owner")?;
+        store
+            .conn
+            .execute("DELETE FROM fork_principal_owner_bindings", [])?;
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+
+        let (store, row) = sqlite_fork_admission_graph("other-owner")?;
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+
+        let (store, mut row) = sqlite_fork_admission_graph("owner")?;
+        row.commitment = Hash::zero();
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_fork_admission_recovery_rejects_an_orphaned_principal_owner_binding(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, row) = sqlite_fork_admission_graph("owner")?;
+        store
+            .conn
+            .execute("DELETE FROM fork_admission_operations WHERE kind = 1", [])?;
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+
+        let (store, row) = sqlite_fork_admission_graph("owner")?;
+        store.conn.execute(
+            "UPDATE fork_admission_operations SET child_id = ?1 WHERE kind = 1",
+            params![TimelineId::new().to_string()],
+        )?;
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+
+        let conn = Connection::open_in_memory()?;
+        assert_eq!(
+            sqlite_fork_principal_owner_binding(&conn, Hash::from_bytes([1; 32])),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_principal_recovery_revalidates_immutable_commitment(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, _) = sqlite_fork_admission_graph("owner")?;
+        let operation_id = Hash::from_bytes([101; 32]);
+        let evidence_digest = Hash::from_bytes([102; 32]);
+        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+            operation_id,
+            principal_digest: Hash::from_bytes([103; 32]),
+            owner: OwnerIdV1::new("principal-owner")?,
+            origin: ForkAuthorityOriginV1::Local,
+        })?;
+        store.conn.execute(
+            "INSERT INTO fork_principal_owner_bindings (operation_id, principal_digest, pob1_cbor) VALUES (?1, ?2, ?3)",
+            params![operation_id.as_bytes().as_slice(), binding.input().principal_digest.as_bytes().as_slice(), binding.to_canonical_cbor()],
+        )?;
+        let row = ForkAdmissionOperationRowV1 {
+            kind: ForkAdmissionOperationKindV1::PrincipalOwner,
+            operation_id,
+            evidence_digest,
+            commitment: principal_owner_commitment(
+                Hash::from_bytes([71; 32]),
+                &binding,
+                evidence_digest,
+            ),
+            result_digest: binding.digest(),
+            child_id: None,
+        };
+        let _ = sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &row)?;
+        let mut corrupt = row;
+        corrupt.commitment = Hash::zero();
+        assert_eq!(
+            sqlite_fork_admission_result(&store.conn, store.hasher.as_ref(), &corrupt),
+            Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_fork_admission_transaction_rejects_missing_binding_and_parent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let hash = |value| Hash::from_bytes([value; 32]);
+        let signer = ForkHostSigningKeyV1::from_seed([81; 32])?;
+        let mut store = tests::new_store();
+        let policy_digest = hash(82);
+        let initialize = store.begin_fork_admission_initialize(
+            PublicKey::from_bytes(signer.public_key()),
+            policy_digest,
+        )?;
+        let initialized = signer.sign_initialize(&initialize.to_canonical_cbor()?)?;
+        store.finalize_fork_admission_initialize(&initialize, &initialized)?;
+        let open = store
+            .begin_fork_admission_open(PublicKey::from_bytes(signer.public_key()), policy_digest)?;
+        let opened = signer.sign_open(&open.to_canonical_cbor()?)?;
+        let session = store.finalize_fork_admission_open(&open, &opened)?;
+        let host = store.fork_admission_host_record()?;
+
+        let command = |operation_id, principal_digest| VerifiedForkAdmissionCommandV1::Fork {
+            operation_id,
+            evidence_digest: hash(83),
+            principal_digest,
+            parent_id: TimelineId::new(),
+            cut: 0,
+            descriptor_hash: hash(84),
+            composition_hash: hash(85),
+            attribution_required: false,
+            child_name: "child".to_owned(),
+            commitment: hash(86),
+            issued_at: 0,
+            expires_at: u64::MAX,
+        };
+        let replaced_host = ForkAdmissionHostRecordV1::new(
+            hash(92),
+            PublicKey::from_bytes(signer.public_key()),
+            policy_digest,
+        )?;
+        assert_eq!(
+            store.execute_fork_admission_in_transaction(
+                &session,
+                replaced_host,
+                command(hash(87), hash(88)),
+                Ok(()),
+            ),
+            Err(pos_core::ForkAdmissionErrorV1::HostAuthorityMismatch)
+        );
+        assert_eq!(
+            store.execute_fork_admission_in_transaction(
+                &session,
+                host,
+                command(hash(87), hash(88)),
+                Ok(()),
+            ),
+            Err(pos_core::ForkAdmissionErrorV1::InvalidRequest)
+        );
+
+        let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+            operation_id: hash(89),
+            principal_digest: hash(90),
+            owner: OwnerIdV1::new("owner")?,
+            origin: ForkAuthorityOriginV1::Local,
+        })?;
+        store.conn.execute(
+            "INSERT INTO fork_principal_owner_bindings
+             (operation_id, principal_digest, pob1_cbor)
+             VALUES (?1, ?2, ?3)",
+            params![
+                binding.input().operation_id.as_bytes().as_slice(),
+                binding.input().principal_digest.as_bytes().as_slice(),
+                binding.to_canonical_cbor(),
+            ],
+        )?;
+        assert_eq!(
+            store.execute_fork_admission_in_transaction(
+                &session,
+                host,
+                command(hash(91), hash(90)),
+                Ok(()),
+            ),
+            Err(pos_core::ForkAdmissionErrorV1::ParentChanged)
+        );
+        Ok(())
+    }
+
+    type SqliteAuthorityFixture = (
+        SqliteStore,
+        ForkHostSigningKeyV1,
+        ForkAuthenticationAdapterSigningKeyV1,
+        pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+        ForkAdmissionAuthoritySessionV1,
+    );
+
+    fn sqlite_authority_public_fixture(
+    ) -> Result<SqliteAuthorityFixture, Box<dyn std::error::Error>> {
+        let host = ForkHostSigningKeyV1::from_seed([101; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([102; 32])?;
+        let policy = pos_core::fork_authentication::ForkAuthenticationPolicyV1::new(vec![
+            pos_core::fork_authentication::ForkAuthenticationAdapterPolicyV1 {
+                adapter_id: "sqlite-coverage".to_owned(),
+                verifying_key: adapter.public_key(),
+                minimum_assurance: 1,
+                registry_bindings: vec![Hash::from_bytes([103; 32])],
+            },
+        ])?;
+        let mut store = tests::new_store();
+        let key = PublicKey::from_bytes(host.public_key());
+        let initialize = store.begin_fork_admission_initialize(key, policy.digest()?)?;
+        let signature = host.sign_initialize(&initialize.to_canonical_cbor()?)?;
+        store.finalize_fork_admission_initialize(&initialize, &signature)?;
+        let open = store.begin_fork_admission_open(key, policy.digest()?)?;
+        let signature = host.sign_open(&open.to_canonical_cbor()?)?;
+        let session = store.finalize_fork_admission_open(&open, &signature)?;
+        Ok((store, host, adapter, policy, session))
+    }
+
+    fn sqlite_principal_command(
+        store: &SqliteStore,
+        host: &ForkHostSigningKeyV1,
+        adapter: &ForkAuthenticationAdapterSigningKeyV1,
+        policy: &pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+        session: &ForkAdmissionAuthoritySessionV1,
+        operation_id: [u8; 32],
+    ) -> Result<ForkAdmissionHostCommandV1, Box<dyn std::error::Error>> {
+        use ciborium::value::Value;
+        use pos_core::fork_authentication::{principal_digest_v1, AuthenticatedPrincipalRecordV1};
+
+        let record = AuthenticatedPrincipalRecordV1 {
+            principal: pos_core::PrincipalRefV1::try_new([104; 16], "sqlite.test")?,
+            adapter_id: "sqlite-coverage".to_owned(),
+            assurance: 1,
+            issued_at: 0,
+            expires_at: u64::MAX,
+            registry_binding: Hash::from_bytes([103; 32]),
+            operation_nonce: [105; 32],
+        };
+        let evidence = adapter.sign_authenticated_principal(record)?;
+        let verified = verify_authenticated_principal_evidence_v1(policy, evidence)?;
+        let principal = principal_digest_v1(&verified.evidence().record().principal)?;
+        let command = Value::Array(vec![
+            Value::Text("POC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(
+                store
+                    .fork_admission_host_record()?
+                    .store_id()
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            Value::Bytes(session.identity().as_bytes().to_vec()),
+            Value::Bytes(operation_id.to_vec()),
+            Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+            Value::Bytes(principal.as_bytes().to_vec()),
+            Value::Text("owner".to_owned()),
+        ]);
+        let mut command_bytes = Vec::new();
+        ciborium::into_writer(&command, &mut command_bytes)?;
+        let signature = host.sign_command(&command_bytes, &verified)?;
+        let envelope = Value::Array(vec![
+            Value::Text("FAC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(command_bytes),
+            Value::Bytes(verified.evidence().to_canonical_cbor()?),
+            Value::Bytes(signature.as_bytes().to_vec()),
+        ]);
+        let mut envelope_bytes = Vec::new();
+        ciborium::into_writer(&envelope, &mut envelope_bytes)?;
+        Ok(ForkAdmissionHostCommandV1::from_canonical_cbor(
+            &envelope_bytes,
+        )?)
+    }
+
+    fn sqlite_fork_command(
+        store: &SqliteStore,
+        host: &ForkHostSigningKeyV1,
+        adapter: &ForkAuthenticationAdapterSigningKeyV1,
+        policy: &pos_core::fork_authentication::ForkAuthenticationPolicyV1,
+        session: &ForkAdmissionAuthoritySessionV1,
+        operation_id: [u8; 32],
+        parent: TimelineId,
+    ) -> Result<ForkAdmissionHostCommandV1, Box<dyn std::error::Error>> {
+        use ciborium::value::Value;
+        use pos_core::fork_authentication::{principal_digest_v1, AuthenticatedPrincipalRecordV1};
+
+        let record = AuthenticatedPrincipalRecordV1 {
+            principal: pos_core::PrincipalRefV1::try_new([104; 16], "sqlite.test")?,
+            adapter_id: "sqlite-coverage".to_owned(),
+            assurance: 1,
+            issued_at: 0,
+            expires_at: u64::MAX,
+            registry_binding: Hash::from_bytes([103; 32]),
+            operation_nonce: [105; 32],
+        };
+        let evidence = adapter.sign_authenticated_principal(record)?;
+        let verified = verify_authenticated_principal_evidence_v1(policy, evidence)?;
+        let principal = principal_digest_v1(&verified.evidence().record().principal)?;
+        let command = Value::Array(vec![
+            Value::Text("FCC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(
+                store
+                    .fork_admission_host_record()?
+                    .store_id()
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            Value::Bytes(session.identity().as_bytes().to_vec()),
+            Value::Bytes(operation_id.to_vec()),
+            Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+            Value::Bytes(principal.as_bytes().to_vec()),
+            Value::Bytes(parent.inner().to_bytes().to_vec()),
+            Value::Integer(0.into()),
+            Value::Integer(0.into()),
+            Value::Bytes(vec![74; 32]),
+            Value::Bytes(vec![75; 32]),
+            Value::Integer(0.into()),
+            Value::Text("classified-registration-child".to_owned()),
+        ]);
+        let mut command_bytes = Vec::new();
+        ciborium::into_writer(&command, &mut command_bytes)?;
+        let signature = host.sign_command(&command_bytes, &verified)?;
+        let envelope = Value::Array(vec![
+            Value::Text("FAC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(command_bytes),
+            Value::Bytes(verified.evidence().to_canonical_cbor()?),
+            Value::Bytes(signature.as_bytes().to_vec()),
+        ]);
+        let mut envelope_bytes = Vec::new();
+        ciborium::into_writer(&envelope, &mut envelope_bytes)?;
+        Ok(ForkAdmissionHostCommandV1::from_canonical_cbor(
+            &envelope_bytes,
+        )?)
+    }
+
+    #[test]
+    fn sqlite_public_admission_transaction_faults_fail_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let (mut store, host, adapter, policy, session) = sqlite_authority_public_fixture()?;
+        let command =
+            sqlite_principal_command(&store, &host, &adapter, &policy, &session, [106; 32])?;
+        store.conn.authorizer(Some(|context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Begin
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        assert_eq!(
+            store.execute_fork_admission_command(&session, &policy, &command),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+
+        let command =
+            sqlite_principal_command(&store, &host, &adapter, &policy, &session, [107; 32])?;
+        store.conn.commit_hook(Some(|| true))?;
+        assert_eq!(
+            store.execute_fork_admission_command(&session, &policy, &command),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        );
+        store.conn.commit_hook::<fn() -> bool>(None)?;
+
+        let command =
+            sqlite_principal_command(&store, &host, &adapter, &policy, &session, [108; 32])?;
+        store.conn.execute_batch(
+            "CREATE TRIGGER reject_principal_operation
+             BEFORE INSERT ON fork_admission_operations
+             WHEN NEW.kind = 1
+             BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+        )?;
+        store.conn.authorizer(Some(|context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Rollback
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        assert_eq!(
+            store.execute_fork_admission_command(&session, &policy, &command),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        store.conn.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
 
     #[test]
     fn sqlite_origin_conversion_covers_boundaries() -> Result<(), CoreError> {
@@ -7312,6 +11669,15 @@ mod tests {
         assert!(sqlite_origin_seq(i64::MAX.unsigned_abs(), Seq::from_u64(1)).is_err());
         assert!(sqlite_origin_seq(u64::MAX, Seq::from_u64(1)).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn sqlite_authority_state_rejects_a_wall_fence_outside_sqlite_range() {
+        let store = tests::new_store();
+        assert_eq!(
+            write_fork_admission_wall_fence(&store.conn, u64::MAX),
+            Err(ForkAdmissionAuthorityErrorV1::CorruptAuthority)
+        );
     }
 
     #[test]
@@ -7512,20 +11878,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    fn running_as_root() -> bool {
-        std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|status| {
-                status
-                    .lines()
-                    .find_map(|line| line.strip_prefix("Uid:\t"))
-                    .and_then(|uids| uids.split_whitespace().next())
-                    .and_then(|uid| uid.parse::<u32>().ok())
-            })
-            == Some(0)
-    }
-
     fn read_bounds(max_payload_bytes: usize) -> EventReadBounds {
         EventReadBounds::new(max_payload_bytes, usize::MAX, usize::MAX, usize::MAX)
     }
@@ -7541,6 +11893,100 @@ mod tests {
 
     pub(super) fn new_store() -> SqliteStore {
         fixture_store(SqliteStore::open_in_memory().test_ok())
+    }
+
+    #[test]
+    fn generic_append_paths_reject_an_admitted_fork_inside_the_writer_transaction() {
+        let mut store = new_store();
+        let child = store.create_timeline("admitted-child").test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, ?2)",
+                params![child.id().to_string(), vec![0_u8]],
+            )
+            .test_ok();
+        let draft = make_draft(EntityId::new(), b"unclassified");
+
+        assert!(store
+            .append_or_duplicate(
+                child.id(),
+                append_identity(1, 1),
+                WallTime::from_micros(1),
+                draft.clone(),
+            )
+            .is_err());
+        assert!(store
+            .append(child.id(), std::slice::from_ref(&draft))
+            .is_err());
+        assert!(store
+            .append_visible(child.id(), std::slice::from_ref(&draft))
+            .is_err());
+        assert!(store.append_bounded(child.id(), &[draft], 1).is_err());
+        assert!(store.append_committed(child.id(), &[]).is_err());
+        assert_eq!(store.logical_head(child.id()).test_ok(), Seq::ZERO);
+    }
+
+    #[test]
+    fn fork_event_suffix_rejects_orphaned_origin_and_intervention_rows() {
+        let mut store = new_store();
+        let parent = store
+            .create_timeline("orphaned-provenance-parent")
+            .test_ok();
+        let child = store
+            .fork(parent.id(), Seq::ZERO, "orphaned-provenance-child")
+            .test_ok();
+        let event_id = EventId::new();
+        let origin = EventOriginRecordV1::new(EventOriginRecordInputV1 {
+            fork_timeline_id: child.id(),
+            logical_seq: 1,
+            event_id,
+            classification: pos_core::ForkEventClassificationV1::new(
+                ForkEventOriginKindV1::HostInternal,
+                false,
+            )
+            .test_ok(),
+            classifier_revision_digest: Hash::from_bytes([1; 32]),
+            fork_admission_digest: Hash::from_bytes([2; 32]),
+        })
+        .test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO fork_event_origins (event_id, eor1_cbor) VALUES (?1, ?2)",
+                params![event_id.to_string(), origin.to_canonical_cbor()],
+            )
+            .test_ok();
+        assert_eq!(
+            store.read_fork_event_suffix(child.id(), 1),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        store
+            .conn
+            .execute("DELETE FROM fork_event_origins", [])
+            .test_ok();
+        let intervention = ForkInterventionAdmissionV1::new(ForkInterventionAdmissionInputV1 {
+            operation_id: Hash::from_bytes([3; 32]),
+            fork_timeline_id: child.id(),
+            logical_seq: 1,
+            event_id,
+            payload_hash: Hash::from_bytes([4; 32]),
+            room_revision_descriptor_hash: Hash::from_bytes([5; 32]),
+            classifier_revision_digest: Hash::from_bytes([1; 32]),
+            fork_admission_digest: Hash::from_bytes([2; 32]),
+        })
+        .test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO fork_intervention_admissions (event_id, fia1_cbor) VALUES (?1, ?2)",
+                params![event_id.to_string(), intervention.to_canonical_cbor()],
+            )
+            .test_ok();
+        assert_eq!(
+            store.read_fork_event_suffix(child.id(), 1),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
     }
 
     fn fixture_store(mut store: SqliteStore) -> SqliteStore {
@@ -10174,7 +14620,7 @@ mod tests {
                         usize::MAX,
                         2,
                         10,
-                        1_000,
+                        10_000,
                     ),
                 )
                 .test_err();
@@ -10988,14 +15434,14 @@ mod tests {
             .iter()
             .find(|table| table.name == "erasure_records")
             .test_ok();
-        let incompatible_records = ErasureSchemaTable {
+        let incompatible_records = SqliteSchemaTable {
             name: records.name,
             columns_query: records.columns_query,
             columns: records.columns,
             constraints: &["CHECK (length(request_digest) = 31)"],
         };
         let erasure_error = store
-            .validate_erasure_schema_table(&incompatible_records)
+            .validate_sqlite_schema_table(&incompatible_records)
             .err()
             .test_ok();
         assert!(matches!(
@@ -11958,12 +16404,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_fails_on_readonly_database_file() {
-        use std::os::unix::fs::PermissionsExt;
-        if running_as_root() {
-            return;
-        }
-
+    fn append_fails_on_readonly_connection() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_owned();
         let tl_id = {
@@ -11971,15 +16412,11 @@ mod tests {
             let tl = store.create_timeline("main").test_ok();
             tl.id()
         };
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).test_ok();
-        let mut store = open_store_at(path.to_str().test_ok());
+        let mut store =
+            fixture_store(SqliteStore::open_read_only(path.to_str().test_ok()).test_ok());
         let entity = EntityId::new();
         let result = store.append(tl_id, &[make_draft(entity, b"x")]);
         assert_storage_err(result.map(|_| ()));
-        drop(std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(0o644),
-        ));
     }
 
     #[test]
@@ -12385,12 +16822,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn fork_fails_on_readonly_database_file() {
-        use std::os::unix::fs::PermissionsExt;
-        if running_as_root() {
-            return;
-        }
-
+    fn fork_fails_on_readonly_connection() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_owned();
         let tl_id = {
@@ -12400,13 +16832,9 @@ mod tests {
             store.append(tl.id(), &[make_draft(entity, b"x")]).test_ok();
             tl.id()
         };
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).test_ok();
-        let mut store = open_store_at(path.to_str().test_ok());
+        let mut store =
+            fixture_store(SqliteStore::open_read_only(path.to_str().test_ok()).test_ok());
         assert_storage_err(store.fork(tl_id, Seq::from_u64(1), "branch").map(|_| ()));
-        drop(std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(0o644),
-        ));
     }
 
     #[test]
@@ -12469,12 +16897,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_update_head_fails_on_readonly_database_file() {
-        use std::os::unix::fs::PermissionsExt;
-        if running_as_root() {
-            return;
-        }
-
+    fn append_update_head_fails_on_readonly_connection() {
         let tmp = tempfile::NamedTempFile::new().test_ok();
         let path = tmp.path().to_owned();
         let (tl_id, entity) = {
@@ -12482,13 +16905,9 @@ mod tests {
             let tl = store.create_timeline("main").test_ok();
             (tl.id(), EntityId::new())
         };
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).test_ok();
-        let mut store = open_store_at(path.to_str().test_ok());
+        let mut store =
+            fixture_store(SqliteStore::open_read_only(path.to_str().test_ok()).test_ok());
         assert_storage_err(store.append(tl_id, &[make_draft(entity, b"x")]).map(|_| ()));
-        drop(std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(0o644),
-        ));
     }
 
     #[test]
@@ -13622,10 +18041,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn create_timeline_with_meta_insert_fails_on_readonly() {
-        if running_as_root() {
-            return;
-        }
+    fn create_timeline_with_meta_insert_fails_on_readonly_connection() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir.path().join("db.sqlite");
         let path_s = path.to_str().test_ok();
@@ -13633,10 +18049,7 @@ mod tests {
             let mut store = open_store_at(path_s);
             let _ = store.create_timeline("seed").test_ok();
         }
-        let mut perms = std::fs::metadata(&path).test_ok().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&path, perms).test_ok();
-        let mut store = open_store_at(path_s);
+        let mut store = fixture_store(SqliteStore::open_read_only(path_s).test_ok());
         let err = store
             .create_timeline_with_meta(TimelineMeta::root("x"))
             .test_err();

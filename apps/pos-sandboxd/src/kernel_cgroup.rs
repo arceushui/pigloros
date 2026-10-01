@@ -1,4 +1,4 @@
-//! Read-only kernel observations for one manager-bound attempt cgroup.
+//! Kernel observations and escalation for one manager-bound attempt cgroup.
 
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
@@ -11,6 +11,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use crate::{CgroupRoot, TransientServiceUnitName};
 
+mod kill;
 mod limit_events;
 
 pub use limit_events::{
@@ -60,6 +61,15 @@ pub enum AttemptCgroupError {
     /// The events file lacks one unambiguous canonical populated value.
     #[error("attempt cgroup.events has no unambiguous populated value")]
     MalformedEvents,
+    /// The bound cgroup path is missing, so no kill command was issued.
+    #[error("the bound attempt cgroup is missing; kill was not issued")]
+    KillTargetMissing,
+    /// The kill control could not be opened beneath the retained directory.
+    #[error("failed to open the exact attempt cgroup.kill")]
+    KillOpen(#[source] Errno),
+    /// The kernel did not accept the complete kill command.
+    #[error("failed to write the attempt cgroup.kill command")]
+    KillWrite(#[source] std::io::Error),
     /// The exact original cgroup still contains a process in its subtree.
     #[error("the attempt cgroup remains populated")]
     StillPopulated,
@@ -216,7 +226,9 @@ enum BoundCgroupPath {
     Missing { retained_unlinked: bool },
 }
 
-/// A retained descriptor-bound attempt cgroup, without termination authority.
+/// A retained descriptor-bound attempt cgroup for observation and escalation.
+///
+/// Neither possession nor a successful kill command proves completed cleanup.
 #[derive(Debug)]
 pub struct BoundAttemptCgroup {
     root: CgroupRoot,

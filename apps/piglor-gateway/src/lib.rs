@@ -8,6 +8,9 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod authorization;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod e2e_determinism;
 pub mod executor;
 mod http;
 pub mod ledger_config;
@@ -22,7 +25,6 @@ pub use authorization::{
 };
 pub use http::{router, router_for_addr, spectator_router, AppState};
 pub use ledger_config::{LedgerConfig, LedgerGateway, LedgerWriteMode};
-
 #[cfg(test)]
 use pos_core::store::{AppendIntent, AppendOrDuplicateOutcome};
 #[cfg(test)]
@@ -31,14 +33,14 @@ use pos_core::{
     clock::{Seq, WallTime},
     event::{CanonicalBytes, Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
-    ids::{EntityId, EventId, PluginId, TimelineId},
+    ids::{EntityId, EventId, TimelineId},
     store::{
         AppendDedupKey, AppendDedupScope, AppendIdentity, EventReadBounds, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
     ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1,
-    Plugin, ProposedAction,
+    Plugin, PluginId, ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -61,6 +63,51 @@ use std::{
 use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
+
+#[cfg(test)]
+fn gateway_binding_error(
+    plugin_name: &str,
+    error: pos_runtime::OutputAdmissionErrorV1,
+) -> pos_runtime::RuntimeError {
+    match error {
+        error @ pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" } => {
+            pos_runtime::RuntimeError::CapabilityMismatch {
+                name: plugin_name.to_owned(),
+                reason: error.to_string(),
+            }
+        }
+        error => error.into(),
+    }
+}
+
+#[cfg(test)]
+fn gateway_output_binding<P: Plugin>(
+    plugin: &P,
+    configuration_details: &[u8],
+) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Gateway,
+        configuration_details,
+        "deterministic-local-v1",
+    )
+    .map_err(|error| gateway_binding_error(plugin.name(), error))
+}
+
+#[cfg(test)]
+fn gateway_output_binding_with_profile<P: Plugin>(
+    plugin: &P,
+    configuration_details: &[u8],
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Gateway,
+        configuration_details,
+        profile_id,
+    )
+    .map_err(|error| gateway_binding_error(plugin.name(), error))
+}
 
 /// Pre-registered Prediction Ledger entry view (Redmine #58 / OKR KR4.6).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -114,16 +161,45 @@ mod coverage_tests {
         }
     }
 
-    use super::{Gateway, OwnTracksOwnerKey};
+    use super::{
+        gateway_output_binding, gateway_output_binding_with_profile, Gateway, GatewayActionPlugin,
+        OwnTracksOwnerKey, EVENT_TYPE_ACTION,
+    };
     use pos_core::{
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
-        CanonicalBytes, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
-        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Seq,
+        CanonicalBytes, Capability, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Plugin, PluginId, Seq,
+    };
+    use pos_runtime::{
+        DomainImplementationKindV1, HostCatalogueEntryV1, InstalledPluginFactoryV1,
+        InstalledPluginProductV1, OutputAdmissionErrorV1, PluginAvailabilityV1, PluginIsolationV1,
+        PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use std::path::Path;
+
+    struct SameNameForeignPlugin {
+        id: PluginId,
+    }
+
+    impl Plugin for SameNameForeignPlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "gateway-world-actions"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: vec![Kind::new("world.action.v1")],
+                ..Capability::default()
+            }
+        }
+    }
 
     fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
         ConsentGrantedV1 {
@@ -138,6 +214,483 @@ mod coverage_tests {
             expiry_secs: 0,
             grant_seq,
         }
+    }
+
+    #[test]
+    fn output_binding_tracks_delegated_world_source() {
+        let plugin = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        assert!(matches!(
+            gateway_output_binding(&plugin, &[]),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        assert_eq!(
+            binding.policy().fields().implementation_hash,
+            pos_runtime::implementation_artifact_hash_v1(binding.implementation_artifact()),
+        );
+        let mut changed_source = binding.implementation_artifact().to_vec();
+        *changed_source.last_mut().test_ok() ^= 1;
+        assert!(matches!(
+            pos_runtime::validate_output_policy_artifacts_v1(
+                &binding.policy().to_canonical_cbor(),
+                &binding.budget().to_canonical_cbor(),
+                &changed_source,
+                binding.configuration_artifact(),
+                binding.execution_profile_artifact(),
+                binding.retention_policy_artifact(),
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactIdentityMismatch {
+                kind: "implementation"
+            })
+        ));
+    }
+
+    #[test]
+    fn installed_gateway_rejects_same_name_plugin_and_foreign_approver() {
+        let plugin = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        let foreign = SameNameForeignPlugin { id: plugin.id };
+        assert!(matches!(
+            gateway_output_binding(&foreign, &[]),
+            Err(RuntimeError::OutputAdmission(
+                OutputAdmissionErrorV1::PluginMismatch
+            ))
+        ));
+        assert!(matches!(
+            gateway_output_binding(&plugin, &[]),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        let bound = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok()
+        .with_installed_action_approver(
+            super::GatewayWorldActionApprover(super::WorldPlugin::new()),
+            [Kind::new(EVENT_TYPE_ACTION)],
+        )
+        .test_ok();
+        assert!(matches!(
+            bound.with_installed_action_approver(
+                super::GatewayWorldActionApprover(super::WorldPlugin::new()),
+                [Kind::new(EVENT_TYPE_ACTION)],
+            ),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+        ));
+        assert!(matches!(
+            pos_runtime::OutputPolicyBindingV1::from_installed_source(
+                &plugin,
+                pos_runtime::InstalledOutputPolicySourceV1::Generated,
+                &[],
+                "deterministic-local-v1",
+            )
+            .test_ok()
+            .with_installed_action_approver(
+                super::GatewayWorldActionApprover(super::WorldPlugin::new()),
+                std::iter::repeat(Kind::new(EVENT_TYPE_ACTION)),
+            ),
+            Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
+        ));
+    }
+
+    #[test]
+    fn draft_world_approver_cannot_be_installed_without_qualified_profile() {
+        let world = super::WorldPlugin::new();
+        assert!(matches!(
+            pos_runtime::OutputPolicyBindingV1::from_installed_source(
+                &world,
+                pos_runtime::InstalledOutputPolicySourceV1::World,
+                &[],
+                "deterministic-local-v1",
+            ),
+            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+        ));
+    }
+
+    #[test]
+    fn gateway_fixture_has_no_installed_pin_and_release_builder_fails_closed() {
+        let registry = super::fixture_action_registry_builder(std::iter::empty(), None).test_ok();
+        assert!(registry.composition().plugins[0].pin.is_none());
+        assert!(matches!(
+            super::gateway_action_registry_builder(std::iter::empty(), None),
+            Err(RuntimeError::OutputAdmission(
+                OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+            ))
+        ));
+    }
+
+    // Counts selected-factory invocations while delegating to the Gateway factory.
+    struct CountedGatewayConfiguration {
+        frozen: super::FrozenGatewayActionConfiguration,
+        builds: std::cell::Cell<usize>,
+    }
+
+    impl CountedGatewayConfiguration {
+        fn new(bodies: Vec<EntityId>) -> Self {
+            Self {
+                frozen: super::FrozenGatewayActionConfiguration::resolve(bodies).test_ok(),
+                builds: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl InstalledPluginFactoryV1 for CountedGatewayConfiguration {
+        type Configuration = Self;
+        type Plugin = GatewayActionPlugin;
+        type Approver = super::GatewayWorldActionApprover;
+
+        fn configuration_details(configuration: &Self) -> Vec<u8> {
+            GatewayActionPlugin::configuration_details(&configuration.frozen)
+        }
+
+        fn build(
+            configuration: &Self,
+        ) -> InstalledPluginProductV1<GatewayActionPlugin, super::GatewayWorldActionApprover>
+        {
+            configuration.builds.set(configuration.builds.get() + 1);
+            GatewayActionPlugin::build(&configuration.frozen)
+        }
+    }
+
+    // Supplies the Gateway Plugin with a foreign approver implementation.
+    struct ForeignApproverConfiguration;
+
+    struct ForeignWorldApprover(super::WorldPlugin);
+
+    impl pos_core::ActionApprover for ForeignWorldApprover {
+        fn approve(
+            &self,
+            proposal: &pos_core::ProposedAction,
+        ) -> Result<EventDraft, pos_core::ActionRejected> {
+            pos_core::ActionApprover::approve(&self.0, proposal)
+        }
+    }
+
+    impl InstalledPluginFactoryV1 for ForeignApproverConfiguration {
+        type Configuration = Self;
+        type Plugin = GatewayActionPlugin;
+        type Approver = ForeignWorldApprover;
+
+        fn configuration_details(_configuration: &Self) -> Vec<u8> {
+            Vec::new()
+        }
+
+        fn build(
+            _configuration: &Self,
+        ) -> InstalledPluginProductV1<GatewayActionPlugin, ForeignWorldApprover> {
+            InstalledPluginProductV1 {
+                plugin: GatewayActionPlugin {
+                    id: PluginId::new(),
+                },
+                reducer: None,
+                approver: ForeignWorldApprover(super::WorldPlugin::new()),
+            }
+        }
+    }
+
+    // Supplies the actual Gateway callbacks plus a Reducer the Plugin never declares.
+    struct ExtraReducerConfiguration;
+
+    struct ExtraReducer;
+
+    impl pos_core::Reducer for ExtraReducer {
+        fn initial(&self) -> pos_core::State {
+            pos_core::State::new()
+        }
+
+        fn apply(&self, _state: &mut pos_core::State, _event: &pos_core::Event) {}
+    }
+
+    impl InstalledPluginFactoryV1 for ExtraReducerConfiguration {
+        type Configuration = Self;
+        type Plugin = GatewayActionPlugin;
+        type Approver = super::GatewayWorldActionApprover;
+
+        fn configuration_details(_configuration: &Self) -> Vec<u8> {
+            Vec::new()
+        }
+
+        fn build(
+            _configuration: &Self,
+        ) -> InstalledPluginProductV1<GatewayActionPlugin, super::GatewayWorldActionApprover>
+        {
+            let product = GatewayActionPlugin::build(
+                &super::FrozenGatewayActionConfiguration::resolve(Vec::new()).test_ok(),
+            );
+            InstalledPluginProductV1 {
+                reducer: Some(Box::new(ExtraReducer)),
+                ..product
+            }
+        }
+    }
+
+    #[test]
+    fn selected_gateway_entry_builds_once_and_fails_closed_at_installed_epf1() {
+        let configuration = CountedGatewayConfiguration::new(Vec::new());
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        let schemas_before = registry.composition().schemas.len();
+        assert!(matches!(
+            registry.register_from_host_catalogue_entry(
+                &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
+                &configuration,
+            ),
+            Err(RuntimeError::OutputAdmission(
+                OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+            ))
+        ));
+        assert_eq!(configuration.builds.get(), 1);
+        assert!(registry.is_empty());
+        assert_eq!(registry.composition().schemas.len(), schemas_before);
+    }
+
+    #[test]
+    fn nonproduction_gateway_entry_builds_once_without_pin_or_admitted_composition() {
+        let configuration = CountedGatewayConfiguration::new(vec![EntityId::new()]);
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        registry
+            .register_host_catalogue_fixture(
+                &HostCatalogueEntryV1::<CountedGatewayConfiguration>::gateway(),
+                &configuration,
+            )
+            .test_ok();
+        assert_eq!(configuration.builds.get(), 1);
+        let composition = registry.composition();
+        assert_eq!(composition.plugins.len(), 1);
+        let registered = &composition.plugins[0];
+        assert_eq!(registered.name, "gateway-world-actions");
+        assert!(registered.pin.is_none());
+        assert_eq!(registry.replay_policy_closures().count(), 1);
+        let pin = PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            pos_core::Hash::from_bytes([1; 32]),
+            vec!["gateway-role".to_owned()],
+        )
+        .test_ok();
+        let required_plugin =
+            pos_runtime::RequiredPluginV1::try_new(registered.id, registered.version.clone(), pin)
+                .test_ok();
+        let required = pos_runtime::RequiredPluginCompositionV1::try_new(
+            pos_runtime::PluginExecutionModeV1::Local,
+            vec![required_plugin],
+        )
+        .test_ok();
+        assert!(matches!(
+            registry.resolve_required_composition(&required),
+            Err(pos_runtime::PluginCompositionErrorV1::UnpinnedImplementation { .. })
+        ));
+    }
+
+    #[test]
+    fn gateway_entry_rejects_foreign_approver_and_extra_reducer_without_mutation() {
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+        let schemas_before = registry.composition().schemas.len();
+        let foreign = HostCatalogueEntryV1::<ForeignApproverConfiguration>::gateway();
+        for result in [
+            registry.register_from_host_catalogue_entry(&foreign, &ForeignApproverConfiguration),
+            registry.register_host_catalogue_fixture(&foreign, &ForeignApproverConfiguration),
+        ] {
+            assert!(matches!(
+                result,
+                Err(RuntimeError::OutputAdmission(
+                    OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" }
+                ))
+            ));
+        }
+        assert!(matches!(
+            registry.register_host_catalogue_fixture(
+                &HostCatalogueEntryV1::<ExtraReducerConfiguration>::gateway(),
+                &ExtraReducerConfiguration,
+            ),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+        assert!(registry.is_empty());
+        assert_eq!(registry.composition().schemas.len(), schemas_before);
+        assert_eq!(registry.replay_policy_closures().count(), 0);
+    }
+
+    #[test]
+    fn gateway_body_cap_leaves_room_for_the_frozen_configuration_prefix() {
+        let max_bodies = super::max_gateway_bodies();
+        let at_cap = super::FrozenGatewayActionConfiguration::resolve(
+            (0..max_bodies).map(|_| EntityId::new()),
+        )
+        .test_ok();
+        assert_eq!(at_cap.bodies.len(), max_bodies);
+        let details = GatewayActionPlugin::configuration_details(&at_cap);
+        assert!(details.len() <= pos_runtime::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1);
+        assert_eq!(
+            details.len(),
+            super::gateway_configuration_details_overhead() + 16 * max_bodies
+        );
+        assert!(matches!(
+            super::FrozenGatewayActionConfiguration::resolve(
+                (0..=max_bodies).map(|_| EntityId::new()),
+            ),
+            Err(pos_runtime::RuntimeError::OutputAdmission(
+                pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid {
+                    kind: "configuration"
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn frozen_gateway_defaults_change_configuration_and_policy_identity() {
+        let resolved = || super::FrozenGatewayActionConfiguration::resolve(Vec::new()).test_ok();
+        let identity = |frozen: &super::FrozenGatewayActionConfiguration| {
+            let mut registry = PluginRegistry::new().without_erasure_gate();
+            registry
+                .register_host_catalogue_fixture(
+                    &HostCatalogueEntryV1::<GatewayActionPlugin>::gateway(),
+                    frozen,
+                )
+                .test_ok();
+            let mut identities = registry.replay_policy_closure_identities();
+            identities.next().test_ok().1
+        };
+        let baseline = resolved();
+        let changes = [
+            super::FrozenGatewayActionConfiguration {
+                catalogue_version: 2,
+                ..resolved()
+            },
+            super::FrozenGatewayActionConfiguration {
+                allowed_action_kinds: vec!["impulse".to_owned()],
+                ..resolved()
+            },
+            super::FrozenGatewayActionConfiguration::resolve([EntityId::new()]).test_ok(),
+        ];
+        assert_eq!(identity(&baseline), identity(&resolved()));
+        for revised in &changes {
+            assert_ne!(
+                GatewayActionPlugin::configuration_details(&baseline),
+                GatewayActionPlugin::configuration_details(revised)
+            );
+            assert_ne!(identity(&baseline), identity(revised));
+        }
+    }
+
+    #[test]
+    fn gateway_fixture_routes_actions_to_the_frozen_world_approver() {
+        let actor = EntityId::new();
+        let body = EntityId::new();
+        let registry = super::gateway_action_registry_with_authority_and_erasure_gate(
+            [body],
+            None,
+            std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()),
+        );
+        let submit = |body_entity_id, catalogue_version| {
+            let payload = super::WorldActionV1 {
+                actor_entity_id: actor,
+                body_entity_id,
+                action_kind: super::ActionKindV1::Impulse,
+                params_cbor: super::encode_actuator_pair_v1(1.0, 0.0).test_ok(),
+                action_scope: 0,
+                catalogue_version,
+                tick: 1,
+            }
+            .encode()
+            .test_ok();
+            registry.submit_action(
+                pos_core::TimelineId::new(),
+                &pos_core::ProposedAction::new(
+                    Kind::new(EVENT_TYPE_ACTION),
+                    actor,
+                    payload,
+                    Kind::new("world.action.v1.submit"),
+                ),
+            )
+        };
+        assert_eq!(
+            submit(body, 1).test_ok().event_type,
+            Kind::new(EVENT_TYPE_ACTION)
+        );
+        assert!(matches!(
+            submit(EntityId::new(), 1),
+            Err(pos_runtime::ActionSubmissionError::Rejected(
+                pos_core::ActionRejected::DomainValidationFailed(_)
+            ))
+        ));
+        assert!(matches!(
+            submit(body, 2),
+            Err(pos_runtime::ActionSubmissionError::Rejected(
+                pos_core::ActionRejected::DomainValidationFailed(_)
+            ))
+        ));
+    }
+
+    #[repr(transparent)]
+    struct WrappedGatewayActionPlugin(GatewayActionPlugin);
+
+    impl Plugin for WrappedGatewayActionPlugin {
+        fn id(&self) -> PluginId {
+            self.0.id()
+        }
+
+        fn name(&self) -> &'static str {
+            self.0.name()
+        }
+
+        fn capability(&self) -> Capability {
+            self.0.capability()
+        }
+
+        fn version(&self) -> &'static str {
+            self.0.version()
+        }
+    }
+
+    #[test]
+    fn installed_gateway_rejects_transparent_foreign_plugin_before_mutation() {
+        let wrapped = WrappedGatewayActionPlugin(GatewayActionPlugin {
+            id: PluginId::new(),
+        });
+        let plugin = &wrapped.0;
+        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        )
+        .test_ok();
+        let pin = PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            binding.policy().digest(),
+            vec![pos_runtime::installed_plugin_role_v1(plugin)],
+        )
+        .test_ok();
+        let registration = PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available);
+        let mut registry = PluginRegistry::new().without_erasure_gate();
+
+        assert!(matches!(
+            registry.register_installed_output(&wrapped, binding, registration, None),
+            Err(RuntimeError::OutputAdmission(
+                OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+            ))
+        ));
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn output_binding_rejects_unknown_profile_and_foreign_same_name_plugin() {
+        let plugin = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        assert!(gateway_output_binding_with_profile(&plugin, &[], "unknown-profile",).is_err());
+        assert!(gateway_output_binding(&SameNameForeignPlugin { id: plugin.id }, &[]).is_err());
     }
 
     #[test]
@@ -586,7 +1139,6 @@ impl ActionPrincipal {
         }
     }
 
-    #[cfg(test)]
     fn authorizes(&self, proposal: &ProposedAction) -> Result<(), ActionRejected> {
         if proposal.actor_entity_id != self.entity_id {
             return Err(ActionRejected::InvalidActorEntityId);
@@ -601,6 +1153,12 @@ impl ActionPrincipal {
         Ok(())
     }
 }
+
+/// Action kinds admitted by the Gateway World approver.
+const GATEWAY_ALLOWED_ACTION_KINDS: [&str; 2] = ["impulse", "target_velocity"];
+
+/// Actuator catalogue version admitted by the Gateway World approver.
+const GATEWAY_CATALOGUE_VERSION: u32 = 1;
 
 struct GatewayActionPlugin {
     id: PluginId,
@@ -623,6 +1181,101 @@ impl Plugin for GatewayActionPlugin {
     }
 }
 
+struct GatewayWorldActionApprover(WorldPlugin);
+
+impl pos_core::ActionApprover for GatewayWorldActionApprover {
+    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+        pos_core::ActionApprover::approve(&self.0, proposal)
+    }
+}
+
+/// Gateway action configuration with every output-affecting default resolved.
+struct FrozenGatewayActionConfiguration {
+    bodies: Vec<EntityId>,
+    // Frozen from the reviewed Gateway constants so they enter the CFG1
+    // identity; they are not operator-configurable.
+    allowed_action_kinds: Vec<String>,
+    catalogue_version: u32,
+}
+
+impl FrozenGatewayActionConfiguration {
+    fn resolve(
+        bodies: impl IntoIterator<Item = EntityId>,
+    ) -> Result<Self, pos_runtime::RuntimeError> {
+        canonical_gateway_bodies(bodies).map(|bodies| Self {
+            bodies,
+            allowed_action_kinds: GATEWAY_ALLOWED_ACTION_KINDS.map(str::to_owned).into(),
+            catalogue_version: GATEWAY_CATALOGUE_VERSION,
+        })
+    }
+}
+
+// The Gateway action Plugin is built only by this factory, compiled into the
+// Gateway for its reviewed host catalogue entry.
+impl pos_runtime::InstalledPluginFactoryV1 for GatewayActionPlugin {
+    type Configuration = FrozenGatewayActionConfiguration;
+    type Plugin = Self;
+    type Approver = GatewayWorldActionApprover;
+
+    fn configuration_details(configuration: &FrozenGatewayActionConfiguration) -> Vec<u8> {
+        let mut details = Vec::new();
+        details.extend_from_slice(&configuration.catalogue_version.to_le_bytes());
+        details.extend_from_slice(&(configuration.allowed_action_kinds.len() as u64).to_le_bytes());
+        for kind in &configuration.allowed_action_kinds {
+            details.extend_from_slice(&(kind.len() as u64).to_le_bytes());
+            details.extend_from_slice(kind.as_bytes());
+        }
+        for body in &configuration.bodies {
+            details.extend_from_slice(&body.inner().to_bytes());
+        }
+        details
+    }
+
+    fn build(
+        configuration: &FrozenGatewayActionConfiguration,
+    ) -> pos_runtime::InstalledPluginProductV1<Self, GatewayWorldActionApprover> {
+        pos_runtime::InstalledPluginProductV1 {
+            plugin: Self {
+                id: PluginId::new(),
+            },
+            reducer: None,
+            approver: GatewayWorldActionApprover(
+                WorldPlugin::new()
+                    .with_allowed_actions(configuration.allowed_action_kinds.clone())
+                    .with_catalogue_version(configuration.catalogue_version)
+                    .with_bodies(configuration.bodies.clone()),
+            ),
+        }
+    }
+}
+
+/// Registration operation applied to the selected Gateway catalogue entry.
+type GatewayCatalogueRegistration = fn(
+    &mut PluginRegistry,
+    &pos_runtime::HostCatalogueEntryV1<GatewayActionPlugin>,
+    &FrozenGatewayActionConfiguration,
+) -> Result<(), pos_runtime::RuntimeError>;
+
+// Resolve the frozen configuration and register the reviewed Gateway entry.
+// Production and nonproduction registries differ only in `register`.
+fn gateway_action_registry_with(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+    register: GatewayCatalogueRegistration,
+) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    let frozen = FrozenGatewayActionConfiguration::resolve(bodies)?;
+    let mut registry = PluginRegistry::new().without_erasure_gate();
+    register(
+        &mut registry,
+        &pos_runtime::HostCatalogueEntryV1::gateway(),
+        &frozen,
+    )?;
+    if let Some(authority) = authority {
+        registry = registry.with_consent_authority(authority);
+    }
+    Ok(registry)
+}
+
 #[cfg(test)]
 fn gateway_action_registry() -> Arc<PluginRegistry> {
     gateway_action_registry_with_bodies(std::iter::empty())
@@ -640,36 +1293,151 @@ fn gateway_action_registry_with_authority(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
 ) -> Arc<PluginRegistry> {
-    Arc::new(gateway_action_registry_builder(bodies, authority))
+    Arc::new(gateway_action_registry_builder_for_test(bodies, authority))
 }
 
+// The production registry selects the reviewed Gateway entry with installed
+// evidence. Wave 8 has no installed Gateway EPF1, so it fails closed; #461
+// owns positive activation.
 fn gateway_action_registry_builder(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
-) -> PluginRegistry {
-    let mut registry = PluginRegistry::new().without_erasure_gate();
-    let descriptor = GatewayActionPlugin {
-        id: PluginId::new(),
-    };
-    drop(registry.register_with_approver(
-        &descriptor,
-        None,
-        None,
-        Some(Box::new(WorldPlugin::new().with_bodies(bodies))),
-        [Kind::new(EVENT_TYPE_ACTION)],
-    ));
-    if let Some(authority) = authority {
-        registry = registry.with_consent_authority(authority);
-    }
-    registry
+) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    gateway_action_registry_with(
+        bodies,
+        authority,
+        PluginRegistry::register_from_host_catalogue_entry::<GatewayActionPlugin>,
+    )
 }
 
+// Unit-test behavior fixtures have no installed profile, session pin, or
+// production registration authority. They never enter the release builder.
+/// Build a nonproduction Gateway registry without an installed profile or pin.
+///
+/// It selects the same reviewed catalogue entry, factory and registration
+/// step as production; only the evidence is the generated fixture source.
+///
+/// # Errors
+/// Returns an error when canonical body validation or fixture registration fails.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn fixture_action_registry_builder(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    gateway_action_registry_with(
+        bodies,
+        authority,
+        PluginRegistry::register_host_catalogue_fixture::<GatewayActionPlugin>,
+    )
+}
+
+/// Build a nonproduction Gateway around a verified erasure host.
+///
+/// # Errors
+/// Returns an error when the store, fixture registry, or Gateway cannot be built.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn gateway_with_erasure_host_and_authorization(
+    host: ErasureExecutionHostV1,
+    bodies: impl IntoIterator<Item = EntityId>,
+    authorization: GatewayAuthorization,
+) -> Result<Gateway, GatewayError> {
+    let gate = host.containment_gate();
+    let consent_authority = ConsentAuthority::new();
+    let store =
+        executor::StoreExecutor::new_with_erasure_host(host, consent_authority.append_permit())?;
+    let action_registry = fixture_action_registry_builder(bodies, Some(consent_authority.clone()))
+        .map(|mut registry| {
+            registry.bind_erasure_gate(gate);
+            Arc::new(registry)
+        });
+    Gateway::from_host_components(
+        store,
+        broadcast::channel(EVENT_BUS_CAPACITY).0,
+        GatewayLimits::LOCAL_DEFAULT,
+        false,
+        action_registry,
+        consent_authority,
+        Some(Arc::new(authorization)),
+    )
+}
+
+/// Bytes the Gateway configuration details spend before the bodies: the
+/// catalogue version, the allowed-kind count and each length-framed kind.
+fn gateway_configuration_details_overhead() -> usize {
+    GATEWAY_ALLOWED_ACTION_KINDS
+        .iter()
+        .fold(size_of::<u32>() + size_of::<u64>(), |len, kind| {
+            len + size_of::<u64>() + kind.len()
+        })
+}
+
+/// Most bodies whose 16-byte identities still fit the configuration details
+/// after [`gateway_configuration_details_overhead`].
+fn max_gateway_bodies() -> usize {
+    let available = pos_runtime::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1
+        .saturating_sub(gateway_configuration_details_overhead());
+    available / 16
+}
+
+fn canonical_gateway_bodies(
+    bodies: impl IntoIterator<Item = EntityId>,
+) -> Result<Vec<EntityId>, pos_runtime::RuntimeError> {
+    let max_bodies = max_gateway_bodies();
+    let mut bodies = bodies.into_iter().take(max_bodies + 1).collect::<Vec<_>>();
+    if bodies.len() > max_bodies {
+        return Err(pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid {
+            kind: "configuration",
+        }
+        .into());
+    }
+    bodies.sort_unstable();
+    bodies.dedup();
+    Ok(bodies)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn gateway_action_registry_builder_for_test(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
+) -> PluginRegistry {
+    fixture_action_registry_builder(bodies, authority).unwrap_or_else(|error| {
+        std::panic::resume_unwind(Box::new(format!(
+            "gateway action registration must remain valid in test fixtures: {error:?}"
+        )))
+    })
+}
+
+fn bind_action_registry_erasure_gate(
+    registry: Result<PluginRegistry, pos_runtime::RuntimeError>,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<Arc<PluginRegistry>, pos_runtime::RuntimeError> {
+    registry.map(|mut registry| {
+        registry.bind_erasure_gate(gate);
+        Arc::new(registry)
+    })
+}
+
+fn gateway_empty_action_registry(
+    authority: ConsentAuthority,
+    gate: Arc<dyn ErasureGate>,
+) -> Arc<PluginRegistry> {
+    Arc::new(
+        PluginRegistry::new()
+            .with_consent_authority(authority)
+            .with_erasure_gate(gate),
+    )
+}
+
+#[cfg(test)]
 fn gateway_action_registry_with_authority_and_erasure_gate(
     bodies: impl IntoIterator<Item = EntityId>,
     authority: Option<ConsentAuthority>,
     gate: Arc<dyn ErasureGate>,
 ) -> Arc<PluginRegistry> {
-    let mut registry = gateway_action_registry_builder(bodies, authority);
+    let mut registry = gateway_action_registry_builder_for_test(bodies, authority);
     registry.bind_erasure_gate(gate);
     Arc::new(registry)
 }
@@ -690,12 +1458,41 @@ impl GatewayLimits {
 
 /// A bounded page of Timeline Events.
 ///
-/// `next_from_seq` is the inclusive sequence of the first omitted Event, or
-/// `None` only when the requested Timeline is exhausted.
+/// `next_cursor` is the generation-bound continuation for this page.
+/// `next_from_seq` reports the inclusive sequence of the first omitted Event;
+/// it can also be used to start a separate read.
 #[derive(Debug, PartialEq, Eq)]
 pub struct EventPage {
     pub events: Vec<Event>,
     pub next_from_seq: Option<Seq>,
+    pub next_cursor: Option<EventPageCursor>,
+}
+
+/// An opaque continuation bound to one Timeline and inventory generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventPageCursor {
+    timeline_id: TimelineId,
+    from_seq: Seq,
+    inventory_generation: Option<ErasureReferenceV1>,
+}
+
+fn cursor_from_seq(timeline_id: &str, cursor: EventPageCursor) -> Result<u64, GatewayError> {
+    if parse_timeline_id(timeline_id)? != cursor.timeline_id {
+        return Err(GatewayError::InvalidId(
+            "cursor timeline mismatch".to_owned(),
+        ));
+    }
+    Ok(cursor.from_seq.as_u64())
+}
+
+fn page_at_cursor(
+    bounded: GenerationBoundEventPage,
+    cursor: EventPageCursor,
+) -> Result<EventPage, GatewayError> {
+    if bounded.inventory_generation != cursor.inventory_generation {
+        return Err(GatewayError::StaleEventCursor);
+    }
+    Ok(bounded.page)
 }
 
 pub(crate) struct GenerationBoundEventPage {
@@ -819,6 +1616,9 @@ pub enum GatewayError {
     /// A host revocation must bind the sequence it is about to commit.
     #[error("consent revocation fence does not match the current Timeline position")]
     ConsentRevocationFenceMismatch,
+    /// The production action registry could not be bound to its declared policy.
+    #[error("action registry initialization failed: {0}")]
+    ActionRegistry(#[from] pos_runtime::RuntimeError),
 }
 
 /// An existing, owner-only `OwnTracks` activation key loaded from disk.
@@ -924,7 +1724,7 @@ pub(crate) enum OwnTracksIngressResult {
 }
 
 impl OwnTracksIngressResult {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) const fn is_rate_limited(self) -> bool {
         matches!(self, Self::RateLimited)
     }
@@ -1134,6 +1934,32 @@ impl Gateway {
             .map_err(GatewayError::ConsentCodec)
     }
 
+    fn from_host_components(
+        store: executor::StoreExecutor,
+        bus: broadcast::Sender<EventNotice>,
+        limits: GatewayLimits,
+        owntracks_enabled: bool,
+        action_registry: Result<Arc<PluginRegistry>, pos_runtime::RuntimeError>,
+        consent_authority: ConsentAuthority,
+        authorization: Option<Arc<GatewayAuthorization>>,
+    ) -> Result<Self, GatewayError> {
+        let action_registry = action_registry.map_err(GatewayError::ActionRegistry)?;
+        Ok(Self {
+            store,
+            bus,
+            limits,
+            owntracks_enabled,
+            action_registry,
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
+            authorization,
+            #[cfg(test)]
+            action_principal: None,
+        }
+        .schedule_startup_consent_cleanup())
+    }
+
     /// Wrap an existing store backend.
     ///
     /// Human action submission is intentionally disabled until the host supplies
@@ -1184,27 +2010,22 @@ impl Gateway {
     ) -> Result<Self, GatewayError> {
         store.bind_erasure_gate(Arc::clone(&gate))?;
         let consent_authority = ConsentAuthority::new();
-        Ok(Self {
-            store: executor::StoreExecutor::new_with_consent_authority(
+        Self::from_host_components(
+            executor::StoreExecutor::new_with_consent_authority(
                 store,
                 consent_authority.append_permit(),
             ),
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
-                std::iter::empty(),
-                Some(consent_authority.clone()),
-                gate,
-            ),
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            false,
+            fixture_action_registry_builder(std::iter::empty(), Some(consent_authority.clone()))
+                .map(|mut registry| {
+                    registry.bind_erasure_gate(gate);
+                    Arc::new(registry)
+                }),
             consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: None,
-            #[cfg(test)]
-            action_principal: None,
-        }
-        .schedule_startup_consent_cleanup())
+            None,
+        )
     }
 
     /// Construct a Gateway whose executor exclusively owns the recovered
@@ -1214,9 +2035,11 @@ impl Gateway {
     /// Plugin/action checks. All [`pos_core::store::EventStore`] effects remain in the host-owned
     /// single-consumer command stream.
     ///
+    /// Protected actions remain unavailable until the host supplies an
+    /// installed policy through the authorized constructor.
+    ///
     /// # Errors
-    /// Returns a store error if the recovered host cannot bind the Gateway's
-    /// independently owned consent authority.
+    /// Returns a store error if the recovered host cannot be bound.
     pub fn new_with_erasure_host(host: ErasureExecutionHostV1) -> Result<Self, GatewayError> {
         let gate = host.containment_gate();
         let consent_authority = ConsentAuthority::new();
@@ -1224,24 +2047,18 @@ impl Gateway {
             host,
             consent_authority.append_permit(),
         )?;
-        Ok(Self {
+        Self::from_host_components(
             store,
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
-                std::iter::empty(),
-                Some(consent_authority.clone()),
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            false,
+            Ok(gateway_empty_action_registry(
+                consent_authority.clone(),
                 gate,
-            ),
+            )),
             consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: None,
-            #[cfg(test)]
-            action_principal: None,
-        }
-        .schedule_startup_consent_cleanup())
+            None,
+        )
     }
 
     /// Construct an action-capable Gateway over one recovered erasure host.
@@ -1252,8 +2069,8 @@ impl Gateway {
     /// therefore cannot enable a proposed action outside ADR-060 containment.
     ///
     /// # Errors
-    /// Returns a store error if the recovered host cannot bind the Gateway's
-    /// independently owned consent authority.
+    /// Returns a store or action-registry error if the recovered host or its
+    /// declared output policy cannot be bound.
     pub fn new_with_erasure_host_and_authorization(
         host: ErasureExecutionHostV1,
         bodies: impl IntoIterator<Item = EntityId>,
@@ -1265,32 +2082,28 @@ impl Gateway {
             host,
             consent_authority.append_permit(),
         )?;
-        Ok(Self {
+        Self::from_host_components(
             store,
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
-                bodies,
-                Some(consent_authority.clone()),
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            false,
+            bind_action_registry_erasure_gate(
+                gateway_action_registry_builder(bodies, Some(consent_authority.clone())),
                 gate,
             ),
             consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: Some(Arc::new(authorization)),
-            #[cfg(test)]
-            action_principal: None,
-        }
-        .schedule_startup_consent_cleanup())
+            Some(Arc::new(authorization)),
+        )
     }
 
     /// Construct authenticated local `OwnTracks` ingress behind one recovered
     /// host-owned Gateway store and erasure containment gate.
     ///
+    /// Protected Gateway actions remain unavailable; `OwnTracks` ingress is
+    /// independently authenticated by its owner key.
+    ///
     /// # Errors
-    /// Returns a store error if the recovered host cannot bind the Gateway's
-    /// independently owned consent authority.
+    /// Returns a store error if the recovered host cannot be bound.
     pub fn new_with_owntracks_erasure_host(
         host: ErasureExecutionHostV1,
         owner_key: &OwnTracksOwnerKey,
@@ -1302,24 +2115,18 @@ impl Gateway {
             owner_key.0,
             consent_authority.append_permit(),
         )?;
-        Ok(Self {
+        Self::from_host_components(
             store,
-            bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
-            limits: GatewayLimits::LOCAL_DEFAULT,
-            owntracks_enabled: true,
-            action_registry: gateway_action_registry_with_authority_and_erasure_gate(
-                std::iter::empty(),
-                Some(consent_authority.clone()),
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            true,
+            Ok(gateway_empty_action_registry(
+                consent_authority.clone(),
                 gate,
-            ),
+            )),
             consent_authority,
-            consent_history_locks: new_consent_history_locks(),
-            pending_consent_cleanup: new_pending_consent_cleanup(),
-            authorization: None,
-            #[cfg(test)]
-            action_principal: None,
-        }
-        .schedule_startup_consent_cleanup())
+            None,
+        )
     }
 
     /// Wrap a store and configure the World body catalogue used for actions.
@@ -1646,8 +2453,6 @@ impl Gateway {
     ///
     /// # Errors
     /// Returns a bounded executor or store error when ingress cannot run.
-    ///
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn admit_owntracks_ingress(
         &self,
         basic_handle: [u8; 32],
@@ -1882,8 +2687,10 @@ impl Gateway {
 
     /// Poll one bounded page of Timeline events, starting at `from_seq` (inclusive).
     ///
-    /// The store is read for `limit + 1` Events. `next_from_seq` is `None` when
-    /// exhausted; otherwise it is the inclusive sequence of the first omitted Event.
+    /// The store is read for `limit + 1` Events. Use the returned
+    /// [`EventPage::next_cursor`] with [`Self::read_events_page_after`] to
+    /// continue within the same inventory generation. A new `from_seq` call
+    /// starts a separate read and does not promise a stable pagination view.
     ///
     /// # Errors
     /// Returns [`GatewayError::AuthorizationUnavailable`] when this Gateway
@@ -1896,7 +2703,7 @@ impl Gateway {
     /// # -> Result<(), piglor_gateway::GatewayError> {
     /// let page = gateway.read_events_page(timeline, 0, 100).await?;
     /// let _events = page.events;
-    /// let _cursor = page.next_from_seq;
+    /// let _cursor = page.next_cursor;
     /// # Ok(())
     /// # }
     /// ```
@@ -1909,6 +2716,30 @@ impl Gateway {
         self.read_events_page_at_generation(timeline_id, from_seq, limit, None)
             .await
             .map(|bounded| bounded.page)
+    }
+
+    /// Continue a Timeline page read at the generation recorded in `cursor`.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::StaleEventCursor`] when the inventory changed,
+    /// or [`GatewayError::InvalidId`] when the cursor belongs to another Timeline.
+    /// Other errors match [`Self::read_events_page`].
+    pub async fn read_events_page_after(
+        &self,
+        timeline_id: &str,
+        cursor: EventPageCursor,
+        limit: usize,
+    ) -> Result<EventPage, GatewayError> {
+        let from_seq = cursor_from_seq(timeline_id, cursor)?;
+        let bounded = self
+            .read_events_page_at_generation(
+                timeline_id,
+                from_seq,
+                limit,
+                cursor.inventory_generation,
+            )
+            .await?;
+        page_at_cursor(bounded, cursor)
     }
 
     pub(crate) async fn read_events_page_at_generation(
@@ -1932,83 +2763,72 @@ impl Gateway {
         limit: usize,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<GenerationBoundEventPage, GatewayError> {
+        const MAX_FILTER_SCAN_EVENTS: usize = 1_000;
         if limit == 0 || limit > MAX_EVENTS_PER_POLL {
             return Err(GatewayError::InvalidPageLimit {
                 maximum: MAX_EVENTS_PER_POLL,
             });
         }
         let id = parse_timeline_id(timeline_id)?;
-        let first_seq = from_seq.max(1);
-        let last_seq = first_seq.saturating_add(limit as u64);
-        let range = SeqRange {
-            from: Seq::from_u64(first_seq),
-            to: Some(Seq::from_u64(last_seq)),
-        };
-        let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
-            MAX_EVENT_PAYLOAD_BYTES,
-            MAX_EVENT_TYPE_BYTES,
-            MAX_FORK_DEPTH,
-            limit + 1,
-            (limit + 1) * (MAX_EVENT_PAYLOAD_BYTES + MAX_EVENT_TYPE_BYTES),
-            MAX_EVENTS_READ_TIME_MICROS,
-        );
-        let page = match self
-            .store
-            .read_page(id, range, bounds, expected_generation)
-            .await
-        {
-            Ok(page) => page,
-            Err(executor::StoreExecutorError::Store(CoreError::PayloadTooLarge { .. })) => {
-                return Err(GatewayError::EventPayloadTooLarge {
-                    maximum: MAX_EVENT_PAYLOAD_BYTES,
-                })
+        // A cursor is derived only from visible Events. Scan in bounded chunks
+        // so protected Events cannot hide later public Events in the same page.
+        let mut next_seq = from_seq.max(1);
+        let mut scanned = 0usize;
+        let mut visible = Vec::with_capacity(limit + 1);
+        let mut generation = expected_generation;
+        loop {
+            let chunk_size = (MAX_FILTER_SCAN_EVENTS - scanned).min(MAX_EVENTS_PER_POLL + 1);
+            if chunk_size == 0 {
+                return Err(GatewayError::ResourceUnavailable);
             }
-            Err(executor::StoreExecutorError::Store(CoreError::EventMetadataTooLarge {
-                field,
-                ..
-            })) => {
-                return Err(GatewayError::EventMetadataTooLarge {
-                    field,
-                    maximum: MAX_EVENT_TYPE_BYTES,
-                })
+            let range = SeqRange {
+                from: Seq::from_u64(next_seq),
+                to: Some(Seq::from_u64(
+                    next_seq.saturating_add(chunk_size as u64 - 1),
+                )),
+            };
+            let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
+                MAX_EVENT_PAYLOAD_BYTES,
+                MAX_EVENT_TYPE_BYTES,
+                MAX_FORK_DEPTH,
+                chunk_size,
+                chunk_size * (MAX_EVENT_PAYLOAD_BYTES + MAX_EVENT_TYPE_BYTES),
+                MAX_EVENTS_READ_TIME_MICROS,
+            );
+            let page = self
+                .store
+                .read_page(id, range, bounds, generation)
+                .await
+                .map_err(map_event_page_read_error)?;
+            generation = page.generation.or(generation);
+            let raw_count = page.events.len();
+            let last_seq = page.events.last().map_or(next_seq, event_seq);
+            scanned += raw_count;
+            visible.extend(
+                page.events
+                    .into_iter()
+                    .filter(|event| !is_subject_controlled_event_type(&event.event_type)),
+            );
+            if visible.len() > limit || raw_count < chunk_size {
+                break;
             }
-            Err(executor::StoreExecutorError::Store(CoreError::ForkDepthTooLarge { .. })) => {
-                return Err(GatewayError::ForkDepthTooLarge {
-                    maximum: MAX_FORK_DEPTH,
-                })
-            }
-            Err(executor::StoreExecutorError::Store(CoreError::ReadBytesTooLarge { .. })) => {
-                return Err(GatewayError::EventResponseTooLarge {
-                    maximum: MAX_EVENTS_RESPONSE_BYTES,
-                })
-            }
-            Err(
-                executor::StoreExecutorError::Store(CoreError::ReadTimeTooLarge { .. })
-                | executor::StoreExecutorError::DeadlineExceeded,
-            ) => {
-                return Err(GatewayError::EventReadTimeExceeded {
-                    maximum_micros: MAX_EVENTS_READ_TIME_MICROS,
-                })
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let mut events = page.events;
-        if events
-            .iter()
-            .any(|event| is_subject_controlled_event_type(&event.event_type))
-        {
-            return Err(GatewayError::ResourceUnavailable);
+            next_seq = last_seq.saturating_add(1);
         }
-        let next_from_seq = events
+        let next_from_seq = visible
             .get(limit)
             .map(|event| Seq::from_u64(event_seq(event)));
-        events.truncate(limit);
+        visible.truncate(limit);
         Ok(GenerationBoundEventPage {
             page: EventPage {
-                events,
+                events: visible,
                 next_from_seq,
+                next_cursor: next_from_seq.map(|from_seq| EventPageCursor {
+                    timeline_id: id,
+                    from_seq,
+                    inventory_generation: generation,
+                }),
             },
-            inventory_generation: page.generation,
+            inventory_generation: generation,
         })
     }
 
@@ -2016,7 +2836,8 @@ impl Gateway {
     ///
     /// The commit fence is held through the store read, so a host authority
     /// replacement cannot race a protected read.  The same seam is used for
-    /// exports and other Gateway-owned projections as they are added.
+    /// exports and other Gateway-owned projections as they are added. Continue
+    /// the same read with [`Self::read_events_page_authorized_after`].
     ///
     /// # Errors
     /// Returns [`GatewayError::AuthorizationUnavailable`] or
@@ -2032,6 +2853,40 @@ impl Gateway {
         self.read_events_page_authorized_at_generation(timeline_id, from_seq, limit, request, None)
             .await
             .map(|bounded| bounded.page)
+    }
+
+    /// Continue an authorized Timeline page read at the cursor's generation.
+    /// The actor receives a fresh authority decision for this page.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::StaleEventCursor`] when the inventory changed,
+    /// or [`GatewayError::InvalidId`] when the cursor belongs to another Timeline.
+    /// Other errors match [`Self::read_events_page_authorized`].
+    pub async fn read_events_page_authorized_after(
+        &self,
+        timeline_id: &str,
+        cursor: EventPageCursor,
+        limit: usize,
+        actor_entity_id: EntityId,
+    ) -> Result<EventPage, GatewayError> {
+        let from_seq = cursor_from_seq(timeline_id, cursor)?;
+        let request = GatewayAuthorizationRequest::read(
+            actor_entity_id,
+            cursor.timeline_id,
+            from_seq,
+            limit,
+            WallTime::now(),
+        );
+        let bounded = self
+            .read_events_page_authorized_at_generation(
+                timeline_id,
+                from_seq,
+                limit,
+                request,
+                cursor.inventory_generation,
+            )
+            .await?;
+        page_at_cursor(bounded, cursor)
     }
 
     pub(crate) async fn read_events_page_authorized_at_generation(
@@ -2087,7 +2942,7 @@ impl Gateway {
     /// Compatibility shim for Timelines that fit in one bounded page.
     ///
     /// This method no longer aggregates the Timeline to exhaustion. New callers
-    /// must use [`Self::read_events_page`] and follow `next_from_seq`.
+    /// must use [`Self::read_events_page`] and follow `next_cursor`.
     ///
     /// # Errors
     /// Returns [`GatewayError::CompatibilityReadTruncated`] when more than one
@@ -2095,7 +2950,7 @@ impl Gateway {
     /// [`Self::read_events_page`].
     #[deprecated(
         since = "0.1.0",
-        note = "use read_events_page and follow EventPage::next_from_seq"
+        note = "use read_events_page and follow EventPage::next_cursor"
     )]
     pub async fn read_events_from(
         &self,
@@ -2999,6 +3854,37 @@ fn is_subject_controlled_event_type(event_type: &Kind) -> bool {
         || event_type.as_str().starts_with("retention.")
 }
 
+fn map_event_page_read_error(error: executor::StoreExecutorError) -> GatewayError {
+    match error {
+        executor::StoreExecutorError::Store(CoreError::PayloadTooLarge { .. }) => {
+            GatewayError::EventPayloadTooLarge {
+                maximum: MAX_EVENT_PAYLOAD_BYTES,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::EventMetadataTooLarge { field, .. }) => {
+            GatewayError::EventMetadataTooLarge {
+                field,
+                maximum: MAX_EVENT_TYPE_BYTES,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::ForkDepthTooLarge { .. }) => {
+            GatewayError::ForkDepthTooLarge {
+                maximum: MAX_FORK_DEPTH,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::ReadBytesTooLarge { .. }) => {
+            GatewayError::EventResponseTooLarge {
+                maximum: MAX_EVENTS_RESPONSE_BYTES,
+            }
+        }
+        executor::StoreExecutorError::Store(CoreError::ReadTimeTooLarge { .. })
+        | executor::StoreExecutorError::DeadlineExceeded => GatewayError::EventReadTimeExceeded {
+            maximum_micros: MAX_EVENTS_READ_TIME_MICROS,
+        },
+        error => error.into(),
+    }
+}
+
 fn normalize_protected_read_error(
     result: Result<GenerationBoundEventPage, GatewayError>,
 ) -> Result<GenerationBoundEventPage, GatewayError> {
@@ -3070,6 +3956,53 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     const EXPORT_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([233; 32]);
+
+    #[tokio::test]
+    async fn foundation_gateway_starts_without_an_installed_action_profile() {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+
+        assert!(!gateway.has_authorization());
+        let timeline = gateway.create_timeline("foundation").await.test_ok();
+        let timeline_id = timeline.id().to_string();
+        let page = gateway.read_events_page(&timeline_id, 0, 1).await.test_ok();
+        assert!(page.events.is_empty());
+        assert!(matches!(
+            gateway
+                .submit_json_action(
+                    &timeline_id,
+                    &EntityId::new().to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({}),
+                    "world-action",
+                )
+                .await,
+            Err(GatewayError::ActionAuthorizationUnavailable)
+        ));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn action_capable_host_gateway_fails_closed_without_installed_epf1() {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        assert!(matches!(
+            Gateway::new_with_erasure_host_and_authorization(
+                host,
+                [EntityId::new()],
+                crate::authorization::test_authorization_for(EntityId::new()),
+            ),
+            Err(GatewayError::ActionRegistry(_))
+        ));
+    }
 
     #[test]
     fn host_gateway_constructors_fail_closed_when_containment_is_unavailable() {
@@ -3237,6 +4170,67 @@ mod tests {
     fn gateway_action_registry_exposes_the_host_action_schema() {
         let registry = gateway_action_registry();
         assert!(registry.schemas.contains(EVENT_TYPE_ACTION));
+    }
+
+    #[test]
+    fn action_registry_erasure_gate_binds_a_built_registry() {
+        let gate: Arc<dyn ErasureGate> =
+            Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
+        let bound =
+            bind_action_registry_erasure_gate(fixture_action_registry_builder([], None), gate);
+        assert!(bound.is_ok_and(|registry| registry.schemas.contains(EVENT_TYPE_ACTION)));
+    }
+
+    #[test]
+    fn gateway_action_registry_builder_propagates_binding_errors() {
+        let too_many_bodies =
+            gateway_action_registry_builder(std::iter::repeat(EntityId::new()), None);
+        assert!(matches!(
+            too_many_bodies,
+            Err(pos_runtime::RuntimeError::OutputAdmission(
+                pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid {
+                    kind: "configuration"
+                }
+            ))
+        ));
+
+        let descriptor = GatewayActionPlugin {
+            id: PluginId::new(),
+        };
+        let configuration_details: Vec<u8> = Vec::new();
+        assert!(matches!(
+            super::gateway_output_binding(&descriptor, &configuration_details),
+            Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
+        ));
+        let invalid_profile = gateway_output_binding_with_profile(
+            &descriptor,
+            &configuration_details,
+            "unknown-profile",
+        );
+        assert!(matches!(
+            invalid_profile,
+            Err(pos_runtime::RuntimeError::CapabilityMismatch { .. })
+        ));
+
+        assert!(matches!(
+            Gateway::from_host_components(
+                executor::StoreExecutor::new_with_consent_authority(
+                    open_store(StoreConfig::Memory).test_ok(),
+                    ConsentAuthority::new().append_permit(),
+                ),
+                broadcast::channel(EVENT_BUS_CAPACITY).0,
+                GatewayLimits::LOCAL_DEFAULT,
+                false,
+                Err(pos_runtime::RuntimeError::UnknownEventType(
+                    "world.unowned".to_owned(),
+                )),
+                ConsentAuthority::new(),
+                None,
+            ),
+            Err(GatewayError::ActionRegistry(
+                pos_runtime::RuntimeError::UnknownEventType(_)
+            ))
+        ));
     }
 
     #[test]
@@ -3601,7 +4595,8 @@ mod tests {
         )
         .test_ok();
         let gateway =
-            Gateway::new_with_erasure_host_and_authorization(host, [body], authorization).test_ok();
+            super::gateway_with_erasure_host_and_authorization(host, [body], authorization)
+                .test_ok();
         let timeline = gateway.create_timeline("host-owned-action").await.test_ok();
         let payload = serde_json::json!({
             "actor_entity_id": actor,
@@ -3723,7 +4718,8 @@ mod tests {
         )
         .test_ok();
         let gateway =
-            Gateway::new_with_erasure_host_and_authorization(host, [body], authorization).test_ok();
+            super::gateway_with_erasure_host_and_authorization(host, [body], authorization)
+                .test_ok();
         let timeline = gateway
             .create_timeline("host-authority-commit-recheck")
             .await
@@ -4175,6 +5171,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authorized_public_page_cursor_preserves_read_authorization() {
+        let actor = EntityId::new();
+        let gateway = Gateway::new_with_world_bodies_and_authorization(
+            open_store(StoreConfig::Memory).test_ok(),
+            [],
+            crate::authorization::test_authorization_for(actor),
+        );
+        let timeline = gateway
+            .create_timeline("authorized-public-cursor")
+            .await
+            .test_ok();
+        let id = timeline.id().to_string();
+        for marker in 1..=2 {
+            gateway
+                .append_action(
+                    &id,
+                    &actor.to_string(),
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({"marker": marker}),
+                )
+                .await
+                .test_ok();
+        }
+        let request =
+            GatewayAuthorizationRequest::read(actor, timeline.id(), 0, 1, WallTime::now());
+        let first = gateway
+            .read_events_page_authorized(&id, 0, 1, request)
+            .await
+            .test_ok();
+        let cursor = first.next_cursor.test_ok();
+        let second = gateway
+            .read_events_page_authorized_after(&id, cursor, 1, actor)
+            .await
+            .test_ok();
+        assert_eq!(second.events[0].seq.as_u64(), 2);
+        assert!(second.next_cursor.is_none());
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized_after("not-a-timeline", cursor, 1, actor)
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized_after(
+                    &TimelineId::new().to_string(),
+                    cursor,
+                    1,
+                    actor,
+                )
+                .await,
+            Err(GatewayError::InvalidId(_))
+        ));
+        assert!(matches!(
+            gateway
+                .read_events_page_authorized_after(&id, cursor, 1, EntityId::new())
+                .await,
+            Err(GatewayError::AuthorizationDenied)
+        ));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn cursor_without_inventory_generation_cannot_continue_host_read() {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gateway = Gateway::new_with_erasure_host(host).test_ok();
+        let timeline = gateway
+            .create_timeline("generationless-cursor")
+            .await
+            .test_ok();
+        // A cursor issued by an unhosted Gateway cannot continue under a host.
+        let cursor = EventPageCursor {
+            timeline_id: timeline.id(),
+            from_seq: Seq::from_u64(1),
+            inventory_generation: None,
+        };
+        assert!(matches!(
+            gateway
+                .read_events_page_after(&timeline.id().to_string(), cursor, 1)
+                .await,
+            Err(GatewayError::StaleEventCursor)
+        ));
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
     async fn authority_bound_gateway_rejects_action_capability_as_read() {
         let actor = EntityId::new();
         let timeline = TimelineId::new();
@@ -4228,7 +5316,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authority_bound_gateway_blocks_subject_controlled_reads_and_normalizes_missing() {
+    async fn authority_bound_gateway_filters_subject_controlled_reads_and_normalizes_missing() {
         let actor = EntityId::new();
         for event_type in [
             "persona.profile",
@@ -4245,7 +5333,7 @@ mod tests {
                 [],
                 crate::authorization::test_authorization_for(actor),
             );
-            let error = gateway
+            let page = gateway
                 .read_events_page_authorized(
                     &target.to_string(),
                     0,
@@ -4253,8 +5341,9 @@ mod tests {
                     GatewayAuthorizationRequest::read(actor, target, 0, 1, WallTime::now()),
                 )
                 .await
-                .test_err();
-            assert_eq!(error.to_string(), "resource not found");
+                .test_ok();
+            assert!(page.events.is_empty());
+            assert_eq!(page.next_from_seq, None);
             gateway.shutdown().await.test_ok();
             drop(gateway);
         }
@@ -5180,11 +6269,12 @@ mod tests {
             fence_error,
             GatewayError::ConsentRevocationFenceMismatch
         ));
-        let page_error = gateway
+        let page = gateway
             .read_events_page(&timeline.id().to_string(), 0, 2)
             .await
-            .test_err();
-        assert!(matches!(page_error, GatewayError::ResourceUnavailable));
+            .test_ok();
+        assert!(page.events.is_empty());
+        assert_eq!(page.next_from_seq, None);
         drop(gateway);
     }
 
@@ -5286,7 +6376,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn public_gateway_read_rejects_geographic_events_from_an_adapter() {
+    async fn public_gateway_read_filters_geographic_events_from_an_adapter() {
         for event_type in [
             pos_core::GEOGRAPHIC_EVENT_TYPE,
             pos_core::GEOGRAPHIC_CELL_EVENT_TYPE,
@@ -5294,21 +6384,23 @@ mod tests {
             let gateway = Gateway::new(Box::new(ScriptedStore {
                 mode: ScriptMode::GeographicRead(event_type),
             }));
-            let error = gateway
+            let page = gateway
                 .read_events_page(&TimelineId::new().to_string(), 0, 1)
                 .await
-                .test_err();
-            assert!(matches!(error, GatewayError::ResourceUnavailable));
+                .test_ok();
+            assert!(page.events.is_empty());
+            assert_eq!(page.next_from_seq, None);
             drop(gateway);
         }
         let gateway = Gateway::new(Box::new(ScriptedStore {
             mode: ScriptMode::ConsentRead(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
         }));
-        let error = gateway
+        let page = gateway
             .read_events_page(&TimelineId::new().to_string(), 0, 1)
             .await
-            .test_err();
-        assert!(matches!(error, GatewayError::ResourceUnavailable));
+            .test_ok();
+        assert!(page.events.is_empty());
+        assert_eq!(page.next_from_seq, None);
         drop(gateway);
     }
 
@@ -6221,9 +7313,110 @@ mod tests {
         let first = gateway.read_events_page(&timeline_id, 0, 1).await.test_ok();
         assert_eq!(first.events.len(), 1);
         assert_eq!(first.next_from_seq, Some(Seq::from_u64(2)));
-        let exhausted = gateway.read_events_page(&timeline_id, 2, 1).await.test_ok();
+        let exhausted = gateway
+            .read_events_page_after(&timeline_id, first.next_cursor.test_ok(), 1)
+            .await
+            .test_ok();
         assert_eq!(exhausted.events.len(), 1);
         assert_eq!(exhausted.next_from_seq, None);
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn event_pages_filter_protected_events_before_deriving_cursors() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("mixed-scope").await.test_ok();
+        let timeline_id = timeline.id().to_string();
+        let drafts = [
+            EVENT_TYPE_ACTION,
+            "persona.profile",
+            EVENT_TYPE_ACTION,
+            "retention.policy",
+            EVENT_TYPE_ACTION,
+        ]
+        .into_iter()
+        .map(|kind| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(kind),
+                json_to_cbor(&serde_json::json!({})),
+            )
+        })
+        .collect::<Vec<_>>();
+        gateway
+            .store
+            .append(timeline.id(), drafts, None)
+            .await
+            .test_ok();
+
+        let first = gateway.read_events_page(&timeline_id, 0, 1).await.test_ok();
+        assert_eq!(
+            first.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(first.next_from_seq, Some(Seq::from_u64(3)));
+        let second = gateway
+            .read_events_page_after(&timeline_id, first.next_cursor.test_ok(), 1)
+            .await
+            .test_ok();
+        assert_eq!(
+            second.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(second.next_from_seq, Some(Seq::from_u64(5)));
+        let final_page = gateway
+            .read_events_page_after(&timeline_id, second.next_cursor.test_ok(), 1)
+            .await
+            .test_ok();
+        assert_eq!(
+            final_page.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![5]
+        );
+        assert_eq!(final_page.next_from_seq, None);
+        gateway.shutdown().await.test_ok();
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn event_pages_bound_protected_scans_and_resume_at_public_events() {
+        let gateway = memory_gw();
+        let timeline = gateway
+            .create_timeline("protected-scan-cap")
+            .await
+            .test_ok();
+        let mut drafts = (0..1_000)
+            .map(|_| {
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("persona.profile"),
+                    json_to_cbor(&serde_json::json!({})),
+                )
+            })
+            .collect::<Vec<_>>();
+        drafts.extend((0..2).map(|_| {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(EVENT_TYPE_ACTION),
+                json_to_cbor(&serde_json::json!({})),
+            )
+        }));
+        gateway
+            .store
+            .append(timeline.id(), drafts, None)
+            .await
+            .test_ok();
+        let id = timeline.id().to_string();
+        assert!(matches!(
+            gateway.read_events_page(&id, 0, 1).await,
+            Err(GatewayError::ResourceUnavailable)
+        ));
+        let page = gateway.read_events_page(&id, 900, 1).await.test_ok();
+        assert_eq!(
+            page.events.iter().map(event_seq).collect::<Vec<_>>(),
+            vec![1001]
+        );
+        assert_eq!(page.next_from_seq, Some(Seq::from_u64(1002)));
+        gateway.shutdown().await.test_ok();
         drop(gateway);
     }
 
@@ -6305,16 +7498,22 @@ mod tests {
             .await
             .test_ok();
 
-        let mut from_seq = 0;
+        let mut cursor = None;
         let mut count = 0;
         loop {
-            let page = gateway
-                .read_events_page(&child.id().to_string(), from_seq, MAX_EVENTS_PER_POLL)
-                .await
-                .test_ok();
+            let page = match cursor {
+                Some(cursor) => gateway
+                    .read_events_page_after(&child.id().to_string(), cursor, MAX_EVENTS_PER_POLL)
+                    .await
+                    .test_ok(),
+                None => gateway
+                    .read_events_page(&child.id().to_string(), 0, MAX_EVENTS_PER_POLL)
+                    .await
+                    .test_ok(),
+            };
             count += page.events.len();
-            match page.next_from_seq {
-                Some(next) => from_seq = next.as_u64(),
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
                 None => break,
             }
         }
@@ -7131,12 +8330,11 @@ mod coverage_entrypoints {
                 },
             )
             .await?;
-        assert!(matches!(
-            gateway
-                .read_events_page(&timeline.id().to_string(), 0, 8)
-                .await,
-            Err(GatewayError::ResourceUnavailable)
-        ));
+        let visible = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 8)
+            .await?;
+        assert_eq!(visible.events.len(), 2);
+        assert_eq!(visible.next_from_seq, None);
         gateway
             .purge_expired_ingress_identities(NonZeroUsize::MIN)
             .await?;

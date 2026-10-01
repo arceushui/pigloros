@@ -5,6 +5,8 @@
 //! and architecture before these requested-state components are used.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[cfg(target_os = "linux")]
+mod attempt_registry;
 mod hardening;
 mod kernel_cgroup;
 mod system_bus;
@@ -12,6 +14,14 @@ mod transient_unit;
 
 #[derive(Debug)]
 struct CgroupRoot(std::fs::File);
+
+#[cfg(target_os = "linux")]
+pub use attempt_registry::{
+    CommittedPlannedAttempt, PlannedAttemptIntent, PreparedAttemptDirectory,
+    RecoveredAttemptIntent, RecoveredUnmountedDirectory, RegistryRecoveryEntry,
+    SystemdAttemptRecovery, SystemdAttemptRegistry, SystemdAttemptRegistryError,
+    UnmountedDirectoryInventory,
+};
 
 pub use hardening::{
     SystemdHardeningProperty, SystemdHardeningReadback, SystemdHardeningReadbackValue,
@@ -23,9 +33,9 @@ pub use kernel_cgroup::{
     AttemptLimitEventSource, BoundAttemptCgroup,
 };
 pub use system_bus::{
-    SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted, SystemdTransientUnitTransport,
-    SystemdTransientUnitTransportError, SystemdVerifiedStart, TransientServiceUnitName,
-    TransientServiceUnitNameError,
+    SystemdAttemptUnitObservation, SystemdJobFailure, SystemdStartJob, SystemdStopJobCompleted,
+    SystemdTransientUnitTransport, SystemdTransientUnitTransportError, SystemdVerifiedStart,
+    TransientServiceUnitName, TransientServiceUnitNameError,
 };
 pub use transient_unit::{
     ActivatedRootDirectory, LaunchMode, LauncherSource, SystemdManagerReadback,

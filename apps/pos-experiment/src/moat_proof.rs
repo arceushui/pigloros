@@ -13,8 +13,8 @@ use pos_conformance::{
     ExecutionModeV1, FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1,
     FixturePrincipalRefV1, HostClosureAuditV1, InputDependencyV1, InterventionV1,
     InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
-    NonInterferenceExecutionStatusV1, ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1,
-    PluginFailureV1, ProjectionEvidenceV1, RecomputationFrontierV1, ReplayClaimV1, ReproManifestV1,
+    NonInterferenceExecutionStatusV1, ParticipantEventV1, ParticipantViewV1, PluginFailureV1,
+    ProjectionEvidenceV1, RecomputationFrontierV1, ReplayClaimV1, ReproManifestV1,
     ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
     SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1,
     Wave8ProofContractV1, EVIDENCE_FORMAT_V1,
@@ -23,20 +23,32 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
 };
-use pos_plugin_society::{draft_signal, SocietyDimension, SocietyReducer, SocietySignal};
+use pos_plugin_society::SocietyDimension;
 use pos_plugin_world::{
     encode_actuator_pair_v1, ActionKindV1, Body, BodyRotationV1, WorldActionV1, WorldConfigV1,
-    WorldDriver, WorldPlugin, WorldReducer, ACTION_SCOPE_SINGLE_BODY, EVENT_TYPE_ACTION_V1,
-    EVENT_TYPE_CONFIG_V1, EVENT_TYPE_OBSERVATION_V1,
+    WorldDriver, WorldPlugin, ACTION_SCOPE_SINGLE_BODY, EVENT_TYPE_ACTION_V1, EVENT_TYPE_CONFIG_V1,
+    EVENT_TYPE_OBSERVATION_V1,
 };
-use pos_runtime::{
-    Driver, DriverRecoveryEvidence, HostWorldProfileV1, ObservationView, RecoveryEventHeader,
-    RuntimeError, StepOutput, WorldInstallationErrorV1,
-};
+use pos_runtime::{HostWorldProfileV1, RuntimeError, WorldInstallationErrorV1};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+// Proof callbacks run only through generated fixture registration until
+// installed registration returns with Wave 9 (#467/#462).
+#[cfg(test)]
+use pos_conformance::PluginFailureClassV1;
+#[cfg(test)]
+use pos_core::state::{Reducer, State};
+#[cfg(test)]
+use pos_plugin_society::{draft_signal, SocietyReducer, SocietySignal};
+#[cfg(test)]
+use pos_plugin_world::WorldReducer;
+#[cfg(test)]
+use pos_runtime::{
+    Driver, DriverRecoveryEvidence, ObservationView, RecoveryEventHeader, StepOutput,
+};
+#[cfg(test)]
 use std::sync::{atomic::AtomicU64, Arc};
 
 // Keep fallible proof orchestration linear without the compiler-generated
@@ -64,6 +76,97 @@ const SOCIETY_ENTITY_KIND: &str = "proof-society";
 const EXECUTION_PROFILE_CONTENT: &[u8] = b"PiglorOS.ExecutionProfile.deterministic-v1";
 const TRUST_POLICY_CONTENT: &[u8] = b"PiglorOS.TrustPolicySnapshot.wave8-v1";
 const EVALUATOR_CONTENT: &[u8] = include_bytes!("../../../crates/pos-reference/src/lib.rs");
+
+/// Selects how the proof admits its Plugins.
+///
+/// Release builds have only [`Self::Installed`], which fails closed until
+/// installed registration returns with Wave 9 (#467/#462). The enum is still
+/// threaded through the proof signatures so that the fixture proof and the
+/// installed proof share one code path: tests run every stage with the
+/// generated fixture and differ from the installed path only at the
+/// admission step, instead of maintaining a parallel fixture-only pipeline.
+#[derive(Clone, Copy)]
+enum ProofAdmission {
+    Installed,
+    #[cfg(test)]
+    GeneratedFixture,
+}
+
+fn reviewed_output_binding<P: Plugin>(
+    plugin: &P,
+    source: pos_runtime::InstalledOutputPolicySourceV1,
+    profile_id: &str,
+    configuration_details: &[u8],
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        source,
+        configuration_details,
+        profile_id,
+    )
+    .map_err(Into::into)
+}
+
+/// Wave 8 has no installed EPF1, so installed registration fails closed even
+/// if an installed binding were resolved. #467/#462 restore installed proof
+/// registration together with a real installed EPF1.
+fn installed_registration_closed() -> RuntimeError {
+    pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }.into()
+}
+
+fn world_output_binding(
+    plugin: &WorldPlugin,
+    config: &WorldConfigV1,
+    body: EntityId,
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
+    let configuration_details =
+        config
+            .encode()
+            .map_err(|error| RuntimeError::CapabilityMismatch {
+                name: plugin.name().to_owned(),
+                reason: error.to_string(),
+            })?;
+    let mut details = configuration_details.as_slice().to_vec();
+    details.extend_from_slice(&body.inner().to_bytes());
+    reviewed_output_binding(
+        plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::World,
+        profile_id,
+        &details,
+    )
+}
+
+fn proof_agent_output_binding(
+    plugin: &ProofAgentPlugin,
+    threshold: f64,
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
+    let configuration_details = threshold.to_bits().to_be_bytes();
+    reviewed_output_binding(
+        plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        profile_id,
+        &configuration_details,
+    )
+}
+
+fn proof_society_output_binding(
+    plugin: &ProofSocietyPlugin,
+    profile_id: &str,
+) -> Result<pos_runtime::OutputPolicyBindingV1, RuntimeError> {
+    let configuration_details = SocietyDimension::all()
+        .iter()
+        .flat_map(|dimension| dimension.as_str().as_bytes().iter().copied().chain([0]))
+        .collect::<Vec<_>>();
+    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        &configuration_details,
+        profile_id,
+    )
+    .map_err(Into::into)
+}
 
 /// Result of one Local or Air-Gapped proof execution.
 #[derive(Debug)]
@@ -155,14 +258,26 @@ impl MoatProofRun {
     /// # Errors
     /// Returns host, codec, or evidence construction failures.
     pub fn run(self) -> Result<MoatProofReport, MoatProofError> {
-        let input = self.input;
-        let mode = self.mode;
+        self.run_with_admission(ProofAdmission::Installed)
+    }
+
+    #[cfg(test)]
+    fn run_fixture(self) -> Result<MoatProofReport, MoatProofError> {
+        self.run_with_admission(ProofAdmission::GeneratedFixture)
+    }
+
+    fn run_with_admission(
+        self,
+        admission: ProofAdmission,
+    ) -> Result<MoatProofReport, MoatProofError> {
+        let Self { input, mode } = self;
         result_pipeline! {
-            failure_probes(input.resource_limit) => |failure_probes|;
+            let profile_id = execution_profile_id(mode);
+            failure_probes(input.resource_limit, profile_id, admission) => |failure_probes|;
             ProofTopology::new(input.clone()).map_err(MoatProofError::from) => |topology|;
-            plugin_versions(&topology).map_err(MoatProofError::from) => |plugin_versions|;
+            plugin_versions_for_profile(&topology, profile_id, admission).map_err(MoatProofError::from) => |plugin_versions|;
             let factory_topology = topology.clone();
-            let registry_factory = move || build_registry(&factory_topology);
+            let registry_factory = move || build_registry_for_admission(&factory_topology, profile_id, admission);
             let mut experiment = Experiment::new(ExperimentConfig {
                 name: format!("wave8-{}", input.scenario_id),
                 stop: StopCondition::MaxTicks(input.ticks.saturating_add(1)),
@@ -170,7 +285,7 @@ impl MoatProofRun {
             })
             .with_fork_registry_factory(registry_factory)
             .with_resource_limit(input.resource_limit);
-            register_plugins(&mut experiment, &topology).map_err(MoatProofError::from) => |()|;
+            experiment.register_proof_plugins(&topology, profile_id, admission).map_err(MoatProofError::from) => |()|;
             experiment.start().map_err(MoatProofError::from) => |mut parent|;
             parent.step_tick().map_err(MoatProofError::from) => |_|;
             parent.source_events_with_control().map_err(MoatProofError::from) => |events|;
@@ -269,13 +384,27 @@ impl MoatProofRun {
 pub fn run_local_and_air_gapped(
     input: MoatProofInputV1,
 ) -> Result<(MoatProofReport, MoatProofReport, ComparisonV1), MoatProofError> {
+    run_local_and_air_gapped_with_admission(input, ProofAdmission::Installed)
+}
+
+#[cfg(test)]
+fn run_local_and_air_gapped_fixture(
+    input: MoatProofInputV1,
+) -> Result<(MoatProofReport, MoatProofReport, ComparisonV1), MoatProofError> {
+    run_local_and_air_gapped_with_admission(input, ProofAdmission::GeneratedFixture)
+}
+
+fn run_local_and_air_gapped_with_admission(
+    input: MoatProofInputV1,
+    admission: ProofAdmission,
+) -> Result<(MoatProofReport, MoatProofReport, ComparisonV1), MoatProofError> {
     result_pipeline! {
         MoatProofRun::new(input.clone(), ExecutionModeV1::Local)
             .map_err(MoatProofError::from) => |local_run|;
-        local_run.run() => |local|;
+        local_run.run_with_admission(admission) => |local|;
         MoatProofRun::new(input, ExecutionModeV1::AirGapped)
             .map_err(MoatProofError::from) => |air_gapped_run|;
-        air_gapped_run.run() => |air_gapped|;
+        air_gapped_run.run_with_admission(admission) => |air_gapped|;
         compare_authoritative_outputs(&local.comparable_baseline, &air_gapped.comparable_baseline)
             .map_err(MoatProofError::from) => |comparison|;
         let left_digest = comparison.left_digest;
@@ -466,20 +595,148 @@ impl ProofTopology {
     }
 }
 
-fn register_plugins(
-    experiment: &mut Experiment,
+// Proof Plugin registration targets. Installed registration has no sink
+// until Wave 9 (#467/#462) supplies an installed EPF1.
+trait ProofRegistrationSink: Sized {
+    /// Register the proof Plugins under one admission mode.
+    ///
+    /// Installed admission fails closed while resolving its bindings, before
+    /// the target is mutated.
+    fn register_proof_plugins(
+        &mut self,
+        topology: &ProofTopology,
+        profile_id: &str,
+        admission: ProofAdmission,
+    ) -> Result<(), RuntimeError> {
+        match admission {
+            ProofAdmission::Installed => Err(installed_proof_admission(topology, profile_id)),
+            #[cfg(test)]
+            ProofAdmission::GeneratedFixture => register_plugins_fixture(self, topology),
+        }
+    }
+
+    #[cfg(test)]
+    fn register_fixture_generated(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError>;
+
+    #[cfg(test)]
+    fn register_fixture_generated_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Box<dyn pos_core::ActionApprover>,
+        event_types: Vec<Kind>,
+    ) -> Result<(), RuntimeError>;
+}
+
+impl ProofRegistrationSink for Experiment {
+    #[cfg(test)]
+    fn register_fixture_generated(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        Self::register_generated(self, plugin, reducer, driver)
+    }
+
+    #[cfg(test)]
+    fn register_fixture_generated_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Box<dyn pos_core::ActionApprover>,
+        event_types: Vec<Kind>,
+    ) -> Result<(), RuntimeError> {
+        Self::register_generated_with_approver(
+            self,
+            plugin,
+            reducer,
+            driver,
+            Some(approver),
+            event_types,
+        )
+    }
+}
+
+impl ProofRegistrationSink for pos_runtime::PluginRegistry {
+    #[cfg(test)]
+    fn register_fixture_generated(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+    ) -> Result<(), RuntimeError> {
+        Self::register_generated(self, plugin, reducer, driver)
+    }
+
+    #[cfg(test)]
+    fn register_fixture_generated_with_approver(
+        &mut self,
+        plugin: &dyn Plugin,
+        reducer: Option<Box<dyn Reducer>>,
+        driver: Option<Box<dyn Driver>>,
+        approver: Box<dyn pos_core::ActionApprover>,
+        event_types: Vec<Kind>,
+    ) -> Result<(), RuntimeError> {
+        Self::register_generated_with_approver(
+            self,
+            plugin,
+            reducer,
+            driver,
+            Some(approver),
+            event_types,
+        )
+    }
+}
+
+/// Resolve the proof's installed World, agent and Society bindings.
+///
+/// Wave 8 has no installed EPF1, so resolution fails closed before any
+/// registration can mutate a target.
+fn installed_proof_admission(topology: &ProofTopology, profile_id: &str) -> RuntimeError {
+    let agent_binding = proof_agent_output_binding(
+        &topology.agent_plugin,
+        topology.input.agent_response_threshold,
+        profile_id,
+    );
+    let society_binding = proof_society_output_binding(&topology.society_plugin, profile_id);
+    world_driver(&topology.input, topology.body, topology.config_entity)
+        .and_then(|driver| {
+            world_output_binding(
+                &topology.world_plugin,
+                driver.configuration(),
+                topology.body,
+                profile_id,
+            )
+        })
+        .and(agent_binding)
+        .and(society_binding)
+        .err()
+        .unwrap_or_else(installed_registration_closed)
+}
+
+#[cfg(test)]
+fn register_plugins_fixture(
+    target: &mut impl ProofRegistrationSink,
     topology: &ProofTopology,
 ) -> Result<(), RuntimeError> {
     result_pipeline! {
-        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
-        experiment.register_with_approver(
+        world_driver(&topology.input, topology.body, topology.config_entity) => |world_driver|;
+        target.register_fixture_generated_with_approver(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
-            Some(Box::new(driver)),
-            Some(Box::new(topology.world_plugin.clone())),
-            [Kind::new(EVENT_TYPE_ACTION_V1)],
+            Some(Box::new(world_driver)),
+            Box::new(topology.world_plugin.clone()),
+            vec![Kind::new(EVENT_TYPE_ACTION_V1)],
         ) => |()|;
-        experiment.register(
+        target.register_fixture_generated(
             &topology.agent_plugin,
             Some(Box::new(ProofAgentReducer)),
             Some(Box::new(ProofAgentDriver::new(
@@ -487,7 +744,7 @@ fn register_plugins(
                 topology.input.agent_response_threshold,
             ))),
         ) => |()|;
-        experiment.register(
+        target.register_fixture_generated(
             &topology.society_plugin,
             Some(Box::new(SocietyReducer)),
             Some(Box::new(ProofSocietyDriver::new(topology.society))),
@@ -495,32 +752,41 @@ fn register_plugins(
     }
 }
 
-fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
+#[cfg(test)]
+fn register_plugins(
+    experiment: &mut Experiment,
+    topology: &ProofTopology,
+) -> Result<(), RuntimeError> {
+    register_plugins_fixture(experiment, topology)
+}
+
+fn build_registry_for_admission(
+    topology: &ProofTopology,
+    profile_id: &str,
+    admission: ProofAdmission,
+) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
     let mut registry =
         pos_runtime::PluginRegistry::new().with_resource_limit(topology.input.resource_limit);
-    result_pipeline! {
-        world_driver(&topology.input, topology.body, topology.config_entity) => |driver|;
-        registry.register_with_approver(
-            &topology.world_plugin,
-            Some(Box::new(WorldReducer)),
-            Some(Box::new(driver)),
-            Some(Box::new(topology.world_plugin.clone())),
-            [Kind::new(EVENT_TYPE_ACTION_V1)],
-        ) => |()|;
-        registry.register(
-            &topology.agent_plugin,
-            Some(Box::new(ProofAgentReducer)),
-            Some(Box::new(ProofAgentDriver::new(
-                topology.agent,
-                topology.input.agent_response_threshold,
-            ))),
-        ) => |()|;
-        registry.register(
-            &topology.society_plugin,
-            Some(Box::new(SocietyReducer)),
-            Some(Box::new(ProofSocietyDriver::new(topology.society))),
-        ) => |()|;
-        Ok(registry)
+    registry
+        .register_proof_plugins(topology, profile_id, admission)
+        .map(|()| registry)
+}
+
+#[cfg(test)]
+fn build_registry(topology: &ProofTopology) -> Result<pos_runtime::PluginRegistry, RuntimeError> {
+    build_registry_for_admission(
+        topology,
+        "deterministic-local-v1",
+        ProofAdmission::GeneratedFixture,
+    )
+}
+
+const fn execution_profile_id(mode: ExecutionModeV1) -> &'static str {
+    match mode {
+        ExecutionModeV1::AirGapped => "deterministic-air-gapped-v1",
+        ExecutionModeV1::Local | ExecutionModeV1::Replay | ExecutionModeV1::Fork => {
+            "deterministic-local-v1"
+        }
     }
 }
 
@@ -674,11 +940,17 @@ fn evidence_with_closure_digest(
         (AGENT_ENTITY_KIND, topology.agent),
         (SOCIETY_NAME, topology.society),
     ] {
-        if let Some(state) = projections.state_for_reducer(name, &entity) {
+        if let Some(state) = projections
+            .state_for_reducer(context.timeline_id, name, &entity)
+            .map_err(RuntimeError::from)?
+        {
+            let fields = serde_json::Value::Object(state.fields.into_iter().collect());
+            let state =
+                serde_json::Value::Object(std::iter::once(("fields".to_owned(), fields)).collect());
             projection_evidence.push(ProjectionEvidenceV1 {
                 reducer: name.to_owned(),
                 entity: entity.to_string(),
-                state: serde_json::to_value(state)?,
+                state,
             });
         }
     }
@@ -1504,8 +1776,12 @@ fn is_endogenous_event(event_type: &str) -> bool {
     )
 }
 
-fn plugin_versions(topology: &ProofTopology) -> Result<BTreeMap<String, String>, RuntimeError> {
-    build_registry(topology).map(|registry| {
+fn plugin_versions_for_profile(
+    topology: &ProofTopology,
+    profile_id: &str,
+    admission: ProofAdmission,
+) -> Result<BTreeMap<String, String>, RuntimeError> {
+    build_registry_for_admission(topology, profile_id, admission).map(|registry| {
         registry
             .plugin_versions()
             .map(|(name, version)| (name.to_owned(), version.to_owned()))
@@ -1580,14 +1856,83 @@ fn suffix_audit(baseline: &[Event], counterfactual: &[Event], fork_cut_seq: u64)
     )
 }
 
-fn failure_probes(resource_limit: u64) -> Result<Vec<PluginFailureV1>, MoatProofError> {
+fn failure_probes(
+    resource_limit: u64,
+    profile_id: &str,
+    admission: ProofAdmission,
+) -> Result<Vec<PluginFailureV1>, MoatProofError> {
     ["plugin_crash", "resource_exhaustion"]
         .into_iter()
-        .map(|class| failure_probe(class, resource_limit))
+        .map(|class| failure_probe(class, resource_limit, profile_id, admission))
         .collect()
 }
 
 fn failure_probe(
+    class: &'static str,
+    resource_limit: u64,
+    profile_id: &str,
+    admission: ProofAdmission,
+) -> Result<PluginFailureV1, MoatProofError> {
+    admission.probe_failure(class, resource_limit, profile_id)
+}
+
+impl ProofAdmission {
+    /// Run one failure probe under this admission mode.
+    fn probe_failure(
+        self,
+        class: &'static str,
+        resource_limit: u64,
+        profile_id: &str,
+    ) -> Result<PluginFailureV1, MoatProofError> {
+        match self {
+            Self::Installed => Err(MoatProofError::from(installed_failure_probe_admission(
+                class,
+                resource_limit,
+                profile_id,
+            ))),
+            #[cfg(test)]
+            Self::GeneratedFixture => failure_probe_fixture(class, resource_limit),
+        }
+    }
+}
+
+/// Resolve the installed sibling and failure-probe bindings.
+///
+/// Wave 8 has no installed EPF1, so the probe fails closed before any
+/// Experiment or registration exists.
+fn installed_failure_probe_admission(
+    class: &str,
+    resource_limit: u64,
+    profile_id: &str,
+) -> RuntimeError {
+    let mut failure_details = class.as_bytes().to_vec();
+    failure_details.push(0);
+    failure_details.extend_from_slice(&resource_limit.to_be_bytes());
+    let sibling_plugin = SiblingProbePlugin {
+        id: PluginId::new(),
+    };
+    let plugin = FailureProbePlugin {
+        id: PluginId::new(),
+    };
+    let probe_binding = reviewed_output_binding(
+        &plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        profile_id,
+        &failure_details,
+    );
+    reviewed_output_binding(
+        &sibling_plugin,
+        pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+        profile_id,
+        b"successful-sibling:v1",
+    )
+    .and(probe_binding)
+    .err()
+    .unwrap_or_else(installed_registration_closed)
+}
+
+#[cfg(test)]
+fn failure_probe_fixture(
     class: &'static str,
     resource_limit: u64,
 ) -> Result<PluginFailureV1, MoatProofError> {
@@ -1599,38 +1944,33 @@ fn failure_probe(
         id: PluginId::new(),
     };
     let mut experiment = Experiment::new(ExperimentConfig {
-        name: format!("wave8-failure-{class}"),
+        name: format!("wave8-failure-fixture-{class}"),
         stop: StopCondition::MaxTicks(1),
         store_config: pos_store::StoreConfig::Memory,
     })
     .with_resource_limit(resource_limit);
     result_pipeline! {
-        experiment.register(
+        experiment.register_generated(
             &sibling_plugin,
             None,
-            Some(Box::new(SiblingProbeDriver {
-                steps: Arc::clone(&sibling_steps),
-            })),
+            Some(Box::new(SiblingProbeDriver { steps: Arc::clone(&sibling_steps) })),
         ).map_err(MoatProofError::from) => |()|;
-        experiment.register(
+        experiment.register_generated(
             &plugin,
             None,
-            Some(Box::new(FailureProbeDriver {
-                class,
-                resource_limit,
-            })),
+            Some(Box::new(FailureProbeDriver { class, resource_limit })),
         ).map_err(MoatProofError::from) => |()|;
         experiment.start().map_err(MoatProofError::from) => |mut session|;
         session.source_events_with_control().map_err(MoatProofError::from) => |before|;
         let step_failed = session.step_tick().is_err();
         session.source_events_with_control().map_err(MoatProofError::from) => |after|;
-        let failure_class = match class {
-            "resource_exhaustion" => PluginFailureClassV1::ResourceExhaustion,
-            _ => PluginFailureClassV1::PluginCrash,
-        };
         Ok(PluginFailureV1 {
             plugin: "failure-probe".to_owned(),
-            class: failure_class,
+            class: if class == "resource_exhaustion" {
+                PluginFailureClassV1::ResourceExhaustion
+            } else {
+                PluginFailureClassV1::PluginCrash
+            },
             tick: 0,
             committed: !step_failed || before != after,
             staged_event_count: 0,
@@ -1721,10 +2061,12 @@ impl Plugin for SiblingProbePlugin {
     }
 }
 
+#[cfg(test)]
 struct SiblingProbeDriver {
     steps: Arc<AtomicU64>,
 }
 
+#[cfg(test)]
 impl Driver for SiblingProbeDriver {
     fn name(&self) -> &'static str {
         "successful-sibling-driver"
@@ -1759,11 +2101,13 @@ impl Plugin for FailureProbePlugin {
     }
 }
 
+#[cfg(test)]
 struct FailureProbeDriver {
     class: &'static str,
     resource_limit: u64,
 }
 
+#[cfg(test)]
 impl Driver for FailureProbeDriver {
     fn name(&self) -> &'static str {
         "failure-probe-driver"
@@ -1863,6 +2207,7 @@ struct AgentReaction {
     observed_x: f64,
 }
 
+#[cfg(test)]
 struct ProofAgentDriver {
     entity: EntityId,
     threshold: f64,
@@ -1870,6 +2215,7 @@ struct ProofAgentDriver {
     staged_tick: Option<u64>,
 }
 
+#[cfg(test)]
 impl ProofAgentDriver {
     const fn new(entity: EntityId, threshold: f64) -> Self {
         Self {
@@ -1881,6 +2227,7 @@ impl ProofAgentDriver {
     }
 }
 
+#[cfg(test)]
 impl Driver for ProofAgentDriver {
     fn name(&self) -> &'static str {
         "proof-agent-driver"
@@ -1993,8 +2340,10 @@ impl Driver for ProofAgentDriver {
     }
 }
 
+#[cfg(test)]
 struct ProofAgentReducer;
 
+#[cfg(test)]
 impl Reducer for ProofAgentReducer {
     fn initial(&self) -> State {
         let mut state = State::new();
@@ -2020,11 +2369,13 @@ impl Reducer for ProofAgentReducer {
     }
 }
 
+#[cfg(test)]
 struct ProofSocietyDriver {
     entity: EntityId,
     staged: bool,
 }
 
+#[cfg(test)]
 impl ProofSocietyDriver {
     const fn new(entity: EntityId) -> Self {
         Self {
@@ -2034,6 +2385,7 @@ impl ProofSocietyDriver {
     }
 }
 
+#[cfg(test)]
 impl Driver for ProofSocietyDriver {
     fn name(&self) -> &'static str {
         "proof-society-driver"
@@ -2160,6 +2512,26 @@ mod tests {
         ids::EventId,
     };
 
+    struct InvalidVersionPlugin;
+
+    impl Plugin for InvalidVersionPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "invalid-moat-version"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability::default()
+        }
+
+        fn version(&self) -> &'static str {
+            ""
+        }
+    }
+
     fn input() -> MoatProofInputV1 {
         MoatProofInputV1 {
             scenario_id: "proof-test".to_owned(),
@@ -2175,10 +2547,131 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_output_binding_rejects_wrong_profile_and_source() {
+        let plugin = ProofAgentPlugin::new();
+        assert!(reviewed_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+            "unknown-profile",
+            &[],
+        )
+        .is_err());
+        assert!(reviewed_output_binding(
+            &plugin,
+            pos_runtime::InstalledOutputPolicySourceV1::World,
+            "deterministic-local-v1",
+            &[],
+        )
+        .is_err());
+
+        assert!(reviewed_output_binding(
+            &InvalidVersionPlugin,
+            pos_runtime::InstalledOutputPolicySourceV1::Experiment,
+            "deterministic-local-v1",
+            &[],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn experiment_binding_rejects_uninstalled_profile_before_callback_attachment() {
+        let plugin = ProofAgentPlugin::new();
+        assert!(proof_agent_output_binding(&plugin, 0.5, "deterministic-local-v1").is_err());
+    }
+
+    #[test]
+    fn experiment_binding_rejects_uninstalled_society_source() {
+        let plugin = ProofSocietyPlugin::new();
+        assert!(proof_society_output_binding(&plugin, "deterministic-local-v1").is_err());
+    }
+
+    #[test]
+    fn experiment_binding_rejects_uninstalled_agent_source() {
+        let plugin = ProofAgentPlugin::new();
+        assert!(proof_agent_output_binding(&plugin, 0.5, "deterministic-air-gapped-v1").is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn world_output_binding_reports_invalid_configuration_encoding() {
+        let plugin = WorldPlugin::new();
+        let driver = world_driver(&input(), EntityId::new(), EntityId::new()).test_ok();
+        let mut config = driver.configuration().clone();
+        config.coord_convention = u8::MAX;
+        assert!(matches!(
+            world_output_binding(&plugin, &config, EntityId::new(), "deterministic-local-v1",),
+            Err(RuntimeError::CapabilityMismatch { .. })
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn generated_world_fixture_registers_without_installed_profile_authority() {
+        let body = EntityId::new();
+        let plugin = WorldPlugin::new().with_bodies([body]);
+        let driver = world_driver(&input(), body, EntityId::new()).test_ok();
+        assert!(world_output_binding(
+            &plugin,
+            driver.configuration(),
+            body,
+            "deterministic-local-v1",
+        )
+        .is_err());
+        let mut registry = pos_runtime::PluginRegistry::new();
+        registry
+            .register_generated_with_approver(
+                &plugin,
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(driver)),
+                Some(Box::new(plugin.clone())),
+                [Kind::new(EVENT_TYPE_ACTION_V1)],
+            )
+            .test_ok();
+        assert_eq!(
+            registry.plugin_names().collect::<Vec<_>>(),
+            vec![plugin.name()]
+        );
+    }
+
+    #[test]
+    fn production_proof_run_and_comparison_fail_closed_without_installed_profile() {
+        assert!(MoatProofRun::new(input(), ExecutionModeV1::Local)
+            .test_ok()
+            .run()
+            .is_err());
+        assert!(run_local_and_air_gapped(input()).is_err());
+        let topology = ProofTopology::new(input()).test_ok();
+        let closed_epf1 = |error: &RuntimeError| {
+            matches!(
+                error,
+                RuntimeError::OutputAdmission(
+                    pos_runtime::OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" }
+                )
+            )
+        };
+        assert!(build_registry_for_admission(
+            &topology,
+            "deterministic-local-v1",
+            ProofAdmission::Installed,
+        )
+        .is_err_and(|error| closed_epf1(&error)));
+        assert!(closed_epf1(&installed_proof_admission(
+            &topology,
+            "deterministic-air-gapped-v1",
+        )));
+        assert!(closed_epf1(&installed_failure_probe_admission(
+            "plugin_crash",
+            3,
+            "deterministic-local-v1",
+        )));
+        assert!(closed_epf1(&installed_registration_closed()));
+    }
+
+    #[test]
     fn proof_run_exhibits_the_three_reactions_and_fork_divergence() {
         let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
             .test_ok()
-            .run()
+            .run_fixture()
             .test_ok();
         assert!(report.passes_reaction_gates());
         assert_eq!(report.prefix_identical_through_fork, GateStatus::Passed);
@@ -2198,7 +2691,7 @@ mod tests {
 
     #[test]
     fn local_and_air_gapped_have_equivalent_baseline_evidence() {
-        let (local, air_gapped, comparison) = run_local_and_air_gapped(input()).test_ok();
+        let (local, air_gapped, comparison) = run_local_and_air_gapped_fixture(input()).test_ok();
         assert!(comparison.equal);
         assert!(local.passes_reaction_gates());
         assert!(air_gapped.passes_reaction_gates());
@@ -2250,7 +2743,7 @@ mod tests {
     fn profile_comparison_fails_closed_on_invalid_provenance_in_either_run() {
         let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
             .test_ok()
-            .run()
+            .run_fixture()
             .test_ok();
         let mut invalid = report.baseline.clone();
         let world = invalid
@@ -2288,7 +2781,7 @@ mod tests {
     fn independent_reference_agrees_for_every_divergence_class() {
         let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
             .test_ok()
-            .run()
+            .run_fixture()
             .test_ok();
         let baseline = report.baseline;
         let variants = divergence_variants(&baseline);
@@ -2556,7 +3049,7 @@ mod tests {
             store_config: pos_store::StoreConfig::Memory,
         });
         experiment
-            .register(
+            .register_generated(
                 &agent_duplicate.world_plugin,
                 Some(Box::new(WorldReducer)),
                 Some(Box::new(
@@ -2627,6 +3120,25 @@ mod tests {
                 WorldInstallationErrorV1::RetainedConfigMissing
             )))
         ));
+        assert!(matches!(
+            evidence_with_closure_digest(
+                &EvidenceContext {
+                    input: &input,
+                    mode: ExecutionModeV1::Local,
+                    timeline_id: TimelineId::new(),
+                    fork_cut_seq: None,
+                    events: &[],
+                    factual_events: &[],
+                    projections: &projections,
+                    topology: &topology,
+                    plugin_versions: &versions,
+                    failure_probes: &[],
+                    host_closure: &host_closure,
+                },
+                [0; 32],
+            ),
+            Err(MoatProofError::Runtime(RuntimeError::Authority(_)))
+        ));
 
         assert_eq!(serialized_digest(&BrokenSerialize), [0; 32]);
         let custom = AuthoritativeEventV1 {
@@ -2648,7 +3160,13 @@ mod tests {
         assert_eq!(frontiers[0].earliest_tick, 1);
         assert_eq!(frontiers[0].cause_node_digests.len(), 1);
 
-        let failure = failure_probe("unknown", 3).test_ok();
+        let failure = failure_probe(
+            "unknown",
+            3,
+            "deterministic-local-v1",
+            ProofAdmission::GeneratedFixture,
+        )
+        .test_ok();
         assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
         assert!(!failure.committed);
     }
@@ -2657,7 +3175,7 @@ mod tests {
     fn independent_fixture_reproduction_rejects_a_wrong_equality_claim() {
         let report = MoatProofRun::new(input(), ExecutionModeV1::Local)
             .test_ok()
-            .run()
+            .run_fixture()
             .test_ok();
         let expected = ComparisonV1 {
             equal: true,
@@ -2705,7 +3223,7 @@ mod coverage_entrypoints {
     #[test]
     fn public_run_and_reference_paths_are_instrumented() {
         let run = test_ok(MoatProofRun::new(input(), ExecutionModeV1::Local));
-        let report = test_ok(run.run());
+        let report = test_ok(run.run_fixture());
         let baseline = report.baseline;
         let variants = divergence_variants(&baseline);
 
@@ -2721,7 +3239,7 @@ mod coverage_entrypoints {
             Err(MoatProofError::ReferenceDivergenceMismatch)
         ));
 
-        let (_, _, comparison) = test_ok(run_local_and_air_gapped(input()));
+        let (_, _, comparison) = test_ok(run_local_and_air_gapped_fixture(input()));
         assert!(comparison.equal);
     }
 
@@ -2771,7 +3289,12 @@ mod coverage_entrypoints {
         ));
 
         assert_eq!(GateStatus::from(false), GateStatus::Failed);
-        let failure = test_ok(failure_probe("unknown", 3));
+        let failure = test_ok(failure_probe(
+            "unknown",
+            3,
+            "deterministic-local-v1",
+            ProofAdmission::GeneratedFixture,
+        ));
         assert_eq!(failure.class, PluginFailureClassV1::PluginCrash);
         assert_eq!(suffix_audit(&[], &[], 0), (true, false));
         assert_eq!(suffix_audit(&[], &[], 0), (true, false));
@@ -2837,7 +3360,8 @@ mod coverage_entrypoints {
             )))
         ));
         let empty =
-            test_ok(test_ok(MoatProofRun::new(input, ExecutionModeV1::Local)).run()).baseline;
+            test_ok(test_ok(MoatProofRun::new(input, ExecutionModeV1::Local)).run_fixture())
+                .baseline;
 
         let mut failed = MoatProofReport {
             baseline: empty.clone(),
@@ -2907,7 +3431,8 @@ mod run_coverage_entrypoints {
 
     #[test]
     fn complete_local_and_air_gapped_runs_instrument_the_proof_kernel() {
-        let (mut local, air_gapped, comparison) = test_ok(run_local_and_air_gapped(proof_input()));
+        let (mut local, air_gapped, comparison) =
+            test_ok(run_local_and_air_gapped_fixture(proof_input()));
         assert!(comparison.equal);
         assert!(local.passes_reaction_gates());
         assert!(air_gapped.passes_reaction_gates());
@@ -3055,7 +3580,7 @@ mod run_coverage_entrypoints {
             stop: StopCondition::MaxTicks(1),
             store_config: pos_store::StoreConfig::Memory,
         });
-        test_ok(experiment.register(
+        test_ok(experiment.register_generated(
             &topology.world_plugin,
             Some(Box::new(WorldReducer)),
             Some(Box::new(test_ok(world_driver(
@@ -3082,7 +3607,7 @@ mod run_coverage_entrypoints {
             store_config: pos_store::StoreConfig::Memory,
         })
         .with_resource_limit(3);
-        test_ok(experiment.register(
+        test_ok(experiment.register_generated(
             &plugin,
             None,
             Some(Box::new(FailureProbeDriver {

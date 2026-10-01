@@ -231,6 +231,10 @@ impl SigningAuthority {
     }
 
     fn trust(&self) -> TestResult<SandboxTrustSnapshot> {
+        self.trust_with_certificate([9; 32])
+    }
+
+    fn trust_with_certificate(&self, fingerprint: [u8; 32]) -> TestResult<SandboxTrustSnapshot> {
         let keys = ordered(vec![
             key_record("policy", 1, &self.policy),
             key_record("release", 2, &self.release),
@@ -238,7 +242,7 @@ impl SigningAuthority {
             key_record("reviewer", 4, &self.reviewer),
             key_record("image", 5, &self.image),
         ])?;
-        let certificate = Value::Array(vec![bytes([9; 32]), integer(77), integer(2)]);
+        let certificate = Value::Array(vec![bytes(fingerprint), integer(77), integer(2)]);
         let unsigned = Value::Array(vec![
             Value::Text("TRS1".to_owned()),
             integer(1),
@@ -2886,4 +2890,9 @@ fn audit_record_rejects_every_malformed_wire_field() -> TestResult {
     assert!(SandboxAuditRecord::from_canonical_cbor(&corrupt_signed_digest(&record)?).is_err());
     Ok(())
 }
+}
+
+public_admission_tests! {
+include!("network_admission_cases.rs");
+include!("image_proof_cases.rs");
 }

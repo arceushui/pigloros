@@ -1,0 +1,22 @@
+[package]
+name = "pos-plugin-release"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = [
+  "fs",
+  "process",
+  "std",
+] }
+
+[lints]
+workspace = true

@@ -35,10 +35,27 @@
 //! Disable `SQLite` entirely: `--no-default-features`
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+pub mod fork_admission_authority;
+pub mod fork_delivery_journal;
+pub mod fork_event_authority;
 pub mod memory;
 pub mod stitch;
 mod timeline_range;
 
+pub use fork_admission_authority::{
+    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
+    ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
+};
+pub use fork_delivery_journal::{
+    ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
+    ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1,
+    ForkDeliveryStateV1, ForkDeliveryTupleV1,
+};
+pub use fork_event_authority::{
+    ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
+    ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1,
+    ForkEventProvenanceAuthorityPortV1,
+};
 pub use timeline_range::{
     verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1, TimelineSignedRangeReportV1,
 };
