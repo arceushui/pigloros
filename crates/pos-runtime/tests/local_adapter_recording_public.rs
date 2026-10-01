@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)]
+
 use std::sync::{Arc, Mutex};
 
 use pos_core::{
@@ -29,9 +31,11 @@ impl Plugin for LocalPlugin {
     }
 }
 
+type CompletedResponse = (LocalAdapterIdempotencyKeyV1, Vec<u8>);
+
 struct EchoProvider {
     idempotency_keys: Arc<Mutex<Vec<LocalAdapterIdempotencyKeyV1>>>,
-    completed_responses: Arc<Mutex<Vec<(LocalAdapterIdempotencyKeyV1, Vec<u8>)>>>,
+    completed_responses: Arc<Mutex<Vec<CompletedResponse>>>,
 }
 
 impl LocalAdapterProviderV1 for EchoProvider {
@@ -303,13 +307,18 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
         transcript.as_input().adapter_admission_digest,
         closed.admission().digest()
     );
-    let keys = keys
+    let observed_keys = keys
         .lock()
         .expect("idempotency key lock should be available");
-    assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].owner_reference(), handle.as_input().owner_reference);
-    assert_eq!(keys[0].run_operation_id(), operation_id);
-    assert_eq!(keys[0].global_call_index(), 0);
+    assert_eq!(observed_keys.len(), 1);
+    assert_eq!(
+        observed_keys[0].owner_reference(),
+        handle.as_input().owner_reference
+    );
+    assert_eq!(observed_keys[0].run_operation_id(), operation_id);
+    assert_eq!(observed_keys[0].global_call_index(), 0);
+    drop(observed_keys);
+    drop(keys);
     let closed_bytes = closed.transcript_bytes();
     assert_eq!(
         recorder
@@ -412,13 +421,15 @@ fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it
     session
         .finish()
         .expect("the acknowledged call should close");
-    let keys = keys
+    let observed_keys = keys
         .lock()
         .expect("idempotency key lock should be available");
-    assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].owner_reference(), owner_reference);
-    assert_eq!(keys[0].run_operation_id(), operation_id);
-    assert_eq!(keys[0].global_call_index(), 0);
+    assert_eq!(observed_keys.len(), 1);
+    assert_eq!(observed_keys[0].owner_reference(), owner_reference);
+    assert_eq!(observed_keys[0].run_operation_id(), operation_id);
+    assert_eq!(observed_keys[0].global_call_index(), 0);
+    drop(observed_keys);
+    drop(keys);
     assert_eq!(
         completed_responses
             .lock()
@@ -525,14 +536,19 @@ fn externally_idempotent_retry_reuses_provider_output_after_completion_failure()
         .expect("the wrapper should delegate the closed-session read")
         .is_some());
 
-    let keys = keys
+    let observed_keys = keys
         .lock()
         .expect("idempotency key lock should be available");
-    assert_eq!(keys.len(), 2);
-    assert_eq!(keys[0], keys[1]);
-    assert_eq!(keys[0].owner_reference(), handle.as_input().owner_reference);
-    assert_eq!(keys[0].run_operation_id(), operation_id);
-    assert_eq!(keys[0].global_call_index(), 0);
+    assert_eq!(observed_keys.len(), 2);
+    assert_eq!(observed_keys[0], observed_keys[1]);
+    assert_eq!(
+        observed_keys[0].owner_reference(),
+        handle.as_input().owner_reference
+    );
+    assert_eq!(observed_keys[0].run_operation_id(), operation_id);
+    assert_eq!(observed_keys[0].global_call_index(), 0);
+    drop(observed_keys);
+    drop(keys);
     assert_eq!(
         completed_responses
             .lock()
