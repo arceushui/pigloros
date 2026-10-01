@@ -215,7 +215,9 @@ impl LocalScheduledAdmissionHostV1 {
     /// identities are fresh, so the action is never retried implicitly.
     ///
     /// # Errors
-    /// Returns the same typed errors as [`PluginRegistry::admit_human_action`].
+    /// Returns the same typed errors as [`PluginRegistry::admit_human_action`],
+    /// or [`HumanActionAdmissionErrorV1::HostContract`] when this host cannot
+    /// derive its own admission inputs.
     pub fn admit_action(
         &self,
         registry: &PluginRegistry,
@@ -249,7 +251,7 @@ impl LocalScheduledAdmissionHostV1 {
                     }
                 })
             })
-            .map_err(HumanActionAdmissionErrorV1::Contract)
+            .map_err(HumanActionAdmissionErrorV1::HostContract)
             .and_then(|admission| registry.admit_human_action(store, proposal, &admission))
     }
 

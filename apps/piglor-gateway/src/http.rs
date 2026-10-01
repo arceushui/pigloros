@@ -596,7 +596,8 @@ impl GatewayError {
             | Self::StoreExecutorDeadlineExceeded
             | Self::StoreExecutorUnhealthy
             | Self::LedgerUnavailable
-            | Self::OwnTracksOwnerKeyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::OwnTracksOwnerKeyUnavailable
+            | Self::ActionAdmissionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Ledger(le) => match le {
                 pos_plugin_ledger::LedgerError::InvalidPrediction(_) => {
                     StatusCode::UNPROCESSABLE_ENTITY
@@ -1825,8 +1826,9 @@ osf_link = \"https://osf.io/example\"\n";
             })),
         )
         .await;
-        // The host's erasure fence admits nothing for an unknown Timeline.
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        // An authorized caller learns only that the Timeline does not exist:
+        // a refused erasure fence for an unclassified Timeline is not-found.
+        assert_eq!(status, StatusCode::NOT_FOUND);
 
         let (status, _) = json_request(
             test_app(),
@@ -2083,6 +2085,8 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::ActionAuthorizationUnavailable.into_response();
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = GatewayError::ActionAdmissionUnavailable.into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         let r = GatewayError::AuthorizationDenied.into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(

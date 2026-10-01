@@ -422,6 +422,10 @@ async fn authorization_precedes_approval_and_late_authority_failures_commit_noth
             "{name}"
         );
         assert_eq!(revoked.to_string(), "authorization denied", "{name}");
+        // An exact retry of the committed request is authorized again first,
+        // so it is denied rather than handed the retained receipt.
+        let retry = rejected(submit(&fixture, 1, Some("before-revocation"), None).await?)?;
+        assert!(matches!(retry, GatewayError::AuthorizationDenied), "{name}");
         assert_eq!(committed_events(&fixture).await?, 1, "{name}");
         fixture.gateway.shutdown().await?;
         drop(fixture);
@@ -786,6 +790,15 @@ fn every_not_admitted_outcome_maps_to_a_stable_gateway_error() {
         ),
         GatewayError::ActionRejected(_)
     ));
+    // A host derivation fault is unavailable, never a domain rejection.
+    let host_fault = pos_runtime::HumanActionAdmissionErrorV1::HostContract(
+        pos_core::PipelineContractErrorV1::EmptyBatch,
+    );
+    assert!(host_fault.to_string().contains("host admission inputs"));
+    assert!(matches!(
+        crate::action_command_error(executor::ActionCommandError::Admission(host_fault), 7),
+        GatewayError::ActionAdmissionUnavailable
+    ));
     assert!(matches!(
         crate::action_command_error(
             executor::ActionCommandError::Admission(
@@ -797,6 +810,32 @@ fn every_not_admitted_outcome_maps_to_a_stable_gateway_error() {
         ),
         GatewayError::Store(pos_core::CoreError::StorageOutcomeUnknown(_))
     ));
+}
+
+#[tokio::test]
+async fn an_unknown_timeline_is_not_found_rather_than_unavailable() -> TestResult {
+    for backend in backends()? {
+        let name = backend.name;
+        let mut fixture = fixture(&backend.config).await?;
+        let existing = fixture.timeline;
+        fixture.timeline = TimelineId::new();
+
+        let outcome = rejected(submit(&fixture, 1, Some("unknown"), None).await?)?;
+
+        assert!(
+            matches!(
+                outcome,
+                GatewayError::Store(pos_core::CoreError::TimelineNotFound(timeline))
+                    if timeline == fixture.timeline
+            ),
+            "{name}: {outcome:?}"
+        );
+        fixture.timeline = existing;
+        assert_eq!(committed_events(&fixture).await?, 0, "{name}");
+        fixture.gateway.shutdown().await?;
+        drop(fixture);
+    }
+    Ok(())
 }
 
 #[tokio::test]

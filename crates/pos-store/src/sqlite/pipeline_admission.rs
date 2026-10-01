@@ -1,4 +1,27 @@
 //! `SQLite` adapter and additive schema for the ADR-021 admitted-batch port.
+//!
+//! # Schema evolution
+//!
+//! These tables are unreleased pre-product V1 state (they are not on `main`),
+//! so their shape is replaced rather than migrated. Opening a file whose
+//! `pipeline_admission_receipts` table predates the `scope_key`,
+//! `attempt_id`, and `draft_batch_digest` columns fails closed with a storage
+//! error: `CREATE TABLE IF NOT EXISTS` keeps the old table, so a writable
+//! open cannot build the scope index on it and a read-only open fails the
+//! exact column comparison. Both receipt indexes are validated on every
+//! open, including a read-only one, so a missing or reshaped index is
+//! rejected the same way.
+//!
+//! # Shared files
+//!
+//! The admission fence is one row per Timeline, last writer wins. Two hosts
+//! sharing one file (for example a Gateway and a local experiment session)
+//! that each republish a Timeline's fence are supported only in the
+//! fail-closed sense: a connection that observes another connection's write
+//! rejects with a storage error before comparing, and a basis built against a
+//! replaced fence is [`PipelineOutcomeV1::AdmissionConflict`]. Neither host
+//! commits against the other's fence, but they can starve each other, so a
+//! deployment should give each Timeline one admitting host.
 
 use std::num::{NonZeroUsize, TryFromIntError};
 
@@ -14,8 +37,8 @@ use pos_core::{
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{
-    begin_immediate_scope, finish_immediate_scope, read_authority_state, sqlite_schema_ddl,
-    SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
+    begin_immediate_scope, finish_immediate_scope, normalize_schema_sql, read_authority_state,
+    sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
 };
 use crate::{
     committed_pipeline_receipt, evaluate_pipeline_admission, install_or_reject,
@@ -121,6 +144,19 @@ const PIPELINE_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
     },
 ];
 
+/// Receipt indexes and their exact column lists: expiry purge order, and the
+/// subject-scoped consent cleanup group.
+const PIPELINE_ADMISSION_RECEIPT_INDEXES: &[(&str, &str)] = &[
+    (
+        "idx_pipeline_admission_receipts_expiry",
+        "(expires_at, dedup_key)",
+    ),
+    (
+        "idx_pipeline_admission_receipts_scope",
+        "(scope_key, expires_at, dedup_key)",
+    ),
+];
+
 /// Retained exact-retry row for one committed admitted batch.
 struct RetainedPipelineReceiptV1 {
     timeline: String,
@@ -174,14 +210,20 @@ fn integer_out_of_range(_error: TryFromIntError) -> CoreError {
 impl SqliteStore {
     /// Create the additive admitted-batch tables, then validate their shape.
     pub(super) fn prepare_pipeline_admission_schema(&self) -> Result<(), CoreError> {
+        let indexes = PIPELINE_ADMISSION_RECEIPT_INDEXES
+            .iter()
+            .map(|(name, columns)| {
+                format!(
+                    "CREATE INDEX IF NOT EXISTS {name} ON pipeline_admission_receipts{columns};"
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat();
         self.conn
             .execute_batch(&format!(
                 "BEGIN IMMEDIATE;
                  {}
-                 CREATE INDEX IF NOT EXISTS idx_pipeline_admission_receipts_expiry
-                 ON pipeline_admission_receipts(expires_at, dedup_key);
-                 CREATE INDEX IF NOT EXISTS idx_pipeline_admission_receipts_scope
-                 ON pipeline_admission_receipts(scope_key, expires_at, dedup_key);
+                 {indexes}
                  COMMIT;",
                 sqlite_schema_ddl(PIPELINE_ADMISSION_SCHEMA_TABLES)
             ))
@@ -189,11 +231,39 @@ impl SqliteStore {
             .and_then(|()| self.validate_pipeline_admission_schema())
     }
 
-    /// Validate the admitted-batch tables without creating them.
+    /// Validate the admitted-batch tables and receipt indexes without
+    /// creating them.
     pub(super) fn validate_pipeline_admission_schema(&self) -> Result<(), CoreError> {
         PIPELINE_ADMISSION_SCHEMA_TABLES
             .iter()
             .try_for_each(|table| self.validate_sqlite_schema_table(table))
+            .and_then(|()| {
+                PIPELINE_ADMISSION_RECEIPT_INDEXES
+                    .iter()
+                    .try_for_each(|(name, columns)| self.validate_receipt_index(name, columns))
+            })
+    }
+
+    /// Require one receipt index on its exact column list.
+    fn validate_receipt_index(&self, name: &str, columns: &str) -> Result<(), CoreError> {
+        let expected = normalize_schema_sql(&format!("ON pipeline_admission_receipts{columns}"));
+        self.conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                params![name],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Self::into_storage_error)
+            .and_then(|sql| {
+                if sql.is_some_and(|sql| normalize_schema_sql(&sql).ends_with(&expected)) {
+                    Ok(())
+                } else {
+                    Err(CoreError::Storage(format!(
+                        "SQLite {name} index has an incompatible schema"
+                    )))
+                }
+            })
     }
 
     fn admit_visible_pipeline_batch(

@@ -1989,6 +1989,11 @@ impl ExperimentSession {
     /// The owning Plugin's `ActionApprover` runs inside host admission; its
     /// draft commits only when the store accepts the complete basis, and the
     /// committed Event becomes visible through the normal boundary fold.
+    ///
+    /// A direct append's schema-registry check is implied here: an approver
+    /// route exists only for a Plugin-owned event type, which registration
+    /// also records in the schema registry, and the approved draft must keep
+    /// the proposal's event type before its output policy validates it.
     fn admit_action(
         &mut self,
         proposal: &pos_core::ProposedAction,

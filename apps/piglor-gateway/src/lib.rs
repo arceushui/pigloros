@@ -1569,6 +1569,10 @@ pub enum GatewayError {
     /// Human action submission requires an authenticated action principal.
     #[error("human action authorization is unavailable")]
     ActionAuthorizationUnavailable,
+    /// The trusted host could not derive its own admission inputs for a
+    /// human action; a host fault, never a rejection of the proposal.
+    #[error("human action admission is unavailable")]
+    ActionAdmissionUnavailable,
     /// The provider-neutral host authorization decision denied the operation.
     #[error("authorization denied")]
     AuthorizationDenied,
@@ -1734,6 +1738,7 @@ fn action_admission_error(error: HumanActionAdmissionErrorV1, maximum: u64) -> G
         HumanActionAdmissionErrorV1::Contract(_) => GatewayError::ActionRejected(
             ActionRejected::DomainValidationFailed("approved action is not admissible".to_owned()),
         ),
+        HumanActionAdmissionErrorV1::HostContract(_) => GatewayError::ActionAdmissionUnavailable,
         HumanActionAdmissionErrorV1::Store(error) => GatewayError::Store(error),
     }
 }
@@ -4222,7 +4227,7 @@ mod tests {
             .test_err();
         assert!(matches!(
             missing,
-            GatewayError::Store(CoreError::ErasureContainmentUnavailable)
+            GatewayError::Store(CoreError::TimelineNotFound(_))
         ));
         assert_eq!(audit_host.audits().len(), 1);
 
@@ -4421,9 +4426,7 @@ mod tests {
             gateway
                 .submit_proposed_action(&TimelineId::new().to_string(), proposal.clone())
                 .await,
-            Err(GatewayError::Store(
-                CoreError::ErasureContainmentUnavailable
-            ))
+            Err(GatewayError::Store(CoreError::TimelineNotFound(_)))
         ));
         let malformed = ProposedAction::new(
             Kind::new(EVENT_TYPE_ACTION),
@@ -4467,9 +4470,7 @@ mod tests {
                     "boundary-missing-timeline",
                 )
                 .await,
-            Err(GatewayError::Store(
-                CoreError::ErasureContainmentUnavailable
-            ))
+            Err(GatewayError::Store(CoreError::TimelineNotFound(_)))
         ));
         assert!(matches!(
             gateway

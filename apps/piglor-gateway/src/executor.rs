@@ -2994,9 +2994,7 @@ fn execute_host_action_admission(
         Result<(AdmittedAction, GatewayAuthorizationDecision), ActionCommandError>,
     >,
 ) {
-    // Prove the Timeline's erasure fence admits the action before the
-    // authority persistence writes anything to a shared store.
-    let result = with_host_action_fence(host, context.timeline, |_sender| Ok(()))
+    let result = open_action_fence(host, context.timeline)
         .and_then(|()| persisted_action_authority(host, context.authorization))
         .and_then(|authority| {
             with_host_action_fence(host, context.timeline, |sender| {
@@ -3033,6 +3031,44 @@ fn execute_host_action_admission(
     drop(reply.send(result));
 }
 
+/// Prove the Timeline's erasure fence admits the action before the authority
+/// persistence writes anything to a shared store.
+fn open_action_fence(
+    host: &mut ErasureExecutionHostV1,
+    timeline: TimelineId,
+) -> Result<(), ActionCommandError> {
+    with_host_action_fence(host, timeline, |_sender| Ok(()))
+        .or_else(|error| refused_action_fence(host, timeline, error))
+}
+
+/// Type a refused fence for a Timeline outside the classified inventory as
+/// its stable not-found error; any other refusal keeps its own error.
+///
+/// The fence cannot tell an unknown Timeline from an unavailable one, so the
+/// inventory is consulted only on this failure path. The caller is already
+/// authorized for this Timeline, so the distinction enumerates nothing an
+/// unauthorized caller could observe.
+fn refused_action_fence(
+    host: &mut ErasureExecutionHostV1,
+    timeline: TimelineId,
+    refusal: ActionCommandError,
+) -> Result<(), ActionCommandError> {
+    let not_found = ActionCommandError::Executor(StoreExecutorError::Store(
+        CoreError::TimelineNotFound(timeline),
+    ));
+    host.read_sender()
+        .and_then(|mut sender| sender.timelines())
+        .map_err(host_action_error)
+        .map(|timelines| {
+            timelines
+                .iter()
+                .find(|known| known.id() == timeline)
+                .and(Some(refusal))
+                .unwrap_or(not_found)
+        })
+        .and_then(Err)
+}
+
 /// Persist the authority chain behind the decision before the Timeline's
 /// erasure fence opens, in the same store command as the admission.
 fn persisted_action_authority(
@@ -3049,11 +3085,11 @@ fn persisted_action_authority(
         .and_then(|persisted| persisted.map_err(ActionCommandError::Admission))
 }
 
-/// The owned Event count and Logical Head of an existing Timeline.
-fn admission_state(
+/// The metadata of an existing Timeline, or its stable not-found error.
+fn action_timeline(
     sender: &mut pos_runtime::ErasureCommandSenderV1<'_>,
     timeline: TimelineId,
-) -> Result<(u64, Seq), ActionCommandError> {
+) -> Result<Timeline, ActionCommandError> {
     sender
         .timeline(timeline)
         .map_err(host_action_error)
@@ -3062,12 +3098,19 @@ fn admission_state(
                 CoreError::TimelineNotFound(timeline),
             )))
         })
-        .and_then(|metadata| {
-            sender
-                .logical_head(timeline)
-                .map_err(host_action_error)
-                .map(|logical_head| (metadata.head.as_u64(), logical_head))
-        })
+}
+
+/// The owned Event count and Logical Head of an existing Timeline.
+fn admission_state(
+    sender: &mut pos_runtime::ErasureCommandSenderV1<'_>,
+    timeline: TimelineId,
+) -> Result<(u64, Seq), ActionCommandError> {
+    action_timeline(sender, timeline).and_then(|metadata| {
+        sender
+            .logical_head(timeline)
+            .map_err(host_action_error)
+            .map(|logical_head| (metadata.head.as_u64(), logical_head))
+    })
 }
 
 /// Read the committed Event the authoritative receipt names.

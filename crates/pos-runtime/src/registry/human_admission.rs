@@ -90,6 +90,11 @@ pub enum HumanActionAdmissionErrorV1 {
     /// The approved draft cannot form a valid admission basis.
     #[error(transparent)]
     Contract(#[from] PipelineContractErrorV1),
+    /// The trusted host could not derive its own admission inputs (attempt,
+    /// observation, authorization evidence, or admission fence). This is a
+    /// host fault, never a rejection of the proposal.
+    #[error("host admission inputs are invalid: {0}")]
+    HostContract(PipelineContractErrorV1),
     /// The store failed; an unknown commit outcome is recovered by retrying
     /// the same request, which only looks up its receipt.
     #[error(transparent)]

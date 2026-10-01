@@ -19,6 +19,19 @@
 //! The Principal and the acting `EntityId` stay distinct: the Principal scopes
 //! the idempotency key and the authorization evidence, while the proposal
 //! names the acting Entity. A first-party caller has no other route.
+//!
+//! Failures keep their owner: a fence, attempt, observation, or evidence
+//! value this host cannot derive is
+//! [`HumanActionAdmissionErrorV1::HostContract`] (unavailable), never a domain
+//! rejection of the proposal. An exact retry is recovered only after the
+//! request is authorized again, so a retry after its grant was revoked or
+//! expired is denied rather than handed the retained receipt (fail closed).
+//!
+//! The Timeline's admission fence is one last-writer-wins row. Sharing one
+//! `SQLite` file with another host that republishes the same Timeline's fence
+//! (for example a local experiment session) is unsupported for liveness: an
+//! interleaved republish makes this attempt fail closed, never commit against
+//! the other host's fence.
 
 use pos_core::{
     pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendIdentity,
@@ -64,7 +77,7 @@ impl GatewayActionAdmission<'_> {
         self.publish_fence(ports)
             .and_then(|revisions| {
                 self.admission(revisions)
-                    .map_err(HumanActionAdmissionErrorV1::Contract)
+                    .map_err(HumanActionAdmissionErrorV1::HostContract)
             })
             .and_then(|admission| {
                 self.registry
@@ -88,7 +101,7 @@ impl GatewayActionAdmission<'_> {
                 )
                 .map(|fence| (fence, revisions))
             })
-            .map_err(HumanActionAdmissionErrorV1::Contract)
+            .map_err(HumanActionAdmissionErrorV1::HostContract)
             .and_then(|(fence, revisions)| {
                 ports
                     .set_pipeline_admission_fence(self.timeline, fence)

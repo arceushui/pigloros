@@ -1055,3 +1055,109 @@ fn sqlite_connections_racing_on_one_logical_head_commit_at_most_once() {
         Some(7)
     );
 }
+
+#[test]
+fn sqlite_hosts_republishing_one_fence_fail_closed_when_interleaved() {
+    let clock = TestClock::at(1_000);
+    let directory = ok(tempdir());
+    let path = directory.path().join("admission-shared-fence.db");
+    let gateway_attempt = {
+        let mut store = ok(SqliteStore::open_with_clock(
+            path.to_str().unwrap_or_default(),
+            Box::new(clock.clone()),
+        ));
+        attempt(&prepare(&mut store), 1, 0)
+    };
+    let timeline = gateway_attempt.timeline;
+    let session_revisions = ok(PipelineSecurityRevisionsV1::try_from_draft(
+        PipelineSecurityRevisionsDraftV1 {
+            execution_profile: hash(16),
+            ..gateway_attempt.revisions.as_draft()
+        },
+    ));
+    let session_attempt = Attempt {
+        key: 2,
+        revisions: session_revisions,
+        ..gateway_attempt.clone()
+    };
+
+    // A Gateway and an experiment session share one file and each republish
+    // the Timeline's fence from their own revisions; the session writes last.
+    let mut gateway = open_file(&path, &clock);
+    ok(gateway
+        .set_pipeline_admission_fence(timeline, fence_for(gateway_attempt.revisions, hash(1))));
+    let mut session = open_file(&path, &clock);
+    ok(session.set_pipeline_admission_fence(timeline, fence_for(session_revisions, hash(1))));
+
+    // The open Gateway connection observes the foreign write and rejects
+    // before comparing.
+    assert!(admit(&mut gateway, &gateway_attempt).is_err());
+    drop(gateway);
+    drop(session);
+    // A fresh Gateway connection compares its basis with the replaced fence.
+    assert_eq!(
+        ok(admit(&mut open_file(&path, &clock), &gateway_attempt)),
+        PipelineOutcomeV1::AdmissionConflict
+    );
+    assert_eq!(
+        ok(lookup(&mut open_file(&path, &clock), timeline, 1, 1)),
+        PipelineReceiptLookupV1::Absent
+    );
+    assert_eq!(event_count(&open_file(&path, &clock), timeline), 0);
+
+    // Only the host whose fence is current commits.
+    let receipt = committed(ok(admit(&mut open_file(&path, &clock), &session_attempt)));
+    assert_eq!(receipt_positions(&receipt), [1, 2, 3]);
+}
+
+#[test]
+fn sqlite_rejects_an_unreleased_receipt_table_or_index_shape_closed() {
+    let clock = TestClock::at(1_000);
+    let directory = ok(tempdir());
+    let path = directory.path().join("admission-schema.db");
+    let path_text = path.to_str().unwrap_or_default();
+    drop(ok(SqliteStore::open_with_clock(
+        path_text,
+        Box::new(clock.clone()),
+    )));
+    let open_read_only = || error_text(SqliteStore::open_read_only(path_text));
+    let open_writable = || {
+        error_text(SqliteStore::open_with_clock(
+            path_text,
+            Box::new(clock.clone()),
+        ))
+    };
+
+    execute(&path, "DROP INDEX idx_pipeline_admission_receipts_scope;");
+    assert!(open_read_only()
+        .is_some_and(|text| text.contains("idx_pipeline_admission_receipts_scope index")));
+    // A writable open recreates a missing index.
+    assert_eq!(open_writable(), None);
+    assert_eq!(open_read_only(), None);
+
+    execute(
+        &path,
+        "DROP INDEX idx_pipeline_admission_receipts_scope;
+         CREATE INDEX idx_pipeline_admission_receipts_scope
+         ON pipeline_admission_receipts(scope_key);",
+    );
+    assert!(open_writable()
+        .is_some_and(|text| text.contains("idx_pipeline_admission_receipts_scope index")));
+
+    // The receipt shape before #319 has no migration and is rejected closed.
+    execute(
+        &path,
+        "DROP TABLE pipeline_admission_receipts;
+         CREATE TABLE pipeline_admission_receipts (
+             dedup_key BLOB PRIMARY KEY NOT NULL CHECK (length(dedup_key) = 32),
+             timeline_id TEXT NOT NULL,
+             basis_digest BLOB NOT NULL CHECK (length(basis_digest) = 32),
+             first_local_seq INTEGER NOT NULL CHECK (first_local_seq >= 1),
+             event_count INTEGER NOT NULL CHECK (event_count >= 1),
+             expires_at INTEGER NOT NULL
+         );",
+    );
+    assert!(open_read_only().is_some_and(|text| text.contains("pipeline_admission_receipts table")));
+    assert!(open_writable().is_some());
+    assert!(open_read_only().is_some_and(|text| text.contains("pipeline_admission_receipts table")));
+}
