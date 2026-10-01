@@ -305,13 +305,33 @@ fn recipient_owner_public_contract_quarantines_unregistered_staged_material(
     )?;
 
     assert!(store.enroll_recipient_key(&owner).is_err());
+    let directory = temporary.path().join("recipient-private");
+    let unrelated = directory.join(".unrelated.orphan");
+    std::fs::write(&unrelated, [])?;
+    let earlier_orphan = directory.join(".recipient-earlier.key.orphan");
+    std::fs::write(&earlier_orphan, [9_u8; 32])?;
     assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
-    let names = std::fs::read_dir(temporary.path().join("recipient-private"))?
+    let mut names = std::fs::read_dir(&directory)?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    assert!(names.iter().any(|name| name.ends_with(".orphan")));
+    names.sort();
+    // The unregistered staged key was quarantined and then purged together
+    // with the earlier orphan; only registered custody and unrelated entries
+    // remain.
+    assert_eq!(
+        names,
+        vec![
+            ".unrelated.orphan".to_owned(),
+            recipient_private_path(&directory, descriptor)
+                .file_name()
+                .ok_or("recipient private path has no file name")?
+                .to_string_lossy()
+                .into_owned(),
+        ]
+    );
+    assert!(!earlier_orphan.exists());
     Ok(())
 }
 
@@ -456,13 +476,25 @@ fn recipient_owner_public_contract_keeps_destruction_pending_if_inventory_remova
             |row| row.get::<_, i64>(0),
         )?;
         assert_eq!((inventory_count, receipt_count), (1, 0));
-        assert!(store.recover_recipient_keys(&owner).is_err());
+        assert!(store.recover_recipient_keys(&owner)?.is_empty());
+
+        connection.execute_batch("DROP TRIGGER refuse_recipient_inventory_delete;")?;
+        store.destroy_recipient_key(
+            &owner,
+            descriptor.identity().epoch,
+            Hash::from_bytes([72; 32]),
+        )?;
+        let registry = store
+            .load_key_registry()?
+            .ok_or("recipient registry is absent")?;
+        assert!(registry.tombstone(descriptor.identity()).is_some());
+        assert!(registry.pending_destruction_requests().next().is_none());
     }
     Ok(())
 }
 
 #[test]
-fn recipient_owner_public_contract_never_finalizes_a_pending_missing_file_without_receipt(
+fn recipient_owner_public_contract_finalizes_pending_destruction_after_unlinked_bound_file(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
     let registry = store
@@ -475,9 +507,11 @@ fn recipient_owner_public_contract_never_finalizes_a_pending_missing_file_withou
     let request =
         KeyDestructionRequestV1::new(descriptor.identity(), digest, Hash::from_bytes([11; 32]));
     store.begin_key_registry_destruction(request)?;
-    std::fs::remove_file(only_private_file(
-        &temporary.path().join("recipient-private"),
-    )?)?;
+    let path = only_private_file(&temporary.path().join("recipient-private"))?;
+    let metadata = std::fs::metadata(&path)?;
+    // Simulate a crash after the bound name was unlinked but before the
+    // receipt and registry tombstone committed.
+    std::fs::remove_file(&path)?;
     drop(store);
 
     let mut resumed = SqliteStore::open(
@@ -487,24 +521,48 @@ fn recipient_owner_public_contract_never_finalizes_a_pending_missing_file_withou
             .to_str()
             .ok_or("database path is not UTF-8")?,
     )?;
-    assert!(resumed
-        .destroy_recipient_key(
-            &owner,
-            descriptor.identity().epoch,
-            Hash::from_bytes([11; 32])
-        )
-        .is_err());
+    assert!(resumed.recover_recipient_keys(&owner)?.is_empty());
+    resumed.destroy_recipient_key(
+        &owner,
+        descriptor.identity().epoch,
+        Hash::from_bytes([11; 32]),
+    )?;
     let resumed_registry = resumed
         .load_key_registry()?
         .ok_or("recipient registry is absent")?;
-    assert!(resumed_registry.tombstone(descriptor.identity()).is_none());
-    let receipt_count = rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?
-        .query_row(
-            "SELECT COUNT(*) FROM recipient_key_destruction_receipts_v1",
+    assert!(resumed_registry.tombstone(descriptor.identity()).is_some());
+    assert!(resumed_registry
+        .pending_destruction_requests()
+        .next()
+        .is_none());
+    let (receipt_path, receipt_device, receipt_inode, receipt_uid) =
+        rusqlite::Connection::open(temporary.path().join("recipient.sqlite"))?.query_row(
+            "SELECT private_path, file_device, file_inode, file_uid
+             FROM recipient_key_destruction_receipts_v1",
             [],
-            |row| row.get::<_, i64>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
         )?;
-    assert_eq!(receipt_count, 0);
+    assert_eq!(receipt_path, path.as_os_str().as_encoded_bytes());
+    assert_eq!(
+        receipt_device,
+        std::os::unix::fs::MetadataExt::dev(&metadata).to_be_bytes()
+    );
+    assert_eq!(
+        receipt_inode,
+        std::os::unix::fs::MetadataExt::ino(&metadata).to_be_bytes()
+    );
+    assert_eq!(
+        receipt_uid,
+        std::os::unix::fs::MetadataExt::uid(&metadata).to_be_bytes()
+    );
+    assert!(resumed.recover_recipient_keys(&owner)?.is_empty());
     Ok(())
 }
 
@@ -671,10 +729,18 @@ fn recipient_owner_public_contract_keeps_missing_and_pending_material_unavailabl
 
     let (temporary, mut store, owner, descriptor) = enrolled_owner()?;
     begin_pending_destruction(&mut store, descriptor, Hash::from_bytes([96; 32]))?;
-    assert!(store.recover_recipient_keys(&owner).is_err());
+    assert!(store.recover_recipient_keys(&owner)?.is_empty());
+    let live = store.enroll_recipient_key(&owner)?;
+    assert_eq!(store.recover_recipient_keys(&owner)?, vec![live]);
     assert!(
         recipient_private_path(&temporary.path().join("recipient-private"), descriptor).exists()
     );
+    let registry = store
+        .load_key_registry()?
+        .ok_or("recipient registry is absent")?;
+    assert!(registry
+        .pending_destruction_requests()
+        .any(|pending| pending.identity == descriptor.identity()));
     Ok(())
 }
 

@@ -473,7 +473,14 @@ impl SqliteStore {
     /// Reopen every registered recipient key that is still safe and complete.
     ///
     /// Missing, corrupt, or descriptor-mismatched material fails closed; this
-    /// method never derives a replacement from public RKP1 data.
+    /// method never derives a replacement from public RKP1 data. Epochs pending
+    /// destruction are skipped: they are never opened or returned, and they do
+    /// not block recovery of live epochs.
+    ///
+    /// After validation, unregistered staged material is first quarantined
+    /// under a durable `.orphan` name and then purged under the same writer
+    /// reservation. One call removes at most 256 quarantined entries; any
+    /// remainder is purged by a later recovery.
     ///
     /// # Errors
     ///
@@ -525,6 +532,7 @@ impl SqliteStore {
                                 )
                                 .and_then(|descriptors| {
                                     quarantine_unregistered_staged_material(owner, &inventories)
+                                        .and_then(|()| purge_quarantined_material(owner))
                                         .map(|()| descriptors)
                                 })
                             })
@@ -537,6 +545,20 @@ impl SqliteStore {
 
     /// Mark one recipient epoch pending, durably remove its owned key file,
     /// then commit the irreversible registry tombstone.
+    ///
+    /// Destruction means durable deletion of the inventory-bound file: the
+    /// exact bound name is unlinked relative to the retained private directory
+    /// descriptor and the directory is synced before the receipt commits.
+    /// Accepted ADR-098 says the adapter "durably deletes the owned file with
+    /// a receipt bound to its original path and file identity"; it does
+    /// not require overwriting the 32 key bytes, which journaling,
+    /// copy-on-write, and flash-translation storage would not guarantee to
+    /// erase anyway. Process copies are zeroized when dropped.
+    ///
+    /// Retrying a pending destruction resumes it. If an earlier attempt already
+    /// unlinked the exact bound name but stopped before committing, the retry
+    /// syncs the directory and commits the receipt from the stored inventory
+    /// path and file identity instead of leaving the epoch pending forever.
     ///
     /// # Errors
     ///
@@ -600,9 +622,11 @@ impl SqliteStore {
     /// Resume the exact pending request under the `SQLite` writer reservation.
     ///
     /// The receipt row and registry tombstone commit together only after the
-    /// directory-relative unlink and directory sync. If a process stops after
-    /// unlinking but before that commit, the request remains pending and this
-    /// method refuses to manufacture a receipt from the missing pathname.
+    /// directory-relative unlink and directory sync. If a process stopped after
+    /// unlinking but before that commit, the exact inventory-bound name is
+    /// absent; the retry re-syncs the directory and records the receipt from
+    /// the inventory row's stored path and file identity. The pending epoch is
+    /// never reactivated.
     fn finish_recipient_key_destruction(
         &self,
         owner: &RecipientKeyOwnerV1,
@@ -748,6 +772,10 @@ fn validate_recipient_key_inventory(
         })
         .map(|record| record.identity)
         .collect::<BTreeSet<_>>();
+    let pending_identities = registry
+        .pending_destruction_requests()
+        .map(|pending| pending.identity)
+        .collect::<BTreeSet<_>>();
     let mut inventory_identities = BTreeSet::new();
     let mut descriptors = Vec::new();
     for inventory in inventories {
@@ -770,13 +798,15 @@ fn validate_recipient_key_inventory(
         if registry.key_record(identity).is_none_or(|record| {
             record.private_material_digest != Some(inventory_digest)
                 || registry.tombstone(identity).is_some()
-                || registry
-                    .pending_destruction_requests()
-                    .any(|pending| pending.identity == identity)
         }) {
             return Err(CoreError::Storage(
                 "recipient key inventory is not an exact live registry identity".to_owned(),
             ));
+        }
+        // A pending destruction stays unavailable without blocking live
+        // epochs: its material is neither opened nor returned.
+        if pending_identities.contains(&identity) {
+            continue;
         }
         // The writer-reserved directory claim has already validated this
         // descriptor-derived filename for every inventory row.
@@ -1036,6 +1066,46 @@ fn quarantine_unregistered_staged_material(
         })
 }
 
+/// Upper bound on quarantined entries one writer-serialized recovery removes,
+/// so a directory flooded with orphans cannot hold the writer reservation for
+/// an unbounded time. Remaining entries are purged by later recoveries.
+const MAX_QUARANTINE_PURGE_PER_RECOVERY: usize = 256;
+
+fn is_quarantined_recipient_name(name: &[u8]) -> bool {
+    name.starts_with(b".recipient-") && name.ends_with(b".key.orphan")
+}
+
+/// Delete quarantined unregistered private material.
+///
+/// Quarantine only renames material that no durable inventory row names, so
+/// a `.recipient-*.key.orphan` entry is never registered custody. Names are
+/// collected before unlinking so directory iteration is not mutated in place.
+fn purge_quarantined_material(owner: &RecipientKeyOwnerV1) -> Result<(), CoreError> {
+    rustix::fs::Dir::read_from(&owner.directory_file)
+        .map_err(storage_error)
+        .and_then(|mut directory| {
+            std::iter::from_fn(|| directory.read())
+                .filter_map(|entry| {
+                    entry
+                        .map(|entry| {
+                            let name = entry.file_name();
+                            is_quarantined_recipient_name(name.to_bytes()).then(|| name.to_owned())
+                        })
+                        .transpose()
+                })
+                .take(MAX_QUARANTINE_PURGE_PER_RECOVERY)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_error)
+        })
+        .and_then(|names| {
+            names.iter().try_for_each(|name| {
+                recipient_unlinkat(&owner.directory_file, name.as_c_str(), AtFlags::empty())
+                    .map_err(storage_error)
+            })
+        })
+        .and_then(|()| recipient_fsync(&owner.directory_file).map_err(storage_error))
+}
+
 fn quarantine_unregistered_owned_staged_material(
     owner: &RecipientKeyOwnerV1,
 ) -> Result<(), CoreError> {
@@ -1258,6 +1328,14 @@ fn read_bound_private_key(
     })
 }
 
+/// Durably remove the inventory-bound private file for a pending destruction.
+///
+/// A previous attempt may have unlinked the exact inventory-bound name and then
+/// stopped before its receipt/registry commit. When that name is now absent
+/// under the writer reservation, the directory is synced again so the earlier
+/// unlink is durable, and the caller records the receipt from the stored
+/// inventory path and file identity. No material digest is re-derived for an
+/// absent file; the pending request already binds the registered digest.
 fn delete_bound_private_key(
     owner: &RecipientKeyOwnerV1,
     path: &Path,
@@ -1266,53 +1344,62 @@ fn delete_bound_private_key(
 ) -> Result<(), CoreError> {
     validate_owner_directory(owner).and_then(|()| {
         bound_name(path).and_then(|name| {
-            recipient_openat2(
-                &owner.directory_file,
-                name,
-                OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
-                Mode::empty(),
-                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-            )
-            .map(File::from)
-            .map_err(storage_error)
-            .and_then(|mut file| {
-                file.metadata()
+            match recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Err(rustix::io::Errno::NOENT) => {
+                    recipient_fsync(&owner.directory_file).map_err(storage_error)
+                }
+                _ => unlink_present_private_key(owner, name, expected, material_digest),
+            }
+        })
+    })
+}
+
+fn unlink_present_private_key(
+    owner: &RecipientKeyOwnerV1,
+    name: &Path,
+    expected: RecipientPrivateFileIdentityV1,
+    material_digest: pos_core::Hash,
+) -> Result<(), CoreError> {
+    recipient_openat2(
+        &owner.directory_file,
+        name,
+        OFlags::RDWR | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )
+    .map(File::from)
+    .map_err(storage_error)
+    .and_then(|mut file| {
+        file.metadata().map_err(storage_error).and_then(|metadata| {
+            validate_private_file(&metadata, expected).and_then(|()| {
+                let mut material = Zeroizing::new([0_u8; 32]);
+                recipient_read_exact(&mut file, &mut *material)
                     .map_err(storage_error)
-                    .and_then(|metadata| {
-                        validate_private_file(&metadata, expected).and_then(|()| {
-                            let mut material = Zeroizing::new([0_u8; 32]);
-                            recipient_read_exact(&mut file, &mut *material)
-                                .map_err(storage_error)
-                                .map(|()| material)
-                                .and_then(|material| {
-                                    if pos_crypto::key_roles::key_material_digest(&material)
-                                        != material_digest
-                                    {
-                                        return Err(CoreError::Storage(
-                                            "recipient private key digest differs from pending destruction"
-                                                .to_owned(),
-                                        ));
-                                    }
-                                    recipient_fsync(&file)
-                                        .map_err(storage_error)
-                                        .and_then(|()| {
-                                            verify_bound_entry(owner, name, expected).and_then(
-                                                |()| {
-                                                    recipient_unlinkat(
-                                                        &owner.directory_file,
-                                                        name,
-                                                        AtFlags::empty(),
-                                                    )
-                                                    .map_err(storage_error)
-                                                    .and_then(|()| {
-                                                        recipient_fsync(&owner.directory_file)
-                                                            .map_err(storage_error)
-                                                    })
-                                                },
-                                            )
-                                        })
+                    .map(|()| material)
+                    .and_then(|material| {
+                        if pos_crypto::key_roles::key_material_digest(&material) != material_digest
+                        {
+                            return Err(CoreError::Storage(
+                                "recipient private key digest differs from pending destruction"
+                                    .to_owned(),
+                            ));
+                        }
+                        recipient_fsync(&file)
+                            .map_err(storage_error)
+                            .and_then(|()| {
+                                verify_bound_entry(owner, name, expected).and_then(|()| {
+                                    recipient_unlinkat(
+                                        &owner.directory_file,
+                                        name,
+                                        AtFlags::empty(),
+                                    )
+                                    .map_err(storage_error)
+                                    .and_then(|()| {
+                                        recipient_fsync(&owner.directory_file)
+                                            .map_err(storage_error)
+                                    })
                                 })
-                        })
+                            })
                     })
             })
         })
@@ -1472,11 +1559,13 @@ mod tests {
                 .load_key_registry()?
                 .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
             assert!(registry.tombstone(descriptor.identity()).is_none());
-            if failure == 1 {
-                assert!(store
-                    .destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)
-                    .is_err());
-            }
+            // Failure 0 leaves the bound file in place; failure 1 has already
+            // unlinked it. Either retry resumes and finalizes the destruction.
+            store.destroy_recipient_key(&owner, descriptor.identity().epoch, authorization)?;
+            let registry = store
+                .load_key_registry()?
+                .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+            assert!(registry.tombstone(descriptor.identity()).is_some());
         }
         Ok(())
     }
