@@ -25318,194 +25318,152 @@ pub(super) mod key_registry_coverage {
         store.conn.execute_batch("ROLLBACK")?;
         Ok(())
     }
-    #[test]
-    fn sqlite_adapter_recording_durable_error_branches_are_closed(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        fn closed_recording(
-            run_byte: u8,
-        ) -> Result<
-            (
-                SqliteStore,
-                AdapterRecordingSessionV1,
-                AdapterCallReservationV1,
-            ),
-            Box<dyn std::error::Error>,
-        > {
-            let (session, reservation, _) = adapter_recording_fixture(run_byte)?;
-            let owner_reference = session.owner_reference();
-            let run_operation_id = session.run_operation_id();
-            let mut store = open_store()?;
-            store.open_adapter_recording_session(session.clone())?;
-            store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone())?;
-            store.complete_adapter_call(
-                owner_reference,
-                run_operation_id,
-                0,
-                b"exact response".to_vec(),
-            )?;
-            store.close_adapter_recording_session(owner_reference, run_operation_id)?;
-            Ok((store, session, reservation))
-        }
+    fn closed_adapter_recording(
+        run_byte: u8,
+    ) -> Result<
+        (
+            SqliteStore,
+            AdapterRecordingSessionV1,
+            AdapterCallReservationV1,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let (session, reservation, _) = adapter_recording_fixture(run_byte)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let store = open_store()?;
+        store.open_adapter_recording_session(session.clone())?;
+        store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone())?;
+        store.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            b"exact response".to_vec(),
+        )?;
+        store.close_adapter_recording_session(owner_reference, run_operation_id)?;
+        Ok((store, session, reservation))
+    }
 
-        let (mut store, session, _) = closed_recording(151)?;
+    fn assert_closed_recording_rejects_call_mutation(
+        run_byte: u8,
+        mutation: &str,
+        ignore_check_constraints: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, session, _) = closed_adapter_recording(run_byte)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        if ignore_check_constraints {
+            store
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+        }
+        let mutation_result = store.conn.execute(
+            mutation,
+            rusqlite::params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+            ],
+        );
+        if ignore_check_constraints {
+            store
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = OFF;")?;
+        }
+        mutation_result?;
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    fn assert_closed_recording_rejects_session_mutation(
+        run_byte: u8,
+        mutation: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, session, _) = closed_adapter_recording(run_byte)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
         store.conn.execute(
+            mutation,
+            rusqlite::params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+            ],
+        )?;
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_adapter_recording_durable_rows_reject_corruption(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_closed_recording_rejects_call_mutation(
+            151,
             "UPDATE adapter_recording_calls SET global_call_index = 1
              WHERE owner_reference = ?1 AND run_operation_id = ?2",
-            rusqlite::params![
-                owner_reference.as_bytes().as_slice(),
-                run_operation_id.as_bytes().as_slice(),
-            ],
+            false,
         )?;
-        assert_eq!(
-            store.close_adapter_recording_session(owner_reference, run_operation_id),
-            Err(AdapterRecordingStoreErrorV1::CorruptState)
-        );
-
-        let (store, session, _) = closed_recording(152)?;
-        let owner_reference = session.owner_reference();
-        let run_operation_id = session.run_operation_id();
-        store.conn.execute(
-            "UPDATE adapter_recording_calls SET output_bytes = ?1
-             WHERE owner_reference = ?2 AND run_operation_id = ?3",
-            rusqlite::params![
-                b"changed durable response".as_slice(),
-                owner_reference.as_bytes().as_slice(),
-                run_operation_id.as_bytes().as_slice(),
-            ],
-        )?;
-        assert_eq!(
-            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
-            Err(AdapterRecordingStoreErrorV1::CorruptState)
-        );
-
-        let (store, session, _) = closed_recording(153)?;
-        let owner_reference = session.owner_reference();
-        let run_operation_id = session.run_operation_id();
-        store.conn.execute(
-            "UPDATE adapter_recording_sessions SET world_handle_cbor = ?1
-             WHERE owner_reference = ?2 AND run_operation_id = ?3",
-            rusqlite::params![
-                b"malformed WRH1".as_slice(),
-                owner_reference.as_bytes().as_slice(),
-                run_operation_id.as_bytes().as_slice(),
-            ],
-        )?;
-        assert_eq!(
-            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
-            Err(AdapterRecordingStoreErrorV1::CorruptState)
-        );
-
-        let (mut store, session, _) = closed_recording(154)?;
-        let owner_reference = session.owner_reference();
-        let run_operation_id = session.run_operation_id();
-        store
-            .conn
-            .execute_batch("PRAGMA ignore_check_constraints = ON;")?;
-        store.conn.execute(
-            "UPDATE adapter_recording_calls SET plugin_id = ?1
-             WHERE owner_reference = ?2 AND run_operation_id = ?3",
-            rusqlite::params![
-                b"short plugin id".as_slice(),
-                owner_reference.as_bytes().as_slice(),
-                run_operation_id.as_bytes().as_slice(),
-            ],
-        )?;
-        store
-            .conn
-            .execute_batch("PRAGMA ignore_check_constraints = OFF;")?;
-        assert_eq!(
-            store.close_adapter_recording_session(owner_reference, run_operation_id),
-            Err(AdapterRecordingStoreErrorV1::CorruptState)
-        );
-
-        let (mut store, session, _) = closed_recording(155)?;
-        let owner_reference = session.owner_reference();
-        let run_operation_id = session.run_operation_id();
-        store
-            .conn
-            .execute_batch("PRAGMA ignore_check_constraints = ON;")?;
-        store.conn.execute(
-            "UPDATE adapter_recording_calls SET idempotency_key = zeroblob(31)
+        assert_closed_recording_rejects_call_mutation(
+            152,
+            "UPDATE adapter_recording_calls SET output_bytes = X'01'
              WHERE owner_reference = ?1 AND run_operation_id = ?2",
-            rusqlite::params![
-                owner_reference.as_bytes().as_slice(),
-                run_operation_id.as_bytes().as_slice(),
-            ],
+            false,
         )?;
-        store
-            .conn
-            .execute_batch("PRAGMA ignore_check_constraints = OFF;")?;
-        assert_eq!(
-            store.close_adapter_recording_session(owner_reference, run_operation_id),
-            Err(AdapterRecordingStoreErrorV1::CorruptState)
-        );
-
-        let (mut store, session, _) = closed_recording(156)?;
-        let owner_reference = session.owner_reference();
-        let run_operation_id = session.run_operation_id();
-        store
-            .conn
-            .execute_batch("PRAGMA ignore_check_constraints = ON;")?;
-        store.conn.execute(
-            "UPDATE adapter_recording_calls SET per_plugin_call_index = -1
+        assert_closed_recording_rejects_session_mutation(
+            153,
+            "UPDATE adapter_recording_sessions SET world_handle_cbor = X'00'
              WHERE owner_reference = ?1 AND run_operation_id = ?2",
-            rusqlite::params![
-                owner_reference.as_bytes().as_slice(),
-                run_operation_id.as_bytes().as_slice(),
-            ],
         )?;
-        store
-            .conn
-            .execute_batch("PRAGMA ignore_check_constraints = OFF;")?;
-        assert_eq!(
-            store.close_adapter_recording_session(owner_reference, run_operation_id),
-            Err(AdapterRecordingStoreErrorV1::CorruptState)
-        );
+        Ok(())
+    }
 
-        let (mut store, session, _) = closed_recording(157)?;
-        let owner_reference = session.owner_reference();
-        let run_operation_id = session.run_operation_id();
-        store
-            .conn
-            .execute_batch("PRAGMA ignore_check_constraints = ON;")?;
-        store.conn.execute(
-            "UPDATE adapter_recording_calls SET reserved_at_micros = -1
-             WHERE owner_reference = ?1 AND run_operation_id = ?2",
-            rusqlite::params![
-                owner_reference.as_bytes().as_slice(),
-                run_operation_id.as_bytes().as_slice(),
-            ],
-        )?;
-        store
-            .conn
-            .execute_batch("PRAGMA ignore_check_constraints = OFF;")?;
-        assert_eq!(
-            store.close_adapter_recording_session(owner_reference, run_operation_id),
-            Err(AdapterRecordingStoreErrorV1::CorruptState)
-        );
-
-        let (mut store, session, _) = closed_recording(158)?;
-        let owner_reference = session.owner_reference();
-        let run_operation_id = session.run_operation_id();
-        store.conn.execute(
+    #[test]
+    fn sqlite_adapter_recording_durable_column_bounds_are_rejected(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (run_byte, mutation) in [
+            (
+                154,
+                "UPDATE adapter_recording_calls SET plugin_id = X'00'
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                155,
+                "UPDATE adapter_recording_calls SET idempotency_key = zeroblob(31)
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                156,
+                "UPDATE adapter_recording_calls SET per_plugin_call_index = -1
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                157,
+                "UPDATE adapter_recording_calls SET reserved_at_micros = -1
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+        ] {
+            assert_closed_recording_rejects_call_mutation(run_byte, mutation, true)?;
+        }
+        assert_closed_recording_rejects_call_mutation(
+            158,
             "UPDATE adapter_recording_calls SET invocation_cbor = X'00'
              WHERE owner_reference = ?1 AND run_operation_id = ?2",
-            rusqlite::params![
-                owner_reference.as_bytes().as_slice(),
-                run_operation_id.as_bytes().as_slice(),
-            ],
+            false,
         )?;
-        assert_eq!(
-            store.close_adapter_recording_session(owner_reference, run_operation_id),
-            Err(AdapterRecordingStoreErrorV1::CorruptState)
-        );
+        Ok(())
+    }
 
+    #[test]
+    fn sqlite_adapter_recording_reservation_bounds_are_rejected(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (session, reservation, _) = adapter_recording_fixture(159)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
-        let mut store = open_store()?;
+        let store = open_store()?;
         store.open_adapter_recording_session(session)?;
         let mut high_index_input = reservation.invocation().as_input().clone();
         high_index_input.global_call_index =
@@ -25519,7 +25477,7 @@ pub(super) mod key_registry_coverage {
             reservation.reserved_at_micros(),
         )?;
         assert_eq!(
-            store.reserve_adapter_call(owner_reference, run_operation_id, high_index_reservation,),
+            store.reserve_adapter_call(owner_reference, run_operation_id, high_index_reservation),
             Err(AdapterRecordingStoreErrorV1::InvalidCall)
         );
         let wrong_plugin_index = AdapterCallReservationV1::new(
@@ -25534,7 +25492,7 @@ pub(super) mod key_registry_coverage {
             Err(AdapterRecordingStoreErrorV1::InvalidCall)
         );
         assert_eq!(
-            store.complete_adapter_call(owner_reference, run_operation_id, u64::MAX, Vec::new(),),
+            store.complete_adapter_call(owner_reference, run_operation_id, u64::MAX, Vec::new()),
             Err(AdapterRecordingStoreErrorV1::InvalidCall)
         );
         store.abort_adapter_recording_session(owner_reference, run_operation_id)?;
