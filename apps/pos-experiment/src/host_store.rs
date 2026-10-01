@@ -8,7 +8,6 @@ macro_rules! forward_scheduled_admission_ports {
                 &mut self,
                 basis: &pos_core::PipelineAdmissionBasisV1,
             ) -> Result<pos_core::PipelineOutcomeV1, pos_core::CoreError> {
-                use pos_core::PipelineAdmissionPortV1 as _;
                 self.$field.admit_pipeline_batch(basis)
             }
 
@@ -16,7 +15,6 @@ macro_rules! forward_scheduled_admission_ports {
                 &mut self,
                 limit: std::num::NonZeroUsize,
             ) -> Result<pos_core::store::PurgeOutcome, pos_core::CoreError> {
-                use pos_core::PipelineAdmissionPortV1 as _;
                 self.$field.purge_expired_pipeline_receipts_bounded(limit)
             }
         }
@@ -36,7 +34,6 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 timeline: pos_core::TimelineId,
                 fence: pos_core::PipelineAdmissionFenceV1,
             ) -> Result<(), pos_core::CoreError> {
-                use pos_core::PipelineAdmissionFencePublisherV1 as _;
                 self.$field.set_pipeline_admission_fence(timeline, fence)
             }
 
@@ -44,7 +41,6 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 &self,
                 timeline: pos_core::TimelineId,
             ) -> Result<Option<pos_core::PipelineAdmissionFenceV1>, pos_core::CoreError> {
-                use pos_core::PipelineAdmissionFencePublisherV1 as _;
                 self.$field.pipeline_admission_fence(timeline)
             }
         }
@@ -54,7 +50,6 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 &mut self,
                 binding: pos_core::AuthorityPersistenceBindingV1,
             ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
-                use pos_core::AuthorityPersistencePortV1 as _;
                 self.$field.bind_authority_persistence(binding)
             }
 
@@ -64,7 +59,6 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 grant: &pos_core::CapabilityGrantV1,
             ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1>
             {
-                use pos_core::AuthorityPersistencePortV1 as _;
                 self.$field.issue_capability_grant(permit, grant)
             }
 
@@ -74,7 +68,6 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 revocation: &pos_core::CapabilityRevocationV1,
             ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1>
             {
-                use pos_core::AuthorityPersistencePortV1 as _;
                 self.$field.revoke_capability_grant(permit, revocation)
             }
 
@@ -82,7 +75,6 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 &self,
                 leaf_grant_id: pos_core::Hash,
             ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
-                use pos_core::AuthorityPersistencePortV1 as _;
                 self.$field.load_authority(leaf_grant_id)
             }
         }
