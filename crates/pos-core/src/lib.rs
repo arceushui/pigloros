@@ -47,7 +47,6 @@ pub mod pipeline;
 pub mod pipeline_admission;
 pub mod pipeline_evidence;
 pub mod plugin;
-<<<<<<< HEAD
 pub mod recipient_key;
 pub mod repro_manifest_root;
 pub mod retention;
