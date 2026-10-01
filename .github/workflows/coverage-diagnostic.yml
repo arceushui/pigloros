@@ -1,0 +1,56 @@
+name: coverage diagnostic
+
+on:
+  push:
+    branches:
+      - redmine/432-ard1-registration
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    if: contains(github.event.head_commit.message, 'diagnostic(#432)')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-diagnostics-4d939668beae4fb4e40a713bc265b8bf849615ba
+          run-id: "36889784113"
+          github-token: ${{ github.token }}
+          path: coverage
+      - name: Report uncovered changed-code locations
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          coverage = next(Path("coverage").rglob("coverage.json"))
+          payload = json.loads(coverage.read_text())
+          targets = (
+              "crates/pos-core/src/erasure/registration.rs",
+              "crates/pos-core/src/erasure/registration_commit.rs",
+              "crates/pos-runtime/src/registry/adapter.rs",
+              "crates/pos-runtime/src/registry.rs",
+              "crates/pos-store/src/memory.rs",
+              "crates/pos-store/src/sqlite.rs",
+          )
+          for unit in payload["data"]:
+              for file in unit["files"]:
+                  filename = file["filename"]
+                  if not filename.endswith(targets):
+                      continue
+                  zero_lines = sorted(
+                      {
+                          segment[0]
+                          for segment in file["segments"]
+                          if segment[2] == 0 and segment[3]
+                      }
+                  )
+                  print(json.dumps({
+                      "file": filename,
+                      "summary": file["summary"],
+                      "uncovered_lines": zero_lines,
+                  }, sort_keys=True))
+          PY
