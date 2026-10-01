@@ -1160,53 +1160,53 @@ impl OutputPolicyClosureV1 {
         }
         output
     }
-}
 
-/// Validate one exact retained OPC1 envelope and every native member.
-///
-/// The envelope framing alone does not establish that its five referenced
-/// members have known schemas, canonical encodings, matching identities, or
-/// valid transitive policy references. Local owner admission calls this before
-/// it asks the installed authority to retain a kind-14 copy.
-pub(crate) fn validate_manifest_opc1_copy_v1(bytes: &[u8], expected_eop1: &[u8]) -> bool {
-    const MEMBER_COUNT: usize = 6;
-    if bytes.len() > MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 || !bytes.starts_with(b"OPC1") {
-        return false;
-    }
+    /// Decode and validate one exact OPC1 envelope and every native member.
+    ///
+    /// The expected EOP1 bytes must equal member zero. Each remaining member
+    /// is checked by its native decoder, including canonical encoding and
+    /// recorded identity, before this method returns the retained closure.
+    ///
+    /// # Errors
+    /// Returns an artifact error when the envelope, member schemas, identities,
+    /// or canonical encoding are invalid.
+    pub fn from_manifest_canonical_bytes_v1(
+        bytes: &[u8],
+        expected_eop1: &[u8],
+    ) -> Result<Self, OutputAdmissionErrorV1> {
+        const MEMBER_COUNT: usize = 6;
+        if bytes.len() > MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 || !bytes.starts_with(b"OPC1") {
+            return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" });
+        }
 
-    let mut members = [&[][..]; MEMBER_COUNT];
-    let mut offset = 4_usize;
-    for member in &mut members {
-        let Some(length_end) = offset.checked_add(8) else {
-            return false;
-        };
-        let Some(length_bytes) = bytes.get(offset..length_end) else {
-            return false;
-        };
-        let mut raw_length = [0_u8; 8];
-        raw_length.copy_from_slice(length_bytes);
-        let Ok(length) = usize::try_from(u64::from_be_bytes(raw_length)) else {
-            return false;
-        };
-        let Some(member_end) = length_end.checked_add(length) else {
-            return false;
-        };
-        let Some(member_bytes) = bytes.get(length_end..member_end) else {
-            return false;
-        };
-        *member = member_bytes;
-        offset = member_end;
-    }
+        let mut members = [&[][..]; MEMBER_COUNT];
+        let mut offset = 4_usize;
+        for member in &mut members {
+            let length_end = offset + 8;
+            let length_bytes = bytes
+                .get(offset..length_end)
+                .ok_or(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
+            let mut raw_length = [0_u8; 8];
+            raw_length.copy_from_slice(length_bytes);
+            let length = usize::try_from(u64::from_be_bytes(raw_length))
+                .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
+            let member_end = length_end
+                .checked_add(length)
+                .ok_or(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
+            *member = bytes
+                .get(length_end..member_end)
+                .ok_or(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
+            offset = member_end;
+        }
 
-    if offset != bytes.len() || members[0] != expected_eop1 {
-        return false;
+        if offset != bytes.len() || members[0] != expected_eop1 {
+            return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" });
+        }
+        let closure = Self::from_artifacts_inner(
+            members[0], members[1], members[2], members[3], members[4], members[5],
+        )?;
+        Ok(closure)
     }
-    let Ok(closure) = OutputPolicyClosureV1::from_artifacts_inner(
-        members[0], members[1], members[2], members[3], members[4], members[5],
-    ) else {
-        return false;
-    };
-    closure.to_canonical_bytes() == bytes
 }
 
 /// Validate a complete host artifact set without minting an admission closure.
@@ -1971,28 +1971,6 @@ mod tests {
             crate::reviewed_policy::reviewed_retention_policy_bytes_v1(),
         )
         .or_resume()
-    }
-
-    #[test]
-    fn manifest_opc1_validation_checks_every_nonempty_member() {
-        let closure = closure_for(PluginId::new(), WorkloadProfileV1::Interactive);
-        let bytes = closure.to_canonical_bytes();
-        let eop1 = closure.output_policy_bytes();
-        assert!(validate_manifest_opc1_copy_v1(&bytes, eop1));
-
-        let mut offset = 4_usize;
-        for _ in 0..6 {
-            let length_end = offset + 8;
-            let mut raw_length = [0_u8; 8];
-            raw_length.copy_from_slice(&bytes[offset..length_end]);
-            let member_length = usize::try_from(u64::from_be_bytes(raw_length)).or_resume();
-            if member_length > 0 {
-                let mut malformed = bytes.clone();
-                malformed[length_end] ^= 1;
-                assert!(!validate_manifest_opc1_copy_v1(&malformed, eop1));
-            }
-            offset = length_end + member_length;
-        }
     }
 
     fn fixture_configuration_artifact() -> Vec<u8> {

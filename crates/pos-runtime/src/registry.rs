@@ -1402,10 +1402,12 @@ impl PluginRegistry {
                 {
                     return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
                 }
-                if !crate::output_admission::validate_manifest_opc1_copy_v1(
+                if OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
                     &copies.opc1_bytes,
                     &copies.eop1_bytes,
-                ) {
+                )
+                .is_err()
+                {
                     return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
                 }
             }
