@@ -406,6 +406,19 @@ impl PreparedArtifactRegistrationBatchV1 {
     }
 }
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl PreparedArtifactRegistrationBatchV1 {
+    pub(crate) fn empty_for_test() -> Self {
+        Self {
+            owner_id: OwnerIdV1::from_static("unsupported-event-store-test"),
+            root_registration_address: Hash::zero(),
+            root_operation_id: Hash::zero(),
+            records: Vec::new(),
+        }
+    }
+}
+
 /// One exact record in a prepared batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedArtifactRegistrationRecordV1 {
@@ -571,12 +584,8 @@ fn parse_artifact_inputs(
     let mut registration_bytes = 0_usize;
     let mut parsed = Vec::with_capacity(inputs.len());
     for input in inputs {
-        artifact_bytes = artifact_bytes
-            .checked_add(input.artifact_bytes.len())
-            .ok_or(ArtifactRegistrationPreparationErrorV1::BoundExceeded)?;
-        registration_bytes = registration_bytes
-            .checked_add(input.registration_cbor.len())
-            .ok_or(ArtifactRegistrationPreparationErrorV1::BoundExceeded)?;
+        artifact_bytes = artifact_bytes.saturating_add(input.artifact_bytes.len());
+        registration_bytes = registration_bytes.saturating_add(input.registration_cbor.len());
         if artifact_bytes > MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1 {
             return Err(ArtifactRegistrationPreparationErrorV1::BoundExceeded);
         }
@@ -731,16 +740,8 @@ fn derive_expected_registration(
                 closure,
                 root_input.world_handle.as_input().recording_receipt_digest,
             )?;
-            let transcript = find_transcript(closure, root_input.adapter_transcript_digest)?;
-            let transcript_native = match &transcript.native {
-                NativeArtifactV1::AdapterTranscript(value) => value,
-                NativeArtifactV1::AdapterAdmission(_)
-                | NativeArtifactV1::WorldRecordingReceipt(_)
-                | NativeArtifactV1::ReproManifestRoot(_)
-                | NativeArtifactV1::OwnerNative => {
-                    return Err(ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact);
-                }
-            };
+            let (transcript, transcript_native) =
+                find_transcript(closure, root_input.adapter_transcript_digest)?;
             let admission = find_admission(
                 closure,
                 transcript_native.as_input().adapter_admission_digest,
@@ -796,18 +797,19 @@ fn find_admission(
 fn find_transcript(
     closure: &[ParsedArtifact],
     native_digest: Hash,
-) -> Result<&ParsedArtifact, ArtifactRegistrationPreparationErrorV1> {
-    find_unique_native(
-        closure,
-        |native| match native {
-            NativeArtifactV1::AdapterTranscript(value) => Some(value.digest()),
-            NativeArtifactV1::AdapterAdmission(_)
-            | NativeArtifactV1::WorldRecordingReceipt(_)
-            | NativeArtifactV1::ReproManifestRoot(_)
-            | NativeArtifactV1::OwnerNative => None,
-        },
-        native_digest,
-    )
+) -> Result<(&ParsedArtifact, &AdapterTranscriptV1), ArtifactRegistrationPreparationErrorV1> {
+    let mut found = None;
+    for candidate in closure {
+        if let NativeArtifactV1::AdapterTranscript(transcript) = &candidate.native {
+            if transcript.digest() == native_digest {
+                if found.is_some() {
+                    return Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph);
+                }
+                found = Some((candidate, transcript));
+            }
+        }
+    }
+    found.ok_or(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
 }
 
 fn find_recording_receipt(
@@ -851,15 +853,7 @@ const fn map_graph_error(
         ArtifactRegistrationGraphErrorV1::BoundExceeded => {
             ArtifactRegistrationPreparationErrorV1::BoundExceeded
         }
-        ArtifactRegistrationGraphErrorV1::InvalidRoot
-        | ArtifactRegistrationGraphErrorV1::DuplicateAddress
-        | ArtifactRegistrationGraphErrorV1::MissingChild
-        | ArtifactRegistrationGraphErrorV1::OwnerMismatch
-        | ArtifactRegistrationGraphErrorV1::IdentityMismatch
-        | ArtifactRegistrationGraphErrorV1::Cycle
-        | ArtifactRegistrationGraphErrorV1::ExtraRegistration => {
-            ArtifactRegistrationPreparationErrorV1::InvalidGraph
-        }
+        _ => ArtifactRegistrationPreparationErrorV1::InvalidGraph,
     }
 }
 

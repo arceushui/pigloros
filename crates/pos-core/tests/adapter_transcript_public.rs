@@ -481,12 +481,33 @@ fn malformed_air1_reject_before_authority() -> TestResult<()> {
         AdapterInvocationV1::from_canonical_cbor(&overbound_length),
         Err(AdapterTranscriptErrorV1::FieldOutOfBounds)
     );
+    let mut invalid_adapter_identity = invocation(0, b"payload".to_vec())?.to_canonical_cbor();
+    let identity_offset = invalid_adapter_identity
+        .windows(b"adapter.1".len())
+        .position(|window| window == b"adapter.1")
+        .ok_or("missing adapter identity")?;
+    invalid_adapter_identity[identity_offset] = b' ';
+    assert_eq!(
+        AdapterInvocationV1::from_canonical_cbor(&invalid_adapter_identity),
+        Err(AdapterTranscriptErrorV1::InvalidCall)
+    );
     Ok(())
 }
 
 #[test]
 fn malformed_mat1_reject_before_authority() -> TestResult<()> {
     let good = vector()?;
+    let (_, valid_transcript) = admitted_transcript()?;
+    let mut invalid_nested_air_identity = valid_transcript.to_canonical_cbor();
+    let identity_offset = invalid_nested_air_identity
+        .windows(b"adapter.1".len())
+        .position(|window| window == b"adapter.1")
+        .ok_or("missing nested adapter identity")?;
+    invalid_nested_air_identity[identity_offset] = b' ';
+    assert_eq!(
+        AdapterTranscriptV1::from_canonical_cbor(&invalid_nested_air_identity),
+        Err(AdapterTranscriptErrorV1::InvalidCall)
+    );
     let mut cases = vec![
         (Vec::new(), AdapterTranscriptErrorV1::InvalidEncoding),
         (
