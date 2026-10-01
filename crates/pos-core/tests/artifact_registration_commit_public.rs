@@ -568,7 +568,7 @@ fn registration_preparation_rejects_invalid_bytes_extraction_and_closure_shapes(
     );
 
     let mut missing_recording = inputs.clone();
-    missing_recording.retain(|input| input.artifact_bytes.get(2..6) != Some(b"WCR1"));
+    missing_recording.retain(|input| input.artifact_bytes.get(2..6) != Some(&b"WCR1"[..]));
     assert_eq!(
         prepare_artifact_registration_batch_v1(
             owner_id,
@@ -579,7 +579,7 @@ fn registration_preparation_rejects_invalid_bytes_extraction_and_closure_shapes(
         Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
     );
     let mut missing_transcript = inputs.clone();
-    missing_transcript.retain(|input| input.artifact_bytes.get(2..6) != Some(b"MAT1"));
+    missing_transcript.retain(|input| input.artifact_bytes.get(2..6) != Some(&b"MAT1"[..]));
     assert_eq!(
         prepare_artifact_registration_batch_v1(
             owner_id,
