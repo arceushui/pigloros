@@ -5,6 +5,7 @@ use pos_core::{
     AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationV1, AdapterRecordingStoreV1,
     AdapterTranscriptV1, ArtifactRegistrationV1, Capability, Hash, OwnerIdV1, Plugin, PluginId,
     TimelineId, WorldReplayHandleInputV1, WorldReplayHandleV1,
+    MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 use pos_runtime::{
     LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1,
@@ -846,5 +847,95 @@ fn local_adapter_session_maps_recorder_boundaries_to_closed_errors() -> TestResu
         &mut recorder,
     )?;
     assert_eq!(session.abort(), Err(LocalAdapterErrorV1::RecordingFailed));
+    Ok(())
+}
+
+
+#[test]
+fn local_adapter_session_enforces_public_request_and_call_bounds() -> TestResult {
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
+    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
+    let mut recorder = pos_store::memory::MemoryStore::new();
+    let mut oversized = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([34; 32]),
+        &mut recorder,
+    )?;
+    assert_eq!(
+        oversized.invoke(
+            plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            vec![0; pos_core::MAX_ADAPTER_CALL_BYTES_V1 + 1],
+        ),
+        Err(LocalAdapterErrorV1::CallBoundExceeded)
+    );
+    oversized.abort()?;
+
+    let keys = Arc::new(Mutex::new(Vec::new()));
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(EchoProvider {
+        idempotency_keys: Arc::clone(&keys),
+        completed_responses: Arc::new(Mutex::new(Vec::new())),
+    }))?;
+    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
+    let mut recorder = pos_store::memory::MemoryStore::new();
+    let mut session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([35; 32]),
+        &mut recorder,
+    )?;
+    for _ in 0..MAX_ADAPTER_TRANSCRIPT_CALLS_V1 {
+        assert_eq!(
+            session.invoke(
+                plugin_id,
+                "weather.client",
+                "fixture.provider",
+                "read-current",
+                1,
+                b"x".to_vec(),
+            ),
+            Ok(b"x".to_vec())
+        );
+    }
+    assert_eq!(
+        session.invoke(
+            plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"x".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::CallBoundExceeded)
+    );
+    session.abort()?;
+    Ok(())
+}
+
+#[test]
+fn local_adapter_registry_orders_multiple_contracts() -> TestResult {
+    let low = LocalPlugin {
+        id: PluginId::from_ulid(ulid::Ulid::from(1_u128)),
+    };
+    let high = LocalPlugin {
+        id: PluginId::from_ulid(ulid::Ulid::from(2_u128)),
+    };
+    let mut registry = PluginRegistry::new();
+    registry.register_local(&high, vec!["weather.high".to_owned()], None, None)?;
+    registry.register_local(&low, vec!["weather.low".to_owned()], None, None)?;
+    registry.register_local_adapter(adapter_entry(high.id()), Box::new(RejectingProvider))?;
+    registry.register_local_adapter(adapter_entry(low.id()), Box::new(RejectingProvider))?;
+    let admitted = registry.admit_local_manifest_registration(
+        OwnerIdV1::from_static("ordered-local-adapter-owner"),
+        5,
+    )?;
+    let entries = &admitted.adapter_admission().as_input().entries;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].plugin_id, low.id());
+    assert_eq!(entries[1].plugin_id, high.id());
     Ok(())
 }
