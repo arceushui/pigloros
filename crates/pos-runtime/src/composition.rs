@@ -96,7 +96,7 @@ impl AdmittedManifestPolicySourceV1 {
         &self.stable_slot
     }
 
-    /// Actual allocated PluginId, including reducer-only Plugins.
+    /// Actual allocated `PluginId`, including reducer-only Plugins.
     #[must_use]
     pub const fn plugin_id(&self) -> PluginId {
         self.plugin_id
