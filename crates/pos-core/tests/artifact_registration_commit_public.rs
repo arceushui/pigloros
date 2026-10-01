@@ -1070,8 +1070,7 @@ fn persisted_catalog_rejects_a_semantically_wrong_admission_registration(
 
     let changed_admission =
         registration_with_data_class(&admission, ArtifactDataClassV1::StructuralAuditMetadata)?;
-    fixture.rows[admission_index] =
-        catalog_row_with_registration(&admission, &changed_admission)?;
+    fixture.rows[admission_index] = catalog_row_with_registration(&admission, &changed_admission)?;
     let changed_transcript = registration_with_child_identity(
         &transcript,
         admission.registration_address(),
