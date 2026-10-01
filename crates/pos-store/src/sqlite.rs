@@ -5047,7 +5047,7 @@ impl EventStore for SqliteStore {
                     timeline,
                     &mut registry,
                     &draft,
-                    authorization,
+                    &authorization,
                     crate::PreparedAppendCallbacks {
                         prepare_payload,
                         sign,

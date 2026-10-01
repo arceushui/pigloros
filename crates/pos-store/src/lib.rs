@@ -241,7 +241,7 @@ fn finalize_timeline_signing_event(
 /// the caller's serialization boundary keeps unchanged through commit.
 fn authorize_prepared_subject_append(
     registry: &mut pos_core::KeyRegistryStateV1,
-    authorization: pos_core::PreparedSubjectAppendAuthorizationV1,
+    authorization: &pos_core::PreparedSubjectAppendAuthorizationV1,
 ) -> Result<(), CoreError> {
     registry
         .with_encryption_authorization(
@@ -292,7 +292,7 @@ fn prepare_subject_encrypted_timeline_event(
     timeline: TimelineId,
     registry: &mut pos_core::KeyRegistryStateV1,
     draft: &EventDraft,
-    authorization: pos_core::PreparedSubjectAppendAuthorizationV1,
+    authorization: &pos_core::PreparedSubjectAppendAuthorizationV1,
     callbacks: PreparedAppendCallbacks<'_>,
 ) -> Result<Event, CoreError> {
     let PreparedAppendCallbacks {
