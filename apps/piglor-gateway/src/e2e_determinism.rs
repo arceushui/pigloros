@@ -21,8 +21,8 @@ use pos_plugin_society::{
 };
 use pos_plugin_world::{encode_actuator_pair_v1, ActionKindV1, WorldActionV1};
 use pos_runtime::{
-    Driver, ErasureExecutionHostV1, OutputPolicySourceV1, ObservationView,
-    OutputPolicyBindingV1, ProjectionKey, RuntimeError, StepOutput,
+    Driver, ErasureExecutionHostV1, ObservationView, OutputPolicyBindingV1, OutputPolicySourceV1,
+    ProjectionKey, RuntimeError, StepOutput,
 };
 use pos_state::{EntityStateProjection, ProjectionRegistry};
 use pos_store::{open_store, SeqRange, StoreConfig};

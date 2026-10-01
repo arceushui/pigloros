@@ -6,9 +6,9 @@ use pos_core::{
 };
 use pos_runtime::{
     installed_plugin_role_v1, validate_output_policy_artifacts_v1, DomainImplementationKindV1,
-    Driver, OutputPolicySourceV1, ObservationView, OutputAdmissionErrorV1,
-    PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
-    RuntimeError, StepOutput, TickScheduler,
+    Driver, ObservationView, OutputAdmissionErrorV1, OutputPolicySourceV1, PluginAvailabilityV1,
+    PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError, StepOutput,
+    TickScheduler,
 };
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

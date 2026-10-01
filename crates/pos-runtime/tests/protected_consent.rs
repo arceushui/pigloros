@@ -10,9 +10,8 @@ use pos_core::{
     ProposedAction, Reducer, State,
 };
 use pos_runtime::{
-    ActionSubmissionError, Driver, OutputPolicySourceV1, ObservationView,
-    OutputPolicyBindingV1, PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput,
-    TimelineHistorySegment,
+    ActionSubmissionError, Driver, ObservationView, OutputPolicyBindingV1, OutputPolicySourceV1,
+    PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
 };
 use pos_store::{open_store, EventStore, StoreConfig};
 use std::{

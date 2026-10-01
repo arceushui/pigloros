@@ -612,11 +612,7 @@ fn registration_byte_ceiling_is_checked_through_the_public_inspector(
     let owner_id = OwnerIdV1::new("a".repeat(128))?;
     let shared_keys = (1..=2_048_u64)
         .map(|epoch| ArtifactKeyDependencyV1 {
-            identity: KeyIdentityV1::from_parts(
-                owner_id,
-                KeyRoleV1::SubjectDataEncryption,
-                epoch,
-            ),
+            identity: KeyIdentityV1::from_parts(owner_id, KeyRoleV1::SubjectDataEncryption, epoch),
             material_digest: Hash::from_bytes([1; 32]),
             private_material_required: true,
         })

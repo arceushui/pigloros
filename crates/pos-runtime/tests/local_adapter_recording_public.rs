@@ -68,7 +68,10 @@ impl LocalAdapterProviderV1 for EchoProvider {
             .lock()
             .expect("idempotency key lock should be available")
             .push(idempotency_key);
-        Ok(LocalAdapterProviderResponseV1::acknowledged(response, idempotency_key))
+        Ok(LocalAdapterProviderResponseV1::acknowledged(
+            response,
+            idempotency_key,
+        ))
     }
 }
 
@@ -96,7 +99,9 @@ impl LocalAdapterProviderV1 for UnacknowledgedProvider {
         _: &AdapterInvocationV1,
         _: LocalAdapterIdempotencyKeyV1,
     ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
-        Ok(LocalAdapterProviderResponseV1::unacknowledged(b"response".to_vec()))
+        Ok(LocalAdapterProviderResponseV1::unacknowledged(
+            b"response".to_vec(),
+        ))
     }
 }
 
@@ -118,10 +123,8 @@ impl AdapterRecordingStoreV1 for FailFirstCompletionStore {
         owner_reference: Hash,
         run_operation_id: Hash,
         reservation: pos_core::AdapterCallReservationV1,
-    ) -> Result<
-        pos_core::AdapterCallReservationOutcomeV1,
-        pos_core::AdapterRecordingStoreErrorV1,
-    > {
+    ) -> Result<pos_core::AdapterCallReservationOutcomeV1, pos_core::AdapterRecordingStoreErrorV1>
+    {
         self.inner
             .reserve_adapter_call(owner_reference, run_operation_id, reservation)
     }
@@ -433,12 +436,7 @@ fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it
         fail_next_completion: false,
     };
     let mut session = registry
-        .begin_local_adapter_session(
-            &admitted,
-            handle,
-            Hash::from_bytes([25; 32]),
-            &mut recorder,
-        )
+        .begin_local_adapter_session(&admitted, handle, Hash::from_bytes([25; 32]), &mut recorder)
         .expect("the provider advertises the external guarantee");
     assert_eq!(
         session.invoke(
