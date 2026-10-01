@@ -1224,7 +1224,6 @@ fn sqlite_adapter_recording_requires_its_complete_schema() -> Result<(), Box<dyn
     Ok(())
 }
 
-
 #[cfg(feature = "sqlite")]
 fn closed_sqlite_adapter_recording(
     run_operation_id: Hash,
@@ -1371,20 +1370,11 @@ fn sqlite_adapter_recording_rejects_durable_row_corruption_and_bounds(
         reservation.reserved_at_micros(),
     )?;
     assert_eq!(
-        store.reserve_adapter_call(
-            owner_reference,
-            run_operation_id,
-            over_limit_reservation,
-        ),
+        store.reserve_adapter_call(owner_reference, run_operation_id, over_limit_reservation,),
         Err(AdapterRecordingStoreErrorV1::InvalidCall)
     );
     assert_eq!(
-        store.complete_adapter_call(
-            owner_reference,
-            run_operation_id,
-            u64::MAX,
-            Vec::new(),
-        ),
+        store.complete_adapter_call(owner_reference, run_operation_id, u64::MAX, Vec::new(),),
         Err(AdapterRecordingStoreErrorV1::InvalidCall)
     );
     store.abort_adapter_recording_session(owner_reference, run_operation_id)?;
