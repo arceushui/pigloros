@@ -374,8 +374,7 @@ fn assert_canonical_closure_member_lengths(
             malformed[length_end] ^= 1;
             assert!(
                 pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-                    &malformed,
-                    members[0],
+                    &malformed, members[0],
                 )
                 .is_err()
             );
@@ -487,10 +486,7 @@ fn verified_output_policy_closure_round_trips_and_rejects_malformed_wire() -> Te
             source.retention_artifact.as_slice(),
         ],
     )?;
-    assert_canonical_closure_rejects_invalid_wire(
-        &expected_bytes,
-        &source.output_policy_bytes,
-    );
+    assert_canonical_closure_rejects_invalid_wire(&expected_bytes, &source.output_policy_bytes);
     Ok(())
 }
 
