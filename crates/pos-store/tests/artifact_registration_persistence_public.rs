@@ -1032,9 +1032,14 @@ fn sqlite_event_store_exposes_the_artifact_registration_port(
     let mut store = pos_store::sqlite::SqliteStore::open(path)?;
     let (owner_id, root_address, batch) = prepared_repro_manifest()?;
     close_repro_manifest_recording(&mut store, &batch)?;
+    let retry = batch.clone();
     assert_eq!(
         pos_core::store::EventStore::commit_artifact_registration_batch(&mut store, batch)?,
         ArtifactRegistrationCommitOutcomeV1::Applied
+    );
+    assert_eq!(
+        pos_core::store::EventStore::commit_artifact_registration_batch(&mut store, retry)?,
+        ArtifactRegistrationCommitOutcomeV1::ExactRetry
     );
     assert!(pos_core::store::EventStore::read_artifact_registration(
         &store,
@@ -1042,5 +1047,25 @@ fn sqlite_event_store_exposes_the_artifact_registration_port(
         root_address,
     )?
     .is_some());
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_catalog_commit_requires_the_complete_schema(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    let (_, _, batch) = prepared_repro_manifest()?;
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch("DROP TABLE artifact_registration_operations")?;
+    assert_eq!(
+        store.commit_artifact_registration_batch(batch),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+    );
     Ok(())
 }
