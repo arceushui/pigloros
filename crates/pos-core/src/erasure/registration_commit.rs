@@ -3,8 +3,8 @@
 use super::{
     extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
     extract_repro_manifest_root_registration_v1, inspect_artifact_registration_graph_v1,
-    ArtifactRegistrationGraphErrorV1, ArtifactRegistrationGraphNodeV1, ArtifactRegistrationV1,
-    ErasureArtifactClassV1, ReproManifestRootRegistrationInputV1,
+    ArtifactDataClassV1, ArtifactRegistrationGraphErrorV1, ArtifactRegistrationGraphNodeV1,
+    ArtifactRegistrationV1, ErasureArtifactClassV1, ReproManifestRootRegistrationInputV1,
     MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1, MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
 };
 use crate::{
@@ -57,6 +57,22 @@ pub trait ArtifactRegistrationOwnerVerifierV1 {
         artifact_class: ErasureArtifactClassV1,
         artifact_bytes: &[u8],
     ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1>;
+
+    /// Classify an optional MRM1 label using the installed owner's record policy.
+    ///
+    /// The returned class is accepted only when it is `PublicRecord` or
+    /// `StructuralAuditMetadata`. An implementation must derive the result
+    /// from the actual owner policy, not from the caller's label text.
+    ///
+    /// # Errors
+    /// Returns `Rejected` when the owner cannot classify this exact label.
+    fn classify_repro_manifest_label(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _label: &str,
+    ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+    }
 
     /// Confirm that this exact native artifact was committed by `owner_id`.
     ///
@@ -342,6 +358,7 @@ fn validate_root_catalog_row(
             admission_registration: &admission_registration,
             transcript_registration: &transcript_registration,
             owner_id: row.owner_id(),
+            label_data_class: None,
         })
         .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
     if &expected == row.registration() {
@@ -762,6 +779,16 @@ fn derive_expected_registration(
                 &admission_registration,
             )
             .map_err(|_| ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)?;
+            let label_data_class = root
+                .as_input()
+                .label
+                .as_deref()
+                .map(|label| {
+                    owner_verifier
+                        .classify_repro_manifest_label(&candidate.owner_id, label)
+                        .map_err(|_| ArtifactRegistrationPreparationErrorV1::OwnerRejected)
+                })
+                .transpose()?;
             extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
                 root_bytes: &candidate.artifact_bytes,
                 recording_receipt_bytes: &recording.artifact_bytes,
@@ -771,6 +798,7 @@ fn derive_expected_registration(
                 admission_registration: &admission_registration,
                 transcript_registration: &transcript_registration,
                 owner_id,
+                label_data_class,
             })
             .map_err(|_| ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)
         }

@@ -47,6 +47,14 @@ impl ArtifactRegistrationOwnerVerifierV1 for TestOnlyStructuralOwnerVerifier {
         .map_err(|_| ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
     }
 
+    fn classify_repro_manifest_label(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _label: &str,
+    ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        Ok(ArtifactDataClassV1::PublicRecord)
+    }
+
     fn verify_committed_artifact(
         &self,
         _owner_id: &OwnerIdV1,
@@ -83,6 +91,40 @@ impl ArtifactRegistrationOwnerVerifierV1 for RejectingTestOwnerVerifier {
     }
 }
 
+struct WrongLabelClassificationVerifier;
+
+impl ArtifactRegistrationOwnerVerifierV1 for WrongLabelClassificationVerifier {
+    fn derive_native_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        TestOnlyStructuralOwnerVerifier.derive_native_registration(
+            owner_id,
+            artifact_class,
+            artifact_bytes,
+        )
+    }
+
+    fn classify_repro_manifest_label(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _label: &str,
+    ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        Ok(ArtifactDataClassV1::AggregateData)
+    }
+
+    fn verify_committed_artifact(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _artifact_bytes: &[u8],
+        _registration: &ArtifactRegistrationV1,
+    ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+        Ok(())
+    }
+}
+
 struct RejectingNativeDerivationVerifier;
 
 impl ArtifactRegistrationOwnerVerifierV1 for RejectingNativeDerivationVerifier {
@@ -106,6 +148,12 @@ impl ArtifactRegistrationOwnerVerifierV1 for RejectingNativeDerivationVerifier {
 }
 
 fn repro_manifest_closure(
+) -> Result<(OwnerIdV1, Hash, Vec<ArtifactRegistrationInputV1>), Box<dyn std::error::Error>> {
+    repro_manifest_closure_with_label(Some("public reproducibility record"))
+}
+
+fn repro_manifest_closure_with_label(
+    label: Option<&str>,
 ) -> Result<(OwnerIdV1, Hash, Vec<ArtifactRegistrationInputV1>), Box<dyn std::error::Error>> {
     let owner_id = OwnerIdV1::from_static("wave8-local-owner");
     let owner_reference = ArtifactRegistrationV1::owner_reference(&owner_id);
@@ -146,7 +194,7 @@ fn repro_manifest_closure(
         plugin_roster_digest: Hash::from_bytes([0x47; 32]),
         adapter_transcript_digest: transcript.digest(),
         created_at_micros: 1,
-        label: Some("public reproducibility record".to_owned()),
+        label: label.map(str::to_owned),
     })?;
 
     let admission_bytes = admission.to_canonical_cbor();
@@ -174,6 +222,7 @@ fn repro_manifest_closure(
             admission_registration: &admission_registration,
             transcript_registration: &transcript_registration,
             owner_id: &owner_id,
+            label_data_class: Some(ArtifactDataClassV1::PublicRecord),
         })?;
     let root_address = root_registration.address();
     let inputs = [
@@ -211,6 +260,45 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
         .records()
         .iter()
         .any(|record| record.registration_address() == root));
+    let root_registration = prepared
+        .records()
+        .iter()
+        .find(|record| record.registration_address() == root)
+        .ok_or_else(|| std::io::Error::other("MRM1 registration was absent"))?
+        .registration();
+    assert_eq!(
+        root_registration.fields().data_class,
+        ArtifactDataClassV1::StructuralAuditMetadata
+    );
+
+    let (owner_id, root, inputs_without_label) = repro_manifest_closure_with_label(None)?;
+    let no_label_batch = prepare_artifact_registration_batch_v1(
+        owner_id,
+        root,
+        inputs_without_label,
+        &TestOnlyStructuralOwnerVerifier,
+    )?;
+    let no_label_root = no_label_batch
+        .records()
+        .iter()
+        .find(|record| record.registration_address() == root)
+        .ok_or_else(|| std::io::Error::other("unlabeled MRM1 registration was absent"))?
+        .registration();
+    assert_eq!(
+        no_label_root.fields().data_class,
+        ArtifactDataClassV1::StructuralAuditMetadata
+    );
+
+    let (owner_id, root, incorrectly_classified_label) = repro_manifest_closure()?;
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            incorrectly_classified_label,
+            &WrongLabelClassificationVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::OwnerRejected)
+    );
 
     let (owner_id, root, mut missing_admission) = repro_manifest_closure()?;
     missing_admission.retain(|candidate| {
