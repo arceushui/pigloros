@@ -1,13 +1,15 @@
 use pos_core::{
     extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
     extract_repro_manifest_root_registration_v1, prepare_artifact_registration_batch_v1,
-    AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterTranscriptInputV1, AdapterTranscriptV1,
-    ArtifactDataClassV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
+    validate_artifact_registration_catalog_graph_v1, AdapterAdmissionInputV1, AdapterAdmissionV1,
+    AdapterTranscriptInputV1, AdapterTranscriptV1, ArtifactDataClassV1,
+    ArtifactRegistrationCatalogRowV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
     ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
-    ArtifactRegistrationPreparationErrorV1, ArtifactRegistrationV1, ArtifactTransitionRuleV1,
-    ErasureArtifactClassV1, Hash, OwnerIdV1, ReproManifestRootInputV1,
-    ReproManifestRootRegistrationInputV1, ReproManifestRootV1, WorldRecordingReceiptInputV1,
-    WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
+    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPreparationErrorV1,
+    ArtifactRegistrationV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, Hash, OwnerIdV1,
+    ReproManifestRootInputV1, ReproManifestRootRegistrationInputV1, ReproManifestRootV1,
+    WorldRecordingReceiptInputV1, WorldRecordingReceiptV1, WorldReplayHandleInputV1,
+    WorldReplayHandleV1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
     MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
 };
 use ulid::Ulid;
@@ -78,6 +80,28 @@ impl ArtifactRegistrationOwnerVerifierV1 for RejectingTestOwnerVerifier {
         _registration: &ArtifactRegistrationV1,
     ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
         Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+    }
+}
+
+struct RejectingNativeDerivationVerifier;
+
+impl ArtifactRegistrationOwnerVerifierV1 for RejectingNativeDerivationVerifier {
+    fn derive_native_registration(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _artifact_class: ErasureArtifactClassV1,
+        _artifact_bytes: &[u8],
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+    }
+
+    fn verify_committed_artifact(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _artifact_bytes: &[u8],
+        _registration: &ArtifactRegistrationV1,
+    ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+        Ok(())
     }
 }
 
@@ -263,6 +287,323 @@ fn unsupported_timeline_replay_class_stays_unavailable() -> Result<(), Box<dyn s
                 registration_cbor: registration.canonical_cbor().to_vec(),
             }],
             &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::OwnerRejected)
+    );
+    Ok(())
+}
+
+#[test]
+fn persisted_registration_rows_reject_each_mismatched_identity_column(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    let batch = prepare_artifact_registration_batch_v1(
+        owner_id,
+        root,
+        inputs,
+        &TestOnlyStructuralOwnerVerifier,
+    )?;
+    let record = batch
+        .records()
+        .first()
+        .ok_or_else(|| std::io::Error::other("prepared registration was empty"))?;
+    let valid = ArtifactRegistrationCatalogRowV1::from_persisted(
+        owner_id,
+        record.artifact_class(),
+        record.artifact_digest(),
+        record.registration_address(),
+        record.artifact_bytes().to_vec(),
+        record.registration().canonical_cbor(),
+    )?;
+    assert_eq!(valid.artifact_bytes(), record.artifact_bytes());
+
+    assert_eq!(
+        ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner_id,
+            record.artifact_class(),
+            record.artifact_digest(),
+            record.registration_address(),
+            record.artifact_bytes().to_vec(),
+            b"not canonical ARD1",
+        ),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    assert_eq!(
+        ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner_id,
+            record.artifact_class(),
+            record.artifact_digest(),
+            Hash::from_bytes([0x81; 32]),
+            record.artifact_bytes().to_vec(),
+            record.registration().canonical_cbor(),
+        ),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    assert_eq!(
+        ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner_id,
+            ErasureArtifactClassV1::TimelineReplay,
+            record.artifact_digest(),
+            record.registration_address(),
+            record.artifact_bytes().to_vec(),
+            record.registration().canonical_cbor(),
+        ),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    assert_eq!(
+        ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner_id,
+            record.artifact_class(),
+            Hash::from_bytes([0x82; 32]),
+            record.registration_address(),
+            record.artifact_bytes().to_vec(),
+            record.registration().canonical_cbor(),
+        ),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    assert_eq!(
+        ArtifactRegistrationCatalogRowV1::from_persisted(
+            OwnerIdV1::from_static("another-wave8-owner"),
+            record.artifact_class(),
+            record.artifact_digest(),
+            record.registration_address(),
+            record.artifact_bytes().to_vec(),
+            record.registration().canonical_cbor(),
+        ),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    let mut changed_bytes = record.artifact_bytes().to_vec();
+    changed_bytes.push(0);
+    assert_eq!(
+        ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner_id,
+            record.artifact_class(),
+            record.artifact_digest(),
+            record.registration_address(),
+            changed_bytes,
+            record.registration().canonical_cbor(),
+        ),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+#[test]
+fn complete_native_catalog_closure_revalidates_through_the_public_port(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    let batch = prepare_artifact_registration_batch_v1(
+        owner_id,
+        root,
+        inputs,
+        &TestOnlyStructuralOwnerVerifier,
+    )?;
+    let rows: Vec<_> = batch
+        .records()
+        .iter()
+        .map(|record| {
+            ArtifactRegistrationCatalogRowV1::from_persisted(
+                *record.owner_id(),
+                record.artifact_class(),
+                record.artifact_digest(),
+                record.registration_address(),
+                record.artifact_bytes().to_vec(),
+                record.registration().canonical_cbor(),
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(rows.len(), 4);
+    validate_artifact_registration_catalog_graph_v1(root, &rows)?;
+    assert_eq!(
+        validate_artifact_registration_catalog_graph_v1(root, &rows[..rows.len() - 1]),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+#[test]
+fn registration_preparation_rejects_invalid_bytes_extraction_and_closure_shapes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            Vec::new(),
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::BoundExceeded)
+    );
+    let repeated_input = inputs
+        .first()
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("MAA1 input was absent"))?;
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            vec![repeated_input.clone(); MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1 + 1],
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::BoundExceeded)
+    );
+
+    let mut malformed_registration = inputs.clone();
+    malformed_registration[0].registration_cbor = b"not ARD1".to_vec();
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            malformed_registration,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::InvalidRegistration)
+    );
+    let mut mismatched_artifact = inputs.clone();
+    mismatched_artifact[0].artifact_bytes.push(0);
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            mismatched_artifact,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::InvalidRegistration)
+    );
+    let mut mismatched_owner = inputs.clone();
+    mismatched_owner[0].owner_id = OwnerIdV1::from_static("another-wave8-owner");
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            mismatched_owner,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::InvalidRegistration)
+    );
+
+    let mut tampered_registration = inputs.clone();
+    let admission =
+        ArtifactRegistrationV1::from_canonical_cbor(&tampered_registration[0].registration_cbor)?;
+    let mut fields = (*admission.fields()).clone();
+    fields.data_class = ArtifactDataClassV1::StructuralAuditMetadata;
+    tampered_registration[0].registration_cbor = ArtifactRegistrationV1::new(fields)?
+        .canonical_cbor()
+        .to_vec();
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            tampered_registration,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::ExtractionMismatch)
+    );
+
+    let mut unsupported_format = inputs.clone();
+    let unknown_bytes = b"unsupported ReproManifest native format".to_vec();
+    let unknown_registration = ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+        artifact_class: ErasureArtifactClassV1::ReproManifest,
+        artifact_digest: ArtifactRegistrationV1::artifact_digest(
+            ErasureArtifactClassV1::ReproManifest,
+            &unknown_bytes,
+        ),
+        owner_reference: ArtifactRegistrationV1::owner_reference(&owner_id),
+        data_class: ArtifactDataClassV1::PublicRecord,
+        optionality: pos_core::ArtifactOptionalityV1::Required,
+        transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+        required_key_roles: Vec::new(),
+        key_dependencies: Vec::new(),
+        child_artifacts: Vec::new(),
+    })?;
+    unsupported_format.push(ArtifactRegistrationInputV1 {
+        owner_id,
+        artifact_bytes: unknown_bytes,
+        registration_cbor: unknown_registration.canonical_cbor().to_vec(),
+    });
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            unsupported_format,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)
+    );
+
+    let mut duplicate_admission = inputs.clone();
+    duplicate_admission.push(repeated_input);
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            duplicate_admission,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    );
+
+    let mut extra_admission = inputs.clone();
+    let other_admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+        owner_reference: ArtifactRegistrationV1::owner_reference(&owner_id),
+        configuration_generation: 4,
+        scope_digest: Hash::from_bytes([0x83; 32]),
+        entries: Vec::new(),
+    })?;
+    let other_bytes = other_admission.to_canonical_cbor();
+    let other_registration = extract_adapter_admission_registration_v1(&other_bytes)?;
+    extra_admission.push(ArtifactRegistrationInputV1 {
+        owner_id,
+        artifact_bytes: other_bytes,
+        registration_cbor: other_registration.canonical_cbor().to_vec(),
+    });
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            extra_admission,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    );
+
+    let mut missing_recording = inputs.clone();
+    missing_recording.retain(|input| input.artifact_bytes.get(2..6) != Some(b"WCR1"));
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            missing_recording,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    );
+    let mut missing_transcript = inputs.clone();
+    missing_transcript.retain(|input| input.artifact_bytes.get(2..6) != Some(b"MAT1"));
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            missing_transcript,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    );
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            Hash::from_bytes([0x84; 32]),
+            inputs.clone(),
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    );
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            inputs,
+            &RejectingNativeDerivationVerifier,
         ),
         Err(ArtifactRegistrationPreparationErrorV1::OwnerRejected)
     );

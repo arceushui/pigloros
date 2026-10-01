@@ -302,6 +302,7 @@ pub fn completed_adapter_call_v1(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::{
