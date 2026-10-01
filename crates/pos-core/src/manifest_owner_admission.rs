@@ -22,6 +22,109 @@ pub const MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1: usize = 16_777_216;
 /// Aggregate EOP1/OPC1 native-byte bound for one owner admission transaction.
 pub const MAX_MANIFEST_OWNER_ADMISSION_NATIVE_BYTES_V1: usize =
     2 * MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1;
+/// Exact OPC1 framing member count.
+pub const OUTPUT_POLICY_CLOSURE_MEMBER_COUNT_V1: usize = 6;
+
+/// Closed failures returned while decoding one bounded OPC1 envelope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum OutputPolicyClosureEnvelopeErrorV1 {
+    /// The envelope is malformed, truncated, has extra bytes, or binds another EOP1.
+    #[error("invalid OPC1 envelope")]
+    InvalidEnvelope,
+    /// The exact envelope exceeds its accepted native-copy bound.
+    #[error("OPC1 envelope exceeds its accepted bound")]
+    BoundExceeded,
+}
+
+/// Borrowed native members from one exactly framed OPC1 closure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputPolicyClosureEnvelopeV1<'a> {
+    members: [&'a [u8]; OUTPUT_POLICY_CLOSURE_MEMBER_COUNT_V1],
+}
+
+impl<'a> OutputPolicyClosureEnvelopeV1<'a> {
+    /// Decode bounded OPC1 framing and require member zero to equal exact EOP1 bytes.
+    ///
+    /// This shared core decoder owns only the OPC1 envelope contract. Runtime
+    /// code remains responsible for validating each native member's schema.
+    ///
+    /// # Errors
+    /// Returns `BoundExceeded` for oversized input and `InvalidEnvelope` for
+    /// malformed framing, trailing bytes, or an EOP1 binding mismatch.
+    pub fn from_canonical_bytes_v1(
+        bytes: &'a [u8],
+        expected_eop1: &[u8],
+    ) -> Result<Self, OutputPolicyClosureEnvelopeErrorV1> {
+        if bytes.len() > MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1 {
+            return Err(OutputPolicyClosureEnvelopeErrorV1::BoundExceeded);
+        }
+        if bytes.get(..4) != Some(b"OPC1") {
+            return Err(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope);
+        }
+
+        let mut members = [&[][..]; OUTPUT_POLICY_CLOSURE_MEMBER_COUNT_V1];
+        let mut offset = 4_usize;
+        for member in &mut members {
+            let length_end = offset
+                .checked_add(8)
+                .ok_or(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope)?;
+            let length_bytes = bytes
+                .get(offset..length_end)
+                .ok_or(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope)?;
+            let mut raw_length = [0_u8; 8];
+            raw_length.copy_from_slice(length_bytes);
+            let length = usize::try_from(u64::from_be_bytes(raw_length))
+                .map_err(|_| OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope)?;
+            let member_end = length_end
+                .checked_add(length)
+                .ok_or(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope)?;
+            *member = bytes
+                .get(length_end..member_end)
+                .ok_or(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope)?;
+            offset = member_end;
+        }
+        if offset != bytes.len() || members[0] != expected_eop1 {
+            return Err(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope);
+        }
+        Ok(Self { members })
+    }
+
+    /// Borrow the exact EOP1 bytes in member zero.
+    #[must_use]
+    pub const fn eop1_bytes(&self) -> &'a [u8] {
+        self.members[0]
+    }
+
+    /// Borrow the exact executable-budget bytes in member one.
+    #[must_use]
+    pub const fn executable_budget_bytes(&self) -> &'a [u8] {
+        self.members[1]
+    }
+
+    /// Borrow the exact implementation artifact bytes in member two.
+    #[must_use]
+    pub const fn implementation_artifact(&self) -> &'a [u8] {
+        self.members[2]
+    }
+
+    /// Borrow the exact configuration artifact bytes in member three.
+    #[must_use]
+    pub const fn configuration_artifact(&self) -> &'a [u8] {
+        self.members[3]
+    }
+
+    /// Borrow the exact execution-profile artifact bytes in member four.
+    #[must_use]
+    pub const fn execution_profile_artifact(&self) -> &'a [u8] {
+        self.members[4]
+    }
+
+    /// Borrow the exact retention-policy artifact bytes in member five.
+    #[must_use]
+    pub const fn retention_policy_artifact(&self) -> &'a [u8] {
+        self.members[5]
+    }
+}
 
 /// Closed preparation, verification and persistence failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -858,7 +961,11 @@ fn valid_native_copy(
         && policy.fields().plugin_version == row.plugin_version
         && policy.fields().implementation_hash == row.implementation_hash
         && policy.digest() == row.eop1_native_digest
-        && valid_opc1_envelope(&copy.opc1_bytes, &copy.eop1_bytes)
+        && OutputPolicyClosureEnvelopeV1::from_canonical_bytes_v1(
+            &copy.opc1_bytes,
+            &copy.eop1_bytes,
+        )
+        .is_ok()
         && opc1_native_digest(&copy.opc1_bytes) == row.closure_hash
         && eop.scope == scope
         && opc.scope == scope
@@ -873,38 +980,6 @@ fn valid_native_copy(
         && eop.optionality == ArtifactOptionalityV1::Required
         && opc.optionality == ArtifactOptionalityV1::Required
         && eop.source_lease_hash == opc.source_lease_hash
-}
-
-fn valid_opc1_envelope(bytes: &[u8], expected_eop1: &[u8]) -> bool {
-    const OPC1_MEMBER_COUNT: usize = 6;
-    if !bytes.starts_with(b"OPC1") {
-        return false;
-    }
-    let mut offset = 4_usize;
-    for member_index in 0..OPC1_MEMBER_COUNT {
-        if offset > bytes.len().saturating_sub(8) {
-            return false;
-        }
-        let length_end = offset + 8;
-        let mut length_bytes = [0; 8];
-        length_bytes.copy_from_slice(&bytes[offset..length_end]);
-        let member_length = u64::from_be_bytes(length_bytes);
-        offset = length_end;
-        let remaining = bytes.len() - offset;
-        if member_length > remaining as u64 {
-            return false;
-        }
-        let Ok(member_length) = usize::try_from(member_length) else {
-            return false;
-        };
-        let member_end = offset + member_length;
-        let member = &bytes[offset..member_end];
-        if member_index == 0 && member != expected_eop1 {
-            return false;
-        }
-        offset = member_end;
-    }
-    offset == bytes.len()
 }
 
 fn opc1_native_digest(bytes: &[u8]) -> Hash {
