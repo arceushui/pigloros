@@ -291,6 +291,19 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
     run_operation_id: Hash,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (session, reservation) = adapter_recording_fixture(run_operation_id)?;
+    assert_invalid_adapter_recording_arguments(&session, &reservation, run_operation_id)?;
+    assert_inactive_adapter_recording_store(store, &session, &reservation, run_operation_id)?;
+    open_adapter_recording_session(store, &session, run_operation_id)?;
+    assert_invalid_adapter_call_reservations(store, &session, &reservation, run_operation_id)?;
+    let output = complete_adapter_recording_call(store, &session, &reservation, run_operation_id)?;
+    close_and_abort_adapter_recording(store, &session, &reservation, run_operation_id, output)
+}
+
+fn assert_invalid_adapter_recording_arguments(
+    session: &AdapterRecordingSessionV1,
+    reservation: &AdapterCallReservationV1,
+    run_operation_id: Hash,
+) -> Result<(), Box<dyn std::error::Error>> {
     let owner_reference = session.owner_reference();
     assert_eq!(
         AdapterCallReservationV1::new(
@@ -310,7 +323,7 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
         recorded_wall_time_micros: reservation.reserved_at_micros(),
     };
     assert_eq!(
-        close_adapter_recording_v1(&session, vec![invalid_order_call]),
+        close_adapter_recording_v1(session, vec![invalid_order_call]),
         Err(AdapterRecordingStoreErrorV1::CorruptState)
     );
     let mismatched_contract_call = AdapterTranscriptCallV1 {
@@ -329,13 +342,23 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
     })?;
     let mismatched_transcript_bytes = mismatched_transcript.to_canonical_cbor();
     assert_eq!(
-        validate_closed_adapter_recording_v1(&session, &mismatched_transcript_bytes),
+        validate_closed_adapter_recording_v1(session, &mismatched_transcript_bytes),
         Err(AdapterRecordingStoreErrorV1::CorruptState)
     );
     assert_eq!(
-        close_adapter_recording_v1(&session, vec![mismatched_contract_call]),
+        close_adapter_recording_v1(session, vec![mismatched_contract_call]),
         Err(AdapterRecordingStoreErrorV1::CorruptState)
     );
+    Ok(())
+}
+
+fn assert_inactive_adapter_recording_store<S: pos_core::store::EventStore>(
+    store: &mut S,
+    session: &AdapterRecordingSessionV1,
+    reservation: &AdapterCallReservationV1,
+    run_operation_id: Hash,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let owner_reference = session.owner_reference();
     assert_eq!(
         store.adapter_recording_close_session(owner_reference, run_operation_id),
         Err(AdapterRecordingStoreErrorV1::InvalidState)
@@ -360,7 +383,15 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
         store.adapter_recording_read_closed_session(owner_reference, run_operation_id)?,
         None
     );
+    Ok(())
+}
 
+fn open_adapter_recording_session<S: pos_core::store::EventStore>(
+    store: &mut S,
+    session: &AdapterRecordingSessionV1,
+    run_operation_id: Hash,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let owner_reference = session.owner_reference();
     store.adapter_recording_open_session(session.clone())?;
     store.adapter_recording_open_session(session.clone())?;
     let other_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
@@ -386,7 +417,16 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
         store.adapter_recording_read_closed_session(owner_reference, run_operation_id)?,
         None
     );
+    Ok(())
+}
 
+fn assert_invalid_adapter_call_reservations<S: pos_core::store::EventStore>(
+    store: &mut S,
+    session: &AdapterRecordingSessionV1,
+    reservation: &AdapterCallReservationV1,
+    run_operation_id: Hash,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let owner_reference = session.owner_reference();
     let reserved = store.adapter_recording_reserve_call(
         owner_reference,
         run_operation_id,
@@ -464,7 +504,16 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
         store.adapter_recording_close_session(owner_reference, run_operation_id),
         Err(AdapterRecordingStoreErrorV1::InvalidState)
     );
+    Ok(())
+}
 
+fn complete_adapter_recording_call<S: pos_core::store::EventStore>(
+    store: &mut S,
+    session: &AdapterRecordingSessionV1,
+    reservation: &AdapterCallReservationV1,
+    run_operation_id: Hash,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let owner_reference = session.owner_reference();
     let output = b"exact response".to_vec();
     store.adapter_recording_complete_call(owner_reference, run_operation_id, 0, output.clone())?;
     store.adapter_recording_complete_call(owner_reference, run_operation_id, 0, output.clone())?;
@@ -487,11 +536,21 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
     assert_eq!(
         store.adapter_recording_reserve_call(owner_reference, run_operation_id, completed_retry)?,
         AdapterCallReservationOutcomeV1::Completed {
-            output_bytes: output,
+            output_bytes: output.clone(),
             reserved_at_micros: 123,
         }
     );
+    Ok(output)
+}
 
+fn close_and_abort_adapter_recording<S: pos_core::store::EventStore>(
+    store: &mut S,
+    session: &AdapterRecordingSessionV1,
+    reservation: &AdapterCallReservationV1,
+    run_operation_id: Hash,
+    output: Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let owner_reference = session.owner_reference();
     let transcript = store.adapter_recording_close_session(owner_reference, run_operation_id)?;
     assert_eq!(
         store.adapter_recording_close_session(owner_reference, run_operation_id)?,
@@ -502,11 +561,11 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
         Some(transcript)
     );
     assert_eq!(
-        store.adapter_recording_open_session(session),
+        store.adapter_recording_open_session(session.clone()),
         Err(AdapterRecordingStoreErrorV1::InvalidState)
     );
     assert_eq!(
-        store.adapter_recording_reserve_call(owner_reference, run_operation_id, reservation),
+        store.adapter_recording_reserve_call(owner_reference, run_operation_id, reservation.clone()),
         Err(AdapterRecordingStoreErrorV1::InvalidState)
     );
     assert_eq!(
@@ -534,6 +593,7 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
         store.adapter_recording_read_closed_session(owner_reference, aborted_id)?,
         None
     );
+    assert_eq!(output, b"exact response");
     Ok(())
 }
 
