@@ -97,7 +97,7 @@ fn root_grant() -> CapabilityGrantV1 {
         trust_domain: "local.test".to_owned(),
         scope: ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
             resources: vec!["world".to_owned()],
-            actions: vec![DELEGATE_ACTION_V1.to_owned(), "act".to_owned()],
+            actions: vec!["act".to_owned(), DELEGATE_ACTION_V1.to_owned()],
             purposes: vec!["simulation".to_owned()],
             audiences: vec!["local-host".to_owned()],
             actor_entity_ids: vec![entity(10)],
