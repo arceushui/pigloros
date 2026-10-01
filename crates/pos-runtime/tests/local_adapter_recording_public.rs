@@ -4,8 +4,7 @@ use pos_core::{
     adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
     AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationV1, AdapterRecordingStoreV1,
     AdapterTranscriptV1, ArtifactRegistrationV1, Capability, Hash, OwnerIdV1, Plugin, PluginId,
-    TimelineId, WorldReplayHandleInputV1, WorldReplayHandleV1,
-    MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+    TimelineId, WorldReplayHandleInputV1, WorldReplayHandleV1, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 use pos_runtime::{
     LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1,
@@ -849,7 +848,6 @@ fn local_adapter_session_maps_recorder_boundaries_to_closed_errors() -> TestResu
     assert_eq!(session.abort(), Err(LocalAdapterErrorV1::RecordingFailed));
     Ok(())
 }
-
 
 #[test]
 fn local_adapter_session_enforces_public_request_and_call_bounds() -> TestResult {
