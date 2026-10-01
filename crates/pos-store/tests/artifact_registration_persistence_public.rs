@@ -1068,7 +1068,6 @@ fn sqlite_catalog_commit_requires_the_complete_schema() -> Result<(), Box<dyn st
     Ok(())
 }
 
-
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_catalog_reads_fail_closed_for_missing_and_malformed_durable_rows(
@@ -1202,8 +1201,8 @@ fn sqlite_adapter_recording_rejects_malformed_durable_state(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_adapter_recording_requires_its_complete_schema(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_adapter_recording_requires_its_complete_schema() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = tempfile::NamedTempFile::new()?;
     let path = database
         .path()

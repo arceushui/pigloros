@@ -9,8 +9,8 @@ use pos_core::{
     ArtifactRegistrationV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, Hash, OwnerIdV1,
     ReproManifestRootInputV1, ReproManifestRootRegistrationInputV1, ReproManifestRootV1,
     WorldRecordingReceiptInputV1, WorldRecordingReceiptV1, WorldReplayHandleInputV1,
-    WorldReplayHandleV1, MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
-    MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1, MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
+    WorldReplayHandleV1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
+    MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
 };
 use ulid::Ulid;
 
@@ -1160,7 +1160,6 @@ fn persisted_catalog_rejects_an_unknown_repro_manifest_format(
     Ok(())
 }
 
-
 struct RejectingCommitVerifier;
 
 impl ArtifactRegistrationOwnerVerifierV1 for RejectingCommitVerifier {
@@ -1272,10 +1271,7 @@ fn persisted_catalog_rejects_a_semantically_wrong_root_registration(
 #[test]
 fn registration_preparation_covers_registration_byte_and_native_owner_failures(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(
-        MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
-        64 * 1024 * 1024
-    );
+    assert_eq!(MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1, 64 * 1024 * 1024);
     let owner_id = OwnerIdV1::from_static("wave8-registration-byte-bound");
     assert_eq!(
         prepare_artifact_registration_batch_v1(
