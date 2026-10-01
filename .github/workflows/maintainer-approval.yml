@@ -1,0 +1,47 @@
+# Maintainer approval gate (ADR-111, Redmine #476).
+#
+# The repository has a single maintainer, and GitHub does not let a pull
+# request author approve their own pull request, so required human approvals
+# would block every maintainer PR in Trunk Merge Queue. This required check
+# replaces that approval: it passes only for pull requests opened by an
+# allowed author.
+#
+#   arceushui      — the maintainer
+#   trunk-io[bot]  — Trunk Merge Queue draft PRs, which contain only PRs that
+#                    already passed this check before admission
+#
+# pull_request_target runs this file from the base branch, never from the pull
+# request, so a fork cannot edit the gate to pass. The job reads only event
+# metadata: it does not check out code and has no token permissions.
+
+name: maintainer-approval
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: maintainer-approval-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  maintainer-approval:
+    name: maintainer-approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require an allowed pull request author
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          case "${AUTHOR}" in
+            arceushui | 'trunk-io[bot]')
+              echo "Pull request author ${AUTHOR} is allowed."
+              ;;
+            *)
+              echo "::error::Pull request author ${AUTHOR} is not an allowed author; a maintainer must merge this change."
+              exit 1
+              ;;
+          esac
