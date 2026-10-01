@@ -5,13 +5,16 @@
 //! accepts manifest bytes or provenance fields from a caller.
 
 use pos_core::{
-    EventOriginRecordV1, ForkAdmissionRecordV1, ForkAppendOperationV1, ForkAttributionOriginV1,
-    ForkInterventionAdmissionV1, ForkPublicationArtifactInputV1, ForkPublicationArtifactV1,
-    ForkPublicationBindingInputV1, ForkPublicationBindingV1, ForkPublicationOperationInputV1,
-    ForkPublicationOperationV1, ForkPublicationReceiptV1, ForkReproManifestV1, Hash, KeyIdentityV1,
-    KeyRegistryStateV1, KeyRoleV1, PublicKey, Signature, SignedForkReproManifestV1, TimelineId,
+    CoreError, EventOriginRecordV1, ForkAdmissionRecordV1, ForkAppendOperationV1,
+    ForkAttributionOriginV1, ForkInterventionAdmissionV1, ForkPublicationArtifactInputV1,
+    ForkPublicationArtifactV1, ForkPublicationBindingInputV1, ForkPublicationBindingV1,
+    ForkPublicationOperationInputV1, ForkPublicationOperationV1, ForkPublicationReceiptV1,
+    ForkReproManifestV1, Hash, KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryStateV1, KeyRoleV1,
+    PublicKey, Signature, SignedForkReproManifestV1, TimelineId,
 };
 use pos_crypto::fork_attribution::verify_local_fork_manifest_signature_only;
+
+use crate::ForkEventAuthorityErrorV1;
 
 /// Input that can be supplied by the trusted composition root for one local
 /// publication attempt.
@@ -93,11 +96,22 @@ pub struct CommittedForkManifestV1 {
 }
 
 /// Closed outcomes for local Fork-manifest publication and trusted reads.
+///
+/// Registry variants follow the ADR-099 / ADR-065 precedence: `InvalidEpoch`,
+/// `SigningRoleRequired`, `RegistryUnavailable` or `RegistryChanged`,
+/// `NotFound`, `Destroyed`, `DestructionPending`, `InactiveKey`, then
+/// `SigningKeyMismatch`; creator/head/provenance errors follow them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ForkManifestPublicationErrorV1 {
-    /// The caller did not provide a valid local publication request.
+    /// The caller did not provide a nonzero publication operation ID.
     #[error("invalid Fork-manifest publication request")]
     InvalidRequest,
+    /// The requested signing epoch is zero.
+    #[error("Fork-manifest signing epoch zero is reserved")]
+    InvalidEpoch,
+    /// The requested role is not exactly `SubjectAttributionSigning`.
+    #[error("Fork-manifest signing requires the attribution-signing role")]
+    SigningRoleRequired,
     /// The durable key registry is unavailable or malformed.
     #[error("Fork-manifest registry is unavailable")]
     RegistryUnavailable,
@@ -123,23 +137,48 @@ pub enum ForkManifestPublicationErrorV1 {
     #[error("Fork-manifest creator does not match the admitted Fork")]
     PrincipalOwnerConflict,
     /// The requested final Fork head no longer matches durable state.
-    #[error("Fork-manifest final head changed")]
-    HeadChanged,
+    #[error("Fork-manifest final sequence or head changed")]
+    SequenceOrHeadChanged,
     /// The synchronous signer failed or returned an invalid signature.
     #[error("Fork-manifest signing failed")]
     SigningFailed,
     /// A stable operation ID or Fork/head binding was reused unequally.
     #[error("Fork-manifest publication conflicts with committed state")]
     Conflict,
-    /// The sidecar graph or its authoritative sources are incomplete or unequal.
-    #[error("Fork-manifest publication authority is corrupt")]
+    /// An authoritative Fork provenance source for new issuance is absent,
+    /// malformed, or cannot produce a valid publication graph.
+    #[error("Fork-manifest provenance authority is corrupt")]
     CorruptAuthority,
+    /// Recovery found a partial, orphaned, or unequal publication graph.
+    #[error("Fork-manifest publication graph is corrupt or conflicting")]
+    CorruptOrConflicting,
     /// No committed sidecar exists for the requested Fork and logical head.
     #[error("Fork-manifest publication is missing")]
     PublicationMissing,
+    /// A trusted read found a missing join, extra row, invalid origin,
+    /// noncanonical record, missing retained key, invalid signature, or
+    /// unequal recomputed field.
+    #[error("Fork-manifest publication conflicts with its trusted sources")]
+    PublicationConflict,
     /// The adapter cannot determine whether its transaction committed.
     #[error("Fork-manifest publication storage outcome is indeterminate")]
     StorageIndeterminate,
+}
+
+impl From<KeyRegistryErrorV1> for ForkManifestPublicationErrorV1 {
+    /// Map ADR-065 active-signing authorization failures one-to-one.
+    fn from(error: KeyRegistryErrorV1) -> Self {
+        match error {
+            KeyRegistryErrorV1::InvalidEpoch => Self::InvalidEpoch,
+            KeyRegistryErrorV1::SigningRoleRequired => Self::SigningRoleRequired,
+            KeyRegistryErrorV1::NotFound => Self::NotFound,
+            KeyRegistryErrorV1::Destroyed => Self::Destroyed,
+            KeyRegistryErrorV1::DestructionPending => Self::DestructionPending,
+            KeyRegistryErrorV1::InactiveKey => Self::InactiveKey,
+            KeyRegistryErrorV1::SigningKeyMismatch => Self::SigningKeyMismatch,
+            _ => Self::RegistryUnavailable,
+        }
+    }
 }
 
 /// Purpose-specific local publication and trusted-sidecar read port.
@@ -175,6 +214,9 @@ pub trait ForkManifestPublicationPortV1 {
 /// Result of one adapter-independent publication step.
 type PublicationResultV1<T> = Result<T, ForkManifestPublicationErrorV1>;
 
+/// Result of one adapter read of an authoritative publication source.
+pub(crate) type PublicationSourceResultV1<T> = Result<T, PublicationSourceErrorV1>;
+
 /// One child suffix row: Event origin, optional intervention, append operation.
 pub(crate) type PublicationSuffixV1 = Vec<(
     EventOriginRecordV1,
@@ -182,9 +224,63 @@ pub(crate) type PublicationSuffixV1 = Vec<(
     ForkAppendOperationV1,
 )>;
 
-/// Authoritative sources an adapter read under its publication transaction.
+/// Classified failure of one authoritative source read: a storage failure
+/// stays indeterminate, every other failure is a conflict for its caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PublicationSourceErrorV1 {
+    /// The adapter could not read the stored value.
+    Storage,
+    /// The stored value is absent, malformed, or unequal.
+    Invalid,
+}
+
+impl PublicationSourceErrorV1 {
+    const fn classify(
+        self,
+        invalid: ForkManifestPublicationErrorV1,
+    ) -> ForkManifestPublicationErrorV1 {
+        match self {
+            Self::Storage => ForkManifestPublicationErrorV1::StorageIndeterminate,
+            Self::Invalid => invalid,
+        }
+    }
+
+    /// A new issuance cannot read a valid Fork provenance source.
+    pub(crate) const fn into_corrupt_authority(self) -> ForkManifestPublicationErrorV1 {
+        self.classify(ForkManifestPublicationErrorV1::CorruptAuthority)
+    }
+
+    /// A new issuance cannot read a valid durable key registry.
+    pub(crate) const fn into_registry_unavailable(self) -> ForkManifestPublicationErrorV1 {
+        self.classify(ForkManifestPublicationErrorV1::RegistryUnavailable)
+    }
+
+    /// A trusted read cannot obtain one of its comparison sources.
+    pub(crate) const fn into_publication_conflict(self) -> ForkManifestPublicationErrorV1 {
+        self.classify(ForkManifestPublicationErrorV1::PublicationConflict)
+    }
+}
+
+impl From<CoreError> for PublicationSourceErrorV1 {
+    fn from(error: CoreError) -> Self {
+        match error {
+            CoreError::Storage(_) | CoreError::StorageOutcomeUnknown(_) => Self::Storage,
+            _ => Self::Invalid,
+        }
+    }
+}
+
+impl From<ForkEventAuthorityErrorV1> for PublicationSourceErrorV1 {
+    fn from(error: ForkEventAuthorityErrorV1) -> Self {
+        match error {
+            ForkEventAuthorityErrorV1::StorageIndeterminate => Self::Storage,
+            _ => Self::Invalid,
+        }
+    }
+}
+
+/// Authoritative Fork sources validated for one new issuance.
 pub(crate) struct PublicationSourcesV1 {
-    registry: KeyRegistryStateV1,
     admission: ForkAdmissionRecordV1,
     final_chain_head_hash: Hash,
     manifest: ForkReproManifestV1,
@@ -198,27 +294,72 @@ pub(crate) struct PublicationGraphV1 {
     pub(crate) receipt: ForkPublicationReceiptV1,
 }
 
-/// Committed rows plus the trusted sources an adapter read for one Fork/head.
-pub(crate) struct CommittedPublicationSourcesV1<'a> {
+/// Committed rows an adapter joined for one Fork/head lookup key.
+pub(crate) struct CommittedPublicationRowsV1 {
     pub(crate) child_timeline_id: TimelineId,
     pub(crate) final_logical_head: u64,
     pub(crate) binding: ForkPublicationBindingV1,
     pub(crate) operation: ForkPublicationOperationV1,
     pub(crate) artifact: ForkPublicationArtifactV1,
-    pub(crate) admission: &'a ForkAdmissionRecordV1,
-    pub(crate) final_chain_head_hash: Hash,
-    pub(crate) registry: Option<&'a KeyRegistryStateV1>,
 }
 
-/// Reject a request that cannot name a local attribution-signing operation.
+/// Trusted sources an adapter read under the same snapshot as the rows.
+pub(crate) struct CommittedPublicationSourcesV1 {
+    pub(crate) admission: PublicationSourceResultV1<ForkAdmissionRecordV1>,
+    pub(crate) final_chain_head_hash: PublicationSourceResultV1<Hash>,
+    pub(crate) suffix: PublicationSourceResultV1<PublicationSuffixV1>,
+    pub(crate) registry: PublicationSourceResultV1<Option<KeyRegistryStateV1>>,
+}
+
+/// Comparison sources a trusted read obtained successfully.
+struct TrustedPublicationSourcesV1 {
+    admission: ForkAdmissionRecordV1,
+    final_chain_head_hash: Hash,
+    intervention_sequences: Vec<u64>,
+    registry: Option<KeyRegistryStateV1>,
+}
+
+/// ADR-099 step 1: reject zero epoch, then any role other than exactly
+/// `SubjectAttributionSigning`, then a zero operation ID, before any
+/// transaction begins.
 pub(crate) fn validate_publication_request(
     request: &ForkManifestPublicationRequestV1,
 ) -> PublicationResultV1<()> {
-    (request.operation_id != Hash::zero()
-        && request.signing_identity.role == KeyRoleV1::SubjectAttributionSigning
-        && request.signing_identity.epoch != 0)
+    let identity = request.signing_identity;
+    if identity.epoch == 0 {
+        return Err(ForkManifestPublicationErrorV1::InvalidEpoch);
+    }
+    if identity.role != KeyRoleV1::SubjectAttributionSigning {
+        return Err(ForkManifestPublicationErrorV1::SigningRoleRequired);
+    }
+    (request.operation_id != Hash::zero())
         .then_some(())
         .ok_or(ForkManifestPublicationErrorV1::InvalidRequest)
+}
+
+/// ADR-099 recovery preflight for an absent `FPO1`: a binding or artifact
+/// that already references the operation ID is an orphan, and an occupied
+/// Fork/head binding belongs to another operation.
+pub(crate) const fn require_absent_publication_graph(
+    operation_is_referenced: bool,
+    binding_is_occupied: bool,
+) -> PublicationResultV1<()> {
+    if operation_is_referenced {
+        return Err(ForkManifestPublicationErrorV1::CorruptOrConflicting);
+    }
+    if binding_is_occupied {
+        return Err(ForkManifestPublicationErrorV1::Conflict);
+    }
+    Ok(())
+}
+
+/// A trusted-read failure during recovery is a corrupt or conflicting graph
+/// unless storage itself is indeterminate.
+const fn recovery_error(error: ForkManifestPublicationErrorV1) -> ForkManifestPublicationErrorV1 {
+    match error {
+        ForkManifestPublicationErrorV1::StorageIndeterminate => error,
+        _ => ForkManifestPublicationErrorV1::CorruptOrConflicting,
+    }
 }
 
 /// ADR-099 recovery: an existing `FPO1` must carry the exact durable request
@@ -245,44 +386,83 @@ pub(crate) fn recovered_publication_receipt(
     ) {
         return Err(ForkManifestPublicationErrorV1::Conflict);
     }
-    committed
-        .ok()
-        .filter(|committed| committed.operation == *operation)
-        .map(|committed| committed.receipt)
-        .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
+    committed.map_err(recovery_error).and_then(|committed| {
+        (committed.operation == *operation)
+            .then_some(committed.receipt)
+            .ok_or(ForkManifestPublicationErrorV1::CorruptOrConflicting)
+    })
 }
 
-/// Check the expected registry, admitted creator, and final head, then derive
-/// `FRM1` only from the adapter's authoritative Fork sources.
+/// ADR-099 step 2: require the durable registry read inside the publisher
+/// transaction to equal the expected snapshot, then run ADR-065's complete
+/// active signing authorization before any Fork provenance is read.
+pub(crate) fn authorize_publication(
+    request: &ForkManifestPublicationRequestV1,
+    registry: PublicationSourceResultV1<Option<KeyRegistryStateV1>>,
+) -> PublicationResultV1<HeldRegistryAuthorizationV1> {
+    registry
+        .map_err(PublicationSourceErrorV1::into_registry_unavailable)
+        .and_then(|registry| registry.ok_or(ForkManifestPublicationErrorV1::RegistryUnavailable))
+        .and_then(|registry| {
+            (registry == request.expected_registry)
+                .then_some(registry)
+                .ok_or(ForkManifestPublicationErrorV1::RegistryChanged)
+        })
+        .and_then(|mut registry| {
+            registry
+                .with_signing_authorization(
+                    request.signing_identity,
+                    request.private_material_digest,
+                    request.public_verification_key,
+                    || (),
+                )
+                .map_err(ForkManifestPublicationErrorV1::from)
+        })
+        .map(|()| {
+            HeldRegistryAuthorizationV1::new(
+                request.signing_identity,
+                request.private_material_digest,
+                request.public_verification_key,
+            )
+        })
+}
+
+/// ADR-099 step 3: after authorization, check the admitted creator and final
+/// head, then derive `FRM1` only from the adapter's authoritative sources.
 pub(crate) fn publication_sources(
     request: &ForkManifestPublicationRequestV1,
-    registry: Option<KeyRegistryStateV1>,
-    admission: Option<ForkAdmissionRecordV1>,
-    head_and_chain: Option<(u64, Hash)>,
-    suffix: Option<PublicationSuffixV1>,
+    admission: PublicationSourceResultV1<ForkAdmissionRecordV1>,
+    head_and_chain: PublicationSourceResultV1<(u64, Hash)>,
+    suffix: PublicationSourceResultV1<PublicationSuffixV1>,
 ) -> PublicationResultV1<PublicationSourcesV1> {
-    let registry = registry.ok_or(ForkManifestPublicationErrorV1::RegistryUnavailable)?;
-    if registry != request.expected_registry {
-        return Err(ForkManifestPublicationErrorV1::RegistryChanged);
-    }
-    let ((admission, (head, chain)), suffix) = admission
-        .zip(head_and_chain)
-        .zip(suffix)
-        .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)?;
+    admission
+        .and_then(|admission| head_and_chain.map(|head_and_chain| (admission, head_and_chain)))
+        .and_then(|(admission, head_and_chain)| {
+            suffix.map(|suffix| (admission, head_and_chain, suffix))
+        })
+        .map_err(PublicationSourceErrorV1::into_corrupt_authority)
+        .and_then(|(admission, (head, chain), suffix)| {
+            bind_publication_sources(request, admission, head, chain, suffix)
+        })
+}
+
+fn bind_publication_sources(
+    request: &ForkManifestPublicationRequestV1,
+    admission: ForkAdmissionRecordV1,
+    head: u64,
+    chain: Hash,
+    suffix: PublicationSuffixV1,
+) -> PublicationResultV1<PublicationSourcesV1> {
     if admission.input().creator != request.signing_identity.owner_id {
         return Err(ForkManifestPublicationErrorV1::PrincipalOwnerConflict);
     }
     if head != request.expected_final_logical_head {
-        return Err(ForkManifestPublicationErrorV1::HeadChanged);
+        return Err(ForkManifestPublicationErrorV1::SequenceOrHeadChanged);
     }
-    let interventions = suffix
-        .into_iter()
-        .filter_map(|(origin, intervention, _)| intervention.map(|_| origin.input().logical_seq))
-        .collect();
+    let interventions = intervention_sequences(suffix, head);
     ForkReproManifestV1::from_admission(&admission, interventions, head, chain)
         .ok()
         .map(|manifest| PublicationSourcesV1 {
-            registry,
             admission,
             final_chain_head_hash: chain,
             manifest,
@@ -290,10 +470,22 @@ pub(crate) fn publication_sources(
         .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
 }
 
-/// Invoke the signer exactly once under the held registry authorization,
-/// verify its signature, and derive the complete sidecar graph.
+/// The ordered classified intervention sequences at or below a final head.
+fn intervention_sequences(suffix: PublicationSuffixV1, final_logical_head: u64) -> Vec<u64> {
+    suffix
+        .into_iter()
+        .filter_map(|(origin, intervention, _)| intervention.map(|_| origin.input().logical_seq))
+        .filter(|sequence| *sequence <= final_logical_head)
+        .collect()
+}
+
+/// ADR-099 steps 4-7: invoke the signer exactly once with the held
+/// authorization, verify its signature, and derive the complete graph.
+/// Only the callback's own failure or an unverifiable signature is
+/// `SigningFailed`.
 pub(crate) fn sign_publication<E, F>(
     request: &ForkManifestPublicationRequestV1,
+    authorization: &HeldRegistryAuthorizationV1,
     sources: PublicationSourcesV1,
     sign: F,
 ) -> PublicationResultV1<PublicationGraphV1>
@@ -301,36 +493,24 @@ where
     F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>,
 {
     let PublicationSourcesV1 {
-        mut registry,
         admission,
         final_chain_head_hash,
         manifest,
     } = sources;
-    let authorization = HeldRegistryAuthorizationV1::new(
-        request.signing_identity,
-        request.private_material_digest,
-        request.public_verification_key,
-    );
     SignedForkReproManifestV1::new(
-        request.signing_identity,
+        authorization.identity(),
         manifest,
         Signature::from_bytes([0; 64]),
     )
     .ok()
     .and_then(|unsigned| {
-        registry
-            .with_signing_authorization(
-                request.signing_identity,
-                request.private_material_digest,
-                request.public_verification_key,
-                || sign(&authorization, &unsigned.manifest_bytes()),
-            )
+        sign(authorization, &unsigned.manifest_bytes())
             .ok()
-            .and_then(Result::ok)
             .map(|signature| unsigned.with_signature(signature))
     })
     .filter(|signed| {
-        verify_local_fork_manifest_signature_only(signed, request.public_verification_key).is_ok()
+        verify_local_fork_manifest_signature_only(signed, authorization.public_verification_key())
+            .is_ok()
     })
     .ok_or(ForkManifestPublicationErrorV1::SigningFailed)
     .and_then(|signed| publication_graph(request, &admission, final_chain_head_hash, &signed))
@@ -385,48 +565,79 @@ fn publication_graph(
 }
 
 /// ADR-099 trusted read over one committed graph and its trusted sources.
+///
+/// Besides the `FPO1` source table, the signed `FRM1` intervention vector
+/// must equal the durable classified intervention rows at or below the
+/// published head.
 pub(crate) fn trusted_committed_manifest(
-    sources: &CommittedPublicationSourcesV1<'_>,
+    rows: &CommittedPublicationRowsV1,
+    sources: CommittedPublicationSourcesV1,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
-    let outer_bytes = &sources.artifact.input().signed_manifest_bytes;
+    let CommittedPublicationSourcesV1 {
+        admission,
+        final_chain_head_hash,
+        suffix,
+        registry,
+    } = sources;
+    admission
+        .and_then(|admission| final_chain_head_hash.map(|chain| (admission, chain)))
+        .and_then(|(admission, chain)| suffix.map(|suffix| (admission, chain, suffix)))
+        .and_then(|(admission, chain, suffix)| {
+            registry.map(|registry| TrustedPublicationSourcesV1 {
+                admission,
+                final_chain_head_hash: chain,
+                intervention_sequences: intervention_sequences(suffix, rows.final_logical_head),
+                registry,
+            })
+        })
+        .map_err(PublicationSourceErrorV1::into_publication_conflict)
+        .and_then(|trusted| verified_committed_manifest(rows, &trusted))
+}
+
+fn verified_committed_manifest(
+    rows: &CommittedPublicationRowsV1,
+    trusted: &TrustedPublicationSourcesV1,
+) -> PublicationResultV1<CommittedForkManifestV1> {
+    let outer_bytes = &rows.artifact.input().signed_manifest_bytes;
     SignedForkReproManifestV1::from_canonical_cbor(outer_bytes)
         .ok()
         .filter(|signed| {
-            committed_graph_is_consistent(sources, signed)
+            committed_graph_is_consistent(rows, trusted, signed)
                 && verify_local_fork_manifest_signature_only(
                     signed,
-                    sources.operation.input().public_verification_key,
+                    rows.operation.input().public_verification_key,
                 )
                 .is_ok()
         })
         .and_then(|signed| {
-            ForkPublicationReceiptV1::from_records(&sources.operation, &sources.binding)
+            ForkPublicationReceiptV1::from_records(&rows.operation, &rows.binding)
                 .ok()
                 .map(|receipt| CommittedForkManifestV1 {
                     receipt,
-                    operation: sources.operation.clone(),
-                    binding: sources.binding,
+                    operation: rows.operation.clone(),
+                    binding: rows.binding,
                     record_id: signed.record_id(),
                     outer_bytes: outer_bytes.clone(),
                 })
         })
-        .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
+        .ok_or(ForkManifestPublicationErrorV1::PublicationConflict)
 }
 
 /// Enforce every cross-record and FPO1 source-table equality.
 fn committed_graph_is_consistent(
-    sources: &CommittedPublicationSourcesV1<'_>,
+    rows: &CommittedPublicationRowsV1,
+    trusted: &TrustedPublicationSourcesV1,
     signed: &SignedForkReproManifestV1,
 ) -> bool {
     let record_id = signed.record_id();
-    let binding = sources.binding.input();
-    let operation = sources.operation.input();
-    let artifact = sources.artifact.input();
+    let binding = rows.binding.input();
+    let operation = rows.operation.input();
+    let artifact = rows.artifact.input();
     let manifest = signed.manifest().input();
     let lookup = (
-        sources.child_timeline_id,
-        sources.final_logical_head,
-        sources.final_chain_head_hash,
+        rows.child_timeline_id,
+        rows.final_logical_head,
+        trusted.final_chain_head_hash,
     );
     (
         binding.child_timeline_id,
@@ -447,10 +658,13 @@ fn committed_graph_is_consistent(
         && (artifact.operation_id, artifact.signed_manifest_record_id)
             == (operation.operation_id, record_id)
         && operation.signed_manifest_record_id == record_id
-        && operation.admission_digest == sources.admission.digest()
+        && operation.admission_digest == trusted.admission.digest()
         && signed.identity() == operation.signing_identity
-        && signed.validate_against_admission(sources.admission).is_ok()
-        && retained_key_is_consistent(sources.registry, operation)
+        && signed
+            .validate_against_admission(&trusted.admission)
+            .is_ok()
+        && manifest.intervention_sequences == trusted.intervention_sequences
+        && retained_key_is_consistent(trusted.registry.as_ref(), operation)
 }
 
 /// The retained exact-identity key must keep the FPO1 public key, and its
@@ -470,4 +684,108 @@ fn retained_key_is_consistent(
                 tombstone.destroyed_material_digest == operation.private_material_digest
             }))
     })
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use pos_core::{CoreError, KeyRegistryErrorV1};
+
+    use super::{
+        recovery_error, ForkManifestPublicationErrorV1 as PublicationError,
+        PublicationSourceErrorV1 as SourceError,
+    };
+    use crate::ForkEventAuthorityErrorV1;
+
+    #[test]
+    fn registry_authorization_errors_map_one_to_one() {
+        for (registry, expected) in [
+            (
+                KeyRegistryErrorV1::InvalidEpoch,
+                PublicationError::InvalidEpoch,
+            ),
+            (
+                KeyRegistryErrorV1::SigningRoleRequired,
+                PublicationError::SigningRoleRequired,
+            ),
+            (
+                KeyRegistryErrorV1::RegistryUnavailable,
+                PublicationError::RegistryUnavailable,
+            ),
+            (KeyRegistryErrorV1::NotFound, PublicationError::NotFound),
+            (KeyRegistryErrorV1::Destroyed, PublicationError::Destroyed),
+            (
+                KeyRegistryErrorV1::DestructionPending,
+                PublicationError::DestructionPending,
+            ),
+            (
+                KeyRegistryErrorV1::InactiveKey,
+                PublicationError::InactiveKey,
+            ),
+            (
+                KeyRegistryErrorV1::SigningKeyMismatch,
+                PublicationError::SigningKeyMismatch,
+            ),
+            (
+                KeyRegistryErrorV1::InvalidState,
+                PublicationError::RegistryUnavailable,
+            ),
+        ] {
+            assert_eq!(PublicationError::from(registry), expected);
+        }
+    }
+
+    #[test]
+    fn source_errors_keep_storage_indeterminate() {
+        assert_eq!(
+            SourceError::from(CoreError::Storage(String::new())),
+            SourceError::Storage
+        );
+        assert_eq!(
+            SourceError::from(CoreError::StorageOutcomeUnknown(String::new())),
+            SourceError::Storage
+        );
+        assert_eq!(
+            SourceError::from(CoreError::ArtifactUnavailable),
+            SourceError::Invalid
+        );
+        assert_eq!(
+            SourceError::from(ForkEventAuthorityErrorV1::StorageIndeterminate),
+            SourceError::Storage
+        );
+        assert_eq!(
+            SourceError::from(ForkEventAuthorityErrorV1::CorruptAuthority),
+            SourceError::Invalid
+        );
+        for (source, corrupt, registry, conflict) in [
+            (
+                SourceError::Storage,
+                PublicationError::StorageIndeterminate,
+                PublicationError::StorageIndeterminate,
+                PublicationError::StorageIndeterminate,
+            ),
+            (
+                SourceError::Invalid,
+                PublicationError::CorruptAuthority,
+                PublicationError::RegistryUnavailable,
+                PublicationError::PublicationConflict,
+            ),
+        ] {
+            assert_eq!(source.into_corrupt_authority(), corrupt);
+            assert_eq!(source.into_registry_unavailable(), registry);
+            assert_eq!(source.into_publication_conflict(), conflict);
+        }
+    }
+
+    #[test]
+    fn recovery_keeps_only_storage_indeterminate() {
+        assert_eq!(
+            recovery_error(PublicationError::StorageIndeterminate),
+            PublicationError::StorageIndeterminate
+        );
+        assert_eq!(
+            recovery_error(PublicationError::PublicationConflict),
+            PublicationError::CorruptOrConflicting
+        );
+    }
 }
