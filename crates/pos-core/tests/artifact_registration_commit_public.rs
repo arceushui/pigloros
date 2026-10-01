@@ -1114,6 +1114,7 @@ fn persisted_catalog_rejects_a_semantically_wrong_transcript_registration(
         &root,
         transcript.registration_address(),
         changed_transcript.address(),
+        transcript.artifact_digest(),
     )?;
     fixture.rows[root_index] = catalog_row_with_registration(&root, changed_root.clone())?;
 
@@ -1149,6 +1150,7 @@ fn persisted_catalog_rejects_an_unknown_repro_manifest_format(
         &root,
         transcript.registration_address(),
         changed_transcript.address(),
+        transcript.artifact_digest(),
     )?;
     fixture.rows[root_index] = catalog_row_with_registration(&root, changed_root.clone())?;
 
