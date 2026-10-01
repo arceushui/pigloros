@@ -57,6 +57,14 @@ impl ArtifactRegistrationOwnerVerifierV1 for TestOnlyStructuralOwnerVerifier {
         .map_err(|_| ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
     }
 
+    fn classify_repro_manifest_label(
+        &self,
+        _owner_id: &OwnerIdV1,
+        _label: &str,
+    ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        Ok(ArtifactDataClassV1::PublicRecord)
+    }
+
     fn verify_committed_artifact(
         &self,
         _owner_id: &OwnerIdV1,
@@ -141,6 +149,7 @@ fn prepared_repro_manifest() -> Result<
             admission_registration: &admission_registration,
             transcript_registration: &transcript_registration,
             owner_id: &owner_id,
+            label_data_class: Some(ArtifactDataClassV1::PublicRecord),
         })?;
     let root_address = root_registration.address();
     let inputs = [
