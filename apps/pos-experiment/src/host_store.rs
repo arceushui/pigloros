@@ -162,7 +162,7 @@ impl HostedExperimentStore {
     /// Run one scheduled-admission operation on the host-owned store.
     fn with_admission<T>(
         &self,
-        operation: impl FnOnce(&mut dyn pos_runtime::ScheduledAdmissionStoreV1) -> T,
+        operation: impl FnOnce(&mut dyn pos_runtime::ScheduledAdmissionPortsV1) -> T,
     ) -> Result<T, CoreError> {
         self.with_host(|host| {
             host.command_sender()

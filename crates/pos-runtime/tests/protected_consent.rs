@@ -61,7 +61,6 @@ fn admit(
     revisions: PipelineSecurityRevisionsV1,
     commit_head: Seq,
     commit_now_secs: u64,
-    drafts: &[EventDraft],
 ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
     test_ok(LocalScheduledAdmissionHostV1::shared()).admit(
         registry,
@@ -69,7 +68,6 @@ fn admit(
         revisions,
         commit_head,
         commit_now_secs,
-        drafts,
     )
 }
 
@@ -632,7 +630,6 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
         revisions,
         Seq::from_u64(1),
         2,
-        &drafts,
     ));
     assert!(matches!(
         error,
@@ -869,14 +866,7 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
     let revisions = observe(&registry, &mut store, timeline);
     let drafts = test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
-    let error = test_err(admit(
-        &mut registry,
-        &mut store,
-        revisions,
-        Seq::ZERO,
-        2,
-        &drafts,
-    ));
+    let error = test_err(admit(&mut registry, &mut store, revisions, Seq::ZERO, 2));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::Expired)
@@ -911,15 +901,9 @@ fn protected_append_fence_rejects_before_store_append() {
     let revisions = observe(&registry, &mut store, timeline.id());
     let drafts =
         test_ok(registry.step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 1, &[]));
+    assert_eq!(drafts.len(), 1);
 
-    let error = test_err(admit(
-        &mut registry,
-        &mut store,
-        revisions,
-        Seq::ZERO,
-        2,
-        &drafts,
-    ));
+    let error = test_err(admit(&mut registry, &mut store, revisions, Seq::ZERO, 2));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::Expired)
@@ -1030,15 +1014,8 @@ fn protected_cadenced_public_seam_stages_and_commits() {
         test_ok(registry.tick_cadenced_anchored_protected(timeline, 0, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
     let receipt = test_ok(
-        test_ok(admit(
-            &mut registry,
-            &mut store,
-            revisions,
-            Seq::ZERO,
-            1,
-            &drafts,
-        ))
-        .ok_or("expected a committed batch"),
+        test_ok(admit(&mut registry, &mut store, revisions, Seq::ZERO, 1))
+            .ok_or("expected a committed batch"),
     );
     assert_eq!(receipt.committed_events().len(), 1);
     assert_eq!(test_ok(store.logical_head(timeline)), Seq::from_u64(1));
@@ -1255,6 +1232,7 @@ fn public_registry_rechecks_revocation_when_committing() {
     );
     let revisions = observe(&revoked, &mut store, timeline);
     let drafts = test_ok(revoked.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
+    assert_eq!(drafts.len(), 1);
     test_ok(authority.record_revocation_on_timeline(
         timeline,
         &pos_core::ConsentRevokedV1 {
@@ -1271,7 +1249,6 @@ fn public_registry_rechecks_revocation_when_committing() {
             revisions,
             Seq::from_u64(1),
             2,
-            &drafts,
         )),
         RuntimeError::Consent(ConsentError::Revoked)
     ));
@@ -1526,7 +1503,6 @@ fn public_registry_requires_a_gate_for_protected_admission() {
             revisions,
             Seq::ZERO,
             0,
-            &[],
         ),
         Err(RuntimeError::ConsentOperationUnavailable)
     ));
@@ -1547,7 +1523,6 @@ fn public_registry_requires_a_gate_for_public_admission() {
             revisions,
             Seq::ZERO,
             0,
-            &[],
         ),
         Err(RuntimeError::ConsentOperationUnavailable)
     ));
@@ -1958,14 +1933,136 @@ fn public_registry_commits_and_admits_empty_anchored_steps() {
     let mut admitted = PluginRegistry::new();
     let revisions = observe(&admitted, &mut store, timeline.id());
     test_ok(admitted.step_all_anchored(timeline.id(), Seq::ZERO));
-    assert!(test_ok(admit(
-        &mut admitted,
-        &mut store,
+    assert!(test_ok(admit(&mut admitted, &mut store, revisions, Seq::ZERO, 0)).is_none());
+    assert_eq!(test_ok(store.logical_head(timeline.id())), Seq::ZERO);
+}
+
+/// Admission ports that lose a scheduled pass's outcome before the store
+/// commits it.
+struct LostOutcomePorts<'a>(&'a mut MemoryStore);
+
+impl pos_core::PipelineAdmissionPortV1 for LostOutcomePorts<'_> {
+    fn admit_pipeline_batch(
+        &mut self,
+        _: &pos_core::PipelineAdmissionBasisV1,
+    ) -> Result<pos_core::PipelineOutcomeV1, pos_core::CoreError> {
+        Err(pos_core::CoreError::StorageOutcomeUnknown(
+            "injected lost admission outcome".to_owned(),
+        ))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<pos_core::store::PurgeOutcome, pos_core::CoreError> {
+        pos_core::PipelineAdmissionPortV1::purge_expired_pipeline_receipts_bounded(
+            &mut *self.0,
+            limit,
+        )
+    }
+}
+
+impl pos_core::PipelineAdmissionFencePublisherV1 for LostOutcomePorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn set_pipeline_admission_fence(
+        &mut self,
+        timeline: TimelineId,
+        fence: pos_core::PipelineAdmissionFenceV1,
+    ) -> Result<(), pos_core::CoreError> {
+        pos_core::PipelineAdmissionFencePublisherV1::set_pipeline_admission_fence(
+            &mut *self.0,
+            timeline,
+            fence,
+        )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn pipeline_admission_fence(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::PipelineAdmissionFenceV1>, pos_core::CoreError> {
+        pos_core::PipelineAdmissionFencePublisherV1::pipeline_admission_fence(&*self.0, timeline)
+    }
+}
+
+impl pos_core::AuthorityPersistencePortV1 for LostOutcomePorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bind_authority_persistence(
+        &mut self,
+        binding: pos_core::AuthorityPersistenceBindingV1,
+    ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+        pos_core::AuthorityPersistencePortV1::bind_authority_persistence(&mut *self.0, binding)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn issue_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        grant: &pos_core::CapabilityGrantV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1> {
+        pos_core::AuthorityPersistencePortV1::issue_capability_grant(&mut *self.0, permit, grant)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revoke_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        revocation: &pos_core::CapabilityRevocationV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1> {
+        pos_core::AuthorityPersistencePortV1::revoke_capability_grant(
+            &mut *self.0,
+            permit,
+            revocation,
+        )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authority(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
+        pos_core::AuthorityPersistencePortV1::load_authority(&*self.0, leaf_grant_id)
+    }
+}
+
+/// Recovery of an in-doubt protected pass resubmits inside the consent token
+/// fence, so it fails closed once the consent gate is unbound.
+#[test]
+fn protected_recovery_fails_closed_after_the_consent_gate_is_unbound() {
+    let mut store = admission_store();
+    let timeline = test_ok(store.create_timeline("protected-recovery-missing-gate")).id();
+    let subject = EntityId::new();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(timeline, &grant(subject));
+    let mut registry = PluginRegistry::new().with_consent_authority(authority);
+    register_output_driver(
+        &mut registry,
+        "protected.event",
+        Box::new(ProtectedEventDriver { entity: subject }),
+    );
+    register_protected_schema(&mut registry);
+    let host = test_ok(LocalScheduledAdmissionHostV1::shared());
+    let revisions = test_ok(host.observe(&registry, &mut store, timeline));
+    let drafts = test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
+    assert_eq!(drafts.len(), 1);
+
+    let lost = test_err(host.admit(
+        &mut registry,
+        &mut LostOutcomePorts(&mut store),
         revisions,
         Seq::ZERO,
-        0,
-        &[]
-    ))
-    .is_none());
-    assert_eq!(test_ok(store.logical_head(timeline.id())), Seq::ZERO);
+        1,
+    ));
+    assert!(matches!(
+        lost,
+        RuntimeError::Store(pos_core::CoreError::StorageOutcomeUnknown(_))
+    ));
+
+    let mut unbound = registry.without_consent_gate();
+    assert!(matches!(
+        test_err(unbound.recover_scheduled_pass(&mut store)),
+        RuntimeError::ConsentOperationUnavailable
+    ));
+    assert_eq!(test_ok(store.logical_head(timeline)), Seq::ZERO);
 }

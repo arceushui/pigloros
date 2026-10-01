@@ -1003,8 +1003,7 @@ fn local_host_publishes_admits_and_refreshes_the_session_fence() {
 
         let drafts = ok(registry.step_all_anchored(timeline, Seq::ZERO));
         let head = ok(store.logical_head(timeline));
-        let committed =
-            receipt(host.admit(&mut registry, store.as_mut(), revisions, head, 1, &drafts));
+        let committed = receipt(host.admit(&mut registry, store.as_mut(), revisions, head, 1));
         assert_eq!(committed.committed_events().len(), 2, "{name}");
         assert_eq!(
             budget(store.as_ref(), timeline),
@@ -1054,4 +1053,108 @@ fn local_host_fails_closed_for_a_store_bound_to_another_authority_host() {
         );
         assert_eq!(budget(store.as_ref(), unfenced), None, "{name}");
     }
+}
+
+/// Admission ports whose fence publication fails after authority binds.
+struct FenceRejectingPorts<'a> {
+    inner: &'a mut MemoryStore,
+}
+
+impl PipelineAdmissionPortV1 for FenceRejectingPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.inner.admit_pipeline_batch(basis)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: NonZeroUsize,
+    ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
+        self.inner.purge_expired_pipeline_receipts_bounded(limit)
+    }
+}
+
+impl PipelineAdmissionFencePublisherV1 for FenceRejectingPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn set_pipeline_admission_fence(
+        &mut self,
+        _: TimelineId,
+        _: PipelineAdmissionFenceV1,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Storage(
+            "injected fence publication failure".to_owned(),
+        ))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn pipeline_admission_fence(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<PipelineAdmissionFenceV1>, CoreError> {
+        self.inner.pipeline_admission_fence(timeline)
+    }
+}
+
+impl AuthorityPersistencePortV1 for FenceRejectingPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bind_authority_persistence(
+        &mut self,
+        binding: pos_core::AuthorityPersistenceBindingV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        self.inner.bind_authority_persistence(binding)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn issue_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        grant: &CapabilityGrantV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        self.inner.issue_capability_grant(permit, grant)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revoke_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        revocation: &CapabilityRevocationV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        self.inner.revoke_capability_grant(permit, revocation)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authority(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<pos_core::PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
+        self.inner.load_authority(leaf_grant_id)
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn local_host_reports_a_fence_publication_failure_as_a_store_error() {
+    let mut store = MemoryStore::new();
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    ok(store.bind_erasure_gate(Arc::clone(&gate)));
+    let timeline = ok(store.create_timeline("fence-publication-failure")).id();
+    let host = ok(LocalScheduledAdmissionHostV1::shared());
+    let registry = PluginRegistry::new().with_erasure_gate(gate);
+
+    let error = err(host.observe(
+        &registry,
+        &mut FenceRejectingPorts { inner: &mut store },
+        timeline,
+    ));
+    assert!(
+        matches!(&error, RuntimeError::Store(CoreError::Storage(message))
+            if message == "injected fence publication failure"),
+        "{error}"
+    );
+    assert!(ok(store.pipeline_admission_fence(timeline)).is_none());
+    assert!(store.load_authority(host.authority_grant()).is_ok());
 }

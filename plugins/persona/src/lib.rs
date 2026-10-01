@@ -951,7 +951,7 @@ mod tests {
                 .test_ok();
             registry.schemas.validate_batch(&drafts).test_ok();
             let head = store.logical_head(tl.id()).test_ok();
-            host.admit(&mut registry, &mut store, revisions, head, 0, &drafts)
+            host.admit(&mut registry, &mut store, revisions, head, 0)
                 .test_ok();
         }
 

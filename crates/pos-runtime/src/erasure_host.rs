@@ -3557,21 +3557,25 @@ impl ErasureCommandSenderV1<'_> {
     /// Run one host-only ADR-021 scheduled-admission operation on the owned
     /// store.
     ///
-    /// The closure receives only the admitted-batch, admission-fence, and
-    /// authority-persistence ports; each adapter operation serializes under
-    /// the store's own bound erasure fence. The borrow cannot outlive the
-    /// closure, so no raw store escapes the host. Adapter errors, including
-    /// an unknown commit outcome, reach the caller unchanged.
+    /// The closure receives the owned store only as
+    /// [`crate::ScheduledAdmissionPortsV1`]: the admitted-batch,
+    /// admission-fence, and authority-persistence ports. That view has no
+    /// `EventStore` supertrait, so the closure cannot raw-append, create, or
+    /// Fork a Timeline outside the fenced admission path, and the borrow
+    /// cannot outlive the closure. Each adapter operation serializes under
+    /// the store's own bound erasure fence. Adapter errors, including an
+    /// unknown commit outcome, reach the caller unchanged.
     ///
     /// # Errors
     /// Returns a payload-free host error for a stale or unavailable sender.
     pub fn with_scheduled_admission<T>(
         &mut self,
-        operation: impl FnOnce(&mut dyn crate::ScheduledAdmissionStoreV1) -> T,
+        operation: impl FnOnce(&mut dyn crate::ScheduledAdmissionPortsV1) -> T,
     ) -> Result<T, ErasureHostErrorV1> {
-        self.host
-            .ensure_generation(self.generation)
-            .map(|()| operation(self.host.store.host_store()))
+        self.host.ensure_generation(self.generation).map(|()| {
+            let ports: &mut dyn crate::ScheduledAdmissionPortsV1 = self.host.store.host_store();
+            operation(ports)
+        })
     }
 
     /// Append authoritative Events inside the installed erasure fence.

@@ -42,6 +42,18 @@ pub struct ScheduledPassAdmissionV1 {
 }
 
 impl PluginRegistry {
+    /// The draft vector of the staged pass, empty when nothing is staged.
+    ///
+    /// This is the exact vector [`Self::admit_scheduled_pass`] validates and
+    /// submits, so the local host derives its validation evidence from it.
+    #[cfg(feature = "local-admission-host")]
+    pub(crate) fn staged_scheduled_drafts(&self) -> &[pos_core::EventDraft] {
+        self.pending_step
+            .as_ref()
+            .map(|pending| pending.staged_drafts.as_slice())
+            .unwrap_or_default()
+    }
+
     /// Admit and commit the staged scheduled pass through host admission.
     ///
     /// The complete staged draft vector keeps host Driver schedule order and

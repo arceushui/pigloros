@@ -904,19 +904,9 @@ fn admit_scheduled_pass(
     revisions: PipelineSecurityRevisionsV1,
     commit_head: pos_core::clock::Seq,
     commit_now_secs: u64,
-    drafts: &[EventDraft],
 ) -> Result<u64, ExperimentError> {
     LocalScheduledAdmissionHostV1::shared()
-        .and_then(|host| {
-            host.admit(
-                registry,
-                store,
-                revisions,
-                commit_head,
-                commit_now_secs,
-                drafts,
-            )
-        })
+        .and_then(|host| host.admit(registry, store, revisions, commit_head, commit_now_secs))
         .map(|receipt| {
             receipt.map_or(0, |receipt| {
                 u64::try_from(receipt.committed_events().len()).unwrap_or(u64::MAX)
@@ -943,7 +933,7 @@ fn append_driver_drafts(
             .map(|()| 0)
             .map_err(ExperimentError::from)
     } else {
-        append_nonempty_driver_drafts(store, timeline_id, registry, revisions, &drafts)
+        append_nonempty_driver_drafts(store, timeline_id, registry, revisions)
     }
 }
 
@@ -952,7 +942,6 @@ fn append_nonempty_driver_drafts(
     timeline_id: pos_core::ids::TimelineId,
     registry: &mut PluginRegistry,
     revisions: PipelineSecurityRevisionsV1,
-    drafts: &[EventDraft],
 ) -> Result<u64, ExperimentError> {
     let head = match store.logical_head(timeline_id) {
         Ok(head) => head,
@@ -961,7 +950,7 @@ fn append_nonempty_driver_drafts(
             return Err(error.into());
         }
     };
-    admit_scheduled_pass(store, registry, revisions, head, 0, drafts)
+    admit_scheduled_pass(store, registry, revisions, head, 0)
 }
 
 fn step_driver_with_completed_prefix(
@@ -2036,22 +2025,17 @@ impl ExperimentSession {
         let (folded_events, committed_events) = self.prepare_tick()?;
 
         // The admission revisions are observed before any Driver runs, so the
-        // pass binds the security state in force at its base snapshot.
-        let staged = lock_store(&self.store)
-            .and_then(|mut store| {
-                observe_scheduled_admission(&mut store, &self.registry, self.timeline.id())
-            })
-            .and_then(|revisions| {
-                self.select_step_drafts(request, &committed_events)
-                    .map(|drafts| (revisions, drafts))
-                    .map_err(ExperimentError::from)
-            });
-        let (revisions, drafts) = match staged {
-            Ok(staged) => staged,
+        // pass binds the security state in force at its base snapshot. Nothing
+        // is staged yet, so an observation failure leaves the session healthy.
+        let revisions = lock_store(&self.store).and_then(|mut store| {
+            observe_scheduled_admission(&mut **store, &self.registry, self.timeline.id())
+        })?;
+        let drafts = match self.select_step_drafts(request, &committed_events) {
+            Ok(drafts) => drafts,
             Err(error) => {
                 self.registry.abort_step();
                 self.health = SessionHealth::Faulted;
-                return Err(error);
+                return Err(error.into());
             }
         };
         if drafts
@@ -2079,12 +2063,11 @@ impl ExperimentSession {
                     .logical_head(self.timeline.id())
                     .map_err(ExperimentError::from)?;
                 admit_scheduled_pass(
-                    &mut store,
+                    &mut **store,
                     &mut self.registry,
                     revisions,
                     head,
                     current_now_secs(),
-                    &drafts,
                 )
             }) {
                 Ok(count) => count,
@@ -7899,6 +7882,45 @@ mod coverage_entrypoints {
             ok(store.logical_head(timeline.id())),
             pos_core::clock::Seq::ZERO
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_boundary_returns_an_observation_failure_without_faulting_the_session() {
+        let mut session = ok(Experiment::new(ExperimentConfig {
+            name: "observation-failure".to_owned(),
+            stop: StopCondition::MaxTicks(10),
+            store_config: StoreConfig::Memory,
+        })
+        .start());
+        let foreign = pos_core::AuthorityPersistenceHostV1::new(&ok(
+            pos_core::AuthorityRegistrySnapshotV1::try_new(
+                pos_core::Hash::from_bytes([5; 32]),
+                vec![pos_core::Hash::from_bytes([6; 32])],
+                Vec::new(),
+                Vec::new(),
+            ),
+        ));
+        {
+            let mut store = ok(lock_store(&session.store));
+            ok(
+                pos_core::AuthorityPersistencePortV1::bind_authority_persistence(
+                    &mut **store,
+                    foreign.persistence_binding(),
+                ),
+            );
+        }
+
+        assert!(matches!(
+            session.step_tick(),
+            Err(ExperimentError::Runtime(
+                RuntimeError::AuthorityPersistence(
+                    pos_core::AuthorityPersistenceErrorV1::Unavailable
+                )
+            ))
+        ));
+        assert_eq!(session.health, SessionHealth::Healthy);
+        assert_eq!(session.ticks, 0);
     }
 
     #[test]

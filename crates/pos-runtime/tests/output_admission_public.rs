@@ -1110,26 +1110,24 @@ fn admit_staged(
     registry: &mut PluginRegistry,
     store: &mut pos_store::memory::MemoryStore,
     timeline: pos_core::TimelineId,
-    drafts: &[EventDraft],
 ) -> Result<usize, Box<dyn Error>> {
     let host = LocalScheduledAdmissionHostV1::shared()?;
     let revisions = host.observe(registry, store, timeline)?;
     let head = store.logical_head(timeline)?;
     let receipt = host
-        .admit(registry, store, revisions, head, 0, drafts)?
+        .admit(registry, store, revisions, head, 0)?
         .ok_or("expected a committed batch")?;
     Ok(receipt.committed_events().len())
 }
 
-/// A rejected step leaves nothing staged: admitting the rejected draft fails
-/// because no pass is pending, and the Timeline stays empty.
+/// A rejected step leaves nothing staged: admission fails because no pass is
+/// pending, and the Timeline stays empty.
 fn assert_rejected_output_is_not_persisted(
     registry: &mut PluginRegistry,
     store: &mut pos_store::memory::MemoryStore,
     timeline: pos_core::TimelineId,
-    rejected: &EventDraft,
 ) -> TestResult {
-    let error = admit_staged(registry, store, timeline, std::slice::from_ref(rejected))
+    let error = admit_staged(registry, store, timeline)
         .err()
         .ok_or("expected the rejected draft to be refused")?;
     assert!(error.to_string().contains("Driver step is already pending"));
@@ -1150,10 +1148,7 @@ fn verified_step_appends_output_at_the_exact_event_byte_limit() -> TestResult {
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].payload.len(), usize::try_from(limit)?);
     register_output_schema(&mut registry);
-    assert_eq!(
-        admit_staged(&mut registry, &mut store, timeline, &drafts)?,
-        1
-    );
+    assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::from_u64(1));
     Ok(())
 }
@@ -1176,8 +1171,7 @@ fn verified_step_rejects_output_one_byte_over_the_event_limit_before_append() ->
             limit: recorded,
         })) if event_type == "plugin.output" && requested == requested_bytes && recorded == limit
     ));
-    let draft = sized_draft("plugin.output", requested_bytes);
-    assert_rejected_output_is_not_persisted(&mut registry, &mut store, timeline, &draft)
+    assert_rejected_output_is_not_persisted(&mut registry, &mut store, timeline)
 }
 
 /// Emits one valid draft followed by one draft over the event byte limit on
@@ -1242,10 +1236,7 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
     let drafts = registry.step_all_anchored(timeline, pos_core::Seq::ZERO)?;
     assert_eq!(drafts.len(), 1);
     register_output_schema(&mut registry);
-    assert_eq!(
-        admit_staged(&mut registry, &mut store, timeline, &drafts)?,
-        1
-    );
+    assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::from_u64(1));
     Ok(())
 }
@@ -1265,8 +1256,7 @@ fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult 
             ref event_type,
         })) if event_type == "plugin.undeclared"
     ));
-    let draft = sized_draft("plugin.undeclared", 1);
-    assert_rejected_output_is_not_persisted(&mut registry, &mut store, timeline, &draft)
+    assert_rejected_output_is_not_persisted(&mut registry, &mut store, timeline)
 }
 
 #[test]

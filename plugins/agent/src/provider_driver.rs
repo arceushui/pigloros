@@ -594,7 +594,7 @@ mod tests {
 
     /// Admit the staged pass through the local host's atomic admission and
     /// return the committed Event count.
-    fn admit_staged(fixture: &mut DriverFixture, drafts: &[pos_core::event::EventDraft]) -> usize {
+    fn admit_staged(fixture: &mut DriverFixture) -> usize {
         let host = LocalScheduledAdmissionHostV1::shared().test_ok();
         let revisions = host
             .observe(&fixture.registry, &mut fixture.store, fixture.timeline)
@@ -606,7 +606,6 @@ mod tests {
             revisions,
             head,
             0,
-            drafts,
         )
         .test_ok()
         .map_or(0, |receipt| receipt.committed_events().len())
@@ -1166,7 +1165,7 @@ mod tests {
             .test_ok();
         assert_eq!(fixture.calls.get(), 2);
         assert_eq!(first[0].payload, retry[0].payload);
-        assert_eq!(admit_staged(&mut fixture, &retry), retry.len());
+        assert_eq!(admit_staged(&mut fixture), retry.len());
         fixture.registry.commit_step_at(Seq::ZERO, 0).test_ok();
 
         let next = fixture
@@ -1334,7 +1333,7 @@ mod tests {
             .registry
             .step_all_anchored(fixture.timeline, Seq::ZERO)
             .test_ok();
-        assert_eq!(admit_staged(&mut fixture, &drafts), drafts.len());
+        assert_eq!(admit_staged(&mut fixture), drafts.len());
         // committed_tick is now 1; the guard fires before verifying evidence.
         let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
         let err = fixture
