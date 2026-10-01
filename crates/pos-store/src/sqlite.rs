@@ -88,12 +88,11 @@ use pos_core::{
     ManifestOwnerAdmissionSnapshotV1, ManifestOwnerPolicyCopiesV1,
     ManifestOwnerTimelineAdmissionV1, ManifestSlotAdmissionReceiptV1, ManifestSlotBindingV1,
     OwnerIdV1, PersistedAuthorityV1, PluginId, PreparedArtifactRegistrationBatchV1,
-    PreparedManifestOwnerAdmissionV1,
     PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1, WorldArtifactLeafV1,
-    WorldConsumerSetV1, WorldReplayHandleV1,
-    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+    PreparedErasureRecoveryErrorV1, PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1,
+    PrincipalOwnerBindingV1, PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
+    WorldArtifactLeafV1, WorldConsumerSetV1, WorldReplayHandleV1, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 
 use crate::fork_admission_authority::{
@@ -6645,7 +6644,8 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
             owner_id,
             configuration_generation,
             timeline_id,
-        )? else {
+        )?
+        else {
             return Ok(None);
         };
         let receipt = snapshot.timeline.receipt.as_input();
@@ -6723,9 +6723,7 @@ fn sqlite_read_manifest_owner_current_state(
             Ok(None)
         };
     };
-    if inventory_generation == Hash::zero()
-        || previous_visible_lcq1_hash == Some(Hash::zero())
-    {
+    if inventory_generation == Hash::zero() || previous_visible_lcq1_hash == Some(Hash::zero()) {
         return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
     }
     let generation_rows = sqlite_read_manifest_owner_generation(
@@ -6802,7 +6800,11 @@ fn sqlite_read_manifest_owner_generation(
         )?
         .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
         if snapshot.resulting_inventory_generation != inventory_generation
-            || snapshot.timeline.receipt.as_input().previous_visible_lcq1_hash
+            || snapshot
+                .timeline
+                .receipt
+                .as_input()
+                .previous_visible_lcq1_hash
                 != previous_visible_lcq1_hash
             || operation_id.is_some_and(|stored| stored != snapshot.operation_id)
             || catalog_digest.is_some_and(|stored| stored != snapshot.catalog.digest())
@@ -6885,21 +6887,23 @@ fn sqlite_manifest_owner_operation(
         )
         .optional()
         .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
-    row.map(|(digest, generation, inventory, receipt_count, receipt_set_digest)| {
-        if receipt_count < 1
-            || receipt_count > pos_core::MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1 as i64
-        {
-            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
-        }
-        let receipt_count = receipt_count as usize;
-        Ok((
-            manifest_owner_hash(digest)?,
-            manifest_owner_generation(generation)?,
-            manifest_owner_hash(inventory)?,
-            receipt_count,
-            manifest_owner_hash(receipt_set_digest)?,
-        ))
-    })
+    row.map(
+        |(digest, generation, inventory, receipt_count, receipt_set_digest)| {
+            if receipt_count < 1
+                || receipt_count > pos_core::MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1 as i64
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+            let receipt_count = receipt_count as usize;
+            Ok((
+                manifest_owner_hash(digest)?,
+                manifest_owner_generation(generation)?,
+                manifest_owner_hash(inventory)?,
+                receipt_count,
+                manifest_owner_hash(receipt_set_digest)?,
+            ))
+        },
+    )
     .transpose()
 }
 
@@ -7094,8 +7098,7 @@ fn sqlite_resolve_manifest_owner_retry(
         inventory_generation,
         receipt_count,
         receipt_set_digest,
-    )) =
-        sqlite_manifest_owner_operation(connection, owner_id, operation_id)?
+    )) = sqlite_manifest_owner_operation(connection, owner_id, operation_id)?
     else {
         return Ok(None);
     };
@@ -7175,13 +7178,9 @@ fn sqlite_manifest_owner_operation_receipts(
             .try_into()
             .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
         let timeline_id = TimelineId::from_ulid(ulid::Ulid::from_bytes(raw));
-        let snapshot = sqlite_read_manifest_owner_admission(
-            connection,
-            owner_id,
-            generation,
-            timeline_id,
-        )?
-        .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        let snapshot =
+            sqlite_read_manifest_owner_admission(connection, owner_id, generation, timeline_id)?
+                .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
         if snapshot.operation_id != operation_id {
             return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
         }
