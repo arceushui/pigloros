@@ -51,7 +51,7 @@ pub enum ManifestOwnerAdmissionErrorV1 {
 /// Applications must only use an implementation bound to the actual local
 /// Plugin registry and installed coordinator-key verifier. An untrusted
 /// remote caller's implementation is not an owner authority.
-pub trait ManifestOwnerAdmissionVerifierV1 {
+pub trait ManifestOwnerAdmissionVerifierV1: Send + Sync {
     /// Confirm that MCA1 is the exact current, complete registry-issued batch.
     ///
     /// # Errors
