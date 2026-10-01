@@ -1,40 +1,25 @@
-name: Temporary Targeted Format Wave 8 Root
+name: Temporary Cancel Obsolete Wave 8 Runs
 on:
   push:
     branches:
       - automation/format-wave8-targeted-20261002
 permissions:
-  contents: write
+  actions: write
+  contents: read
 jobs:
-  format:
-    timeout-minutes: 5
+  cancel:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: redmine/432-ard1-registration
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
-        with:
-          toolchain: stable
-          components: rustfmt
-      - name: Format only files reported by Trunk
+      - name: Cancel superseded hosted runs
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          rustfmt --edition 2024 \
-            crates/pos-core/tests/artifact_registration_commit_public.rs \
-            crates/pos-runtime/tests/local_adapter_recording_public.rs \
-            crates/pos-store/src/sqlite.rs \
-            crates/pos-store/tests/artifact_registration_persistence_public.rs
-          if git diff --quiet; then
-            exit 0
-          fi
-          git add crates/pos-core/tests/artifact_registration_commit_public.rs \
-            crates/pos-runtime/tests/local_adapter_recording_public.rs \
-            crates/pos-store/src/sqlite.rs \
-            crates/pos-store/tests/artifact_registration_persistence_public.rs
-          git commit -m "style(#432): format coverage cases"
-          git push origin HEAD:refs/heads/redmine/432-ard1-registration
+          for run_id in 36906487302 36905460666; do
+            curl --fail --silent --show-error \
+              --request POST \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel"
+          done
