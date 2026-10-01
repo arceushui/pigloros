@@ -508,7 +508,7 @@ fn registration_preparation_rejects_malformed_and_mismatched_records(
         ArtifactRegistrationPreparationErrorV1::InvalidRegistration,
     );
 
-    let mut tampered_registration = inputs.clone();
+    let mut tampered_registration = inputs;
     let admission =
         ArtifactRegistrationV1::from_canonical_cbor(&tampered_registration[0].registration_cbor)?;
     let mut fields = (*admission.fields()).clone();
@@ -578,7 +578,7 @@ fn registration_preparation_rejects_duplicate_and_extra_graph_rows(
         ArtifactRegistrationPreparationErrorV1::InvalidGraph,
     );
 
-    let mut extra_admission = inputs.clone();
+    let mut extra_admission = inputs;
     let other_admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
         owner_reference: ArtifactRegistrationV1::owner_reference(&owner_id),
         configuration_generation: 4,
