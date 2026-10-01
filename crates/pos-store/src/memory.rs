@@ -4693,8 +4693,10 @@ impl EventStore for MemoryStore {
                     &mut registry,
                     &draft,
                     authorization,
-                    prepare_payload,
-                    sign,
+                    crate::PreparedAppendCallbacks {
+                        prepare_payload,
+                        sign,
+                    },
                 )
             })
             .and_then(|event| {
