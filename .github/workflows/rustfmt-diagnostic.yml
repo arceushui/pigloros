@@ -1,0 +1,17 @@
+name: rustfmt diagnostic
+
+on:
+  push:
+    branches:
+      - redmine/418-scoped-owner-admission
+
+jobs:
+  rustfmt-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Print rustfmt diff
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --no-self-update
+          rustup run 1.97.1 rustfmt --edition 2021 --emit stdout crates/pos-runtime/tests/output_admission_public.rs > /tmp/output_admission_public.rs
+          diff -u crates/pos-runtime/tests/output_admission_public.rs /tmp/output_admission_public.rs || true
