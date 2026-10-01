@@ -52,6 +52,79 @@ impl AdmittedCompositionV1 {
     }
 }
 
+/// Exact EOP1 and OPC1 native bytes read from one current admitted Plugin.
+///
+/// This value is an extraction result, not owner persistence or an admission
+/// receipt. Its constructor stays private to the complete Plugin registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedManifestPolicySourceV1 {
+    stable_slot: String,
+    plugin_id: PluginId,
+    plugin_name: String,
+    plugin_version: String,
+    implementation_hash: Hash,
+    eop1_native_digest: Hash,
+    closure_hash: Hash,
+    eop1_bytes: Vec<u8>,
+    opc1_bytes: Vec<u8>,
+}
+
+impl AdmittedManifestPolicySourceV1 {
+    /// Stable slot bound by the complete registry capability.
+    #[must_use]
+    pub fn stable_slot(&self) -> &str {
+        &self.stable_slot
+    }
+
+    /// Actual allocated PluginId, including reducer-only Plugins.
+    #[must_use]
+    pub const fn plugin_id(&self) -> PluginId {
+        self.plugin_id
+    }
+
+    /// Exact Plugin display name retained by the registry.
+    #[must_use]
+    pub fn plugin_name(&self) -> &str {
+        &self.plugin_name
+    }
+
+    /// Exact Plugin version retained by the registry.
+    #[must_use]
+    pub fn plugin_version(&self) -> &str {
+        &self.plugin_version
+    }
+
+    /// Host-admitted implementation pin.
+    #[must_use]
+    pub const fn implementation_hash(&self) -> Hash {
+        self.implementation_hash
+    }
+
+    /// ADR-077 EOP1 native identity.
+    #[must_use]
+    pub const fn eop1_native_digest(&self) -> Hash {
+        self.eop1_native_digest
+    }
+
+    /// ADR-088 OPC1 exact closure identity.
+    #[must_use]
+    pub const fn closure_hash(&self) -> Hash {
+        self.closure_hash
+    }
+
+    /// Exact canonical EOP1 bytes retained by output admission.
+    #[must_use]
+    pub fn eop1_bytes(&self) -> &[u8] {
+        &self.eop1_bytes
+    }
+
+    /// Exact canonical OPC1 bytes retained by output admission.
+    #[must_use]
+    pub fn opc1_bytes(&self) -> &[u8] {
+        &self.opc1_bytes
+    }
+}
+
 /// Maximum number of explicitly required Plugin implementations in one V1 composition.
 pub const MAX_REQUIRED_PLUGINS_V1: usize = 32;
 

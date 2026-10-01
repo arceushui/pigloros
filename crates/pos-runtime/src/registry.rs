@@ -11,6 +11,12 @@ use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::{PluginId, TimelineId},
+    manifest_owner_admission::{
+        manifest_owner_admission_intent_digest_v1, prepare_manifest_owner_admission_v1,
+        ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1,
+        ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerAdmissionVerifierV1,
+    },
     manifest_owner_link::{
         ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     },
@@ -24,8 +30,9 @@ use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 use crate::output_admission::OutputPolicySourceV1;
 use crate::{
     composition::{
-        AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
-        PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
+        AdmittedCompositionV1, AdmittedManifestPolicySourceV1, DomainImplementationKindV1,
+        ManifestRegistrationErrorV1, PluginAvailabilityV1, PluginComposition,
+        PluginCompositionErrorV1, PluginExecutionModeV1,
         PluginIsolationV1, PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema,
         RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1,
         ResolvedPluginCompositionV1, ResolvedPluginV1,
@@ -1048,6 +1055,7 @@ pub struct PluginRegistry {
     plugins: IndexMap<PluginId, PluginEntry>,
     manifest_batch: Option<ManifestAdmissionCatalogV1>,
     manifest_identity: Arc<()>,
+    manifest_owner_admission_verifier: Option<Box<dyn ManifestOwnerAdmissionVerifierV1>>,
     registration_revision: u64,
     local_adapters: Vec<adapter::RegisteredLocalAdapterV1>,
     approver_map: IndexMap<Kind, PluginId>,
@@ -1263,6 +1271,125 @@ impl PluginRegistry {
                 self.adapter_admission_for_catalog(&admitted.catalog),
                 Ok(ref current) if current == &admitted.adapter_admission
             )
+    }
+
+    /// Extract exact EOP1/OPC1 bytes from the current complete owner capability.
+    ///
+    /// Every registry Plugin must still match the private capability. This
+    /// includes reducer-only zero-output Plugins; WCS1 producer rows are not
+    /// used to discover the returned set.
+    ///
+    /// # Errors
+    /// Rejects a stale capability, incomplete registry, or unavailable exact
+    /// EOP1/OPC1 native bytes.
+    pub fn admitted_manifest_policy_sources(
+        &self,
+        admitted: &AdmittedCompositionV1,
+    ) -> Result<Vec<AdmittedManifestPolicySourceV1>, ManifestRegistrationErrorV1> {
+        let generation = admitted.catalog.as_input().configuration_generation;
+        if !self.is_admitted_composition_current_for_generation(admitted, generation) {
+            return Err(ManifestRegistrationErrorV1::IncompleteBatch);
+        }
+        self.validate_complete_manifest_batch(&admitted.catalog)?;
+        let mut sources = Vec::with_capacity(admitted.catalog.as_input().rows.len());
+        for row in &admitted.catalog.as_input().rows {
+            let entry = self
+                .plugins
+                .get(&row.plugin_id)
+                .ok_or(ManifestRegistrationErrorV1::IncompleteBatch)?;
+            let admission = entry
+                .output_admission
+                .as_ref()
+                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+            let closure = admission
+                .closure()
+                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+            let eop1_bytes = admission.policy().to_canonical_cbor();
+            let opc1_bytes = closure.to_canonical_bytes();
+            if admission.policy_digest() != row.eop1_native_digest
+                || closure.manifest_closure_hash() != row.closure_hash
+                || admission.policy().fields().plugin_id != row.plugin_id
+                || admission.policy().fields().plugin_version != row.plugin_version
+                || admission.policy().fields().implementation_hash != row.implementation_hash
+            {
+                return Err(ManifestRegistrationErrorV1::IncompleteBatch);
+            }
+            sources.push(AdmittedManifestPolicySourceV1 {
+                stable_slot: row.stable_slot.clone(),
+                plugin_id: row.plugin_id,
+                plugin_name: row.plugin_name.clone(),
+                plugin_version: row.plugin_version.clone(),
+                implementation_hash: row.implementation_hash,
+                eop1_native_digest: row.eop1_native_digest,
+                closure_hash: row.closure_hash,
+                eop1_bytes,
+                opc1_bytes,
+            });
+        }
+        sources.sort_unstable_by_key(AdmittedManifestPolicySourceV1::plugin_id);
+        Ok(sources)
+    }
+
+    /// Prepare and commit an admission while the private complete Plugin
+    /// capability is still current.
+    ///
+    /// The request catalog and each supplied EOP1/OPC1 byte copy must match
+    /// this registry's current `AdmittedCompositionV1`. The trusted owner
+    /// verifier then checks the owner pre-state and complete Timeline scopes,
+    /// verifies native policy semantics, and signs each MSR1 before the store
+    /// commits the complete batch with its generation CAS.
+    ///
+    /// # Errors
+    /// Returns `OwnerRejected` for a stale or mismatched complete capability;
+    /// forwards malformed requests, owner-verification failures, and atomic
+    /// persistence conflicts from the core owner-admission boundary.
+    pub fn commit_admitted_manifest_owner_admission_v1<
+        S: ManifestOwnerAdmissionPersistencePortV1,
+    >(
+        &self,
+        admitted: &AdmittedCompositionV1,
+        request: ManifestOwnerAdmissionRequestV1,
+        store: &mut S,
+    ) -> Result<ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1> {
+        let verifier = self
+            .manifest_owner_admission_verifier
+            .as_deref()
+            .ok_or(ManifestOwnerAdmissionErrorV1::OwnerRejected)?;
+        let sources = self
+            .admitted_manifest_policy_sources(admitted)
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)?;
+        if &request.catalog != admitted.catalog() {
+            return Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
+        }
+        for timeline in &request.timelines {
+            for copies in &timeline.policy_copies {
+                let source = sources
+                    .iter()
+                    .find(|source| source.plugin_id() == copies.plugin_id)
+                    .ok_or(ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
+                if copies.eop1_bytes.as_slice() != source.eop1_bytes()
+                    || copies.opc1_bytes.as_slice() != source.opc1_bytes()
+                {
+                    return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
+                }
+            }
+        }
+        let owner_id = request.catalog.as_input().owner_id;
+        let intent_digest = manifest_owner_admission_intent_digest_v1(&request)?;
+        let current_state = store.read_manifest_owner_state_v1(owner_id)?;
+        if let Some(retry) = store.resolve_manifest_owner_admission_retry_v1(
+            owner_id,
+            request.operation_id,
+            intent_digest,
+        )? {
+            return Ok(retry);
+        }
+        let prepared = prepare_manifest_owner_admission_v1(
+            request,
+            verifier,
+            current_state.as_ref(),
+        )?;
+        store.commit_manifest_owner_admission_v1(prepared)
     }
 
     fn validate_complete_manifest_batch(
@@ -1617,6 +1744,20 @@ impl PluginRegistry {
         Self::new_with_mode(RunMode::Live, PluginExecutionModeV1::Local)
     }
 
+    /// Create a live local registry with its owner admission service installed.
+    ///
+    /// The owner verifier is bound once at registry construction and is never
+    /// selected per admission request. The local host must bind its actual
+    /// coordinator admission role here; remote request data must not choose it.
+    #[must_use]
+    pub fn new_with_manifest_owner_admission_verifier(
+        verifier: impl ManifestOwnerAdmissionVerifierV1 + 'static,
+    ) -> Self {
+        let mut registry = Self::new();
+        registry.manifest_owner_admission_verifier = Some(Box::new(verifier));
+        registry
+    }
+
     /// Create a live registry for an Air-Gapped execution profile.
     #[must_use]
     pub fn new_air_gapped() -> Self {
@@ -1648,6 +1789,7 @@ impl PluginRegistry {
             plugins: IndexMap::new(),
             manifest_batch: None,
             manifest_identity: Arc::new(()),
+            manifest_owner_admission_verifier: None,
             registration_revision: 0,
             local_adapters: Vec::new(),
             approver_map: IndexMap::new(),

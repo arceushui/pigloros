@@ -39,6 +39,7 @@ pub mod ids;
 pub mod key_registry;
 pub mod local_cut_seal;
 pub mod manifest;
+pub mod manifest_owner_admission;
 pub mod manifest_owner_link;
 pub mod output_policy;
 pub mod owntracks_enrollment;
@@ -237,6 +238,20 @@ pub use manifest_owner_link::{
     ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1,
     MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, MAX_MANIFEST_OWNER_PLUGINS_V1,
     MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+};
+pub use manifest_owner_admission::{
+    manifest_owner_admission_intent_digest_v1, prepare_manifest_owner_admission_v1,
+    validate_manifest_owner_admission_snapshot_v1,
+    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
+    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionInputV1,
+    ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
+    ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
+    ManifestOwnerTimelineAdmissionRequestV1, ManifestOwnerTimelineAdmissionV1,
+    ManifestSlotAdmissionReceiptDraftV1, PreparedManifestOwnerAdmissionV1,
+    MAX_MANIFEST_OWNER_ADMISSION_NATIVE_BYTES_V1,
+    MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1,
+    MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 pub use repro_manifest_root::{
     ReproManifestRootErrorV1, ReproManifestRootInputV1, ReproManifestRootV1,

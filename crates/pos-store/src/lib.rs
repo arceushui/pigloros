@@ -88,6 +88,10 @@ use pos_core::{
 pub use pos_core::{
     ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
     ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
+    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
+    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
+    ManifestOwnerAdmissionPersistencePortV1,
+    ManifestOwnerAdmissionSnapshotV1, PreparedManifestOwnerAdmissionV1,
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     CanonicalBytes, CapabilityRevocationV1, CoreError, CorrelationId, EntityId,

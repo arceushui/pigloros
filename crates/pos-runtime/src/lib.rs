@@ -42,7 +42,8 @@ pub mod world_replay;
 
 pub use authorization_cache::AuthorizationCacheKeyV1;
 pub use composition::{
-    AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
+    AdmittedCompositionV1, AdmittedManifestPolicySourceV1, DomainImplementationKindV1,
+    ManifestRegistrationErrorV1,
     PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
     PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1, RegisteredEventSchema,
     RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
