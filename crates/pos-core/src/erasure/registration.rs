@@ -613,13 +613,10 @@ impl<'a> Reader<'a> {
 
     fn bounded_array(&mut self, maximum: usize) -> Result<usize, ArtifactRegistrationErrorV1> {
         let count = self.head(4)?;
-        let count =
-            usize::try_from(count).map_err(|_| ArtifactRegistrationErrorV1::FieldOutOfBounds)?;
-        if count > maximum {
-            Err(ArtifactRegistrationErrorV1::FieldOutOfBounds)
-        } else {
-            Ok(count)
+        if count > maximum as u64 {
+            return Err(ArtifactRegistrationErrorV1::FieldOutOfBounds);
         }
+        Ok(count as usize)
     }
 
     fn blob(&mut self, length: usize) -> Result<&'a [u8], ArtifactRegistrationErrorV1> {
