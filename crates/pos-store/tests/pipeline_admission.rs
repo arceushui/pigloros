@@ -6,15 +6,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 
 use pos_core::{
-    pipeline_authority_revision_v1, AdmissionClock, AppendDedupKey, AppendDedupScope,
-    AppendIdentity, AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, CapabilityGrantDraftV1,
-    CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1,
-    CapabilityScopeV1, CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, EventDraft,
-    EventStore, Hash, Kind, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
-    PipelineAttemptV1, PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
-    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AdmissionClock, AppendDedupKey,
+    AppendDedupScope, AppendIdentity, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, CoreError, DelegateClassV1, EntityId,
+    ErasureContainmentGateV1, EventDraft, EventStore, Hash, Kind, PipelineAdmissionBasisDraftV1,
+    PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1,
+    PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
+    PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
+    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1, Seq, SeqRange,
     TentativePipelineResultV1, TimelineId, WallTime, APPEND_IDENTITY_RETENTION_MICROS,
     DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE, PIPELINE_CONTRACT_VERSION_V1,
@@ -23,9 +24,21 @@ use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
 use ulid::Ulid;
 
-trait Harness: EventStore + PipelineAdmissionPortV1 + AuthorityPersistencePortV1 {}
+trait Harness:
+    EventStore
+    + PipelineAdmissionPortV1
+    + PipelineAdmissionFencePublisherV1
+    + AuthorityPersistencePortV1
+{
+}
 
-impl<T: EventStore + PipelineAdmissionPortV1 + AuthorityPersistencePortV1> Harness for T {}
+impl<T> Harness for T where
+    T: EventStore
+        + PipelineAdmissionPortV1
+        + PipelineAdmissionFencePublisherV1
+        + AuthorityPersistencePortV1
+{
+}
 
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
@@ -164,7 +177,7 @@ fn root_revocation() -> CapabilityRevocationV1 {
     ))
 }
 
-fn revisions_with(authority: Hash) -> PipelineSecurityRevisionsV1 {
+fn revisions_with(authority: Hash, erasure: Hash) -> PipelineSecurityRevisionsV1 {
     ok(PipelineSecurityRevisionsV1::try_from_draft(
         PipelineSecurityRevisionsDraftV1 {
             authority,
@@ -173,7 +186,7 @@ fn revisions_with(authority: Hash) -> PipelineSecurityRevisionsV1 {
             delegation: hash(13),
             policy: hash(14),
             execution_profile: hash(15),
-            erasure: hash(16),
+            erasure,
         },
     ))
 }
@@ -203,9 +216,10 @@ fn prepare(store: &mut dyn Harness) -> Fixture {
     ok(store.bind_authority_persistence(host.persistence_binding()));
     let root = root_grant();
     ok(store.issue_capability_grant(ok(host.authorize_grant(&root)), &root));
-    let revisions = revisions_with(pipeline_authority_revision_v1(&ok(
-        store.load_authority(hash(1))
-    )));
+    let revisions = revisions_with(
+        pipeline_authority_revision_v1(&ok(store.load_authority(hash(1)))),
+        pipeline_erasure_revision_v1(gate.inventory_generation().ok()),
+    );
     let fence = fence_for(revisions, hash(1));
     ok(store.set_pipeline_admission_fence(timeline, fence));
     Fixture {
@@ -292,6 +306,17 @@ fn basis(attempt: &Attempt) -> PipelineAdmissionBasisV1 {
 
 fn admit(store: &mut dyn Harness, attempt: &Attempt) -> Result<PipelineOutcomeV1, CoreError> {
     store.admit_pipeline_batch(&basis(attempt))
+}
+
+fn error_text<T>(result: Result<T, CoreError>) -> Option<String> {
+    result.err().map(|error| error.to_string())
+}
+
+const fn receipt_of(outcome: &PipelineOutcomeV1) -> Option<&PipelineCommitReceiptV1> {
+    match outcome {
+        PipelineOutcomeV1::Committed(receipt) => Some(receipt),
+        _ => None,
+    }
 }
 
 fn committed(outcome: PipelineOutcomeV1) -> PipelineCommitReceiptV1 {
@@ -465,7 +490,7 @@ fn rejection_cases(
         (
             "stale security revisions",
             Attempt {
-                revisions: revisions_with(hash(99)),
+                revisions: revisions_with(hash(99), valid.revisions.as_draft().erasure),
                 ..valid.clone()
             },
             PipelineOutcomeV1::AdmissionConflict,
@@ -532,7 +557,7 @@ fn rejection_cases(
 }
 
 #[test]
-fn persisted_authority_is_composed_at_commit() {
+fn persisted_authority_and_erasure_are_composed_at_commit() {
     let clock = TestClock::at(1_000);
     for (name, mut store) in stores(&clock) {
         let fixture = prepare(store.as_mut());
@@ -548,13 +573,32 @@ fn persisted_authority_is_composed_at_commit() {
             "{name}"
         );
 
-        let forged = revisions_with(hash(99));
+        let erasure = fixture.revisions.as_draft().erasure;
+        let forged = revisions_with(hash(99), erasure);
         ok(store.set_pipeline_admission_fence(fixture.timeline, fence_for(forged, hash(1))));
         assert_eq!(
             ok(admit(
                 store.as_mut(),
                 &Attempt {
                     revisions: forged,
+                    ..valid.clone()
+                }
+            )),
+            PipelineOutcomeV1::AdmissionConflict,
+            "{name}"
+        );
+
+        // The host fence and the basis agree, but neither names the persisted
+        // erasure inventory generation, so the comparison fails closed.
+        let authority = fixture.revisions.as_draft().authority;
+        let stale_erasure = revisions_with(authority, hash(16));
+        assert_ne!(stale_erasure.as_draft().erasure, erasure, "{name}");
+        ok(store.set_pipeline_admission_fence(fixture.timeline, fence_for(stale_erasure, hash(1))));
+        assert_eq!(
+            ok(admit(
+                store.as_mut(),
+                &Attempt {
+                    revisions: stale_erasure,
                     ..valid.clone()
                 }
             )),
@@ -594,12 +638,17 @@ fn frozen_erasure_scope_rejects_before_commit() {
     for (name, mut store) in stores(&clock) {
         let fixture = prepare(store.as_mut());
         fixture.gate.freeze_timeline_for_test(fixture.timeline);
+        let frozen = Some(CoreError::ErasureAccessFrozen.to_string());
 
-        assert!(
-            matches!(
-                admit(store.as_mut(), &attempt(&fixture, 1, 0)),
-                Err(CoreError::ErasureAccessFrozen)
-            ),
+        assert_eq!(
+            error_text(admit(store.as_mut(), &attempt(&fixture, 1, 0))),
+            frozen,
+            "{name}"
+        );
+        let replacement = ok(fixture.fence.after_commit(1).ok_or("budget"));
+        assert_eq!(
+            error_text(store.set_pipeline_admission_fence(fixture.timeline, replacement)),
+            frozen,
             "{name}"
         );
         assert_eq!(remaining_budget(store.as_ref(), fixture.timeline), Some(10));
@@ -638,14 +687,7 @@ fn fork_history_and_concurrent_attempts_serialize_on_the_logical_head() {
         });
         let outcomes = handles.map(|handle| ok(handle.join()));
 
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, PipelineOutcomeV1::Committed(_)))
-                .count(),
-            1,
-            "{name}"
-        );
+        assert_eq!(outcomes.iter().filter_map(receipt_of).count(), 1, "{name}");
         assert!(
             outcomes.contains(&PipelineOutcomeV1::AdmissionConflict),
             "{name}"
@@ -665,12 +707,14 @@ fn expired_receipts_release_their_key_and_are_purged_in_bounds() {
         committed(ok(admit(store.as_mut(), &attempt(&fixture, 2, 3))));
         clock.advance(APPEND_IDENTITY_RETENTION_MICROS);
 
+        // A rejected attempt under an expired key leaves its receipt retained.
         assert_eq!(
             ok(admit(store.as_mut(), &first)),
             PipelineOutcomeV1::AdmissionConflict,
             "{name}"
         );
-        let reused = committed(ok(admit(store.as_mut(), &attempt(&fixture, 1, 6))));
+        // A successful commit under an expired key replaces its receipt.
+        let reused = committed(ok(admit(store.as_mut(), &attempt(&fixture, 2, 6))));
         assert_eq!(receipt_positions(&reused), [7, 8, 9], "{name}");
 
         let limit = ok(NonZeroUsize::new(1).ok_or("limit"));
@@ -678,18 +722,28 @@ fn expired_receipts_release_their_key_and_are_purged_in_bounds() {
         assert_eq!(
             (purged.removed, purged.more_may_remain),
             (1, true),
-            "{name}"
+            "{name}: the rejected key's expired receipt was retained"
         );
-        let drained = ok(store.purge_expired_pipeline_receipts_bounded(limit));
+        let drained = ok(store.purge_expired_pipeline_receipts_bounded(NonZeroUsize::MAX));
         assert_eq!(
             (drained.removed, drained.more_may_remain),
             (0, false),
             "{name}"
         );
         assert_eq!(
-            ok(admit(store.as_mut(), &attempt(&fixture, 1, 6))),
+            ok(admit(store.as_mut(), &attempt(&fixture, 2, 6))),
             PipelineOutcomeV1::RecoveredDuplicate(reused),
             "{name}"
+        );
+        let fresh = Attempt {
+            drafts: drafts(&[b"fresh"]),
+            ..attempt(&fixture, 1, 9)
+        };
+        let fresh_receipt = committed(ok(admit(store.as_mut(), &fresh)));
+        assert_eq!(
+            receipt_positions(&fresh_receipt),
+            [10],
+            "{name}: a purged key admits a fresh batch"
         );
     }
 }
@@ -708,11 +762,9 @@ fn deleting_a_timeline_removes_its_admission_state() {
             None,
             "{name}"
         );
-        assert!(
-            matches!(
-                store.set_pipeline_admission_fence(fixture.timeline, fixture.fence),
-                Err(CoreError::TimelineNotFound(_))
-            ),
+        assert_eq!(
+            error_text(store.set_pipeline_admission_fence(fixture.timeline, fixture.fence)),
+            Some(CoreError::TimelineNotFound(fixture.timeline).to_string()),
             "{name}"
         );
     }
@@ -791,6 +843,20 @@ fn sqlite_faults_roll_back_the_complete_batch_and_receipt() {
 
     execute(
         &path,
+        "UPDATE pipeline_admission_receipts SET expires_at = -expires_at;",
+    );
+    assert!(
+        error_text(admit(&mut open_file(&path, &clock), &first))
+            .is_some_and(|text| text.contains("outside its storage range")),
+        "an out-of-range persisted integer is a storage error, not a clamp"
+    );
+    execute(
+        &path,
+        "UPDATE pipeline_admission_receipts SET expires_at = -expires_at;",
+    );
+
+    execute(
+        &path,
         "CREATE TRIGGER blocked_cleanup BEFORE DELETE ON pipeline_admission_receipts
          BEGIN SELECT RAISE(ABORT, 'injected cleanup fault'); END;",
     );
@@ -816,4 +882,54 @@ fn attempt_after(previous: &Attempt, key: u8, head: u64) -> Attempt {
         precondition: PipelinePreconditionV1::ExpectedLogicalHead(Seq::from_u64(head)),
         ..previous.clone()
     }
+}
+
+#[test]
+fn sqlite_connections_racing_on_one_logical_head_commit_at_most_once() {
+    let clock = TestClock::at(1_000);
+    let directory = ok(tempdir());
+    let path = directory.path().join("admission-race.db");
+    let (fixture_attempt, initial) = {
+        let mut store = ok(SqliteStore::open_with_clock(
+            path.to_str().unwrap_or_default(),
+            Box::new(clock.clone()),
+        ));
+        let fixture = prepare(&mut store);
+        (
+            attempt(&fixture, 1, 0),
+            event_count(&store, fixture.timeline),
+        )
+    };
+
+    // Two independent connections race the same Logical Head. The immediate
+    // transaction serializes them; the loser either waits and observes the
+    // winner's write as a changed erasure inventory, or loses on contention.
+    // Either way it fails closed and commits nothing.
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = [2_u8, 3].map(|key| {
+        let barrier = Arc::clone(&barrier);
+        let mut store = open_file(&path, &clock);
+        let contender = attempt_after(&fixture_attempt, key, 0);
+        std::thread::spawn(move || {
+            barrier.wait();
+            admit(&mut store, &contender)
+        })
+    });
+    let outcomes = handles.map(|handle| ok(handle.join()));
+
+    let winners = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.as_ref().ok().and_then(receipt_of))
+        .collect::<Vec<_>>();
+    assert_eq!(winners.len(), 1);
+    assert_eq!(receipt_positions(winners[0]), [1, 2, 3]);
+    let reopened = open_file(&path, &clock);
+    assert_eq!(
+        event_count(&reopened, fixture_attempt.timeline),
+        initial + 3
+    );
+    assert_eq!(
+        remaining_budget(&reopened, fixture_attempt.timeline),
+        Some(7)
+    );
 }

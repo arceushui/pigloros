@@ -275,7 +275,8 @@ pub use pipeline::{
     MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES, PIPELINE_CONTRACT_VERSION_V1,
 };
 pub use pipeline_admission::{
-    pipeline_authority_revision_v1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
+    pipeline_authority_revision_v1, pipeline_erasure_revision_v1,
+    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
     PIPELINE_ADMISSION_FENCE_BYTES_V1,
 };
 pub use plugin::{

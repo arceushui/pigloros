@@ -1,4 +1,11 @@
 //! `MemoryStore` adapter for the ADR-021 admitted-batch port.
+//!
+//! The adapter stages a complete batch on a clone of the target Timeline state
+//! and installs it only after every fallible step succeeds. Cloning the full
+//! per-Timeline state is acceptable here: `MemoryStore` is the unindexed
+//! in-process reference adapter for tests and benchmarks, its admitted batches
+//! are bounded by `MAX_PIPELINE_DRAFTS_PER_BATCH`, and the clone is the
+//! simplest way to make every pre-install failure leave no partial state.
 
 use std::num::NonZeroUsize;
 
@@ -9,11 +16,15 @@ use pos_core::{
     event::Event,
     ids::TimelineId,
     store::{checked_append_identity_expires_at, AppendDedupKey, PurgeOutcome},
-    ErasureProtectedOperationV1, PipelineAdmissionBasisV1, PipelineAdmissionFenceV1,
-    PipelineAdmissionPortV1, PipelineOutcomeV1,
+    ErasureProtectedOperationV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineOutcomeV1,
 };
 
 use super::MemoryStore;
+use crate::{
+    committed_pipeline_receipt, evaluate_pipeline_admission, install_or_reject,
+    recovered_pipeline_receipt, PipelinePersistedStateV1,
+};
 
 #[cfg(test)]
 thread_local! {
@@ -46,15 +57,13 @@ impl MemoryStore {
         now: WallTime,
     ) -> Result<PipelineOutcomeV1, CoreError> {
         let key = basis.attempt().idempotency().dedup_key;
+        // An expired receipt stays retained until a successful install
+        // replaces it, so every rejection leaves the receipts unchanged.
         match self.pipeline_admission_receipts.get(&key).copied() {
             Some(record) if record.expires_at > now => {
                 self.recover_pipeline_receipt(timeline, basis, record)
             }
-            Some(_) => {
-                self.pipeline_admission_receipts.remove(&key);
-                self.commit_pipeline_batch(timeline, basis, now)
-            }
-            None => self.commit_pipeline_batch(timeline, basis, now),
+            Some(_) | None => self.commit_pipeline_batch(timeline, basis, now),
         }
     }
 
@@ -77,7 +86,7 @@ impl MemoryStore {
                     .map(|event| Self::logical_event(prefix, event.clone()))
                     .collect::<Result<Vec<_>, _>>()
             })
-            .and_then(|events| crate::recovered_pipeline_receipt(basis, timeline, &events))
+            .and_then(|events| recovered_pipeline_receipt(basis, timeline, &events))
     }
 
     fn commit_pipeline_batch(
@@ -94,11 +103,16 @@ impl MemoryStore {
                     .map(|logical_head| (prefix, Seq::from_u64(logical_head)))
             })
             .and_then(|(prefix, logical_head)| {
-                crate::evaluate_pipeline_admission(basis, fence.as_ref(), logical_head, |grant| {
+                let persisted = PipelinePersistedStateV1 {
+                    fence: fence.as_ref(),
+                    logical_head,
+                    erasure_inventory_generation: self.erasure_inventory_generation,
+                };
+                let evaluated = evaluate_pipeline_admission(basis, &persisted, |grant| {
                     self.authority_state.resolve(grant)
-                })
-                .map_or_else(Ok, |next_fence| {
-                    self.install_pipeline_batch(timeline, basis, now, prefix, &next_fence)
+                });
+                install_or_reject(evaluated, |next_fence| {
+                    self.install_pipeline_batch(timeline, basis, now, prefix, next_fence)
                 })
             })
     }
@@ -127,19 +141,13 @@ impl MemoryStore {
                     .iter()
                     .map(|event| Self::logical_event(prefix, event.clone()))
                     .collect::<Result<Vec<Event>, _>>()
-                    .and_then(|events| crate::committed_pipeline_receipt(basis, timeline, &events))
+                    .and_then(|events| committed_pipeline_receipt(basis, timeline, &events))
                     .and_then(|receipt| {
-                        checked_append_identity_expires_at(now)
+                        staged_receipt_expiry(now)
                             .map(|expires_at| (committed, receipt, expires_at))
                     })
             })
-            .and_then(|(committed, receipt, expires_at)| {
-                #[cfg(test)]
-                if FAIL_NEXT_PIPELINE_INSTALL.with(|fail| fail.replace(false)) {
-                    return Err(CoreError::Storage(
-                        "injected admitted-batch install failure".to_owned(),
-                    ));
-                }
+            .map(|(committed, receipt, expires_at)| {
                 self.event_ids
                     .extend(committed.iter().map(|event| event.id));
                 self.timelines.insert(timeline, staged);
@@ -154,19 +162,35 @@ impl MemoryStore {
                         expires_at,
                     },
                 );
-                Ok(PipelineOutcomeV1::Committed(receipt))
+                PipelineOutcomeV1::Committed(receipt)
             })
     }
 }
 
-impl PipelineAdmissionPortV1 for MemoryStore {
+/// Compute the retained receipt horizon, the last fallible step before a
+/// staged batch is installed.
+fn staged_receipt_expiry(now: WallTime) -> Result<WallTime, CoreError> {
+    #[cfg(test)]
+    if FAIL_NEXT_PIPELINE_INSTALL.with(|fail| fail.replace(false)) {
+        return Err(CoreError::Storage(
+            "injected admitted-batch install failure".to_owned(),
+        ));
+    }
+    checked_append_identity_expires_at(now)
+}
+
+impl PipelineAdmissionFencePublisherV1 for MemoryStore {
     fn set_pipeline_admission_fence(
         &mut self,
         timeline: TimelineId,
         fence: PipelineAdmissionFenceV1,
     ) -> Result<(), CoreError> {
-        self.ensure_generic_timeline_visibility(timeline).map(|()| {
-            self.pipeline_admission_fences.insert(timeline, fence);
+        self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .map(|()| {
+                    store.pipeline_admission_fences.insert(timeline, fence);
+                })
         })
     }
 
@@ -176,7 +200,9 @@ impl PipelineAdmissionPortV1 for MemoryStore {
     ) -> Result<Option<PipelineAdmissionFenceV1>, CoreError> {
         Ok(self.pipeline_admission_fences.get(&timeline).copied())
     }
+}
 
+impl PipelineAdmissionPortV1 for MemoryStore {
     fn admit_pipeline_batch(
         &mut self,
         basis: &PipelineAdmissionBasisV1,
@@ -318,16 +344,21 @@ mod tests {
         assert!(ok(store.read(timeline, SeqRange::all())).is_empty());
         assert_eq!(ok(store.pipeline_admission_fence(timeline)), Some(fence));
         assert!(store.pipeline_admission_receipts.is_empty());
-        assert!(matches!(
-            store.install_pipeline_batch(
-                timeline,
-                &basis,
-                WallTime::from_micros(1),
-                0,
-                &staged_fence
-            ),
-            Ok(PipelineOutcomeV1::Committed(_))
+        let retried = ok(store.install_pipeline_batch(
+            timeline,
+            &basis,
+            WallTime::from_micros(1),
+            0,
+            &staged_fence,
         ));
         assert_eq!(ok(store.read(timeline, SeqRange::all())).len(), 2);
+        assert_eq!(
+            ok(store.pipeline_admission_fence(timeline)),
+            Some(staged_fence)
+        );
+        let PipelineOutcomeV1::Committed(receipt) = retried else {
+            std::panic::resume_unwind(Box::new(format!("expected a commit, got {retried:?}")));
+        };
+        assert_eq!(receipt.committed_events().len(), 2);
     }
 }

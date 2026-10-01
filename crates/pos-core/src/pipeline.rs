@@ -213,6 +213,41 @@ pub struct PipelineSecurityRevisionsDraftV1 {
     pub erasure: Hash,
 }
 
+/// Number of security revisions bound by one V1 admission basis.
+pub(crate) const PIPELINE_SECURITY_REVISION_COUNT_V1: usize = 7;
+
+impl PipelineSecurityRevisionsDraftV1 {
+    /// Return every revision in the one canonical V1 order shared by the
+    /// admission-basis digest and the persisted admission fence.
+    pub(crate) const fn ordered(self) -> [Hash; PIPELINE_SECURITY_REVISION_COUNT_V1] {
+        [
+            self.authority,
+            self.consent,
+            self.capability,
+            self.delegation,
+            self.policy,
+            self.execution_profile,
+            self.erasure,
+        ]
+    }
+
+    /// Rebuild a draft from revisions in the canonical V1 order.
+    pub(crate) const fn from_ordered(
+        [authority, consent, capability, delegation, policy, execution_profile, erasure]: [Hash;
+            PIPELINE_SECURITY_REVISION_COUNT_V1],
+    ) -> Self {
+        Self {
+            authority,
+            consent,
+            capability,
+            delegation,
+            policy,
+            execution_profile,
+            erasure,
+        }
+    }
+}
+
 /// Exact security revision set bound by one admission basis.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PipelineSecurityRevisionsV1(PipelineSecurityRevisionsDraftV1);
@@ -225,14 +260,7 @@ impl PipelineSecurityRevisionsV1 {
     pub fn try_from_draft(
         draft: PipelineSecurityRevisionsDraftV1,
     ) -> Result<Self, PipelineContractErrorV1> {
-        if draft.authority == Hash::zero()
-            || draft.consent == Hash::zero()
-            || draft.capability == Hash::zero()
-            || draft.delegation == Hash::zero()
-            || draft.policy == Hash::zero()
-            || draft.execution_profile == Hash::zero()
-            || draft.erasure == Hash::zero()
-        {
+        if draft.ordered().contains(&Hash::zero()) {
             Err(PipelineContractErrorV1::Incomplete)
         } else {
             Ok(Self(draft))
@@ -469,6 +497,7 @@ impl PipelineAdmissionBasisV1 {
         hasher.update(observation.snapshot_digest.as_bytes());
         hasher.update(&attempt.idempotency.dedup_key.as_bytes());
         hasher.update(&attempt.idempotency.scope.as_bytes());
+        hasher.update(&[tentative_result_tag(self.tentative_result)]);
         hasher.update(self.tentative_result.evidence().digest().as_bytes());
         match self.precondition {
             PipelinePreconditionV1::ExpectedLogicalHead(seq) => {
@@ -480,16 +509,7 @@ impl PipelineAdmissionBasisV1 {
                 hasher.update(digest.as_bytes());
             }
         }
-        let revisions = self.security_revisions.as_draft();
-        for revision in [
-            revisions.authority,
-            revisions.consent,
-            revisions.capability,
-            revisions.delegation,
-            revisions.policy,
-            revisions.execution_profile,
-            revisions.erasure,
-        ] {
+        for revision in self.security_revisions.as_draft().ordered() {
             hasher.update(revision.as_bytes());
         }
         hasher.update(self.batch.digest.as_bytes());
@@ -501,6 +521,13 @@ const fn ingress_tag(ingress: PipelineIngressV1) -> u8 {
     match ingress {
         PipelineIngressV1::HumanProposedAction => 1,
         PipelineIngressV1::ScheduledAiDriver => 2,
+    }
+}
+
+const fn tentative_result_tag(result: TentativePipelineResultV1) -> u8 {
+    match result {
+        TentativePipelineResultV1::HumanDomainApproval(_) => 1,
+        TentativePipelineResultV1::AiProviderValidation(_) => 2,
     }
 }
 

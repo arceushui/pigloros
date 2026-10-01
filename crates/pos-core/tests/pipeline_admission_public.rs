@@ -1,6 +1,7 @@
 use pos_core::{
-    Hash, PipelineAdmissionFenceV1, PipelineContractErrorV1, PipelineSecurityRevisionsDraftV1,
-    PipelineSecurityRevisionsV1, PIPELINE_ADMISSION_FENCE_BYTES_V1,
+    pipeline_erasure_revision_v1, ErasureReferenceV1, Hash, PipelineAdmissionFenceV1,
+    PipelineContractErrorV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    PIPELINE_ADMISSION_FENCE_BYTES_V1,
 };
 
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -127,4 +128,20 @@ fn fence_persistence_rejects_malformed_records() {
         decode(&zero_revision),
         Err(PipelineContractErrorV1::Incomplete)
     );
+}
+
+#[test]
+fn erasure_revision_binds_the_exact_inventory_generation() {
+    let generation = |value: u8| Some(ErasureReferenceV1::from_digest([value; 32]));
+    let absent = pipeline_erasure_revision_v1(None);
+    let zero = pipeline_erasure_revision_v1(generation(0));
+    let first = pipeline_erasure_revision_v1(generation(1));
+
+    assert_eq!(absent, pipeline_erasure_revision_v1(None));
+    assert_eq!(first, pipeline_erasure_revision_v1(generation(1)));
+    for different in [zero, first, pipeline_erasure_revision_v1(generation(2))] {
+        assert_ne!(absent, different);
+    }
+    assert_ne!(zero, first);
+    assert_ne!(absent, Hash::zero());
 }

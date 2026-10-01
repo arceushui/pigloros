@@ -74,7 +74,12 @@ pub use pos_core::store::{
     AppendIntent, AppendOrDuplicateOutcome, EventStore, PurgeOutcome, SeqRange, TimelineExport,
     APPEND_IDENTITY_RETENTION_MICROS,
 };
-use pos_core::ErasureGate;
+use pos_core::{
+    is_consent_event_type, is_geographic_event_type, pipeline_authority_revision_v1,
+    pipeline_erasure_revision_v1, ErasureGate, ErasureReferenceV1, Hash, PipelineAdmissionBasisV1,
+    PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineIngressV1, PipelineOutcomeV1,
+    PipelinePreconditionV1, Seq,
+};
 pub use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
@@ -82,8 +87,9 @@ pub use pos_core::{
     ErasureCasOutcomeV1, ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event,
     EventDraft, EventId, GeographicAdmissionAdmin, GeographicAdmissionOutcome,
     GeographicAdmissionStore, GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind,
-    OwnTracksEnrollmentStore, PersistedAuthorityV1, PipelineAdmissionFenceV1,
-    PipelineAdmissionPortV1, TimelineId, ValidatedGeographicAdmissionV1, WallTime,
+    OwnTracksEnrollmentStore, PersistedAuthorityV1, PipelineAdmissionFencePublisherV1,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, TimelineId, ValidatedGeographicAdmissionV1,
+    WallTime,
 };
 
 /// A committed or indeterminate topology write invalidates a cached inventory.
@@ -591,33 +597,56 @@ pub(crate) fn unbounded_append_outcome(
     })
 }
 
-/// Compare one ADR-021 admission basis with an adapter's serialized state.
-///
-/// Adapters call this inside their final commit serialization point. `Ok`
-/// carries the fence after the batch consumes its Event budget; `Err` is the
-/// typed fail-closed outcome for which the adapter commits nothing.
-pub(crate) fn evaluate_pipeline_admission(
-    basis: &pos_core::PipelineAdmissionBasisV1,
-    fence: Option<&pos_core::PipelineAdmissionFenceV1>,
-    logical_head: pos_core::Seq,
-    resolve_authority: impl FnOnce(
-        pos_core::Hash,
-    ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1>,
-) -> Result<pos_core::PipelineAdmissionFenceV1, pos_core::PipelineOutcomeV1> {
-    use pos_core::{PipelineOutcomeV1, PipelinePreconditionV1};
+// ADR-021 admission comparison shared by every store adapter. Adapters call
+// these helpers inside their final commit serialization point, so
+// `MemoryStore` and `SqliteStore` apply one comparison order and one set of
+// typed fail-closed outcomes.
 
-    let Some(fence) = fence else {
+/// The persisted authority chain an admission fence names, if it resolves.
+type AuthorityResolutionV1 = Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1>;
+
+/// Persisted state an adapter has read inside its serialization point.
+pub(crate) struct PipelinePersistedStateV1<'a> {
+    /// The host-published fence persisted for the basis Timeline.
+    pub(crate) fence: Option<&'a PipelineAdmissionFenceV1>,
+    /// The authoritative Logical Head, including inherited Fork history.
+    pub(crate) logical_head: Seq,
+    /// The persisted erasure inventory generation already validated against
+    /// the adapter's bound containment gate.
+    pub(crate) erasure_inventory_generation: Option<ErasureReferenceV1>,
+}
+
+/// Compare one ADR-021 admission basis with an adapter's persisted state.
+///
+/// `Ok` carries the fence after the batch consumes its Event budget; `Err` is
+/// the typed fail-closed outcome for which the adapter commits nothing. The
+/// authority and erasure revisions are compared with their persisted owners;
+/// the remaining revisions are compared with the persisted host-published
+/// fence, which is their persisted source until an owning contract stores
+/// them in the Event Store (see `pos_core::pipeline_admission`).
+pub(crate) fn evaluate_pipeline_admission(
+    basis: &PipelineAdmissionBasisV1,
+    persisted: &PipelinePersistedStateV1<'_>,
+    resolve_authority: impl FnOnce(Hash) -> AuthorityResolutionV1,
+) -> Result<PipelineAdmissionFenceV1, PipelineOutcomeV1> {
+    let Some(fence) = persisted.fence else {
         return Err(PipelineOutcomeV1::PolicyIndeterminate);
     };
-    if fence.security_revisions() != basis.security_revisions() {
+    let revisions = basis.security_revisions();
+    if fence.security_revisions() != revisions
+        || pipeline_erasure_revision_v1(persisted.erasure_inventory_generation)
+            != revisions.as_draft().erasure
+    {
         return Err(PipelineOutcomeV1::AdmissionConflict);
     }
     evaluate_pipeline_authority(basis, resolve_authority(fence.authority_grant()))?;
-    if basis.attempt().observation().observed_through() > logical_head {
+    if basis.attempt().observation().observed_through() > persisted.logical_head {
         return Err(PipelineOutcomeV1::InvalidObservation);
     }
     match basis.precondition() {
-        PipelinePreconditionV1::ExpectedLogicalHead(expected) if expected != logical_head => {
+        PipelinePreconditionV1::ExpectedLogicalHead(expected)
+            if expected != persisted.logical_head =>
+        {
             return Err(PipelineOutcomeV1::AdmissionConflict);
         }
         PipelinePreconditionV1::DomainStateRevision(expected)
@@ -630,16 +659,11 @@ pub(crate) fn evaluate_pipeline_admission(
     }
     let drafts = basis.batch().drafts();
     if drafts.iter().any(|draft| {
-        pos_core::is_geographic_event_type(&draft.event_type)
-            || pos_core::is_consent_event_type(&draft.event_type)
+        is_geographic_event_type(&draft.event_type) || is_consent_event_type(&draft.event_type)
     }) {
         return Err(match basis.attempt().ingress() {
-            pos_core::PipelineIngressV1::HumanProposedAction => {
-                PipelineOutcomeV1::InvalidPluginResult
-            }
-            pos_core::PipelineIngressV1::ScheduledAiDriver => {
-                PipelineOutcomeV1::InvalidProviderResult
-            }
+            PipelineIngressV1::HumanProposedAction => PipelineOutcomeV1::InvalidPluginResult,
+            PipelineIngressV1::ScheduledAiDriver => PipelineOutcomeV1::InvalidProviderResult,
         });
     }
     u64::try_from(drafts.len())
@@ -650,11 +674,9 @@ pub(crate) fn evaluate_pipeline_admission(
 
 /// Compose the persisted authority chain named by an admission fence.
 fn evaluate_pipeline_authority(
-    basis: &pos_core::PipelineAdmissionBasisV1,
-    authority: Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1>,
-) -> Result<(), pos_core::PipelineOutcomeV1> {
-    use pos_core::PipelineOutcomeV1;
-
+    basis: &PipelineAdmissionBasisV1,
+    authority: AuthorityResolutionV1,
+) -> Result<(), PipelineOutcomeV1> {
     let Ok(authority) = authority else {
         return Err(PipelineOutcomeV1::PolicyIndeterminate);
     };
@@ -671,35 +693,45 @@ fn evaluate_pipeline_authority(
     {
         return Err(PipelineOutcomeV1::AuthorityExpired);
     }
-    if pos_core::pipeline_authority_revision_v1(&authority)
-        != basis.security_revisions().as_draft().authority
+    if pipeline_authority_revision_v1(&authority) != basis.security_revisions().as_draft().authority
     {
         return Err(PipelineOutcomeV1::AdmissionConflict);
     }
     Ok(())
 }
 
+/// Run `install` for a passing comparison, or return its typed rejection
+/// without touching adapter state.
+pub(crate) fn install_or_reject(
+    evaluated: Result<PipelineAdmissionFenceV1, PipelineOutcomeV1>,
+    install: impl FnOnce(&PipelineAdmissionFenceV1) -> Result<PipelineOutcomeV1, CoreError>,
+) -> Result<PipelineOutcomeV1, CoreError> {
+    match evaluated {
+        Ok(next_fence) => install(&next_fence),
+        Err(rejected) => Ok(rejected),
+    }
+}
+
 /// Bind a just-committed admitted batch to its authoritative receipt.
 pub(crate) fn committed_pipeline_receipt(
-    basis: &pos_core::PipelineAdmissionBasisV1,
+    basis: &PipelineAdmissionBasisV1,
     timeline: TimelineId,
     events: &[Event],
-) -> Result<pos_core::PipelineCommitReceiptV1, CoreError> {
-    pos_core::PipelineCommitReceiptV1::try_from_committed_events(basis, timeline, events)
+) -> Result<PipelineCommitReceiptV1, CoreError> {
+    PipelineCommitReceiptV1::try_from_committed_events(basis, timeline, events)
         .map_err(pipeline_receipt_error)
 }
 
 /// Rebuild the original receipt for an exact retained retry from its committed Events.
 pub(crate) fn recovered_pipeline_receipt(
-    basis: &pos_core::PipelineAdmissionBasisV1,
+    basis: &PipelineAdmissionBasisV1,
     timeline: TimelineId,
     events: &[Event],
-) -> Result<pos_core::PipelineOutcomeV1, CoreError> {
-    committed_pipeline_receipt(basis, timeline, events)
-        .map(pos_core::PipelineOutcomeV1::RecoveredDuplicate)
+) -> Result<PipelineOutcomeV1, CoreError> {
+    committed_pipeline_receipt(basis, timeline, events).map(PipelineOutcomeV1::RecoveredDuplicate)
 }
 
-fn pipeline_receipt_error(error: pos_core::PipelineContractErrorV1) -> CoreError {
+fn pipeline_receipt_error(error: PipelineContractErrorV1) -> CoreError {
     CoreError::Storage(format!(
         "admitted pipeline batch receipt is invalid: {error}"
     ))

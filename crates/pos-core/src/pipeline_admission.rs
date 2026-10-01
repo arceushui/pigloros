@@ -1,23 +1,46 @@
 //! Host-only ADR-021 admitted-batch store port.
 //!
-//! The trusted host publishes one [`PipelineAdmissionFenceV1`] per Timeline.
-//! An adapter compares a complete [`PipelineAdmissionBasisV1`] against that
-//! fence, the persisted authority chain, the erasure fence, the Logical Head,
-//! and the retained idempotency receipts inside one logical serialization
-//! point, then commits the whole ordered Event batch or nothing.
+//! The trusted host publishes one [`PipelineAdmissionFenceV1`] per Timeline
+//! through [`PipelineAdmissionFencePublisherV1`]. An adapter compares a
+//! complete [`PipelineAdmissionBasisV1`] against that persisted fence, the
+//! persisted authority chain, the persisted erasure inventory generation, the
+//! Logical Head, and the retained idempotency receipts inside one logical
+//! serialization point, then commits the whole ordered Event batch or nothing.
+//!
+//! # Persisted revision sources
+//!
+//! Each of the seven security revisions is compared with the exact persisted
+//! state owned by its accepted contract where the Event Store owns one:
+//!
+//! - **authority**: [`pipeline_authority_revision_v1`] over the persisted
+//!   root-to-leaf grant chain (#178) named by the fence, at its current
+//!   revocation epoch. It binds every grant identity, delegation link, and
+//!   per-grant policy revision of that chain.
+//! - **erasure**: [`pipeline_erasure_revision_v1`] over the persisted erasure
+//!   inventory generation (#186) that the adapter has already validated
+//!   against its bound containment gate.
+//! - **consent, capability, delegation, policy, execution profile**: the
+//!   Event Store owns no separate persisted revision for these yet. The
+//!   host-published fence, persisted in the same store and replaced only by the
+//!   trusted host, is their persisted source until an owning contract stores
+//!   them in the Event Store transaction. The EPF1 execution profile is
+//!   persisted by the Gateway trust-policy registry (#323, #446) outside the
+//!   Event Store transaction, so the host publishes its revision here.
 
 use std::num::NonZeroUsize;
 
 use crate::{
-    store::PurgeOutcome, CoreError, Hash, PersistedAuthorityV1, PipelineAdmissionBasisV1,
+    pipeline::PIPELINE_SECURITY_REVISION_COUNT_V1, store::PurgeOutcome, CoreError,
+    ErasureReferenceV1, Hash, PersistedAuthorityV1, PipelineAdmissionBasisV1,
     PipelineContractErrorV1, PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1,
     PipelineSecurityRevisionsV1, TimelineId,
 };
 
 const FENCE_VERSION_V1: u8 = 1;
 const HASH_BYTES: usize = 32;
-const REVISION_COUNT: usize = 7;
-const DOMAIN_FLAG_OFFSET: usize = 1 + HASH_BYTES * (1 + REVISION_COUNT);
+const REVISIONS_OFFSET: usize = 1 + HASH_BYTES;
+const DOMAIN_FLAG_OFFSET: usize =
+    REVISIONS_OFFSET + HASH_BYTES * PIPELINE_SECURITY_REVISION_COUNT_V1;
 const DOMAIN_OFFSET: usize = DOMAIN_FLAG_OFFSET + 1;
 const BUDGET_OFFSET: usize = DOMAIN_OFFSET + HASH_BYTES;
 
@@ -101,7 +124,7 @@ impl PipelineAdmissionFenceV1 {
         let mut bytes = [0_u8; PIPELINE_ADMISSION_FENCE_BYTES_V1];
         bytes[0] = FENCE_VERSION_V1;
         for (index, value) in std::iter::once(self.authority_grant)
-            .chain(revision_values(self.security_revisions.as_draft()))
+            .chain(self.security_revisions.as_draft().ordered())
             .enumerate()
         {
             let offset = 1 + index * HASH_BYTES;
@@ -135,15 +158,9 @@ impl PipelineAdmissionFenceV1 {
         };
         let mut budget = [0_u8; 8];
         budget.copy_from_slice(&fixed[BUDGET_OFFSET..]);
-        PipelineSecurityRevisionsV1::try_from_draft(PipelineSecurityRevisionsDraftV1 {
-            authority: hash_at(fixed, 1 + HASH_BYTES),
-            consent: hash_at(fixed, 1 + 2 * HASH_BYTES),
-            capability: hash_at(fixed, 1 + 3 * HASH_BYTES),
-            delegation: hash_at(fixed, 1 + 4 * HASH_BYTES),
-            policy: hash_at(fixed, 1 + 5 * HASH_BYTES),
-            execution_profile: hash_at(fixed, 1 + 6 * HASH_BYTES),
-            erasure: hash_at(fixed, 1 + 7 * HASH_BYTES),
-        })
+        PipelineSecurityRevisionsV1::try_from_draft(PipelineSecurityRevisionsDraftV1::from_ordered(
+            std::array::from_fn(|index| hash_at(fixed, REVISIONS_OFFSET + index * HASH_BYTES)),
+        ))
         .and_then(|security_revisions| {
             Self::try_new(
                 hash_at(fixed, 1),
@@ -169,18 +186,40 @@ pub fn pipeline_authority_revision_v1(authority: &PersistedAuthorityV1) -> Hash 
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-/// Host-only store port that atomically compares an admission basis and
-/// commits its bounded ordered Event batch.
+/// Derive the erasure revision an admission basis must bind for the
+/// persisted erasure inventory generation.
 ///
-/// This capability is deliberately separate from [`crate::EventStore`]: the
-/// trusted host composition root owns it and must never expose it to Plugin,
-/// provider, Driver, or `ActionApprover` code.
-pub trait PipelineAdmissionPortV1 {
+/// `None` is the state before any complete inventory is installed; adapters
+/// reach it only with the unverified test-fixture gate, because a production
+/// gate without an installed inventory fails closed before comparison.
+#[must_use]
+pub fn pipeline_erasure_revision_v1(inventory_generation: Option<ErasureReferenceV1>) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.PipelineErasureRevision.v1\0");
+    let (presence, digest) =
+        inventory_generation.map_or((0_u8, [0_u8; 32]), |generation| (1, generation.digest()));
+    hasher.update(&[presence]);
+    hasher.update(&digest);
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Host-only capability that publishes the admission fence for one Timeline.
+///
+/// Publishing is deliberately separate from [`PipelineAdmissionPortV1`]: the
+/// trusted host derives a fence from its own authority, policy, and budget
+/// state, while the admission port only consumes it. Neither capability may
+/// be exposed to Plugin, provider, Driver, or `ActionApprover` code.
+pub trait PipelineAdmissionFencePublisherV1 {
     /// Install or replace the host-published admission fence for one Timeline.
+    ///
+    /// The write is serialized with admissions under the Timeline's erasure
+    /// fence, so a frozen erasure scope rejects it and leaves the fence
+    /// unchanged.
     ///
     /// # Errors
     /// Returns [`CoreError::TimelineNotFound`] for an unknown or invisible
-    /// Timeline, or a storage error when the fence cannot be persisted.
+    /// Timeline, an erasure error for a frozen or unavailable erasure scope,
+    /// or a storage error when the fence cannot be persisted.
     fn set_pipeline_admission_fence(
         &mut self,
         timeline: TimelineId,
@@ -195,7 +234,26 @@ pub trait PipelineAdmissionPortV1 {
         &self,
         timeline: TimelineId,
     ) -> Result<Option<PipelineAdmissionFenceV1>, CoreError>;
+}
 
+/// Host-only store port that atomically compares an admission basis and
+/// commits its bounded ordered Event batch.
+///
+/// This capability is deliberately separate from [`crate::EventStore`]: the
+/// trusted host composition root owns it and must never expose it to Plugin,
+/// provider, Driver, or `ActionApprover` code.
+///
+/// # Serialization point
+///
+/// Every comparison and the commit run inside one adapter serialization
+/// point: exclusive `&mut self` access under the Timeline's erasure fence, and
+/// for `SQLite` additionally one `BEGIN IMMEDIATE` transaction. Concurrent
+/// same-Timeline attempts therefore observe the authoritative Logical Head
+/// (including Fork history) one at a time; at most one attempt can commit
+/// against a given head. A second `SQLite` connection that writes the same
+/// database invalidates this connection's validated erasure inventory, so a
+/// cross-connection race fails closed rather than committing twice.
+pub trait PipelineAdmissionPortV1 {
     /// Atomically compare `basis` and commit its complete Event batch.
     ///
     /// The basis Timeline is the observation anchor's Timeline. A retained
@@ -206,8 +264,10 @@ pub trait PipelineAdmissionPortV1 {
     ///
     /// # Errors
     /// Returns an erasure, visibility, clock, or storage error. Every error
-    /// leaves the Timeline, fence, and retained receipts unchanged unless it is
-    /// [`CoreError::StorageOutcomeUnknown`].
+    /// and every non-`Committed` outcome leaves the Timeline, fence, and
+    /// retained receipts unchanged unless it is
+    /// [`CoreError::StorageOutcomeUnknown`]. An expired receipt for the same
+    /// idempotency key is replaced only by a successful commit.
     fn admit_pipeline_batch(
         &mut self,
         basis: &PipelineAdmissionBasisV1,
@@ -222,18 +282,6 @@ pub trait PipelineAdmissionPortV1 {
         &mut self,
         limit: NonZeroUsize,
     ) -> Result<PurgeOutcome, CoreError>;
-}
-
-const fn revision_values(revisions: PipelineSecurityRevisionsDraftV1) -> [Hash; REVISION_COUNT] {
-    [
-        revisions.authority,
-        revisions.consent,
-        revisions.capability,
-        revisions.delegation,
-        revisions.policy,
-        revisions.execution_profile,
-        revisions.erasure,
-    ]
 }
 
 fn hash_at(bytes: &[u8; PIPELINE_ADMISSION_FENCE_BYTES_V1], offset: usize) -> Hash {
