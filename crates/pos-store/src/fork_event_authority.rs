@@ -881,7 +881,7 @@ mod tests {
             private_material_digest: other_material.material_digest(),
             public_verification_key: other_material.public_verification_key(),
             expected_registry: registry.clone(),
-            ..fixture.request.clone()
+            ..fixture.request
         };
         assert_eq!(
             commit_without_signing(store, creator),
@@ -892,7 +892,7 @@ mod tests {
         );
         let inactive = ForkManifestPublicationRequestV1 {
             expected_registry: registry.clone(),
-            ..fixture.request.clone()
+            ..fixture.request
         };
         assert_eq!(
             commit_without_signing(store, inactive),
@@ -909,7 +909,7 @@ mod tests {
             private_material_digest: rotated_material.material_digest(),
             public_verification_key: rotated_material.public_verification_key(),
             expected_registry: pending_registry,
-            ..fixture.request.clone()
+            ..fixture.request
         };
         assert_eq!(
             commit_without_signing(store, pending.clone()),
