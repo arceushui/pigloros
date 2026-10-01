@@ -787,12 +787,10 @@ fn adapter_registration_extraction_rejects_malformed_and_mismatched_inputs(
     )
     .is_err());
 
-    let transcript =
-        AdapterTranscriptV1::from_canonical_cbor(&fixture.transcript.artifact_bytes)?;
+    let transcript = AdapterTranscriptV1::from_canonical_cbor(&fixture.transcript.artifact_bytes)?;
     let mut inconsistent_transcript = transcript.as_input().clone();
     inconsistent_transcript.adapter_admission_digest = Hash::from_bytes([0x85; 32]);
-    let inconsistent_bytes =
-        AdapterTranscriptV1::new(inconsistent_transcript)?.to_canonical_cbor();
+    let inconsistent_bytes = AdapterTranscriptV1::new(inconsistent_transcript)?.to_canonical_cbor();
     assert!(extract_adapter_transcript_registration_v1(
         &inconsistent_bytes,
         &fixture.admission.artifact_bytes,
@@ -825,55 +823,55 @@ fn root_registration_extraction_rejects_each_invalid_child(
         owner_id: &fixture.owner_id,
         label_data_class: Some(ArtifactDataClassV1::PublicRecord),
     };
-    assert!(extract_repro_manifest_root_registration_v1(
-        ReproManifestRootRegistrationInputV1 {
+    assert!(
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             root_bytes: b"not MRM1",
             ..input
-        }
-    )
-    .is_err());
-    assert!(extract_repro_manifest_root_registration_v1(
-        ReproManifestRootRegistrationInputV1 {
+        })
+        .is_err()
+    );
+    assert!(
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             recording_receipt_bytes: b"not WCR1",
             ..input
-        }
-    )
-    .is_err());
-    assert!(extract_repro_manifest_root_registration_v1(
-        ReproManifestRootRegistrationInputV1 {
+        })
+        .is_err()
+    );
+    assert!(
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             transcript_bytes: b"not MAT1",
             ..input
-        }
-    )
-    .is_err());
-    assert!(extract_repro_manifest_root_registration_v1(
-        ReproManifestRootRegistrationInputV1 {
+        })
+        .is_err()
+    );
+    assert!(
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             recording_registration: &admission_registration,
             ..input
-        }
-    )
-    .is_err());
-    assert!(extract_repro_manifest_root_registration_v1(
-        ReproManifestRootRegistrationInputV1 {
+        })
+        .is_err()
+    );
+    assert!(
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             admission_bytes: b"not MAA1",
             ..input
-        }
-    )
-    .is_err());
-    assert!(extract_repro_manifest_root_registration_v1(
-        ReproManifestRootRegistrationInputV1 {
+        })
+        .is_err()
+    );
+    assert!(
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             admission_registration: &root_registration,
             ..input
-        }
-    )
-    .is_err());
-    assert!(extract_repro_manifest_root_registration_v1(
-        ReproManifestRootRegistrationInputV1 {
+        })
+        .is_err()
+    );
+    assert!(
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             transcript_registration: &admission_registration,
             ..input
-        }
-    )
-    .is_err());
+        })
+        .is_err()
+    );
     Ok(())
 }
 
@@ -902,28 +900,27 @@ fn root_registration_extraction_rejects_invalid_label_and_binding(
     let mut unclassified_label = root.as_input().clone();
     unclassified_label.label = None;
     let unlabeled_bytes = ReproManifestRootV1::new(unclassified_label)?.to_canonical_cbor();
-    assert!(extract_repro_manifest_root_registration_v1(
-        ReproManifestRootRegistrationInputV1 {
+    assert!(
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             root_bytes: &unlabeled_bytes,
             label_data_class: Some(ArtifactDataClassV1::PublicRecord),
             ..input
-        }
-    )
-    .is_err());
+        })
+        .is_err()
+    );
 
     let mut mismatched_binding = root.as_input().clone();
     mismatched_binding.adapter_transcript_digest = Hash::from_bytes([0x86; 32]);
     let mismatched_bytes = ReproManifestRootV1::new(mismatched_binding)?.to_canonical_cbor();
-    assert!(extract_repro_manifest_root_registration_v1(
-        ReproManifestRootRegistrationInputV1 {
+    assert!(
+        extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             root_bytes: &mismatched_bytes,
             ..input
-        }
-    )
-    .is_err());
+        })
+        .is_err()
+    );
     Ok(())
 }
-
 
 fn input_with_trailing_native_byte(
     mut input: ArtifactRegistrationInputV1,
@@ -933,7 +930,9 @@ fn input_with_trailing_native_byte(
     let mut fields = registration.fields().clone();
     fields.artifact_digest =
         ArtifactRegistrationV1::artifact_digest(fields.artifact_class, &input.artifact_bytes);
-    input.registration_cbor = ArtifactRegistrationV1::new(fields)?.canonical_cbor().to_vec();
+    input.registration_cbor = ArtifactRegistrationV1::new(fields)?
+        .canonical_cbor()
+        .to_vec();
     Ok(input)
 }
 
@@ -958,7 +957,6 @@ fn registration_preparation_rejects_noncanonical_supported_native_records(
     }
     Ok(())
 }
-
 
 struct CatalogFixture {
     rows: Vec<ArtifactRegistrationCatalogRowV1>,

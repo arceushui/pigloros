@@ -1019,7 +1019,6 @@ fn sqlite_event_store_adapter_recording_port_covers_the_public_state_machine(
     exercise_event_store_adapter_recording(&mut store, Hash::from_bytes([0x7f; 32]))
 }
 
-
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_event_store_exposes_the_artifact_registration_port(
@@ -1052,8 +1051,7 @@ fn sqlite_event_store_exposes_the_artifact_registration_port(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_catalog_commit_requires_the_complete_schema(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_catalog_commit_requires_the_complete_schema() -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let path = database
         .path()
