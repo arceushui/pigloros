@@ -14,8 +14,17 @@ mod e2e_determinism;
 pub mod executor;
 mod http;
 pub mod ledger_config;
+#[cfg(target_os = "linux")]
+pub mod local_fork_authentication;
+#[cfg(target_os = "linux")]
+pub mod local_fork_coordinator;
+#[cfg(target_os = "linux")]
+pub mod local_fork_listener;
+#[cfg(target_os = "linux")]
+pub mod local_fork_service;
 pub mod owntracks;
 pub mod owntracks_http;
+pub mod startup;
 
 pub use authorization::{
     AirGappedAuthenticationAdapter, GatewayAuthenticationAdapter, GatewayAuthenticationError,
@@ -2127,6 +2136,46 @@ impl Gateway {
             consent_authority,
             None,
         )
+    }
+
+    /// Construct the local Fork-admission Gateway: its executor owns the one
+    /// recovered erasure host of the store together with the private
+    /// ADR-109 revision 9 Fork-admission slot.
+    ///
+    /// The returned submitter is the only handle that can submit the
+    /// Fork-admission commands; the Gateway and its HTTP routes never hold
+    /// it. With an owner key the Gateway also accepts authenticated local
+    /// `OwnTracks` ingress, as `new_with_owntracks_erasure_host` does.
+    ///
+    /// # Errors
+    /// Returns a store error if the recovered host cannot bind the Gateway's
+    /// independently owned consent authority.
+    pub(crate) fn new_with_fork_admission_erasure_host(
+        host: ErasureExecutionHostV1,
+        owntracks_owner_key: Option<&OwnTracksOwnerKey>,
+        slot: executor::ForkAdmissionSlotV1,
+    ) -> Result<(Self, executor::ForkAdmissionSubmitterV1), GatewayError> {
+        let gate = host.containment_gate();
+        let consent_authority = ConsentAuthority::new();
+        let (store, submitter) = executor::StoreExecutor::new_with_fork_admission_host(
+            host,
+            owntracks_owner_key.map(|key| key.0),
+            consent_authority.append_permit(),
+            slot,
+        )?;
+        let gateway = Self::from_host_components(
+            store,
+            broadcast::channel(EVENT_BUS_CAPACITY).0,
+            GatewayLimits::LOCAL_DEFAULT,
+            owntracks_owner_key.is_some(),
+            Ok(gateway_empty_action_registry(
+                consent_authority.clone(),
+                gate,
+            )),
+            consent_authority,
+            None,
+        )?;
+        Ok((gateway, submitter))
     }
 
     /// Wrap a store and configure the World body catalogue used for actions.

@@ -1,8 +1,10 @@
 //! ADR-109's bounded local Fork-admission wire boundary.
 //!
-//! This module deliberately stops after authenticating the Unix peer and
-//! decoding the complete FAL1 frame.  The durable delivery journal owns the
-//! later claim, FAC1, FRP1, and response-delivery transitions.
+//! This module binds the private pathname socket, authenticates the Unix
+//! peer, decodes one complete FAL1 frame, and writes the FARL1 response. It
+//! opens no store: the listener-thread coordinator signs FAC1/FRP1 and submits
+//! the claim, FAC1, FRP1 and response-delivery transitions to the Gateway's
+//! one erasure host through its store executor (ADR-109 revision 9).
 
 use std::{
     fs,

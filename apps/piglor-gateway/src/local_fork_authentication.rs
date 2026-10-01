@@ -238,7 +238,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         store: &mut S,
     ) -> Result<ForkAdmissionHostRecordV1, LocalForkAuthorityBootstrapErrorV1>
     where
-        S: ForkAdmissionAuthorityBootstrapPortV1,
+        S: ForkAdmissionAuthorityBootstrapPortV1 + ?Sized,
     {
         self.policy()
             .digest()
@@ -269,7 +269,7 @@ impl LocalForkAuthenticationCredentialsV1 {
         store: &mut S,
     ) -> Result<ForkAdmissionAuthoritySessionV1, LocalForkAuthorityBootstrapErrorV1>
     where
-        S: ForkAdmissionAuthorityBootstrapPortV1,
+        S: ForkAdmissionAuthorityBootstrapPortV1 + ?Sized,
     {
         self.policy()
             .digest()
