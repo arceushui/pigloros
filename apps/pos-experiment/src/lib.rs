@@ -117,6 +117,8 @@ fn open_store_with_gate(
 }
 
 /// Open the concrete store that also provides the scheduled-admission ports.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn open_admission_store(
     config: StoreConfig,
 ) -> Result<Box<dyn ScheduledAdmissionStoreV1>, pos_core::CoreError> {
