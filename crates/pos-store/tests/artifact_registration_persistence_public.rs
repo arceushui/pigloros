@@ -1369,8 +1369,7 @@ fn sqlite_adapter_recording_rejects_session_and_column_corruption(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_adapter_recording_rejects_durable_bounds(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_adapter_recording_rejects_durable_bounds() -> Result<(), Box<dyn std::error::Error>> {
     let _database = tempfile::NamedTempFile::new()?;
     let path = _database
         .path()
