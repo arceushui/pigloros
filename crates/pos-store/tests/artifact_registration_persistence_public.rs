@@ -564,7 +564,11 @@ fn close_and_abort_adapter_recording<S: pos_core::store::EventStore>(
         Err(AdapterRecordingStoreErrorV1::InvalidState)
     );
     assert_eq!(
-        store.adapter_recording_reserve_call(owner_reference, run_operation_id, reservation.clone()),
+        store.adapter_recording_reserve_call(
+            owner_reference,
+            run_operation_id,
+            reservation.clone(),
+        ),
         Err(AdapterRecordingStoreErrorV1::InvalidState)
     );
     assert_eq!(
