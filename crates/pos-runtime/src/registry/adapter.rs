@@ -9,8 +9,7 @@ use std::{
 use pos_core::{
     validate_closed_adapter_recording_v1, AdapterAdmissionEntryV1, AdapterAdmissionInputV1,
     AdapterAdmissionV1, AdapterCallReservationOutcomeV1, AdapterCallReservationV1,
-    AdapterEffectModeV1,
-    AdapterInvocationInputV1, AdapterInvocationV1, AdapterRecordingSessionV1,
+    AdapterEffectModeV1, AdapterInvocationInputV1, AdapterInvocationV1, AdapterRecordingSessionV1,
     AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1, Hash, PluginId,
     WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_BYTES_V1,
     MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
@@ -317,7 +316,7 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
             configuration_digest: entry.configuration_digest,
             global_call_index,
             exact_request_payload,
-        }) {
+        }) else {
             self.failed = true;
             return Err(LocalAdapterErrorV1::CallBoundExceeded);
         };
@@ -392,13 +391,17 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
                     self.recording_session.run_operation_id(),
                     global_call_index,
                 );
-                let effect_mode = self.registry.local_adapters[adapter_index].entry.effect_mode;
+                let effect_mode = self.registry.local_adapters[adapter_index]
+                    .entry
+                    .effect_mode;
                 let output = match catch_unwind(AssertUnwindSafe(|| {
                     self.registry.local_adapters[adapter_index]
                         .provider
                         .invoke(invocation, provider_key)
                 })) {
-                    Ok(Ok(response)) if response.output_bytes.len() <= MAX_ADAPTER_CALL_BYTES_V1 => {
+                    Ok(Ok(response))
+                        if response.output_bytes.len() <= MAX_ADAPTER_CALL_BYTES_V1 =>
+                    {
                         if effect_mode == AdapterEffectModeV1::ExternallyIdempotent
                             && response.idempotency_acknowledgement != Some(provider_key)
                         {
