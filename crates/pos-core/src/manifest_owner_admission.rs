@@ -55,7 +55,7 @@ pub trait ManifestOwnerAdmissionVerifierV1: Send + Sync {
     /// Confirm that MCA1 is the exact current, complete registry-issued batch.
     ///
     /// # Errors
-    /// Returns `OwnerRejected` when any PluginId, stable slot, pin, policy,
+    /// Returns `OwnerRejected` when any `PluginId`, stable slot, pin, policy,
     /// closure, or registry revision is absent, changed, or unverified.
     fn verify_complete_composition(
         &self,
@@ -150,7 +150,7 @@ pub struct ManifestOwnerTimelineAdmissionV1 {
     pub binding: ManifestSlotBindingV1,
     /// Installed-coordinator-signed receipt for this scope.
     pub receipt: ManifestSlotAdmissionReceiptV1,
-    /// Exact native policy bytes and Required leaves, sorted by PluginId.
+    /// Exact native policy bytes and Required leaves, sorted by `PluginId`.
     pub policy_copies: Vec<ManifestOwnerPolicyCopiesV1>,
 }
 
@@ -163,7 +163,7 @@ pub struct ManifestOwnerTimelineAdmissionRequestV1 {
     pub scope: Hash,
     /// Separately authenticated consumer and producer selector.
     pub wcs1: WorldConsumerSetV1,
-    /// Exact native policy bytes and Required leaves, sorted by PluginId.
+    /// Exact native policy bytes and Required leaves, sorted by `PluginId`.
     pub policy_copies: Vec<ManifestOwnerPolicyCopiesV1>,
 }
 
@@ -192,7 +192,9 @@ pub struct ManifestSlotAdmissionReceiptDraftV1 {
 
 impl ManifestSlotAdmissionReceiptDraftV1 {
     /// Construct the exact MSR1 value to be signed using installed evidence.
-    #[must_use]
+    ///
+    /// # Errors
+    /// Returns an error if the combined receipt fields violate MSR1 invariants.
     pub fn with_evidence_and_signature(
         self,
         coordinator_key_evidence_hash: Hash,
@@ -331,7 +333,7 @@ pub fn prepare_manifest_owner_admission_v1(
             msb1_hash: binding.digest(),
         };
         let receipt = verifier.sign_coordinator_receipt(draft)?;
-        if !receipt_matches_draft(&receipt, draft) {
+        if !receipt_matches_draft(&receipt, &draft) {
             return Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
         }
         verifier.verify_coordinator_receipt(&receipt)?;
@@ -470,6 +472,11 @@ pub trait ManifestOwnerAdmissionPersistencePortV1 {
     /// An identical unsigned input returns the original result with
     /// `ExactRetry`; reuse of the operation ID for another input returns
     /// `Conflict`. A missing operation returns `None`.
+    ///
+    /// # Errors
+    /// Returns `Conflict` when an operation ID is reused for another intent,
+    /// `CorruptState` when its persisted row is invalid, or `StorageFailure`
+    /// when the lookup cannot be completed.
     fn resolve_manifest_owner_admission_retry_v1(
         &self,
         owner_id: [u8; 32],
@@ -726,7 +733,7 @@ fn derive_binding(
 
 fn receipt_matches_draft(
     receipt: &ManifestSlotAdmissionReceiptV1,
-    draft: ManifestSlotAdmissionReceiptDraftV1,
+    draft: &ManifestSlotAdmissionReceiptDraftV1,
 ) -> bool {
     let fields = receipt.as_input();
     fields.owner_id == draft.owner_id
@@ -887,7 +894,9 @@ fn valid_opc1_envelope(bytes: &[u8], expected_eop1: &[u8]) -> bool {
         if member_length > remaining as u64 {
             return false;
         }
-        let member_length = member_length as usize;
+        let Ok(member_length) = usize::try_from(member_length) else {
+            return false;
+        };
         let member_end = offset + member_length;
         let member = &bytes[offset..member_end];
         if member_index == 0 && member != expected_eop1 {
