@@ -1022,10 +1022,11 @@ fn registration_with_data_class(
     Ok(ArtifactRegistrationV1::new(fields)?)
 }
 
-fn registration_with_child_address(
+fn registration_with_child_identity(
     row: &ArtifactRegistrationCatalogRowV1,
     old_address: Hash,
     new_address: Hash,
+    new_digest: Hash,
 ) -> Result<ArtifactRegistrationV1, Box<dyn std::error::Error>> {
     let mut fields = row.registration().fields().clone();
     let edge = fields
@@ -1034,6 +1035,7 @@ fn registration_with_child_address(
         .find(|edge| edge.registration_address == old_address)
         .ok_or_else(|| std::io::Error::other("catalog fixture child was absent"))?;
     edge.registration_address = new_address;
+    edge.artifact_digest = new_digest;
     Ok(ArtifactRegistrationV1::new(fields)?)
 }
 
@@ -1072,17 +1074,19 @@ fn persisted_catalog_rejects_a_semantically_wrong_admission_registration(
         registration_with_data_class(&admission, ArtifactDataClassV1::StructuralAuditMetadata)?;
     fixture.rows[admission_index] =
         catalog_row_with_registration(&admission, changed_admission.clone())?;
-    let changed_transcript = registration_with_child_address(
+    let changed_transcript = registration_with_child_identity(
         &transcript,
         admission.registration_address(),
         changed_admission.address(),
+        admission.artifact_digest(),
     )?;
     fixture.rows[transcript_index] =
         catalog_row_with_registration(&transcript, changed_transcript.clone())?;
-    let changed_root = registration_with_child_address(
+    let changed_root = registration_with_child_identity(
         &root,
         transcript.registration_address(),
         changed_transcript.address(),
+        transcript.artifact_digest(),
     )?;
     fixture.rows[root_index] = catalog_row_with_registration(&root, changed_root.clone())?;
 
@@ -1106,7 +1110,7 @@ fn persisted_catalog_rejects_a_semantically_wrong_transcript_registration(
         registration_with_data_class(&transcript, ArtifactDataClassV1::StructuralAuditMetadata)?;
     fixture.rows[transcript_index] =
         catalog_row_with_registration(&transcript, changed_transcript.clone())?;
-    let changed_root = registration_with_child_address(
+    let changed_root = registration_with_child_identity(
         &root,
         transcript.registration_address(),
         changed_transcript.address(),
@@ -1133,14 +1137,15 @@ fn persisted_catalog_rejects_an_unknown_repro_manifest_format(
 
     let unknown_admission = unknown_repro_manifest_row(&admission)?;
     fixture.rows[admission_index] = unknown_admission.clone();
-    let changed_transcript = registration_with_child_address(
+    let changed_transcript = registration_with_child_identity(
         &transcript,
         admission.registration_address(),
         unknown_admission.registration_address(),
+        unknown_admission.artifact_digest(),
     )?;
     fixture.rows[transcript_index] =
         catalog_row_with_registration(&transcript, changed_transcript.clone())?;
-    let changed_root = registration_with_child_address(
+    let changed_root = registration_with_child_identity(
         &root,
         transcript.registration_address(),
         changed_transcript.address(),
