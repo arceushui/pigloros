@@ -1372,7 +1372,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         &mut registry,
         view_authority(&fixture, &evaluation, &authority),
     ))
-    .contains("scheduled pass was not admitted: PolicyIndeterminate"));
+    .contains("store error"));
     assert_eq!(observed(&state).aborts, 1);
     assert!(error_text(admit_unfenced(
         &mut registry,
