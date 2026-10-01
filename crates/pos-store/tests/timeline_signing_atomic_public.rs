@@ -544,7 +544,7 @@ fn reject_prepared_callback_failures(
     )?;
     // The retry reserves the next nonce; no rolled-back value is reused.
     assert_eq!(nonce.get(), 5);
-    assert_eq!(committed.payload, sealed_payload(5));
+    assert_eq!(committed.payload, sealed_payload(nonce.get()));
     assert_eq!(store.read_own(timeline, SeqRange::all())?, vec![committed]);
     Ok(())
 }
@@ -610,7 +610,7 @@ fn sqlite_prepared_append_rolls_back_insert_failure_and_allows_retry(
     )?;
     assert_eq!(committed.seq, Seq::from_u64(1));
     assert_eq!(nonce.get(), 2);
-    assert_eq!(committed.payload, sealed_payload(2));
+    assert_eq!(committed.payload, sealed_payload(nonce.get()));
     assert_eq!(store.read_own(timeline, SeqRange::all())?, vec![committed]);
     Ok(())
 }
