@@ -84,10 +84,16 @@ use crate::fork_delivery_journal::{
     ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 use crate::fork_event_authority::fork_append_request;
+use crate::fork_manifest_publication::{
+    publication_sources, recovered_publication_receipt, sign_publication,
+    trusted_committed_manifest, validate_publication_request, CommittedPublicationSourcesV1,
+    PublicationGraphV1, PublicationSourcesV1,
+};
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
     ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1,
-    ForkEventProvenanceAuthorityPortV1,
+    ForkEventProvenanceAuthorityPortV1, ForkManifestPublicationErrorV1,
+    ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
 #[cfg(test)]
@@ -849,6 +855,110 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             "UNIQUE (event_id)",
             "UNIQUE (fop1_cbor)",
             "UNIQUE (child_id, local_seq)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_publication_operations",
+        columns_query: "PRAGMA table_info(fork_publication_operations)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "record_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fpo1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(operation_id) = 32)",
+            "CHECK (length(record_id) = 32)",
+            "UNIQUE (record_id)",
+            "UNIQUE (fpo1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_publication_bindings",
+        columns_query: "PRAGMA table_info(fork_publication_bindings)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "child_id",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "final_logical_head",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "operation_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "record_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fpb1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (final_logical_head >= 0)",
+            "CHECK (length(operation_id) = 32)",
+            "CHECK (length(record_id) = 32)",
+            "UNIQUE (operation_id)",
+            "UNIQUE (record_id)",
+            "UNIQUE (fpb1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_publication_artifacts",
+        columns_query: "PRAGMA table_info(fork_publication_artifacts)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "record_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "operation_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fpa1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(record_id) = 32)",
+            "CHECK (length(operation_id) = 32)",
+            "UNIQUE (operation_id)",
+            "UNIQUE (fpa1_cbor)",
         ],
     },
 ];
@@ -8977,6 +9087,265 @@ fn sqlite_has_orphaned_fork_provenance(
         |row| row.get(0),
     )
     .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+}
+
+const FORK_PUBLICATION_OPERATION_SQL: &str =
+    "SELECT fpo1_cbor FROM fork_publication_operations WHERE operation_id = ?1";
+const FORK_PUBLICATION_BINDING_SQL: &str = "SELECT fpb1_cbor FROM fork_publication_bindings WHERE child_id = ?1 AND final_logical_head = ?2";
+const FORK_PUBLICATION_ARTIFACT_SQL: &str =
+    "SELECT fpa1_cbor FROM fork_publication_artifacts WHERE record_id = ?1";
+const FORK_PUBLICATION_INSERT_OPERATION_SQL: &str = "INSERT INTO fork_publication_operations (operation_id, record_id, fpo1_cbor) VALUES (?1, ?2, ?3)";
+const FORK_PUBLICATION_INSERT_BINDING_SQL: &str = "INSERT INTO fork_publication_bindings (child_id, final_logical_head, operation_id, record_id, fpb1_cbor) VALUES (?1, ?2, ?3, ?4, ?5)";
+const FORK_PUBLICATION_INSERT_ARTIFACT_SQL: &str = "INSERT INTO fork_publication_artifacts (record_id, operation_id, fpa1_cbor) VALUES (?1, ?2, ?3)";
+
+impl SqliteStore {
+    /// Read and strictly decode the `FPO1` stored for one operation ID.
+    fn fork_publication_operation(
+        &self,
+        operation_id: Hash,
+    ) -> Result<Option<pos_core::ForkPublicationOperationV1>, ForkManifestPublicationErrorV1> {
+        self.conn
+            .query_row(
+                FORK_PUBLICATION_OPERATION_SQL,
+                params![operation_id.as_bytes().as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| ForkManifestPublicationErrorV1::StorageIndeterminate)?
+            .map(|bytes| {
+                pos_core::ForkPublicationOperationV1::from_canonical_cbor(&bytes)
+                    .ok()
+                    .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
+            })
+            .transpose()
+    }
+
+    /// Read and strictly decode the `FPB1` stored for one Fork/head key.
+    fn fork_publication_binding(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+    ) -> Result<Option<pos_core::ForkPublicationBindingV1>, ForkManifestPublicationErrorV1> {
+        // A head above SQLite's signed range can never have been committed.
+        i64::try_from(final_logical_head)
+            .ok()
+            .map_or(Ok(None), |head| {
+                self.conn
+                    .query_row(
+                        FORK_PUBLICATION_BINDING_SQL,
+                        params![child_timeline_id.to_string(), head],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()
+                    .map_err(|_| ForkManifestPublicationErrorV1::StorageIndeterminate)
+            })?
+            .map(|bytes| {
+                pos_core::ForkPublicationBindingV1::from_canonical_cbor(&bytes)
+                    .ok()
+                    .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
+            })
+            .transpose()
+    }
+
+    /// Read and strictly decode the `FPA1` stored for one record ID.
+    fn fork_publication_artifact(
+        &self,
+        record_id: Hash,
+    ) -> Option<pos_core::ForkPublicationArtifactV1> {
+        self.conn
+            .query_row(
+                FORK_PUBLICATION_ARTIFACT_SQL,
+                params![record_id.as_bytes().as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .ok()
+            .and_then(|bytes| pos_core::ForkPublicationArtifactV1::from_canonical_cbor(&bytes).ok())
+    }
+
+    /// Read the authoritative ADR-099 publication sources inside the caller's
+    /// `BEGIN IMMEDIATE` transaction.
+    fn fork_publication_sources(
+        &self,
+        request: &ForkManifestPublicationRequestV1,
+    ) -> Result<PublicationSourcesV1, ForkManifestPublicationErrorV1> {
+        let child = request.child_timeline_id;
+        let admission = sqlite_local_fork_admission(&self.conn, self.hasher.as_ref(), child).ok();
+        let suffix = admission.as_ref().and_then(|admission| {
+            self.read_fork_event_suffix_in_transaction(
+                child,
+                admission.input().parent_logical_head.saturating_add(1),
+            )
+            .ok()
+        });
+        let head_and_chain = Self::logical_head_unchecked_on(&self.conn, child)
+            .ok()
+            .and_then(|head| {
+                Self::compute_chain_hash_at_unchecked_on(
+                    &self.conn,
+                    self.hasher.as_ref(),
+                    child,
+                    head,
+                )
+                .ok()
+                .map(|chain| (head.as_u64(), chain))
+            });
+        let registry = self.load_key_registry().ok().flatten();
+        publication_sources(request, registry, admission, head_and_chain, suffix)
+    }
+
+    /// Insert all three immutable publication rows in the open transaction.
+    fn insert_fork_publication(
+        &self,
+        graph: &PublicationGraphV1,
+    ) -> Result<pos_core::ForkPublicationReceiptV1, ForkManifestPublicationErrorV1> {
+        let binding = graph.binding.input();
+        let operation_id = binding.operation_id.as_bytes().as_slice();
+        let record_id = binding.signed_manifest_record_id.as_bytes().as_slice();
+        i64::try_from(binding.final_logical_head)
+            .ok()
+            .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
+            .and_then(|head| {
+                self.conn
+                    .execute(
+                        FORK_PUBLICATION_INSERT_OPERATION_SQL,
+                        params![operation_id, record_id, graph.operation.to_canonical_cbor()],
+                    )
+                    .and_then(|_| {
+                        self.conn.execute(
+                            FORK_PUBLICATION_INSERT_BINDING_SQL,
+                            params![
+                                binding.child_timeline_id.to_string(),
+                                head,
+                                operation_id,
+                                record_id,
+                                graph.binding.to_canonical_cbor()
+                            ],
+                        )
+                    })
+                    .and_then(|_| {
+                        self.conn.execute(
+                            FORK_PUBLICATION_INSERT_ARTIFACT_SQL,
+                            params![record_id, operation_id, graph.artifact.to_canonical_cbor()],
+                        )
+                    })
+                    .map(|_| graph.receipt)
+                    .map_err(|_| ForkManifestPublicationErrorV1::StorageIndeterminate)
+            })
+    }
+
+    /// Recover, reject, or sign and insert inside one `BEGIN IMMEDIATE`.
+    fn commit_fork_publication_in_transaction<E, F>(
+        &self,
+        request: &ForkManifestPublicationRequestV1,
+        sign: F,
+    ) -> Result<pos_core::ForkPublicationReceiptV1, ForkManifestPublicationErrorV1>
+    where
+        F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>,
+    {
+        if let Some(operation) = self.fork_publication_operation(request.operation_id)? {
+            let input = operation.input();
+            let committed = self
+                .read_committed_fork_publication(input.child_timeline_id, input.final_logical_head);
+            return recovered_publication_receipt(&operation, request, committed);
+        }
+        if self
+            .fork_publication_binding(
+                request.child_timeline_id,
+                request.expected_final_logical_head,
+            )?
+            .is_some()
+        {
+            return Err(ForkManifestPublicationErrorV1::Conflict);
+        }
+        sign_publication(request, self.fork_publication_sources(request)?, sign)
+            .and_then(|graph| self.insert_fork_publication(&graph))
+    }
+
+    /// Trusted read of one committed graph inside the caller's transaction.
+    fn read_committed_fork_publication(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+    ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
+        let binding = self
+            .fork_publication_binding(child_timeline_id, final_logical_head)?
+            .ok_or(ForkManifestPublicationErrorV1::PublicationMissing)?;
+        let operation = self
+            .fork_publication_operation(binding.input().operation_id)?
+            .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)?;
+        let artifact = self.fork_publication_artifact(binding.input().signed_manifest_record_id);
+        let admission =
+            sqlite_local_fork_admission(&self.conn, self.hasher.as_ref(), child_timeline_id).ok();
+        let chain = Self::compute_chain_hash_at_unchecked_on(
+            &self.conn,
+            self.hasher.as_ref(),
+            child_timeline_id,
+            Seq::from_u64(final_logical_head),
+        )
+        .ok();
+        let registry = self.load_key_registry().ok().flatten();
+        artifact
+            .zip(admission.zip(chain))
+            .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
+            .and_then(|(artifact, (admission, final_chain_head_hash))| {
+                trusted_committed_manifest(&CommittedPublicationSourcesV1 {
+                    child_timeline_id,
+                    final_logical_head,
+                    binding,
+                    operation,
+                    artifact,
+                    admission: &admission,
+                    final_chain_head_hash,
+                    registry: registry.as_ref(),
+                })
+            })
+    }
+}
+
+impl ForkManifestPublicationPortV1 for SqliteStore {
+    fn commit_authorized<E, F>(
+        &mut self,
+        request: ForkManifestPublicationRequestV1,
+        sign: F,
+    ) -> Result<pos_core::ForkPublicationReceiptV1, ForkManifestPublicationErrorV1>
+    where
+        F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>,
+    {
+        validate_publication_request(&request)?;
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ForkManifestPublicationErrorV1::StorageIndeterminate)?;
+        let result = self.commit_fork_publication_in_transaction(&request, sign);
+        finish_fork_publication_transaction(&self.conn, result)
+    }
+
+    fn read_committed(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+    ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
+        self.conn
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(|_| ForkManifestPublicationErrorV1::StorageIndeterminate)?;
+        let result = self.read_committed_fork_publication(child_timeline_id, final_logical_head);
+        finish_fork_publication_transaction(&self.conn, result)
+    }
+}
+
+fn finish_fork_publication_transaction<T>(
+    conn: &Connection,
+    result: Result<T, ForkManifestPublicationErrorV1>,
+) -> Result<T, ForkManifestPublicationErrorV1> {
+    match result {
+        Ok(value) => conn
+            .execute_batch("COMMIT")
+            .map(|()| value)
+            .map_err(|_| ForkManifestPublicationErrorV1::StorageIndeterminate),
+        Err(error) => conn.execute_batch("ROLLBACK").map(|()| error).map_or(
+            Err(ForkManifestPublicationErrorV1::StorageIndeterminate),
+            Err,
+        ),
+    }
 }
 
 fn sqlite_local_fork_admission(

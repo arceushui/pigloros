@@ -38,6 +38,7 @@
 pub mod fork_admission_authority;
 pub mod fork_delivery_journal;
 pub mod fork_event_authority;
+pub mod fork_manifest_publication;
 pub mod memory;
 pub mod stitch;
 mod timeline_range;
@@ -55,6 +56,10 @@ pub use fork_event_authority::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
     ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1,
     ForkEventProvenanceAuthorityPortV1,
+};
+pub use fork_manifest_publication::{
+    CommittedForkManifestV1, ForkManifestPublicationErrorV1, ForkManifestPublicationPortV1,
+    ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 pub use timeline_range::{
     verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1, TimelineSignedRangeReportV1,
