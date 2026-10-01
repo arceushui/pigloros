@@ -583,9 +583,7 @@ fn decode_header(value: &Value) -> Result<RecipientExportHeaderV1, RecipientExpo
     let payload_length = unsigned(&fields[8])?;
     let chunk_count = u32::try_from(unsigned(&fields[9])?)
         .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
-    let descriptor_bytes = rkp1_bytes(owner, epoch, public_key);
-    let recipient = RecipientKeyDescriptorV1::decode(&descriptor_bytes)
-        .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
+    let recipient = decode_recipient(owner, epoch, public_key)?;
     if role != u64::from(recipient.identity().role.code()) {
         return Err(RecipientExportErrorV1::IdentityMismatch);
     }
@@ -720,17 +718,29 @@ fn chunk_aad(header_digest: Hash, index: u32, is_final: bool) -> Vec<u8> {
     out.push(if is_final { 0xf5 } else { 0xf4 });
     out
 }
-fn rkp1_bytes(owner: &str, epoch: u64, public_key: [u8; 32]) -> Vec<u8> {
-    let mut out = Vec::new();
-    array(&mut out, 7);
-    byte_string(&mut out, b"RKP1");
-    unsigned_to(&mut out, 1);
-    text(&mut out, owner);
-    unsigned_to(&mut out, 4);
-    unsigned_to(&mut out, epoch);
-    unsigned_to(&mut out, 0x20);
-    byte_string(&mut out, &public_key);
-    out
+/// Rebuild the exact RKP1 descriptor named by TRX1 header fields 4, 6, and 7.
+///
+/// The V1 owner is `recipient:` plus the grantee's lowercase 32-digit
+/// hexadecimal `EntityId`. Re-deriving it through the grantee-bound
+/// constructor and requiring exact owner equality rejects every other spelling.
+fn decode_recipient(
+    owner: &str,
+    epoch: u64,
+    public_key: [u8; 32],
+) -> Result<RecipientKeyDescriptorV1, RecipientExportErrorV1> {
+    owner
+        .strip_prefix(RECIPIENT_OWNER_PREFIX)
+        .and_then(|grantee| u128::from_str_radix(grantee, 16).ok())
+        .and_then(|grantee| {
+            RecipientKeyDescriptorV1::for_grantee(
+                EntityId::from_ulid(Ulid::from(grantee)),
+                epoch,
+                public_key,
+            )
+            .ok()
+        })
+        .filter(|recipient| recipient.identity().owner_id.as_str() == owner)
+        .ok_or(RecipientExportErrorV1::IdentityMismatch)
 }
 fn bytes(value: &Value) -> Result<Vec<u8>, RecipientExportErrorV1> {
     match value {
