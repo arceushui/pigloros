@@ -998,7 +998,7 @@ fn catalog_row_index(
 
 fn catalog_row_with_registration(
     row: &ArtifactRegistrationCatalogRowV1,
-    registration: ArtifactRegistrationV1,
+    registration: &ArtifactRegistrationV1,
 ) -> Result<ArtifactRegistrationCatalogRowV1, Box<dyn std::error::Error>> {
     let fields = registration.fields();
     Ok(ArtifactRegistrationCatalogRowV1::from_persisted(
@@ -1071,7 +1071,7 @@ fn persisted_catalog_rejects_a_semantically_wrong_admission_registration(
     let changed_admission =
         registration_with_data_class(&admission, ArtifactDataClassV1::StructuralAuditMetadata)?;
     fixture.rows[admission_index] =
-        catalog_row_with_registration(&admission, changed_admission.clone())?;
+        catalog_row_with_registration(&admission, &changed_admission)?;
     let changed_transcript = registration_with_child_identity(
         &transcript,
         admission.registration_address(),
@@ -1079,14 +1079,14 @@ fn persisted_catalog_rejects_a_semantically_wrong_admission_registration(
         admission.artifact_digest(),
     )?;
     fixture.rows[transcript_index] =
-        catalog_row_with_registration(&transcript, changed_transcript.clone())?;
+        catalog_row_with_registration(&transcript, &changed_transcript)?;
     let changed_root = registration_with_child_identity(
         &root,
         transcript.registration_address(),
         changed_transcript.address(),
         transcript.artifact_digest(),
     )?;
-    fixture.rows[root_index] = catalog_row_with_registration(&root, changed_root.clone())?;
+    fixture.rows[root_index] = catalog_row_with_registration(&root, &changed_root)?;
 
     assert_eq!(
         validate_artifact_registration_catalog_graph_v1(changed_root.address(), &fixture.rows),
@@ -1107,14 +1107,14 @@ fn persisted_catalog_rejects_a_semantically_wrong_transcript_registration(
     let changed_transcript =
         registration_with_data_class(&transcript, ArtifactDataClassV1::StructuralAuditMetadata)?;
     fixture.rows[transcript_index] =
-        catalog_row_with_registration(&transcript, changed_transcript.clone())?;
+        catalog_row_with_registration(&transcript, &changed_transcript)?;
     let changed_root = registration_with_child_identity(
         &root,
         transcript.registration_address(),
         changed_transcript.address(),
         transcript.artifact_digest(),
     )?;
-    fixture.rows[root_index] = catalog_row_with_registration(&root, changed_root.clone())?;
+    fixture.rows[root_index] = catalog_row_with_registration(&root, &changed_root)?;
 
     assert_eq!(
         validate_artifact_registration_catalog_graph_v1(changed_root.address(), &fixture.rows),
@@ -1135,22 +1135,24 @@ fn persisted_catalog_rejects_an_unknown_repro_manifest_format(
     let root = fixture.rows[root_index].clone();
 
     let unknown_admission = unknown_repro_manifest_row(&admission)?;
-    fixture.rows[admission_index] = unknown_admission.clone();
+    let unknown_admission_address = unknown_admission.registration_address();
+    let unknown_admission_digest = unknown_admission.artifact_digest();
+    fixture.rows[admission_index] = unknown_admission;
     let changed_transcript = registration_with_child_identity(
         &transcript,
         admission.registration_address(),
-        unknown_admission.registration_address(),
-        unknown_admission.artifact_digest(),
+        unknown_admission_address,
+        unknown_admission_digest,
     )?;
     fixture.rows[transcript_index] =
-        catalog_row_with_registration(&transcript, changed_transcript.clone())?;
+        catalog_row_with_registration(&transcript, &changed_transcript)?;
     let changed_root = registration_with_child_identity(
         &root,
         transcript.registration_address(),
         changed_transcript.address(),
         transcript.artifact_digest(),
     )?;
-    fixture.rows[root_index] = catalog_row_with_registration(&root, changed_root.clone())?;
+    fixture.rows[root_index] = catalog_row_with_registration(&root, &changed_root)?;
 
     assert_eq!(
         validate_artifact_registration_catalog_graph_v1(changed_root.address(), &fixture.rows),
