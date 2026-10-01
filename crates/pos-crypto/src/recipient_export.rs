@@ -252,25 +252,33 @@ pub fn encrypt_timeline_export_v1(
     };
     validate_header(&envelope.header)?;
     let header_digest = digest(HEADER_DOMAIN, &encode_header_bytes(&envelope.header));
-    let public_key = <X25519HkdfSha256 as Kem>::PublicKey::from_bytes(&recipient.public_key())
-        .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
-    let (enc, mut context) =
-        setup_sender_with_rng::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
-            &OpModeS::Base,
-            &public_key,
-            header_digest.as_bytes(),
-            rng,
-        )
-        .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?;
+    // Every 32-byte string decodes as an X25519 public key, and at most
+    // 16,384 chunks cannot exhaust the HPKE sequence counter. The one
+    // reachable HPKE failure is a low-order recipient key during encapsulation,
+    // so the whole sender chain maps to one error.
+    let (enc, ciphertext_chunks) =
+        <X25519HkdfSha256 as Kem>::PublicKey::from_bytes(&recipient.public_key())
+            .and_then(|public_key| {
+                setup_sender_with_rng::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
+                    &OpModeS::Base,
+                    &public_key,
+                    header_digest.as_bytes(),
+                    rng,
+                )
+            })
+            .and_then(|(enc, mut context)| {
+                (0..chunk_count)
+                    .zip(payload.chunks(CHUNK_BYTES))
+                    .map(|(index, plaintext)| {
+                        let aad = chunk_aad(header_digest, index, index + 1 == chunk_count);
+                        context.seal(plaintext, &aad)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|chunks| (enc, chunks))
+            })
+            .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?;
     envelope.enc.copy_from_slice(enc.to_bytes().as_slice());
-    for (index, plaintext) in (0..chunk_count).zip(payload.chunks(CHUNK_BYTES)) {
-        let aad = chunk_aad(header_digest, index, index + 1 == chunk_count);
-        envelope.ciphertext_chunks.push(
-            context
-                .seal(plaintext, &aad)
-                .map_err(|_| RecipientExportErrorV1::EncryptionFailed)?,
-        );
-    }
+    envelope.ciphertext_chunks = ciphertext_chunks;
     // Header bounds and fixed HPKE tag width establish the envelope shape.
     Ok(EncryptedTimelineExportV1 {
         envelope,
@@ -296,17 +304,20 @@ pub fn decrypt_timeline_export_v1(
         return Err(RecipientExportErrorV1::IdentityMismatch);
     }
     let header_digest = digest(HEADER_DOMAIN, &encode_header_bytes(&envelope.header));
-    let private_key = <X25519HkdfSha256 as Kem>::PrivateKey::from_bytes(private_key)
-        .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
-    let enc = <X25519HkdfSha256 as Kem>::EncappedKey::from_bytes(&envelope.enc)
+    // Every 32-byte string decodes as an X25519 private or encapsulated key;
+    // only receiver Diffie-Hellman with a low-order `enc` can fail here.
+    let mut context = <X25519HkdfSha256 as Kem>::PrivateKey::from_bytes(private_key)
+        .and_then(|private_key| {
+            <X25519HkdfSha256 as Kem>::EncappedKey::from_bytes(&envelope.enc).and_then(|enc| {
+                setup_receiver::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
+                    &OpModeR::Base,
+                    &private_key,
+                    &enc,
+                    header_digest.as_bytes(),
+                )
+            })
+        })
         .map_err(|_| RecipientExportErrorV1::AuthenticationFailed)?;
-    let mut context = setup_receiver::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(
-        &OpModeR::Base,
-        &private_key,
-        &enc,
-        header_digest.as_bytes(),
-    )
-    .map_err(|_| RecipientExportErrorV1::AuthenticationFailed)?;
     let mut plaintext = Zeroizing::new(Vec::new());
     for (index, ciphertext) in (0..envelope.header.chunk_count).zip(&envelope.ciphertext_chunks) {
         let aad = chunk_aad(
@@ -323,7 +334,7 @@ pub fn decrypt_timeline_export_v1(
     }
     let payload_digest = timeline_export_payload_digest_v1(&plaintext);
     let mut export = decode_payload(&plaintext)?;
-    reconstruct_event_origins(&mut export)?;
+    reconstruct_event_origins(&mut export);
     if export.timeline.id() != envelope.header.timeline_id
         || export.timeline.head != envelope.header.local_head
         || export.parent_fork_hash != envelope.header.parent_fork_hash
@@ -387,6 +398,9 @@ fn encode_payload(export: &TimelineExport) -> Result<Vec<u8>, RecipientExportErr
     for event in &export.events {
         encode_event(&mut out, event);
     }
+    // The per-Event and Event-count caps admit far more than 1 GiB in total,
+    // so this whole-payload cap is independent and must stay. Exercising it
+    // needs a payload above 1 GiB, which no portable hosted test can allocate.
     if out.len() > MAX_PAYLOAD_BYTES {
         return Err(RecipientExportErrorV1::FieldOutOfBounds);
     }
@@ -410,12 +424,6 @@ fn decode_payload(bytes: &[u8]) -> Result<TimelineExport, RecipientExportErrorV1
     let timeline_id = TimelineId::from_ulid(Ulid::from_bytes(bytes_of::<16>(&fields[2])?));
     let mode = decode_mode(unsigned(&fields[3])?)?;
     let name = optional_text_value(&fields[4])?;
-    if name
-        .as_ref()
-        .is_some_and(|value| value.len() > MAX_NAME_BYTES)
-    {
-        return Err(RecipientExportErrorV1::FieldOutOfBounds);
-    }
     let owner = optional_id_value(&fields[5])?.map(|id| EntityId::from_ulid(Ulid::from_bytes(id)));
     let parent =
         optional_id_value(&fields[6])?.map(|id| TimelineId::from_ulid(Ulid::from_bytes(id)));
@@ -448,6 +456,8 @@ fn decode_payload(bytes: &[u8]) -> Result<TimelineExport, RecipientExportErrorV1
         events,
         parent_fork_hash,
     };
+    // One validation pass owns every bound, pairing, payload-hash, identity,
+    // and origin invariant for both encoding and decoding.
     validate_export(&export)?;
     if encode_payload(&export)? != bytes {
         return Err(RecipientExportErrorV1::NonCanonical);
@@ -503,20 +513,24 @@ fn validate_export(export: &TimelineExport) -> Result<(), RecipientExportErrorV1
     Ok(())
 }
 
-fn reconstruct_event_origins(export: &mut TimelineExport) -> Result<(), RecipientExportErrorV1> {
+/// Rebuild each Event's first-commit origin from the export's own coordinates.
+///
+/// Only `decode_payload` output reaches this function, and its
+/// `validate_export` pass has already rejected any `inherited_prefix + seq`
+/// overflow, so the saturating sum is always the exact sum.
+fn reconstruct_event_origins(export: &mut TimelineExport) {
+    let origin_timeline_id = export.timeline.id();
     let inherited_prefix = export
         .timeline
         .meta
         .fork_point
         .map_or(0, |(_, sequence)| sequence.as_u64());
     for event in &mut export.events {
-        event.origin = Some(expected_event_origin(
-            export.timeline.id(),
-            inherited_prefix,
-            event.seq.as_u64(),
-        )?);
+        event.origin = Some(EventOriginV1 {
+            origin_timeline_id,
+            origin_logical_seq: Seq::from_u64(inherited_prefix.saturating_add(event.seq.as_u64())),
+        });
     }
-    Ok(())
 }
 
 fn expected_event_origin(
@@ -622,21 +636,16 @@ fn decode_event(value: &Value) -> Result<Event, RecipientExportErrorV1> {
         return Err(RecipientExportErrorV1::InvalidEncoding);
     }
     let event_type = text_value(&fields[2])?;
-    if !(1..=MAX_EVENT_TYPE_BYTES).contains(&event_type.len()) {
-        return Err(RecipientExportErrorV1::FieldOutOfBounds);
-    }
-    // The CBOR preflight already caps each byte string at the event payload limit.
+    // The CBOR preflight already caps each byte string at the event payload
+    // limit; `validate_export` checks the remaining Event invariants.
     let payload = bytes(&fields[3])?;
     let signature = optional_signature(&fields[9])?;
     let signature_identity = optional_identity(&fields[10])?;
-    if signature.is_some() != signature_identity.is_some() {
-        return Err(RecipientExportErrorV1::FieldOutOfBounds);
-    }
     let schema = unsigned(&fields[8])?;
     if schema != 1 {
         return Err(RecipientExportErrorV1::FieldOutOfBounds);
     }
-    let event = Event {
+    Ok(Event {
         id: EventId::from_ulid(Ulid::from_bytes(bytes_of::<16>(&fields[0])?)),
         entity: EntityId::from_ulid(Ulid::from_bytes(bytes_of::<16>(&fields[1])?)),
         event_type: Kind::new(event_type),
@@ -652,11 +661,7 @@ fn decode_event(value: &Value) -> Result<Event, RecipientExportErrorV1> {
         signature_identity,
         origin: None,
         payload_hash: Hash::from_bytes(bytes_of::<32>(&fields[11])?),
-    };
-    if *blake3::hash(event.payload.as_slice()).as_bytes() != *event.payload_hash.as_bytes() {
-        return Err(RecipientExportErrorV1::SourceMismatch);
-    }
-    Ok(event)
+    })
 }
 
 fn optional_identity(value: &Value) -> Result<Option<KeyIdentityV1>, RecipientExportErrorV1> {
@@ -677,9 +682,6 @@ fn optional_identity(value: &Value) -> Result<Option<KeyIdentityV1>, RecipientEx
     )
     .map_err(|_| RecipientExportErrorV1::IdentityMismatch)?;
     let epoch = unsigned(&fields[2])?;
-    if epoch == 0 || role != KeyRoleV1::TimelineIntegritySigning {
-        return Err(RecipientExportErrorV1::IdentityMismatch);
-    }
     Ok(Some(KeyIdentityV1::from_parts(owner, role, epoch)))
 }
 fn optional_signature(value: &Value) -> Result<Option<Signature>, RecipientExportErrorV1> {
