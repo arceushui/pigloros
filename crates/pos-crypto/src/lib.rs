@@ -10,5 +10,8 @@ pub mod chain;
 pub mod fork_attribution;
 pub mod fork_authentication;
 pub mod key_roles;
+pub mod plugin_trust;
+pub mod recipient_export;
+pub mod recipient_key;
 pub mod signing;
 pub mod timeline_erasure;
