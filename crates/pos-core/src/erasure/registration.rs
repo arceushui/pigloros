@@ -95,6 +95,9 @@ pub enum ReproManifestArtifactRegistrationErrorV1 {
     /// The MRM1 selector does not identify the supplied WCR1 and MAT1 records.
     #[error("MRM1 does not bind its retained WCR1 and MAT1 records")]
     ManifestBindingMismatch,
+    /// A nonnull label lacks an accepted owner classification.
+    #[error("MRM1 label is not classified as public or structural audit metadata")]
+    InvalidLabelClassification,
 }
 
 /// One immutable child registration address and its parent-fixed membership.
@@ -125,6 +128,12 @@ pub struct ReproManifestRootRegistrationInputV1<'a> {
     pub transcript_registration: &'a ArtifactRegistrationV1,
     /// Local owner identity selected by the installed owner.
     pub owner_id: &'a OwnerIdV1,
+    /// Owner classification for the optional label, when known.
+    ///
+    /// `None` permits structural extraction only; the authoritative batch
+    /// preparation path requires the installed owner to classify every label.
+    /// A supplied class must be `PublicRecord` or `StructuralAuditMetadata`.
+    pub label_data_class: Option<ArtifactDataClassV1>,
 }
 
 /// Untrusted ARD1 fields. A byte owner must derive and compare them at commit.
@@ -366,6 +375,17 @@ pub fn extract_repro_manifest_root_registration_v1(
     let recording_input = recording.as_input();
     let transcript_input = transcript.as_input();
     let world_handle_input = root_input.world_handle.as_input();
+    match (root_input.label.as_ref(), input.label_data_class) {
+        (None, None)
+        | (Some(_), None)
+        | (
+            Some(_),
+            Some(ArtifactDataClassV1::PublicRecord | ArtifactDataClassV1::StructuralAuditMetadata),
+        ) => {}
+        _ => {
+            return Err(ReproManifestArtifactRegistrationErrorV1::InvalidLabelClassification);
+        }
+    }
     if root_input.owner_reference != owner_reference
         || world_handle_input.owner_reference != root_input.owner_reference
         || world_handle_input.recording_receipt_digest != recording.digest()
@@ -401,7 +421,7 @@ pub fn extract_repro_manifest_root_registration_v1(
             input.root_bytes,
         ),
         owner_reference: root_input.owner_reference,
-        data_class: ArtifactDataClassV1::PublicRecord,
+        data_class: ArtifactDataClassV1::StructuralAuditMetadata,
         optionality: ArtifactOptionalityV1::Required,
         transition_rule: ArtifactTransitionRuleV1::PreserveExact,
         required_key_roles: Vec::new(),
