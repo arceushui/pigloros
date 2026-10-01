@@ -10,6 +10,10 @@
 //! A protected pass is admitted inside the consent authority's token fence,
 //! so a consent revocation cannot interleave between the commit-time consent
 //! recheck and the store transaction.
+//!
+//! A participant-authorized pass (ADR-059) is admitted through the same
+//! basis and port. Its observation digest binds every Driver's authorized
+//! view, and every view is revalidated against current authority first.
 
 use pos_core::{
     AppendIdentity, CoreError, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
@@ -19,7 +23,7 @@ use pos_core::{
     PipelineSecurityRevisionsV1, Seq, TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
 };
 
-use super::{OperationContext, PendingStep, PluginRegistry};
+use super::{AuthorizedViewAuthorityV1, OperationContext, PendingStep, PluginRegistry};
 use crate::error::RuntimeError;
 
 /// Host-owned inputs that bind one staged scheduled pass to its admission basis.
@@ -62,9 +66,11 @@ impl PluginRegistry {
     /// Event to admit and returns `Ok(None)` after the same consent recheck.
     ///
     /// # Errors
-    /// Returns [`RuntimeError::PendingDriverStep`] when no pass is staged,
-    /// [`RuntimeError::AuthorityFenceRequired`] for participant-authorized
-    /// work, a consent, schema, or [`RuntimeError::PipelineContract`] error, a
+    /// Returns [`RuntimeError::PendingDriverStep`] when no pass is staged, or
+    /// [`RuntimeError::AuthorityFenceRequired`] for a participant-authorized
+    /// pass, which commits only through
+    /// [`Self::admit_authorized_scheduled_pass`]. Also returns a consent,
+    /// schema, or [`RuntimeError::PipelineContract`] error, a
     /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, or a store error.
     /// Every error aborts all staged Driver state and commits no Event, except
     /// [`pos_core::CoreError::StorageOutcomeUnknown`], which retains the exact
@@ -100,6 +106,60 @@ impl PluginRegistry {
             })
             .and_then(|()| self.schemas.validate_batch(&pending.staged_drafts))
             .and_then(|()| scheduled_basis(&pending, admission, observed_through, snapshot_digest));
+        self.settle_prepared_pass(port, pending, admission, prepared)
+    }
+
+    /// Admit and commit a staged participant-authorized scheduled pass.
+    ///
+    /// `authorities` holds the current authority for each Driver's view, in
+    /// the order the pass was staged. Every view is revalidated at this
+    /// commit boundary. The basis binds the shared base cut and the digest of
+    /// every Driver's authorized view. It then commits through the same
+    /// `ScheduledAiDriver` host admission as [`Self::admit_scheduled_pass`]:
+    /// the whole staged batch commits in host schedule order, or nothing
+    /// does. Staged Driver state commits only after the batch commits.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError::PendingDriverStep`] when no pass is staged. A
+    /// closed authority error covers a pass that is not participant-authorized
+    /// and unpaired or stale authority. Also returns a
+    /// [`RuntimeError::PipelineContract`] error, a
+    /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, or a store error.
+    /// Every error aborts all staged Driver state and commits no Event, except
+    /// [`pos_core::CoreError::StorageOutcomeUnknown`], which retains the exact
+    /// basis for [`Self::recover_scheduled_pass`].
+    pub fn admit_authorized_scheduled_pass(
+        &mut self,
+        port: &mut dyn PipelineAdmissionPortV1,
+        admission: &ScheduledPassAdmissionV1,
+        authorities: &[AuthorizedViewAuthorityV1<'_>],
+    ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
+        let Some(pending) = self.pending_step.take() else {
+            return Err(RuntimeError::PendingDriverStep);
+        };
+        let prepared = pending
+            .authorized
+            .as_ref()
+            .map_or(
+                Err(RuntimeError::Authority(
+                    pos_core::AuthorityErrorV1::UnauthorizedSource,
+                )),
+                |authorized| authorized.revalidate(authorities),
+            )
+            .and_then(|(observed_through, view_digest)| {
+                scheduled_basis(&pending, admission, observed_through, view_digest)
+            });
+        self.settle_prepared_pass(port, pending, admission, prepared)
+    }
+
+    /// Submit a prepared basis, commit an empty pass, or abort on error.
+    fn settle_prepared_pass(
+        &mut self,
+        port: &mut dyn PipelineAdmissionPortV1,
+        pending: PendingStep,
+        admission: &ScheduledPassAdmissionV1,
+        prepared: Result<Option<PipelineAdmissionBasisV1>, RuntimeError>,
+    ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
         match prepared {
             Ok(Some(basis)) => self.finish_scheduled_admission(
                 port,

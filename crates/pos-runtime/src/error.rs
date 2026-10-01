@@ -134,14 +134,6 @@ pub enum RuntimeError {
     #[error("protected operation failed its erasure containment fence: {0}")]
     ErasureContainment(ErasureContainmentErrorV1),
 
-    #[error(
-        "erasure containment failed after appending {event_count} Event(s); committed Driver state must be quarantined: {source}"
-    )]
-    ErasureContainmentAfterCommit {
-        event_count: usize,
-        source: ErasureContainmentErrorV1,
-    },
-
     #[error("participant observation authority failed closed: {0}")]
     Authority(#[from] pos_core::AuthorityErrorV1),
 
