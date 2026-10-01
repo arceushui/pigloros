@@ -6,15 +6,15 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
-    ConsentError, ConsentGate, ConsentGrantedV1, ErasureContainmentGateV1, Plugin, PluginId,
-    ProposedAction, Reducer, State,
+    ConsentError, ConsentGate, ConsentGrantedV1, ErasureContainmentGateV1, PipelineCommitReceiptV1,
+    PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, Reducer, State,
 };
 use pos_runtime::{
-    ActionSubmissionError, Driver, InstalledOutputPolicySourceV1, ObservationView,
-    OutputPolicyBindingV1, PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput,
-    TimelineHistorySegment,
+    schema::EventTypeSchema, ActionSubmissionError, Driver, InstalledOutputPolicySourceV1,
+    LocalScheduledAdmissionHostV1, ObservationView, OutputPolicyBindingV1,
+    PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
 };
-use pos_store::{open_store, EventStore, StoreConfig};
+use pos_store::{memory::MemoryStore, EventStore};
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
@@ -39,10 +39,46 @@ fn test_err<T: Debug, E>(result: Result<T, E>) -> E {
     }
 }
 
-fn gated_store() -> Box<dyn EventStore> {
-    let mut store = test_ok(open_store(StoreConfig::Memory));
+fn admission_store() -> MemoryStore {
+    let mut store = MemoryStore::new();
     test_ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
     store
+}
+
+/// Publish the local admission fence for `timeline` before a pass is staged.
+fn observe(
+    registry: &RuntimePluginRegistry,
+    store: &mut MemoryStore,
+    timeline: TimelineId,
+) -> PipelineSecurityRevisionsV1 {
+    test_ok(test_ok(LocalScheduledAdmissionHostV1::shared()).observe(registry, store, timeline))
+}
+
+/// Admit the staged pass through the local host's atomic admission.
+fn admit(
+    registry: &mut RuntimePluginRegistry,
+    store: &mut MemoryStore,
+    revisions: PipelineSecurityRevisionsV1,
+    commit_head: Seq,
+    commit_now_secs: u64,
+    drafts: &[EventDraft],
+) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
+    test_ok(LocalScheduledAdmissionHostV1::shared()).admit(
+        registry,
+        store,
+        revisions,
+        commit_head,
+        commit_now_secs,
+        drafts,
+    )
+}
+
+fn register_protected_schema(registry: &mut RuntimePluginRegistry) {
+    registry.schemas.register(EventTypeSchema {
+        event_type: Kind::new("protected.event"),
+        description: "protected Driver output".to_owned(),
+        json_schema: None,
+    });
 }
 
 struct TestBindingPlugin {
@@ -563,7 +599,7 @@ fn grant(subject_id: EntityId) -> ConsentGrantedV1 {
 
 #[test]
 fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
-    let mut store = gated_store();
+    let mut store = admission_store();
     let timeline = test_ok(store.create_timeline("protected-commit-head")).id();
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -575,6 +611,7 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
         "protected.event",
         Box::new(ProtectedEventDriver { entity: subject }),
     );
+    let revisions = observe(&registry, &mut store, timeline);
 
     let drafts =
         test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 1, &[]));
@@ -589,8 +626,14 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
             fence_seq: 1,
         },
     ));
-    let error =
-        test_err(registry.append_and_commit_step_at(store.as_mut(), Seq::from_u64(1), 2, &drafts));
+    let error = test_err(admit(
+        &mut registry,
+        &mut store,
+        revisions,
+        Seq::from_u64(1),
+        2,
+        &drafts,
+    ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::Revoked)
@@ -806,7 +849,7 @@ impl ConsentGate for CommitFenceGate {
 
 #[test]
 fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
-    let mut store = gated_store();
+    let mut store = admission_store();
     let timeline = test_ok(store.create_timeline("protected-fresh-time")).id();
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -823,9 +866,17 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
         Box::new(ProtectedEventDriver { entity: subject }),
     );
 
+    let revisions = observe(&registry, &mut store, timeline);
     let drafts = test_ok(registry.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
-    let error = test_err(registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 2, &drafts));
+    let error = test_err(admit(
+        &mut registry,
+        &mut store,
+        revisions,
+        Seq::ZERO,
+        2,
+        &drafts,
+    ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::Expired)
@@ -841,7 +892,7 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
 
 #[test]
 fn protected_append_fence_rejects_before_store_append() {
-    let mut store = gated_store();
+    let mut store = admission_store();
     let timeline = test_ok(store.create_timeline("protected-fence"));
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -857,10 +908,18 @@ fn protected_append_fence_rejects_before_store_append() {
         "protected.event",
         Box::new(ProtectedEventDriver { entity: subject }),
     );
+    let revisions = observe(&registry, &mut store, timeline.id());
     let drafts =
         test_ok(registry.step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 1, &[]));
 
-    let error = test_err(registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 2, &drafts));
+    let error = test_err(admit(
+        &mut registry,
+        &mut store,
+        revisions,
+        Seq::ZERO,
+        2,
+        &drafts,
+    ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::Expired)
@@ -870,59 +929,6 @@ fn protected_append_fence_rejects_before_store_append() {
         Seq::ZERO,
         "a rejected consent fence must not append drafts"
     );
-}
-
-#[test]
-fn append_fence_revalidates_caller_supplied_drafts() {
-    let mut store = gated_store();
-    let timeline = test_ok(store.create_timeline("protected-draft-replacement"));
-    let subject = EntityId::new();
-    let authority = ConsentAuthority::new();
-    let token = authority.record_grant_on_timeline(timeline.id(), &grant(subject));
-    let mut registry = PluginRegistry::new().with_consent_authority(authority);
-    register_output_driver(
-        &mut registry,
-        "protected.event",
-        Box::new(ProtectedEventDriver { entity: subject }),
-    );
-    let _staged =
-        test_ok(registry.step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 1, &[]));
-    let replacement = vec![EventDraft::new(
-        subject,
-        Kind::new("consent.granted.v1"),
-        CanonicalBytes::from_static(b"forged"),
-    )];
-
-    let error =
-        test_err(registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &replacement));
-    assert!(matches!(
-        error,
-        RuntimeError::ConsentDraft { ref event_type } if event_type == "consent.granted.v1"
-    ));
-    assert_eq!(test_ok(store.logical_head(timeline.id())), Seq::ZERO);
-}
-
-#[test]
-fn public_append_fence_revalidates_caller_supplied_drafts() {
-    let mut store = gated_store();
-    let timeline = test_ok(store.create_timeline("public-draft-replacement"));
-    let subject = EntityId::new();
-    let mut registry = PluginRegistry::new();
-    registry.register_test_driver(Box::new(EmptyDriver));
-    let _staged = test_ok(registry.step_all_anchored(timeline.id(), Seq::ZERO));
-    let replacement = vec![EventDraft::new(
-        subject,
-        Kind::new("consent.granted.v1"),
-        CanonicalBytes::from_static(b"forged"),
-    )];
-
-    let error =
-        test_err(registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &replacement));
-    assert!(matches!(
-        error,
-        RuntimeError::ConsentDraft { ref event_type } if event_type == "consent.granted.v1"
-    ));
-    assert_eq!(test_ok(store.logical_head(timeline.id())), Seq::ZERO);
 }
 
 #[test]
@@ -1001,18 +1007,11 @@ fn ordinary_step_and_tick_enforce_projection_and_draft_boundaries() {
         test_err(ordinary_tick.tick_cadenced(timeline, 0)),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
-
-    let mut store = gated_store();
-    let mut empty = PluginRegistry::new();
-    assert!(matches!(
-        test_err(empty.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[],)),
-        RuntimeError::PendingDriverStep
-    ));
 }
 
 #[test]
 fn protected_cadenced_public_seam_stages_and_commits() {
-    let mut store = gated_store();
+    let mut store = admission_store();
     let timeline = test_ok(store.create_timeline("protected-cadence")).id();
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -1024,10 +1023,25 @@ fn protected_cadenced_public_seam_stages_and_commits() {
         Box::new(ProtectedEventDriver { entity: subject }),
     );
 
+    register_protected_schema(&mut registry);
+    let revisions = observe(&registry, &mut store, timeline);
+
     let drafts =
         test_ok(registry.tick_cadenced_anchored_protected(timeline, 0, Seq::ZERO, token, 1, &[]));
     assert_eq!(drafts.len(), 1);
-    test_ok(registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &drafts));
+    let receipt = test_ok(
+        test_ok(admit(
+            &mut registry,
+            &mut store,
+            revisions,
+            Seq::ZERO,
+            1,
+            &drafts,
+        ))
+        .ok_or("expected a committed batch"),
+    );
+    assert_eq!(receipt.committed_events().len(), 1);
+    assert_eq!(test_ok(store.logical_head(timeline)), Seq::from_u64(1));
 }
 
 #[test]
@@ -1227,7 +1241,7 @@ fn public_registry_rejects_a_protected_driver_without_matching_consent() {
 
 #[test]
 fn public_registry_rechecks_revocation_when_committing() {
-    let mut store = gated_store();
+    let mut store = admission_store();
     let timeline = test_ok(store.create_timeline("revocation-commit")).id();
     let subject = EntityId::new();
     let authority = ConsentAuthority::new();
@@ -1239,6 +1253,7 @@ fn public_registry_rechecks_revocation_when_committing() {
         "protected.event",
         Box::new(ProtectedEventDriver { entity: subject }),
     );
+    let revisions = observe(&revoked, &mut store, timeline);
     let drafts = test_ok(revoked.step_all_anchored_protected(timeline, Seq::ZERO, token, 1, &[]));
     test_ok(authority.record_revocation_on_timeline(
         timeline,
@@ -1250,7 +1265,14 @@ fn public_registry_rechecks_revocation_when_committing() {
         },
     ));
     assert!(matches!(
-        test_err(revoked.append_and_commit_step_at(store.as_mut(), Seq::from_u64(1), 2, &drafts,)),
+        test_err(admit(
+            &mut revoked,
+            &mut store,
+            revisions,
+            Seq::from_u64(1),
+            2,
+            &drafts,
+        )),
         RuntimeError::Consent(ConsentError::Revoked)
     ));
 }
@@ -1488,67 +1510,45 @@ fn public_registry_rejects_unknown_actions_in_live_and_replay_modes() {
 }
 
 #[test]
-fn public_registry_propagates_public_append_store_errors() {
-    let mut store = gated_store();
-    let orphan_timeline = TimelineId::new();
-    let mut public_append = PluginRegistry::new();
-    test_ok(public_append.step_all_anchored(orphan_timeline, Seq::ZERO));
-    assert!(matches!(
-        public_append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
-        Err(RuntimeError::Store(_))
-    ));
-}
-
-#[test]
-fn public_registry_propagates_protected_append_store_errors() {
-    let mut store = gated_store();
-    let orphan_timeline = TimelineId::new();
+fn public_registry_requires_a_gate_for_protected_admission() {
+    let mut store = admission_store();
+    let timeline = test_ok(store.create_timeline("protected-missing-gate")).id();
     let authority = ConsentAuthority::new();
-    let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
-    let mut protected_append = PluginRegistry::new().with_consent_authority(authority);
-    test_ok(protected_append.step_all_anchored_protected(
-        orphan_timeline,
-        Seq::ZERO,
-        token,
-        0,
-        &[],
-    ));
-    assert!(matches!(
-        protected_append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
-        Err(RuntimeError::Store(_))
-    ));
-}
-
-#[test]
-fn public_registry_requires_a_gate_for_protected_append() {
-    let mut store = gated_store();
-    let orphan_timeline = TimelineId::new();
-    let authority = ConsentAuthority::new();
-    let token = authority.record_grant_on_timeline(orphan_timeline, &grant(EntityId::new()));
+    let token = authority.record_grant_on_timeline(timeline, &grant(EntityId::new()));
     let mut protected_missing_gate = PluginRegistry::new().with_consent_authority(authority);
-    test_ok(protected_missing_gate.step_all_anchored_protected(
-        orphan_timeline,
-        Seq::ZERO,
-        token,
-        0,
-        &[],
-    ));
+    let revisions = observe(&protected_missing_gate, &mut store, timeline);
+    test_ok(protected_missing_gate.step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[]));
     protected_missing_gate = protected_missing_gate.without_consent_gate();
     assert!(matches!(
-        protected_missing_gate.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
+        admit(
+            &mut protected_missing_gate,
+            &mut store,
+            revisions,
+            Seq::ZERO,
+            0,
+            &[],
+        ),
         Err(RuntimeError::ConsentOperationUnavailable)
     ));
 }
 
 #[test]
-fn public_registry_requires_a_gate_for_public_append() {
-    let mut store = gated_store();
-    let orphan_timeline = TimelineId::new();
+fn public_registry_requires_a_gate_for_public_admission() {
+    let mut store = admission_store();
+    let timeline = test_ok(store.create_timeline("public-missing-gate")).id();
     let mut public_missing_gate = PluginRegistry::new();
-    test_ok(public_missing_gate.step_all_anchored(orphan_timeline, Seq::ZERO));
+    let revisions = observe(&public_missing_gate, &mut store, timeline);
+    test_ok(public_missing_gate.step_all_anchored(timeline, Seq::ZERO));
     let mut public_missing_gate = public_missing_gate.without_consent_gate();
     assert!(matches!(
-        public_missing_gate.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[]),
+        admit(
+            &mut public_missing_gate,
+            &mut store,
+            revisions,
+            Seq::ZERO,
+            0,
+            &[],
+        ),
         Err(RuntimeError::ConsentOperationUnavailable)
     ));
 }
@@ -1948,16 +1948,24 @@ fn public_registry_requires_snapshot_anchors() {
 }
 
 #[test]
-fn public_registry_commits_and_appends_empty_anchored_steps() {
-    let mut store = gated_store();
+fn public_registry_commits_and_admits_empty_anchored_steps() {
+    let mut store = admission_store();
     let timeline = test_ok(store.create_timeline("registry-metadata"));
     let mut anchored = PluginRegistry::new();
     assert!(test_ok(anchored.tick_cadenced_anchored(timeline.id(), 0, Seq::ZERO)).is_empty());
     test_ok(anchored.commit_step_at(Seq::ZERO, 0));
 
-    let mut append = PluginRegistry::new();
-    test_ok(append.step_all_anchored(timeline.id(), Seq::ZERO));
-    assert!(
-        test_ok(append.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[],)).is_empty()
-    );
+    let mut admitted = PluginRegistry::new();
+    let revisions = observe(&admitted, &mut store, timeline.id());
+    test_ok(admitted.step_all_anchored(timeline.id(), Seq::ZERO));
+    assert!(test_ok(admit(
+        &mut admitted,
+        &mut store,
+        revisions,
+        Seq::ZERO,
+        0,
+        &[]
+    ))
+    .is_none());
+    assert_eq!(test_ok(store.logical_head(timeline.id())), Seq::ZERO);
 }

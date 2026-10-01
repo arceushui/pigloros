@@ -1,3 +1,4 @@
+use pos_core::store::EventStore;
 use pos_core::{
     AppendDedupKey, AppendDedupScope, AppendIdentity, ArtifactClaimInputV1, ArtifactDataClassV1,
     ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, AssuranceLevelV1,
@@ -960,26 +961,8 @@ fn revoked_authority_is_rejected_before_driver_invocation() {
 }
 
 #[test]
-fn authorized_work_rejects_legacy_append_and_substituted_drafts() {
+fn authorized_work_rejects_substituted_drafts() {
     let fixture = fixture();
-    let (mut legacy, legacy_state) = registry(&fixture, false);
-    let legacy_drafts = stage_current(&mut legacy, &fixture).test_ok();
-    let mut legacy_store = gated_store();
-    assert!(error_text(legacy.append_and_commit_step_at(
-        legacy_store.as_mut(),
-        Seq::from_u64(12),
-        0,
-        &legacy_drafts,
-    ))
-    .contains("requires a fresh authority fence"));
-    assert_eq!(
-        legacy_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .aborts,
-        1
-    );
-
     let (mut substituted, substituted_state) = registry(&fixture, false);
     let mut changed_drafts = stage_current(&mut substituted, &fixture).test_ok();
     changed_drafts[0].payload = CanonicalBytes::from_static(b"substituted");
@@ -1357,5 +1340,131 @@ fn scheduled_admission_refuses_participant_authorized_work() {
     assert!(
         error_text(registry.admit_scheduled_pass(&mut port, &admission))
             .contains("Driver step is already pending")
+    );
+}
+
+/// Poisons the registry's erasure gate after a successful durable append.
+struct PoisonOnAppendStore {
+    inner: Box<dyn pos_core::store::EventStore>,
+    gate: Arc<ErasureContainmentGateV1>,
+}
+
+impl EventStore for PoisonOnAppendStore {
+    fn create_timeline(&mut self, name: &str) -> Result<pos_core::Timeline, pos_core::CoreError> {
+        self.inner.create_timeline(name)
+    }
+
+    fn append(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, pos_core::CoreError> {
+        let events = self.inner.append(timeline, drafts);
+        self.gate.poison();
+        events
+    }
+
+    fn read(
+        &self,
+        timeline: TimelineId,
+        range: SeqRange,
+    ) -> Result<Vec<Event>, pos_core::CoreError> {
+        self.inner.read(timeline, range)
+    }
+
+    fn fork(
+        &mut self,
+        parent: TimelineId,
+        at_seq: Seq,
+        name: &str,
+    ) -> Result<pos_core::Timeline, pos_core::CoreError> {
+        self.inner.fork(parent, at_seq, name)
+    }
+
+    fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, pos_core::CoreError> {
+        self.inner.list_timelines()
+    }
+
+    fn get_timeline(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::Timeline>, pos_core::CoreError> {
+        self.inner.get_timeline(timeline)
+    }
+}
+
+#[test]
+fn authorized_commit_preserves_driver_state_when_containment_fails_after_append() {
+    let mut inner = gated_store();
+    let timeline = inner.create_timeline("authorized-post-append").test_ok();
+    let fixture = fixture_with_timeline(timeline.id());
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    let (mut registry, state) = registry_with_mode(
+        &fixture,
+        false,
+        PluginRegistry::new().with_erasure_gate(Arc::clone(&gate)),
+    );
+    let drafts = stage_current(&mut registry, &fixture).test_ok();
+    let mut store = PoisonOnAppendStore { inner, gate };
+
+    let result = registry.append_and_commit_authorized_step_at(
+        &mut store,
+        &drafts,
+        &observation_evaluation(&fixture.observation),
+        &current_authority(&fixture),
+        &fixture.authority_registry,
+        Seq::from_u64(10),
+    );
+    match result {
+        Err(RuntimeError::ErasureContainmentAfterCommit { event_count: 1, .. }) => {}
+        Ok(_) => std::panic::resume_unwind(Box::new("expected post-append containment error")),
+        Err(other) => std::panic::resume_unwind(Box::new(format!(
+            "expected post-append containment error, got: {other}"
+        ))),
+    }
+    assert_eq!(
+        store.read(timeline.id(), SeqRange::all()).test_ok().len(),
+        1,
+        "the durable append is preserved"
+    );
+    let (aborts, commits) = {
+        let state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.aborts, state.commits)
+    };
+    assert_eq!((aborts, commits), (0, 1));
+}
+
+#[test]
+fn authorized_commit_requires_the_registry_erasure_gate() {
+    let mut store = gated_store();
+    let timeline = store
+        .create_timeline("authorized-missing-erasure-gate")
+        .test_ok();
+    let fixture = fixture_with_timeline(timeline.id());
+    let (mut registry, state) = registry(&fixture, false);
+    let drafts = stage_current(&mut registry, &fixture).test_ok();
+    let mut registry = registry.without_erasure_gate();
+
+    assert!(error_text(registry.append_and_commit_authorized_step_at(
+        store.as_mut(),
+        &drafts,
+        &observation_evaluation(&fixture.observation),
+        &current_authority(&fixture),
+        &fixture.authority_registry,
+        Seq::from_u64(10),
+    ))
+    .contains("erasure containment gate"));
+    assert!(store
+        .read(timeline.id(), SeqRange::all())
+        .test_ok()
+        .is_empty());
+    assert_eq!(
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aborts,
+        1
     );
 }

@@ -1,3 +1,114 @@
+/// Forward the scheduled-admission ports of a test store decorator to one
+/// field that holds the wrapped store.
+#[cfg(test)]
+macro_rules! forward_scheduled_admission_ports {
+    ($store:ty, $field:ident) => {
+        impl pos_core::PipelineAdmissionPortV1 for $store {
+            fn admit_pipeline_batch(
+                &mut self,
+                basis: &pos_core::PipelineAdmissionBasisV1,
+            ) -> Result<pos_core::PipelineOutcomeV1, pos_core::CoreError> {
+                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::PipelineAdmissionPortV1>::admit_pipeline_batch(
+                    &mut self.$field,
+                    basis,
+                )
+            }
+
+            fn purge_expired_pipeline_receipts_bounded(
+                &mut self,
+                limit: std::num::NonZeroUsize,
+            ) -> Result<pos_core::store::PurgeOutcome, pos_core::CoreError> {
+                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::PipelineAdmissionPortV1>::purge_expired_pipeline_receipts_bounded(
+                    &mut self.$field,
+                    limit,
+                )
+            }
+        }
+
+        forward_scheduled_admission_fence_and_authority!($store, $field);
+    };
+}
+
+/// Forward only the admission-fence and authority ports of a test store
+/// decorator that customizes its admitted-batch port.
+#[cfg(test)]
+macro_rules! forward_scheduled_admission_fence_and_authority {
+    ($store:ty, $field:ident) => {
+        impl pos_core::PipelineAdmissionFencePublisherV1 for $store {
+            fn set_pipeline_admission_fence(
+                &mut self,
+                timeline: pos_core::TimelineId,
+                fence: pos_core::PipelineAdmissionFenceV1,
+            ) -> Result<(), pos_core::CoreError> {
+                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::PipelineAdmissionFencePublisherV1>::set_pipeline_admission_fence(
+                    &mut self.$field,
+                    timeline,
+                    fence,
+                )
+            }
+
+            fn pipeline_admission_fence(
+                &self,
+                timeline: pos_core::TimelineId,
+            ) -> Result<Option<pos_core::PipelineAdmissionFenceV1>, pos_core::CoreError> {
+                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::PipelineAdmissionFencePublisherV1>::pipeline_admission_fence(
+                    &self.$field,
+                    timeline,
+                )
+            }
+        }
+
+        impl pos_core::AuthorityPersistencePortV1 for $store {
+            fn bind_authority_persistence(
+                &mut self,
+                binding: pos_core::AuthorityPersistenceBindingV1,
+            ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::AuthorityPersistencePortV1>::bind_authority_persistence(
+                    &mut self.$field,
+                    binding,
+                )
+            }
+
+            fn issue_capability_grant(
+                &mut self,
+                permit: pos_core::AuthorityMutationPermitV1,
+                grant: &pos_core::CapabilityGrantV1,
+            ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1>
+            {
+                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::AuthorityPersistencePortV1>::issue_capability_grant(
+                    &mut self.$field,
+                    permit,
+                    grant,
+                )
+            }
+
+            fn revoke_capability_grant(
+                &mut self,
+                permit: pos_core::AuthorityMutationPermitV1,
+                revocation: &pos_core::CapabilityRevocationV1,
+            ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1>
+            {
+                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::AuthorityPersistencePortV1>::revoke_capability_grant(
+                    &mut self.$field,
+                    permit,
+                    revocation,
+                )
+            }
+
+            fn load_authority(
+                &self,
+                leaf_grant_id: pos_core::Hash,
+            ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1>
+            {
+                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::AuthorityPersistencePortV1>::load_authority(
+                    &self.$field,
+                    leaf_grant_id,
+                )
+            }
+        }
+    };
+}
+
 /// Private compatibility adapter over the host's generation-bound senders.
 ///
 /// The concrete `MemoryStore` or `SQLite` adapter remains exclusively owned by
@@ -46,6 +157,92 @@ impl HostedExperimentStore {
             .lock()
             .map_err(|_| CoreError::ErasureContainmentUnavailable)
             .and_then(|mut host| operation(&mut host).map_err(host_error))
+    }
+
+    /// Run one scheduled-admission operation on the host-owned store.
+    fn with_admission<T>(
+        &self,
+        operation: impl FnOnce(&mut dyn pos_runtime::ScheduledAdmissionStoreV1) -> T,
+    ) -> Result<T, CoreError> {
+        self.with_host(|host| {
+            host.command_sender()
+                .and_then(|mut sender| sender.with_scheduled_admission(operation))
+        })
+    }
+}
+
+impl pos_core::PipelineAdmissionPortV1 for HostedExperimentStore {
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &pos_core::PipelineAdmissionBasisV1,
+    ) -> Result<pos_core::PipelineOutcomeV1, CoreError> {
+        self.with_admission(|store| store.admit_pipeline_batch(basis))
+            .and_then(std::convert::identity)
+    }
+
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
+        self.with_admission(|store| store.purge_expired_pipeline_receipts_bounded(limit))
+            .and_then(std::convert::identity)
+    }
+}
+
+impl pos_core::PipelineAdmissionFencePublisherV1 for HostedExperimentStore {
+    fn set_pipeline_admission_fence(
+        &mut self,
+        timeline: TimelineId,
+        fence: pos_core::PipelineAdmissionFenceV1,
+    ) -> Result<(), CoreError> {
+        self.with_admission(|store| store.set_pipeline_admission_fence(timeline, fence))
+            .and_then(std::convert::identity)
+    }
+
+    fn pipeline_admission_fence(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<pos_core::PipelineAdmissionFenceV1>, CoreError> {
+        self.with_admission(|store| store.pipeline_admission_fence(timeline))
+            .and_then(std::convert::identity)
+    }
+}
+
+/// Authority persistence through the host; a host failure is reported as the
+/// closed `Unavailable` persistence error.
+impl pos_core::AuthorityPersistencePortV1 for HostedExperimentStore {
+    fn bind_authority_persistence(
+        &mut self,
+        binding: pos_core::AuthorityPersistenceBindingV1,
+    ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+        self.with_admission(|store| store.bind_authority_persistence(binding))
+            .unwrap_or(Err(pos_core::AuthorityPersistenceErrorV1::Unavailable))
+    }
+
+    fn issue_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        grant: &pos_core::CapabilityGrantV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1> {
+        self.with_admission(|store| store.issue_capability_grant(permit, grant))
+            .unwrap_or(Err(pos_core::AuthorityPersistenceErrorV1::Unavailable))
+    }
+
+    fn revoke_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        revocation: &pos_core::CapabilityRevocationV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1> {
+        self.with_admission(|store| store.revoke_capability_grant(permit, revocation))
+            .unwrap_or(Err(pos_core::AuthorityPersistenceErrorV1::Unavailable))
+    }
+
+    fn load_authority(
+        &self,
+        leaf_grant_id: pos_core::Hash,
+    ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
+        self.with_admission(|store| store.load_authority(leaf_grant_id))
+            .unwrap_or(Err(pos_core::AuthorityPersistenceErrorV1::Unavailable))
     }
 }
 
@@ -183,9 +380,11 @@ mod host_store_tests {
     }
 
     struct FailSecondTimelineLookupStore {
-        inner: Box<dyn EventStore>,
+        inner: Box<dyn pos_runtime::ScheduledAdmissionStoreV1>,
         lookups: Cell<u32>,
     }
+
+    forward_scheduled_admission_ports!(FailSecondTimelineLookupStore, inner);
 
     impl EventStore for FailSecondTimelineLookupStore {
         fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
@@ -346,7 +545,7 @@ mod host_store_tests {
 
         let shared: SharedEventStore = Arc::new(Mutex::new(Box::new(store)));
         let captured = lock_store(&shared)
-            .and_then(|store| capture_pending_range(store.as_ref(), timeline.id(), Seq::ZERO))?;
+            .and_then(|store| capture_pending_range(&**store, timeline.id(), Seq::ZERO))?;
         let mut boundary = TickBoundaryCoordinator {
             folded_through: Seq::ZERO,
         };
@@ -449,9 +648,8 @@ mod host_store_tests {
         })
         .start()?;
         session.registry = std::mem::take(&mut session.registry).without_erasure_gate();
-        let captured = lock_store(&session.store).and_then(|store| {
-            capture_pending_range(store.as_ref(), session.timeline.id(), Seq::ZERO)
-        })?;
+        let captured = lock_store(&session.store)
+            .and_then(|store| capture_pending_range(&**store, session.timeline.id(), Seq::ZERO))?;
         assert!(session.fold_captured_range_or_fault(&captured).is_err());
         assert_eq!(session.health, SessionHealth::Faulted);
 
@@ -513,6 +711,111 @@ mod host_store_tests {
         .start()?;
         terminal.registry = std::mem::take(&mut terminal.registry).without_erasure_gate();
         assert!(terminal.run_to_completion().is_err());
+        Ok(())
+    }
+
+    const fn admission_hash(value: u8) -> pos_core::Hash {
+        pos_core::Hash::from_bytes([value; 32])
+    }
+
+    /// One registry-attested root grant and its revocation.
+    fn admission_authority_fixture() -> Result<
+        (
+            pos_core::AuthorityPersistenceHostV1,
+            pos_core::CapabilityGrantV1,
+            pos_core::CapabilityRevocationV1,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let principal = pos_core::PrincipalRefV1::try_new([7; 16], "local.test")?;
+        let authority_timeline = TimelineId::new();
+        let grant =
+            pos_core::CapabilityGrantV1::try_from_draft(pos_core::CapabilityGrantDraftV1 {
+                grant_id: admission_hash(1),
+                grantor: principal.clone(),
+                grantee: pos_core::AuthorityGranteeV1::Principal(principal),
+                trust_domain: "local.test".to_owned(),
+                scope: pos_core::CapabilityScopeV1::try_from_draft(
+                    pos_core::CapabilityScopeDraftV1 {
+                        resources: vec!["world".to_owned()],
+                        actions: vec!["act".to_owned()],
+                        purposes: vec!["simulation".to_owned()],
+                        audiences: vec!["local-host".to_owned()],
+                        actor_entity_ids: vec![EntityId::new()],
+                        subject_ids: Vec::new(),
+                        participant_ids: Vec::new(),
+                        plugin_id: None,
+                        principal_roles: vec![pos_core::AuthorityRoleV1::Actor],
+                        max_uses: 10,
+                        budget: 100,
+                        environment_constraints: vec!["local-only".to_owned()],
+                    },
+                )?,
+                valid_from_position: Seq::from_u64(1),
+                valid_until_position: Seq::from_u64(100),
+                parent_grant_id: None,
+                delegation_depth: 0,
+                max_delegation_depth: 0,
+                permitted_delegate_classes: Vec::new(),
+                consent_references: Vec::new(),
+                policy_revision: admission_hash(9),
+                issuance_timeline: authority_timeline,
+                issuance_seq: Seq::from_u64(1),
+                revocation_epoch: 0,
+                revocation_fence: None,
+                authority_registry_digest: admission_hash(7),
+            })?;
+        let registry = pos_core::AuthorityRegistrySnapshotV1::try_new(
+            admission_hash(7),
+            vec![admission_hash(200)],
+            vec![grant.binding_digest()?],
+            Vec::new(),
+        )?;
+        let revocation = pos_core::CapabilityRevocationV1::try_from_draft(
+            pos_core::CapabilityRevocationDraftV1 {
+                grant_id: admission_hash(1),
+                authority_timeline,
+                fence_position: Seq::from_u64(2),
+                revocation_epoch: 1,
+                policy_revision: admission_hash(9),
+                authority_registry_digest: admission_hash(7),
+            },
+        )?;
+        Ok((
+            pos_core::AuthorityPersistenceHostV1::new(&registry),
+            grant,
+            revocation,
+        ))
+    }
+
+    #[test]
+    fn hosted_store_forwards_every_scheduled_admission_port(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use pos_core::{
+            AuthorityPersistencePortV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionPortV1,
+        };
+
+        let mut store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
+        let timeline = store.create_timeline("hosted-admission")?.id();
+        let purged = store.purge_expired_pipeline_receipts_bounded(std::num::NonZeroUsize::MIN)?;
+        assert_eq!(purged.removed, 0);
+        assert!(store.pipeline_admission_fence(timeline)?.is_none());
+
+        let (authority, grant, revocation) = admission_authority_fixture()?;
+        store.bind_authority_persistence(authority.persistence_binding())?;
+        store.issue_capability_grant(authority.authorize_grant(&grant)?, &grant)?;
+        assert_eq!(
+            store.load_authority(grant.grant_id())?.revocation_epoch(),
+            0
+        );
+        store.revoke_capability_grant(
+            authority.authorize_revocation(&grant, &revocation)?,
+            &revocation,
+        )?;
+        assert_eq!(
+            store.load_authority(grant.grant_id())?.revocation_epoch(),
+            1
+        );
         Ok(())
     }
 

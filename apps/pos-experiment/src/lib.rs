@@ -18,10 +18,10 @@ use pos_core::{
     ids::{EntityId, TimelineId},
     store::{EventReadBounds, EventStore, SeqRange},
     ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureContainmentGateV1,
-    ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event, ReproManifest, Seq,
-    Timeline,
+    ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event,
+    PipelineSecurityRevisionsV1, ReproManifest, Seq, Timeline,
 };
-use pos_runtime::PluginRegistry;
+use pos_runtime::{LocalScheduledAdmissionHostV1, PluginRegistry, ScheduledAdmissionStoreV1};
 use pos_store::StoreConfig;
 use std::collections::HashSet;
 use std::fmt::{self, Debug, Formatter};
@@ -86,7 +86,7 @@ fn backtest_runner_on_store(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn start_with_fixture_store(
     experiment: Experiment,
-    store: Box<dyn pos_core::store::EventStore>,
+    store: Box<dyn ScheduledAdmissionStoreV1>,
 ) -> Result<ExperimentSession, ExperimentError> {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     experiment.with_erasure_gate(gate).start_with_store(store)
@@ -96,7 +96,7 @@ fn start_with_fixture_store(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn open_store(
     config: StoreConfig,
-) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
+) -> Result<Box<dyn ScheduledAdmissionStoreV1>, pos_core::CoreError> {
     open_store_with_gate(
         config,
         Some(Arc::new(ErasureContainmentGateV1::new_test_open())),
@@ -108,8 +108,12 @@ fn open_store(
 fn open_store_with_gate(
     config: StoreConfig,
     gate: Option<Arc<ErasureContainmentGateV1>>,
-) -> Result<Box<dyn pos_core::store::EventStore>, pos_core::CoreError> {
-    let mut store = pos_store::open_store(config)?;
+) -> Result<Box<dyn ScheduledAdmissionStoreV1>, pos_core::CoreError> {
+    let mut store: Box<dyn ScheduledAdmissionStoreV1> = match config {
+        StoreConfig::Memory => Box::new(pos_store::memory::MemoryStore::new()),
+        StoreConfig::Sqlite { path } => Box::new(pos_store::sqlite::SqliteStore::open(&path)?),
+        StoreConfig::SqliteInMemory => Box::new(pos_store::sqlite::SqliteStore::open_in_memory()?),
+    };
     if let Some(gate) = gate {
         store.bind_erasure_gate(gate)?;
     }
@@ -690,7 +694,7 @@ struct CapturedRange {
 
 type ForkRegistryFactory =
     Arc<dyn Fn() -> Result<PluginRegistry, pos_runtime::RuntimeError> + Send + Sync>;
-type SharedEventStore = Arc<Mutex<Box<dyn pos_core::store::EventStore>>>;
+type SharedEventStore = Arc<Mutex<Box<dyn ScheduledAdmissionStoreV1>>>;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -844,7 +848,7 @@ fn refold_host_projection_prefix(
     through: pos_core::clock::Seq,
 ) -> Result<Vec<Event>, ExperimentError> {
     let (events, generation) = lock_store(store).and_then(|store| {
-        let events = read_completed_prefix(store.as_ref(), timeline, through)?;
+        let events = read_completed_prefix(&**store, timeline, through)?;
         let generation = registry
             .clone_erasure_gate()
             .and_then(|gate| gate.inventory_generation().ok());
@@ -876,12 +880,58 @@ fn authorized_result_projections(
         .map_err(ExperimentError::Runtime)
 }
 
+/// Observe the host-published admission state for the next scheduled pass.
+///
+/// Called before a pass is staged, so the pass binds the security revisions
+/// in force when it observed its base snapshot.
+fn observe_scheduled_admission(
+    store: &mut dyn ScheduledAdmissionStoreV1,
+    registry: &PluginRegistry,
+    timeline_id: pos_core::ids::TimelineId,
+) -> Result<PipelineSecurityRevisionsV1, ExperimentError> {
+    LocalScheduledAdmissionHostV1::shared()
+        .and_then(|host| host.observe(registry, store, timeline_id))
+        .map_err(map_runtime_error)
+}
+
+/// Admit the staged scheduled pass through the store's atomic host admission.
+///
+/// Event identity and Timeline Order come only from the admission
+/// transaction; staged Driver and cadence state commits only after it.
+fn admit_scheduled_pass(
+    store: &mut dyn ScheduledAdmissionStoreV1,
+    registry: &mut PluginRegistry,
+    revisions: PipelineSecurityRevisionsV1,
+    commit_head: pos_core::clock::Seq,
+    commit_now_secs: u64,
+    drafts: &[EventDraft],
+) -> Result<u64, ExperimentError> {
+    LocalScheduledAdmissionHostV1::shared()
+        .and_then(|host| {
+            host.admit(
+                registry,
+                store,
+                revisions,
+                commit_head,
+                commit_now_secs,
+                drafts,
+            )
+        })
+        .map(|receipt| {
+            receipt.map_or(0, |receipt| {
+                u64::try_from(receipt.committed_events().len()).unwrap_or(u64::MAX)
+            })
+        })
+        .map_err(map_runtime_error)
+}
+
 fn append_driver_drafts(
-    store: &mut dyn pos_core::store::EventStore,
+    store: &mut dyn ScheduledAdmissionStoreV1,
     timeline_id: pos_core::ids::TimelineId,
     registry: &mut PluginRegistry,
     observed_through: pos_core::clock::Seq,
 ) -> Result<u64, ExperimentError> {
+    let revisions = observe_scheduled_admission(store, registry, timeline_id)?;
     let drafts = step_driver_with_completed_prefix(store, timeline_id, registry, observed_through)?;
     if let Err(error) = registry.schemas.validate_batch(&drafts) {
         registry.abort_step();
@@ -893,14 +943,15 @@ fn append_driver_drafts(
             .map(|()| 0)
             .map_err(ExperimentError::from)
     } else {
-        append_nonempty_driver_drafts(store, timeline_id, registry, &drafts)
+        append_nonempty_driver_drafts(store, timeline_id, registry, revisions, &drafts)
     }
 }
 
 fn append_nonempty_driver_drafts(
-    store: &mut dyn pos_core::store::EventStore,
+    store: &mut dyn ScheduledAdmissionStoreV1,
     timeline_id: pos_core::ids::TimelineId,
     registry: &mut PluginRegistry,
+    revisions: PipelineSecurityRevisionsV1,
     drafts: &[EventDraft],
 ) -> Result<u64, ExperimentError> {
     let head = match store.logical_head(timeline_id) {
@@ -910,10 +961,7 @@ fn append_nonempty_driver_drafts(
             return Err(error.into());
         }
     };
-    registry
-        .append_and_commit_step_at(store, head, 0, drafts)
-        .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
-        .map_err(map_runtime_error)
+    admit_scheduled_pass(store, registry, revisions, head, 0, drafts)
 }
 
 fn step_driver_with_completed_prefix(
@@ -933,7 +981,7 @@ fn step_driver_with_completed_prefix(
 
 /// Advance exactly one complete tick through the experiment pipeline.
 fn advance_tick(
-    store: &mut dyn pos_core::store::EventStore,
+    store: &mut dyn ScheduledAdmissionStoreV1,
     timeline_id: pos_core::ids::TimelineId,
     registry: &mut PluginRegistry,
     boundary: &mut TickBoundaryCoordinator,
@@ -975,8 +1023,8 @@ fn chain_head(
 }
 
 fn lock_store(
-    store: &Mutex<Box<dyn pos_core::store::EventStore>>,
-) -> Result<MutexGuard<'_, Box<dyn pos_core::store::EventStore>>, ExperimentError> {
+    store: &Mutex<Box<dyn ScheduledAdmissionStoreV1>>,
+) -> Result<MutexGuard<'_, Box<dyn ScheduledAdmissionStoreV1>>, ExperimentError> {
     store
         .lock()
         .map_err(|_| ExperimentError::SharedStoreLockPoisoned)
@@ -1120,7 +1168,7 @@ fn prepare_backtest_eval_registry(
 /// # Errors
 /// Returns [`ExperimentError`] on runtime or store failures.
 fn run_experiment_on_store(
-    store: &mut dyn pos_core::store::EventStore,
+    store: &mut dyn ScheduledAdmissionStoreV1,
     timeline_id: pos_core::ids::TimelineId,
     stop: &StopCondition,
     registry: &mut PluginRegistry,
@@ -1314,37 +1362,40 @@ impl Experiment {
         self.start_with_hosted_store_and_recipe(store, Some(store_config))
     }
 
-    /// Create the experiment Timeline in a host-supplied `EventStore` adapter.
+    /// Create the experiment Timeline in a host-supplied store adapter.
     ///
     /// This is the production composition seam for decorators such as bounded,
-    /// fault-reporting, or observability adapters. Because the supplied adapter
-    /// cannot be reconstructed from [`ExperimentConfig::store_config`], results
-    /// from this session do not advertise a recovery recipe. The experiment
-    /// must carry an explicit host-owned erasure gate; unbound composition is
-    /// rejected before Timeline creation.
+    /// fault-reporting, or observability adapters. The adapter must expose the
+    /// ADR-021 scheduled-admission ports of the same store, because every
+    /// nonempty scheduled pass commits only through its admitted-batch port.
+    /// Because the supplied adapter cannot be reconstructed from
+    /// [`ExperimentConfig::store_config`], results from this session do not
+    /// advertise a recovery recipe. The experiment must carry an explicit
+    /// host-owned erasure gate; unbound composition is rejected before
+    /// Timeline creation.
     ///
     /// # Errors
     /// Returns [`ExperimentError::Store`] if the supplied store cannot create
     /// the Timeline.
     pub fn start_with_store(
         self,
-        store: Box<dyn pos_core::store::EventStore>,
+        store: Box<dyn ScheduledAdmissionStoreV1>,
     ) -> Result<ExperimentSession, ExperimentError> {
         self.start_with_store_and_recipe(store, None)
     }
 
     fn start_with_store_and_recipe(
         self,
-        mut store: Box<dyn pos_core::store::EventStore>,
+        mut store: Box<dyn ScheduledAdmissionStoreV1>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
-        bind_store_to_experiment_gate(store.as_mut(), &self.registry, self.erasure_gate.clone())?;
+        bind_store_to_experiment_gate(&mut *store, &self.registry, self.erasure_gate.clone())?;
         self.finish_start_with_bound_store(store, recovery_store_config)
     }
 
     fn finish_start_with_bound_store(
         self,
-        mut store: Box<dyn pos_core::store::EventStore>,
+        mut store: Box<dyn ScheduledAdmissionStoreV1>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let registry = self.registry;
@@ -1418,7 +1469,7 @@ impl Experiment {
         self.resume_bound_store_and_recipe(timeline_id, Box::new(store), Some(store_config))
     }
 
-    /// Resume a durable Timeline through a host-supplied `EventStore` adapter.
+    /// Resume a durable Timeline through a host-supplied store adapter.
     ///
     /// Persisted Events are validated and folded exactly as in [`Self::resume`].
     /// This variant keeps host decorators in the recovery path instead of
@@ -1434,7 +1485,7 @@ impl Experiment {
     pub fn resume_with_store(
         self,
         timeline_id: pos_core::ids::TimelineId,
-        store: Box<dyn pos_core::store::EventStore>,
+        store: Box<dyn ScheduledAdmissionStoreV1>,
     ) -> Result<ExperimentSession, ExperimentError> {
         self.resume_with_store_and_recipe(timeline_id, store, None)
     }
@@ -1442,17 +1493,17 @@ impl Experiment {
     fn resume_with_store_and_recipe(
         self,
         timeline_id: pos_core::ids::TimelineId,
-        mut store: Box<dyn pos_core::store::EventStore>,
+        mut store: Box<dyn ScheduledAdmissionStoreV1>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
-        bind_store_to_experiment_gate(store.as_mut(), &self.registry, self.erasure_gate.clone())?;
+        bind_store_to_experiment_gate(&mut *store, &self.registry, self.erasure_gate.clone())?;
         self.resume_bound_store_and_recipe(timeline_id, store, recovery_store_config)
     }
 
     fn resume_bound_store_and_recipe(
         mut self,
         timeline_id: pos_core::ids::TimelineId,
-        store: Box<dyn pos_core::store::EventStore>,
+        store: Box<dyn ScheduledAdmissionStoreV1>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let parent_composition = self.registry.composition();
@@ -1475,7 +1526,7 @@ impl Experiment {
             )?
         };
         validate_captured_range(pos_core::clock::Seq::ZERO, folded_through, &events)?;
-        let ancestry = timeline_ancestry(store.as_ref(), timeline_id, folded_through)?;
+        let ancestry = timeline_ancestry(&*store, timeline_id, folded_through)?;
         self.registry.restore_driver_state(&ancestry, &events)?;
         hydrate_projections(&mut self.registry, timeline_id, &events);
         let revoked_subjects = recovered_revoked_subjects(&events);
@@ -1754,11 +1805,7 @@ impl ExperimentSession {
         &self,
     ) -> Result<Vec<pos_core::Event>, ExperimentError> {
         lock_store(&self.store).and_then(|store| {
-            read_completed_prefix(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )
+            read_completed_prefix(&**store, self.timeline.id(), self.boundary.folded_through)
         })
     }
 
@@ -1801,11 +1848,7 @@ impl ExperimentSession {
                 .map_err(ExperimentError::from)
         })?;
         let after = match lock_store(&self.store).and_then(|store| {
-            capture_pending_range(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )
+            capture_pending_range(&**store, self.timeline.id(), self.boundary.folded_through)
         }) {
             Ok(captured) => captured,
             Err(error) => {
@@ -1992,12 +2035,23 @@ impl ExperimentSession {
 
         let (folded_events, committed_events) = self.prepare_tick()?;
 
-        let drafts = match self.select_step_drafts(request, &committed_events) {
-            Ok(drafts) => drafts,
+        // The admission revisions are observed before any Driver runs, so the
+        // pass binds the security state in force at its base snapshot.
+        let staged = lock_store(&self.store)
+            .and_then(|mut store| {
+                observe_scheduled_admission(&mut store, &self.registry, self.timeline.id())
+            })
+            .and_then(|revisions| {
+                self.select_step_drafts(request, &committed_events)
+                    .map(|drafts| (revisions, drafts))
+                    .map_err(ExperimentError::from)
+            });
+        let (revisions, drafts) = match staged {
+            Ok(staged) => staged,
             Err(error) => {
                 self.registry.abort_step();
                 self.health = SessionHealth::Faulted;
-                return Err(error.into());
+                return Err(error);
             }
         };
         if drafts
@@ -2020,22 +2074,19 @@ impl ExperimentSession {
                 .commit_step_at(self.boundary.folded_through, current_now_secs())?;
             0
         } else {
-            match lock_store(&self.store)
-                .and_then(|mut store| {
-                    let head = store
-                        .logical_head(self.timeline.id())
-                        .map_err(ExperimentError::from)?;
-                    self.registry
-                        .append_and_commit_step_at(
-                            store.as_mut(),
-                            head,
-                            current_now_secs(),
-                            &drafts,
-                        )
-                        .map_err(map_runtime_error)
-                })
-                .map(|events| u64::try_from(events.len()).unwrap_or(u64::MAX))
-            {
+            match lock_store(&self.store).and_then(|mut store| {
+                let head = store
+                    .logical_head(self.timeline.id())
+                    .map_err(ExperimentError::from)?;
+                admit_scheduled_pass(
+                    &mut store,
+                    &mut self.registry,
+                    revisions,
+                    head,
+                    current_now_secs(),
+                    &drafts,
+                )
+            }) {
                 Ok(count) => count,
                 Err(error) => {
                     self.registry.abort_step();
@@ -2046,11 +2097,7 @@ impl ExperimentSession {
         };
 
         let after = match lock_store(&self.store).and_then(|store| {
-            capture_pending_range(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )
+            capture_pending_range(&**store, self.timeline.id(), self.boundary.folded_through)
         }) {
             Ok(captured) => captured,
             Err(error) => {
@@ -2136,11 +2183,7 @@ impl ExperimentSession {
             })?;
         let after = lock_store(&self.store)
             .and_then(|store| {
-                capture_pending_range(
-                    store.as_ref(),
-                    self.timeline.id(),
-                    self.boundary.folded_through,
-                )
+                capture_pending_range(&**store, self.timeline.id(), self.boundary.folded_through)
             })
             .inspect_err(|_| {
                 self.health = SessionHealth::Faulted;
@@ -2190,11 +2233,7 @@ impl ExperimentSession {
 
     fn prepare_tick(&mut self) -> Result<(u64, Vec<pos_core::Event>), ExperimentError> {
         let before = lock_store(&self.store).and_then(|store| {
-            capture_pending_range(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )
+            capture_pending_range(&**store, self.timeline.id(), self.boundary.folded_through)
         })?;
         let (folded_events, committed_events) = self.prepare_projection_view(&before)?;
         Ok((folded_events.0, committed_events))
@@ -2210,11 +2249,7 @@ impl ExperimentSession {
             .is_ok()
         {
             let mut committed_events = lock_store(&self.store).and_then(|store| {
-                read_completed_prefix_at(
-                    store.as_ref(),
-                    self.timeline.id(),
-                    self.boundary.folded_through,
-                )
+                read_completed_prefix_at(&**store, self.timeline.id(), self.boundary.folded_through)
             })?;
             committed_events.extend(before.events.iter().cloned());
             (
@@ -2290,7 +2325,7 @@ impl ExperimentSession {
             let mut fork_result = None;
             let mut append = || {
                 fork_result = Some(registry.fork_restored_timeline(
-                    store.as_mut(),
+                    &mut **store,
                     self.timeline.id(),
                     fork_head,
                     name,
@@ -2374,12 +2409,9 @@ impl ExperimentSession {
             return Err(ExperimentError::IncompatibleForkRegistry);
         }
         let (events, ancestry) = lock_store(&self.store).and_then(|store| {
-            let events = read_completed_prefix(store.as_ref(), self.timeline.id(), fork_head)?;
-            let ancestry = timeline_ancestry(
-                store.as_ref(),
-                self.timeline.id(),
-                self.boundary.folded_through,
-            )?;
+            let events = read_completed_prefix(&**store, self.timeline.id(), fork_head)?;
+            let ancestry =
+                timeline_ancestry(&**store, self.timeline.id(), self.boundary.folded_through)?;
             Ok((events, ancestry))
         })?;
         self.hydrate_fork_registry(&mut registry, &ancestry, &events, durable_head)?;
@@ -2442,7 +2474,7 @@ impl ExperimentSession {
             .and_then(|_| self.registry.clone_consent_gate());
         let protected_token = self.operation_token;
         let public_events = lock_store(&self.store)
-            .and_then(|store| read_completed_prefix(store.as_ref(), timeline_id, timeline_head))?;
+            .and_then(|store| read_completed_prefix(&**store, timeline_id, timeline_head))?;
         let projections = authorized_result_projections(
             &self.store,
             self.registry,
@@ -2455,7 +2487,7 @@ impl ExperimentSession {
         let total_events = self.total_events;
         let store_config = self.recovery_store_config;
         lock_store(&self.store)
-            .and_then(|store| chain_head(store.as_ref(), timeline_id))
+            .and_then(|store| chain_head(&**store, timeline_id))
             .map(|chain_head| {
                 let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
                 for (name, version) in &plugin_versions {
@@ -2783,7 +2815,7 @@ impl BacktestRunner {
     #[cfg(test)]
     fn run_on_store(
         self,
-        store: &mut dyn pos_core::store::EventStore,
+        store: &mut dyn ScheduledAdmissionStoreV1,
     ) -> Result<BacktestResult, ExperimentError> {
         let store_gate = self
             .erasure_gate
@@ -2796,7 +2828,7 @@ impl BacktestRunner {
 
     fn run_on_store_with_gate_bindings(
         self,
-        store: &mut dyn pos_core::store::EventStore,
+        store: &mut dyn ScheduledAdmissionStoreV1,
         runtime_gate: Arc<dyn ErasureGate>,
     ) -> Result<BacktestResult, ExperimentError> {
         let store_config = self.config.store_config.clone();
@@ -3783,11 +3815,46 @@ pub mod tests {
     }
 
     pub(super) struct CaptureAwareStore {
-        pub(super) base: Box<dyn EventStore>,
+        pub(super) base: Box<dyn ScheduledAdmissionStoreV1>,
         pub(super) state: Arc<Mutex<HostTransactionState>>,
         pub(super) failure_mode: CaptureFailureMode,
         pub(super) erasure_gate: Option<Arc<pos_core::ErasureContainmentGateV1>>,
     }
+
+    /// Admission mirrors the injected append faults: the batch is recorded,
+    /// then a failure mode either rejects it or poisons the gate after commit.
+    impl pos_core::PipelineAdmissionPortV1 for CaptureAwareStore {
+        fn admit_pipeline_batch(
+            &mut self,
+            basis: &pos_core::PipelineAdmissionBasisV1,
+        ) -> Result<pos_core::PipelineOutcomeV1, CoreError> {
+            let mut state = self.state.lock().test_ok();
+            let commits = state.commits;
+            state
+                .append_calls
+                .push((basis.batch().drafts().len(), commits));
+            drop(state);
+            if self.failure_mode == CaptureFailureMode::Append {
+                return Err(CoreError::Storage("injected append failure".to_owned()));
+            }
+            let outcome = self.base.admit_pipeline_batch(basis)?;
+            if self.failure_mode == CaptureFailureMode::PoisonAfterAppend {
+                if let Some(gate) = &self.erasure_gate {
+                    gate.poison();
+                }
+            }
+            Ok(outcome)
+        }
+
+        fn purge_expired_pipeline_receipts_bounded(
+            &mut self,
+            limit: std::num::NonZeroUsize,
+        ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
+            self.base.purge_expired_pipeline_receipts_bounded(limit)
+        }
+    }
+
+    forward_scheduled_admission_fence_and_authority!(CaptureAwareStore, base);
 
     impl EventStore for CaptureAwareStore {
         fn bind_erasure_gate(
@@ -4008,10 +4075,12 @@ pub mod tests {
     }
 
     struct FailLogicalHeadStore {
-        inner: Box<dyn EventStore>,
+        inner: Box<dyn ScheduledAdmissionStoreV1>,
         calls: std::cell::Cell<u8>,
         fail_on_call: u8,
     }
+
+    forward_scheduled_admission_ports!(FailLogicalHeadStore, inner);
 
     impl EventStore for FailLogicalHeadStore {
         fn bind_erasure_gate(
@@ -5068,6 +5137,8 @@ pub mod tests {
         head_calls: std::cell::Cell<u8>,
     }
 
+    forward_scheduled_admission_ports!(CaptureFaultStore, base);
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     impl EventStore for CaptureFaultStore {
         fn bind_erasure_gate(
@@ -5358,7 +5429,7 @@ pub mod tests {
     }
 
     fn capture_aware_store(
-        base: Box<dyn EventStore>,
+        base: Box<dyn ScheduledAdmissionStoreV1>,
         case: TransactionCase,
         state: &Arc<Mutex<HostTransactionState>>,
     ) -> CaptureAwareStore {
@@ -5392,9 +5463,9 @@ pub mod tests {
 
         let (timeline, result) = match path {
             TransactionHostPath::AdvanceTick => {
-                let mut base: Box<dyn EventStore> = Box::new(test_memory_store());
+                let mut base: Box<dyn ScheduledAdmissionStoreV1> = Box::new(test_memory_store());
                 let timeline = base.create_timeline("transaction-advance").test_ok().id();
-                seed_external_event(base.as_mut(), timeline);
+                seed_external_event(&mut *base, timeline);
                 let mut store = capture_aware_store(base, case, &state);
                 let mut registry = registry;
                 let mut boundary = TickBoundaryCoordinator {
@@ -5420,7 +5491,7 @@ pub mod tests {
                 let timeline = session.timeline().id();
                 {
                     let mut store = session.store.lock().test_ok();
-                    seed_external_event(store.as_mut(), timeline);
+                    seed_external_event(&mut **store, timeline);
                     let base = std::mem::replace(&mut *store, Box::new(test_memory_store()));
                     *store = Box::new(capture_aware_store(base, case, &state));
                 }
@@ -6263,7 +6334,7 @@ pub mod tests {
         // branch logic through a manual store path.
         let mut store2 = open_store(StoreConfig::Memory).test_ok();
         store2.create_timeline("branch-seed").test_ok();
-        let forked = exp2_mut.branch("branch-seed", store2.as_mut()).test_ok();
+        let forked = exp2_mut.branch("branch-seed", &mut *store2).test_ok();
         assert!(!forked.id().to_string().is_empty());
     }
 
@@ -6276,7 +6347,7 @@ pub mod tests {
             store_config: StoreConfig::Memory,
         });
         let mut store = open_store(StoreConfig::Memory).test_ok();
-        let err = exp.branch("nonexistent", store.as_mut());
+        let err = exp.branch("nonexistent", &mut *store);
         assert!(err.is_err());
     }
 
@@ -6301,7 +6372,7 @@ pub mod tests {
             )
             .test_ok();
         assert!(matches!(
-            experiment.branch("public-child", store.as_mut()),
+            experiment.branch("public-child", &mut *store),
             Err(ExperimentError::Runtime(
                 pos_runtime::RuntimeError::ConsentOperationUnavailable
             ))
@@ -6330,7 +6401,7 @@ pub mod tests {
         })
         .with_consent_authority(authority);
         assert!(gated_experiment
-            .branch_with_token("gated-child", store.as_mut(), &token, 0)
+            .branch_with_token("gated-child", &mut *store, &token, 0)
             .is_ok());
 
         let denied_authority = ConsentAuthority::new();
@@ -6356,7 +6427,7 @@ pub mod tests {
         })
         .with_consent_authority(denied_authority);
         assert!(matches!(
-            denied_experiment.branch_with_token("denied-child", store.as_mut(), &denied_token, 0),
+            denied_experiment.branch_with_token("denied-child", &mut *store, &denied_token, 0),
             Err(ExperimentError::Runtime(
                 pos_runtime::RuntimeError::Consent(pos_core::ConsentError::ForkNotPermitted)
             ))
@@ -6864,7 +6935,7 @@ pub mod tests {
         );
         let gated = experiment.with_consent_authority(authority);
         let child = gated
-            .branch_with_token("unit-token-child", store.as_mut(), &token, 0)
+            .branch_with_token("unit-token-child", &mut *store, &token, 0)
             .test_ok();
         assert_eq!(child.meta.name.as_deref(), Some("unit-token-child"));
 
@@ -7754,7 +7825,7 @@ mod coverage_entrypoints {
             &state,
             &failing_state,
         );
-        let mut base: Box<dyn EventStore> = Box::new(test_memory_store());
+        let mut base: Box<dyn ScheduledAdmissionStoreV1> = Box::new(test_memory_store());
         let timeline = ok(base.create_timeline("head-fault-after-stage"));
         let mut store = CaptureAwareStore {
             base,
@@ -7776,6 +7847,58 @@ mod coverage_entrypoints {
         assert!(!state.staged);
         assert!(state.append_calls.is_empty());
         drop(state);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_driver_drafts_stops_before_staging_when_admission_cannot_be_observed() {
+        let mut store = test_memory_store();
+        let timeline = ok(store.create_timeline("foreign-authority-host"));
+        let foreign = pos_core::AuthorityPersistenceHostV1::new(&ok(
+            pos_core::AuthorityRegistrySnapshotV1::try_new(
+                pos_core::Hash::from_bytes([3; 32]),
+                vec![pos_core::Hash::from_bytes([4; 32])],
+                Vec::new(),
+                Vec::new(),
+            ),
+        ));
+        ok(
+            pos_core::AuthorityPersistencePortV1::bind_authority_persistence(
+                &mut store,
+                foreign.persistence_binding(),
+            ),
+        );
+        let state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let failing_state = Arc::new(Mutex::new(HostTransactionState::default()));
+        let mut registry = transaction_registry(
+            TransactionHostPath::AdvanceTick,
+            TransactionCase::NonEmpty,
+            &state,
+            &failing_state,
+        );
+
+        let result = append_driver_drafts(
+            &mut store,
+            timeline.id(),
+            &mut registry,
+            pos_core::clock::Seq::ZERO,
+        );
+        assert!(matches!(
+            result,
+            Err(ExperimentError::Runtime(
+                RuntimeError::AuthorityPersistence(
+                    pos_core::AuthorityPersistenceErrorV1::Unavailable
+                )
+            ))
+        ));
+        let state = ok(state.lock());
+        assert_eq!(state.steps, 0, "no Driver runs without observed admission");
+        assert!(state.append_calls.is_empty());
+        drop(state);
+        assert_eq!(
+            ok(store.logical_head(timeline.id())),
+            pos_core::clock::Seq::ZERO
+        );
     }
 
     #[test]
@@ -9193,10 +9316,12 @@ mod fault_injection_tests {
     }
 
     struct FailLogicalHeadStore {
-        inner: Box<dyn EventStore>,
+        inner: Box<dyn ScheduledAdmissionStoreV1>,
         calls: Cell<u8>,
         fail_on_call: u8,
     }
+
+    forward_scheduled_admission_ports!(FailLogicalHeadStore, inner);
 
     struct RejectingRevocationGate;
 
@@ -9801,7 +9926,7 @@ mod fault_injection_tests {
         })
         .with_consent_authority(authority);
         assert!(experiment
-            .branch_with_token("child", store.as_mut(), &token, 0)
+            .branch_with_token("child", &mut *store, &token, 0)
             .is_err());
 
         let authority = ConsentAuthority::new();
@@ -9853,7 +9978,7 @@ mod fault_injection_tests {
             Experiment::new(config("branch-token-expired", StopCondition::MaxTicks(1)))
                 .with_consent_authority(authority);
         assert!(experiment
-            .branch_with_token("child", expired_store.as_mut(), &token, 2)
+            .branch_with_token("child", &mut *expired_store, &token, 2)
             .is_err());
     }
 
@@ -10141,12 +10266,9 @@ mod fault_injection_tests {
         )
         .test_ok();
 
-        assert!(matches!(
-            session.step_tick(),
-            Err(ExperimentError::Runtime(
-                pos_runtime::RuntimeError::ErasureContainmentAfterCommit { event_count: 1, .. }
-            ))
-        ));
+        // The admitted batch commits before the gate is poisoned, so the
+        // committed Driver state is kept and the post-commit capture faults.
+        assert!(session.step_tick().is_err());
         let driver_state = driver_state.lock().test_ok();
         assert_eq!(driver_state.commits, 1);
         assert_eq!(driver_state.aborts, 0);
@@ -10347,7 +10469,7 @@ mod fault_injection_tests {
             path: path.to_str().test_ok().to_owned(),
         })
         .test_ok();
-        assert!(exp2.branch("child", store.as_mut()).is_err());
+        assert!(exp2.branch("child", &mut *store).is_err());
     }
 
     #[test]
@@ -10396,7 +10518,7 @@ mod fault_injection_tests {
         )
         .test_ok();
         drop(conn);
-        let err = exp2.branch("child", store.as_mut());
+        let err = exp2.branch("child", &mut *store);
         assert!(matches!(err, Err(ExperimentError::Store(_))));
     }
 
@@ -10487,6 +10609,8 @@ mod fault_injection_tests {
         struct FaultyForkerStore {
             base: pos_store::memory::MemoryStore,
         }
+
+        forward_scheduled_admission_ports!(FaultyForkerStore, base);
 
         impl EventStore for FaultyForkerStore {
             fn bind_erasure_gate(
@@ -10586,6 +10710,8 @@ mod fault_injection_tests {
         base: pos_store::memory::MemoryStore,
         ok_reads_left: Cell<u32>,
     }
+
+    forward_scheduled_admission_ports!(FailReadAfterStore, base);
 
     impl pos_core::store::EventStore for FailReadAfterStore {
         fn create_timeline(

@@ -6,6 +6,10 @@
 //! through the host-only [`PipelineAdmissionPortV1`]: the store compares the
 //! basis and assigns Event identity and Timeline Order inside one transaction,
 //! and staged Driver and cadence state commits only after that batch commits.
+//!
+//! A protected pass is admitted inside the consent authority's token fence,
+//! so a consent revocation cannot interleave between the commit-time consent
+//! recheck and the store transaction.
 
 use pos_core::{
     AppendIdentity, CoreError, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
@@ -15,7 +19,7 @@ use pos_core::{
     PipelineSecurityRevisionsV1, Seq, TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
 };
 
-use super::{PendingStep, PluginRegistry};
+use super::{OperationContext, PendingStep, PluginRegistry};
 use crate::error::RuntimeError;
 
 /// Host-owned inputs that bind one staged scheduled pass to its admission basis.
@@ -85,7 +89,15 @@ impl PluginRegistry {
             .and_then(|()| self.schemas.validate_batch(&pending.staged_drafts))
             .and_then(|()| scheduled_basis(&pending, admission, observed_through, snapshot_digest));
         match prepared {
-            Ok(Some(basis)) => self.finish_scheduled_admission(port, pending, basis),
+            Ok(Some(basis)) => self.finish_scheduled_admission(
+                port,
+                InDoubtAdmission {
+                    pending,
+                    basis,
+                    commit_head: admission.commit_head,
+                    commit_now_secs: admission.commit_now_secs,
+                },
+            ),
             Ok(None) => {
                 self.commit_pending_step(pending);
                 Ok(None)
@@ -101,7 +113,8 @@ impl PluginRegistry {
     ///
     /// Recovery never reruns a Driver or provider: the store either returns
     /// the original receipt for the committed batch or admits the identical
-    /// basis once.
+    /// basis once. A protected pass is resubmitted inside the same consent
+    /// token fence, at the commit head and time of the original attempt.
     ///
     /// # Errors
     /// Returns [`RuntimeError::NoScheduledAdmissionInDoubt`] when nothing is
@@ -113,34 +126,72 @@ impl PluginRegistry {
         let Some(in_doubt) = self.in_doubt_admission.take() else {
             return Err(RuntimeError::NoScheduledAdmissionInDoubt);
         };
-        let (pending, basis) = *in_doubt;
-        self.finish_scheduled_admission(port, pending, basis)
+        self.finish_scheduled_admission(port, *in_doubt)
     }
 
     fn finish_scheduled_admission(
         &mut self,
         port: &mut dyn PipelineAdmissionPortV1,
-        pending: PendingStep,
-        basis: PipelineAdmissionBasisV1,
+        attempt: InDoubtAdmission,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-        match port.admit_pipeline_batch(&basis) {
+        match self.admit_within_consent_fence(port, &attempt) {
             Ok(
                 PipelineOutcomeV1::Committed(receipt)
                 | PipelineOutcomeV1::RecoveredDuplicate(receipt),
             ) => {
-                self.commit_pending_step(pending);
+                self.commit_pending_step(attempt.pending);
                 Ok(Some(receipt))
             }
-            Err(error @ CoreError::StorageOutcomeUnknown(_)) => {
-                self.in_doubt_admission = Some(Box::new((pending, basis)));
-                Err(RuntimeError::Store(error))
+            Err(error @ RuntimeError::Store(CoreError::StorageOutcomeUnknown(_))) => {
+                self.in_doubt_admission = Some(Box::new(attempt));
+                Err(error)
             }
             result => {
-                let _ = self.abort_drivers(&pending.driver_ids);
-                Err(result.map_or_else(RuntimeError::Store, not_admitted))
+                let _ = self.abort_drivers(&attempt.pending.driver_ids);
+                Err(result.map_or_else(std::convert::identity, not_admitted))
             }
         }
     }
+
+    /// Submit the basis, holding the consent token fence for a protected pass.
+    fn admit_within_consent_fence(
+        &self,
+        port: &mut dyn PipelineAdmissionPortV1,
+        attempt: &InDoubtAdmission,
+    ) -> Result<PipelineOutcomeV1, RuntimeError> {
+        let mut admit = || {
+            port.admit_pipeline_batch(&attempt.basis)
+                .map_err(RuntimeError::Store)
+        };
+        match &attempt.pending.operation {
+            OperationContext::Public => admit(),
+            OperationContext::Protected { token, .. } => self.consent_gate.as_ref().map_or(
+                Err(RuntimeError::ConsentOperationUnavailable),
+                |gate| {
+                    let mut outcome = Err(RuntimeError::ConsentOperationUnavailable);
+                    let fenced = gate.with_token_fence(
+                        attempt.pending.timeline,
+                        token,
+                        attempt.commit_head.as_u64(),
+                        attempt.commit_now_secs,
+                        &mut || outcome = admit(),
+                    );
+                    fenced.map_err(RuntimeError::Consent).and(outcome)
+                },
+            ),
+        }
+    }
+}
+
+/// One built scheduled-pass basis with the host inputs of its commit fence.
+///
+/// It is retained unchanged while the store outcome is unknown, so recovery
+/// resubmits exactly the original attempt.
+pub(super) struct InDoubtAdmission {
+    pub(super) pending: PendingStep,
+    basis: PipelineAdmissionBasisV1,
+    commit_head: Seq,
+    commit_now_secs: u64,
 }
 
 fn not_admitted(outcome: PipelineOutcomeV1) -> RuntimeError {
