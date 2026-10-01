@@ -1,4 +1,10 @@
-//! Private ADR-109 coordinator between the Unix listener and durable journal.
+//! Private ADR-109 coordinator between the Unix listener and the Gateway's
+//! one erasure host (ADR-109 revision 9, Decision 1).
+//!
+//! The coordinator holds no store adapter. It keeps the ADR-107 credentials,
+//! the FAH1 record and the session identity digest on the listener thread,
+//! builds and signs every FAC1 and FRP1 there, and submits the five private
+//! journal commands to the `StoreExecutor` that owns the host.
 
 use std::{
     io,
@@ -9,16 +15,21 @@ use ciborium::value::Value;
 use pos_core::{
     ForkAdmissionCommandCodecErrorV1, ForkAdmissionErrorV1, ForkAdmissionHostCommandV1,
     ForkAdmissionHostRecordV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
-    ForkAdmissionRecoveryCommandV1, ForkAdmissionRecoveryProofV1, ForkCreateCommandV1,
+    ForkAdmissionRecoveryCommandV1, ForkAdmissionRecoveryProofV1, ForkCreateCommandV1, Hash,
     PrincipalOwnerCommandV1,
 };
+use pos_runtime::ErasureExecutionHostV1;
 use pos_store::{
-    ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthoritySessionV1,
-    ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
-    ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
+    ForkAdmissionAuthoritySessionV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
+    ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1,
+    ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 
 use crate::{
+    executor::{
+        ForkAdmissionSubmissionErrorV1, ForkAdmissionSubmissionV1, ForkAdmissionSubmitterV1,
+        ForkDeliveryMarkV1,
+    },
     local_fork_authentication::{
         LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1,
         ResolvedLocalAuthenticationV1,
@@ -30,53 +41,136 @@ use crate::{
     },
 };
 
-/// Gateway-owned authority session and its one durable journal adapter.
-pub(super) struct LocalForkAdmissionCoordinatorV1<S> {
-    credentials: LocalForkAuthenticationCredentialsV1,
-    host: ForkAdmissionHostRecordV1,
-    session: ForkAdmissionAuthoritySessionV1,
-    store: S,
+/// The five private journal commands the listener thread submits to the
+/// executor that owns the host (ADR-109 revision 9, Decision 1 item 4).
+pub(super) trait LocalForkDeliveryJournalV1: Send {
+    fn claim(
+        &mut self,
+        tuple: ForkDeliveryTupleV1,
+    ) -> ForkAdmissionSubmissionV1<ForkDeliveryClaimOutcomeV1>;
+
+    fn cancel(&mut self, claim: ForkDeliveryClaimV1) -> ForkAdmissionSubmissionV1<()>;
+
+    fn execute(
+        &mut self,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> ForkAdmissionSubmissionV1<ForkDeliveryExecutionV1>;
+
+    fn recover(
+        &mut self,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+        principal: Hash,
+    ) -> ForkAdmissionSubmissionV1<ForkAdmissionOperationResultV1>;
+
+    fn mark(
+        &mut self,
+        claim: ForkDeliveryClaimV1,
+        mark: ForkDeliveryMarkV1,
+    ) -> ForkAdmissionSubmissionV1<()>;
 }
 
-impl<S> LocalForkAdmissionCoordinatorV1<S>
-where
-    S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionDeliveryJournalPortV1,
-{
-    /// Open an already-provisioned FAH1 authority. Missing or unequal authority
-    /// fails before the caller can bind a Unix listener.
-    pub(super) fn open(
-        mut store: S,
-        credentials: LocalForkAuthenticationCredentialsV1,
-    ) -> Result<Self, LocalForkAuthenticationErrorV1> {
-        let session = credentials
-            .open_authority(&mut store)
-            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
-        let host = store
-            .fork_admission_host_record()
-            .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
-        Ok(Self {
-            credentials,
-            host,
-            session,
-            store,
-        })
+impl LocalForkDeliveryJournalV1 for ForkAdmissionSubmitterV1 {
+    fn claim(
+        &mut self,
+        tuple: ForkDeliveryTupleV1,
+    ) -> ForkAdmissionSubmissionV1<ForkDeliveryClaimOutcomeV1> {
+        self.claim_fork_delivery(tuple)
     }
 
-    /// Reconcile every retained tuple with a private FRP1 before binding the
-    /// listener. This never releases a result or Principal: a retained exact
-    /// operation stays Uncertain for a same-Principal response retry.
-    pub(super) fn reconcile_startup(&mut self) -> Result<(), LocalForkAuthenticationErrorV1> {
-        let tuples = self
-            .store
-            .reconcile_fork_delivery_journal(&self.session)
+    fn cancel(&mut self, claim: ForkDeliveryClaimV1) -> ForkAdmissionSubmissionV1<()> {
+        self.cancel_pending_fork_delivery(claim)
+    }
+
+    fn execute(
+        &mut self,
+        claim: ForkDeliveryClaimV1,
+        command: &ForkAdmissionHostCommandV1,
+    ) -> ForkAdmissionSubmissionV1<ForkDeliveryExecutionV1> {
+        self.execute_claimed_fork_delivery(claim, command)
+    }
+
+    fn recover(
+        &mut self,
+        tuple: ForkDeliveryTupleV1,
+        proof: &ForkAdmissionRecoveryProofV1,
+        principal: Hash,
+    ) -> ForkAdmissionSubmissionV1<ForkAdmissionOperationResultV1> {
+        self.recover_fork_delivery(tuple, proof, principal)
+    }
+
+    fn mark(
+        &mut self,
+        claim: ForkDeliveryClaimV1,
+        mark: ForkDeliveryMarkV1,
+    ) -> ForkAdmissionSubmissionV1<()> {
+        self.mark_fork_delivery(claim, mark)
+    }
+}
+
+/// ADR-109 revision 9 startup step 3: consume one FAO1 challenge on the
+/// host's own adapter and read the FAH1 record the session binds. A missing
+/// or unequal authority fails before any listener can bind.
+pub(super) fn open_fork_admission_session(
+    host: &mut ErasureExecutionHostV1,
+    credentials: &LocalForkAuthenticationCredentialsV1,
+) -> Result<
+    (ForkAdmissionAuthoritySessionV1, ForkAdmissionHostRecordV1),
+    LocalForkAuthenticationErrorV1,
+> {
+    let bootstrap = host.fork_admission_bootstrap();
+    let session = credentials.open_authority(bootstrap).ok();
+    session
+        .zip(bootstrap.fork_admission_host_record().ok())
+        .ok_or(LocalForkAuthenticationErrorV1::CredentialUnavailable)
+}
+
+/// ADR-109 revision 9 startup step 4: reconcile every retained tuple with an
+/// FRP1 signed on the startup thread. FRP1 is fence-free, and this never
+/// releases a result or Principal: a retained exact operation stays
+/// Uncertain for a same-Principal response retry.
+pub(super) fn reconcile_startup<E>(
+    credentials: &LocalForkAuthenticationCredentialsV1,
+    (host, session_identity): (ForkAdmissionHostRecordV1, Hash),
+    tuples: Result<Vec<ForkDeliveryTupleV1>, E>,
+    mut reconcile: impl FnMut(
+        ForkDeliveryTupleV1,
+        &ForkAdmissionRecoveryProofV1,
+    ) -> Result<ForkDeliveryStartupOutcomeV1, E>,
+) -> Result<(), LocalForkAuthenticationErrorV1> {
+    let tuples = tuples.map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
+    for tuple in tuples {
+        let proof = recovery_proof(credentials, host, session_identity, tuple)?;
+        reconcile(tuple, &proof)
             .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
-        for tuple in tuples {
-            let proof = self.recovery_proof(tuple)?;
-            self.store
-                .reconcile_fork_delivery_startup(&self.session, tuple, &proof)
-                .map_err(|_| LocalForkAuthenticationErrorV1::CredentialUnavailable)?;
+    }
+    Ok(())
+}
+
+/// Listener-thread coordinator: credentials, the FAH1 record, the session
+/// identity digest, and the private journal submissions.
+pub(super) struct LocalForkAdmissionCoordinatorV1 {
+    credentials: LocalForkAuthenticationCredentialsV1,
+    host: ForkAdmissionHostRecordV1,
+    session_identity: Hash,
+    journal: Box<dyn LocalForkDeliveryJournalV1>,
+}
+
+impl LocalForkAdmissionCoordinatorV1 {
+    /// Bind the listener-thread authority to its journal submissions.
+    pub(super) const fn new(
+        credentials: LocalForkAuthenticationCredentialsV1,
+        host: ForkAdmissionHostRecordV1,
+        session_identity: Hash,
+        journal: Box<dyn LocalForkDeliveryJournalV1>,
+    ) -> Self {
+        Self {
+            credentials,
+            host,
+            session_identity,
+            journal,
         }
-        Ok(())
     }
 
     /// Accept and process one connection with this process-owned authority.
@@ -102,24 +196,23 @@ where
     }
 
     /// Process one complete peer-bound request. No public field becomes an
-    /// authority input: all FAC1/FRP1 bytes are built here from the opened
-    /// session and protected credentials.
+    /// authority input: all FAC1/FRP1 bytes are built here from the session
+    /// identity and protected credentials.
     fn handle(&mut self, completed: CompletedLocalForkAdmissionV1) -> PreparedDeliveryV1 {
         let Ok(delivery_tuple) = delivery_tuple(&completed) else {
             return PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::InvalidRequest));
         };
-        match self
-            .store
-            .claim_fork_delivery(&self.session, delivery_tuple)
-        {
-            Ok(ForkDeliveryClaimOutcomeV1::Owner(claim)) => self.execute_owned(completed, claim),
-            Ok(ForkDeliveryClaimOutcomeV1::Busy) => {
-                PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate))
+        match self.journal.claim(delivery_tuple) {
+            Ok(Ok(ForkDeliveryClaimOutcomeV1::Owner(claim))) => {
+                self.execute_owned(completed, claim)
             }
-            Ok(ForkDeliveryClaimOutcomeV1::Reconcile(claim, state)) => {
+            Ok(Ok(ForkDeliveryClaimOutcomeV1::Reconcile(claim, state))) => {
                 self.recover(completed, claim, state)
             }
-            Err(_) => PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate)),
+            Ok(Ok(ForkDeliveryClaimOutcomeV1::Busy) | Err(_)) => {
+                PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate))
+            }
+            Err(error) => PreparedDeliveryV1::plain(reject(submission_code(error))),
         }
     }
 
@@ -130,14 +223,13 @@ where
     ) -> io::Result<()> {
         let write_result = write_response(stream, &prepared.response);
         if let Some(claim) = prepared.claim.filter(|_| prepared.mark_after_write) {
-            let transition = if write_result.is_ok() {
-                self.store
-                    .mark_fork_delivery_delivered(&self.session, claim)
+            let mark = if write_result.is_ok() {
+                ForkDeliveryMarkV1::Delivered
             } else {
-                self.store
-                    .mark_fork_delivery_uncertain(&self.session, claim)
+                ForkDeliveryMarkV1::Uncertain
             };
-            if transition.is_err() && write_result.is_ok() {
+            let marked = matches!(self.journal.mark(claim, mark), Ok(Ok(())));
+            if !marked && write_result.is_ok() {
                 return Err(io::Error::other("Fork delivery journal transition failed"));
             }
         }
@@ -162,46 +254,28 @@ where
             Ok(command) => command,
             Err(error) => return self.cancel_pending(claim, authentication_code(error)),
         };
-        match self.store.execute_claimed_fork_delivery(
-            &self.session,
-            self.credentials.policy(),
-            claim,
-            &command,
-        ) {
-            Ok(ForkDeliveryExecutionV1::Committed(result)) => {
+        match execute_disposition(self.journal.execute(claim, &command)) {
+            ExecuteDisposition::Release(result) => {
                 PreparedDeliveryV1::release(claim, &result, true)
             }
-            Ok(ForkDeliveryExecutionV1::Rejected(error)) => {
-                PreparedDeliveryV1::plain(reject(authority_code(error)))
-            }
-            Ok(ForkDeliveryExecutionV1::Uncertain)
-            | Err(ForkDeliveryJournalErrorV1::StorageIndeterminate) => {
-                PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate))
-            }
-            // The journal refused the claim before FAC1 submission, so the
-            // Pending row is still live and must be deleted (ADR-109).
-            Err(
-                ForkDeliveryJournalErrorV1::InvalidTuple
-                | ForkDeliveryJournalErrorV1::Conflict
-                | ForkDeliveryJournalErrorV1::Fenced
-                | ForkDeliveryJournalErrorV1::Corrupt,
-            ) => self.cancel_pending(claim, LocalForkAdmissionCodeV1::AuthorityUnavailable),
+            ExecuteDisposition::Answer(code) => PreparedDeliveryV1::plain(reject(code)),
+            ExecuteDisposition::CancelThenAnswer(code) => self.cancel_pending(claim, code),
         }
     }
 
     /// Definite failures before FAC1 cannot retain a live Pending claim.
-    /// A failed fenced cancellation leaves the caller with only code 6.
+    /// A cancellation that cannot complete leaves the caller with only code
+    /// 6, and the fenced Pending row waits for startup reconciliation.
     fn cancel_pending(
         &mut self,
         claim: ForkDeliveryClaimV1,
         code: LocalForkAdmissionCodeV1,
     ) -> PreparedDeliveryV1 {
-        match self
-            .store
-            .cancel_pending_fork_delivery(&self.session, claim)
-        {
-            Ok(()) => PreparedDeliveryV1::plain(reject(code)),
-            Err(_) => PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate)),
+        match self.journal.cancel(claim) {
+            Ok(Ok(())) => PreparedDeliveryV1::plain(reject(code)),
+            Ok(Err(_)) | Err(_) => {
+                PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate))
+            }
         }
     }
 
@@ -219,20 +293,18 @@ where
         else {
             return PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate));
         };
-        let Ok(proof) = self.recovery_proof(tuple) else {
+        let Ok(proof) = recovery_proof(&self.credentials, self.host, self.session_identity, tuple)
+        else {
             return PreparedDeliveryV1::plain(reject(
                 LocalForkAdmissionCodeV1::AuthorityUnavailable,
             ));
         };
-        self.store
-            .recover_fork_delivery(
-                &self.session,
-                tuple,
-                &proof,
-                authentication.principal_digest(),
-            )
+        self.journal
+            .recover(tuple, &proof, authentication.principal_digest())
+            .ok()
+            .and_then(Result::ok)
             .map_or_else(
-                |_| PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate)),
+                || PreparedDeliveryV1::plain(reject(LocalForkAdmissionCodeV1::Indeterminate)),
                 |result| {
                     PreparedDeliveryV1::release(
                         claim,
@@ -252,7 +324,7 @@ where
         let principal = authentication.principal_digest();
         let common = [
             Value::Bytes(self.host.store_id().as_bytes().to_vec()),
-            Value::Bytes(self.session.identity().as_bytes().to_vec()),
+            Value::Bytes(self.session_identity.as_bytes().to_vec()),
             Value::Bytes(request.operation_id().as_bytes().to_vec()),
             Value::Bytes(evidence.as_bytes().to_vec()),
             Value::Bytes(principal.as_bytes().to_vec()),
@@ -293,21 +365,95 @@ where
             }
         }
     }
+}
 
-    fn recovery_proof(
-        &self,
-        tuple: ForkDeliveryTupleV1,
-    ) -> Result<ForkAdmissionRecoveryProofV1, LocalForkAuthenticationErrorV1> {
-        let fields = vec![
-            Value::Text("FRC1".to_owned()),
-            Value::Integer(1.into()),
-            Value::Bytes(self.host.store_id().as_bytes().to_vec()),
-            Value::Bytes(self.session.identity().as_bytes().to_vec()),
-            Value::Integer(tuple.kind.wire().into()),
-            Value::Bytes(tuple.operation_id.as_bytes().to_vec()),
-        ];
-        encode(fields, ForkAdmissionRecoveryCommandV1::from_canonical_cbor)
-            .and_then(|command| self.credentials.sign_recovery(&command))
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl LocalForkAdmissionCoordinatorV1 {
+    /// Wrap the journal submissions for a service-level fault test.
+    pub(super) fn map_journal_for_test(
+        self,
+        wrap: impl FnOnce(Box<dyn LocalForkDeliveryJournalV1>) -> Box<dyn LocalForkDeliveryJournalV1>,
+    ) -> Self {
+        Self {
+            journal: wrap(self.journal),
+            ..self
+        }
+    }
+}
+
+/// Sign one private FRP1 for `tuple` with the session identity digest.
+fn recovery_proof(
+    credentials: &LocalForkAuthenticationCredentialsV1,
+    host: ForkAdmissionHostRecordV1,
+    session_identity: Hash,
+    tuple: ForkDeliveryTupleV1,
+) -> Result<ForkAdmissionRecoveryProofV1, LocalForkAuthenticationErrorV1> {
+    let fields = vec![
+        Value::Text("FRC1".to_owned()),
+        Value::Integer(1.into()),
+        Value::Bytes(host.store_id().as_bytes().to_vec()),
+        Value::Bytes(session_identity.as_bytes().to_vec()),
+        Value::Integer(tuple.kind.wire().into()),
+        Value::Bytes(tuple.operation_id.as_bytes().to_vec()),
+    ];
+    encode(fields, ForkAdmissionRecoveryCommandV1::from_canonical_cbor)
+        .and_then(|command| credentials.sign_recovery(&command))
+}
+
+/// What the coordinator does with one execute submission outcome.
+enum ExecuteDisposition {
+    /// FAC1 committed; release the result for delivery.
+    Release(Box<ForkAdmissionOperationResultV1>),
+    /// Answer with this code; the journal row needs no cancellation.
+    Answer(LocalForkAdmissionCodeV1),
+    /// Pending is still live: cancel it, then answer with this code.
+    CancelThenAnswer(LocalForkAdmissionCodeV1),
+}
+
+/// Classify an execute submission (ADR-109 r9 Decision 1 item 6).
+fn execute_disposition(
+    outcome: ForkAdmissionSubmissionV1<ForkDeliveryExecutionV1>,
+) -> ExecuteDisposition {
+    match outcome {
+        Ok(Ok(ForkDeliveryExecutionV1::Committed(result))) => ExecuteDisposition::Release(result),
+        Ok(Ok(ForkDeliveryExecutionV1::Rejected(error))) => {
+            ExecuteDisposition::Answer(authority_code(error))
+        }
+        Ok(
+            Ok(ForkDeliveryExecutionV1::Uncertain)
+            | Err(ForkDeliveryJournalErrorV1::StorageIndeterminate),
+        )
+        | Err(ForkAdmissionSubmissionErrorV1::Lost) => {
+            ExecuteDisposition::Answer(LocalForkAdmissionCodeV1::Indeterminate)
+        }
+        // The journal refused the claim before FAC1 submission, so the
+        // Pending row is still live and must be deleted (ADR-109).
+        Ok(Err(
+            ForkDeliveryJournalErrorV1::InvalidTuple
+            | ForkDeliveryJournalErrorV1::Conflict
+            | ForkDeliveryJournalErrorV1::Fenced
+            | ForkDeliveryJournalErrorV1::Corrupt,
+        )) => ExecuteDisposition::CancelThenAnswer(LocalForkAdmissionCodeV1::AuthorityUnavailable),
+        // The execute command definitely did not run (ADR-109 r9 Decision 1
+        // item 6): cancel Pending, then answer 6 or 5.
+        Err(
+            error @ (ForkAdmissionSubmissionErrorV1::Busy
+            | ForkAdmissionSubmissionErrorV1::Unavailable),
+        ) => ExecuteDisposition::CancelThenAnswer(submission_code(error)),
+    }
+}
+
+/// FARL1 code of a Fork-admission command that produced no store result
+/// (ADR-109 revision 9, Decision 1 item 6).
+const fn submission_code(error: ForkAdmissionSubmissionErrorV1) -> LocalForkAdmissionCodeV1 {
+    match error {
+        ForkAdmissionSubmissionErrorV1::Busy | ForkAdmissionSubmissionErrorV1::Lost => {
+            LocalForkAdmissionCodeV1::Indeterminate
+        }
+        ForkAdmissionSubmissionErrorV1::Unavailable => {
+            LocalForkAdmissionCodeV1::AuthorityUnavailable
+        }
     }
 }
 
@@ -441,27 +587,33 @@ mod tests {
         io::{Read as _, Write as _},
         net::Shutdown,
         os::unix::{fs::PermissionsExt as _, net::UnixStream},
+        sync::{Arc, Mutex, MutexGuard, PoisonError},
     };
 
     use super::*;
-    use pos_core::{EventStore as _, Hash, TimelineId};
-    use pos_store::memory::MemoryStore;
+    use pos_core::{EventStore as _, ForkAuthenticationPolicyV1, Hash, TimelineId};
+    use pos_store::{
+        memory::MemoryStore, ForkAdmissionAuthorityBootstrapPortV1 as _,
+        ForkAdmissionDeliveryJournalPortV1 as _,
+    };
 
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    /// Journal outcomes the coordinator must map without a live executor.
     #[derive(Clone, Copy, Eq, PartialEq)]
-    enum StoreFault {
-        HostRecord,
-        Claim,
+    enum JournalFault {
+        Passthrough,
+        ClaimJournal,
+        ClaimNotRun(ForkAdmissionSubmissionErrorV1),
+        ClaimZeroOperation,
         Cancel,
-        ExecuteError,
-        ExecuteCorrupt,
+        ExecuteJournal(ForkDeliveryJournalErrorV1),
         ExecuteRejected,
         ExecuteUncertain,
+        ExecuteNotRun(ForkAdmissionSubmissionErrorV1),
         Recover,
         MarkDelivered,
         MarkUncertain,
-        ReconcileList,
-        ReconcileTuple,
-        ZeroOperation,
     }
 
     /// A journal row whose zero operation identity no FRC1 can carry.
@@ -473,196 +625,145 @@ mod tests {
         }
     }
 
-    struct FaultingStore {
-        inner: MemoryStore,
-        fault: StoreFault,
+    fn lock(store: &Mutex<MemoryStore>) -> MutexGuard<'_, MemoryStore> {
+        store.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    impl ForkAdmissionAuthorityBootstrapPortV1 for FaultingStore {
-        fn begin_fork_admission_initialize(
-            &mut self,
-            host_key: pos_core::PublicKey,
-            policy_digest: Hash,
-        ) -> Result<
-            pos_core::ForkAdmissionInitializeChallengeV1,
-            pos_store::ForkAdmissionAuthorityErrorV1,
-        > {
-            self.inner
-                .begin_fork_admission_initialize(host_key, policy_digest)
-        }
-
-        fn finalize_fork_admission_initialize(
-            &mut self,
-            challenge: &pos_core::ForkAdmissionInitializeChallengeV1,
-            signature: &pos_core::Signature,
-        ) -> Result<pos_core::ForkAdmissionHostRecordV1, pos_store::ForkAdmissionAuthorityErrorV1>
-        {
-            self.inner
-                .finalize_fork_admission_initialize(challenge, signature)
-        }
-
-        fn fork_admission_host_record(
-            &self,
-        ) -> Result<pos_core::ForkAdmissionHostRecordV1, pos_store::ForkAdmissionAuthorityErrorV1>
-        {
-            if self.fault == StoreFault::HostRecord {
-                return Err(pos_store::ForkAdmissionAuthorityErrorV1::StorageIndeterminate);
-            }
-            self.inner.fork_admission_host_record()
-        }
-
-        fn begin_fork_admission_open(
-            &mut self,
-            host_key: pos_core::PublicKey,
-            policy_digest: Hash,
-        ) -> Result<pos_core::ForkAdmissionOpenChallengeV1, pos_store::ForkAdmissionAuthorityErrorV1>
-        {
-            self.inner
-                .begin_fork_admission_open(host_key, policy_digest)
-        }
-
-        fn finalize_fork_admission_open(
-            &mut self,
-            challenge: &pos_core::ForkAdmissionOpenChallengeV1,
-            signature: &pos_core::Signature,
-        ) -> Result<ForkAdmissionAuthoritySessionV1, pos_store::ForkAdmissionAuthorityErrorV1>
-        {
-            self.inner
-                .finalize_fork_admission_open(challenge, signature)
-        }
-
-        fn advance_fork_admission_wall_fence(
-            &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
-        ) -> Result<(), pos_store::ForkAdmissionAuthorityErrorV1> {
-            self.inner.advance_fork_admission_wall_fence(session)
-        }
+    /// The executor's journal commands run directly on one shared store.
+    struct StoreJournal {
+        store: Arc<Mutex<MemoryStore>>,
+        session: Arc<ForkAdmissionAuthoritySessionV1>,
+        policy: ForkAuthenticationPolicyV1,
+        fault: JournalFault,
     }
 
-    impl ForkAdmissionDeliveryJournalPortV1 for FaultingStore {
-        fn claim_fork_delivery(
+    impl LocalForkDeliveryJournalV1 for StoreJournal {
+        fn claim(
             &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
             tuple: ForkDeliveryTupleV1,
-        ) -> Result<ForkDeliveryClaimOutcomeV1, pos_store::ForkDeliveryJournalErrorV1> {
+        ) -> ForkAdmissionSubmissionV1<ForkDeliveryClaimOutcomeV1> {
             match self.fault {
-                StoreFault::Claim => {
-                    Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate)
+                JournalFault::ClaimJournal => {
+                    Ok(Err(ForkDeliveryJournalErrorV1::StorageIndeterminate))
                 }
-                StoreFault::ZeroOperation => Ok(ForkDeliveryClaimOutcomeV1::Reconcile(
+                JournalFault::ClaimNotRun(error) => Err(error),
+                JournalFault::ClaimZeroOperation => Ok(Ok(ForkDeliveryClaimOutcomeV1::Reconcile(
                     ForkDeliveryClaimV1 {
                         tuple: zero_operation_tuple(),
                         owner_fence: 1,
                     },
                     ForkDeliveryStateV1::Uncertain,
-                )),
-                _ => self.inner.claim_fork_delivery(session, tuple),
+                ))),
+                _ => Ok(lock(&self.store).claim_fork_delivery(&self.session, tuple)),
             }
         }
 
-        fn cancel_pending_fork_delivery(
-            &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
-            claim: pos_store::ForkDeliveryClaimV1,
-        ) -> Result<(), pos_store::ForkDeliveryJournalErrorV1> {
-            if self.fault == StoreFault::Cancel {
-                return Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate);
+        fn cancel(&mut self, claim: ForkDeliveryClaimV1) -> ForkAdmissionSubmissionV1<()> {
+            if self.fault == JournalFault::Cancel {
+                return Ok(Err(ForkDeliveryJournalErrorV1::StorageIndeterminate));
             }
-            self.inner.cancel_pending_fork_delivery(session, claim)
+            Ok(lock(&self.store).cancel_pending_fork_delivery(&self.session, claim))
         }
 
-        fn execute_claimed_fork_delivery(
+        fn execute(
             &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
-            policy: &pos_core::ForkAuthenticationPolicyV1,
-            claim: pos_store::ForkDeliveryClaimV1,
-            command: &pos_core::ForkAdmissionHostCommandV1,
-        ) -> Result<ForkDeliveryExecutionV1, pos_store::ForkDeliveryJournalErrorV1> {
+            claim: ForkDeliveryClaimV1,
+            command: &ForkAdmissionHostCommandV1,
+        ) -> ForkAdmissionSubmissionV1<ForkDeliveryExecutionV1> {
             match self.fault {
-                StoreFault::ExecuteError => {
-                    Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate)
-                }
-                StoreFault::ExecuteCorrupt => Err(pos_store::ForkDeliveryJournalErrorV1::Corrupt),
-                StoreFault::ExecuteRejected => Ok(ForkDeliveryExecutionV1::Rejected(
+                JournalFault::ExecuteJournal(error) => Ok(Err(error)),
+                JournalFault::ExecuteRejected => Ok(Ok(ForkDeliveryExecutionV1::Rejected(
                     ForkAdmissionErrorV1::InvalidRequest,
+                ))),
+                JournalFault::ExecuteUncertain => Ok(Ok(ForkDeliveryExecutionV1::Uncertain)),
+                JournalFault::ExecuteNotRun(error) => Err(error),
+                _ => Ok(lock(&self.store).execute_claimed_fork_delivery(
+                    &self.session,
+                    &self.policy,
+                    claim,
+                    command,
                 )),
-                StoreFault::ExecuteUncertain => Ok(ForkDeliveryExecutionV1::Uncertain),
-                _ => self
-                    .inner
-                    .execute_claimed_fork_delivery(session, policy, claim, command),
             }
         }
 
-        fn recover_fork_delivery(
+        fn recover(
             &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
             tuple: ForkDeliveryTupleV1,
-            proof: &pos_core::ForkAdmissionRecoveryProofV1,
-            current_principal_digest: Hash,
-        ) -> Result<ForkAdmissionOperationResultV1, pos_store::ForkDeliveryJournalErrorV1> {
-            if self.fault == StoreFault::Recover {
-                return Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate);
+            proof: &ForkAdmissionRecoveryProofV1,
+            principal: Hash,
+        ) -> ForkAdmissionSubmissionV1<ForkAdmissionOperationResultV1> {
+            if self.fault == JournalFault::Recover {
+                return Ok(Err(ForkDeliveryJournalErrorV1::StorageIndeterminate));
             }
-            self.inner
-                .recover_fork_delivery(session, tuple, proof, current_principal_digest)
+            Ok(lock(&self.store).recover_fork_delivery(&self.session, tuple, proof, principal))
         }
 
-        fn mark_fork_delivery_uncertain(
+        fn mark(
             &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
-            claim: pos_store::ForkDeliveryClaimV1,
-        ) -> Result<(), pos_store::ForkDeliveryJournalErrorV1> {
-            if self.fault == StoreFault::MarkUncertain {
-                return Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate);
-            }
-            self.inner.mark_fork_delivery_uncertain(session, claim)
-        }
-
-        fn mark_fork_delivery_delivered(
-            &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
-            claim: pos_store::ForkDeliveryClaimV1,
-        ) -> Result<(), pos_store::ForkDeliveryJournalErrorV1> {
-            if self.fault == StoreFault::MarkDelivered {
-                return Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate);
-            }
-            self.inner.mark_fork_delivery_delivered(session, claim)
-        }
-
-        fn reconcile_fork_delivery_journal(
-            &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
-        ) -> Result<Vec<ForkDeliveryTupleV1>, pos_store::ForkDeliveryJournalErrorV1> {
-            match self.fault {
-                StoreFault::ReconcileList => {
-                    Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate)
+            claim: ForkDeliveryClaimV1,
+            mark: ForkDeliveryMarkV1,
+        ) -> ForkAdmissionSubmissionV1<()> {
+            match (self.fault, mark) {
+                (JournalFault::MarkDelivered, ForkDeliveryMarkV1::Delivered)
+                | (JournalFault::MarkUncertain, ForkDeliveryMarkV1::Uncertain) => {
+                    Ok(Err(ForkDeliveryJournalErrorV1::StorageIndeterminate))
                 }
-                StoreFault::ZeroOperation => Ok(vec![zero_operation_tuple()]),
-                _ => self.inner.reconcile_fork_delivery_journal(session),
+                (_, ForkDeliveryMarkV1::Delivered) => {
+                    Ok(lock(&self.store).mark_fork_delivery_delivered(&self.session, claim))
+                }
+                (_, ForkDeliveryMarkV1::Uncertain) => {
+                    Ok(lock(&self.store).mark_fork_delivery_uncertain(&self.session, claim))
+                }
             }
         }
+    }
 
-        fn reconcile_fork_delivery_startup(
-            &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
-            tuple: ForkDeliveryTupleV1,
-            proof: &pos_core::ForkAdmissionRecoveryProofV1,
-        ) -> Result<pos_store::ForkDeliveryStartupOutcomeV1, pos_store::ForkDeliveryJournalErrorV1>
-        {
-            if self.fault == StoreFault::ReconcileTuple {
-                return Err(pos_store::ForkDeliveryJournalErrorV1::StorageIndeterminate);
-            }
-            self.inner
-                .reconcile_fork_delivery_startup(session, tuple, proof)
-        }
+    struct Fixture {
+        coordinator: LocalForkAdmissionCoordinatorV1,
+        store: Arc<Mutex<MemoryStore>>,
+        session: Arc<ForkAdmissionAuthoritySessionV1>,
+    }
 
-        fn purge_expired_fork_delivery(
-            &mut self,
-            session: &ForkAdmissionAuthoritySessionV1,
-            tuple: ForkDeliveryTupleV1,
-        ) -> Result<(), pos_store::ForkDeliveryJournalErrorV1> {
-            self.inner.purge_expired_fork_delivery(session, tuple)
+    fn fixture_over(mut store: MemoryStore, fault: JournalFault) -> TestResult<Fixture> {
+        let credentials = crate::local_fork_authentication::test_credentials_for_current_peer()?;
+        credentials.provision_authority(&mut store)?;
+        let session = credentials.open_authority(&mut store)?;
+        let host = store.fork_admission_host_record()?;
+        Ok(fixture_with(credentials, host, (store, session), fault))
+    }
+
+    fn fixture_with(
+        credentials: LocalForkAuthenticationCredentialsV1,
+        host: ForkAdmissionHostRecordV1,
+        (store, session): (MemoryStore, ForkAdmissionAuthoritySessionV1),
+        fault: JournalFault,
+    ) -> Fixture {
+        let store = Arc::new(Mutex::new(store));
+        let session = Arc::new(session);
+        let journal = StoreJournal {
+            store: Arc::clone(&store),
+            session: Arc::clone(&session),
+            policy: credentials.policy().clone(),
+            fault,
+        };
+        Fixture {
+            coordinator: LocalForkAdmissionCoordinatorV1::new(
+                credentials,
+                host,
+                session.identity(),
+                Box::new(journal),
+            ),
+            store,
+            session,
         }
+    }
+
+    /// ADR-106 r3: admitted Forks need an available bound erasure gate, so
+    /// the default fixture binds the open test gate.
+    fn fixture(fault: JournalFault) -> TestResult<Fixture> {
+        let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))?;
+        fixture_over(store, fault)
     }
 
     fn bind_payload() -> Vec<u8> {
@@ -721,218 +822,6 @@ mod tests {
         }
     }
 
-    /// ADR-106 r3: admitted Forks need an available bound erasure gate, so
-    /// the default fixture binds the open test gate.
-    fn coordinator(
-    ) -> Result<LocalForkAdmissionCoordinatorV1<MemoryStore>, Box<dyn std::error::Error>> {
-        let mut store = MemoryStore::new();
-        store.bind_erasure_gate(std::sync::Arc::new(
-            pos_core::ErasureContainmentGateV1::new_test_open(),
-        ))?;
-        coordinator_over(store)
-    }
-
-    fn coordinator_over(
-        mut store: MemoryStore,
-    ) -> Result<LocalForkAdmissionCoordinatorV1<MemoryStore>, Box<dyn std::error::Error>> {
-        let credentials = crate::local_fork_authentication::test_credentials_for_current_peer()?;
-        credentials.provision_authority(&mut store)?;
-        let mut coordinator = LocalForkAdmissionCoordinatorV1::open(store, credentials)?;
-        coordinator.reconcile_startup()?;
-        Ok(coordinator)
-    }
-
-    fn fault_coordinator(
-        fault: StoreFault,
-    ) -> Result<LocalForkAdmissionCoordinatorV1<FaultingStore>, Box<dyn std::error::Error>> {
-        let LocalForkAdmissionCoordinatorV1 {
-            credentials,
-            host,
-            session,
-            store,
-        } = coordinator()?;
-        Ok(LocalForkAdmissionCoordinatorV1 {
-            credentials,
-            host,
-            session,
-            store: FaultingStore {
-                inner: store,
-                fault,
-            },
-        })
-    }
-
-    fn completed_bind(
-        credentials: &LocalForkAuthenticationCredentialsV1,
-        operation: u8,
-        host_request: u8,
-    ) -> Result<CompletedLocalForkAdmissionV1, Box<dyn std::error::Error>> {
-        Ok(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(credentials)?,
-            request: bind_request(operation),
-            host_request_id: Hash::from_bytes([host_request; 32]),
-        })
-    }
-
-    fn response_code(prepared: &PreparedDeliveryV1) -> u8 {
-        prepared.response.to_canonical_cbor()[8]
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn coordinator_closes_on_host_and_startup_store_faults(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let credentials = crate::local_fork_authentication::test_credentials_for_current_peer()?;
-        let mut store = MemoryStore::new();
-        credentials.provision_authority(&mut store)?;
-        assert_eq!(
-            LocalForkAdmissionCoordinatorV1::open(
-                FaultingStore {
-                    inner: store,
-                    fault: StoreFault::HostRecord,
-                },
-                credentials,
-            )
-            .err(),
-            Some(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        );
-
-        let mut list_fault = fault_coordinator(StoreFault::ReconcileList)?;
-        assert_eq!(
-            list_fault.reconcile_startup().err(),
-            Some(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        );
-
-        let mut tuple_fault = fault_coordinator(StoreFault::ReconcileTuple)?;
-        let completed = completed_bind(&tuple_fault.credentials, 41, 42)?;
-        let tuple = delivery_tuple(&completed)
-            .map_err(|()| io::Error::other("valid bind must produce a tuple"))?;
-        assert!(matches!(
-            tuple_fault
-                .store
-                .claim_fork_delivery(&tuple_fault.session, tuple)?,
-            ForkDeliveryClaimOutcomeV1::Owner(_)
-        ));
-        assert_eq!(
-            tuple_fault.reconcile_startup().err(),
-            Some(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        );
-        Ok(())
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn coordinator_closes_on_claim_execution_and_cancel_faults(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        for (fault, expected_code) in [
-            (StoreFault::Claim, 6),
-            (StoreFault::ExecuteError, 6),
-            (StoreFault::ExecuteRejected, 7),
-            (StoreFault::ExecuteUncertain, 6),
-        ] {
-            let mut coordinator = fault_coordinator(fault)?;
-            let completed = completed_bind(&coordinator.credentials, 43, 44)?;
-            assert_eq!(response_code(&coordinator.handle(completed)), expected_code);
-        }
-
-        // A journal refusal before FAC1 submission deletes Pending, so the
-        // same tuple can be claimed again by a corrected request.
-        let mut corrupt = fault_coordinator(StoreFault::ExecuteCorrupt)?;
-        let completed = completed_bind(&corrupt.credentials, 64, 65)?;
-        let tuple = delivery_tuple(&completed)
-            .map_err(|()| io::Error::other("valid bind must produce a tuple"))?;
-        assert_eq!(response_code(&corrupt.handle(completed)), 5);
-        assert!(matches!(
-            corrupt.store.claim_fork_delivery(&corrupt.session, tuple)?,
-            ForkDeliveryClaimOutcomeV1::Owner(_)
-        ));
-
-        let mut cancel_fault = fault_coordinator(StoreFault::Cancel)?;
-        let completed = CompletedLocalForkAdmissionV1 {
-            peer: crate::local_fork_authentication::test_unregistered_peer()?,
-            request: bind_request(45),
-            host_request_id: Hash::from_bytes([46; 32]),
-        };
-        assert_eq!(response_code(&cancel_fault.handle(completed)), 6);
-        Ok(())
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn coordinator_closes_on_recovery_and_response_transition_faults(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut recover_fault = fault_coordinator(StoreFault::Recover)?;
-        let first = completed_bind(&recover_fault.credentials, 47, 48)?;
-        assert_eq!(response_code(&recover_fault.handle(first)), 0);
-        let retry = completed_bind(&recover_fault.credentials, 47, 48)?;
-        assert_eq!(response_code(&recover_fault.handle(retry)), 6);
-
-        let mut delivered_fault = fault_coordinator(StoreFault::MarkDelivered)?;
-        let completed = completed_bind(&delivered_fault.credentials, 49, 50)?;
-        let prepared = delivered_fault.handle(completed);
-        assert_eq!(response_code(&prepared), 0);
-        let (mut writer, _reader) = UnixStream::pair()?;
-        assert!(delivered_fault
-            .write_prepared(&mut writer, &prepared)
-            .is_err());
-
-        let mut uncertain_fault = fault_coordinator(StoreFault::MarkUncertain)?;
-        let completed = completed_bind(&uncertain_fault.credentials, 51, 52)?;
-        let prepared = uncertain_fault.handle(completed);
-        assert_eq!(response_code(&prepared), 0);
-        let (mut writer, reader) = UnixStream::pair()?;
-        drop(reader);
-        assert!(uncertain_fault
-            .write_prepared(&mut writer, &prepared)
-            .is_err());
-        Ok(())
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn coordinator_cancels_a_pending_claim_when_fork_command_is_invalid(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut coordinator = coordinator()?;
-        let request = fork_request(
-            53,
-            TimelineId::from_ulid(ulid::Ulid::from_bytes([54; 16])),
-            55,
-            56,
-            "",
-        );
-        let completed = CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request,
-            host_request_id: Hash::from_bytes([57; 32]),
-        };
-        let tuple = delivery_tuple(&completed)
-            .map_err(|()| io::Error::other("fork request must produce a tuple"))?;
-        assert_eq!(response_code(&coordinator.handle(completed)), 5);
-        let reclaimed = coordinator
-            .store
-            .claim_fork_delivery(&coordinator.session, tuple)?;
-        assert!(matches!(reclaimed, ForkDeliveryClaimOutcomeV1::Owner(_)));
-        Ok(())
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn coordinator_keeps_retained_delivery_after_unauthenticated_retry(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut coordinator = coordinator()?;
-        let first = completed_bind(&coordinator.credentials, 58, 59)?;
-        assert_eq!(response_code(&coordinator.handle(first)), 0);
-        let unauthenticated_retry = CompletedLocalForkAdmissionV1 {
-            peer: crate::local_fork_authentication::test_unregistered_peer()?,
-            request: bind_request(58),
-            host_request_id: Hash::from_bytes([59; 32]),
-        };
-        assert_eq!(response_code(&coordinator.handle(unauthenticated_retry)), 6);
-        let authenticated_retry = completed_bind(&coordinator.credentials, 58, 59)?;
-        assert_eq!(response_code(&coordinator.handle(authenticated_retry)), 0);
-        Ok(())
-    }
-
     fn fork_request(
         operation: u8,
         parent_id: TimelineId,
@@ -951,14 +840,239 @@ mod tests {
         }
     }
 
+    fn completed(
+        coordinator: &LocalForkAdmissionCoordinatorV1,
+        request: LocalForkAdmissionRequestV1,
+        host_request: u8,
+    ) -> TestResult<CompletedLocalForkAdmissionV1> {
+        Ok(CompletedLocalForkAdmissionV1 {
+            peer: current_peer(&coordinator.credentials)?,
+            request,
+            host_request_id: Hash::from_bytes([host_request; 32]),
+        })
+    }
+
+    fn response_code(prepared: &PreparedDeliveryV1) -> u8 {
+        prepared.response.to_canonical_cbor()[8]
+    }
+
+    const BIND_OK: [u8; 10] = [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82];
+
+    #[test]
+    fn startup_session_requires_an_initialized_host_authority() -> TestResult {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let credentials = crate::local_fork_authentication::test_credentials_for_current_peer()?;
+        assert_eq!(
+            open_fork_admission_session(&mut host, &credentials).err(),
+            Some(LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        );
+        let provisioned = credentials.provision_authority(host.fork_admission_bootstrap())?;
+        let (session, record) = open_fork_admission_session(&mut host, &credentials)?;
+        assert_eq!(record, provisioned);
+        assert_ne!(session.identity(), Hash::zero());
+        Ok(())
+    }
+
+    #[test]
+    fn startup_reconciliation_fails_closed_on_list_tuple_and_signing_faults() -> TestResult {
+        let Fixture {
+            coordinator,
+            session,
+            ..
+        } = fixture(JournalFault::Passthrough)?;
+        let ids = (coordinator.host, session.identity());
+        let credentials = &coordinator.credentials;
+        let tuple = ForkDeliveryTupleV1::new(
+            Hash::from_bytes([2; 32]),
+            ForkAdmissionOperationKindV1::PrincipalOwner,
+            Hash::from_bytes([3; 32]),
+        )?;
+        let released = |_: ForkDeliveryTupleV1, _: &ForkAdmissionRecoveryProofV1| {
+            Ok::<_, ()>(ForkDeliveryStartupOutcomeV1::ReleasedPending)
+        };
+        assert_eq!(
+            reconcile_startup(credentials, ids, Err(()), released),
+            Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        );
+        assert_eq!(
+            reconcile_startup(credentials, ids, Ok(vec![tuple]), |_, _| Err(())),
+            Err(LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        );
+        assert_eq!(
+            reconcile_startup(credentials, ids, Ok(vec![zero_operation_tuple()]), released),
+            Err(LocalForkAuthenticationErrorV1::CredentialInvalid)
+        );
+        assert_eq!(
+            reconcile_startup(credentials, ids, Ok(vec![tuple]), released),
+            Ok(())
+        );
+        Ok(())
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
-    fn real_pathname_peer_receives_and_retries_a_signed_bind_admission(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let credentials = crate::local_fork_authentication::test_credentials_for_current_peer()?;
-        let mut store = MemoryStore::new();
-        credentials.provision_authority(&mut store)?;
-        let mut coordinator = LocalForkAdmissionCoordinatorV1::open(store, credentials)?;
+    fn coordinator_maps_claim_execution_and_cancel_outcomes() -> TestResult {
+        for (fault, expected_code) in [
+            (JournalFault::ClaimJournal, 6),
+            (
+                JournalFault::ClaimNotRun(ForkAdmissionSubmissionErrorV1::Busy),
+                6,
+            ),
+            (
+                JournalFault::ClaimNotRun(ForkAdmissionSubmissionErrorV1::Lost),
+                6,
+            ),
+            (
+                JournalFault::ClaimNotRun(ForkAdmissionSubmissionErrorV1::Unavailable),
+                5,
+            ),
+            (
+                JournalFault::ExecuteJournal(ForkDeliveryJournalErrorV1::StorageIndeterminate),
+                6,
+            ),
+            (JournalFault::ExecuteRejected, 7),
+            (JournalFault::ExecuteUncertain, 6),
+            (
+                JournalFault::ExecuteNotRun(ForkAdmissionSubmissionErrorV1::Lost),
+                6,
+            ),
+        ] {
+            let mut fixture = fixture(fault)?;
+            let request = completed(&fixture.coordinator, bind_request(43), 44)?;
+            assert_eq!(
+                response_code(&fixture.coordinator.handle(request)),
+                expected_code
+            );
+        }
+
+        // A journal refusal before FAC1 submission, or an execute command
+        // that definitely did not run, deletes Pending, so the same tuple can
+        // be claimed again (ADR-109 r9 Decision 1 item 6).
+        for (fault, expected_code) in [
+            (
+                JournalFault::ExecuteJournal(ForkDeliveryJournalErrorV1::Corrupt),
+                5,
+            ),
+            (
+                JournalFault::ExecuteNotRun(ForkAdmissionSubmissionErrorV1::Busy),
+                6,
+            ),
+            (
+                JournalFault::ExecuteNotRun(ForkAdmissionSubmissionErrorV1::Unavailable),
+                5,
+            ),
+        ] {
+            let mut fixture = fixture(fault)?;
+            let request = completed(&fixture.coordinator, bind_request(64), 65)?;
+            let tuple = delivery_tuple(&request)
+                .map_err(|()| io::Error::other("valid bind must produce a tuple"))?;
+            assert_eq!(
+                response_code(&fixture.coordinator.handle(request)),
+                expected_code
+            );
+            assert!(matches!(
+                lock(&fixture.store).claim_fork_delivery(&fixture.session, tuple)?,
+                ForkDeliveryClaimOutcomeV1::Owner(_)
+            ));
+        }
+
+        let mut cancel_fault = fixture(JournalFault::Cancel)?;
+        let unregistered = CompletedLocalForkAdmissionV1 {
+            peer: crate::local_fork_authentication::test_unregistered_peer()?,
+            request: bind_request(45),
+            host_request_id: Hash::from_bytes([46; 32]),
+        };
+        assert_eq!(
+            response_code(&cancel_fault.coordinator.handle(unregistered)),
+            6
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn coordinator_closes_on_recovery_and_response_transition_faults() -> TestResult {
+        let mut recover_fault = fixture(JournalFault::Recover)?;
+        let first = completed(&recover_fault.coordinator, bind_request(47), 48)?;
+        assert_eq!(response_code(&recover_fault.coordinator.handle(first)), 0);
+        let retry = completed(&recover_fault.coordinator, bind_request(47), 48)?;
+        assert_eq!(response_code(&recover_fault.coordinator.handle(retry)), 6);
+
+        let mut delivered_fault = fixture(JournalFault::MarkDelivered)?;
+        let request = completed(&delivered_fault.coordinator, bind_request(49), 50)?;
+        let prepared = delivered_fault.coordinator.handle(request);
+        assert_eq!(response_code(&prepared), 0);
+        let (mut writer, _reader) = UnixStream::pair()?;
+        assert!(delivered_fault
+            .coordinator
+            .write_prepared(&mut writer, &prepared)
+            .is_err());
+
+        let mut uncertain_fault = fixture(JournalFault::MarkUncertain)?;
+        let request = completed(&uncertain_fault.coordinator, bind_request(51), 52)?;
+        let prepared = uncertain_fault.coordinator.handle(request);
+        assert_eq!(response_code(&prepared), 0);
+        let (mut writer, reader) = UnixStream::pair()?;
+        drop(reader);
+        assert!(uncertain_fault
+            .coordinator
+            .write_prepared(&mut writer, &prepared)
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn coordinator_cancels_a_pending_claim_when_fork_command_is_invalid() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
+        let request = fork_request(
+            53,
+            TimelineId::from_ulid(ulid::Ulid::from_bytes([54; 16])),
+            55,
+            56,
+            "",
+        );
+        let request = completed(&fixture.coordinator, request, 57)?;
+        let tuple = delivery_tuple(&request)
+            .map_err(|()| io::Error::other("fork request must produce a tuple"))?;
+        assert_eq!(response_code(&fixture.coordinator.handle(request)), 5);
+        assert!(matches!(
+            lock(&fixture.store).claim_fork_delivery(&fixture.session, tuple)?,
+            ForkDeliveryClaimOutcomeV1::Owner(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn coordinator_keeps_retained_delivery_after_unauthenticated_retry() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
+        let first = completed(&fixture.coordinator, bind_request(58), 59)?;
+        assert_eq!(response_code(&fixture.coordinator.handle(first)), 0);
+        let unauthenticated_retry = CompletedLocalForkAdmissionV1 {
+            peer: crate::local_fork_authentication::test_unregistered_peer()?,
+            request: bind_request(58),
+            host_request_id: Hash::from_bytes([59; 32]),
+        };
+        assert_eq!(
+            response_code(&fixture.coordinator.handle(unauthenticated_retry)),
+            6
+        );
+        let authenticated_retry = completed(&fixture.coordinator, bind_request(58), 59)?;
+        assert_eq!(
+            response_code(&fixture.coordinator.handle(authenticated_retry)),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn real_pathname_peer_receives_and_retries_a_signed_bind_admission() -> TestResult {
+        let mut fixture = fixture_over(MemoryStore::new(), JournalFault::Passthrough)?;
         let directory = tempfile::tempdir()?;
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750))?;
         let path = directory.path().join("fork-admission.sock");
@@ -982,7 +1096,7 @@ mod tests {
         for frame in malformed_frames {
             let client_path = path.clone();
             let client = std::thread::spawn(move || closed_request(client_path, frame));
-            coordinator.serve_one(&listener)?;
+            fixture.coordinator.serve_one(&listener)?;
             assert!(client
                 .join()
                 .map_err(|_| io::Error::other("close request panicked"))??);
@@ -991,7 +1105,7 @@ mod tests {
         semantic_payload[11..].fill(0);
         let semantic_path = path.clone();
         let semantic = std::thread::spawn(move || request(semantic_path, semantic_payload));
-        coordinator.serve_one(&listener)?;
+        fixture.coordinator.serve_one(&listener)?;
         assert_eq!(
             semantic
                 .join()
@@ -1001,28 +1115,25 @@ mod tests {
         let first_path = path.clone();
         let first_payload = payload.clone();
         let first = std::thread::spawn(move || request(first_path, first_payload));
-        coordinator.serve_one(&listener)?;
+        fixture.coordinator.serve_one(&listener)?;
         let first = first
             .join()
             .map_err(|_| io::Error::other("first request panicked"))??;
         let second = std::thread::spawn(move || request(path, payload));
-        coordinator.serve_one(&listener)?;
+        fixture.coordinator.serve_one(&listener)?;
         let second = second
             .join()
             .map_err(|_| io::Error::other("retry request panicked"))??;
         assert_eq!(first, second);
-        assert_eq!(
-            &first[..10],
-            &[0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
-        );
+        assert_eq!(&first[..10], &BIND_OK);
         Ok(())
     }
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn coordinator_encodes_commands_and_retries_a_delivered_bind(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut coordinator = coordinator()?;
+    fn coordinator_encodes_commands_and_retries_a_delivered_bind() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
+        let coordinator = &mut fixture.coordinator;
         let bind = bind_request(11);
         let authentication = coordinator
             .credentials
@@ -1042,108 +1153,82 @@ mod tests {
             )
             .is_ok());
 
-        let completed = CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: bind.clone(),
-            host_request_id: Hash::from_bytes([16; 32]),
-        };
-        let prepared = coordinator.handle(completed);
+        let prepared = coordinator.handle(completed(coordinator, bind.clone(), 16)?);
         let (mut writer, _reader) = UnixStream::pair()?;
         coordinator.write_prepared(&mut writer, &prepared)?;
-        assert_eq!(
-            prepared.response.to_canonical_cbor()[..10],
-            [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
-        );
+        assert_eq!(prepared.response.to_canonical_cbor()[..10], BIND_OK);
 
-        let retry = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: bind,
-            host_request_id: Hash::from_bytes([16; 32]),
-        });
-        assert_eq!(
-            retry.response.to_canonical_cbor()[..10],
-            [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
-        );
+        let retry = coordinator.handle(completed(coordinator, bind, 16)?);
+        assert_eq!(retry.response.to_canonical_cbor()[..10], BIND_OK);
 
         // ADR-099: a new Bind for the already-bound Principal resolves to the
         // one immutable committed binding rather than a conflict.
-        let rebind = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: bind_request(21),
-            host_request_id: Hash::from_bytes([22; 32]),
-        });
-        assert_eq!(
-            rebind.response.to_canonical_cbor()[..10],
-            [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
-        );
+        let rebind = coordinator.handle(completed(coordinator, bind_request(21), 22)?);
+        assert_eq!(rebind.response.to_canonical_cbor()[..10], BIND_OK);
         Ok(())
     }
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn coordinator_recovers_interrupted_and_retained_fork_deliveries(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut coordinator = coordinator()?;
-        let binding = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: bind_request(16),
-            host_request_id: Hash::from_bytes([16; 32]),
-        });
+    fn coordinator_recovers_interrupted_and_retained_fork_deliveries() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
+        let binding =
+            fixture
+                .coordinator
+                .handle(completed(&fixture.coordinator, bind_request(16), 16)?);
         let (mut writer, _reader) = UnixStream::pair()?;
-        coordinator.write_prepared(&mut writer, &binding)?;
-        assert_eq!(
-            binding.response.to_canonical_cbor()[..10],
-            [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
-        );
+        fixture.coordinator.write_prepared(&mut writer, &binding)?;
+        assert_eq!(binding.response.to_canonical_cbor()[..10], BIND_OK);
 
-        let parent = coordinator.store.create_timeline("pending Fork parent")?;
+        let parent = lock(&fixture.store).create_timeline("pending Fork parent")?;
         let pending_request = fork_request(17, parent.id(), 18, 19, "pending-child");
-        let pending = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: pending_request.clone(),
-            host_request_id: Hash::from_bytes([20; 32]),
-        });
+        let pending = fixture.coordinator.handle(completed(
+            &fixture.coordinator,
+            pending_request.clone(),
+            20,
+        )?);
         let (mut writer, reader) = UnixStream::pair()?;
         drop(reader);
-        assert!(coordinator.write_prepared(&mut writer, &pending).is_err());
-        let recovered = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: pending_request,
-            host_request_id: Hash::from_bytes([20; 32]),
-        });
+        assert!(fixture
+            .coordinator
+            .write_prepared(&mut writer, &pending)
+            .is_err());
+        let recovered =
+            fixture
+                .coordinator
+                .handle(completed(&fixture.coordinator, pending_request, 20)?);
         assert_eq!(
             recovered.response.to_canonical_cbor()[..10],
             [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x83]
         );
 
-        let busy_parent = coordinator.store.create_timeline("busy Fork parent")?;
+        let busy_parent = lock(&fixture.store).create_timeline("busy Fork parent")?;
         let busy_request = fork_request(21, busy_parent.id(), 22, 23, "busy-child");
-        let busy_host_request_id = Hash::from_bytes([24; 32]);
-        let pending_owner = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: busy_request.clone(),
-            host_request_id: busy_host_request_id,
-        });
-        let recovered_before_delivery = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: busy_request.clone(),
-            host_request_id: busy_host_request_id,
-        });
+        let pending_owner =
+            fixture
+                .coordinator
+                .handle(completed(&fixture.coordinator, busy_request.clone(), 24)?);
+        let recovered_before_delivery =
+            fixture
+                .coordinator
+                .handle(completed(&fixture.coordinator, busy_request.clone(), 24)?);
         assert_eq!(
             recovered_before_delivery.response.to_canonical_cbor(),
             pending_owner.response.to_canonical_cbor()
         );
         let (mut writer, _reader) = UnixStream::pair()?;
-        coordinator.write_prepared(&mut writer, &pending_owner)?;
+        fixture
+            .coordinator
+            .write_prepared(&mut writer, &pending_owner)?;
         let (mut duplicate_writer, _duplicate_reader) = UnixStream::pair()?;
-        assert!(coordinator
+        assert!(fixture
+            .coordinator
             .write_prepared(&mut duplicate_writer, &recovered_before_delivery)
             .is_err());
-        let conflicting_digest = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: busy_request,
-            host_request_id: Hash::from_bytes([25; 32]),
-        });
+        let conflicting_digest =
+            fixture
+                .coordinator
+                .handle(completed(&fixture.coordinator, busy_request, 25)?);
         assert_eq!(
             conflicting_digest.response.to_canonical_cbor(),
             vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 6, 0xf6]
@@ -1158,29 +1243,35 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn coordinator_maps_parent_erasure_contained_and_erasure_containment_unavailable_to_code_five(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let gate = std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
+    ) -> TestResult {
+        let gate = Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
         let mut gated = MemoryStore::new();
-        gated.bind_erasure_gate(std::sync::Arc::clone(&gate))?;
-        for (mut coordinator, frozen) in [
+        gated.bind_erasure_gate(Arc::clone(&gate))?;
+        for (mut fixture, frozen) in [
             // ForkAdmissionErrorV1::ParentErasureContained
-            (coordinator_over(gated)?, true),
+            (fixture_over(gated, JournalFault::Passthrough)?, true),
             // ForkAdmissionErrorV1::ErasureContainmentUnavailable
-            (coordinator_over(MemoryStore::new())?, false),
+            (
+                fixture_over(MemoryStore::new(), JournalFault::Passthrough)?,
+                false,
+            ),
         ] {
-            let bind = coordinator.handle(completed_bind(&coordinator.credentials, 26, 26)?);
+            let bind =
+                fixture
+                    .coordinator
+                    .handle(completed(&fixture.coordinator, bind_request(26), 26)?);
             assert_eq!(response_code(&bind), 0);
-            let parent = coordinator.store.create_timeline("contained Fork parent")?;
+            let parent = lock(&fixture.store).create_timeline("contained Fork parent")?;
             if frozen {
                 gate.freeze_timeline_for_test(parent.id());
             }
             let request = fork_request(27, parent.id(), 28, 29, "contained-child");
             for _ in 0..2 {
-                let rejected = coordinator.handle(CompletedLocalForkAdmissionV1 {
-                    peer: current_peer(&coordinator.credentials)?,
-                    request: request.clone(),
-                    host_request_id: Hash::from_bytes([30; 32]),
-                });
+                let rejected = fixture.coordinator.handle(completed(
+                    &fixture.coordinator,
+                    request.clone(),
+                    30,
+                )?);
                 assert_eq!(
                     rejected.response.to_canonical_cbor(),
                     vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 5, 0xf6]
@@ -1192,52 +1283,59 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn coordinator_reconciles_a_retained_delivery_before_serving_a_retry(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut coordinator = coordinator()?;
+    fn coordinator_reconciles_a_retained_delivery_before_serving_a_retry() -> TestResult {
+        let Fixture {
+            mut coordinator,
+            store,
+            ..
+        } = fixture(JournalFault::Passthrough)?;
         let request = bind_request(26);
-        let host_request_id = Hash::from_bytes([27; 32]);
-        let pending = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: request.clone(),
-            host_request_id,
-        });
-        assert_eq!(
-            pending.response.to_canonical_cbor()[..10],
-            [0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
-        );
+        let pending = coordinator.handle(completed(&coordinator, request.clone(), 27)?);
+        assert_eq!(pending.response.to_canonical_cbor()[..10], BIND_OK);
 
         let LocalForkAdmissionCoordinatorV1 {
-            credentials, store, ..
+            credentials,
+            host,
+            journal,
+            ..
         } = coordinator;
-        let mut restarted = LocalForkAdmissionCoordinatorV1::open(store, credentials)?;
-        restarted.reconcile_startup()?;
-
-        let retry = restarted.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&restarted.credentials)?,
-            request,
-            host_request_id,
-        });
+        drop(journal);
+        let session = credentials.open_authority(&mut *lock(&store))?;
+        let tuples = lock(&store).reconcile_fork_delivery_journal(&session);
+        reconcile_startup(
+            &credentials,
+            (host, session.identity()),
+            tuples,
+            |tuple, proof| lock(&store).reconcile_fork_delivery_startup(&session, tuple, proof),
+        )?;
+        let store = Arc::try_unwrap(store)
+            .map_err(|_| "the restarted journal still shares its store")?
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut restarted = fixture_with(
+            credentials,
+            host,
+            (store, session),
+            JournalFault::Passthrough,
+        );
+        let retry = restarted
+            .coordinator
+            .handle(completed(&restarted.coordinator, request, 27)?);
         assert_eq!(
             retry.response.to_canonical_cbor(),
             pending.response.to_canonical_cbor()
         );
         let (mut writer, _reader) = UnixStream::pair()?;
-        restarted.write_prepared(&mut writer, &retry)?;
+        restarted.coordinator.write_prepared(&mut writer, &retry)?;
         Ok(())
     }
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn coordinator_withholds_results_when_no_frp1_can_be_signed(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut coordinator = fault_coordinator(StoreFault::ZeroOperation)?;
-        assert_eq!(
-            coordinator.reconcile_startup().err(),
-            Some(LocalForkAuthenticationErrorV1::CredentialInvalid)
-        );
-        let completed = completed_bind(&coordinator.credentials, 53, 54)?;
-        let prepared = coordinator.handle(completed);
+    fn coordinator_withholds_results_when_no_frp1_can_be_signed() -> TestResult {
+        let mut fixture = fixture(JournalFault::ClaimZeroOperation)?;
+        let request = completed(&fixture.coordinator, bind_request(53), 54)?;
+        let prepared = fixture.coordinator.handle(request);
         assert_eq!(response_code(&prepared), 5);
         assert!(prepared.claim.is_none());
         Ok(())
@@ -1245,11 +1343,10 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn coordinator_rejects_a_zero_delivery_identity_before_claiming_authority(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut coordinator = coordinator()?;
-        let rejected = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
+    fn coordinator_rejects_a_zero_delivery_identity_before_claiming_authority() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
+        let rejected = fixture.coordinator.handle(CompletedLocalForkAdmissionV1 {
+            peer: current_peer(&fixture.coordinator.credentials)?,
             request: bind_request(28),
             host_request_id: Hash::zero(),
         });
@@ -1262,12 +1359,11 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn coordinator_cancels_a_pending_claim_after_peer_resolution_fails(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut coordinator = coordinator()?;
+    fn coordinator_cancels_a_pending_claim_after_peer_resolution_fails() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
         let host_request_id = Hash::from_bytes([31; 32]);
         let request = bind_request(32);
-        let rejected = coordinator.handle(CompletedLocalForkAdmissionV1 {
+        let rejected = fixture.coordinator.handle(CompletedLocalForkAdmissionV1 {
             peer: crate::local_fork_authentication::test_unregistered_peer()?,
             request: request.clone(),
             host_request_id,
@@ -1278,41 +1374,25 @@ mod tests {
                 .to_canonical_cbor()
         );
 
-        let admitted = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request,
-            host_request_id,
-        });
-        assert_eq!(
-            &admitted.response.to_canonical_cbor()[..10],
-            &[0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 0, 0x82]
-        );
+        let admitted = fixture
+            .coordinator
+            .handle(completed(&fixture.coordinator, request, 31)?);
+        assert_eq!(&admitted.response.to_canonical_cbor()[..10], &BIND_OK);
         Ok(())
     }
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn coordinator_requires_an_initialized_and_current_host_session(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let credentials = crate::local_fork_authentication::test_credentials_for_current_peer()?;
-        assert_eq!(
-            LocalForkAdmissionCoordinatorV1::open(MemoryStore::new(), credentials).err(),
-            Some(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        );
-
-        let mut coordinator = coordinator()?;
-        let _new_session = coordinator
+    fn coordinator_fails_closed_for_a_superseded_session() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
+        let _new_session = fixture
+            .coordinator
             .credentials
-            .open_authority(&mut coordinator.store)?;
-        assert_eq!(
-            coordinator.reconcile_startup().err(),
-            Some(LocalForkAuthenticationErrorV1::CredentialUnavailable)
-        );
-        let rejected = coordinator.handle(CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request: bind_request(33),
-            host_request_id: Hash::from_bytes([34; 32]),
-        });
+            .open_authority(&mut *lock(&fixture.store))?;
+        let rejected =
+            fixture
+                .coordinator
+                .handle(completed(&fixture.coordinator, bind_request(33), 34)?);
         assert_eq!(
             rejected.response.to_canonical_cbor(),
             LocalForkAdmissionResponseV1::rejected(LocalForkAdmissionCodeV1::Indeterminate)
@@ -1323,25 +1403,17 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn coordinator_fails_closed_while_another_owner_holds_a_delivery_claim(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut coordinator = coordinator()?;
-        let request = bind_request(29);
-        let completed = CompletedLocalForkAdmissionV1 {
-            peer: current_peer(&coordinator.credentials)?,
-            request,
-            host_request_id: Hash::from_bytes([30; 32]),
-        };
-        let tuple = delivery_tuple(&completed)
+    fn coordinator_fails_closed_while_another_owner_holds_a_delivery_claim() -> TestResult {
+        let mut fixture = fixture(JournalFault::Passthrough)?;
+        let request = completed(&fixture.coordinator, bind_request(29), 30)?;
+        let tuple = delivery_tuple(&request)
             .map_err(|()| io::Error::other("valid bind request must produce a delivery tuple"))?;
         assert!(matches!(
-            coordinator
-                .store
-                .claim_fork_delivery(&coordinator.session, tuple)?,
+            lock(&fixture.store).claim_fork_delivery(&fixture.session, tuple)?,
             ForkDeliveryClaimOutcomeV1::Owner(_)
         ));
 
-        let busy = coordinator.handle(completed);
+        let busy = fixture.coordinator.handle(request);
         assert_eq!(
             busy.response.to_canonical_cbor(),
             vec![0x84, 0x65, b'F', b'A', b'R', b'L', b'1', 1, 6, 0xf6]
@@ -1350,8 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn a_result_of_the_wrong_kind_is_an_internal_authority_failure(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn a_result_of_the_wrong_kind_is_an_internal_authority_failure() -> TestResult {
         let tuple = ForkDeliveryTupleV1::new(
             Hash::from_bytes([60; 32]),
             ForkAdmissionOperationKindV1::PrincipalOwner,
@@ -1466,6 +1537,26 @@ mod tests {
                 authentication_code(error),
                 LocalForkAdmissionCodeV1::AuthorityUnavailable
             );
+        }
+    }
+
+    #[test]
+    fn submission_outcomes_have_exact_wire_codes() {
+        for (error, expected) in [
+            (
+                ForkAdmissionSubmissionErrorV1::Busy,
+                LocalForkAdmissionCodeV1::Indeterminate,
+            ),
+            (
+                ForkAdmissionSubmissionErrorV1::Lost,
+                LocalForkAdmissionCodeV1::Indeterminate,
+            ),
+            (
+                ForkAdmissionSubmissionErrorV1::Unavailable,
+                LocalForkAdmissionCodeV1::AuthorityUnavailable,
+            ),
+        ] {
+            assert_eq!(submission_code(error), expected);
         }
     }
 }

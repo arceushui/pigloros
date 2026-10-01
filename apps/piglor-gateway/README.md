@@ -200,7 +200,21 @@ systemctl enable --now piglor-gateway.service
 
 The provision unit fails before database open for a direct shell invocation,
 wrong credential directory, or extra, missing, or swapped credential. It also
-fails if authority state already exists. Managed startup performs private FRP1
-reconciliation before binding the client socket. The listener requires a
-complete bounded FAL1 request ending in EOF and exposes no append-permit or
-public permit-issuance path.
+fails if authority state already exists. The listener requires a complete
+bounded FAL1 request ending in EOF and exposes no append-permit or public
+permit-issuance path.
+
+The HTTP routes and the listener share the one erasure host of the database
+(ADR-109 revision 9): the process opens exactly one read-write adapter, owned
+by the Gateway's store executor, so listener writes never make HTTP protected
+operations fail with `503`. Managed startup fails closed in this order:
+credential validation, host recovery with a verified inventory (the binary
+composes only the closed erasure authority, so a store with any erasure request
+does not start), the FAO1 open proof on the host's adapter, private FRP1 journal
+reconciliation, the executor, then the TCP listener and, last, the Unix socket.
+Shutdown stops TCP, then the listener (an in-flight request finishes), then
+drains the executor. A new admitted Fork runs inside the host's erasure
+topology transition and returns code 0 only after the successor inventory is
+published; while the host is not Ready it fails closed with code 5. A saturated
+executor or a lost reply answers code 6, and an exact retry recovers a
+committed result through FRP1.

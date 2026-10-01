@@ -21,25 +21,17 @@ macro_rules! output_stderr {
 }
 
 #[cfg(target_os = "linux")]
-pub mod local_fork_authentication;
-#[cfg(target_os = "linux")]
-pub mod local_fork_coordinator;
-#[cfg(target_os = "linux")]
-pub mod local_fork_listener;
-#[cfg(target_os = "linux")]
-pub mod local_fork_service;
-
-#[cfg(target_os = "linux")]
-use local_fork_service::{
-    provision_local_fork_admission_authority, start_local_fork_admission_listener,
-    LocalForkAdmissionListenerV1,
+use piglor_gateway::local_fork_service::{
+    provision_local_fork_admission_authority, serve_local_fork_admission, LocalForkAdmissionPathsV1,
+};
+use piglor_gateway::startup::{
+    announce_listening, open_recovered_erasure_host, stop_after_bind_failure, GatewayHostStoreV1,
 };
 use piglor_gateway::{
     owntracks, router_for_addr, AppState, Gateway, LedgerConfig, LedgerWriteMode, OwnTracksOwnerKey,
 };
 use piglor_ledger::LedgerView;
-use pos_core::ErasureHostErrorV1;
-use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
+use pos_runtime::ErasureCoordinatorCompositionV1;
 use pos_store::StoreConfig;
 use std::{
     ffi::OsString,
@@ -342,31 +334,22 @@ fn gateway_for_startup_with_recovery(
 ) -> Result<Gateway, Box<dyn std::error::Error + Send + Sync>> {
     match (owntracks_owner_key, sqlite_path) {
         (Some(owner_key), Some(path)) => {
-            let host = ErasureExecutionHostV1::open_gateway_with_authority(
+            let host = open_recovered_erasure_host(
                 StoreConfig::Sqlite {
                     path: path.to_owned(),
                 },
+                GatewayHostStoreV1::OwnTracks,
                 composition,
-                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-            )
-            .map_err(erasure_host_recovery_error)?;
+            )?;
             Gateway::new_with_owntracks_erasure_host(host, owner_key).map_err(Into::into)
         }
         (None, _) => {
-            let host = ErasureExecutionHostV1::open_with_authority(
-                config,
-                composition,
-                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-            )
-            .map_err(erasure_host_recovery_error)?;
+            let host =
+                open_recovered_erasure_host(config, GatewayHostStoreV1::Standard, composition)?;
             Gateway::new_with_erasure_host(host).map_err(Into::into)
         }
         (Some(_), None) => Err("OwnTracks ingress requires an SQLite path".into()),
     }
-}
-
-fn erasure_host_recovery_error(error: ErasureHostErrorV1) -> std::io::Error {
-    std::io::Error::other(format!("erasure host recovery failed ({})", error.code()))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -422,19 +405,31 @@ async fn serve_with_owntracks_and_fork_admission(
             .transpose()?
     };
     #[cfg(target_os = "linux")]
-    let fork_listener = match (
+    match (
         sqlite_path,
         fork_admission_socket,
         fork_admission_credentials,
     ) {
-        (Some(path), Some(socket), Some(credentials)) => Some(start_local_fork_admission_listener(
-            path,
-            credentials,
-            socket,
-        )?),
-        (_, None, None) => None,
+        // ADR-109 r9: one erasure host serves HTTP and the Fork listener, and
+        // the binary composes only the closed erasure authority.
+        (Some(sqlite_path), Some(socket_path), Some(credential_directory)) => {
+            return serve_local_fork_admission(
+                addr,
+                LocalForkAdmissionPathsV1 {
+                    sqlite_path,
+                    socket_path,
+                    credential_directory,
+                },
+                owntracks_owner_key.as_ref(),
+                &ErasureCoordinatorCompositionV1::closed(),
+                shutdown,
+                (ledger_view, ledger_write),
+            )
+            .await;
+        }
+        (_, None, None) => {}
         _ => return Err("Fork admission requires SQLite, socket, and credential directory".into()),
-    };
+    }
     #[cfg(not(target_os = "linux"))]
     if fork_admission_socket.is_some() || fork_admission_credentials.is_some() {
         return Err("fork admission requires Linux Unix peer credentials".into());
@@ -450,22 +445,14 @@ async fn serve_with_owntracks_and_fork_admission(
     );
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
-        Err(error) => {
-            drop(gateway.shutdown().await);
-            return Err(Box::new(error));
-        }
+        Err(error) => return stop_after_bind_failure(&gateway, error).await,
     };
-    output_stderr!("piglor-gateway listening on http://{addr}");
+    announce_listening(addr);
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await;
     let shutdown_result = gateway.shutdown().await;
     drop(gateway);
-    // The Fork listener always stops; a serve error still takes precedence.
-    #[cfg(target_os = "linux")]
-    let fork_stop_result = fork_listener.map_or(Ok(()), LocalForkAdmissionListenerV1::stop);
-    #[cfg(target_os = "linux")]
-    let serve_result = serve_result.and(fork_stop_result);
     finish_run(serve_result, shutdown_result)
 }
 
@@ -583,15 +570,6 @@ mod coverage_tests {
         .test_err()?;
         assert!(!ledger_error.to_string().is_empty());
         Ok(())
-    }
-
-    #[test]
-    fn startup_recovery_error_is_payload_free() {
-        assert_eq!(
-            super::erasure_host_recovery_error(pos_core::ErasureHostErrorV1::RecoveryUnavailable)
-                .to_string(),
-            "erasure host recovery failed (0)"
-        );
     }
 }
 
@@ -1515,58 +1493,6 @@ mod erasure_gate_coverage_tests {
         )
         .await;
         assert!(started.is_err());
-        assert!(!socket.exists());
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn managed_fork_listener_and_gateway_open_one_provisioned_database(
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let directory = tempfile::tempdir()?;
-        let runtime_directory = tempfile::tempdir()?;
-        std::fs::set_permissions(
-            runtime_directory.path(),
-            std::fs::Permissions::from_mode(0o750),
-        )?;
-        let database = directory.path().join("gateway.db");
-        let socket = runtime_directory.path().join("fork.sock");
-        let credentials = directory.path().join("credentials");
-        std::fs::create_dir(&credentials)?;
-        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700))?;
-        let service_uid = rustix::process::geteuid().as_raw();
-        let (auth, host) = local_fork_authentication::test_credential_bytes_for_service(
-            service_uid,
-            [7; 32],
-            [8; 32],
-        )?;
-        for (name, bytes) in [
-            ("pigloros.fork-admission-auth", auth),
-            ("pigloros.fork-admission-host-signer", host),
-        ] {
-            let path = credentials.join(name);
-            std::fs::write(&path, bytes)?;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
-        }
-        let sqlite_path = database
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("temporary database path is not UTF-8"))?;
-        provision_local_fork_admission_authority(sqlite_path, &credentials)?;
-
-        let socket_at_shutdown = socket.clone();
-        serve_with_owntracks_and_fork_admission(
-            "127.0.0.1:0".parse()?,
-            Some(sqlite_path),
-            None,
-            Some(&socket),
-            Some(&credentials),
-            async move { assert!(socket_at_shutdown.exists()) },
-            LedgerView::default(),
-            LedgerWriteMode::Disabled,
-        )
-        .await?;
         assert!(!socket.exists());
         Ok(())
     }
