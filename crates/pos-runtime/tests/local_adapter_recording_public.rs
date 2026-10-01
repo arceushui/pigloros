@@ -53,7 +53,7 @@ impl LocalAdapterProviderV1 for EchoProvider {
             .find(|(key, _)| *key == idempotency_key)
             .map(|(_, response)| response.clone());
         let response = cached_response.unwrap_or_else(|| {
-            let response = invocation
+            let response: Vec<u8> = invocation
                 .as_input()
                 .exact_request_payload
                 .iter()

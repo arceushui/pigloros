@@ -190,10 +190,10 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
 
     let (owner_id, root, mut missing_admission) = repro_manifest_closure()?;
     missing_admission.retain(|candidate| {
-        !candidate
+        candidate
             .artifact_bytes
             .get(2..6)
-            .is_some_and(|magic| magic == b"MAA1")
+            .is_none_or(|magic| magic != b"MAA1")
     });
     assert_eq!(
         prepare_artifact_registration_batch_v1(
