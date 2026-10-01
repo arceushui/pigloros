@@ -1,4 +1,4 @@
-name: Temporary Wave 8 Coverage Expansion
+name: Temporary Wave 8 Coverage Formatting
 on:
   push:
     branches:
