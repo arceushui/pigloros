@@ -85,6 +85,13 @@ pub struct ExecutionProfileV1 {
 }
 
 impl ExecutionProfileV1 {
+    /// Whether this validated profile meets one TPS1 minimum execution-profile version.
+    #[must_use]
+    pub fn meets_minimum_version_v1(&self, minimum: &str) -> bool {
+        valid_semantic_version(minimum)
+            && semantic_version_precedence(&self.semantic_version, minimum) != Ordering::Less
+    }
+
     /// Validate the closed EPF1 contract, its encoded-size limit, and its digest.
     ///
     /// # Errors
@@ -597,4 +604,21 @@ fn optional_digest(value: Option<&[u8; 32]>) -> Value {
 
 fn strings(values: &[String]) -> Value {
     Value::Array(values.iter().map(|value| text(value)).collect())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod minimum_version_tests {
+    use super::ExecutionProfileV1;
+
+    #[test]
+    fn exact_execution_profile_minimum_uses_semantic_precedence(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = crate::draft_execution_profile_bytes_v1("deterministic-local-v1")?;
+        let profile = ExecutionProfileV1::from_canonical_cbor(&bytes)?;
+        assert!(profile.meets_minimum_version_v1("1.0.0"));
+        assert!(!profile.meets_minimum_version_v1("999.0.0"));
+        assert!(!profile.meets_minimum_version_v1("invalid"));
+        Ok(())
+    }
 }
