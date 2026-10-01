@@ -563,7 +563,7 @@ impl LocalAdapterProviderV1 for PanickingProvider {
         _: &AdapterInvocationV1,
         _: LocalAdapterIdempotencyKeyV1,
     ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
-        panic!("provider panic must remain contained by the local recorder");
+        std::panic::panic_any("provider panic must remain contained by the local recorder");
     }
 }
 
