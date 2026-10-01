@@ -1,0 +1,23 @@
+name: Temporary Create Wave 8 Stack
+on:
+  push:
+    branches:
+      - automation/create-wave8-stack-20261002
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Link the rebased Wave 8 pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/${{ github.repository }}/stacks" \
+            -d '{"pull_requests":[190,278,281]}'
