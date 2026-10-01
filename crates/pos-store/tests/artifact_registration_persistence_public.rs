@@ -1,17 +1,21 @@
 use std::fmt::Write as _;
 
 use pos_core::{
-    extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
-    extract_repro_manifest_root_registration_v1, prepare_artifact_registration_batch_v1,
-    validate_artifact_registration_catalog_graph_v1, AdapterAdmissionInputV1, AdapterAdmissionV1,
-    AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1,
-    AdapterTranscriptInputV1, AdapterTranscriptV1, ArtifactDataClassV1,
+    adapter_configuration_digest_v1, extract_adapter_admission_registration_v1,
+    extract_adapter_transcript_registration_v1, extract_repro_manifest_root_registration_v1,
+    prepare_artifact_registration_batch_v1, public_adapter_schema_digest_v1, store::EventStore,
+    validate_artifact_registration_catalog_graph_v1, AdapterAdmissionEntryV1,
+    AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterCallReservationOutcomeV1,
+    AdapterCallReservationV1, AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationInputV1,
+    AdapterInvocationV1, AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1,
+    AdapterRecordingStoreV1, AdapterTranscriptInputV1, AdapterTranscriptV1, ArtifactDataClassV1,
     ArtifactRegistrationCatalogRowV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
     ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
     ArtifactRegistrationV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, Hash, OwnerIdV1,
     PreparedArtifactRegistrationBatchV1, ReproManifestRootInputV1,
     ReproManifestRootRegistrationInputV1, ReproManifestRootV1, WorldRecordingReceiptInputV1,
     WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
+    MAX_ADAPTER_CALL_BYTES_V1,
 };
 use pos_store::{
     memory::MemoryStore, open_store, ArtifactRegistrationCommitOutcomeV1,
@@ -217,6 +221,266 @@ fn alternate_root_with_same_operation(
     inputs[root_index].artifact_bytes = alternate_bytes;
     inputs[root_index].registration_cbor = registration.canonical_cbor().to_vec();
     Ok((address, inputs))
+}
+
+fn adapter_recording_fixture(
+    run_operation_id: Hash,
+) -> Result<(AdapterRecordingSessionV1, AdapterCallReservationV1), Box<dyn std::error::Error>> {
+    let owner_reference = Hash::from_bytes([0x71; 32]);
+    let plugin_id = pos_core::PluginId::new();
+    let configuration = b"adapter-store-test-config".to_vec();
+    let schema_digest = public_adapter_schema_digest_v1();
+    let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+        owner_reference,
+        configuration_generation: 3,
+        scope_digest: Hash::from_bytes([0x72; 32]),
+        entries: vec![AdapterAdmissionEntryV1 {
+            plugin_id,
+            adapter_id: "weather.client".to_owned(),
+            provider_id: "fixture.provider".to_owned(),
+            operation_id: "read-current".to_owned(),
+            protocol_version: 1,
+            request_schema_digest: schema_digest,
+            response_schema_digest: schema_digest,
+            configuration_digest: adapter_configuration_digest_v1(&configuration),
+            exact_configuration_bytes: configuration,
+            input_data_class: AdapterDataClassV1::PublicRecord,
+            output_data_class: AdapterDataClassV1::PublicRecord,
+            effect_mode: AdapterEffectModeV1::ReadOnly,
+        }],
+    })?;
+    let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+        owner_reference,
+        timeline_id: pos_core::TimelineId::new(),
+        cut_id: 3,
+        commit_receipt_digest: Hash::from_bytes([0x73; 32]),
+        recording_receipt_digest: Hash::from_bytes([0x74; 32]),
+        logical_head: 0,
+        stitched_head_hash: Hash::from_bytes([0x75; 32]),
+    })?;
+    let session =
+        AdapterRecordingSessionV1::new(owner_reference, world_handle, run_operation_id, admission)?;
+    let invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
+        adapter_id: "weather.client".to_owned(),
+        provider_id: "fixture.provider".to_owned(),
+        operation_id: "read-current".to_owned(),
+        protocol_version: 1,
+        request_schema_digest: schema_digest,
+        response_schema_digest: schema_digest,
+        configuration_digest: adapter_configuration_digest_v1(b"adapter-store-test-config"),
+        global_call_index: 0,
+        exact_request_payload: b"exact request".to_vec(),
+    })?;
+    let reservation =
+        AdapterCallReservationV1::new(plugin_id, 0, invocation, Hash::from_bytes([0x76; 32]), 123)?;
+    Ok((session, reservation))
+}
+
+fn exercise_event_store_adapter_recording<S: EventStore>(
+    store: &mut S,
+    run_operation_id: Hash,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (session, reservation) = adapter_recording_fixture(run_operation_id)?;
+    let owner_reference = session.owner_reference();
+    assert_eq!(
+        store.adapter_recording_close_session(owner_reference, run_operation_id),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+    assert_eq!(
+        store.adapter_recording_reserve_call(
+            owner_reference,
+            run_operation_id,
+            reservation.clone()
+        ),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+    assert_eq!(
+        store.adapter_recording_complete_call(owner_reference, run_operation_id, 0, Vec::new()),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+    assert_eq!(
+        store.adapter_recording_abort_session(owner_reference, run_operation_id),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+    assert_eq!(
+        store.adapter_recording_read_closed_session(owner_reference, run_operation_id)?,
+        None
+    );
+
+    store.adapter_recording_open_session(session.clone())?;
+    store.adapter_recording_open_session(session.clone())?;
+    let other_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+        owner_reference,
+        timeline_id: pos_core::TimelineId::new(),
+        cut_id: 4,
+        commit_receipt_digest: Hash::from_bytes([0x77; 32]),
+        recording_receipt_digest: Hash::from_bytes([0x78; 32]),
+        logical_head: 0,
+        stitched_head_hash: Hash::from_bytes([0x79; 32]),
+    })?;
+    let conflicting_session = AdapterRecordingSessionV1::new(
+        owner_reference,
+        other_handle,
+        run_operation_id,
+        session.admission().clone(),
+    )?;
+    assert_eq!(
+        store.adapter_recording_open_session(conflicting_session),
+        Err(AdapterRecordingStoreErrorV1::Conflict)
+    );
+    assert_eq!(
+        store.adapter_recording_read_closed_session(owner_reference, run_operation_id)?,
+        None
+    );
+
+    let reserved = store.adapter_recording_reserve_call(
+        owner_reference,
+        run_operation_id,
+        reservation.clone(),
+    )?;
+    assert_eq!(
+        reserved,
+        AdapterCallReservationOutcomeV1::Reserved {
+            reserved_at_micros: 123
+        }
+    );
+    assert_eq!(
+        store.adapter_recording_reserve_call(
+            owner_reference,
+            run_operation_id,
+            reservation.clone(),
+        )?,
+        reserved
+    );
+    let changed_retry = AdapterCallReservationV1::new(
+        reservation.plugin_id(),
+        reservation.per_plugin_call_index(),
+        reservation.invocation().clone(),
+        Hash::from_bytes([0x7a; 32]),
+        999,
+    )?;
+    assert_eq!(
+        store.adapter_recording_reserve_call(owner_reference, run_operation_id, changed_retry),
+        Err(AdapterRecordingStoreErrorV1::InvalidCall)
+    );
+    let wrong_plugin_ordinal = AdapterCallReservationV1::new(
+        reservation.plugin_id(),
+        1,
+        reservation.invocation().clone(),
+        Hash::from_bytes([0x7b; 32]),
+        124,
+    )?;
+    assert_eq!(
+        store.adapter_recording_reserve_call(
+            owner_reference,
+            run_operation_id,
+            wrong_plugin_ordinal,
+        ),
+        Err(AdapterRecordingStoreErrorV1::InvalidCall)
+    );
+    let out_of_order_invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
+        global_call_index: 1,
+        ..reservation.invocation().as_input().clone()
+    })?;
+    let out_of_order = AdapterCallReservationV1::new(
+        reservation.plugin_id(),
+        1,
+        out_of_order_invocation,
+        Hash::from_bytes([0x7c; 32]),
+        124,
+    )?;
+    assert_eq!(
+        store.adapter_recording_reserve_call(owner_reference, run_operation_id, out_of_order),
+        Err(AdapterRecordingStoreErrorV1::InvalidCall)
+    );
+    assert_eq!(
+        store.adapter_recording_complete_call(owner_reference, run_operation_id, 1, Vec::new()),
+        Err(AdapterRecordingStoreErrorV1::InvalidCall)
+    );
+    assert_eq!(
+        store.adapter_recording_complete_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            vec![0; MAX_ADAPTER_CALL_BYTES_V1 + 1],
+        ),
+        Err(AdapterRecordingStoreErrorV1::InvalidCall)
+    );
+    assert_eq!(
+        store.adapter_recording_close_session(owner_reference, run_operation_id),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+
+    let output = b"exact response".to_vec();
+    store.adapter_recording_complete_call(owner_reference, run_operation_id, 0, output.clone())?;
+    store.adapter_recording_complete_call(owner_reference, run_operation_id, 0, output.clone())?;
+    assert_eq!(
+        store.adapter_recording_complete_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            b"conflicting response".to_vec(),
+        ),
+        Err(AdapterRecordingStoreErrorV1::Conflict)
+    );
+    let completed_retry = AdapterCallReservationV1::new(
+        reservation.plugin_id(),
+        reservation.per_plugin_call_index(),
+        reservation.invocation().clone(),
+        reservation.idempotency_key(),
+        999,
+    )?;
+    assert_eq!(
+        store.adapter_recording_reserve_call(owner_reference, run_operation_id, completed_retry)?,
+        AdapterCallReservationOutcomeV1::Completed {
+            output_bytes: output,
+            reserved_at_micros: 123,
+        }
+    );
+
+    let transcript = store.adapter_recording_close_session(owner_reference, run_operation_id)?;
+    assert_eq!(
+        store.adapter_recording_close_session(owner_reference, run_operation_id)?,
+        transcript
+    );
+    assert_eq!(
+        store.adapter_recording_read_closed_session(owner_reference, run_operation_id)?,
+        Some(transcript)
+    );
+    assert_eq!(
+        store.adapter_recording_open_session(session),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+    assert_eq!(
+        store.adapter_recording_reserve_call(owner_reference, run_operation_id, reservation),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+    assert_eq!(
+        store.adapter_recording_complete_call(owner_reference, run_operation_id, 0, Vec::new()),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+    assert_eq!(
+        store.adapter_recording_abort_session(owner_reference, run_operation_id),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+
+    let aborted_id = Hash::from_bytes([0x7d; 32]);
+    let (aborted_session, _) = adapter_recording_fixture(aborted_id)?;
+    store.adapter_recording_open_session(aborted_session)?;
+    store.adapter_recording_abort_session(owner_reference, aborted_id)?;
+    assert_eq!(
+        store.adapter_recording_close_session(owner_reference, aborted_id),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+    assert_eq!(
+        store.adapter_recording_abort_session(owner_reference, aborted_id),
+        Err(AdapterRecordingStoreErrorV1::InvalidState)
+    );
+    assert_eq!(
+        store.adapter_recording_read_closed_session(owner_reference, aborted_id)?,
+        None
+    );
+    Ok(())
 }
 
 #[test]
@@ -617,4 +881,24 @@ fn sqlite_rolls_back_the_entire_closure_when_root_commit_fails(
         })?;
     assert_eq!(row_count, 0);
     Ok(())
+}
+
+#[test]
+fn memory_event_store_adapter_recording_port_covers_the_public_state_machine(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = MemoryStore::new();
+    exercise_event_store_adapter_recording(&mut store, Hash::from_bytes([0x7e; 32]))
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_event_store_adapter_recording_port_covers_the_public_state_machine(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    exercise_event_store_adapter_recording(&mut store, Hash::from_bytes([0x7f; 32]))
 }
