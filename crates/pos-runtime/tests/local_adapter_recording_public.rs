@@ -1,5 +1,3 @@
-#![allow(clippy::expect_used)]
-
 use std::sync::{Arc, Mutex};
 
 use pos_core::{
@@ -32,6 +30,7 @@ impl Plugin for LocalPlugin {
 }
 
 type CompletedResponse = (LocalAdapterIdempotencyKeyV1, Vec<u8>);
+type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 struct EchoProvider {
     idempotency_keys: Arc<Mutex<Vec<LocalAdapterIdempotencyKeyV1>>>,
@@ -51,7 +50,7 @@ impl LocalAdapterProviderV1 for EchoProvider {
         let mut completed_responses = self
             .completed_responses
             .lock()
-            .expect("idempotent response lock should be available");
+            .map_err(|_| LocalAdapterErrorV1::ProviderRejected)?;
         let cached_response = completed_responses
             .iter()
             .find(|(key, _)| *key == idempotency_key)
@@ -70,7 +69,7 @@ impl LocalAdapterProviderV1 for EchoProvider {
         drop(completed_responses);
         self.idempotency_keys
             .lock()
-            .expect("idempotency key lock should be available")
+            .map_err(|_| LocalAdapterErrorV1::ProviderRejected)?
             .push(idempotency_key);
         Ok(LocalAdapterProviderResponseV1::acknowledged(
             response,
@@ -197,8 +196,8 @@ fn adapter_entry(plugin_id: PluginId) -> AdapterAdmissionEntryV1 {
     }
 }
 
-fn world_handle(owner_reference: Hash) -> WorldReplayHandleV1 {
-    WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+fn world_handle(owner_reference: Hash) -> Result<WorldReplayHandleV1, Box<dyn std::error::Error>> {
+    Ok(WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
         owner_reference,
         timeline_id: TimelineId::new(),
         cut_id: 4,
@@ -206,94 +205,86 @@ fn world_handle(owner_reference: Hash) -> WorldReplayHandleV1 {
         recording_receipt_digest: Hash::from_bytes([12; 32]),
         logical_head: 7,
         stitched_head_hash: Hash::from_bytes([13; 32]),
-    })
-    .expect("fixture World Replay handle should be structurally valid")
+    })?)
 }
 
 fn registry_with_adapter(
     provider: Box<dyn LocalAdapterProviderV1>,
-) -> (
-    PluginRegistry,
-    pos_runtime::AdmittedCompositionV1,
-    WorldReplayHandleV1,
-) {
+) -> Result<
+    (
+        PluginRegistry,
+        pos_runtime::AdmittedCompositionV1,
+        WorldReplayHandleV1,
+    ),
+    Box<dyn std::error::Error>,
+> {
     registry_with_adapter_mode(provider, AdapterEffectModeV1::ReadOnly)
 }
 
 fn registry_with_adapter_mode(
     provider: Box<dyn LocalAdapterProviderV1>,
     effect_mode: AdapterEffectModeV1,
-) -> (
-    PluginRegistry,
-    pos_runtime::AdmittedCompositionV1,
-    WorldReplayHandleV1,
-) {
+) -> Result<
+    (
+        PluginRegistry,
+        pos_runtime::AdmittedCompositionV1,
+        WorldReplayHandleV1,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let plugin = LocalPlugin {
         id: PluginId::new(),
     };
     let owner = OwnerIdV1::from_static("local-adapter-test");
     let owner_reference = ArtifactRegistrationV1::owner_reference(&owner);
     let mut registry = PluginRegistry::new();
-    registry
-        .register_local(&plugin, vec!["weather.read".to_owned()], None, None)
-        .expect("a local plugin should register without installed EPF1");
+    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
     let mut entry = adapter_entry(plugin.id());
     entry.effect_mode = effect_mode;
-    registry
-        .register_local_adapter(entry, provider)
-        .expect("the adapter should bind to an available local plugin");
-    let handle = world_handle(owner_reference);
-    let admitted = registry
-        .admit_local_manifest_registration(owner, 2)
-        .expect("the registry should seal the complete local roster");
-    (registry, admitted, handle)
+    registry.register_local_adapter(entry, provider)?;
+    let handle = world_handle(owner_reference)?;
+    let admitted = registry.admit_local_manifest_registration(owner, 2)?;
+    Ok((registry, admitted, handle))
 }
 
 #[test]
-fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
+fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() -> TestResult {
     let keys = Arc::new(Mutex::new(Vec::new()));
     let provider = EchoProvider {
         idempotency_keys: Arc::clone(&keys),
         completed_responses: Arc::new(Mutex::new(Vec::new())),
     };
-    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(provider));
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(provider))?;
     assert_eq!(admitted.adapter_admission().as_input().entries.len(), 1);
     let mut recorder = pos_store::memory::MemoryStore::new();
 
     let operation_id = Hash::from_bytes([21; 32]);
     let request = b"exact request".to_vec();
-    let mut session = registry
-        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
-        .expect("the sealed local admission should start a run");
-    let response = session
-        .invoke(
-            admitted.adapter_admission().as_input().entries[0].plugin_id,
-            "weather.client",
-            "fixture.provider",
-            "read-current",
-            1,
-            request.clone(),
-        )
-        .expect("the registered local provider should run");
+    let mut session =
+        registry.begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)?;
+    let response = session.invoke(
+        admitted.adapter_admission().as_input().entries[0].plugin_id,
+        "weather.client",
+        "fixture.provider",
+        "read-current",
+        1,
+        request.clone(),
+    )?;
     assert_eq!(response, b"tseuqer tcaxe");
     drop(session);
-    let mut retry = registry
-        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
-        .expect("the same still-open operation should resume");
-    let retried_response = retry
-        .invoke(
-            admitted.adapter_admission().as_input().entries[0].plugin_id,
-            "weather.client",
-            "fixture.provider",
-            "read-current",
-            1,
-            b"exact request".to_vec(),
-        )
-        .expect("a committed response should be reused on retry");
+    let mut retry =
+        registry.begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)?;
+    let retried_response = retry.invoke(
+        admitted.adapter_admission().as_input().entries[0].plugin_id,
+        "weather.client",
+        "fixture.provider",
+        "read-current",
+        1,
+        b"exact request".to_vec(),
+    )?;
     assert_eq!(retried_response, response);
-    let closed = retry.finish().expect("the successful run should close");
-    let transcript = AdapterTranscriptV1::from_canonical_cbor(&closed.transcript_bytes())
-        .expect("the closed transcript should have exact MAT1 bytes");
+    let closed = retry.finish()?;
+    let transcript = AdapterTranscriptV1::from_canonical_cbor(&closed.transcript_bytes())?;
     assert_eq!(transcript.as_input().calls.len(), 1);
     assert_eq!(
         transcript.as_input().calls[0]
@@ -309,7 +300,7 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
     );
     let observed_keys = keys
         .lock()
-        .expect("idempotency key lock should be available");
+        .map_err(|_| std::io::Error::other("idempotency key lock was poisoned"))?;
     assert_eq!(observed_keys.len(), 1);
     assert_eq!(
         observed_keys[0].owner_reference(),
@@ -322,28 +313,30 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() {
     let closed_bytes = closed.transcript_bytes();
     assert_eq!(
         recorder
-            .read_closed_adapter_recording_session(handle.as_input().owner_reference, operation_id)
-            .expect("the closed transcript should remain readable")
+            .read_closed_adapter_recording_session(handle.as_input().owner_reference, operation_id)?
             .as_deref(),
         Some(closed_bytes.as_slice())
     );
+    Ok(())
 }
 
 #[test]
-fn local_adapter_session_emits_an_explicit_empty_transcript() {
-    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider));
+fn local_adapter_session_emits_an_explicit_empty_transcript() -> TestResult {
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
     let mut recorder = pos_store::memory::MemoryStore::new();
-    let session = registry
-        .begin_local_adapter_session(&admitted, handle, Hash::from_bytes([22; 32]), &mut recorder)
-        .expect("the sealed local admission should start a run");
-    let closed = session
-        .finish()
-        .expect("a successful empty session should close explicitly");
+    let session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([22; 32]),
+        &mut recorder,
+    )?;
+    let closed = session.finish()?;
     assert!(closed.transcript().as_input().calls.is_empty());
+    Ok(())
 }
 
 #[test]
-fn failed_local_adapter_session_cannot_produce_a_transcript() {
+fn failed_local_adapter_session_cannot_produce_a_transcript() -> TestResult {
     let plugin_id = PluginId::new();
     let provider = RejectingProvider;
     let plugin = LocalPlugin { id: plugin_id };
@@ -351,23 +344,15 @@ fn failed_local_adapter_session_cannot_produce_a_transcript() {
     let owner_reference = ArtifactRegistrationV1::owner_reference(&owner);
     let mut recorder = pos_store::memory::MemoryStore::new();
     let mut registry = PluginRegistry::new();
-    registry
-        .register_local(&plugin, vec!["weather.read".to_owned()], None, None)
-        .expect("a local plugin should register without installed EPF1");
-    registry
-        .register_local_adapter(adapter_entry(plugin_id), Box::new(provider))
-        .expect("the adapter should bind to an available local plugin");
-    let admitted = registry
-        .admit_local_manifest_registration(owner, 2)
-        .expect("the registry should seal the complete local roster");
-    let mut session = registry
-        .begin_local_adapter_session(
-            &admitted,
-            world_handle(owner_reference),
-            Hash::from_bytes([23; 32]),
-            &mut recorder,
-        )
-        .expect("the sealed local admission should start a run");
+    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+    registry.register_local_adapter(adapter_entry(plugin_id), Box::new(provider))?;
+    let admitted = registry.admit_local_manifest_registration(owner, 2)?;
+    let mut session = registry.begin_local_adapter_session(
+        &admitted,
+        world_handle(owner_reference)?,
+        Hash::from_bytes([23; 32]),
+        &mut recorder,
+    )?;
     assert_eq!(
         session.invoke(
             plugin_id,
@@ -379,19 +364,17 @@ fn failed_local_adapter_session_cannot_produce_a_transcript() {
         ),
         Err(LocalAdapterErrorV1::ProviderRejected)
     );
-    session
-        .abort()
-        .expect("a provider failure can explicitly abort the recorder");
+    session.abort()?;
     assert_eq!(
         recorder
-            .read_closed_adapter_recording_session(owner_reference, Hash::from_bytes([23; 32]))
-            .expect("the aborted recorder should remain readable as unclosed"),
+            .read_closed_adapter_recording_session(owner_reference, Hash::from_bytes([23; 32]))?,
         None
     );
+    Ok(())
 }
 
 #[test]
-fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it() {
+fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it() -> TestResult {
     let keys = Arc::new(Mutex::new(Vec::new()));
     let completed_responses = Arc::new(Mutex::new(Vec::new()));
     let (mut registry, admitted, handle) = registry_with_adapter_mode(
@@ -400,13 +383,12 @@ fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it
             completed_responses: Arc::clone(&completed_responses),
         }),
         AdapterEffectModeV1::ExternallyIdempotent,
-    );
+    )?;
     let owner_reference = handle.as_input().owner_reference;
     let operation_id = Hash::from_bytes([24; 32]);
     let mut recorder = pos_store::memory::MemoryStore::new();
-    let mut session = registry
-        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
-        .expect("the admitted provider guarantee should permit the session");
+    let mut session =
+        registry.begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)?;
     assert_eq!(
         session.invoke(
             admitted.adapter_admission().as_input().entries[0].plugin_id,
@@ -418,12 +400,10 @@ fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it
         ),
         Ok(b"tseuqer".to_vec())
     );
-    session
-        .finish()
-        .expect("the acknowledged call should close");
+    session.finish()?;
     let observed_keys = keys
         .lock()
-        .expect("idempotency key lock should be available");
+        .map_err(|_| std::io::Error::other("idempotency key lock was poisoned"))?;
     assert_eq!(observed_keys.len(), 1);
     assert_eq!(observed_keys[0].owner_reference(), owner_reference);
     assert_eq!(observed_keys[0].run_operation_id(), operation_id);
@@ -433,7 +413,7 @@ fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it
     assert_eq!(
         completed_responses
             .lock()
-            .expect("idempotent response lock should be available")
+            .map_err(|_| std::io::Error::other("completed response lock was poisoned"))?
             .len(),
         1
     );
@@ -441,14 +421,17 @@ fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it
     let (mut registry, admitted, handle) = registry_with_adapter_mode(
         Box::new(UnacknowledgedProvider),
         AdapterEffectModeV1::ExternallyIdempotent,
-    );
+    )?;
     let mut recorder = FailFirstCompletionStore {
         inner: pos_store::memory::MemoryStore::new(),
         fail_next_completion: false,
     };
-    let mut session = registry
-        .begin_local_adapter_session(&admitted, handle, Hash::from_bytes([25; 32]), &mut recorder)
-        .expect("the provider advertises the external guarantee");
+    let mut session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([25; 32]),
+        &mut recorder,
+    )?;
     assert_eq!(
         session.invoke(
             admitted.adapter_admission().as_input().entries[0].plugin_id,
@@ -460,30 +443,28 @@ fn externally_idempotent_provider_receives_exact_run_key_and_must_acknowledge_it
         ),
         Err(LocalAdapterErrorV1::ProviderIdempotencyUnacknowledged)
     );
-    session
-        .abort()
-        .expect("the rejected acknowledgement can abort the pending session");
+    session.abort()?;
+    Ok(())
 }
 
 #[test]
-fn externally_idempotent_registration_requires_a_provider_deduplication_guarantee() {
+fn externally_idempotent_registration_requires_a_provider_deduplication_guarantee() -> TestResult {
     let plugin = LocalPlugin {
         id: PluginId::new(),
     };
     let mut registry = PluginRegistry::new();
-    registry
-        .register_local(&plugin, vec!["weather.read".to_owned()], None, None)
-        .expect("a local plugin should register");
+    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
     let mut entry = adapter_entry(plugin.id());
     entry.effect_mode = AdapterEffectModeV1::ExternallyIdempotent;
     assert_eq!(
         registry.register_local_adapter(entry, Box::new(RejectingProvider)),
         Err(LocalAdapterErrorV1::IdempotencyUnavailable)
     );
+    Ok(())
 }
 
 #[test]
-fn externally_idempotent_retry_reuses_provider_output_after_completion_failure() {
+fn externally_idempotent_retry_reuses_provider_output_after_completion_failure() -> TestResult {
     let keys = Arc::new(Mutex::new(Vec::new()));
     let completed_responses = Arc::new(Mutex::new(Vec::new()));
     let (mut registry, admitted, handle) = registry_with_adapter_mode(
@@ -492,15 +473,14 @@ fn externally_idempotent_retry_reuses_provider_output_after_completion_failure()
             completed_responses: Arc::clone(&completed_responses),
         }),
         AdapterEffectModeV1::ExternallyIdempotent,
-    );
+    )?;
     let operation_id = Hash::from_bytes([26; 32]);
     let mut recorder = FailFirstCompletionStore {
         inner: pos_store::memory::MemoryStore::new(),
         fail_next_completion: true,
     };
-    let mut session = registry
-        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
-        .expect("the guaranteed provider should start");
+    let mut session =
+        registry.begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)?;
     assert_eq!(
         session.invoke(
             admitted.adapter_admission().as_input().entries[0].plugin_id,
@@ -514,9 +494,8 @@ fn externally_idempotent_retry_reuses_provider_output_after_completion_failure()
     );
     drop(session);
 
-    let mut retry = registry
-        .begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)
-        .expect("the open reservation should resume after completion failure");
+    let mut retry =
+        registry.begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)?;
     assert_eq!(
         retry.invoke(
             admitted.adapter_admission().as_input().entries[0].plugin_id,
@@ -528,17 +507,15 @@ fn externally_idempotent_retry_reuses_provider_output_after_completion_failure()
         ),
         Ok(b"tseuqer".to_vec())
     );
-    retry
-        .finish()
-        .expect("the deduplicated response should complete and close");
+    retry.finish()?;
     assert!(recorder
         .read_closed_adapter_recording_session(handle.as_input().owner_reference, operation_id)
-        .expect("the wrapper should delegate the closed-session read")
+        .map_err(|_| std::io::Error::other("closed-session read failed"))?
         .is_some());
 
     let observed_keys = keys
         .lock()
-        .expect("idempotency key lock should be available");
+        .map_err(|_| std::io::Error::other("idempotency key lock was poisoned"))?;
     assert_eq!(observed_keys.len(), 2);
     assert_eq!(observed_keys[0], observed_keys[1]);
     assert_eq!(
@@ -552,8 +529,9 @@ fn externally_idempotent_retry_reuses_provider_output_after_completion_failure()
     assert_eq!(
         completed_responses
             .lock()
-            .expect("idempotent response lock should be available")
+            .map_err(|_| std::io::Error::other("completed response lock was poisoned"))?
             .len(),
         1
     );
+    Ok(())
 }
