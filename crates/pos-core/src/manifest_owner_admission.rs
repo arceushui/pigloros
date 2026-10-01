@@ -7,12 +7,12 @@
 
 use std::collections::HashSet;
 
+use crate::output_policy::OutputPolicyV1;
 use crate::{
     ArtifactOptionalityV1, Hash, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1,
-    ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1, OutputPolicyV1,
-    PluginId, TimelineId, WorldArtifactKindV1,
-    WorldArtifactLeafV1, WorldConsumerSetV1,
+    ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1, PluginId,
+    TimelineId, WorldArtifactKindV1, WorldArtifactLeafV1, WorldConsumerSetV1,
 };
 
 /// Maximum owned Timeline scopes committed by one admission transaction.
@@ -305,10 +305,8 @@ pub fn prepare_manifest_owner_admission_v1(
     let intent_digest = digest_request(&request);
     verifier.verify_complete_composition(&request.catalog)?;
     verifier.verify_owner_prestate_and_allocation(&request, current_state)?;
-    verifier.verify_complete_owned_scope_set(
-        request.catalog.as_input().owner_id,
-        &request.timelines,
-    )?;
+    verifier
+        .verify_complete_owned_scope_set(request.catalog.as_input().owner_id, &request.timelines)?;
 
     let mut timelines = Vec::with_capacity(request.timelines.len());
     for timeline_request in &request.timelines {
@@ -383,7 +381,11 @@ pub fn validate_manifest_owner_admission_snapshot_v1(
     } else {
         (
             Some(generation - 1),
-            snapshot.timeline.receipt.as_input().previous_visible_lcq1_hash,
+            snapshot
+                .timeline
+                .receipt
+                .as_input()
+                .previous_visible_lcq1_hash,
         )
     };
     let input = ManifestOwnerAdmissionInputV1 {
@@ -395,9 +397,8 @@ pub fn validate_manifest_owner_admission_snapshot_v1(
         resulting_inventory_generation: snapshot.resulting_inventory_generation,
         timelines: vec![snapshot.timeline.clone()],
     };
-    validate_transaction_shape(&input).and_then(|()| {
-        validate_timeline_admission(&input, &snapshot.timeline)
-    })
+    validate_transaction_shape(&input)
+        .and_then(|()| validate_timeline_admission(&input, &snapshot.timeline))
 }
 
 /// Whether the atomic owner transaction applied or recovered an exact retry.
@@ -648,10 +649,7 @@ fn validate_native_copy_aggregate<'a>(
             {
                 return Err(ManifestOwnerAdmissionErrorV1::BoundExceeded);
             }
-            let copy_bytes = copy
-                .eop1_bytes
-                .len()
-                .saturating_add(copy.opc1_bytes.len());
+            let copy_bytes = copy.eop1_bytes.len().saturating_add(copy.opc1_bytes.len());
             aggregate_bytes = aggregate_bytes.saturating_add(copy_bytes);
             if aggregate_bytes > MAX_MANIFEST_OWNER_ADMISSION_NATIVE_BYTES_V1 {
                 return Err(ManifestOwnerAdmissionErrorV1::BoundExceeded);
@@ -920,7 +918,10 @@ fn digest_request(request: &ManifestOwnerAdmissionRequestV1) -> Hash {
     }
     hash_optional_hash(&mut hasher, request.previous_visible_lcq1_hash);
     hash_optional_hash(&mut hasher, request.expected_inventory_generation);
-    hash_part(&mut hasher, request.resulting_inventory_generation.as_bytes());
+    hash_part(
+        &mut hasher,
+        request.resulting_inventory_generation.as_bytes(),
+    );
     hash_count(&mut hasher, request.timelines.len());
     for timeline in &request.timelines {
         hasher.update(b"timeline\0");
