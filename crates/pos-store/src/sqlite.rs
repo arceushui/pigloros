@@ -25257,7 +25257,8 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
     #[test]
-    fn artifact_registration_helper_boundaries_are_closed() -> Result<(), Box<dyn std::error::Error>> {
+    fn artifact_registration_helper_boundaries_are_closed() -> Result<(), Box<dyn std::error::Error>>
+    {
         let classes = [
             (ErasureArtifactClassV1::TimelineReplay, 0),
             (ErasureArtifactClassV1::ReproManifest, 1),
@@ -25317,5 +25318,4 @@ pub(super) mod key_registry_coverage {
         store.conn.execute_batch("ROLLBACK")?;
         Ok(())
     }
-
 }
