@@ -74,11 +74,16 @@ class RustScopePolicyTests(unittest.TestCase):
                 filter_step = next(step for step in steps if step.get("id") == "scope")
                 self.assertEqual(filter_step["with"]["filters"], ".github/rust-scope.yml")
                 self.assertIn("hashFiles('.github/rust-scope.yml') != ''", filter_step["if"])
+                self.assertIs(filter_step["continue-on-error"], True)
+                fallback_step = next(step for step in steps if step.get("id") == "fallback")
+                self.assertEqual(fallback_step["if"], "steps.scope.outcome == 'failure'")
+                self.assertIn("printf 'rust=true\\n' >> \"$GITHUB_OUTPUT\"", fallback_step["run"])
                 full_step = next(step for step in steps if step.get("id") == "full")
                 self.assertIn("hashFiles('.github/rust-scope.yml') == ''", full_step["if"])
                 self.assertEqual(
                     scope["outputs"]["rust"],
-                    "${{ steps.scope.outputs.rust || steps.full.outputs.rust }}",
+                    "${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || "
+                    "steps.full.outputs.rust }}",
                 )
 
     def test_documentation_only_paths_skip_rust_gate(self) -> None:
