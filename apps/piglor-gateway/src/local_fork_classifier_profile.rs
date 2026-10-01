@@ -64,7 +64,7 @@ impl ForkClassifierProfileV1 {
     /// Move the immutable rows into the executor's Fork-admission slot,
     /// which alone selects a row by a durable FAR1 descriptor hash.
     #[must_use]
-    pub(super) const fn into_sources(self) -> Vec<ForkClassifierSourceV1> {
+    pub(super) fn into_sources(self) -> Vec<ForkClassifierSourceV1> {
         self.sources
     }
 }
