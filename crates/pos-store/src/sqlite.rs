@@ -25256,4 +25256,66 @@ pub(super) mod key_registry_coverage {
         );
         Ok(())
     }
+    #[test]
+    fn artifact_registration_helper_boundaries_are_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let classes = [
+            (ErasureArtifactClassV1::TimelineReplay, 0),
+            (ErasureArtifactClassV1::ReproManifest, 1),
+            (ErasureArtifactClassV1::CausalTrace, 2),
+            (ErasureArtifactClassV1::CalibrationReport, 3),
+            (ErasureArtifactClassV1::Export, 4),
+            (ErasureArtifactClassV1::ForkOrSnapshot, 5),
+            (ErasureArtifactClassV1::ConformanceReport, 6),
+        ];
+        for (class, code) in classes {
+            assert_eq!(artifact_class_code(class), code);
+            assert_eq!(artifact_class_from_code(code), Some(class));
+        }
+        assert_eq!(artifact_class_from_code(7), None);
+        assert_eq!(sqlite_artifact_hash(&[0; 31]), None);
+
+        let store = open_store()?;
+        store.conn.execute_batch("BEGIN")?;
+        let scope = begin_immediate_scope(&store.conn)?;
+        assert!(matches!(scope, SqliteImmediateScopeV1::Savepoint));
+        assert_eq!(
+            finish_adapter_recording_scope(&store.conn, scope, Ok(3_u8)),
+            Ok(3)
+        );
+        store.conn.execute_batch("ROLLBACK")?;
+
+        store.conn.execute_batch("BEGIN")?;
+        let scope = begin_immediate_scope(&store.conn)?;
+        assert_eq!(
+            finish_adapter_recording_scope(
+                &store.conn,
+                scope,
+                Err::<(), _>(AdapterRecordingStoreErrorV1::InvalidState),
+            ),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        store.conn.execute_batch("ROLLBACK")?;
+
+        store.conn.execute_batch("BEGIN")?;
+        let scope = begin_immediate_scope(&store.conn)?;
+        assert_eq!(
+            finish_artifact_registration_scope(&store.conn, scope, Ok(4_u8)),
+            Ok(4)
+        );
+        store.conn.execute_batch("ROLLBACK")?;
+
+        store.conn.execute_batch("BEGIN")?;
+        let scope = begin_immediate_scope(&store.conn)?;
+        assert_eq!(
+            finish_artifact_registration_scope(
+                &store.conn,
+                scope,
+                Err::<(), _>(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
+            ),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        store.conn.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
 }
