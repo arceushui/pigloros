@@ -42,6 +42,7 @@ pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
 pub mod plugin;
+pub mod recipient_key;
 pub mod retention;
 pub mod state;
 pub mod store;
@@ -253,8 +254,9 @@ pub use ids::{CorrelationId, EntityId, EventId, PluginId, RelationshipId, Timeli
 pub use key_registry::{
     deletion_receipt, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionPortV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRecordV1, KeyRegistrationOutcomeV1,
-    KeyRegistrationV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1, KeyRegistryPortV1,
-    KeyRegistrySigningPortV1, KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
+    KeyRegistrationV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryPortV1, KeyRegistrySigningPortV1,
+    KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
 };
 pub use manifest::{AdapterRecord, ReproManifest};
 pub use owntracks_enrollment::{
@@ -277,13 +279,17 @@ pub use plugin::{
     ActionApprover, ActionRejected, Capability, Plugin, ProposedAction,
     MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
+pub use recipient_key::{
+    recipient_owner_id_from_grantee, RecipientKeyDescriptorErrorV1, RecipientKeyDescriptorV1,
+};
 pub use state::{Reducer, State, StateRegistry};
 pub use store::{
     append_identity_expires_at, checked_append_identity_expires_at, export_timeline,
     export_timeline_cow, export_timeline_own, export_timeline_raw, import_committed_with_rollback,
     import_timeline, import_timeline_with_id, validate_committed_batch, AppendDedupKey,
     AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
-    EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
+    EventStore, PreparedSubjectAppendAuthorizationV1, PurgeOutcome, SeqRange, TimelineExport,
+    APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};
 pub use timeline_envelope::{

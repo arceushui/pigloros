@@ -7,8 +7,9 @@ use pos_core::{
     ArtifactTransitionRuleV1, CanonicalBytes, CoreError, EntityId, ErasureArtifactClassV1,
     ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft,
     EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
-    KeyRegistryStateV1, KeyRoleV1, Kind, RegisteredArtifactV1, Seq, SeqRange, Signature,
-    TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeV1, TimelineEventVerificationV1,
+    KeyRegistryStateV1, KeyRoleV1, Kind, PreparedSubjectAppendAuthorizationV1,
+    RegisteredArtifactV1, SchemaVersion, Seq, SeqRange, Signature, TimelineEventEnvelopeErrorV1,
+    TimelineEventEnvelopeInputV1, TimelineEventEnvelopeV1, TimelineEventVerificationV1,
 };
 use pos_crypto::{
     key_roles::{sign_timeline_event_for_registered_role, SigningKeyMaterial},
@@ -63,6 +64,794 @@ fn append_signed(
         material.public_verification_key(),
         &mut sign,
     )
+}
+
+fn registered_sign(
+    material: &SigningKeyMaterial,
+    authorized: &mut KeyRegistryStateV1,
+    envelope: &TimelineEventEnvelopeV1,
+    bytes: &CanonicalBytes,
+) -> Result<Signature, CoreError> {
+    sign_timeline_event_for_registered_role(authorized, material, envelope, bytes)
+        .map_err(|error| CoreError::Storage(error.to_string()))
+}
+
+fn append_prepared(
+    store: &mut dyn EventStore,
+    timeline: pos_core::TimelineId,
+    registry: &KeyRegistryStateV1,
+    authorization: &PreparedSubjectAppendAuthorizationV1,
+    prepare_payload: &mut dyn FnMut(
+        &TimelineEventEnvelopeInputV1,
+    ) -> Result<CanonicalBytes, CoreError>,
+    sign: &mut dyn FnMut(
+        &mut KeyRegistryStateV1,
+        &TimelineEventEnvelopeV1,
+        &CanonicalBytes,
+    ) -> Result<Signature, CoreError>,
+) -> Result<Event, CoreError> {
+    store.append_prepared_subject_encrypted_timeline_signed(
+        timeline,
+        registry,
+        draft(b"placeholder"),
+        *authorization,
+        prepare_payload,
+        sign,
+    )
+}
+
+/// Counts both crypto callbacks so a rejection can prove neither ran.
+#[derive(Default)]
+struct CallbackCounts {
+    payload: std::cell::Cell<usize>,
+    sign: std::cell::Cell<usize>,
+}
+
+impl CallbackCounts {
+    fn append(
+        &self,
+        store: &mut dyn EventStore,
+        timeline: pos_core::TimelineId,
+        registry: &KeyRegistryStateV1,
+        authorization: &PreparedSubjectAppendAuthorizationV1,
+    ) -> Result<Event, CoreError> {
+        let mut payload = |_: &TimelineEventEnvelopeInputV1| {
+            self.payload.set(self.payload.get() + 1);
+            Ok(CanonicalBytes::from_static(b"ciphertext"))
+        };
+        let mut sign =
+            |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+                self.sign.set(self.sign.get() + 1);
+                Err(CoreError::Storage("signer must not run".to_owned()))
+            };
+        append_prepared(
+            store,
+            timeline,
+            registry,
+            authorization,
+            &mut payload,
+            &mut sign,
+        )
+    }
+
+    fn assert_not_invoked(&self) {
+        assert_eq!(self.payload.get(), 0, "payload callback ran");
+        assert_eq!(self.sign.get(), 0, "sign callback ran");
+    }
+}
+
+/// Reserve the next caller-owned nonce, as the ADR-097 ledger would before
+/// AES-GCM runs. The store never rewinds this counter.
+fn reserve_nonce(counter: &std::cell::Cell<u64>) -> u64 {
+    let next = counter.get() + 1;
+    counter.set(next);
+    next
+}
+
+fn sealed_payload(nonce: u64) -> CanonicalBytes {
+    CanonicalBytes::from_vec(nonce.to_be_bytes().to_vec())
+}
+
+fn exercise_prepared_append(store: &mut dyn EventStore) -> Result<(), Box<dyn std::error::Error>> {
+    let (material, registry, timeline, authorization) = prepared_fixture(store, true)?;
+    let mut payload = |input: &TimelineEventEnvelopeInputV1| {
+        if input.origin_timeline_id != timeline || input.identity != authorization.signing_identity
+        {
+            return Err(CoreError::Storage("wrong prepared context".to_owned()));
+        }
+        Ok(CanonicalBytes::from_static(b"prepared"))
+    };
+    let mut sign = |authorized: &mut KeyRegistryStateV1,
+                    envelope: &TimelineEventEnvelopeV1,
+                    bytes: &CanonicalBytes| {
+        registered_sign(&material, authorized, envelope, bytes)
+    };
+    let event = append_prepared(
+        store,
+        timeline,
+        &registry,
+        &authorization,
+        &mut payload,
+        &mut sign,
+    )?;
+    assert_eq!(event.payload, CanonicalBytes::from_static(b"prepared"));
+    assert_eq!(event.schema_version, SchemaVersion::V1);
+    assert_eq!(
+        event.signature_identity,
+        Some(authorization.signing_identity)
+    );
+    assert_eq!(store.read_own(timeline, SeqRange::all())?, vec![event]);
+    Ok(())
+}
+
+#[test]
+fn prepared_append_authorizes_both_identities_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    exercise_prepared_append(&mut MemoryStore::new())?;
+    exercise_prepared_append(&mut SqliteStore::open_in_memory()?)
+}
+
+fn exercise_prepared_append_on_fork(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (material, registry, parent, authorization) = prepared_fixture(store, true)?;
+    append_signed(
+        store,
+        parent,
+        &registry,
+        authorization.signing_identity,
+        &material,
+        b"parent",
+    )?;
+    let child = store.fork(parent, Seq::from_u64(1), "prepared-child")?;
+    let mut payload = |input: &TimelineEventEnvelopeInputV1| {
+        assert_eq!(input.origin_timeline_id, child.id());
+        assert_eq!(input.origin_logical_seq, Seq::from_u64(2));
+        Ok(CanonicalBytes::from_static(b"prepared-child"))
+    };
+    let mut sign = |authorized: &mut KeyRegistryStateV1,
+                    envelope: &TimelineEventEnvelopeV1,
+                    bytes: &CanonicalBytes| {
+        registered_sign(&material, authorized, envelope, bytes)
+    };
+    let event = append_prepared(
+        store,
+        child.id(),
+        &registry,
+        &authorization,
+        &mut payload,
+        &mut sign,
+    )?;
+    assert_eq!(event.seq, Seq::from_u64(1));
+    assert_eq!(
+        event.origin.map(|origin| origin.origin_logical_seq),
+        Some(Seq::from_u64(2))
+    );
+    Ok(())
+}
+
+#[test]
+fn prepared_append_finalizes_fork_context_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    exercise_prepared_append_on_fork(&mut MemoryStore::new())?;
+    exercise_prepared_append_on_fork(&mut SqliteStore::open_in_memory()?)
+}
+
+fn prepared_fixture(
+    store: &mut dyn EventStore,
+    save_registry: bool,
+) -> Result<
+    (
+        SigningKeyMaterial,
+        KeyRegistryStateV1,
+        pos_core::TimelineId,
+        PreparedSubjectAppendAuthorizationV1,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let (material, signing_identity, mut registry) = signing_fixture()?;
+    let encryption_identity =
+        KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
+    let encryption_material_digest = Hash::from_bytes([91; 32]);
+    registry.register_key(KeyRegistrationV1::new(
+        encryption_identity,
+        encryption_material_digest,
+        None,
+    ))?;
+    if save_registry {
+        store.save_key_registry(&registry)?;
+    }
+    let timeline = store.create_timeline("prepared-boundaries")?.id();
+    let authorization = PreparedSubjectAppendAuthorizationV1 {
+        encryption_identity,
+        encryption_material_digest,
+        signing_identity,
+        signing_material_digest: material.material_digest(),
+        signing_public_key: material.public_verification_key(),
+    };
+    Ok((material, registry, timeline, authorization))
+}
+
+fn reject_prepared_authorization(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_material, registry, timeline, authorization) = prepared_fixture(store, true)?;
+    let calls = CallbackCounts::default();
+    let wrong_encryption_role = PreparedSubjectAppendAuthorizationV1 {
+        encryption_identity: authorization.signing_identity,
+        encryption_material_digest: authorization.signing_material_digest,
+        ..authorization
+    };
+    let wrong_signing_role = PreparedSubjectAppendAuthorizationV1 {
+        signing_identity: authorization.encryption_identity,
+        signing_material_digest: authorization.encryption_material_digest,
+        ..authorization
+    };
+    let both_wrong = PreparedSubjectAppendAuthorizationV1 {
+        signing_identity: authorization.encryption_identity,
+        signing_material_digest: authorization.encryption_material_digest,
+        ..wrong_encryption_role
+    };
+    // ADR-097 order: registry match, then subject encryption, then signing.
+    for (expected_registry, request, expected) in [
+        (
+            &registry,
+            wrong_encryption_role,
+            "subject encryption authorization",
+        ),
+        (
+            &registry,
+            wrong_signing_role,
+            "Timeline signing authorization",
+        ),
+        (&registry, both_wrong, "subject encryption authorization"),
+        (
+            &KeyRegistryStateV1::new(),
+            both_wrong,
+            "registry changed during",
+        ),
+    ] {
+        let error = calls
+            .append(store, timeline, expected_registry, &request)
+            .err()
+            .ok_or("invalid prepared authorization was accepted")?;
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+    calls.assert_not_invoked();
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn prepared_append_rejects_wrong_roles_before_crypto_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    reject_prepared_authorization(&mut MemoryStore::new())?;
+    reject_prepared_authorization(&mut SqliteStore::open_in_memory()?)
+}
+
+fn reject_prepared_missing_timeline(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_material, registry, _timeline, authorization) = prepared_fixture(store, true)?;
+    let missing = pos_core::TimelineId::new();
+    let calls = CallbackCounts::default();
+    let result = calls.append(store, missing, &registry, &authorization);
+    assert!(matches!(result, Err(CoreError::TimelineNotFound(id)) if id == missing));
+    calls.assert_not_invoked();
+    Ok(())
+}
+
+#[test]
+fn prepared_append_rejects_missing_timeline_before_callbacks_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    reject_prepared_missing_timeline(&mut MemoryStore::new())?;
+    reject_prepared_missing_timeline(&mut SqliteStore::open_in_memory()?)
+}
+
+fn reject_prepared_missing_registry(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_material, registry, timeline, authorization) = prepared_fixture(store, false)?;
+    let calls = CallbackCounts::default();
+    assert!(calls
+        .append(store, timeline, &registry, &authorization)
+        .is_err());
+    calls.assert_not_invoked();
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn prepared_append_rejects_missing_registry_before_callbacks_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    reject_prepared_missing_registry(&mut MemoryStore::new())?;
+    reject_prepared_missing_registry(&mut SqliteStore::open_in_memory()?)
+}
+
+fn reject_prepared_pending_destruction(
+    store: &mut dyn EventStore,
+    encryption_role: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_material, registry, timeline, authorization) = prepared_fixture(store, true)?;
+    let (identity, material_digest) = if encryption_role {
+        (
+            authorization.encryption_identity,
+            authorization.encryption_material_digest,
+        )
+    } else {
+        (
+            authorization.signing_identity,
+            authorization.signing_material_digest,
+        )
+    };
+    let (_, pending) = store.begin_key_registry_destruction(KeyDestructionRequestV1::new(
+        identity,
+        material_digest,
+        Hash::from_bytes([93; 32]),
+    ))?;
+    let calls = CallbackCounts::default();
+    for expected in [&registry, &pending] {
+        assert!(calls
+            .append(store, timeline, expected, &authorization)
+            .is_err());
+    }
+    calls.assert_not_invoked();
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn prepared_append_rejects_pending_destruction_for_either_role(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for encryption_role in [true, false] {
+        reject_prepared_pending_destruction(&mut MemoryStore::new(), encryption_role)?;
+        reject_prepared_pending_destruction(&mut SqliteStore::open_in_memory()?, encryption_role)?;
+    }
+    Ok(())
+}
+
+fn rotation_registration(encryption_role: bool) -> KeyRegistrationV1 {
+    if encryption_role {
+        KeyRegistrationV1::new(
+            KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 2),
+            Hash::from_bytes([94; 32]),
+            None,
+        )
+    } else {
+        let (key, _) = generate_keypair();
+        let replacement = SigningKeyMaterial::new(key);
+        KeyRegistrationV1::new(
+            KeyIdentityV1::new("timeline-owner", KeyRoleV1::TimelineIntegritySigning, 2),
+            replacement.material_digest(),
+            Some(replacement.public_verification_key()),
+        )
+    }
+}
+
+fn reject_prepared_rotated_role(
+    store: &mut dyn EventStore,
+    encryption_role: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_material, mut registry, timeline, authorization) = prepared_fixture(store, true)?;
+    registry.register_key(rotation_registration(encryption_role))?;
+    store.save_key_registry(&registry)?;
+    let calls = CallbackCounts::default();
+    assert!(calls
+        .append(store, timeline, &registry, &authorization)
+        .is_err());
+    calls.assert_not_invoked();
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn prepared_append_rejects_rotated_epoch_for_either_role() -> Result<(), Box<dyn std::error::Error>>
+{
+    for encryption_role in [true, false] {
+        reject_prepared_rotated_role(&mut MemoryStore::new(), encryption_role)?;
+        reject_prepared_rotated_role(&mut SqliteStore::open_in_memory()?, encryption_role)?;
+    }
+    Ok(())
+}
+
+fn reject_prepared_callback_failures(
+    store: &mut dyn EventStore,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (material, registry, timeline, authorization) = prepared_fixture(store, true)?;
+    let nonce = std::cell::Cell::new(0_u64);
+    let sign_calls = std::cell::Cell::new(0_usize);
+    let mut forged_sign =
+        |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+            sign_calls.set(sign_calls.get() + 1);
+            Ok(Signature::from_bytes([0; 64]))
+        };
+    let mut failed_encryption = |_: &TimelineEventEnvelopeInputV1| {
+        reserve_nonce(&nonce);
+        Err(CoreError::Storage("encryption failed".to_owned()))
+    };
+    let mut sealed = |_: &TimelineEventEnvelopeInputV1| Ok(sealed_payload(reserve_nonce(&nonce)));
+    let mut oversized = |_: &TimelineEventEnvelopeInputV1| {
+        reserve_nonce(&nonce);
+        Ok(CanonicalBytes::from_vec(vec![
+            7;
+            pos_core::MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1
+                + 1
+        ]))
+    };
+    let mut failed_sign =
+        |_: &mut KeyRegistryStateV1, _: &TimelineEventEnvelopeV1, _: &CanonicalBytes| {
+            Err(CoreError::Storage("signer failed".to_owned()))
+        };
+    // Each failure happens after the nonce reservation; the nonce stays spent.
+    assert!(append_prepared(
+        store,
+        timeline,
+        &registry,
+        &authorization,
+        &mut failed_encryption,
+        &mut forged_sign,
+    )
+    .is_err());
+    assert_eq!((nonce.get(), sign_calls.get()), (1, 0));
+    assert!(append_prepared(
+        store,
+        timeline,
+        &registry,
+        &authorization,
+        &mut sealed,
+        &mut failed_sign,
+    )
+    .is_err());
+    assert_eq!(nonce.get(), 2);
+    assert!(append_prepared(
+        store,
+        timeline,
+        &registry,
+        &authorization,
+        &mut oversized,
+        &mut forged_sign,
+    )
+    .is_err());
+    assert_eq!((nonce.get(), sign_calls.get()), (3, 0));
+    // A forged signature is rejected by verification after signing ran.
+    assert!(append_prepared(
+        store,
+        timeline,
+        &registry,
+        &authorization,
+        &mut sealed,
+        &mut forged_sign,
+    )
+    .is_err());
+    assert_eq!((nonce.get(), sign_calls.get()), (4, 1));
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+    let mut sign = |authorized: &mut KeyRegistryStateV1,
+                    envelope: &TimelineEventEnvelopeV1,
+                    bytes: &CanonicalBytes| {
+        registered_sign(&material, authorized, envelope, bytes)
+    };
+    let committed = append_prepared(
+        store,
+        timeline,
+        &registry,
+        &authorization,
+        &mut sealed,
+        &mut sign,
+    )?;
+    // The retry reserves the next nonce; no rolled-back value is reused.
+    assert_eq!(nonce.get(), 5);
+    assert_eq!(committed.payload, sealed_payload(nonce.get()));
+    assert_eq!(store.read_own(timeline, SeqRange::all())?, vec![committed]);
+    Ok(())
+}
+
+#[test]
+fn prepared_append_rolls_back_failed_crypto_and_signature_in_both_adapters(
+) -> Result<(), Box<dyn std::error::Error>> {
+    reject_prepared_callback_failures(&mut MemoryStore::new())?;
+    reject_prepared_callback_failures(&mut SqliteStore::open_in_memory()?)
+}
+
+#[test]
+fn sqlite_prepared_append_rolls_back_insert_failure_and_allows_retry(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("prepared-insert.sqlite");
+    let path = path.to_str().ok_or("temporary SQLite path is not UTF-8")?;
+    let mut store = SqliteStore::open(path)?;
+    let (material, registry, timeline, authorization) = prepared_fixture(&mut store, true)?;
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch(
+        "CREATE TRIGGER reject_prepared_insert BEFORE INSERT ON events
+         BEGIN SELECT RAISE(ABORT, 'injected prepared insertion failure'); END;",
+    )?;
+    drop(connection);
+    drop(store);
+    let mut store = SqliteStore::open(path)?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let nonce = std::cell::Cell::new(0_u64);
+    let mut payload = |_: &TimelineEventEnvelopeInputV1| Ok(sealed_payload(reserve_nonce(&nonce)));
+    let mut sign = |authorized: &mut KeyRegistryStateV1,
+                    envelope: &TimelineEventEnvelopeV1,
+                    bytes: &CanonicalBytes| {
+        registered_sign(&material, authorized, envelope, bytes)
+    };
+    assert!(append_prepared(
+        &mut store,
+        timeline,
+        &registry,
+        &authorization,
+        &mut payload,
+        &mut sign,
+    )
+    .is_err());
+    assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
+    assert_eq!(store.load_key_registry()?, Some(registry.clone()));
+    // The insertion rollback does not return the reserved nonce.
+    assert_eq!(nonce.get(), 1);
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch("DROP TRIGGER reject_prepared_insert")?;
+    drop(connection);
+    let mut store = SqliteStore::open(path)?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let committed = append_prepared(
+        &mut store,
+        timeline,
+        &registry,
+        &authorization,
+        &mut payload,
+        &mut sign,
+    )?;
+    assert_eq!(committed.seq, Seq::from_u64(1));
+    assert_eq!(nonce.get(), 2);
+    assert_eq!(committed.payload, sealed_payload(nonce.get()));
+    assert_eq!(store.read_own(timeline, SeqRange::all())?, vec![committed]);
+    Ok(())
+}
+
+// MemoryStore needs no lifecycle race test: its prepared append takes
+// `&mut self`, so the borrow checker statically forbids any other handle from
+// rotating or destroying a key while the append is between authorization and
+// commit. SQLite connections are independent handles, so the race is real
+// there and `BEGIN IMMEDIATE` must serialize it.
+#[derive(Clone, Copy, Debug)]
+enum LifecycleContender {
+    DestroySubject,
+    DestroySigning,
+    RotateSubject,
+    RotateSigning,
+}
+
+fn contend_lifecycle(
+    store: &mut SqliteStore,
+    contender: LifecycleContender,
+    registry: &KeyRegistryStateV1,
+    authorization: &PreparedSubjectAppendAuthorizationV1,
+) -> Result<KeyRegistryStateV1, CoreError> {
+    let destroyed = match contender {
+        LifecycleContender::DestroySubject => Some((
+            authorization.encryption_identity,
+            authorization.encryption_material_digest,
+        )),
+        LifecycleContender::DestroySigning => Some((
+            authorization.signing_identity,
+            authorization.signing_material_digest,
+        )),
+        LifecycleContender::RotateSubject | LifecycleContender::RotateSigning => None,
+    };
+    if let Some((identity, digest)) = destroyed {
+        return store
+            .begin_key_registry_destruction(KeyDestructionRequestV1::new(
+                identity,
+                digest,
+                Hash::from_bytes([93; 32]),
+            ))
+            .map(|(_, pending)| pending);
+    }
+    let mut rotated = registry.clone();
+    rotated
+        .register_key(rotation_registration(matches!(
+            contender,
+            LifecycleContender::RotateSubject
+        )))
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    store.save_key_registry(&rotated).map(|()| rotated)
+}
+
+fn pause_for_contender(
+    entered: &std::sync::mpsc::Sender<()>,
+    release: &std::sync::mpsc::Receiver<()>,
+) -> Result<(), CoreError> {
+    entered
+        .send(())
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    release
+        .recv()
+        .map_err(|error| CoreError::Storage(error.to_string()))
+}
+
+/// Whether another connection holds the database write lock: a zero-timeout
+/// `BEGIN IMMEDIATE` on a fresh probe connection must fail with `SQLITE_BUSY`.
+fn write_lock_is_held(path: &str) -> Result<bool, CoreError> {
+    let probe =
+        rusqlite::Connection::open(path).map_err(|error| CoreError::Storage(error.to_string()))?;
+    probe
+        .busy_timeout(std::time::Duration::ZERO)
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    let held = match probe.execute_batch("BEGIN IMMEDIATE") {
+        Ok(()) => {
+            probe
+                .execute_batch("ROLLBACK")
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            false
+        }
+        Err(error) => error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy),
+    };
+    Ok(held)
+}
+
+struct PreparedRaceOutcome {
+    appended: Result<Event, CoreError>,
+    lifecycle: Result<KeyRegistryStateV1, CoreError>,
+    /// The contender reached its lifecycle call while the append held the
+    /// write lock, and had not completed when the append was released.
+    lifecycle_blocked: bool,
+}
+
+fn run_prepared_lifecycle_race(
+    path: &str,
+    material: SigningKeyMaterial,
+    registry: &KeyRegistryStateV1,
+    timeline: pos_core::TimelineId,
+    authorization: &PreparedSubjectAppendAuthorizationV1,
+    contender: LifecycleContender,
+    pause_in_sign: bool,
+) -> Result<PreparedRaceOutcome, Box<dyn std::error::Error>> {
+    let mut append_store = SqliteStore::open(path)?;
+    append_store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    // Lifecycle writes on an unbound handle need no erasure inventory fence,
+    // so only the append store's `BEGIN IMMEDIATE` can hold this contender back.
+    let mut lifecycle_store = SqliteStore::open(path)?;
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let outcome = std::thread::scope(|scope| -> Result<_, CoreError> {
+        let appending = scope.spawn(move || {
+            let mut payload =
+                |_: &TimelineEventEnvelopeInputV1| -> Result<CanonicalBytes, CoreError> {
+                    if !pause_in_sign {
+                        pause_for_contender(&entered_tx, &release_rx)?;
+                    }
+                    Ok(CanonicalBytes::from_static(b"ciphertext"))
+                };
+            let mut sign = |authorized: &mut KeyRegistryStateV1,
+                            envelope: &TimelineEventEnvelopeV1,
+                            bytes: &CanonicalBytes|
+             -> Result<Signature, CoreError> {
+                if pause_in_sign {
+                    pause_for_contender(&entered_tx, &release_rx)?;
+                }
+                registered_sign(&material, authorized, envelope, bytes)
+            };
+            append_prepared(
+                &mut append_store,
+                timeline,
+                registry,
+                authorization,
+                &mut payload,
+                &mut sign,
+            )
+        });
+        entered_rx
+            .recv()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let lifecycle = scope.spawn(move || {
+            attempt_tx
+                .send(())
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            let result =
+                contend_lifecycle(&mut lifecycle_store, contender, registry, authorization);
+            done_tx
+                .send(())
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            result
+        });
+        // The contender signals immediately before its destroy/rotate call.
+        // While the paused append holds `BEGIN IMMEDIATE`, a probe proves the
+        // write lock is taken, so the contender cannot have committed yet.
+        let attempted = attempt_rx.recv().is_ok();
+        let lock_probe = write_lock_is_held(path);
+        let not_completed = done_rx.try_recv().is_err();
+        // Release before propagating a probe error so the scope can join.
+        release_tx
+            .send(())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let lifecycle_blocked = attempted && lock_probe? && not_completed;
+        let appended = appending
+            .join()
+            .map_err(|_| CoreError::Storage("append thread panicked".to_owned()))?;
+        let lifecycle = lifecycle
+            .join()
+            .map_err(|_| CoreError::Storage("lifecycle thread panicked".to_owned()))?;
+        Ok(PreparedRaceOutcome {
+            appended,
+            lifecycle,
+            lifecycle_blocked,
+        })
+    })?;
+    Ok(outcome)
+}
+
+fn assert_prepared_lifecycle_race(
+    contender: LifecycleContender,
+    pause_in_sign: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("prepared-lifecycle-race.sqlite");
+    let path = path.to_str().ok_or("temporary SQLite path is not UTF-8")?;
+    let mut setup = SqliteStore::open(path)?;
+    let (material, registry, timeline, authorization) = prepared_fixture(&mut setup, true)?;
+    drop(setup);
+    let outcome = run_prepared_lifecycle_race(
+        path,
+        material,
+        &registry,
+        timeline,
+        &authorization,
+        contender,
+        pause_in_sign,
+    )?;
+    assert!(
+        outcome.lifecycle_blocked,
+        "{contender:?} was not blocked by the prepared append's write lock"
+    );
+    let appended = outcome.appended?;
+    let updated = outcome.lifecycle?;
+    assert_eq!(
+        appended.signature_identity,
+        Some(authorization.signing_identity)
+    );
+
+    let mut reopened = SqliteStore::open(path)?;
+    reopened.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    assert_eq!(reopened.load_key_registry()?, Some(updated.clone()));
+    // After the lifecycle change commits, neither the stale nor the updated
+    // registry authorizes another append with the old identities.
+    let calls = CallbackCounts::default();
+    for expected in [&registry, &updated] {
+        assert!(calls
+            .append(&mut reopened, timeline, expected, &authorization)
+            .is_err());
+    }
+    calls.assert_not_invoked();
+    assert_eq!(
+        reopened.read_own(timeline, SeqRange::all())?,
+        vec![appended]
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_prepared_append_fixes_both_identities_through_commit(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for contender in [
+        LifecycleContender::DestroySubject,
+        LifecycleContender::DestroySigning,
+        LifecycleContender::RotateSubject,
+        LifecycleContender::RotateSigning,
+    ] {
+        for pause_in_sign in [false, true] {
+            assert_prepared_lifecycle_race(contender, pause_in_sign)?;
+        }
+    }
+    Ok(())
 }
 
 const fn timeline_artifact(

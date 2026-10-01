@@ -58,10 +58,12 @@ use pos_core::{
     ForkAppendOperationV1, ForkAttributionOriginV1, ForkAuthorityOriginV1, ForkClassifiedEventV1,
     ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
     ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1,
-    ForkInterventionAdmissionV1, KeyRegistryStateV1, PersistedAuthorityV1, PreparedErasureCasV1,
-    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1,
-    PrincipalOwnerBindingV1, PublicKey, Signature, StoredErasureManifestV1,
-    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ForkInterventionAdmissionV1, KeyIdentityV1, KeyRegistryErrorV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, PersistedAuthorityV1,
+    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
+    PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PublicKey, Signature,
+    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE,
 };
 
 use crate::fork_admission_authority::{
@@ -4472,6 +4474,31 @@ impl MemoryStore {
     }
 }
 
+impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
+    fn with_decryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        // The mutable store owner is held through the callback, as it is for
+        // signing and destruction on this single-process adapter.
+        identity
+            .validate_historical_subject_decryption()
+            .and_then(|()| {
+                self.load_key_registry()
+                    .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
+            })
+            .and_then(|registry| registry.ok_or(KeyRegistryErrorV1::RegistryUnavailable))
+            .and_then(|mut registry| {
+                registry.with_decryption_authorization(identity, private_material_digest, operation)
+            })
+    }
+}
+
 impl EventStore for MemoryStore {
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         self.bind_erasure_gate_impl(gate)
@@ -4637,6 +4664,45 @@ impl EventStore for MemoryStore {
             .map_err(|error| {
                 CoreError::Storage(format!("Timeline signing authorization: {error}"))
             })?
+    }
+
+    fn append_prepared_subject_encrypted_timeline_signed(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        authorization: pos_core::PreparedSubjectAppendAuthorizationV1,
+        prepare_payload: &mut dyn FnMut(
+            &pos_core::TimelineEventEnvelopeInputV1,
+        ) -> Result<pos_core::CanonicalBytes, CoreError>,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &pos_core::CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        // `&mut self` is the registry serialization boundary: no other handle
+        // can rotate or destroy either identity until this call returns, so
+        // concurrent lifecycle races are statically impossible here.
+        self.checked_signing_registry(expected_registry)
+            .and_then(|mut registry| {
+                crate::prepare_subject_encrypted_timeline_event(
+                    &*self,
+                    self.hasher.as_ref(),
+                    timeline,
+                    &mut registry,
+                    &draft,
+                    &authorization,
+                    crate::PreparedAppendCallbacks {
+                        prepare_payload,
+                        sign,
+                    },
+                )
+            })
+            .and_then(|event| {
+                self.append_committed(timeline, std::slice::from_ref(&event))
+                    .map(|()| event)
+            })
     }
 
     fn begin_key_registry_destruction(
@@ -10795,6 +10861,18 @@ mod coverage_entrypoints {
         store.key_registry = Some(invalid.clone());
         assert!(store.load_key_registry().is_err());
         assert!(store.save_key_registry(&invalid).is_err());
+        let decryption_identity =
+            KeyIdentityV1::new("corrupt-owner", KeyRoleV1::SubjectDataEncryption, 1);
+        let decryption_result: Result<(), KeyRegistryErrorV1> = store
+            .with_decryption_authorization(
+                decryption_identity,
+                Hash::from_bytes([11; 32]),
+                Default::default,
+            );
+        assert_eq!(
+            decryption_result,
+            Err(KeyRegistryErrorV1::RegistryUnavailable)
+        );
         let identity = KeyIdentityV1::new("corrupt-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         let request = pos_core::KeyDestructionRequestV1::new(
             identity,
