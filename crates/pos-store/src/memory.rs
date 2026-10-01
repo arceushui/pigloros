@@ -62,16 +62,20 @@ use pos_core::{
     ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
     ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1, ForkAdmissionReceiptV1,
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAdmissionRecoveryProofV1,
-    ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkAttributionOriginV1,
-    ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
-    ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
-    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1,
-    ForkPublicationArtifactV1, ForkPublicationBindingV1, ForkPublicationOperationV1,
-    ForkPublicationReceiptV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, OwnerIdV1, PersistedAuthorityV1,
-    PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
+    validate_manifest_owner_admission_snapshot_v1, ForkAppendOperationV1,
+    ForkAppendSourceIdentityV1, ForkAttributionOriginV1, ForkAuthorityOriginV1,
+    ForkClassifiedEventV1, ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1,
+    ForkClassifierRegistrationV1, ForkClassifierSourceV1, ForkClassifierTableV1,
+    ForkEventClassifierV1, ForkInterventionAdmissionV1, ForkPublicationArtifactV1,
+    ForkPublicationBindingV1, ForkPublicationOperationV1, ForkPublicationReceiptV1, KeyIdentityV1,
+    KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1,
+    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
+    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
+    ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerAdmissionSnapshotV1, OwnerIdV1,
+    PersistedAuthorityV1, PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1,
+    PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, PreparedManifestOwnerAdmissionV1,
+    PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PublicKey, ReproManifestRootV1,
+    Signature, StoredErasureManifestV1,
     ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
@@ -283,6 +287,14 @@ pub struct MemoryStore {
     artifact_registration_identities: BTreeMap<(OwnerIdV1, ErasureArtifactClassV1, Hash), Hash>,
     /// Immutable `(owner, MRM1 operation ID) -> root registration` index.
     artifact_registration_operations: BTreeMap<(OwnerIdV1, Hash), Hash>,
+    /// Current local manifest-owner generation and complete owned Timeline set.
+    manifest_owner_admission_states: BTreeMap<[u8; 32], MemoryManifestOwnerAdmissionStateV1>,
+    /// Immutable historical MCA1/MSB1/MSR1 rows and exact scoped native copies.
+    manifest_owner_admission_snapshots:
+        BTreeMap<([u8; 32], u64, TimelineId), ManifestOwnerAdmissionSnapshotV1>,
+    /// Idempotent operation outcomes, including the original receipt digests.
+    manifest_owner_admission_operations:
+        BTreeMap<([u8; 32], Hash), MemoryManifestOwnerAdmissionOperationV1>,
     /// Crash-recoverable local adapter recorder sessions by owner/run ID.
     adapter_recording_sessions: BTreeMap<(Hash, Hash), MemoryAdapterRecordingSessionV1>,
     /// Canonical ERS1 history needed to validate predecessor links after restart.
@@ -320,6 +332,20 @@ struct MemoryAdapterRecordingSessionV1 {
     status: MemoryAdapterRecordingStatusV1,
     calls: BTreeMap<u64, MemoryAdapterRecordingCallV1>,
     transcript_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryManifestOwnerAdmissionStateV1 {
+    configuration_generation: u64,
+    previous_visible_lcq1_hash: Option<Hash>,
+    inventory_generation: Hash,
+    timelines: BTreeSet<TimelineId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryManifestOwnerAdmissionOperationV1 {
+    intent_digest: Hash,
+    result: ManifestOwnerAdmissionCommitV1,
 }
 
 #[derive(Clone, Copy)]
@@ -667,6 +693,9 @@ impl MemoryStore {
             artifact_registrations: BTreeMap::new(),
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
+            manifest_owner_admission_states: BTreeMap::new(),
+            manifest_owner_admission_snapshots: BTreeMap::new(),
+            manifest_owner_admission_operations: BTreeMap::new(),
             adapter_recording_sessions: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
             erasure_attempt_pages: BTreeMap::new(),
@@ -10898,6 +10927,316 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
         }
         self.validate_artifact_registration_closure(registration_address)?;
         Ok(Some(row.clone()))
+    }
+}
+
+impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
+    fn read_manifest_owner_state_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<ManifestOwnerAdmissionOwnerStateV1>, ManifestOwnerAdmissionErrorV1> {
+        let Some(state) = self.manifest_owner_admission_states.get(&owner_id) else {
+            let has_rows = self
+                .manifest_owner_admission_snapshots
+                .keys()
+                .any(|(stored_owner, _, _)| *stored_owner == owner_id)
+                || self
+                    .manifest_owner_admission_operations
+                    .keys()
+                    .any(|(stored_owner, _)| *stored_owner == owner_id);
+            return if has_rows {
+                Err(ManifestOwnerAdmissionErrorV1::CorruptState)
+            } else {
+                Ok(None)
+            };
+        };
+        if state.configuration_generation == 0
+            || state.timelines.is_empty()
+            || state.inventory_generation == Hash::zero()
+            || state.previous_visible_lcq1_hash == Some(Hash::zero())
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let current_generation_rows = self
+            .manifest_owner_admission_snapshots
+            .keys()
+            .filter(|(stored_owner, generation, _)| {
+                *stored_owner == owner_id && *generation == state.configuration_generation
+            })
+            .count();
+        if current_generation_rows != state.timelines.len() {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut owner_operation = None;
+        let mut owner_catalog = None;
+        let mut scopes = HashSet::with_capacity(state.timelines.len());
+        let mut receipt_hashes = Vec::with_capacity(state.timelines.len());
+        for timeline_id in &state.timelines {
+            let snapshot = self
+                .manifest_owner_admission_snapshots
+                .get(&(owner_id, state.configuration_generation, *timeline_id))
+                .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+            if snapshot.resulting_inventory_generation != state.inventory_generation
+                || snapshot.timeline.timeline_id != *timeline_id
+                || snapshot.timeline.receipt.as_input().previous_visible_lcq1_hash
+                    != state.previous_visible_lcq1_hash
+                || owner_operation.is_some_and(|operation| operation != snapshot.operation_id)
+                || owner_catalog.is_some_and(|catalog| catalog != snapshot.catalog.digest())
+                || !scopes.insert(snapshot.timeline.scope)
+                || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+            owner_operation = Some(snapshot.operation_id);
+            owner_catalog = Some(snapshot.catalog.digest());
+            receipt_hashes.push(snapshot.timeline.receipt.digest());
+        }
+        let operation_id = owner_operation.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        let operation = self
+            .manifest_owner_admission_operations
+            .get(&(owner_id, operation_id))
+            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        if operation.result.kind != ManifestOwnerAdmissionCommitKindV1::Applied
+            || operation.result.configuration_generation != state.configuration_generation
+            || operation.result.inventory_generation != state.inventory_generation
+            || operation.result.receipt_hashes != receipt_hashes
+            || self
+                .manifest_owner_admission_operations
+                .iter()
+                .filter(|((stored_owner, _), operation)| {
+                    *stored_owner == owner_id
+                        && operation.result.configuration_generation
+                            == state.configuration_generation
+                })
+                .count()
+                != 1
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        Ok(Some(ManifestOwnerAdmissionOwnerStateV1 {
+            owner_id,
+            configuration_generation: state.configuration_generation,
+            previous_visible_lcq1_hash: state.previous_visible_lcq1_hash,
+            inventory_generation: state.inventory_generation,
+            timelines: state.timelines.iter().copied().collect(),
+        }))
+    }
+
+    fn resolve_manifest_owner_admission_retry_v1(
+        &self,
+        owner_id: [u8; 32],
+        operation_id: Hash,
+        intent_digest: Hash,
+    ) -> Result<Option<ManifestOwnerAdmissionCommitV1>, ManifestOwnerAdmissionErrorV1> {
+        self.read_manifest_owner_state_v1(owner_id)?;
+        let Some(operation) = self
+            .manifest_owner_admission_operations
+            .get(&(owner_id, operation_id))
+        else {
+            return Ok(None);
+        };
+        if operation.intent_digest != intent_digest {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+        let result = &operation.result;
+        if result.kind != ManifestOwnerAdmissionCommitKindV1::Applied
+            || result.configuration_generation == 0
+            || result.inventory_generation == Hash::zero()
+            || result.receipt_hashes.is_empty()
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut receipt_hashes = Vec::with_capacity(result.receipt_hashes.len());
+        let mut row_count = 0;
+        for ((stored_owner, generation, timeline_id), snapshot) in
+            &self.manifest_owner_admission_snapshots
+        {
+            if *stored_owner == owner_id && *generation == result.configuration_generation {
+                row_count += 1;
+                if snapshot.operation_id != operation_id
+                    || snapshot.timeline.timeline_id != *timeline_id
+                    || snapshot.resulting_inventory_generation != result.inventory_generation
+                    || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+                {
+                    return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+                }
+                receipt_hashes.push(snapshot.timeline.receipt.digest());
+            }
+        }
+        if row_count != result.receipt_hashes.len() || receipt_hashes != result.receipt_hashes {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut retry = result.clone();
+        retry.kind = ManifestOwnerAdmissionCommitKindV1::ExactRetry;
+        Ok(Some(retry))
+    }
+
+    fn commit_manifest_owner_admission_v1(
+        &mut self,
+        batch: PreparedManifestOwnerAdmissionV1,
+    ) -> Result<ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1> {
+        let input = batch.input();
+        let owner_id = input.catalog.as_input().owner_id;
+        let current_state = self.read_manifest_owner_state_v1(owner_id)?;
+        if let Some(result) = self.resolve_manifest_owner_admission_retry_v1(
+            owner_id,
+            input.operation_id,
+            batch.intent_digest(),
+        )? {
+            return Ok(result);
+        }
+
+        match (
+            input.expected_configuration_generation,
+            current_state,
+        ) {
+            (None, None) => {}
+            (Some(expected_generation), Some(state))
+                if state.configuration_generation == expected_generation
+                    && state.previous_visible_lcq1_hash == input.previous_visible_lcq1_hash
+                    && Some(state.inventory_generation) == input.expected_inventory_generation
+                    && !state.timelines.is_empty()
+                    && expected_generation.checked_add(1)
+                        == Some(input.catalog.as_input().configuration_generation) => {}
+            _ => return Err(ManifestOwnerAdmissionErrorV1::Conflict),
+        }
+
+        let configuration_generation = input.catalog.as_input().configuration_generation;
+        if input.timelines.iter().any(|timeline| {
+            self.manifest_owner_admission_snapshots.contains_key(&(
+                owner_id,
+                configuration_generation,
+                timeline.timeline_id,
+            ))
+        }) {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+
+        let result = ManifestOwnerAdmissionCommitV1 {
+            kind: ManifestOwnerAdmissionCommitKindV1::Applied,
+            configuration_generation,
+            inventory_generation: input.resulting_inventory_generation,
+            receipt_hashes: input
+                .timelines
+                .iter()
+                .map(|timeline| timeline.receipt.digest())
+                .collect(),
+        };
+        let snapshots: Vec<_> = input
+            .timelines
+            .iter()
+            .map(|timeline| {
+                (
+                    (owner_id, configuration_generation, timeline.timeline_id),
+                    ManifestOwnerAdmissionSnapshotV1 {
+                        catalog: input.catalog.clone(),
+                        timeline: timeline.clone(),
+                        operation_id: input.operation_id,
+                        expected_inventory_generation: input.expected_inventory_generation,
+                        resulting_inventory_generation: input.resulting_inventory_generation,
+                    },
+                )
+            })
+            .collect();
+        let next_state = MemoryManifestOwnerAdmissionStateV1 {
+            configuration_generation,
+            previous_visible_lcq1_hash: input.previous_visible_lcq1_hash,
+            inventory_generation: input.resulting_inventory_generation,
+            timelines: input
+                .timelines
+                .iter()
+                .map(|timeline| timeline.timeline_id)
+                .collect(),
+        };
+        let operation = MemoryManifestOwnerAdmissionOperationV1 {
+            intent_digest: batch.intent_digest(),
+            result: result.clone(),
+        };
+
+        for (key, snapshot) in snapshots {
+            self.manifest_owner_admission_snapshots.insert(key, snapshot);
+        }
+        self.manifest_owner_admission_states
+            .insert(owner_id, next_state);
+        self.manifest_owner_admission_operations
+            .insert((owner_id, input.operation_id), operation);
+        Ok(result)
+    }
+
+    fn read_manifest_owner_admission_v1(
+        &self,
+        owner_id: [u8; 32],
+        configuration_generation: u64,
+        timeline_id: TimelineId,
+    ) -> Result<Option<ManifestOwnerAdmissionSnapshotV1>, ManifestOwnerAdmissionErrorV1> {
+        let Some(snapshot) = self.manifest_owner_admission_snapshots.get(&(
+            owner_id,
+            configuration_generation,
+            timeline_id,
+        )) else {
+            return Ok(None);
+        };
+        if snapshot.catalog.as_input().owner_id != owner_id
+            || snapshot.catalog.as_input().configuration_generation != configuration_generation
+            || snapshot.timeline.timeline_id != timeline_id
+            || snapshot.timeline.receipt.digest() == Hash::zero()
+            || snapshot.resulting_inventory_generation == Hash::zero()
+            || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let operation = self
+            .manifest_owner_admission_operations
+            .get(&(owner_id, snapshot.operation_id))
+            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        if operation.result.configuration_generation != configuration_generation
+            || operation.result.inventory_generation != snapshot.resulting_inventory_generation
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut generation_receipts = Vec::new();
+        let mut generation_operations = 0_usize;
+        for ((stored_owner, stored_operation_id), stored_operation) in
+            &self.manifest_owner_admission_operations
+        {
+            if *stored_owner == owner_id
+                && stored_operation.result.configuration_generation == configuration_generation
+            {
+                generation_operations += 1;
+                if *stored_operation_id != snapshot.operation_id {
+                    return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+                }
+            }
+        }
+        for ((stored_owner, stored_generation, stored_timeline), stored_snapshot) in
+            &self.manifest_owner_admission_snapshots
+        {
+            if *stored_owner != owner_id || *stored_generation != configuration_generation {
+                continue;
+            }
+            if stored_snapshot.operation_id != snapshot.operation_id
+                || stored_snapshot.resulting_inventory_generation
+                    != snapshot.resulting_inventory_generation
+                || stored_snapshot.timeline.receipt.as_input().previous_visible_lcq1_hash
+                    != snapshot.timeline.receipt.as_input().previous_visible_lcq1_hash
+                || validate_manifest_owner_admission_snapshot_v1(stored_snapshot).is_err()
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+            generation_receipts.push(stored_snapshot.timeline.receipt.digest());
+            if *stored_timeline == timeline_id
+                && stored_snapshot.timeline.receipt.digest() != snapshot.timeline.receipt.digest()
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+        }
+        if generation_operations != 1
+            || generation_receipts.is_empty()
+            || generation_receipts != operation.result.receipt_hashes
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        Ok(Some(snapshot.clone()))
     }
 }
 
