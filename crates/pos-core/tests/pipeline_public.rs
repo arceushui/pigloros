@@ -338,6 +338,65 @@ fn receipt_requires_exact_committed_content_and_contiguous_store_order() {
 }
 
 #[test]
+fn retained_receipt_rebuilds_the_original_receipt_without_the_basis() {
+    let drafts = vec![draft(b"a"), draft(b"b")];
+    let basis = basis(
+        PipelineIngressV1::HumanProposedAction,
+        TentativePipelineResultV1::HumanDomainApproval(ok(PipelineEvidenceRefV1::try_new(hash(
+            20,
+        )))),
+        drafts.clone(),
+    );
+    let events = vec![committed(&drafts[0], 40, 9), committed(&drafts[1], 41, 10)];
+    let original = ok(PipelineCommitReceiptV1::try_from_committed_events(
+        &basis,
+        timeline(1),
+        &events,
+    ));
+
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_retained_events(
+            basis.attempt().attempt_id(),
+            timeline(1),
+            basis.batch().digest(),
+            &events,
+        ),
+        Ok(original)
+    );
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_retained_events(
+            basis.attempt().attempt_id(),
+            timeline(1),
+            basis.batch().digest(),
+            &[],
+        ),
+        Err(PipelineContractErrorV1::CommittedBatchMismatch)
+    );
+    let mut non_contiguous = events.clone();
+    non_contiguous[1].seq = Seq::from_u64(12);
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_retained_events(
+            basis.attempt().attempt_id(),
+            timeline(1),
+            basis.batch().digest(),
+            &non_contiguous,
+        ),
+        Err(PipelineContractErrorV1::NonContiguousCommit)
+    );
+    let mut duplicate_id = events;
+    duplicate_id[1].id = duplicate_id[0].id;
+    assert_eq!(
+        PipelineCommitReceiptV1::try_from_retained_events(
+            basis.attempt().attempt_id(),
+            timeline(1),
+            basis.batch().digest(),
+            &duplicate_id,
+        ),
+        Err(PipelineContractErrorV1::InvalidCommittedIdentity)
+    );
+}
+
+#[test]
 fn outcome_set_distinguishes_every_fail_closed_state() {
     let outcomes = [
         PipelineOutcomeV1::Rejected,

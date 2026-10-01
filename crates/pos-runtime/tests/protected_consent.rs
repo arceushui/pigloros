@@ -1961,6 +1961,21 @@ impl pos_core::PipelineAdmissionPortV1 for LostOutcomePorts<'_> {
             limit,
         )
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: pos_core::TimelineId,
+        key: pos_core::AppendDedupKey,
+        attempt_id: pos_core::PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
+        pos_core::PipelineAdmissionPortV1::lookup_pipeline_receipt(
+            &mut *self.0,
+            timeline,
+            key,
+            attempt_id,
+        )
+    }
 }
 
 impl pos_core::PipelineAdmissionFencePublisherV1 for LostOutcomePorts<'_> {

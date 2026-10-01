@@ -15,15 +15,16 @@ use pos_core::{
     error::CoreError,
     event::Event,
     ids::TimelineId,
-    store::{checked_append_identity_expires_at, AppendDedupKey, PurgeOutcome},
+    store::{checked_append_identity_expires_at, AppendDedupKey, AppendDedupScope, PurgeOutcome},
     ErasureProtectedOperationV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineOutcomeV1,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineOutcomeV1,
+    PipelineReceiptLookupV1,
 };
 
 use super::MemoryStore;
 use crate::{
     committed_pipeline_receipt, evaluate_pipeline_admission, install_or_reject,
-    recovered_pipeline_receipt, PipelinePersistedStateV1,
+    recovered_pipeline_receipt, retained_pipeline_receipt, PipelinePersistedStateV1,
 };
 
 #[cfg(test)]
@@ -36,10 +37,14 @@ thread_local! {
 #[derive(Clone, Copy)]
 pub(super) struct PipelineReceiptRecordV1 {
     timeline: TimelineId,
+    /// Subject-scoped cleanup group shared with append identities.
+    pub(super) scope: AppendDedupScope,
+    pub(super) expires_at: WallTime,
+    attempt_id: PipelineAttemptIdV1,
     basis_digest: Hash,
+    draft_batch_digest: Hash,
     first_local_seq: u64,
     event_count: usize,
-    expires_at: WallTime,
 }
 
 impl MemoryStore {
@@ -76,17 +81,52 @@ impl MemoryStore {
         if record.timeline != timeline || record.basis_digest != basis.digest() {
             return Ok(PipelineOutcomeV1::AdmissionConflict);
         }
-        self.logical_prefix(timeline)
-            .and_then(|prefix| {
-                self.state(timeline)
-                    .events
-                    .iter()
-                    .skip_while(|event| event.seq.as_u64() < record.first_local_seq)
-                    .take(record.event_count)
-                    .map(|event| Self::logical_event(prefix, event.clone()))
-                    .collect::<Result<Vec<_>, _>>()
-            })
+        self.retained_pipeline_events(timeline, record)
             .and_then(|events| recovered_pipeline_receipt(basis, timeline, &events))
+    }
+
+    /// The committed logical Events a retained receipt record names.
+    fn retained_pipeline_events(
+        &self,
+        timeline: TimelineId,
+        record: PipelineReceiptRecordV1,
+    ) -> Result<Vec<Event>, CoreError> {
+        self.logical_prefix(timeline).and_then(|prefix| {
+            self.state(timeline)
+                .events
+                .iter()
+                .skip_while(|event| event.seq.as_u64() < record.first_local_seq)
+                .take(record.event_count)
+                .map(|event| Self::logical_event(prefix, event.clone()))
+                .collect::<Result<Vec<_>, _>>()
+        })
+    }
+
+    /// Resolve a basis-free receipt lookup for one visible Timeline.
+    fn lookup_visible_pipeline_receipt(
+        &self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+        now: WallTime,
+    ) -> Result<PipelineReceiptLookupV1, CoreError> {
+        match self.pipeline_admission_receipts.get(&key).copied() {
+            Some(record) if record.expires_at > now => {
+                if record.timeline != timeline || record.attempt_id != attempt_id {
+                    return Ok(PipelineReceiptLookupV1::Conflict);
+                }
+                self.retained_pipeline_events(timeline, record)
+                    .and_then(|events| {
+                        retained_pipeline_receipt(
+                            attempt_id,
+                            timeline,
+                            record.draft_batch_digest,
+                            &events,
+                        )
+                    })
+            }
+            Some(_) | None => Ok(PipelineReceiptLookupV1::Absent),
+        }
     }
 
     fn commit_pipeline_batch(
@@ -156,10 +196,13 @@ impl MemoryStore {
                     basis.attempt().idempotency().dedup_key,
                     PipelineReceiptRecordV1 {
                         timeline,
+                        scope: basis.attempt().idempotency().scope,
+                        expires_at,
+                        attempt_id: basis.attempt().attempt_id(),
                         basis_digest: basis.digest(),
+                        draft_batch_digest: basis.batch().digest(),
                         first_local_seq,
                         event_count: committed.len(),
-                        expires_at,
                     },
                 );
                 PipelineOutcomeV1::Committed(receipt)
@@ -214,6 +257,23 @@ impl PipelineAdmissionPortV1 for MemoryStore {
                     .ensure_generic_fork_append_is_rejected(timeline)
                     .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
                     .and_then(|()| store.admit_visible_pipeline_batch(timeline, basis, now))
+            })
+        })
+    }
+
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<PipelineReceiptLookupV1, CoreError> {
+        self.clock.now().and_then(|now| {
+            self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+                store
+                    .ensure_generic_timeline_visibility(timeline)
+                    .and_then(|()| {
+                        store.lookup_visible_pipeline_receipt(timeline, key, attempt_id, now)
+                    })
             })
         })
     }

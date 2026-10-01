@@ -729,6 +729,8 @@ pub enum ExperimentError {
     SessionFaulted,
     #[error("consent has been revoked at the completed Tick Boundary")]
     ConsentRevokedV1,
+    #[error("action was not admitted: {0}")]
+    ActionNotAdmitted(Box<pos_runtime::HumanActionAdmissionErrorV1>),
     #[error("cadence time regressed from {previous_ns}ns to {requested_ns}ns")]
     CadenceTimeRegressed {
         previous_ns: u128,
@@ -958,6 +960,44 @@ fn observe_and_step_drivers(
         step_driver_with_completed_prefix(store, timeline_id, registry, observed_through)
             .map(|drafts| (revisions, drafts))
     })
+}
+
+/// Admit one human `ProposedAction` through the local host's atomic admission.
+///
+/// The host observes the current revisions and Logical Head before the
+/// owning `ActionApprover` runs, so a commit in between makes the attempt
+/// stale rather than letting an approval from older state commit.
+fn admit_human_action(
+    store: &mut dyn ScheduledAdmissionStoreV1,
+    registry: &PluginRegistry,
+    proposal: &pos_core::ProposedAction,
+    timeline_id: pos_core::ids::TimelineId,
+) -> Result<usize, ExperimentError> {
+    observe_scheduled_admission(store, registry, timeline_id)
+        .and_then(|revisions| {
+            store
+                .logical_head(timeline_id)
+                .map(|head| (revisions, head))
+                .map_err(ExperimentError::from)
+        })
+        .and_then(|(revisions, head)| {
+            LocalScheduledAdmissionHostV1::shared()
+                .map_err(map_runtime_error)
+                .and_then(|host| {
+                    host.admit_action(registry, store, proposal, revisions, (timeline_id, head))
+                        .map_err(map_human_admission_error)
+                })
+        })
+        .map(|receipt| receipt.receipt().committed_events().len())
+}
+
+fn map_human_admission_error(error: pos_runtime::HumanActionAdmissionErrorV1) -> ExperimentError {
+    match error {
+        pos_runtime::HumanActionAdmissionErrorV1::Submission(error) => {
+            map_action_submission_error(error)
+        }
+        error => ExperimentError::ActionNotAdmitted(Box::new(error)),
+    }
 }
 
 fn append_nonempty_driver_drafts(
@@ -1833,23 +1873,7 @@ impl ExperimentSession {
         &mut self,
         drafts: &[pos_core::event::EventDraft],
     ) -> Result<u64, ExperimentError> {
-        if self.health == SessionHealth::Faulted {
-            return Err(ExperimentError::SessionFaulted);
-        }
-        if self.consent_revoked
-            || self.consent_revocation_pending.is_some()
-            || drafts
-                .iter()
-                .any(|draft| self.revoked_subjects.contains(&draft.entity))
-        {
-            return Err(ExperimentError::ConsentRevokedV1);
-        }
-        if drafts
-            .iter()
-            .any(|draft| pos_core::is_consent_event_type(&draft.event_type))
-        {
-            return Err(ExperimentError::ConsentRevokedV1);
-        }
+        self.ensure_session_accepts(drafts.iter().map(|draft| (draft.entity, &draft.event_type)))?;
         self.registry.schemas.validate_batch(drafts)?;
         if drafts.is_empty() {
             return Ok(0);
@@ -1883,23 +1907,29 @@ impl ExperimentSession {
 
     /// Submit one external action through the owning Plugin's authority seam.
     ///
-    /// The approved Event is appended only at the current completed Tick
-    /// Boundary. Callers cannot bypass the Plugin's actor, capability, schema,
-    /// and domain validation by supplying an arbitrary `EventDraft`.
+    /// The local session host admits the action on the ADR-021
+    /// `HumanProposedAction` path: the owning `ActionApprover` result stays
+    /// tentative until the store compares the complete admission basis and
+    /// commits it at the current completed Tick Boundary. Callers cannot
+    /// bypass the Plugin's actor, capability, and domain validation by
+    /// supplying an arbitrary `EventDraft`, and a rejected action is never
+    /// retried.
     ///
     /// # Errors
-    /// Returns the owning Plugin's action rejection or a store/runtime error
-    /// when the approved Event cannot be appended and folded.
+    /// Returns the owning Plugin's action rejection, an
+    /// [`ExperimentError::ActionNotAdmitted`] outcome, or a store/runtime
+    /// error when the approved Event cannot be admitted and folded. An
+    /// admission error commits no Event.
     pub fn submit_action(
         &mut self,
         proposal: &pos_core::ProposedAction,
     ) -> Result<u64, ExperimentError> {
-        let draft = self
-            .registry
-            .submit_action(self.timeline.id(), proposal)
-            .map_err(map_action_submission_error)?;
+        self.ensure_session_accepts(std::iter::once((
+            proposal.actor_entity_id,
+            &proposal.event_type,
+        )))?;
         let Some(token) = self.operation_token.clone() else {
-            return self.append_events(std::slice::from_ref(&draft));
+            return self.admit_action(proposal);
         };
         let gate = self
             .registry
@@ -1917,7 +1947,7 @@ impl ExperimentSession {
             pos_runtime::RuntimeError::ConsentOperationUnavailable,
         ));
         let mut append = || {
-            result = self.append_events(std::slice::from_ref(&draft));
+            result = self.admit_action(proposal);
         };
         gate.with_token_fence(
             timeline_id,
@@ -1928,6 +1958,55 @@ impl ExperimentSession {
         )
         .map_err(|error| map_runtime_error(pos_runtime::RuntimeError::Consent(error)))?;
         result
+    }
+
+    /// Reject Events, or an action's Event, the session can no longer accept.
+    ///
+    /// Shared by direct appends and action admission, so both fail closed for
+    /// a faulted session, a revoked or closing consent scope, a revoked
+    /// subject, and any consent lifecycle Event type before any write.
+    fn ensure_session_accepts<'a>(
+        &self,
+        mut events: impl Iterator<Item = (EntityId, &'a pos_core::Kind)>,
+    ) -> Result<(), ExperimentError> {
+        if self.health == SessionHealth::Faulted {
+            return Err(ExperimentError::SessionFaulted);
+        }
+        if self.consent_revoked
+            || self.consent_revocation_pending.is_some()
+            || events.any(|(entity, event_type)| {
+                self.revoked_subjects.contains(&entity)
+                    || pos_core::is_consent_event_type(event_type)
+            })
+        {
+            return Err(ExperimentError::ConsentRevokedV1);
+        }
+        Ok(())
+    }
+
+    /// Admit one approved action through the local host, then fold it.
+    ///
+    /// The owning Plugin's `ActionApprover` runs inside host admission; its
+    /// draft commits only when the store accepts the complete basis, and the
+    /// committed Event becomes visible through the normal boundary fold.
+    fn admit_action(
+        &mut self,
+        proposal: &pos_core::ProposedAction,
+    ) -> Result<u64, ExperimentError> {
+        let timeline_id = self.timeline.id();
+        let committed = lock_store(&self.store).and_then(|mut store| {
+            admit_human_action(store.as_mut(), &self.registry, proposal, timeline_id)
+        })?;
+        let after = match lock_store(&self.store).and_then(|store| {
+            capture_pending_range(&**store, timeline_id, self.boundary.folded_through)
+        }) {
+            Ok(captured) => captured,
+            Err(error) => {
+                self.health = SessionHealth::Faulted;
+                return Err(error);
+            }
+        };
+        self.finish_append_after(&after, committed)
     }
 
     /// Close this host session at the next Tick Boundary.
@@ -3867,6 +3946,16 @@ pub mod tests {
             limit: std::num::NonZeroUsize,
         ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
             self.base.purge_expired_pipeline_receipts_bounded(limit)
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn lookup_pipeline_receipt(
+            &mut self,
+            timeline: pos_core::TimelineId,
+            key: pos_core::AppendDedupKey,
+            attempt_id: pos_core::PipelineAttemptIdV1,
+        ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
+            self.base.lookup_pipeline_receipt(timeline, key, attempt_id)
         }
     }
 

@@ -4838,17 +4838,26 @@ impl EventStore for MemoryStore {
         scope: AppendDedupScope,
         limit: std::num::NonZeroUsize,
     ) -> Result<PurgeOutcome, CoreError> {
+        // Admitted-batch receipts share the subject-scoped cleanup group, so a
+        // consent revocation also releases the subject's action retry keys.
         let mut matching: Vec<_> = self
             .append_identities
             .iter()
             .filter(|(_, record)| record.scope == scope)
             .map(|(key, record)| (record.expires_at, *key))
+            .chain(
+                self.pipeline_admission_receipts
+                    .iter()
+                    .filter(|(_, record)| record.scope == scope)
+                    .map(|(key, record)| (record.expires_at, *key)),
+            )
             .collect();
         matching.sort_unstable_by_key(|(expires_at, key)| (*expires_at, key.as_bytes()));
         let more_may_remain = matching.len() > limit.get();
         let removed = matching.len().min(limit.get());
         for (_, key) in matching.into_iter().take(removed) {
             self.append_identities.remove(&key);
+            self.pipeline_admission_receipts.remove(&key);
         }
         if more_may_remain {
             if !self.pending_append_identity_cleanup.contains(&scope) {

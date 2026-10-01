@@ -277,7 +277,7 @@ pub use pipeline::{
 pub use pipeline_admission::{
     pipeline_authority_revision_v1, pipeline_erasure_revision_v1,
     PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
-    PIPELINE_ADMISSION_FENCE_BYTES_V1,
+    PipelineReceiptLookupV1, PIPELINE_ADMISSION_FENCE_BYTES_V1,
 };
 pub use plugin::{
     ActionApprover, ActionRejected, Capability, Plugin, ProposedAction,

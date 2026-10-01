@@ -6,9 +6,10 @@ use pos_core::{
     clock::{Seq, WallTime},
     error::CoreError,
     ids::TimelineId,
-    store::{checked_append_identity_expires_at, AppendDedupKey, PurgeOutcome},
-    ErasureProtectedOperationV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineContractErrorV1, PipelineOutcomeV1,
+    store::{checked_append_identity_expires_at, AppendDedupKey, AppendDedupScope, PurgeOutcome},
+    ErasureProtectedOperationV1, Hash, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
+    PipelineContractErrorV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -18,7 +19,7 @@ use super::{
 };
 use crate::{
     committed_pipeline_receipt, evaluate_pipeline_admission, install_or_reject,
-    recovered_pipeline_receipt, PipelinePersistedStateV1,
+    recovered_pipeline_receipt, retained_pipeline_receipt, PipelinePersistedStateV1,
 };
 
 /// `SQLite` treats a negative `LIMIT` as having no upper bound.
@@ -66,7 +67,25 @@ const PIPELINE_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
                 primary_key: false,
             },
             SqliteSchemaColumn {
+                name: "scope_key",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "attempt_id",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
                 name: "basis_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "draft_batch_digest",
                 kind: "BLOB",
                 not_null: true,
                 primary_key: false,
@@ -92,7 +111,10 @@ const PIPELINE_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
         ],
         constraints: &[
             "CHECK (length(dedup_key) = 32)",
+            "CHECK (length(scope_key) = 32)",
+            "CHECK (length(attempt_id) = 16)",
             "CHECK (length(basis_digest) = 32)",
+            "CHECK (length(draft_batch_digest) = 32)",
             "CHECK (first_local_seq >= 1)",
             "CHECK (event_count >= 1)",
         ],
@@ -102,26 +124,38 @@ const PIPELINE_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
 /// Retained exact-retry row for one committed admitted batch.
 struct RetainedPipelineReceiptV1 {
     timeline: String,
+    attempt_id: [u8; 16],
     basis_digest: Vec<u8>,
+    draft_batch_digest: [u8; 32],
     first_local_seq: u64,
     event_count: usize,
     expires_at: WallTime,
 }
 
 /// Raw integer columns of one retained receipt row before range validation.
-type RetainedPipelineReceiptRowV1 = (String, Vec<u8>, i64, i64, i64);
+type RetainedPipelineReceiptRowV1 = (String, [u8; 16], Vec<u8>, [u8; 32], i64, i64, i64);
 
 impl RetainedPipelineReceiptV1 {
     /// Validate a raw row; an out-of-range integer is a storage error rather
     /// than a clamped value.
     fn try_from_row(row: RetainedPipelineReceiptRowV1) -> Result<Self, CoreError> {
-        let (timeline, basis_digest, first_local_seq, event_count, expires_at) = row;
+        let (
+            timeline,
+            attempt_id,
+            basis_digest,
+            draft_batch_digest,
+            first_local_seq,
+            event_count,
+            expires_at,
+        ) = row;
         u64::try_from(first_local_seq)
             .and_then(|first_local_seq| {
                 usize::try_from(event_count).and_then(|event_count| {
                     u64::try_from(expires_at).map(|expires_at| Self {
                         timeline,
+                        attempt_id,
                         basis_digest,
+                        draft_batch_digest,
                         first_local_seq,
                         event_count,
                         expires_at: WallTime::from_micros(expires_at),
@@ -146,6 +180,8 @@ impl SqliteStore {
                  {}
                  CREATE INDEX IF NOT EXISTS idx_pipeline_admission_receipts_expiry
                  ON pipeline_admission_receipts(expires_at, dedup_key);
+                 CREATE INDEX IF NOT EXISTS idx_pipeline_admission_receipts_scope
+                 ON pipeline_admission_receipts(scope_key, expires_at, dedup_key);
                  COMMIT;",
                 sqlite_schema_ddl(PIPELINE_ADMISSION_SCHEMA_TABLES)
             ))
@@ -209,6 +245,17 @@ impl SqliteStore {
         {
             return Ok(PipelineOutcomeV1::AdmissionConflict);
         }
+        self.retained_pipeline_events(timeline, prefix, record)
+            .and_then(|events| recovered_pipeline_receipt(basis, timeline, &events))
+    }
+
+    /// The committed logical Events a retained receipt row names.
+    fn retained_pipeline_events(
+        &self,
+        timeline: TimelineId,
+        prefix: u64,
+        record: &RetainedPipelineReceiptV1,
+    ) -> Result<Vec<pos_core::Event>, CoreError> {
         Self::read_own_events_limited_on(
             &self.conn,
             timeline,
@@ -224,7 +271,53 @@ impl SqliteStore {
                 .map(|event| Self::logical_event(prefix, event))
                 .collect::<Result<Vec<_>, _>>()
         })
-        .and_then(|events| recovered_pipeline_receipt(basis, timeline, &events))
+    }
+
+    /// Resolve a basis-free receipt lookup inside one read transaction.
+    fn lookup_visible_pipeline_receipt(
+        &self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+        now: WallTime,
+    ) -> Result<PipelineReceiptLookupV1, CoreError> {
+        begin_immediate_scope(&self.conn).and_then(|scope| {
+            let result = self
+                .validate_erasure_inventory_data_version()
+                .and_then(|()| Self::fork_chain_with_leaf_head_on(&self.conn, timeline))
+                .and_then(|(chain, _)| {
+                    let prefix = chain.last().map_or(0, |(_, fork)| fork.as_u64());
+                    read_retained_receipt(&self.conn, key).and_then(|retained| match retained {
+                        Some(record) if record.expires_at > now => {
+                            self.retained_lookup(timeline, prefix, attempt_id, &record)
+                        }
+                        Some(_) | None => Ok(PipelineReceiptLookupV1::Absent),
+                    })
+                });
+            finish_immediate_scope(&self.conn, scope, result)
+        })
+    }
+
+    /// Rebuild the receipt of an unexpired retained row, or report a conflict.
+    fn retained_lookup(
+        &self,
+        timeline: TimelineId,
+        prefix: u64,
+        attempt_id: PipelineAttemptIdV1,
+        record: &RetainedPipelineReceiptV1,
+    ) -> Result<PipelineReceiptLookupV1, CoreError> {
+        if record.timeline != timeline.to_string() || record.attempt_id != attempt_id.as_bytes() {
+            return Ok(PipelineReceiptLookupV1::Conflict);
+        }
+        self.retained_pipeline_events(timeline, prefix, record)
+            .and_then(|events| {
+                retained_pipeline_receipt(
+                    attempt_id,
+                    timeline,
+                    Hash::from_bytes(record.draft_batch_digest),
+                    &events,
+                )
+            })
     }
 
     fn commit_pipeline_batch(
@@ -318,11 +411,15 @@ fn write_receipt(
         .and_then(|(first_local_seq, event_count, expires_at)| {
             conn.execute(
                 "INSERT INTO pipeline_admission_receipts
-                 (dedup_key, timeline_id, basis_digest, first_local_seq, event_count, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 (dedup_key, timeline_id, scope_key, attempt_id, basis_digest,
+                  draft_batch_digest, first_local_seq, event_count, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(dedup_key) DO UPDATE SET
                      timeline_id = excluded.timeline_id,
+                     scope_key = excluded.scope_key,
+                     attempt_id = excluded.attempt_id,
                      basis_digest = excluded.basis_digest,
+                     draft_batch_digest = excluded.draft_batch_digest,
                      first_local_seq = excluded.first_local_seq,
                      event_count = excluded.event_count,
                      expires_at = excluded.expires_at",
@@ -334,7 +431,10 @@ fn write_receipt(
                         .as_bytes()
                         .as_slice(),
                     timeline.to_string(),
+                    basis.attempt().idempotency().scope.as_bytes().as_slice(),
+                    basis.attempt().attempt_id().as_bytes().as_slice(),
                     basis.digest().as_bytes().as_slice(),
+                    basis.batch().digest().as_bytes().as_slice(),
                     first_local_seq,
                     event_count,
                     expires_at,
@@ -343,6 +443,27 @@ fn write_receipt(
             .map(|_| ())
             .map_err(SqliteStore::into_storage_error)
         })
+}
+
+/// Remove one subject-scoped retry identity, whether an append identity or
+/// an admitted-batch receipt, inside the caller's cleanup transaction.
+pub(super) fn delete_scoped_identity(
+    conn: &Connection,
+    scope: AppendDedupScope,
+    key: &[u8],
+) -> Result<(), CoreError> {
+    conn.execute(
+        "DELETE FROM append_identities WHERE scope_key = ?1 AND dedup_key = ?2",
+        params![scope.as_bytes().as_slice(), key],
+    )
+    .and_then(|_| {
+        conn.execute(
+            "DELETE FROM pipeline_admission_receipts WHERE scope_key = ?1 AND dedup_key = ?2",
+            params![scope.as_bytes().as_slice(), key],
+        )
+    })
+    .map(|_| ())
+    .map_err(SqliteStore::into_storage_error)
 }
 
 /// Remove admission rows owned by a Timeline inside its deletion transaction.
@@ -369,22 +490,29 @@ fn read_retained_receipt(
     key: AppendDedupKey,
 ) -> Result<Option<RetainedPipelineReceiptV1>, CoreError> {
     conn.query_row(
-        "SELECT timeline_id, basis_digest, first_local_seq, event_count, expires_at
+        "SELECT timeline_id, attempt_id, basis_digest, draft_batch_digest,
+                first_local_seq, event_count, expires_at
          FROM pipeline_admission_receipts WHERE dedup_key = ?1",
         params![key.as_bytes().as_slice()],
         |row| {
             row.get::<_, String>(0).and_then(|timeline| {
-                row.get::<_, Vec<u8>>(1).and_then(|basis_digest| {
-                    row.get::<_, i64>(2).and_then(|first_local_seq| {
-                        row.get::<_, i64>(3).and_then(|event_count| {
-                            row.get::<_, i64>(4).map(|expires_at| {
-                                (
-                                    timeline,
-                                    basis_digest,
-                                    first_local_seq,
-                                    event_count,
-                                    expires_at,
-                                )
+                row.get::<_, [u8; 16]>(1).and_then(|attempt_id| {
+                    row.get::<_, Vec<u8>>(2).and_then(|basis_digest| {
+                        row.get::<_, [u8; 32]>(3).and_then(|draft_batch_digest| {
+                            row.get::<_, i64>(4).and_then(|first_local_seq| {
+                                row.get::<_, i64>(5).and_then(|event_count| {
+                                    row.get::<_, i64>(6).map(|expires_at| {
+                                        (
+                                            timeline,
+                                            attempt_id,
+                                            basis_digest,
+                                            draft_batch_digest,
+                                            first_local_seq,
+                                            event_count,
+                                            expires_at,
+                                        )
+                                    })
+                                })
                             })
                         })
                     })
@@ -482,6 +610,23 @@ impl PipelineAdmissionPortV1 for SqliteStore {
                 store
                     .ensure_generic_timeline_visibility(timeline)
                     .and_then(|()| store.admit_visible_pipeline_batch(timeline, basis, now))
+            })
+        })
+    }
+
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<PipelineReceiptLookupV1, CoreError> {
+        self.clock.now().and_then(|now| {
+            self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
+                store
+                    .ensure_generic_timeline_visibility(timeline)
+                    .and_then(|()| {
+                        store.lookup_visible_pipeline_receipt(timeline, key, attempt_id, now)
+                    })
             })
         })
     }

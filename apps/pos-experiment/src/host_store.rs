@@ -17,6 +17,16 @@ macro_rules! forward_scheduled_admission_ports {
             ) -> Result<pos_core::store::PurgeOutcome, pos_core::CoreError> {
                 self.$field.purge_expired_pipeline_receipts_bounded(limit)
             }
+
+            fn lookup_pipeline_receipt(
+                &mut self,
+                timeline: pos_core::TimelineId,
+                key: pos_core::AppendDedupKey,
+                attempt_id: pos_core::PipelineAttemptIdV1,
+            ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
+                self.$field
+                    .lookup_pipeline_receipt(timeline, key, attempt_id)
+            }
         }
 
         forward_scheduled_admission_fence_and_authority!($store, $field);
@@ -157,6 +167,16 @@ impl pos_core::PipelineAdmissionPortV1 for HostedExperimentStore {
         limit: std::num::NonZeroUsize,
     ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
         self.with_admission(|store| store.purge_expired_pipeline_receipts_bounded(limit))
+            .and_then(std::convert::identity)
+    }
+
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: pos_core::AppendDedupKey,
+        attempt_id: pos_core::PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, CoreError> {
+        self.with_admission(|store| store.lookup_pipeline_receipt(timeline, key, attempt_id))
             .and_then(std::convert::identity)
     }
 }
