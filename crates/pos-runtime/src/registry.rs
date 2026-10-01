@@ -1941,11 +1941,17 @@ impl PluginRegistry {
         if let Some(name) = &self.poisoned_driver {
             return Err(RuntimeError::DriverCommitPanicked { name: name.clone() });
         }
-        if self.pending_step.is_some() || self.in_doubt_admission.is_some() {
+        if self.has_unfinished_step() {
             Err(RuntimeError::PendingDriverStep)
         } else {
             Ok(())
         }
+    }
+
+    /// A staged pass or a retained in-doubt scheduled admission both block a
+    /// new pass until it is committed, recovered, or aborted.
+    const fn has_unfinished_step(&self) -> bool {
+        self.pending_step.is_some() || self.in_doubt_admission.is_some()
     }
 
     fn abort_drivers(&mut self, driver_ids: &[PluginId]) -> Option<RuntimeError> {
