@@ -8414,43 +8414,49 @@ impl crate::fork_event_authority::ForkEventPermitIssuerPortV1 for SqliteStore {
     }
 }
 
+/// One raw durable FCS1 row: its key columns and its canonical bytes.
+type SqliteClassifierSourceRow = (Vec<u8>, String, Vec<u8>);
+
 /// Read and strictly decode every durable FCS1 for the read-only FCP1
-/// preflight. A row whose key columns do not select its own canonical bytes
-/// is malformed authority.
+/// preflight in one scan. A read failure is `StorageIndeterminate`; a row
+/// whose key columns do not select its own canonical bytes is malformed
+/// authority.
 fn sqlite_durable_classifier_sources(
     conn: &Connection,
 ) -> Result<Vec<ForkClassifierSourceV1>, ForkEventAuthorityErrorV1> {
-    conn.prepare("SELECT fcs1_cbor FROM fork_classifier_sources")
-        .and_then(|mut statement| -> rusqlite::Result<Vec<Vec<u8>>> {
+    conn.prepare(
+        "SELECT descriptor_hash, registrar_identifier, fcs1_cbor FROM fork_classifier_sources",
+    )
+    .and_then(
+        |mut statement| -> rusqlite::Result<Vec<SqliteClassifierSourceRow>> {
             statement
-                .query_map([], |row| row.get(0))
+                .query_map([], |row| {
+                    row.get(0).and_then(|descriptor_hash| {
+                        row.get(1).and_then(|registrar_identifier| {
+                            row.get(2)
+                                .map(|bytes| (descriptor_hash, registrar_identifier, bytes))
+                        })
+                    })
+                })
                 .and_then(Iterator::collect)
-        })
-        .map_err(sqlite_fork_event_storage_error)
-        .and_then(|rows| {
-            rows.iter()
-                .map(|bytes| sqlite_keyed_classifier_source(conn, bytes))
-                .collect()
-        })
+        },
+    )
+    .map_err(sqlite_fork_event_storage_error)
+    .and_then(|rows| rows.iter().map(sqlite_keyed_classifier_source).collect())
 }
 
-/// Decode one durable FCS1 row and require its own key to select it.
+/// Decode one durable FCS1 row and require its own key columns to be the
+/// decoded key. The composite primary key makes this the same as the key
+/// selecting the row's own bytes, with no second read.
 fn sqlite_keyed_classifier_source(
-    conn: &Connection,
-    bytes: &[u8],
+    (descriptor_hash, registrar_identifier, bytes): &SqliteClassifierSourceRow,
 ) -> Result<ForkClassifierSourceV1, ForkEventAuthorityErrorV1> {
     ForkClassifierSourceV1::from_canonical_cbor(bytes)
         .ok()
         .filter(|source| {
-            sqlite_fork_classifier_source(
-                conn,
-                source.input().room_revision_descriptor_hash,
-                &source.input().registrar_identifier,
-            )
-            .ok()
-            .flatten()
-            .as_ref()
-                == Some(source)
+            let input = source.input();
+            *descriptor_hash == input.room_revision_descriptor_hash.as_bytes()
+                && input.registrar_identifier == *registrar_identifier
         })
         .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
 }

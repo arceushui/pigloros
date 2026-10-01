@@ -1415,9 +1415,8 @@ impl ErasureExecutionHostV1 {
     /// It writes no record and needs no gate.
     ///
     /// # Errors
-    /// Returns `CorruptAuthority` for a malformed or mis-keyed durable FCS1,
-    /// `Conflict` when a durable FCS1 is not exactly one profile row, and
-    /// `StorageIndeterminate` when the store cannot be read.
+    /// Returns the adapter's preflight error, as stated per adapter on
+    /// [`ForkEventPermitIssuerPortV1::preflight_fork_classifier_profile`].
     pub fn preflight_fork_classifier_profile(
         &mut self,
         profile_sources: &[ForkClassifierSourceV1],

@@ -1859,15 +1859,25 @@ impl ForkAdmissionSlotV1 {
             (&self.issuer, &self.session),
             classifier_registration_operation_id(child, admission_digest),
             child,
-            |descriptor| {
-                self.profile
-                    .iter()
-                    .find(|source| source.input().room_revision_descriptor_hash == descriptor)
-                    .cloned()
-            },
+            |descriptor| select_profile_source(&self.profile, descriptor),
         )
         .map(|_| ())
     }
+}
+
+/// Select the one FCP1 row for a durable FAR1 room revision descriptor hash
+/// (ADR-099 revision 11 section 3). An absent descriptor selects nothing; it
+/// never falls back to another row.
+///
+/// The executor slot and every test registration seam share this selection.
+pub(crate) fn select_profile_source(
+    profile: &[ForkClassifierSourceV1],
+    descriptor: Hash,
+) -> Option<ForkClassifierSourceV1> {
+    profile
+        .iter()
+        .find(|source| source.input().room_revision_descriptor_hash == descriptor)
+        .cloned()
 }
 
 /// Deterministic host-only FCR1 operation ID for one committed Fork, so every
@@ -1915,8 +1925,10 @@ pub(crate) enum ForkDeliveryMarkV1 {
 type ForkAdmissionReplyV1<T> = std::sync::mpsc::SyncSender<ForkAdmissionSubmissionV1<T>>;
 
 /// The five private journal commands (ADR-109 revision 9, Decision 1 item 4).
-/// They carry no FAL1 bytes, UID, or Owner; the session and policy come from
-/// the executor's slot.
+/// The sixth private command, the ADR-109 revision 12 classifier
+/// registration, is `ForkClassifierRegistrationCommandV1`; both run through
+/// `ForkAdmissionWorkV1`. They carry no FAL1 bytes, UID, or Owner; the
+/// session and policy come from the executor's slot.
 enum ForkAdmissionCommandV1 {
     Claim {
         tuple: ForkDeliveryTupleV1,

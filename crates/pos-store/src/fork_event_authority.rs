@@ -404,8 +404,12 @@ pub trait ForkEventPermitIssuerPortV1 {
     ///
     /// # Errors
     ///
-    /// Returns `CorruptAuthority` for a malformed or mis-keyed durable FCS1,
-    /// and `Conflict` when a durable FCS1 is not exactly one profile row.
+    /// Every adapter returns `Conflict` when a durable FCS1 is not exactly
+    /// one profile row. Only the `SQLite` adapter, which decodes its rows from
+    /// stored bytes, also returns `CorruptAuthority` for a malformed or
+    /// mis-keyed durable FCS1 and `StorageIndeterminate` when its rows cannot
+    /// be read; the Memory adapter holds typed rows and returns only
+    /// `Conflict`.
     fn preflight_fork_classifier_profile(
         &self,
         profile_sources: &[ForkClassifierSourceV1],
@@ -3183,6 +3187,10 @@ mod tests {
             ("malformed", ForkEventAuthorityErrorV1::CorruptAuthority),
             ("mis-keyed", ForkEventAuthorityErrorV1::CorruptAuthority),
             (
+                "mis-registered",
+                ForkEventAuthorityErrorV1::CorruptAuthority,
+            ),
+            (
                 "unreadable",
                 ForkEventAuthorityErrorV1::StorageIndeterminate,
             ),
@@ -3209,6 +3217,12 @@ mod tests {
                     conn.execute(
                         "UPDATE fork_classifier_sources SET descriptor_hash = ?1",
                         params![vec![91_u8; 32]],
+                    )?;
+                }
+                "mis-registered" => {
+                    conn.execute(
+                        "UPDATE fork_classifier_sources SET registrar_identifier = ?1",
+                        params!["another-registrar"],
                     )?;
                 }
                 _ => conn.execute_batch("DROP TABLE fork_classifier_sources")?,

@@ -4,9 +4,10 @@
 //! The coordinator holds no store adapter. It keeps the ADR-107 credentials,
 //! the FAH1 record and the session identity digest on the listener thread,
 //! builds and signs every FAC1 and FRP1 there, and submits the five private
-//! journal commands to the `StoreExecutor` that owns the host. A committed or
-//! recovered Fork is released only after a sixth command registers its
-//! profile-selected classifier in that executor (ADR-109 revision 12).
+//! journal commands (ADR-109 revision 9) and the sixth, classifier
+//! registration command (ADR-109 revision 12) to the `StoreExecutor` that
+//! owns the host. A committed or recovered Fork is released only after that
+//! sixth command registers its profile-selected classifier in the executor.
 
 use std::{
     io,
@@ -676,11 +677,9 @@ mod tests {
     }
 
     impl ClassifierAuthority {
+        /// The executor slot's own row selection.
         fn source_for(&self, descriptor: Hash) -> Option<ForkClassifierSourceV1> {
-            self.profile
-                .iter()
-                .find(|source| source.input().room_revision_descriptor_hash == descriptor)
-                .cloned()
+            crate::executor::select_profile_source(&self.profile, descriptor)
         }
     }
 
@@ -737,7 +736,14 @@ mod tests {
         session: Arc<ForkAdmissionAuthoritySessionV1>,
         policy: ForkAuthenticationPolicyV1,
         classifier: Arc<Mutex<ClassifierAuthority>>,
-        fault: JournalFault,
+        fault: Arc<Mutex<JournalFault>>,
+    }
+
+    impl<S> StoreJournal<S> {
+        /// The journal outcome currently injected by the test.
+        fn fault(&self) -> JournalFault {
+            *lock(&self.fault)
+        }
     }
 
     impl<S: AcceptanceStore> LocalForkDeliveryJournalV1 for StoreJournal<S> {
@@ -745,7 +751,7 @@ mod tests {
             &mut self,
             tuple: ForkDeliveryTupleV1,
         ) -> ForkAdmissionSubmissionV1<ForkDeliveryClaimOutcomeV1> {
-            match self.fault {
+            match self.fault() {
                 JournalFault::ClaimJournal => {
                     Ok(Err(ForkDeliveryJournalErrorV1::StorageIndeterminate))
                 }
@@ -762,7 +768,7 @@ mod tests {
         }
 
         fn cancel(&mut self, claim: ForkDeliveryClaimV1) -> ForkAdmissionSubmissionV1<()> {
-            if self.fault == JournalFault::Cancel {
+            if self.fault() == JournalFault::Cancel {
                 return Ok(Err(ForkDeliveryJournalErrorV1::StorageIndeterminate));
             }
             Ok(lock(&self.store).cancel_pending_fork_delivery(&self.session, claim))
@@ -773,7 +779,7 @@ mod tests {
             claim: ForkDeliveryClaimV1,
             command: &ForkAdmissionHostCommandV1,
         ) -> ForkAdmissionSubmissionV1<ForkDeliveryExecutionV1> {
-            match self.fault {
+            match self.fault() {
                 JournalFault::ExecuteJournal(error) => Ok(Err(error)),
                 JournalFault::ExecuteRejected => Ok(Ok(ForkDeliveryExecutionV1::Rejected(
                     ForkAdmissionErrorV1::InvalidRequest,
@@ -795,7 +801,7 @@ mod tests {
             proof: &ForkAdmissionRecoveryProofV1,
             principal: Hash,
         ) -> ForkAdmissionSubmissionV1<ForkAdmissionOperationResultV1> {
-            if self.fault == JournalFault::Recover {
+            if self.fault() == JournalFault::Recover {
                 return Ok(Err(ForkDeliveryJournalErrorV1::StorageIndeterminate));
             }
             Ok(lock(&self.store).recover_fork_delivery(&self.session, tuple, proof, principal))
@@ -806,7 +812,7 @@ mod tests {
             claim: ForkDeliveryClaimV1,
             mark: ForkDeliveryMarkV1,
         ) -> ForkAdmissionSubmissionV1<()> {
-            match (self.fault, mark) {
+            match (self.fault(), mark) {
                 (JournalFault::MarkDelivered, ForkDeliveryMarkV1::Delivered)
                 | (JournalFault::MarkUncertain, ForkDeliveryMarkV1::Uncertain) => {
                     Ok(Err(ForkDeliveryJournalErrorV1::StorageIndeterminate))
@@ -827,7 +833,7 @@ mod tests {
             child: TimelineId,
             admission_digest: Hash,
         ) -> ForkAdmissionSubmissionV1<ForkClassifierRegistrationV1> {
-            if let JournalFault::RegisterNotRun(error) = self.fault {
+            if let JournalFault::RegisterNotRun(error) = self.fault() {
                 return Err(error);
             }
             let classifier = lock(&self.classifier);
@@ -867,6 +873,7 @@ mod tests {
         store: Arc<Mutex<S>>,
         session: Arc<ForkAdmissionAuthoritySessionV1>,
         classifier: Arc<Mutex<ClassifierAuthority>>,
+        fault: Arc<Mutex<JournalFault>>,
     }
 
     fn fixture_over(store: MemoryStore, fault: JournalFault) -> TestResult<Fixture> {
@@ -900,12 +907,13 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
         let session = Arc::new(session);
         let classifier = Arc::new(Mutex::new(ClassifierAuthority { issuer, profile }));
+        let fault = Arc::new(Mutex::new(fault));
         let journal = StoreJournal {
             store: Arc::clone(&store),
             session: Arc::clone(&session),
             policy: credentials.policy().clone(),
             classifier: Arc::clone(&classifier),
-            fault,
+            fault: Arc::clone(&fault),
         };
         Ok(Fixture {
             coordinator: LocalForkAdmissionCoordinatorV1::new(
@@ -917,6 +925,7 @@ mod tests {
             store,
             session,
             classifier,
+            fault,
         })
     }
 
@@ -1744,6 +1753,43 @@ mod tests {
             for _ in 0..2 {
                 assert_eq!(response_code(&fixture.submit(request.clone(), 44)?), 6);
             }
+        }
+        Ok(())
+    }
+
+    /// ADR-109 r12: a registration command that definitely did not run,
+    /// because the executor was busy or unavailable, answers code 6 and leaves
+    /// the claim unmarked; a same-operation retry registers and releases the
+    /// Fork once the command runs.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn coordinator_retries_a_classifier_registration_that_did_not_run() -> TestResult {
+        for error in [
+            ForkAdmissionSubmissionErrorV1::Busy,
+            ForkAdmissionSubmissionErrorV1::Unavailable,
+        ] {
+            let mut fixture = fixture(JournalFault::RegisterNotRun(error))?;
+            assert_eq!(response_code(&fixture.submit(bind_request(41), 41)?), 0);
+            let parent = lock(&fixture.store).create_timeline("unregistered Fork parent")?;
+            let request = fork_request(42, parent.id(), 18, 43, "unregistered-child");
+            let tuple = delivery_tuple(&completed(&fixture.coordinator, request.clone(), 44)?)
+                .map_err(|()| io::Error::other("fork request must produce a tuple"))?;
+
+            let held = fixture.submit(request.clone(), 44)?;
+            assert_eq!(response_code(&held), 6);
+            assert!(held.claim.is_none());
+            assert!(matches!(
+                lock(&fixture.store).claim_fork_delivery(&fixture.session, tuple)?,
+                ForkDeliveryClaimOutcomeV1::Reconcile(_, state)
+                    if state != ForkDeliveryStateV1::Delivered
+            ));
+
+            *lock(&fixture.fault) = JournalFault::Passthrough;
+            assert_eq!(response_code(&fixture.submit(request, 44)?), 0);
+            assert!(matches!(
+                lock(&fixture.store).claim_fork_delivery(&fixture.session, tuple)?,
+                ForkDeliveryClaimOutcomeV1::Reconcile(_, ForkDeliveryStateV1::Delivered)
+            ));
         }
         Ok(())
     }
