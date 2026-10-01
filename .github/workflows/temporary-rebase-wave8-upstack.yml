@@ -38,7 +38,10 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          cargo fmt --all
+          rustfmt --edition 2021 \
+            crates/pos-runtime/tests/local_adapter_recording_public.rs \
+            crates/pos-store/src/sqlite.rs \
+            crates/pos-store/tests/artifact_registration_persistence_public.rs
           if git diff --quiet; then
             exit 0
           fi
