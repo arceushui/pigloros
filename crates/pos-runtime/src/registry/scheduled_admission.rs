@@ -61,6 +61,12 @@ impl PluginRegistry {
         let Some(pending) = self.pending_step.take() else {
             return Err(RuntimeError::PendingDriverStep);
         };
+        // Only an anchored scheduled pass carries a base cut and snapshot
+        // digest; participant-authorized work keeps its own authority fence.
+        let Some((observed_through, snapshot_digest)) = pending.scheduled else {
+            let _ = self.abort_drivers(&pending.driver_ids);
+            return Err(RuntimeError::AuthorityFenceRequired);
+        };
         let prepared = self
             .validate_operation(
                 pending.timeline,
@@ -77,7 +83,7 @@ impl PluginRegistry {
                 )
             })
             .and_then(|()| self.schemas.validate_batch(&pending.staged_drafts))
-            .and_then(|()| scheduled_basis(&pending, admission));
+            .and_then(|()| scheduled_basis(&pending, admission, observed_through, snapshot_digest));
         match prepared {
             Ok(Some(basis)) => self.finish_scheduled_admission(port, pending, basis),
             Ok(None) => {
@@ -144,18 +150,15 @@ fn not_admitted(outcome: PipelineOutcomeV1) -> RuntimeError {
 fn scheduled_basis(
     pending: &PendingStep,
     admission: &ScheduledPassAdmissionV1,
+    observed_through: Seq,
+    snapshot_digest: pos_core::Hash,
 ) -> Result<Option<PipelineAdmissionBasisV1>, RuntimeError> {
-    pending
-        .scheduled
-        .ok_or(RuntimeError::AuthorityFenceRequired)
-        .and_then(|(observed_through, snapshot_digest)| {
-            if pending.staged_drafts.is_empty() {
-                return Ok(None);
-            }
-            build_basis(pending, admission, observed_through, snapshot_digest)
-                .map(Some)
-                .map_err(RuntimeError::PipelineContract)
-        })
+    if pending.staged_drafts.is_empty() {
+        return Ok(None);
+    }
+    build_basis(pending, admission, observed_through, snapshot_digest)
+        .map(Some)
+        .map_err(RuntimeError::PipelineContract)
 }
 
 fn build_basis(

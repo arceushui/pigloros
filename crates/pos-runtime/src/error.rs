@@ -151,7 +151,7 @@ pub enum RuntimeError {
     #[error("scheduled pass admission basis is invalid: {0}")]
     PipelineContract(pos_core::PipelineContractErrorV1),
 
-    #[error("scheduled pass was not admitted: {0:?}")]
+    #[error("scheduled pass was not admitted: {}", outcome_discriminant(.0))]
     ScheduledPassNotAdmitted(Box<pos_core::PipelineOutcomeV1>),
 
     #[error("no scheduled pass admission is in doubt")]
@@ -195,6 +195,26 @@ pub enum RuntimeError {
 
     #[error("recorder mode mismatch: expected {expected}, got {got}")]
     ModeMismatch { expected: String, got: String },
+}
+
+/// Name only the outcome discriminant so a rendered error never carries
+/// receipt data such as Event identities or digests.
+const fn outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
+    use pos_core::PipelineOutcomeV1 as Outcome;
+    match outcome {
+        Outcome::Rejected => "Rejected",
+        Outcome::InvalidObservation => "InvalidObservation",
+        Outcome::AuthorityRevoked => "AuthorityRevoked",
+        Outcome::AuthorityExpired => "AuthorityExpired",
+        Outcome::PolicyIndeterminate => "PolicyIndeterminate",
+        Outcome::ResourceExhausted => "ResourceExhausted",
+        Outcome::InvalidPluginResult => "InvalidPluginResult",
+        Outcome::InvalidProviderResult => "InvalidProviderResult",
+        Outcome::DomainConflict => "DomainConflict",
+        Outcome::AdmissionConflict => "AdmissionConflict",
+        Outcome::Committed(_) => "Committed",
+        Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
+    }
 }
 
 #[cfg(test)]

@@ -2167,7 +2167,7 @@ impl PluginRegistry {
             ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
                 states.get(key).cloned()
             });
-        let snapshot_digest = snapshot.anchored_digest(anchor);
+        let scheduled = snapshot.anchored_digest();
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
         for id in driver_ids {
@@ -2218,7 +2218,7 @@ impl PluginRegistry {
             operation,
             staged_drafts: all_drafts.clone(),
             authorized: None,
-            scheduled: Some((observed_through, snapshot_digest)),
+            scheduled,
         });
         Ok(all_drafts)
     }

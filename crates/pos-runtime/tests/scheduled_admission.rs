@@ -739,6 +739,54 @@ fn in_doubt_pass_recovers_its_receipt_without_rerunning_drivers() {
 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn not_admitted_error_displays_only_the_outcome_discriminant() {
+    let mut store = MemoryStore::new();
+    let host = Host::prepare(&mut store, 10);
+    let log = Log::default();
+    let mut registry = host.registry();
+    register(&mut registry, driver("first", vec![b"a1"], &log));
+    ok(registry.step_all_anchored(host.timeline, Seq::ZERO));
+    let committed = receipt(host.admit(&mut registry, &mut store, 1));
+    let event_id = committed.committed_events()[0].event_id().to_string();
+
+    let outcomes = [
+        (PipelineOutcomeV1::Rejected, "Rejected"),
+        (PipelineOutcomeV1::InvalidObservation, "InvalidObservation"),
+        (PipelineOutcomeV1::AuthorityRevoked, "AuthorityRevoked"),
+        (PipelineOutcomeV1::AuthorityExpired, "AuthorityExpired"),
+        (
+            PipelineOutcomeV1::PolicyIndeterminate,
+            "PolicyIndeterminate",
+        ),
+        (PipelineOutcomeV1::ResourceExhausted, "ResourceExhausted"),
+        (
+            PipelineOutcomeV1::InvalidPluginResult,
+            "InvalidPluginResult",
+        ),
+        (
+            PipelineOutcomeV1::InvalidProviderResult,
+            "InvalidProviderResult",
+        ),
+        (PipelineOutcomeV1::DomainConflict, "DomainConflict"),
+        (PipelineOutcomeV1::AdmissionConflict, "AdmissionConflict"),
+        (PipelineOutcomeV1::Committed(committed.clone()), "Committed"),
+        (
+            PipelineOutcomeV1::RecoveredDuplicate(committed),
+            "RecoveredDuplicate",
+        ),
+    ];
+    for (outcome, discriminant) in outcomes {
+        let rendered = RuntimeError::ScheduledPassNotAdmitted(Box::new(outcome)).to_string();
+        assert_eq!(
+            rendered,
+            format!("scheduled pass was not admitted: {discriminant}")
+        );
+        assert!(!rendered.contains(&event_id), "{rendered}");
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn cadence_commits_only_after_admission_and_empty_passes_admit_no_event() {
     let mut store = MemoryStore::new();
     let host = Host::prepare(&mut store, 10);
