@@ -485,14 +485,14 @@ async fn post_action(
                 ingress_id,
             )
             .await?;
-        let status = if result.duplicate {
+        let status = if result.duplicate() {
             StatusCode::OK
         } else {
             StatusCode::CREATED
         };
-        return EventView::try_from(&result.event).map(|view| (status, Json(view)));
+        return EventView::try_from(result.event()).map(|view| (status, Json(view)));
     }
-    let event = state
+    let action = state
         .gateway
         .submit_json_action(
             &id,
@@ -502,7 +502,7 @@ async fn post_action(
             &body.capability,
         )
         .await?;
-    EventView::try_from(&event).map(|view| (StatusCode::CREATED, Json(view)))
+    EventView::try_from(action.event()).map(|view| (StatusCode::CREATED, Json(view)))
 }
 
 async fn post_signal(
@@ -582,6 +582,7 @@ impl GatewayError {
             Self::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
             Self::CompatibilityReadTruncated { .. }
             | Self::IngressConflict
+            | Self::ActionObservationStale
             | Self::StaleEventCursor => StatusCode::CONFLICT,
             Self::ResourceUnavailable => StatusCode::NOT_FOUND,
             Self::Store(error) => {
@@ -631,7 +632,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::{ActionPrincipal, LedgerConfig, LedgerGateway, EVENT_BUS_CAPACITY};
+    use crate::{LedgerConfig, LedgerGateway, EVENT_BUS_CAPACITY};
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -654,18 +655,34 @@ mod tests {
         EntityId::from_ulid(ulid::Ulid::from_string("01J38AE3E965B9281A2ADF6FDB").test_ok())
     }
 
-    fn test_action_principal() -> ActionPrincipal {
-        ActionPrincipal::new(test_action_actor(), [Kind::new("world.action.v1.submit")])
-    }
-
     fn test_app() -> Router {
-        let gw = Gateway::new_with_world_bodies_and_principal_for_test(
+        let gw = Gateway::new_with_world_bodies(
             open_store(StoreConfig::Memory).test_ok(),
             [test_world_body()],
-            test_action_principal(),
         );
         router(AppState {
             gateway: gw,
+            ledger_view: LedgerView::default(),
+            ledger_write: LedgerWriteMode::Disabled,
+        })
+    }
+
+    /// A host-owned Gateway whose only human action path is authenticated
+    /// Principal authorization plus atomic host admission.
+    fn action_test_app() -> Router {
+        let host = ErasureExecutionHostV1::open_verified_empty(
+            StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let gateway = crate::gateway_with_erasure_host_and_authorization(
+            host,
+            [test_world_body()],
+            crate::authorization::test_authorization_for(test_action_actor()),
+        )
+        .test_ok();
+        router(AppState {
+            gateway,
             ledger_view: LedgerView::default(),
             ledger_write: LedgerWriteMode::Disabled,
         })
@@ -731,7 +748,7 @@ mod tests {
 
     #[tokio::test]
     async fn versioned_action_contract_validates_typed_payload_and_rejects_legacy() {
-        let app = test_app();
+        let app = action_test_app();
         let (_, created) = json_request(
             app.clone(),
             "POST",
@@ -1213,7 +1230,7 @@ osf_link = \"https://osf.io/example\"\n";
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn http_action_poll_flow() {
-        let app = test_app();
+        let app = action_test_app();
         let (status, created) = json_request(
             app.clone(),
             "POST",
@@ -1226,7 +1243,7 @@ osf_link = \"https://osf.io/example\"\n";
 
         let entity = test_action_actor().to_string();
         let body = test_world_body().to_string();
-        let (status, _) = json_request(
+        let (status, committed) = json_request(
             app.clone(),
             "POST",
             &format!("/v1/timelines/{id}/actions"),
@@ -1239,14 +1256,25 @@ osf_link = \"https://osf.io/example\"\n";
         .await;
         assert_eq!(status, StatusCode::CREATED);
 
-        let (status, listed) = json_request(
-            app,
-            "GET",
-            &format!("/v1/timelines/{id}/events?from_seq=0"),
-            None,
+        assert_eq!(committed["seq"], 1);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/timelines/{id}/events?from_seq=0&limit=10"))
+                    .header("x-piglor-actor-entity", entity.clone())
+                    .body(Body::empty())
+                    .test_ok(),
+            )
+            .await
+            .test_ok();
+        assert_eq!(response.status(), StatusCode::OK);
+        let listed: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .test_ok(),
         )
-        .await;
-        assert_eq!(status, StatusCode::OK);
+        .test_ok();
         assert_eq!(listed["events"].as_array().test_ok().len(), 1);
         assert_eq!(listed["events"][0]["event_type"], "world.action.v1");
         assert_eq!(listed["events"][0]["payload"][4], "impulse");
@@ -1256,7 +1284,7 @@ osf_link = \"https://osf.io/example\"\n";
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn identified_http_action_retries_are_idempotent_and_conflicts_are_visible() {
-        let app = test_app();
+        let app = action_test_app();
         let (status, created) = json_request(
             app.clone(),
             "POST",
@@ -1321,16 +1349,15 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(status, StatusCode::CREATED);
         let id = created["id"].as_str().test_ok();
         let entity = test_action_actor().to_string();
-        let body = test_world_body().to_string();
-        for dx in 0..3 {
+        for value in [0.1, 0.2, 0.3] {
             let (status, _) = json_request(
                 app.clone(),
                 "POST",
-                &format!("/v1/timelines/{id}/actions"),
+                &format!("/v1/timelines/{id}/signals"),
                 Some(json!({
                     "entity_id": entity,
-                    "capability": "world.action.v1.submit",
-                    "payload": world_action_payload(&entity, &body, dx)
+                    "dimension": "trust",
+                    "value": value
                 })),
             )
             .await;
@@ -1716,7 +1743,7 @@ osf_link = \"https://osf.io/example\"\n";
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn http_signal_and_bad_action_type() {
-        let app = test_app();
+        let app = action_test_app();
         let (status, created) = json_request(
             app.clone(),
             "POST",
@@ -1788,7 +1815,7 @@ osf_link = \"https://osf.io/example\"\n";
         let id = TimelineId::new().to_string();
         let entity = test_action_actor().to_string();
         let (status, _) = json_request(
-            test_app(),
+            action_test_app(),
             "POST",
             &format!("/v1/timelines/{id}/actions"),
             Some(json!({
@@ -1798,7 +1825,8 @@ osf_link = \"https://osf.io/example\"\n";
             })),
         )
         .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        // The host's erasure fence admits nothing for an unknown Timeline.
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
         let (status, _) = json_request(
             test_app(),
@@ -1869,7 +1897,7 @@ osf_link = \"https://osf.io/example\"\n";
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn malformed_json_body_is_rejected() {
-        let app = test_app();
+        let app = action_test_app();
         let (status, created) = json_request(
             app.clone(),
             "POST",
@@ -1945,7 +1973,6 @@ osf_link = \"https://osf.io/example\"\n";
                     pending_consent_cleanup: crate::new_pending_consent_cleanup(),
                     action_registry: crate::gateway_action_registry(),
                     authorization: None,
-                    action_principal: None,
                 },
                 ledger_view: LedgerView::default(),
                 ledger_write: LedgerWriteMode::Disabled,
@@ -2270,7 +2297,7 @@ osf_link = \"https://osf.io/example\"\n";
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn post_action_rejects_missing_or_invalid_capability() {
-        let app = test_app();
+        let app = action_test_app();
         let (_status, created) = json_request(
             app.clone(),
             "POST",
@@ -2307,8 +2334,10 @@ osf_link = \"https://osf.io/example\"\n";
             })),
         )
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(err["error"].as_str().test_ok().contains("actor"));
+        // Another acting Entity is outside this Principal's authority; the
+        // error is identical, so it does not enumerate which check failed.
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(err["error"], "authorization denied");
     }
 
     #[test]

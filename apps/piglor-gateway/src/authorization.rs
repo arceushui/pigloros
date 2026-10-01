@@ -10,6 +10,7 @@
 
 use pos_core::{
     AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1,
     AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, EventId,
     Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
@@ -416,6 +417,7 @@ pub struct GatewayAuthorization {
     adapter: Arc<dyn GatewayAuthenticationAdapter>,
     authority: Arc<RwLock<PersistedAuthorityV1>>,
     registry: AuthorityRegistrySnapshotV1,
+    persistence: AuthorityPersistenceHostV1,
     revocation_state_current: bool,
     commit_lock: Arc<AsyncRwLock<()>>,
     audits: Arc<Mutex<VecDeque<GatewayAuthorizationAudit>>>,
@@ -448,6 +450,7 @@ impl GatewayAuthorization {
         Self {
             adapter,
             authority: Arc::new(RwLock::new(authority)),
+            persistence: AuthorityPersistenceHostV1::new(&registry),
             registry,
             revocation_state_current,
             commit_lock: Arc::new(AsyncRwLock::new(())),
@@ -577,6 +580,65 @@ impl GatewayAuthorization {
     /// Acquire the append fence used by the Gateway before a final recheck.
     pub(crate) async fn commit_fence(&self) -> OwnedRwLockReadGuard<()> {
         Arc::clone(&self.commit_lock).read_owned().await
+    }
+
+    /// Persist the current authority chain in the admission store and load
+    /// it back as the store resolves it.
+    ///
+    /// This Gateway is the trusted composition root for its pinned registry,
+    /// so it binds the store to its own persistence host and issues every
+    /// grant of the current root-to-leaf chain (an exact retry is
+    /// unchanged). The returned leaf grant names the persisted chain the
+    /// store composes at its admission serialization point. Call it under
+    /// [`Self::commit_fence`], so an authority replacement cannot interleave.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error when the authority lock is
+    /// poisoned, the chain is empty, the store is bound to another host, or
+    /// a grant cannot be persisted for this registry.
+    pub(crate) fn persist_authority(
+        &self,
+        store: &mut dyn AuthorityPersistencePortV1,
+    ) -> Result<(Hash, PersistedAuthorityV1), AuthorityPersistenceErrorV1> {
+        // Replacement only swaps a complete snapshot, so a poisoned lock
+        // still holds a whole chain.
+        let grants = self
+            .authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .chain()
+            .grants()
+            .to_vec();
+        store
+            .bind_authority_persistence(self.persistence.persistence_binding())
+            .and_then(|()| {
+                grants.iter().try_for_each(|grant| {
+                    self.persistence
+                        .authorize_grant(grant)
+                        .and_then(|permit| store.issue_capability_grant(permit, grant))
+                        .map(|_| ())
+                })
+            })
+            .and_then(|()| {
+                grants
+                    .last()
+                    .map(pos_core::CapabilityGrantV1::grant_id)
+                    .ok_or(AuthorityPersistenceErrorV1::Unavailable)
+            })
+            .and_then(|leaf| {
+                store
+                    .load_authority(leaf)
+                    .map(|authority| (leaf, authority))
+            })
+    }
+
+    /// The pinned authority registry digest and revocation-freshness claim
+    /// that select this host's execution profile.
+    pub(crate) const fn execution_profile(&self) -> (Hash, bool) {
+        (
+            self.registry.registry_digest(),
+            self.revocation_state_current,
+        )
     }
 }
 
