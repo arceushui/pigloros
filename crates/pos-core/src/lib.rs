@@ -287,7 +287,8 @@ pub use store::{
     export_timeline_cow, export_timeline_own, export_timeline_raw, import_committed_with_rollback,
     import_timeline, import_timeline_with_id, validate_committed_batch, AppendDedupKey,
     AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
-    EventStore, PurgeOutcome, SeqRange, TimelineExport, APPEND_IDENTITY_RETENTION_MICROS,
+    EventStore, PreparedSubjectAppendAuthorizationV1, PurgeOutcome, SeqRange, TimelineExport,
+    APPEND_IDENTITY_RETENTION_MICROS,
 };
 pub use timeline::{Timeline, TimelineMeta, TimelineMode};
 pub use timeline_envelope::{

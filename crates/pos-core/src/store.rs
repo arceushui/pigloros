@@ -33,6 +33,16 @@ use crate::{
 };
 use std::sync::Arc;
 
+/// Exact identities and public signing material for one prepared protected append.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedSubjectAppendAuthorizationV1 {
+    pub encryption_identity: crate::KeyIdentityV1,
+    pub encryption_material_digest: Hash,
+    pub signing_identity: crate::KeyIdentityV1,
+    pub signing_material_digest: Hash,
+    pub signing_public_key: crate::PublicKey,
+}
+
 /// Opaque, fixed-size identity for a retried external append.
 ///
 /// An application derives this from its external identity using a keyed hash.
@@ -1013,6 +1023,47 @@ pub trait EventStore: Send {
         ))
     }
 
+    /// Atomically authorize active subject encryption and Timeline signing,
+    /// finalize Event context, prepare its protected payload, then sign and append.
+    ///
+    /// The callback is synchronous and non-escaping. It receives the immutable
+    /// first-commit context before the payload exists; adapters retain the same
+    /// registry serialization boundary through commit or rollback.
+    ///
+    /// Only the draft's metadata (entity, type, schema version, wall time, and
+    /// causal IDs) is used: `draft.payload` is ignored, and the committed
+    /// payload is exactly the bytes returned by `prepare_payload`.
+    ///
+    /// Authorization order is registry match, then `SubjectDataEncryption`,
+    /// then `TimelineIntegritySigning`; any failure invokes neither callback.
+    /// `sign` receives a clone of the authorized registry. A nonce reserved by
+    /// `prepare_payload` stays spent if a later step rolls back. Callbacks run
+    /// while the boundary is held and must return errors instead of panicking.
+    ///
+    /// # Errors
+    /// Returns a closed error when either identity is unavailable or the
+    /// callback, signature verification, insertion, or commit fails.
+    fn append_prepared_subject_encrypted_timeline_signed(
+        &mut self,
+        _timeline: TimelineId,
+        _expected_registry: &crate::KeyRegistryStateV1,
+        _draft: EventDraft,
+        _authorization: PreparedSubjectAppendAuthorizationV1,
+        _prepare_payload: &mut dyn FnMut(
+            &crate::TimelineEventEnvelopeInputV1,
+        ) -> Result<CanonicalBytes, CoreError>,
+        _sign: &mut dyn FnMut(
+            &mut crate::KeyRegistryStateV1,
+            &crate::TimelineEventEnvelopeV1,
+            &CanonicalBytes,
+        ) -> Result<crate::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        Err(CoreError::Storage(
+            "prepared subject-encryption Timeline append is unavailable for this EventStore"
+                .to_owned(),
+        ))
+    }
+
     /// Persist the `DestructionPending` state and return the resulting snapshot.
     ///
     /// This is intentionally separate from [`Self::complete_key_registry_destruction`].
@@ -1931,6 +1982,37 @@ mod tests {
         assert!(error
             .to_string()
             .contains("atomic Timeline signing is unavailable"));
+
+        let mut prepare = |_: &crate::TimelineEventEnvelopeInputV1| {
+            Err::<CanonicalBytes, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_prepared_subject_encrypted_timeline_signed(
+                TimelineId::new(),
+                &crate::KeyRegistryStateV1::new(),
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("test.prepared"),
+                    CanonicalBytes::from_static(b"test"),
+                ),
+                PreparedSubjectAppendAuthorizationV1 {
+                    encryption_identity: crate::KeyIdentityV1::new(
+                        "test-owner",
+                        crate::KeyRoleV1::SubjectDataEncryption,
+                        1,
+                    ),
+                    encryption_material_digest: Hash::from_bytes([3; 32]),
+                    signing_identity: identity,
+                    signing_material_digest: Hash::from_bytes([1; 32]),
+                    signing_public_key: crate::PublicKey::from_bytes([2; 32]),
+                },
+                &mut prepare,
+                &mut sign,
+            )
+            .test_err()?;
+        assert!(error
+            .to_string()
+            .contains("prepared subject-encryption Timeline append is unavailable"));
 
         let error = store
             .begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(

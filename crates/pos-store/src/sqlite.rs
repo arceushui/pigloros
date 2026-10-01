@@ -5015,6 +5015,62 @@ impl EventStore for SqliteStore {
         committed
     }
 
+    fn append_prepared_subject_encrypted_timeline_signed(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        authorization: pos_core::PreparedSubjectAppendAuthorizationV1,
+        prepare_payload: &mut dyn FnMut(
+            &pos_core::TimelineEventEnvelopeInputV1,
+        ) -> Result<CanonicalBytes, CoreError>,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        // `BEGIN IMMEDIATE` is the registry serialization boundary: another
+        // connection cannot rotate or destroy either identity until this
+        // transaction commits or rolls back. Callbacks run while it is held
+        // and must return errors rather than panic; an unwinding panic would
+        // leave this connection inside the open transaction.
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(Self::into_storage_error)?;
+        let result = self
+            .load_key_registry()
+            .and_then(|registry| {
+                registry.ok_or_else(|| {
+                    CoreError::Storage("durable key registry is unavailable".to_owned())
+                })
+            })
+            .and_then(|mut registry| {
+                if registry != *expected_registry {
+                    return Err(CoreError::Storage(
+                        "durable key registry changed during prepared append".to_owned(),
+                    ));
+                }
+                crate::prepare_subject_encrypted_timeline_event(
+                    &*self,
+                    self.hasher.as_ref(),
+                    timeline,
+                    &mut registry,
+                    &draft,
+                    &authorization,
+                    crate::PreparedAppendCallbacks {
+                        prepare_payload,
+                        sign,
+                    },
+                )
+            })
+            .and_then(|event| {
+                self.append_committed(timeline, std::slice::from_ref(&event))
+                    .map(|()| event)
+            });
+        finish_immediate_transaction(&self.conn, result)
+    }
+
     fn begin_key_registry_destruction(
         &mut self,
         request: KeyDestructionRequestV1,
@@ -22485,6 +22541,56 @@ pub(super) mod key_registry_coverage {
         );
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
         assert!(result.is_err());
+        assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn prepared_append_rejects_a_failed_transaction_begin_before_callbacks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let mut store = open_store()?;
+        let timeline = store.create_timeline("failed-prepared-begin")?;
+        store.save_key_registry(&registry)?;
+        let payload_calls = std::cell::Cell::new(0_usize);
+        let sign_calls = std::cell::Cell::new(0_usize);
+        let mut prepare_payload = |_: &pos_core::TimelineEventEnvelopeInputV1| {
+            payload_calls.set(payload_calls.get() + 1);
+            Err::<CanonicalBytes, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let mut sign = |_: &mut KeyRegistryStateV1,
+                        _: &pos_core::TimelineEventEnvelopeV1,
+                        _: &CanonicalBytes| {
+            sign_calls.set(sign_calls.get() + 1);
+            Err::<pos_core::Signature, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let result = store.append_prepared_subject_encrypted_timeline_signed(
+            timeline.id(),
+            &registry,
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("timeline.failed-prepared-begin"),
+                CanonicalBytes::from_static(b"ignored"),
+            ),
+            pos_core::PreparedSubjectAppendAuthorizationV1 {
+                encryption_identity: pos_core::KeyIdentityV1::new(
+                    "subject-owner",
+                    pos_core::KeyRoleV1::SubjectDataEncryption,
+                    1,
+                ),
+                encryption_material_digest: Hash::from_bytes([5; 32]),
+                signing_identity: identity,
+                signing_material_digest: material_digest,
+                signing_public_key: pos_core::PublicKey::from_bytes([4; 32]),
+            },
+            &mut prepare_payload,
+            &mut sign,
+        );
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(matches!(result, Err(CoreError::Storage(_))));
+        assert_eq!((payload_calls.get(), sign_calls.get()), (0, 0));
         assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
         Ok(())
     }

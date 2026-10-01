@@ -143,6 +143,28 @@ fn prepare_timeline_signing_event(
     identity: pos_core::KeyIdentityV1,
     hasher: &dyn pos_core::hasher::Hasher,
 ) -> Result<(Event, pos_core::TimelineEventEnvelopeV1), CoreError> {
+    prepare_timeline_signing_input(timeline, local_head, inherited_prefix, &draft, identity)
+        .and_then(|context| finalize_timeline_signing_event(context, draft.payload, hasher))
+}
+
+/// Immutable first-commit context finalized before a protected payload exists.
+///
+/// The Event schema version is captured once from the draft; the envelope
+/// input's numeric schema field and the committed Event both derive from it.
+struct PreparedTimelineSigningContextV1 {
+    local_seq: pos_core::Seq,
+    schema_version: pos_core::SchemaVersion,
+    input: pos_core::TimelineEventEnvelopeInputV1,
+}
+
+/// Finalize immutable first-commit context before a protected payload exists.
+fn prepare_timeline_signing_input(
+    timeline: TimelineId,
+    local_head: pos_core::Seq,
+    inherited_prefix: u64,
+    draft: &EventDraft,
+    identity: pos_core::KeyIdentityV1,
+) -> Result<PreparedTimelineSigningContextV1, CoreError> {
     let local_seq = local_head
         .as_u64()
         .checked_add(1)
@@ -152,47 +174,160 @@ fn prepare_timeline_signing_event(
         .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))?;
     let event_id = EventId::new();
     let wall_time = draft.wall_time.unwrap_or_else(WallTime::now);
-    let envelope = pos_core::TimelineEventEnvelopeV1::new(
-        pos_core::TimelineEventEnvelopeInputV1 {
+    let schema_version = draft.schema_version;
+    Ok(PreparedTimelineSigningContextV1 {
+        local_seq: pos_core::Seq::from_u64(local_seq),
+        schema_version,
+        input: pos_core::TimelineEventEnvelopeInputV1 {
             identity,
             origin_timeline_id: timeline,
             event_id,
             origin_logical_seq: pos_core::Seq::from_u64(origin_seq),
             entity_id: draft.entity,
             event_type: draft.event_type.clone(),
-            schema_version: draft.schema_version.as_u32(),
+            schema_version: schema_version.as_u32(),
             wall_time,
             causation_id: draft.causation_id,
             correlation_id: draft.correlation_id,
         },
-        &draft.payload,
-    )
-    .map_err(|error| CoreError::Storage(format!("Timeline envelope validation: {error}")))?;
+    })
+}
+
+/// Bind a prepared payload to finalized first-commit context.
+fn finalize_timeline_signing_event(
+    context: PreparedTimelineSigningContextV1,
+    payload: CanonicalBytes,
+    hasher: &dyn pos_core::hasher::Hasher,
+) -> Result<(Event, pos_core::TimelineEventEnvelopeV1), CoreError> {
+    let PreparedTimelineSigningContextV1 {
+        local_seq,
+        schema_version,
+        input,
+    } = context;
+    let envelope = pos_core::TimelineEventEnvelopeV1::new(input, &payload)
+        .map_err(|error| CoreError::Storage(format!("Timeline envelope validation: {error}")))?;
     let payload_hash = envelope.payload_hash();
-    if hasher.hash_payload(&draft.payload) != payload_hash {
+    if hasher.hash_payload(&payload) != payload_hash {
         return Err(CoreError::Storage(
             "store payload hash differs from Timeline envelope BLAKE3 digest".to_owned(),
         ));
     }
+    let input = envelope.input();
     let event = Event {
-        id: event_id,
-        entity: draft.entity,
-        event_type: draft.event_type,
-        payload: draft.payload,
-        wall_time,
-        seq: pos_core::Seq::from_u64(local_seq),
-        causation_id: draft.causation_id,
-        correlation_id: draft.correlation_id,
-        schema_version: draft.schema_version,
+        id: input.event_id,
+        entity: input.entity_id,
+        event_type: input.event_type.clone(),
+        payload,
+        wall_time: input.wall_time,
+        seq: local_seq,
+        causation_id: input.causation_id,
+        correlation_id: input.correlation_id,
+        schema_version,
         signature: None,
         signature_identity: None,
         origin: Some(pos_core::EventOriginV1 {
-            origin_timeline_id: timeline,
-            origin_logical_seq: pos_core::Seq::from_u64(origin_seq),
+            origin_timeline_id: input.origin_timeline_id,
+            origin_logical_seq: input.origin_logical_seq,
         }),
         payload_hash,
     };
     Ok((event, envelope))
+}
+
+/// Check the exact ADR-097 order for a prepared protected append: active
+/// `SubjectDataEncryption` first, then active `TimelineIntegritySigning`.
+///
+/// Neither check runs a crypto operation; both only fix the identities that
+/// the caller's serialization boundary keeps unchanged through commit.
+fn authorize_prepared_subject_append(
+    registry: &mut pos_core::KeyRegistryStateV1,
+    authorization: &pos_core::PreparedSubjectAppendAuthorizationV1,
+) -> Result<(), CoreError> {
+    registry
+        .with_encryption_authorization(
+            authorization.encryption_identity,
+            authorization.encryption_material_digest,
+            || (),
+        )
+        .map_err(|error| CoreError::Storage(format!("subject encryption authorization: {error}")))
+        .and_then(|()| {
+            registry
+                .with_signing_authorization(
+                    authorization.signing_identity,
+                    authorization.signing_material_digest,
+                    authorization.signing_public_key,
+                    || (),
+                )
+                .map_err(|error| {
+                    CoreError::Storage(format!("Timeline signing authorization: {error}"))
+                })
+        })
+}
+
+/// The two caller-owned, non-escaping crypto callbacks of one prepared append.
+struct PreparedAppendCallbacks<'a> {
+    prepare_payload: &'a mut dyn FnMut(
+        &pos_core::TimelineEventEnvelopeInputV1,
+    ) -> Result<CanonicalBytes, CoreError>,
+    sign: &'a mut dyn FnMut(
+        &mut pos_core::KeyRegistryStateV1,
+        &pos_core::TimelineEventEnvelopeV1,
+        &CanonicalBytes,
+    ) -> Result<pos_core::Signature, CoreError>,
+}
+
+/// Shared ADR-097 prepared append pipeline for every durable adapter.
+///
+/// The adapter must already hold its registry serialization boundary and pass
+/// the exact registry it loaded and compared inside that boundary. This
+/// authorizes both identities, then looks up the owning Timeline, finalizes
+/// the Event context, prepares the protected payload, signs with a clone of
+/// the authorized registry, and verifies the signature. The Timeline lookup
+/// stays here, after authorization, so a failed identity check is reported
+/// before a missing Timeline. The adapter appends the returned Event and
+/// commits or rolls back before releasing the boundary.
+fn prepare_subject_encrypted_timeline_event(
+    store: &dyn pos_core::EventStore,
+    hasher: &dyn pos_core::hasher::Hasher,
+    timeline: TimelineId,
+    registry: &mut pos_core::KeyRegistryStateV1,
+    draft: &EventDraft,
+    authorization: &pos_core::PreparedSubjectAppendAuthorizationV1,
+    callbacks: PreparedAppendCallbacks<'_>,
+) -> Result<Event, CoreError> {
+    let PreparedAppendCallbacks {
+        prepare_payload,
+        sign,
+    } = callbacks;
+    let signing_identity = authorization.signing_identity;
+    authorize_prepared_subject_append(registry, authorization)
+        .and_then(|()| store.get_timeline(timeline))
+        .and_then(|owning| owning.ok_or(CoreError::TimelineNotFound(timeline)))
+        .and_then(|owning| {
+            let prefix = owning.meta.fork_point.map_or(0, |(_, at)| at.as_u64());
+            prepare_timeline_signing_input(timeline, owning.head, prefix, draft, signing_identity)
+        })
+        .and_then(|context| prepare_payload(&context.input).map(|payload| (context, payload)))
+        .and_then(|(context, payload)| finalize_timeline_signing_event(context, payload, hasher))
+        .and_then(|(event, envelope)| {
+            let mut signing_registry = registry.clone();
+            sign(&mut signing_registry, &envelope, &event.payload)
+                .map(|signature| (event, envelope, signature))
+        })
+        .and_then(|(mut event, envelope, signature)| {
+            verify_new_timeline_signature(
+                authorization.signing_public_key,
+                signing_identity,
+                &envelope,
+                &event.payload,
+                &signature,
+            )
+            .map(|()| {
+                event.signature = Some(signature);
+                event.signature_identity = Some(signing_identity);
+                event
+            })
+        })
 }
 
 /// Reject a callback result that is not a signature over the finalized

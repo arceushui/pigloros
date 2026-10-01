@@ -4639,6 +4639,45 @@ impl EventStore for MemoryStore {
             })?
     }
 
+    fn append_prepared_subject_encrypted_timeline_signed(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        authorization: pos_core::PreparedSubjectAppendAuthorizationV1,
+        prepare_payload: &mut dyn FnMut(
+            &pos_core::TimelineEventEnvelopeInputV1,
+        ) -> Result<pos_core::CanonicalBytes, CoreError>,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &pos_core::CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        // `&mut self` is the registry serialization boundary: no other handle
+        // can rotate or destroy either identity until this call returns, so
+        // concurrent lifecycle races are statically impossible here.
+        self.checked_signing_registry(expected_registry)
+            .and_then(|mut registry| {
+                crate::prepare_subject_encrypted_timeline_event(
+                    &*self,
+                    self.hasher.as_ref(),
+                    timeline,
+                    &mut registry,
+                    &draft,
+                    &authorization,
+                    crate::PreparedAppendCallbacks {
+                        prepare_payload,
+                        sign,
+                    },
+                )
+            })
+            .and_then(|event| {
+                self.append_committed(timeline, std::slice::from_ref(&event))
+                    .map(|()| event)
+            })
+    }
+
     fn begin_key_registry_destruction(
         &mut self,
         request: pos_core::KeyDestructionRequestV1,
