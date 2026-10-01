@@ -264,14 +264,28 @@ fn authorize_prepared_subject_append(
         })
 }
 
+/// The two caller-owned, non-escaping crypto callbacks of one prepared append.
+struct PreparedAppendCallbacks<'a> {
+    prepare_payload: &'a mut dyn FnMut(
+        &pos_core::TimelineEventEnvelopeInputV1,
+    ) -> Result<CanonicalBytes, CoreError>,
+    sign: &'a mut dyn FnMut(
+        &mut pos_core::KeyRegistryStateV1,
+        &pos_core::TimelineEventEnvelopeV1,
+        &CanonicalBytes,
+    ) -> Result<pos_core::Signature, CoreError>,
+}
+
 /// Shared ADR-097 prepared append pipeline for every durable adapter.
 ///
 /// The adapter must already hold its registry serialization boundary and pass
 /// the exact registry it loaded and compared inside that boundary. This
-/// authorizes both identities, finalizes the Event context, prepares the
-/// protected payload, signs with a clone of the authorized registry, and
-/// verifies the signature. The adapter appends the returned Event and commits
-/// or rolls back before releasing the boundary.
+/// authorizes both identities, then looks up the owning Timeline, finalizes
+/// the Event context, prepares the protected payload, signs with a clone of
+/// the authorized registry, and verifies the signature. The Timeline lookup
+/// stays here, after authorization, so a failed identity check is reported
+/// before a missing Timeline. The adapter appends the returned Event and
+/// commits or rolls back before releasing the boundary.
 fn prepare_subject_encrypted_timeline_event(
     store: &dyn pos_core::EventStore,
     hasher: &dyn pos_core::hasher::Hasher,
@@ -279,15 +293,12 @@ fn prepare_subject_encrypted_timeline_event(
     registry: &mut pos_core::KeyRegistryStateV1,
     draft: &EventDraft,
     authorization: pos_core::PreparedSubjectAppendAuthorizationV1,
-    prepare_payload: &mut dyn FnMut(
-        &pos_core::TimelineEventEnvelopeInputV1,
-    ) -> Result<CanonicalBytes, CoreError>,
-    sign: &mut dyn FnMut(
-        &mut pos_core::KeyRegistryStateV1,
-        &pos_core::TimelineEventEnvelopeV1,
-        &CanonicalBytes,
-    ) -> Result<pos_core::Signature, CoreError>,
+    callbacks: PreparedAppendCallbacks<'_>,
 ) -> Result<Event, CoreError> {
+    let PreparedAppendCallbacks {
+        prepare_payload,
+        sign,
+    } = callbacks;
     let signing_identity = authorization.signing_identity;
     authorize_prepared_subject_append(registry, authorization)
         .and_then(|()| store.get_timeline(timeline))

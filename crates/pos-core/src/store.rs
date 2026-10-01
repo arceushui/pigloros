@@ -1039,6 +1039,7 @@ pub trait EventStore: Send {
     /// `sign` receives a clone of the authorized registry. A nonce reserved by
     /// `prepare_payload` stays spent if a later step rolls back. Callbacks run
     /// while the boundary is held and must return errors instead of panicking.
+    ///
     /// # Errors
     /// Returns a closed error when either identity is unavailable or the
     /// callback, signature verification, insertion, or commit fails.
