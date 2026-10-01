@@ -16,6 +16,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+// The custody adapter relies on Linux-only `openat2` resolve flags and
+// `renameat2(RENAME_NOREPLACE)`; every other target gets the explicit stub,
+// which ADR-098 permits for targets without these durability guarantees.
+#[cfg(target_os = "linux")]
+mod recipient_owner;
+#[cfg(not(target_os = "linux"))]
+#[path = "sqlite/recipient_owner_unsupported.rs"]
+mod recipient_owner;
+pub use recipient_owner::RecipientKeyOwnerV1;
+
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     event::{CanonicalBytes, Event, EventDraft, EventOriginV1, Kind, SchemaVersion},
@@ -62,8 +72,9 @@ use pos_core::{
     ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
     ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
     ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryErrorV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
     PublicKey, Signature, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
     GEOGRAPHIC_EVENT_TYPE,
@@ -175,9 +186,10 @@ fn bounded_read_delay_for_test(phase: u8) {
 
 pub struct SqliteStore {
     conn: Connection,
-    /// Writable lock connection used only to serialize protected effects for
-    /// a read-only store connection. It never performs application writes.
-    erasure_effect_lock_connection: Option<Connection>,
+    /// Writable connection used to reserve the database writer for protected
+    /// effects and historical decryption on a read-only store handle. It never
+    /// performs application writes.
+    writer_reservation_connection: Option<Connection>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
@@ -1454,7 +1466,7 @@ impl SqliteStore {
         let conn = Connection::open_with_flags(path, flags)
             .map_err(|e| CoreError::Storage(e.to_string()))?;
 
-        let erasure_effect_lock_connection = Self::open_erasure_effect_lock_connection(path, flags);
+        let writer_reservation_connection = Self::open_writer_reservation_connection(path, flags);
 
         Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
 
@@ -1466,7 +1478,7 @@ impl SqliteStore {
 
         let mut store = Self {
             conn,
-            erasure_effect_lock_connection,
+            writer_reservation_connection,
             hasher,
             clock: Box::new(SystemAdmissionClock),
             consent_authority_permit: None,
@@ -1491,7 +1503,7 @@ impl SqliteStore {
         Ok(store)
     }
 
-    fn open_erasure_effect_lock_connection(path: &str, flags: OpenFlags) -> Option<Connection> {
+    fn open_writer_reservation_connection(path: &str, flags: OpenFlags) -> Option<Connection> {
         if flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
             Connection::open_with_flags(
                 path,
@@ -4748,6 +4760,51 @@ impl SqliteStore {
     }
 }
 
+impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
+    fn with_decryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        // A read-only store uses its writable lock connection so rotation and
+        // destruction serialize with the held callback.
+        let connection = self
+            .writer_reservation_connection
+            .as_ref()
+            .unwrap_or(&self.conn);
+        identity
+            .validate_historical_subject_decryption()
+            .and_then(|()| {
+                connection
+                    .execute_batch(begin_immediate_sql())
+                    .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
+            })
+            .and_then(|()| {
+                let _rollback_on_drop = SqliteRollbackOnDrop(connection);
+                let result = sqlite_load_key_registry(connection)
+                    .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
+                    .and_then(|registry| registry.ok_or(KeyRegistryErrorV1::RegistryUnavailable))
+                    .and_then(|mut registry| {
+                        registry.with_decryption_authorization(
+                            identity,
+                            private_material_digest,
+                            operation,
+                        )
+                    });
+                finish_transaction(
+                    connection,
+                    result,
+                    |_, _| KeyRegistryErrorV1::RegistryUnavailable,
+                    |_, _| KeyRegistryErrorV1::RegistryUnavailable,
+                )
+            })
+    }
+}
+
 impl EventStore for SqliteStore {
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         self.bind_erasure_gate_impl(gate)
@@ -4815,24 +4872,7 @@ impl EventStore for SqliteStore {
     }
 
     fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
-        let state_cbor = match self.conn.query_row(
-            "SELECT state_cbor FROM key_registry WHERE singleton = 1",
-            [],
-            |row| row.get::<_, Vec<u8>>(0),
-        ) {
-            Ok(bytes) => bytes,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-            Err(error) => return Err(CoreError::Storage(error.to_string())),
-        };
-        ciborium::from_reader(state_cbor.as_slice())
-            .map_err(|error| CoreError::Serialization(error.to_string()))
-            .and_then(|registry: KeyRegistryStateV1| {
-                registry
-                    .validate()
-                    .map(|()| registry)
-                    .map_err(|error| CoreError::Serialization(error.to_string()))
-            })
-            .map(Some)
+        sqlite_load_key_registry(&self.conn)
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
@@ -5003,6 +5043,62 @@ impl EventStore for SqliteStore {
             ),
         };
         committed
+    }
+
+    fn append_prepared_subject_encrypted_timeline_signed(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        draft: EventDraft,
+        authorization: pos_core::PreparedSubjectAppendAuthorizationV1,
+        prepare_payload: &mut dyn FnMut(
+            &pos_core::TimelineEventEnvelopeInputV1,
+        ) -> Result<CanonicalBytes, CoreError>,
+        sign: &mut dyn FnMut(
+            &mut KeyRegistryStateV1,
+            &pos_core::TimelineEventEnvelopeV1,
+            &CanonicalBytes,
+        ) -> Result<pos_core::Signature, CoreError>,
+    ) -> Result<Event, CoreError> {
+        // `BEGIN IMMEDIATE` is the registry serialization boundary: another
+        // connection cannot rotate or destroy either identity until this
+        // transaction commits or rolls back. Callbacks run while it is held
+        // and must return errors rather than panic; an unwinding panic would
+        // leave this connection inside the open transaction.
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(Self::into_storage_error)?;
+        let result = self
+            .load_key_registry()
+            .and_then(|registry| {
+                registry.ok_or_else(|| {
+                    CoreError::Storage("durable key registry is unavailable".to_owned())
+                })
+            })
+            .and_then(|mut registry| {
+                if registry != *expected_registry {
+                    return Err(CoreError::Storage(
+                        "durable key registry changed during prepared append".to_owned(),
+                    ));
+                }
+                crate::prepare_subject_encrypted_timeline_event(
+                    &*self,
+                    self.hasher.as_ref(),
+                    timeline,
+                    &mut registry,
+                    &draft,
+                    &authorization,
+                    crate::PreparedAppendCallbacks {
+                        prepare_payload,
+                        sign,
+                    },
+                )
+            })
+            .and_then(|event| {
+                self.append_committed(timeline, std::slice::from_ref(&event))
+                    .map(|()| event)
+            });
+        finish_immediate_transaction(&self.conn, result)
     }
 
     fn begin_key_registry_destruction(
@@ -6050,7 +6146,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         &self,
     ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
         let interval_connection = self
-            .erasure_effect_lock_connection
+            .writer_reservation_connection
             .as_ref()
             .unwrap_or(&self.conn);
         if !interval_connection.is_autocommit() {
@@ -6098,7 +6194,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
             return Ok(());
         }
         let interval_connection = self
-            .erasure_effect_lock_connection
+            .writer_reservation_connection
             .as_ref()
             .unwrap_or(&self.conn);
         let statement = match disposition {
@@ -9990,6 +10086,37 @@ impl AuthorityPersistencePortV1 for SqliteStore {
     }
 }
 
+fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+    let state_cbor = match conn.query_row(
+        "SELECT state_cbor FROM key_registry WHERE singleton = 1",
+        [],
+        |row| row.get::<_, Vec<u8>>(0),
+    ) {
+        Ok(bytes) => bytes,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(error) => return Err(CoreError::Storage(error.to_string())),
+    };
+    ciborium::from_reader(state_cbor.as_slice())
+        .map_err(|error| CoreError::Serialization(error.to_string()))
+        .and_then(|registry: KeyRegistryStateV1| {
+            registry
+                .validate()
+                .map(|()| registry)
+                .map_err(|error| CoreError::Serialization(error.to_string()))
+        })
+        .map(Some)
+}
+
+struct SqliteRollbackOnDrop<'a>(&'a Connection);
+
+impl Drop for SqliteRollbackOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.0.is_autocommit() {
+            drop(self.0.execute_batch("ROLLBACK"));
+        }
+    }
+}
+
 fn finish_transaction<T, E>(
     conn: &Connection,
     result: Result<T, E>,
@@ -12490,7 +12617,7 @@ mod tests {
         let path = database.path().to_str().test_ok();
         drop(open_store_at(path));
         let store = fixture_store(SqliteStore::open_read_only(path).test_ok());
-        assert!(store.erasure_effect_lock_connection.is_some());
+        assert!(store.writer_reservation_connection.is_some());
         let interval = store.begin_protected_effect_interval().test_ok();
         assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
         store
@@ -18700,12 +18827,30 @@ mod tests {
 
     #[test]
     fn registry_storage_errors_are_reported_by_sqlite_port() {
-        let store = new_store();
+        let mut store = new_store();
         store.conn.execute("DROP TABLE key_registry", []).test_ok();
         assert!(matches!(
             store.load_key_registry(),
             Err(CoreError::Storage(_))
         ));
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::SubjectDataEncryption, 1);
+        let called = std::cell::Cell::new(false);
+        assert_eq!(
+            store.with_decryption_authorization(identity, Hash::from_bytes([3; 32]), || {
+                called.set(true);
+            }),
+            Err(KeyRegistryErrorV1::RegistryUnavailable)
+        );
+        assert!(!called.get());
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        assert_eq!(
+            store.with_decryption_authorization(identity, Hash::from_bytes([3; 32]), || {
+                called.set(true);
+            }),
+            Err(KeyRegistryErrorV1::RegistryUnavailable)
+        );
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(!called.get());
 
         let mut save_store = new_store();
         save_store
@@ -19194,6 +19339,117 @@ mod tests {
             .test_ok()
             .is_empty());
         assert_eq!(reopened.load_key_registry().test_ok(), Some(registry));
+    }
+
+    #[derive(Clone, Copy)]
+    enum CompetingMutation {
+        Rotate,
+        BeginDestruction,
+    }
+
+    #[test]
+    fn historical_decryption_holds_registry_lock_through_callback() {
+        for mutation in [
+            CompetingMutation::Rotate,
+            CompetingMutation::BeginDestruction,
+        ] {
+            check_historical_decryption_lock(mutation);
+        }
+    }
+
+    fn check_historical_decryption_lock(mutation: CompetingMutation) {
+        let old = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
+        let current = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 2);
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok();
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(old, Hash::from_bytes([1; 32]), None))
+            .test_ok();
+        let mut rotated = registry.clone();
+        rotated
+            .register_key(KeyRegistrationV1::new(
+                current,
+                Hash::from_bytes([2; 32]),
+                None,
+            ))
+            .test_ok();
+        let request =
+            KeyDestructionRequestV1::new(old, Hash::from_bytes([1; 32]), Hash::from_bytes([3; 32]));
+        let mut setup = open_store_at(path);
+        setup.save_key_registry(&registry).test_ok();
+        drop(setup);
+
+        let mut decrypting_store = open_store_at(path);
+        let mut mutating_store = open_store_at(path);
+        mutating_store.conn.busy_timeout(Duration::ZERO).test_ok();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (mutation_tx, mutation_rx) = std::sync::mpsc::channel();
+        let rotated_for_mutation = &rotated;
+        let (decryption_result, mutation_result) = std::thread::scope(|scope| {
+            let decryption = scope.spawn(move || {
+                decrypting_store.with_decryption_authorization(
+                    old,
+                    Hash::from_bytes([1; 32]),
+                    || {
+                        entered_tx.send(()).test_ok();
+                        release_rx.recv().test_ok();
+                        "plaintext"
+                    },
+                )
+            });
+            let entered = entered_rx.recv_timeout(Duration::from_secs(5));
+            if entered.is_err() {
+                assert!(release_tx.send(()).is_ok(), "callback must be released");
+            }
+            assert!(
+                entered.is_ok(),
+                "decryption callback did not start: {entered:?}"
+            );
+
+            let mutation = scope.spawn(move || {
+                let result = match mutation {
+                    CompetingMutation::Rotate => {
+                        mutating_store.save_key_registry(rotated_for_mutation)
+                    }
+                    CompetingMutation::BeginDestruction => mutating_store
+                        .begin_key_registry_destruction(request)
+                        .map(|_| ()),
+                };
+                mutation_tx.send(result).test_ok();
+            });
+            let mutation_result = mutation_rx.recv_timeout(Duration::from_secs(5));
+            release_tx.send(()).test_ok();
+            let decryption_result = decryption.join().test_ok();
+            mutation.join().test_ok();
+            (decryption_result, mutation_result)
+        });
+        assert_eq!(decryption_result, Ok("plaintext"));
+        assert!(mutation_result
+            .test_ok()
+            .is_err_and(|error| error.to_string().contains("database is locked")));
+
+        let mut verify = open_store_at(path);
+        assert_eq!(verify.load_key_registry().test_ok(), Some(registry));
+        match mutation {
+            CompetingMutation::Rotate => {
+                verify.save_key_registry(&rotated).test_ok();
+                assert_eq!(
+                    verify.with_decryption_authorization(old, Hash::from_bytes([1; 32]), || {
+                        "old plaintext"
+                    }),
+                    Ok("old plaintext")
+                );
+            }
+            CompetingMutation::BeginDestruction => {
+                verify.begin_key_registry_destruction(request).test_ok();
+                assert_eq!(
+                    verify.with_decryption_authorization(old, Hash::from_bytes([1; 32]), || {}),
+                    Err(KeyRegistryErrorV1::DestructionPending)
+                );
+            }
+        }
     }
 
     #[test]
@@ -22475,6 +22731,56 @@ pub(super) mod key_registry_coverage {
         );
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
         assert!(result.is_err());
+        assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn prepared_append_rejects_a_failed_transaction_begin_before_callbacks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let mut store = open_store()?;
+        let timeline = store.create_timeline("failed-prepared-begin")?;
+        store.save_key_registry(&registry)?;
+        let payload_calls = std::cell::Cell::new(0_usize);
+        let sign_calls = std::cell::Cell::new(0_usize);
+        let mut prepare_payload = |_: &pos_core::TimelineEventEnvelopeInputV1| {
+            payload_calls.set(payload_calls.get() + 1);
+            Err::<CanonicalBytes, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let mut sign = |_: &mut KeyRegistryStateV1,
+                        _: &pos_core::TimelineEventEnvelopeV1,
+                        _: &CanonicalBytes| {
+            sign_calls.set(sign_calls.get() + 1);
+            Err::<pos_core::Signature, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let result = store.append_prepared_subject_encrypted_timeline_signed(
+            timeline.id(),
+            &registry,
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("timeline.failed-prepared-begin"),
+                CanonicalBytes::from_static(b"ignored"),
+            ),
+            pos_core::PreparedSubjectAppendAuthorizationV1 {
+                encryption_identity: pos_core::KeyIdentityV1::new(
+                    "subject-owner",
+                    pos_core::KeyRoleV1::SubjectDataEncryption,
+                    1,
+                ),
+                encryption_material_digest: Hash::from_bytes([5; 32]),
+                signing_identity: identity,
+                signing_material_digest: material_digest,
+                signing_public_key: pos_core::PublicKey::from_bytes([4; 32]),
+            },
+            &mut prepare_payload,
+            &mut sign,
+        );
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(matches!(result, Err(CoreError::Storage(_))));
+        assert_eq!((payload_calls.get(), sign_calls.get()), (0, 0));
         assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
         Ok(())
     }

@@ -6,19 +6,34 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Exposes unchecked PMF1 release-projection fixtures for public-seam tests only.
+# Never enable in deployable builds; fixtures do not establish release authority.
+# Enforced by scripts/check_test_support_features.py in CI.
+test-support = []
+
 [dependencies]
 pos-core = { path = "../pos-core" }
 serde = { workspace = true }
 ciborium = { workspace = true }
 blake3 = { workspace = true }
 ed25519-dalek = { workspace = true }
+hpke = { workspace = true }
+x25519-dalek = { workspace = true }
 rand = { workspace = true }
+ulid = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+
+# Release-query tests need the unchecked PMF1 projection fixture; tests that
+# need no fixture live in `plugin_trust_public` and run without features.
+[[test]]
+name = "plugin_release_query_public"
+required-features = ["test-support"]
 
 [lints]
 workspace = true
