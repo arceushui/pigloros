@@ -1,4 +1,4 @@
-name: Temporary Cancel Obsolete Wave 8 Runs
+name: Temporary Cancel Obsolete Wave 8 Run
 on:
   push:
     branches:
@@ -10,16 +10,20 @@ jobs:
   cancel:
     runs-on: ubuntu-latest
     steps:
-      - name: Cancel superseded hosted runs
+      - name: Cancel the superseded root CI run
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for run_id in 36906487302 36905460666; do
-            curl --fail --silent --show-error \
+          status="$(
+            curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
               --request POST \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel"
-          done
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/36907936731/cancel"
+          )"
+          case "${status}" in
+            202|409) exit 0 ;;
+            *) echo "unexpected cancellation status: ${status}" >&2; exit 1 ;;
+          esac
