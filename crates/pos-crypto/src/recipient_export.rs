@@ -41,6 +41,31 @@ const MAX_NESTING: usize = 16;
 const MAX_ENVELOPE_BYTES: usize = MAX_PAYLOAD_BYTES + MAX_CHUNKS * TAG_BYTES + 1024 * 1024;
 const HEADER_DOMAIN: &[u8] = b"pigloros/timeline-recipient-export-header/v1\0";
 const PAYLOAD_DOMAIN: &[u8] = b"pigloros/timeline-export-payload/v1\0";
+const RECIPIENT_OWNER_PREFIX: &str = "recipient:";
+/// TRX1 has eight scalar fields, a ten-field header, and at most
+/// `MAX_CHUNKS` ciphertext byte strings.
+const TRX_CBOR_LIMITS: CborLimits = CborLimits {
+    items: MAX_CHUNKS + 32,
+    array_items: MAX_CHUNKS,
+    string_bytes: CHUNK_BYTES + TAG_BYTES,
+};
+/// TEP1 has twelve top-level items plus at most thirteen items per Event.
+const TEP_CBOR_LIMITS: CborLimits = CborLimits {
+    items: MAX_EVENTS * 13 + 12,
+    array_items: MAX_EVENTS,
+    string_bytes: MAX_EVENT_PAYLOAD_BYTES,
+};
+
+/// Bounds enforced by the CBOR preflight before general decoding.
+#[derive(Clone, Copy)]
+struct CborLimits {
+    /// Maximum total data items, including nested items.
+    items: usize,
+    /// Maximum declared length of any one array.
+    array_items: usize,
+    /// Maximum declared length of any one byte or text string.
+    string_bytes: usize,
+}
 
 /// Closed failures for the recipient export codec.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -110,12 +135,7 @@ impl RecipientTimelineExportV1 {
     /// Returns an encoding or bounds error for any invalid envelope.
     pub fn decode(encoded: &[u8]) -> Result<Self, RecipientExportErrorV1> {
         validate_envelope_length(encoded.len())?;
-        preflight_cbor(
-            encoded,
-            MAX_CHUNKS + 32,
-            MAX_CHUNKS,
-            CHUNK_BYTES + TAG_BYTES,
-        )?;
+        preflight_cbor(encoded, TRX_CBOR_LIMITS)?;
         let value: Value =
             ciborium::from_reader(encoded).map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
         let Value::Array(fields) = value else {
@@ -375,12 +395,7 @@ fn encode_payload(export: &TimelineExport) -> Result<Vec<u8>, RecipientExportErr
 
 fn decode_payload(bytes: &[u8]) -> Result<TimelineExport, RecipientExportErrorV1> {
     // The decoded envelope already bounds plaintext length and requires a nonempty payload.
-    preflight_cbor(
-        bytes,
-        MAX_EVENTS.saturating_mul(13).saturating_add(12),
-        MAX_EVENTS,
-        MAX_EVENT_PAYLOAD_BYTES,
-    )?;
+    preflight_cbor(bytes, TEP_CBOR_LIMITS)?;
     let value: Value =
         ciborium::from_reader(bytes).map_err(|_| RecipientExportErrorV1::InvalidEncoding)?;
     let Value::Array(fields) = value else {
@@ -835,23 +850,10 @@ fn head(out: &mut Vec<u8>, major: u8, value: u64) {
 ///
 /// The structural decoders below enforce the fixed schemas. This pass only
 /// permits the primitive forms used by TEP1/TRX1 and caps depth and items.
-fn preflight_cbor(
-    bytes: &[u8],
-    max_items: usize,
-    max_array_items: usize,
-    max_string_bytes: usize,
-) -> Result<(), RecipientExportErrorV1> {
+fn preflight_cbor(bytes: &[u8], limits: CborLimits) -> Result<(), RecipientExportErrorV1> {
     let mut position = 0;
     let mut items = 0;
-    scan_cbor_item(
-        bytes,
-        &mut position,
-        0,
-        &mut items,
-        max_items,
-        max_array_items,
-        max_string_bytes,
-    )?;
+    scan_cbor_item(bytes, &mut position, 0, &mut items, limits)?;
     if position == bytes.len() {
         Ok(())
     } else {
@@ -864,11 +866,9 @@ fn scan_cbor_item(
     position: &mut usize,
     depth: usize,
     items: &mut usize,
-    max_items: usize,
-    max_array_items: usize,
-    max_string_bytes: usize,
+    limits: CborLimits,
 ) -> Result<(), RecipientExportErrorV1> {
-    if depth > MAX_NESTING || *items >= max_items {
+    if depth > MAX_NESTING || *items >= limits.items {
         return Err(RecipientExportErrorV1::FieldOutOfBounds);
     }
     *items += 1;
@@ -881,10 +881,10 @@ fn scan_cbor_item(
     match major {
         0 => Ok(()),
         2 | 3 => {
-            if length > u64::try_from(max_string_bytes).unwrap_or(u64::MAX) {
+            if length > u64::try_from(limits.string_bytes).unwrap_or(u64::MAX) {
                 return Err(RecipientExportErrorV1::FieldOutOfBounds);
             }
-            let length = usize::try_from(length).unwrap_or(max_string_bytes);
+            let length = usize::try_from(length).unwrap_or(limits.string_bytes);
             let remaining = &bytes[*position..];
             if length > remaining.len() {
                 return Err(RecipientExportErrorV1::InvalidEncoding);
@@ -893,23 +893,15 @@ fn scan_cbor_item(
             Ok(())
         }
         4 => {
-            if length > u64::try_from(max_array_items).unwrap_or(u64::MAX) {
+            if length > u64::try_from(limits.array_items).unwrap_or(u64::MAX) {
                 return Err(RecipientExportErrorV1::FieldOutOfBounds);
             }
             let length = usize::try_from(length).unwrap_or(usize::MAX);
-            if length > max_array_items || length > max_items.saturating_sub(*items) {
+            if length > limits.array_items || length > limits.items.saturating_sub(*items) {
                 return Err(RecipientExportErrorV1::FieldOutOfBounds);
             }
             for _ in 0..length {
-                scan_cbor_item(
-                    bytes,
-                    position,
-                    depth + 1,
-                    items,
-                    max_items,
-                    max_array_items,
-                    max_string_bytes,
-                )?;
+                scan_cbor_item(bytes, position, depth + 1, items, limits)?;
             }
             Ok(())
         }
