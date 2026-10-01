@@ -24634,7 +24634,7 @@ pub(super) mod key_registry_coverage {
         let (session, reservation, _) = adapter_recording_fixture(run_byte)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
-        let store = open_store()?;
+        let mut store = open_store()?;
         store.open_adapter_recording_session(session.clone())?;
         store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone())?;
         store.complete_adapter_call(
@@ -24652,7 +24652,7 @@ pub(super) mod key_registry_coverage {
         mutation: &str,
         ignore_check_constraints: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (store, session, _) = closed_adapter_recording(run_byte)?;
+        let (mut store, session, _) = closed_adapter_recording(run_byte)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
         if ignore_check_constraints {
@@ -24766,7 +24766,7 @@ pub(super) mod key_registry_coverage {
         let (session, reservation, _) = adapter_recording_fixture(159)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
-        let store = open_store()?;
+        let mut store = open_store()?;
         store.open_adapter_recording_session(session)?;
         let mut high_index_input = reservation.invocation().as_input().clone();
         high_index_input.global_call_index =
