@@ -148,6 +148,15 @@ pub enum RuntimeError {
     #[error("participant-authorized Driver work requires a fresh authority fence")]
     AuthorityFenceRequired,
 
+    #[error("scheduled pass admission basis is invalid: {0}")]
+    PipelineContract(pos_core::PipelineContractErrorV1),
+
+    #[error("scheduled pass was not admitted: {0:?}")]
+    ScheduledPassNotAdmitted(Box<pos_core::PipelineOutcomeV1>),
+
+    #[error("no scheduled pass admission is in doubt")]
+    NoScheduledAdmissionInDoubt,
+
     #[error(
         "driver '{driver}' cadence overflow: previous={previous_ns}ns, interval={interval_ns}ns"
     )]
