@@ -728,3 +728,197 @@ fn registration_preparation_rejects_incomplete_roots_and_owner_failure(
     );
     Ok(())
 }
+
+
+fn fixture_input(
+    inputs: &[ArtifactRegistrationInputV1],
+    magic: &[u8],
+) -> Result<ArtifactRegistrationInputV1, Box<dyn std::error::Error>> {
+    inputs
+        .iter()
+        .find(|input| input.artifact_bytes.get(2..6) == Some(magic))
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("native fixture input was absent").into())
+}
+
+struct NativeRegistrationFixture {
+    owner_id: OwnerIdV1,
+    admission: ArtifactRegistrationInputV1,
+    transcript: ArtifactRegistrationInputV1,
+    recording: ArtifactRegistrationInputV1,
+    root: ArtifactRegistrationInputV1,
+}
+
+fn native_registration_fixture() -> Result<NativeRegistrationFixture, Box<dyn std::error::Error>> {
+    let (owner_id, _, inputs) = repro_manifest_closure()?;
+    Ok(NativeRegistrationFixture {
+        owner_id,
+        admission: fixture_input(&inputs, b"MAA1")?,
+        transcript: fixture_input(&inputs, b"MAT1")?,
+        recording: fixture_input(&inputs, b"WCR1")?,
+        root: fixture_input(&inputs, b"MRM1")?,
+    })
+}
+
+#[test]
+fn adapter_registration_extraction_rejects_malformed_and_mismatched_inputs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = native_registration_fixture()?;
+    let admission_registration =
+        ArtifactRegistrationV1::from_canonical_cbor(&fixture.admission.registration_cbor)?;
+    let wrong_registration =
+        ArtifactRegistrationV1::from_canonical_cbor(&fixture.root.registration_cbor)?;
+    assert!(extract_adapter_admission_registration_v1(b"not MAA1").is_err());
+    assert!(extract_adapter_transcript_registration_v1(
+        b"not MAT1",
+        &fixture.admission.artifact_bytes,
+        &admission_registration,
+    )
+    .is_err());
+    assert!(extract_adapter_transcript_registration_v1(
+        &fixture.transcript.artifact_bytes,
+        b"not MAA1",
+        &admission_registration,
+    )
+    .is_err());
+    assert!(extract_adapter_transcript_registration_v1(
+        &fixture.transcript.artifact_bytes,
+        &fixture.admission.artifact_bytes,
+        &wrong_registration,
+    )
+    .is_err());
+
+    let transcript =
+        AdapterTranscriptV1::from_canonical_cbor(&fixture.transcript.artifact_bytes)?;
+    let mut inconsistent_transcript = transcript.as_input().clone();
+    inconsistent_transcript.adapter_admission_digest = Hash::from_bytes([0x85; 32]);
+    let inconsistent_bytes = AdapterTranscriptV1::new(inconsistent_transcript)?.to_canonical_cbor();
+    assert!(extract_adapter_transcript_registration_v1(
+        &inconsistent_bytes,
+        &fixture.admission.artifact_bytes,
+        &admission_registration,
+    )
+    .is_err());
+    Ok(())
+}
+
+#[test]
+fn root_registration_extraction_rejects_each_invalid_child(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = native_registration_fixture()?;
+    let recording_registration =
+        ArtifactRegistrationV1::from_canonical_cbor(&fixture.recording.registration_cbor)?;
+    let admission_registration =
+        ArtifactRegistrationV1::from_canonical_cbor(&fixture.admission.registration_cbor)?;
+    let transcript_registration =
+        ArtifactRegistrationV1::from_canonical_cbor(&fixture.transcript.registration_cbor)?;
+    let root_registration = ArtifactRegistrationV1::from_canonical_cbor(&fixture.root.registration_cbor)?;
+    let input = ReproManifestRootRegistrationInputV1 {
+        root_bytes: &fixture.root.artifact_bytes,
+        recording_receipt_bytes: &fixture.recording.artifact_bytes,
+        recording_registration: &recording_registration,
+        transcript_bytes: &fixture.transcript.artifact_bytes,
+        admission_bytes: &fixture.admission.artifact_bytes,
+        admission_registration: &admission_registration,
+        transcript_registration: &transcript_registration,
+        owner_id: &fixture.owner_id,
+        label_data_class: Some(ArtifactDataClassV1::PublicRecord),
+    };
+    assert!(extract_repro_manifest_root_registration_v1(
+        ReproManifestRootRegistrationInputV1 {
+            root_bytes: b"not MRM1",
+            ..input
+        }
+    )
+    .is_err());
+    assert!(extract_repro_manifest_root_registration_v1(
+        ReproManifestRootRegistrationInputV1 {
+            recording_receipt_bytes: b"not WCR1",
+            ..input
+        }
+    )
+    .is_err());
+    assert!(extract_repro_manifest_root_registration_v1(
+        ReproManifestRootRegistrationInputV1 {
+            transcript_bytes: b"not MAT1",
+            ..input
+        }
+    )
+    .is_err());
+    assert!(extract_repro_manifest_root_registration_v1(
+        ReproManifestRootRegistrationInputV1 {
+            recording_registration: &admission_registration,
+            ..input
+        }
+    )
+    .is_err());
+    assert!(extract_repro_manifest_root_registration_v1(
+        ReproManifestRootRegistrationInputV1 {
+            admission_bytes: b"not MAA1",
+            ..input
+        }
+    )
+    .is_err());
+    assert!(extract_repro_manifest_root_registration_v1(
+        ReproManifestRootRegistrationInputV1 {
+            admission_registration: &root_registration,
+            ..input
+        }
+    )
+    .is_err());
+    assert!(extract_repro_manifest_root_registration_v1(
+        ReproManifestRootRegistrationInputV1 {
+            transcript_registration: &admission_registration,
+            ..input
+        }
+    )
+    .is_err());
+    Ok(())
+}
+
+#[test]
+fn root_registration_extraction_rejects_invalid_label_and_binding(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = native_registration_fixture()?;
+    let recording_registration =
+        ArtifactRegistrationV1::from_canonical_cbor(&fixture.recording.registration_cbor)?;
+    let admission_registration =
+        ArtifactRegistrationV1::from_canonical_cbor(&fixture.admission.registration_cbor)?;
+    let transcript_registration =
+        ArtifactRegistrationV1::from_canonical_cbor(&fixture.transcript.registration_cbor)?;
+    let input = ReproManifestRootRegistrationInputV1 {
+        root_bytes: &fixture.root.artifact_bytes,
+        recording_receipt_bytes: &fixture.recording.artifact_bytes,
+        recording_registration: &recording_registration,
+        transcript_bytes: &fixture.transcript.artifact_bytes,
+        admission_bytes: &fixture.admission.artifact_bytes,
+        admission_registration: &admission_registration,
+        transcript_registration: &transcript_registration,
+        owner_id: &fixture.owner_id,
+        label_data_class: Some(ArtifactDataClassV1::PublicRecord),
+    };
+    let root = ReproManifestRootV1::from_canonical_cbor(&fixture.root.artifact_bytes)?;
+    let mut unclassified_label = root.as_input().clone();
+    unclassified_label.label = None;
+    let unlabeled_bytes = ReproManifestRootV1::new(unclassified_label)?.to_canonical_cbor();
+    assert!(extract_repro_manifest_root_registration_v1(
+        ReproManifestRootRegistrationInputV1 {
+            root_bytes: &unlabeled_bytes,
+            label_data_class: Some(ArtifactDataClassV1::PublicRecord),
+            ..input
+        }
+    )
+    .is_err());
+
+    let mut mismatched_binding = root.as_input().clone();
+    mismatched_binding.adapter_transcript_digest = Hash::from_bytes([0x86; 32]);
+    let mismatched_bytes = ReproManifestRootV1::new(mismatched_binding)?.to_canonical_cbor();
+    assert!(extract_repro_manifest_root_registration_v1(
+        ReproManifestRootRegistrationInputV1 {
+            root_bytes: &mismatched_bytes,
+            ..input
+        }
+    )
+    .is_err());
+    Ok(())
+}
