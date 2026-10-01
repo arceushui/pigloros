@@ -103,7 +103,7 @@ pub struct LocalAdapterProviderResponseV1 {
 impl LocalAdapterProviderResponseV1 {
     /// Return a response without an idempotency acknowledgement.
     #[must_use]
-    pub fn unacknowledged(output_bytes: Vec<u8>) -> Self {
+    pub const fn unacknowledged(output_bytes: Vec<u8>) -> Self {
         Self {
             output_bytes,
             idempotency_acknowledgement: None,
@@ -112,7 +112,7 @@ impl LocalAdapterProviderResponseV1 {
 
     /// Return a response acknowledging the exact supplied run call key.
     #[must_use]
-    pub fn acknowledged(
+    pub const fn acknowledged(
         output_bytes: Vec<u8>,
         idempotency_key: LocalAdapterIdempotencyKeyV1,
     ) -> Self {
@@ -235,7 +235,7 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
         )?;
         let entry = self.registry.local_adapters[adapter_index].entry.clone();
         let (global_call_index, invocation) =
-            self.build_invocation(entry, exact_request_payload)?;
+            self.build_invocation(&entry, exact_request_payload)?;
         let per_plugin_call_index = self
             .next_per_plugin_call
             .get(&plugin_id)
@@ -295,7 +295,7 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
 
     fn build_invocation(
         &mut self,
-        entry: AdapterAdmissionEntryV1,
+        entry: &AdapterAdmissionEntryV1,
         exact_request_payload: Vec<u8>,
     ) -> Result<(u64, AdapterInvocationV1), LocalAdapterErrorV1> {
         let Ok(global_call_index) = u64::try_from(self.calls.len()) else {
