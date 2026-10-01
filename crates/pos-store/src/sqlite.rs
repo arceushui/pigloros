@@ -5060,13 +5060,11 @@ impl EventStore for SqliteStore {
             &CanonicalBytes,
         ) -> Result<pos_core::Signature, CoreError>,
     ) -> Result<Event, CoreError> {
-        let pos_core::PreparedSubjectAppendAuthorizationV1 {
-            encryption_identity,
-            encryption_material_digest,
-            signing_identity,
-            signing_material_digest,
-            signing_public_key,
-        } = authorization;
+        // `BEGIN IMMEDIATE` is the registry serialization boundary: another
+        // connection cannot rotate or destroy either identity until this
+        // transaction commits or rolls back. Callbacks run while it is held
+        // and must return errors rather than panic; an unwinding panic would
+        // leave this connection inside the open transaction.
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(Self::into_storage_error)?;
@@ -5083,74 +5081,20 @@ impl EventStore for SqliteStore {
                         "durable key registry changed during prepared append".to_owned(),
                     ));
                 }
-                registry
-                    .with_encryption_authorization(
-                        encryption_identity,
-                        encryption_material_digest,
-                        || (),
-                    )
-                    .map_err(|error| {
-                        CoreError::Storage(format!("subject encryption authorization: {error}"))
-                    })
-                    .and_then(|()| {
-                        registry
-                            .with_signing_authorization(
-                                signing_identity,
-                                signing_material_digest,
-                                signing_public_key,
-                                || (),
-                            )
-                            .map_err(|error| {
-                                CoreError::Storage(format!(
-                                    "Timeline signing authorization: {error}"
-                                ))
-                            })
-                    })
-                    .and_then(|()| self.get_timeline(timeline))
-                    .and_then(|owning| owning.ok_or(CoreError::TimelineNotFound(timeline)))
-                    .and_then(|owning| {
-                        let prefix = owning.meta.fork_point.map_or(0, |(_, at)| at.as_u64());
-                        crate::prepare_timeline_signing_input(
-                            timeline,
-                            owning.head,
-                            prefix,
-                            &draft,
-                            signing_identity,
-                        )
-                    })
-                    .and_then(|(seq, input)| {
-                        prepare_payload(&input).map(|payload| (seq, input, payload))
-                    })
-                    .and_then(|(seq, input, payload)| {
-                        crate::finalize_timeline_signing_event(
-                            seq,
-                            input,
-                            payload,
-                            self.hasher.as_ref(),
-                        )
-                    })
-                    .and_then(|(event, envelope)| {
-                        sign(&mut registry, &envelope, &event.payload)
-                            .map(|signature| (event, envelope, signature))
-                    })
-                    .and_then(|(mut event, envelope, signature)| {
-                        crate::verify_new_timeline_signature(
-                            signing_public_key,
-                            signing_identity,
-                            &envelope,
-                            &event.payload,
-                            &signature,
-                        )
-                        .map(|()| {
-                            event.signature = Some(signature);
-                            event.signature_identity = Some(signing_identity);
-                            event
-                        })
-                    })
-                    .and_then(|event| {
-                        self.append_committed(timeline, std::slice::from_ref(&event))
-                            .map(|()| event)
-                    })
+                crate::prepare_subject_encrypted_timeline_event(
+                    &*self,
+                    self.hasher.as_ref(),
+                    timeline,
+                    &mut registry,
+                    &draft,
+                    authorization,
+                    prepare_payload,
+                    sign,
+                )
+            })
+            .and_then(|event| {
+                self.append_committed(timeline, std::slice::from_ref(&event))
+                    .map(|()| event)
             });
         finish_immediate_transaction(&self.conn, result)
     }

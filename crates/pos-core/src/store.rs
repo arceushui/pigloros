@@ -1029,6 +1029,16 @@ pub trait EventStore: Send {
     /// The callback is synchronous and non-escaping. It receives the immutable
     /// first-commit context before the payload exists; adapters retain the same
     /// registry serialization boundary through commit or rollback.
+    ///
+    /// Only the draft's metadata (entity, type, schema version, wall time, and
+    /// causal IDs) is used: `draft.payload` is ignored, and the committed
+    /// payload is exactly the bytes returned by `prepare_payload`.
+    ///
+    /// Authorization order is registry match, then `SubjectDataEncryption`,
+    /// then `TimelineIntegritySigning`; any failure invokes neither callback.
+    /// `sign` receives a clone of the authorized registry. A nonce reserved by
+    /// `prepare_payload` stays spent if a later step rolls back. Callbacks run
+    /// while the boundary is held and must return errors instead of panicking.
     /// # Errors
     /// Returns a closed error when either identity is unavailable or the
     /// callback, signature verification, insertion, or commit fails.

@@ -4681,62 +4681,21 @@ impl EventStore for MemoryStore {
             &pos_core::CanonicalBytes,
         ) -> Result<pos_core::Signature, CoreError>,
     ) -> Result<Event, CoreError> {
-        let pos_core::PreparedSubjectAppendAuthorizationV1 {
-            encryption_identity,
-            encryption_material_digest,
-            signing_identity,
-            signing_material_digest,
-            signing_public_key,
-        } = authorization;
-        let mut registry = self.checked_signing_registry(expected_registry)?;
-        registry
-            .with_encryption_authorization(encryption_identity, encryption_material_digest, || ())
-            .map_err(|error| {
-                CoreError::Storage(format!("subject encryption authorization: {error}"))
-            })?;
-        registry
-            .with_signing_authorization(
-                signing_identity,
-                signing_material_digest,
-                signing_public_key,
-                || (),
-            )
-            .map_err(|error| {
-                CoreError::Storage(format!("Timeline signing authorization: {error}"))
-            })?;
-        self.get_timeline(timeline)
-            .and_then(|owning| owning.ok_or(CoreError::TimelineNotFound(timeline)))
-            .and_then(|owning| {
-                let prefix = owning.meta.fork_point.map_or(0, |(_, at)| at.as_u64());
-                crate::prepare_timeline_signing_input(
+        // `&mut self` is the registry serialization boundary: no other handle
+        // can rotate or destroy either identity until this call returns, so
+        // concurrent lifecycle races are statically impossible here.
+        self.checked_signing_registry(expected_registry)
+            .and_then(|mut registry| {
+                crate::prepare_subject_encrypted_timeline_event(
+                    &*self,
+                    self.hasher.as_ref(),
                     timeline,
-                    owning.head,
-                    prefix,
+                    &mut registry,
                     &draft,
-                    signing_identity,
+                    authorization,
+                    prepare_payload,
+                    sign,
                 )
-            })
-            .and_then(|(seq, input)| prepare_payload(&input).map(|payload| (seq, input, payload)))
-            .and_then(|(seq, input, payload)| {
-                crate::finalize_timeline_signing_event(seq, input, payload, self.hasher.as_ref())
-            })
-            .and_then(|(event, envelope)| {
-                sign(&mut registry, &envelope, &event.payload)
-                    .map(|signature| (event, envelope, signature))
-            })
-            .and_then(|(mut event, envelope, signature)| {
-                crate::verify_new_timeline_signature(
-                    signing_public_key,
-                    signing_identity,
-                    &envelope,
-                    &event.payload,
-                    &signature,
-                )
-                .map(|()| {
-                    event.signature = Some(signature);
-                    event.signature_identity = Some(signing_identity);
-                    event
-                })
             })
             .and_then(|event| {
                 self.append_committed(timeline, std::slice::from_ref(&event))
