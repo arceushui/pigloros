@@ -916,12 +916,15 @@ fn local_adapter_session_enforces_public_request_and_call_bounds() -> TestResult
 
 #[test]
 fn local_adapter_registry_orders_multiple_contracts() -> TestResult {
-    let low = LocalPlugin {
-        id: PluginId::from_ulid(ulid::Ulid::from(1_u128)),
+    let first = PluginId::new();
+    let second = PluginId::new();
+    let (low_id, high_id) = if first < second {
+        (first, second)
+    } else {
+        (second, first)
     };
-    let high = LocalPlugin {
-        id: PluginId::from_ulid(ulid::Ulid::from(2_u128)),
-    };
+    let low = LocalPlugin { id: low_id };
+    let high = LocalPlugin { id: high_id };
     let mut registry = PluginRegistry::new();
     registry.register_local(&high, vec!["weather.high".to_owned()], None, None)?;
     registry.register_local(&low, vec!["weather.low".to_owned()], None, None)?;
