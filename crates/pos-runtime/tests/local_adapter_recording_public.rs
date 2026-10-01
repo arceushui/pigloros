@@ -310,6 +310,7 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() -> TestRe
     assert_eq!(observed_keys[0].global_call_index(), 0);
     drop(observed_keys);
     drop(keys);
+    assert_eq!(closed.admission_bytes(), closed.admission().to_canonical_cbor());
     let closed_bytes = closed.transcript_bytes();
     assert_eq!(
         recorder
@@ -533,5 +534,312 @@ fn externally_idempotent_retry_reuses_provider_output_after_completion_failure()
             .len(),
         1
     );
+    Ok(())
+}
+
+
+struct OversizedProvider;
+
+impl LocalAdapterProviderV1 for OversizedProvider {
+    fn invoke(
+        &mut self,
+        _: &AdapterInvocationV1,
+        idempotency_key: LocalAdapterIdempotencyKeyV1,
+    ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
+        Ok(LocalAdapterProviderResponseV1::acknowledged(
+            vec![0; pos_core::MAX_ADAPTER_CALL_BYTES_V1 + 1],
+            idempotency_key,
+        ))
+    }
+}
+
+struct PanickingProvider;
+
+impl LocalAdapterProviderV1 for PanickingProvider {
+    fn invoke(
+        &mut self,
+        _: &AdapterInvocationV1,
+        _: LocalAdapterIdempotencyKeyV1,
+    ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
+        panic!("provider panic must remain contained by the local recorder");
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RecorderFailure {
+    Open,
+    Reserve,
+    Close,
+    Abort,
+}
+
+struct FailingRecordingStore {
+    inner: pos_store::memory::MemoryStore,
+    failure: RecorderFailure,
+}
+
+impl AdapterRecordingStoreV1 for FailingRecordingStore {
+    fn open_adapter_recording_session(
+        &mut self,
+        session: pos_core::AdapterRecordingSessionV1,
+    ) -> Result<(), pos_core::AdapterRecordingStoreErrorV1> {
+        if matches!(self.failure, RecorderFailure::Open) {
+            return Err(pos_core::AdapterRecordingStoreErrorV1::StorageFailure);
+        }
+        self.inner.open_adapter_recording_session(session)
+    }
+
+    fn reserve_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: pos_core::AdapterCallReservationV1,
+    ) -> Result<pos_core::AdapterCallReservationOutcomeV1, pos_core::AdapterRecordingStoreErrorV1>
+    {
+        if matches!(self.failure, RecorderFailure::Reserve) {
+            return Err(pos_core::AdapterRecordingStoreErrorV1::StorageFailure);
+        }
+        self.inner
+            .reserve_adapter_call(owner_reference, run_operation_id, reservation)
+    }
+
+    fn complete_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), pos_core::AdapterRecordingStoreErrorV1> {
+        self.inner.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            global_call_index,
+            output_bytes,
+        )
+    }
+
+    fn close_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, pos_core::AdapterRecordingStoreErrorV1> {
+        if matches!(self.failure, RecorderFailure::Close) {
+            return Err(pos_core::AdapterRecordingStoreErrorV1::StorageFailure);
+        }
+        self.inner
+            .close_adapter_recording_session(owner_reference, run_operation_id)
+    }
+
+    fn read_closed_adapter_recording_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, pos_core::AdapterRecordingStoreErrorV1> {
+        self.inner
+            .read_closed_adapter_recording_session(owner_reference, run_operation_id)
+    }
+
+    fn abort_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), pos_core::AdapterRecordingStoreErrorV1> {
+        if matches!(self.failure, RecorderFailure::Abort) {
+            return Err(pos_core::AdapterRecordingStoreErrorV1::StorageFailure);
+        }
+        self.inner
+            .abort_adapter_recording_session(owner_reference, run_operation_id)
+    }
+}
+
+#[test]
+fn local_adapter_registration_rejects_missing_duplicate_and_sealed_entries() -> TestResult {
+    let plugin = LocalPlugin {
+        id: PluginId::new(),
+    };
+    let mut missing = PluginRegistry::new();
+    assert_eq!(
+        missing.register_local_adapter(adapter_entry(plugin.id()), Box::new(RejectingProvider)),
+        Err(LocalAdapterErrorV1::PluginUnavailable)
+    );
+
+    let mut registry = PluginRegistry::new();
+    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+    let entry = adapter_entry(plugin.id());
+    registry.register_local_adapter(entry.clone(), Box::new(RejectingProvider))?;
+    assert_eq!(
+        registry.register_local_adapter(entry.clone(), Box::new(RejectingProvider)),
+        Err(LocalAdapterErrorV1::InvalidContract)
+    );
+    registry.admit_local_manifest_registration(OwnerIdV1::from_static("sealed-local-adapter"), 4)?;
+    assert_eq!(
+        registry.register_local_adapter(entry, Box::new(RejectingProvider)),
+        Err(LocalAdapterErrorV1::ManifestSealed)
+    );
+    Ok(())
+}
+
+#[test]
+fn local_adapter_session_rejects_stale_unknown_and_terminal_calls() -> TestResult {
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
+    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
+    let owner_reference = handle.as_input().owner_reference;
+    let mut recorder = pos_store::memory::MemoryStore::new();
+
+    assert!(matches!(
+        registry.begin_local_adapter_session(&admitted, handle, Hash::zero(), &mut recorder),
+        Err(LocalAdapterErrorV1::StaleAdmission)
+    ));
+
+    let mut session = registry.begin_local_adapter_session(
+        &admitted,
+        world_handle(owner_reference)?,
+        Hash::from_bytes([27; 32]),
+        &mut recorder,
+    )?;
+    assert_eq!(
+        session.invoke(
+            plugin_id,
+            "other.adapter",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::UnknownAdapter)
+    );
+    assert_eq!(
+        session.invoke(
+            plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::SessionAborted)
+    );
+    session.abort()?;
+    Ok(())
+}
+
+#[test]
+fn local_adapter_session_contains_provider_output_and_panic_failures() -> TestResult {
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(OversizedProvider))?;
+    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
+    let mut recorder = pos_store::memory::MemoryStore::new();
+    let mut session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([28; 32]),
+        &mut recorder,
+    )?;
+    assert_eq!(
+        session.invoke(
+            plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::CallBoundExceeded)
+    );
+    session.abort()?;
+
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(PanickingProvider))?;
+    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
+    let mut recorder = pos_store::memory::MemoryStore::new();
+    let mut session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([29; 32]),
+        &mut recorder,
+    )?;
+    assert_eq!(
+        session.invoke(
+            plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::ProviderRejected)
+    );
+    session.abort()?;
+    Ok(())
+}
+
+#[test]
+fn local_adapter_session_maps_recorder_boundaries_to_closed_errors() -> TestResult {
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
+    let mut recorder = FailingRecordingStore {
+        inner: pos_store::memory::MemoryStore::new(),
+        failure: RecorderFailure::Open,
+    };
+    assert!(matches!(
+        registry.begin_local_adapter_session(
+            &admitted,
+            handle,
+            Hash::from_bytes([30; 32]),
+            &mut recorder,
+        ),
+        Err(LocalAdapterErrorV1::RecordingFailed)
+    ));
+
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
+    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
+    let mut recorder = FailingRecordingStore {
+        inner: pos_store::memory::MemoryStore::new(),
+        failure: RecorderFailure::Reserve,
+    };
+    let mut session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([31; 32]),
+        &mut recorder,
+    )?;
+    assert_eq!(
+        session.invoke(
+            plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::RecordingFailed)
+    );
+    session.abort()?;
+
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
+    let mut recorder = FailingRecordingStore {
+        inner: pos_store::memory::MemoryStore::new(),
+        failure: RecorderFailure::Close,
+    };
+    let session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([32; 32]),
+        &mut recorder,
+    )?;
+    assert_eq!(
+        session.finish(),
+        Err(LocalAdapterErrorV1::RecordingFailed)
+    );
+
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
+    let mut recorder = FailingRecordingStore {
+        inner: pos_store::memory::MemoryStore::new(),
+        failure: RecorderFailure::Abort,
+    };
+    let session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([33; 32]),
+        &mut recorder,
+    )?;
+    assert_eq!(session.abort(), Err(LocalAdapterErrorV1::RecordingFailed));
     Ok(())
 }
