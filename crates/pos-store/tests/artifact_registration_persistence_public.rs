@@ -1402,4 +1402,4 @@ fn sqlite_adapter_recording_rejects_durable_bounds(
         Err(AdapterRecordingStoreErrorV1::InvalidCall)
     );
     Ok(())
-}}
+}
