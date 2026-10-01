@@ -923,3 +923,38 @@ fn root_registration_extraction_rejects_invalid_label_and_binding(
     .is_err());
     Ok(())
 }
+
+
+fn input_with_trailing_native_byte(
+    mut input: ArtifactRegistrationInputV1,
+) -> Result<ArtifactRegistrationInputV1, Box<dyn std::error::Error>> {
+    input.artifact_bytes.push(0);
+    let registration = ArtifactRegistrationV1::from_canonical_cbor(&input.registration_cbor)?;
+    let mut fields = registration.fields().clone();
+    fields.artifact_digest =
+        ArtifactRegistrationV1::artifact_digest(fields.artifact_class, &input.artifact_bytes);
+    input.registration_cbor = ArtifactRegistrationV1::new(fields)?.canonical_cbor().to_vec();
+    Ok(input)
+}
+
+#[test]
+fn registration_preparation_rejects_noncanonical_supported_native_records(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    for magic in [&b"MAA1"[..], &b"MAT1"[..], &b"WCR1"[..], &b"MRM1"[..]] {
+        let mut malformed = inputs.clone();
+        let index = malformed
+            .iter()
+            .position(|input| input.artifact_bytes.get(2..6) == Some(magic))
+            .ok_or_else(|| std::io::Error::other("native fixture input was absent"))?;
+        malformed[index] = input_with_trailing_native_byte(malformed[index].clone())?;
+        assert_preparation_error(
+            owner_id,
+            root,
+            malformed,
+            &TestOnlyStructuralOwnerVerifier,
+            ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact,
+        );
+    }
+    Ok(())
+}
