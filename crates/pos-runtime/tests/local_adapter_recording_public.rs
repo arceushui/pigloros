@@ -310,7 +310,10 @@ fn local_registry_records_exact_adapter_calls_in_a_closed_transcript() -> TestRe
     assert_eq!(observed_keys[0].global_call_index(), 0);
     drop(observed_keys);
     drop(keys);
-    assert_eq!(closed.admission_bytes(), closed.admission().to_canonical_cbor());
+    assert_eq!(
+        closed.admission_bytes(),
+        closed.admission().to_canonical_cbor()
+    );
     let closed_bytes = closed.transcript_bytes();
     assert_eq!(
         recorder
@@ -537,7 +540,6 @@ fn externally_idempotent_retry_reuses_provider_output_after_completion_failure()
     Ok(())
 }
 
-
 struct OversizedProvider;
 
 impl LocalAdapterProviderV1 for OversizedProvider {
@@ -671,7 +673,8 @@ fn local_adapter_registration_rejects_missing_duplicate_and_sealed_entries() -> 
         registry.register_local_adapter(entry.clone(), Box::new(RejectingProvider)),
         Err(LocalAdapterErrorV1::InvalidContract)
     );
-    registry.admit_local_manifest_registration(OwnerIdV1::from_static("sealed-local-adapter"), 4)?;
+    registry
+        .admit_local_manifest_registration(OwnerIdV1::from_static("sealed-local-adapter"), 4)?;
     assert_eq!(
         registry.register_local_adapter(entry, Box::new(RejectingProvider)),
         Err(LocalAdapterErrorV1::ManifestSealed)
