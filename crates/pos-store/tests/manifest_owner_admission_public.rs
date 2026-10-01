@@ -714,6 +714,135 @@ fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reope
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_owner_admission_replaces_complete_generation_and_recovers_after_reopen(
+) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("owner-admission-replacement.sqlite");
+    let path = path.to_str().ok_or("non-UTF8 test path")?;
+    let owner_id = [29; 32];
+    let original_timelines = vec![timeline(21), timeline(22)];
+    let genesis_operation = hash(151);
+    let genesis_request = request(
+        AdmissionTransition {
+            owner_id,
+            generation: 1,
+            expected_generation: None,
+            previous_receipt: None,
+            expected_inventory: None,
+            resulting_inventory: hash(150),
+            operation_id: genesis_operation,
+        },
+        &original_timelines,
+    )?;
+    let genesis_owner = FixtureOwner::new(original_timelines.clone(), genesis_operation);
+    let mut store = SqliteStore::open(path)?;
+    let genesis = prepare_manifest_owner_admission_v1(genesis_request, &genesis_owner, None)?;
+    let genesis_result = store.commit_manifest_owner_admission_v1(genesis)?;
+    assert_eq!(genesis_result.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
+    let pre_replacement = store
+        .read_manifest_owner_state_v1(owner_id)?
+        .ok_or("SQLite owner state is missing before replacement")?;
+
+    let replacement_timelines = vec![timeline(23), timeline(24)];
+    let replacement_operation = hash(153);
+    let replacement_request = request(
+        AdmissionTransition {
+            owner_id,
+            generation: 2,
+            expected_generation: Some(1),
+            previous_receipt: None,
+            expected_inventory: Some(hash(150)),
+            resulting_inventory: hash(152),
+            operation_id: replacement_operation,
+        },
+        &replacement_timelines,
+    )?;
+    let replacement_owner = FixtureOwner::new(replacement_timelines.clone(), replacement_operation);
+    let replacement = prepare_manifest_owner_admission_v1(
+        replacement_request.clone(),
+        &replacement_owner,
+        Some(&pre_replacement),
+    )?;
+    let replaced = store.commit_manifest_owner_admission_v1(replacement)?;
+    assert_eq!(replaced.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
+    assert_eq!(replaced.configuration_generation, 2);
+    assert_eq!(replaced.receipt_hashes.len(), replacement_timelines.len());
+
+    let competing_timelines = vec![timeline(25), timeline(26)];
+    let competing_operation = hash(155);
+    let competing_request = request(
+        AdmissionTransition {
+            owner_id,
+            generation: 2,
+            expected_generation: Some(1),
+            previous_receipt: None,
+            expected_inventory: Some(hash(150)),
+            resulting_inventory: hash(154),
+            operation_id: competing_operation,
+        },
+        &competing_timelines,
+    )?;
+    let competing_owner = FixtureOwner::new(competing_timelines.clone(), competing_operation);
+    let competing = prepare_manifest_owner_admission_v1(
+        competing_request,
+        &competing_owner,
+        Some(&pre_replacement),
+    )?;
+    assert_eq!(
+        store.commit_manifest_owner_admission_v1(competing),
+        Err(ManifestOwnerAdmissionErrorV1::Conflict)
+    );
+    drop(store);
+
+    let reopened = SqliteStore::open(path)?;
+    let current = reopened
+        .read_manifest_owner_state_v1(owner_id)?
+        .ok_or("SQLite owner state is missing after replacement")?;
+    assert_eq!(current.configuration_generation, 2);
+    assert_eq!(current.timelines, replacement_timelines);
+    assert_eq!(current.inventory_generation, hash(152));
+    assert_eq!(current.previous_visible_lcq1_hash, None);
+    assert!(reopened
+        .read_manifest_owner_admission_v1(owner_id, 1, timeline(21))?
+        .is_some());
+    for timeline_id in [timeline(23), timeline(24)] {
+        let historical = reopened
+            .read_manifest_owner_admission_v1(owner_id, 2, timeline_id)?
+            .ok_or("replacement generation scope row was lost after reopen")?;
+        assert_eq!(historical.timeline.policy_copies.len(), 2);
+        assert_eq!(
+            historical
+                .timeline
+                .receipt
+                .as_input()
+                .expected_inventory_generation,
+            Some(hash(150))
+        );
+    }
+    let retry = reopened
+        .resolve_manifest_owner_admission_retry_v1(
+            owner_id,
+            replacement_operation,
+            manifest_owner_admission_intent_digest_v1(&replacement_request)?,
+        )?
+        .ok_or("SQLite did not recover the replacement operation")?;
+    assert_eq!(retry.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+    assert_eq!(retry.receipt_hashes, replaced.receipt_hashes);
+    let mut conflicting_retry = replacement_request;
+    conflicting_retry.resulting_inventory_generation = hash(156);
+    assert_eq!(
+        reopened.resolve_manifest_owner_admission_retry_v1(
+            owner_id,
+            replacement_operation,
+            manifest_owner_admission_intent_digest_v1(&conflicting_retry)?,
+        ),
+        Err(ManifestOwnerAdmissionErrorV1::Conflict)
+    );
+    Ok(())
+}
+
 fn assert_sqlite_owner_receipt_corruption_is_rejected(
     store: &SqliteStore,
     connection: &rusqlite::Connection,
