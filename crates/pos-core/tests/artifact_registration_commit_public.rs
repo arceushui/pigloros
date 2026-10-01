@@ -222,7 +222,7 @@ fn repro_manifest_closure_with_label(
             admission_registration: &admission_registration,
             transcript_registration: &transcript_registration,
             owner_id: &owner_id,
-            label_data_class: Some(ArtifactDataClassV1::PublicRecord),
+            label_data_class: label.map(|_| ArtifactDataClassV1::PublicRecord),
         })?;
     let root_address = root_registration.address();
     let inputs = [
