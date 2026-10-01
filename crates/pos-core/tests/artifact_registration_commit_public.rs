@@ -9,8 +9,8 @@ use pos_core::{
     ArtifactRegistrationV1, ArtifactTransitionRuleV1, ErasureArtifactClassV1, Hash, OwnerIdV1,
     ReproManifestRootInputV1, ReproManifestRootRegistrationInputV1, ReproManifestRootV1,
     WorldRecordingReceiptInputV1, WorldRecordingReceiptV1, WorldReplayHandleInputV1,
-    WorldReplayHandleV1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
-    MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
+    WorldReplayHandleV1, MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
+    MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1, MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
 };
 use ulid::Ulid;
 
@@ -1156,6 +1156,183 @@ fn persisted_catalog_rejects_an_unknown_repro_manifest_format(
     assert_eq!(
         validate_artifact_registration_catalog_graph_v1(changed_root.address(), &fixture.rows),
         Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+
+struct RejectingCommitVerifier;
+
+impl ArtifactRegistrationOwnerVerifierV1 for RejectingCommitVerifier {
+    fn derive_native_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        TestOnlyStructuralOwnerVerifier.derive_native_registration(
+            owner_id,
+            artifact_class,
+            artifact_bytes,
+        )
+    }
+
+    fn classify_repro_manifest_label(
+        &self,
+        owner_id: &OwnerIdV1,
+        label: &str,
+    ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        TestOnlyStructuralOwnerVerifier.classify_repro_manifest_label(owner_id, label)
+    }
+
+    fn verify_committed_artifact(
+        &self,
+        _: &OwnerIdV1,
+        _: &[u8],
+        _: &ArtifactRegistrationV1,
+    ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+        Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+    }
+}
+
+struct RejectingSecondNativeDerivationVerifier {
+    calls: std::cell::Cell<usize>,
+}
+
+impl ArtifactRegistrationOwnerVerifierV1 for RejectingSecondNativeDerivationVerifier {
+    fn derive_native_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        let calls = self.calls.get() + 1;
+        self.calls.set(calls);
+        if calls == 2 {
+            return Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected);
+        }
+        TestOnlyStructuralOwnerVerifier.derive_native_registration(
+            owner_id,
+            artifact_class,
+            artifact_bytes,
+        )
+    }
+
+    fn classify_repro_manifest_label(
+        &self,
+        owner_id: &OwnerIdV1,
+        label: &str,
+    ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+        TestOnlyStructuralOwnerVerifier.classify_repro_manifest_label(owner_id, label)
+    }
+
+    fn verify_committed_artifact(
+        &self,
+        owner_id: &OwnerIdV1,
+        artifact_bytes: &[u8],
+        registration: &ArtifactRegistrationV1,
+    ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+        TestOnlyStructuralOwnerVerifier.verify_committed_artifact(
+            owner_id,
+            artifact_bytes,
+            registration,
+        )
+    }
+}
+
+#[test]
+fn persisted_catalog_accepts_the_complete_semantic_closure(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = catalog_fixture()?;
+    let root_index = catalog_row_index(&fixture.rows, b"MRM1")?;
+    let root = fixture.rows[root_index].registration_address();
+    assert_eq!(
+        validate_artifact_registration_catalog_graph_v1(root, &fixture.rows),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn persisted_catalog_rejects_a_semantically_wrong_root_registration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = catalog_fixture()?;
+    let root_index = catalog_row_index(&fixture.rows, b"MRM1")?;
+    let root = fixture.rows[root_index].clone();
+    let changed =
+        registration_with_data_class(&root, ArtifactDataClassV1::StructuralAuditMetadata)?;
+    fixture.rows[root_index] = catalog_row_with_registration(&root, &changed)?;
+    assert_eq!(
+        validate_artifact_registration_catalog_graph_v1(changed.address(), &fixture.rows),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+#[test]
+fn registration_preparation_covers_registration_byte_and_native_owner_failures(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
+        64 * 1024 * 1024
+    );
+    let owner_id = OwnerIdV1::from_static("wave8-registration-byte-bound");
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            Hash::from_bytes([0x91; 32]),
+            vec![ArtifactRegistrationInputV1 {
+                owner_id,
+                artifact_bytes: Vec::new(),
+                registration_cbor: vec![0; MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1 + 1],
+            }],
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::BoundExceeded)
+    );
+
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    assert_preparation_error(
+        owner_id,
+        root,
+        inputs.clone(),
+        &RejectingCommitVerifier,
+        ArtifactRegistrationPreparationErrorV1::OwnerRejected,
+    );
+    assert_preparation_error(
+        owner_id,
+        root,
+        inputs,
+        &RejectingSecondNativeDerivationVerifier {
+            calls: std::cell::Cell::new(0),
+        },
+        ArtifactRegistrationPreparationErrorV1::OwnerRejected,
+    );
+    Ok(())
+}
+
+#[test]
+fn registration_preparation_rejects_missing_and_duplicate_native_dependencies(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    let mut missing_admission = inputs.clone();
+    missing_admission.retain(|input| input.artifact_bytes.get(2..6) != Some(&b"MAA1"[..]));
+    assert_preparation_error(
+        owner_id,
+        root,
+        missing_admission,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidGraph,
+    );
+
+    let mut duplicate_transcript = inputs;
+    duplicate_transcript.push(fixture_input(&duplicate_transcript, b"MAT1")?);
+    assert_preparation_error(
+        owner_id,
+        root,
+        duplicate_transcript,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidGraph,
     );
     Ok(())
 }
