@@ -1,4 +1,4 @@
-name: Temporary Rebase Wave 8 Upstack
+name: Temporary Format Wave 8 Root
 on:
   push:
     branches:
@@ -6,28 +6,29 @@ on:
 permissions:
   contents: write
 jobs:
-  rebase:
+  format:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: redmine/432-ard1-registration
           fetch-depth: 0
-      - name: Rebase #278 and #281 onto their updated parents
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+      - name: Format the Wave 8 root PR
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin \
-            redmine/432-ard1-registration \
-            redmine/418-scoped-owner-admission \
-            redmine/419-local-cut-owner
-          git checkout -B rebase-418 origin/redmine/418-scoped-owner-admission
-          git rebase --onto origin/redmine/432-ard1-registration f53326d2eabcd6cd76d7cbf85d7bb438bf9dcabb
-          git push origin HEAD:refs/heads/redmine/418-scoped-owner-admission \
-            --force-with-lease=refs/heads/redmine/418-scoped-owner-admission:ba1fb23ba9a319ffd077ceae960ca8237ae7ab71
-          git fetch origin redmine/418-scoped-owner-admission
-          git checkout -B rebase-419 origin/redmine/419-local-cut-owner
-          git rebase --onto origin/redmine/418-scoped-owner-admission ba1fb23ba9a319ffd077ceae960ca8237ae7ab71
-          git push origin HEAD:refs/heads/redmine/419-local-cut-owner \
-            --force-with-lease=refs/heads/redmine/419-local-cut-owner:46e8ac9fa88548970652ca41fba82fed38a9e6e7
+          cargo fmt --all
+          if git diff --quiet; then
+            exit 0
+          fi
+          git add crates/pos-core/tests/artifact_registration_commit_public.rs \
+            crates/pos-runtime/tests/local_adapter_recording_public.rs \
+            crates/pos-store/src/sqlite.rs \
+            crates/pos-store/tests/artifact_registration_persistence_public.rs
+          git commit -m "style(#432): format coverage cases"
+          git push origin HEAD:refs/heads/redmine/432-ard1-registration
