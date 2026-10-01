@@ -1258,8 +1258,7 @@ fn persisted_catalog_rejects_a_semantically_wrong_root_registration(
     let mut fixture = catalog_fixture()?;
     let root_index = catalog_row_index(&fixture.rows, b"MRM1")?;
     let root = fixture.rows[root_index].clone();
-    let changed =
-        registration_with_data_class(&root, ArtifactDataClassV1::StructuralAuditMetadata)?;
+    let changed = registration_with_data_class(&root, ArtifactDataClassV1::PublicRecord)?;
     fixture.rows[root_index] = catalog_row_with_registration(&root, &changed)?;
     assert_eq!(
         validate_artifact_registration_catalog_graph_v1(changed.address(), &fixture.rows),
