@@ -1,5 +1,9 @@
+use std::error::Error;
+
 use pos_core::{ids::PluginId, OwnerIdV1, Plugin};
 use pos_runtime::{ManifestRegistrationErrorV1, PluginRegistry, RuntimeError};
+
+type TestResult = Result<(), Box<dyn Error>>;
 
 struct LocalPlugin {
     id: PluginId,
@@ -21,7 +25,7 @@ impl Plugin for LocalPlugin {
 }
 
 #[test]
-fn local_registration_admits_the_actual_complete_registry_without_epf1() {
+fn local_registration_admits_the_actual_complete_registry_without_epf1() -> TestResult {
     let plugins = [
         LocalPlugin {
             id: PluginId::new(),
@@ -35,14 +39,10 @@ fn local_registration_admits_the_actual_complete_registry_without_epf1() {
     let owner = OwnerIdV1::from_static("open-source-app");
     let mut registry = PluginRegistry::new();
     for (plugin, role) in plugins.iter().zip(["world", "agent"]) {
-        registry
-            .register_local(plugin, vec![role.to_owned()], None, None)
-            .expect("local native registration should need no installed EPF1");
+        registry.register_local(plugin, vec![role.to_owned()], None, None)?;
     }
 
-    let admitted = registry
-        .admit_local_manifest_registration(owner, 3)
-        .expect("the actual local registry should produce a complete admission");
+    let admitted = registry.admit_local_manifest_registration(owner, 3)?;
     let catalog = admitted.catalog();
     assert_eq!(catalog.as_input().rows.len(), plugins.len());
     assert_eq!(catalog.as_input().configuration_generation, 3);
@@ -74,10 +74,11 @@ fn local_registration_admits_the_actual_complete_registry_without_epf1() {
             ManifestRegistrationErrorV1::BatchState
         ))
     ));
+    Ok(())
 }
 
 #[test]
-fn local_admission_rejects_empty_or_unpinned_registries() {
+fn local_admission_rejects_empty_or_unpinned_registries() -> TestResult {
     let owner = OwnerIdV1::from_static("open-source-app");
     assert!(matches!(
         PluginRegistry::new().admit_local_manifest_registration(owner, 1),
@@ -89,11 +90,10 @@ fn local_admission_rejects_empty_or_unpinned_registries() {
         name: "unpinned-local-plugin",
     };
     let mut registry = PluginRegistry::new();
-    registry
-        .register_generated(&plugin, None, None)
-        .expect("local output admission should remain available without a pin");
+    registry.register_generated(&plugin, None, None)?;
     assert!(matches!(
         registry.admit_local_manifest_registration(owner, 1),
         Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
     ));
+    Ok(())
 }
