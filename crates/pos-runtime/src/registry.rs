@@ -1950,19 +1950,6 @@ impl PluginRegistry {
         })
     }
 
-    fn validate_registered_output(
-        &self,
-        plugin_id: PluginId,
-        drafts: &[EventDraft],
-    ) -> Result<(), RuntimeError> {
-        let Some(entry) = self.plugins.get(&plugin_id) else {
-            return Err(RuntimeError::NoDriver {
-                name: plugin_id.to_string(),
-            });
-        };
-        validate_plugin_output(entry, drafts)
-    }
-
     fn collect_anchored_selection(
         &self,
         selection: AnchoredSelection,
@@ -8503,15 +8490,6 @@ mod erasure_gate_coverage {
         assert!(rejecting
             .commit_step_at(pos_core::clock::Seq::ZERO, 0)
             .is_ok());
-    }
-
-    #[test]
-    fn validate_registered_output_reports_missing_plugin() {
-        let registry = PluginRegistry::new();
-        assert!(matches!(
-            registry.validate_registered_output(PluginId::new(), &[]),
-            Err(RuntimeError::NoDriver { .. })
-        ));
     }
 
     #[test]

@@ -153,12 +153,12 @@ impl PluginRegistry {
             let invoked = self
                 .plugins
                 .get_mut(&plugin_id)
-                .map_or(
-                    Err(RuntimeError::NoDriver {
-                        name: plugin_id.to_string(),
-                    }),
-                    |entry| invoke_authorized_entry(entry, timeline, snapshot, &view.knowledge),
-                )
+                .ok_or(RuntimeError::Authority(
+                    AuthorityErrorV1::UnauthorizedSource,
+                ))
+                .and_then(|entry| {
+                    invoke_authorized_entry(entry, timeline, snapshot, &view.knowledge)
+                })
                 .and_then(|output| self.check_pass_output(drafts.len(), output));
             match invoked {
                 Ok(output) => drafts.extend(output),

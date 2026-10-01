@@ -655,7 +655,7 @@ fn stage_current(
     )
 }
 
-fn view_authority<'a>(
+const fn view_authority<'a>(
     fixture: &'a Fixture,
     evaluation: &'a ReplayClaimEvaluationV1,
     authority: &'a PersistedAuthorityV1,
