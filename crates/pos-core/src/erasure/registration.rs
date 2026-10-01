@@ -611,12 +611,12 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn bounded_array(&mut self, maximum: usize) -> Result<usize, ArtifactRegistrationErrorV1> {
+    fn bounded_array(&mut self, maximum: u64) -> Result<u64, ArtifactRegistrationErrorV1> {
         let count = self.head(4)?;
-        if count > maximum as u64 {
+        if count > maximum {
             return Err(ArtifactRegistrationErrorV1::FieldOutOfBounds);
         }
-        Ok(count as usize)
+        Ok(count)
     }
 
     fn blob(&mut self, length: usize) -> Result<&'a [u8], ArtifactRegistrationErrorV1> {
@@ -695,7 +695,7 @@ impl<'a> Reader<'a> {
 
     fn roles(&mut self) -> Result<Vec<KeyRoleV1>, ArtifactRegistrationErrorV1> {
         let count = self.bounded_array(5)?;
-        let mut roles = Vec::with_capacity(count);
+        let mut roles = Vec::new();
         for _ in 0..count {
             roles.push(self.role()?);
         }
@@ -705,8 +705,8 @@ impl<'a> Reader<'a> {
     fn dependencies(
         &mut self,
     ) -> Result<Vec<ArtifactKeyDependencyV1>, ArtifactRegistrationErrorV1> {
-        let count = self.bounded_array(MAX_ARTIFACT_REGISTRATION_KEYS_V1)?;
-        let mut dependencies = Vec::with_capacity(count);
+        let count = self.bounded_array(u64::from(MAX_ARTIFACT_REGISTRATION_KEYS_V1))?;
+        let mut dependencies = Vec::new();
         for _ in 0..count {
             self.array(5)?;
             let owner_id = self.owner()?;
@@ -724,8 +724,8 @@ impl<'a> Reader<'a> {
     }
 
     fn children(&mut self) -> Result<Vec<ArtifactChildEdgeV1>, ArtifactRegistrationErrorV1> {
-        let count = self.bounded_array(MAX_ARTIFACT_REGISTRATION_CHILDREN_V1)?;
-        let mut children = Vec::with_capacity(count);
+        let count = self.bounded_array(u64::from(MAX_ARTIFACT_REGISTRATION_CHILDREN_V1))?;
+        let mut children = Vec::new();
         for _ in 0..count {
             self.array(4)?;
             children.push(ArtifactChildEdgeV1 {
