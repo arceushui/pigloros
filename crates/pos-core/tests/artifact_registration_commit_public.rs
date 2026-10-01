@@ -958,3 +958,198 @@ fn registration_preparation_rejects_noncanonical_supported_native_records(
     }
     Ok(())
 }
+
+
+struct CatalogFixture {
+    rows: Vec<ArtifactRegistrationCatalogRowV1>,
+}
+
+fn catalog_fixture() -> Result<CatalogFixture, Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    let batch = prepare_artifact_registration_batch_v1(
+        owner_id,
+        root,
+        inputs,
+        &TestOnlyStructuralOwnerVerifier,
+    )?;
+    let rows = batch
+        .records()
+        .iter()
+        .map(|record| {
+            ArtifactRegistrationCatalogRowV1::from_persisted(
+                *record.owner_id(),
+                record.artifact_class(),
+                record.artifact_digest(),
+                record.registration_address(),
+                record.artifact_bytes().to_vec(),
+                record.registration().canonical_cbor(),
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(CatalogFixture { rows })
+}
+
+fn catalog_row_index(
+    rows: &[ArtifactRegistrationCatalogRowV1],
+    magic: &[u8],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    rows.iter()
+        .position(|row| row.artifact_bytes().get(2..6) == Some(magic))
+        .ok_or_else(|| std::io::Error::other("catalog fixture row was absent").into())
+}
+
+fn catalog_row_with_registration(
+    row: &ArtifactRegistrationCatalogRowV1,
+    registration: ArtifactRegistrationV1,
+) -> Result<ArtifactRegistrationCatalogRowV1, Box<dyn std::error::Error>> {
+    let fields = registration.fields();
+    Ok(ArtifactRegistrationCatalogRowV1::from_persisted(
+        *row.owner_id(),
+        fields.artifact_class,
+        fields.artifact_digest,
+        registration.address(),
+        row.artifact_bytes().to_vec(),
+        registration.canonical_cbor(),
+    )?)
+}
+
+fn registration_with_data_class(
+    row: &ArtifactRegistrationCatalogRowV1,
+    data_class: ArtifactDataClassV1,
+) -> Result<ArtifactRegistrationV1, Box<dyn std::error::Error>> {
+    let mut fields = row.registration().fields().clone();
+    fields.data_class = data_class;
+    Ok(ArtifactRegistrationV1::new(fields)?)
+}
+
+fn registration_with_child_address(
+    row: &ArtifactRegistrationCatalogRowV1,
+    old_address: Hash,
+    new_address: Hash,
+) -> Result<ArtifactRegistrationV1, Box<dyn std::error::Error>> {
+    let mut fields = row.registration().fields().clone();
+    let edge = fields
+        .child_artifacts
+        .iter_mut()
+        .find(|edge| edge.registration_address == old_address)
+        .ok_or_else(|| std::io::Error::other("catalog fixture child was absent"))?;
+    edge.registration_address = new_address;
+    Ok(ArtifactRegistrationV1::new(fields)?)
+}
+
+fn unknown_repro_manifest_row(
+    row: &ArtifactRegistrationCatalogRowV1,
+) -> Result<ArtifactRegistrationCatalogRowV1, Box<dyn std::error::Error>> {
+    let artifact_bytes = b"unknown ReproManifest artifact format".to_vec();
+    let mut fields = row.registration().fields().clone();
+    fields.artifact_digest = ArtifactRegistrationV1::artifact_digest(
+        ErasureArtifactClassV1::ReproManifest,
+        &artifact_bytes,
+    );
+    let registration = ArtifactRegistrationV1::new(fields)?;
+    Ok(ArtifactRegistrationCatalogRowV1::from_persisted(
+        *row.owner_id(),
+        ErasureArtifactClassV1::ReproManifest,
+        registration.fields().artifact_digest,
+        registration.address(),
+        artifact_bytes,
+        registration.canonical_cbor(),
+    )?)
+}
+
+#[test]
+fn persisted_catalog_rejects_a_semantically_wrong_admission_registration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = catalog_fixture()?;
+    let admission_index = catalog_row_index(&fixture.rows, b"MAA1")?;
+    let transcript_index = catalog_row_index(&fixture.rows, b"MAT1")?;
+    let root_index = catalog_row_index(&fixture.rows, b"MRM1")?;
+    let admission = fixture.rows[admission_index].clone();
+    let transcript = fixture.rows[transcript_index].clone();
+    let root = fixture.rows[root_index].clone();
+
+    let changed_admission =
+        registration_with_data_class(&admission, ArtifactDataClassV1::StructuralAuditMetadata)?;
+    fixture.rows[admission_index] = catalog_row_with_registration(&admission, changed_admission.clone())?;
+    let changed_transcript = registration_with_child_address(
+        &transcript,
+        admission.registration_address(),
+        changed_admission.address(),
+    )?;
+    fixture.rows[transcript_index] =
+        catalog_row_with_registration(&transcript, changed_transcript.clone())?;
+    let changed_root = registration_with_child_address(
+        &root,
+        transcript.registration_address(),
+        changed_transcript.address(),
+    )?;
+    fixture.rows[root_index] = catalog_row_with_registration(&root, changed_root.clone())?;
+
+    assert_eq!(
+        validate_artifact_registration_catalog_graph_v1(changed_root.address(), &fixture.rows),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+#[test]
+fn persisted_catalog_rejects_a_semantically_wrong_transcript_registration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = catalog_fixture()?;
+    let transcript_index = catalog_row_index(&fixture.rows, b"MAT1")?;
+    let root_index = catalog_row_index(&fixture.rows, b"MRM1")?;
+    let transcript = fixture.rows[transcript_index].clone();
+    let root = fixture.rows[root_index].clone();
+
+    let changed_transcript =
+        registration_with_data_class(&transcript, ArtifactDataClassV1::StructuralAuditMetadata)?;
+    fixture.rows[transcript_index] =
+        catalog_row_with_registration(&transcript, changed_transcript.clone())?;
+    let changed_root = registration_with_child_address(
+        &root,
+        transcript.registration_address(),
+        changed_transcript.address(),
+    )?;
+    fixture.rows[root_index] = catalog_row_with_registration(&root, changed_root.clone())?;
+
+    assert_eq!(
+        validate_artifact_registration_catalog_graph_v1(changed_root.address(), &fixture.rows),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+#[test]
+fn persisted_catalog_rejects_an_unknown_repro_manifest_format(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = catalog_fixture()?;
+    let admission_index = catalog_row_index(&fixture.rows, b"MAA1")?;
+    let transcript_index = catalog_row_index(&fixture.rows, b"MAT1")?;
+    let root_index = catalog_row_index(&fixture.rows, b"MRM1")?;
+    let admission = fixture.rows[admission_index].clone();
+    let transcript = fixture.rows[transcript_index].clone();
+    let root = fixture.rows[root_index].clone();
+
+    let unknown_admission = unknown_repro_manifest_row(&admission)?;
+    fixture.rows[admission_index] =
+        catalog_row_with_registration(&unknown_admission, unknown_admission.registration().clone())?;
+    let changed_transcript = registration_with_child_address(
+        &transcript,
+        admission.registration_address(),
+        unknown_admission.registration_address(),
+    )?;
+    fixture.rows[transcript_index] =
+        catalog_row_with_registration(&transcript, changed_transcript.clone())?;
+    let changed_root = registration_with_child_address(
+        &root,
+        transcript.registration_address(),
+        changed_transcript.address(),
+    )?;
+    fixture.rows[root_index] = catalog_row_with_registration(&root, changed_root.clone())?;
+
+    assert_eq!(
+        validate_artifact_registration_catalog_graph_v1(changed_root.address(), &fixture.rows),
+        Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
