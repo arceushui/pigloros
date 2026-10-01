@@ -805,8 +805,7 @@ fn sqlite_owner_admission_replaces_complete_generation_and_recovers_after_reopen
         },
         &replacement_timelines,
     )?;
-    let replacement_owner =
-        FixtureOwner::new(replacement_timelines.clone(), replacement_operation);
+    let replacement_owner = FixtureOwner::new(replacement_timelines.clone(), replacement_operation);
     let replacement = prepare_manifest_owner_admission_v1(
         replacement_request.clone(),
         &replacement_owner,
