@@ -1,4 +1,4 @@
-name: Temporary Cancel Obsolete Wave 8 Run
+name: Temporary Cancel Superseded Wave 8 Run
 on:
   push:
     branches:
@@ -21,7 +21,7 @@ jobs:
               --request POST \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/36907936731/cancel"
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/36908370435/cancel"
           )"
           case "${status}" in
             202|409) exit 0 ;;
