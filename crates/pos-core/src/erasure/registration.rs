@@ -376,8 +376,7 @@ pub fn extract_repro_manifest_root_registration_v1(
     let transcript_input = transcript.as_input();
     let world_handle_input = root_input.world_handle.as_input();
     match (root_input.label.as_ref(), input.label_data_class) {
-        (None, None)
-        | (Some(_), None)
+        (None | Some(_), None)
         | (
             Some(_),
             Some(ArtifactDataClassV1::PublicRecord | ArtifactDataClassV1::StructuralAuditMetadata),
