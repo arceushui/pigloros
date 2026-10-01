@@ -19,11 +19,11 @@
 use std::sync::OnceLock;
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope,
-    AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, EventDraft, Hash,
-    PipelineAdmissionFenceV1, PipelineAttemptIdV1, PipelineCommitReceiptV1,
+    pipeline_authority_revision_v1, pipeline_draft_vector_digest_v1, pipeline_erasure_revision_v1,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1,
+    AuthorityPersistenceHostV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
+    EventDraft, Hash, PipelineAdmissionFenceV1, PipelineAttemptIdV1, PipelineCommitReceiptV1,
     PipelineContractErrorV1, PipelineEvidenceRefV1, PipelineSecurityRevisionsDraftV1,
     PipelineSecurityRevisionsV1, PrincipalRefV1, Seq, TimelineId,
 };
@@ -291,30 +291,15 @@ fn local_revisions(
     })
 }
 
-/// Bind one attempt to the exact staged draft vector.
+/// Bind one attempt to the exact staged draft vector, covering every draft
+/// field through the canonical pipeline draft encoding.
 fn validation_digest(attempt: &[u8; 16], drafts: &[EventDraft]) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(DOMAIN);
     hasher.update(b"validation\0");
     hasher.update(attempt);
-    hasher.update(&length(drafts.len()));
-    for draft in drafts {
-        let entity = draft.entity.inner().to_bytes();
-        for field in [
-            entity.as_slice(),
-            draft.event_type.as_str().as_bytes(),
-            draft.payload.as_slice(),
-        ] {
-            hasher.update(&length(field.len()));
-            hasher.update(field);
-        }
-    }
+    hasher.update(pipeline_draft_vector_digest_v1(drafts).as_bytes());
     Hash::from_bytes(*hasher.finalize().as_bytes())
-}
-
-/// Encode one length prefix; no addressable length exceeds `u64`.
-fn length(len: usize) -> [u8; 8] {
-    u64::try_from(len).unwrap_or(u64::MAX).to_be_bytes()
 }
 
 /// Derive one domain-separated local-session identity.

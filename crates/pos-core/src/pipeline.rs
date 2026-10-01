@@ -684,6 +684,16 @@ fn draft_content_bytes(draft: &EventDraft) -> usize {
         .saturating_add(draft.wall_time.map_or(0, |_| 8))
 }
 
+/// Canonical digest of an exact Event draft vector.
+///
+/// It binds every [`EventDraft`] field, in order, with the same encoding
+/// [`PipelineDraftBatchV1::digest`] uses, so a host can bind evidence to a
+/// staged vector before the batch is constructed.
+#[must_use]
+pub fn pipeline_draft_vector_digest_v1(drafts: &[EventDraft]) -> Hash {
+    digest_drafts(drafts)
+}
+
 fn digest_drafts(drafts: &[EventDraft]) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.PipelineDraftBatch.v1\0");
