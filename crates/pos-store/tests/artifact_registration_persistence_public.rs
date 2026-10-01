@@ -1371,11 +1371,17 @@ fn sqlite_adapter_recording_rejects_session_and_column_corruption(
 #[test]
 fn sqlite_adapter_recording_rejects_durable_bounds(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (_database, path, session, reservation) =
-        closed_sqlite_adapter_recording(Hash::from_bytes([0x99; 32]))?;
+    let _database = tempfile::NamedTempFile::new()?;
+    let path = _database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?
+        .to_owned();
+    let (session, reservation) = adapter_recording_fixture(Hash::from_bytes([0x99; 32]))?;
     let owner_reference = session.owner_reference();
     let run_operation_id = session.run_operation_id();
     let mut store = pos_store::sqlite::SqliteStore::open(&path)?;
+    store.open_adapter_recording_session(session)?;
     let over_limit_invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
         global_call_index: u64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)?,
         ..reservation.invocation().as_input().clone()
