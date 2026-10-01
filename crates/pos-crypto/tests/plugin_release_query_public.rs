@@ -109,7 +109,7 @@ fn incomplete_manifest_projection_fails_closed() -> TestResult {
     empty_interval.not_before = 60;
     cases.push(empty_interval);
     let mut invalid_plugin_id = manifest()?;
-    invalid_plugin_id.plugin_id = "-plugin-a".to_owned();
+    "-plugin-a".clone_into(&mut invalid_plugin_id.plugin_id);
     cases.push(invalid_plugin_id);
     let mut unsorted = manifest()?;
     unsorted.descriptor_digests = vec![NESTED_DESCRIPTOR, FIRST_DESCRIPTOR];
@@ -164,7 +164,7 @@ fn unknown_publisher_key_and_ungranted_plugin_id_fail_closed() -> TestResult {
         Err(PluginTrustErrorV1::UnknownPublisherKey)
     );
     let mut other_plugin = manifest()?;
-    other_plugin.plugin_id = "plugin-b".to_owned();
+    "plugin-b".clone_into(&mut other_plugin.plugin_id);
     assert_eq!(
         authorize(&evidence, other_plugin),
         Err(PluginTrustErrorV1::PluginIdNotGranted)
@@ -231,7 +231,7 @@ fn release_and_nested_descriptor_revocations_deny_release() -> TestResult {
 
 fn golden_manifest() -> Result<PluginManifestProjectionFixtureV1, Box<dyn std::error::Error>> {
     let mut golden = manifest()?;
-    golden.plugin_id = "alpha/plugin".to_owned();
+    "alpha/plugin".clone_into(&mut golden.plugin_id);
     golden.epoch = 9;
     golden.not_before = -1;
     golden.not_after = 1;
