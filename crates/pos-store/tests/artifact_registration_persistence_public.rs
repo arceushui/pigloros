@@ -757,7 +757,7 @@ fn persisted_graph_rejects_structurally_valid_but_wrong_mrm1_registration_fields
         .ok_or_else(|| std::io::Error::other("MRM1 root row was not present"))?;
     let root = rows[root_index].clone();
     let mut fields = (*root.registration().fields()).clone();
-    fields.data_class = ArtifactDataClassV1::StructuralAuditMetadata;
+    fields.data_class = ArtifactDataClassV1::PublicRecord;
     let tampered_registration = ArtifactRegistrationV1::new(fields)?;
     let tampered_address = tampered_registration.address();
     rows[root_index] = ArtifactRegistrationCatalogRowV1::from_persisted(
