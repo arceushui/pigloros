@@ -676,10 +676,29 @@ fn pause_for_contender(
         .map_err(|error| CoreError::Storage(error.to_string()))
 }
 
+/// Whether another connection holds the database write lock: a zero-timeout
+/// `BEGIN IMMEDIATE` on a fresh probe connection must fail with `SQLITE_BUSY`.
+fn write_lock_is_held(path: &str) -> Result<bool, CoreError> {
+    let probe =
+        rusqlite::Connection::open(path).map_err(|error| CoreError::Storage(error.to_string()))?;
+    probe
+        .busy_timeout(std::time::Duration::ZERO)
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    match probe.execute_batch("BEGIN IMMEDIATE") {
+        Ok(()) => probe
+            .execute_batch("ROLLBACK")
+            .map(|()| false)
+            .map_err(|error| CoreError::Storage(error.to_string())),
+        Err(error) => Ok(error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)),
+    }
+}
+
 struct PreparedRaceOutcome {
     appended: Result<Event, CoreError>,
     lifecycle: Result<KeyRegistryStateV1, CoreError>,
-    lifecycle_waited: bool,
+    /// The contender reached its lifecycle call while the append held the
+    /// write lock, and had not completed when the append was released.
+    lifecycle_blocked: bool,
 }
 
 fn run_prepared_lifecycle_race(
@@ -741,14 +760,17 @@ fn run_prepared_lifecycle_race(
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
             result
         });
+        // The contender signals immediately before its destroy/rotate call.
+        // While the paused append holds `BEGIN IMMEDIATE`, a probe proves the
+        // write lock is taken, so the contender cannot have committed yet.
         let attempted = attempt_rx.recv().is_ok();
-        let lifecycle_waited = attempted
-            && done_rx
-                .recv_timeout(std::time::Duration::from_millis(100))
-                .is_err();
+        let lock_probe = write_lock_is_held(path);
+        let not_completed = done_rx.try_recv().is_err();
+        // Release before propagating a probe error so the scope can join.
         release_tx
             .send(())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let lifecycle_blocked = attempted && lock_probe? && not_completed;
         let appended = appending
             .join()
             .map_err(|_| CoreError::Storage("append thread panicked".to_owned()))?;
@@ -758,7 +780,7 @@ fn run_prepared_lifecycle_race(
         Ok(PreparedRaceOutcome {
             appended,
             lifecycle,
-            lifecycle_waited,
+            lifecycle_blocked,
         })
     })?;
     Ok(outcome)
@@ -784,8 +806,8 @@ fn assert_prepared_lifecycle_race(
         pause_in_sign,
     )?;
     assert!(
-        outcome.lifecycle_waited,
-        "{contender:?} did not wait for the prepared append to commit"
+        outcome.lifecycle_blocked,
+        "{contender:?} was not blocked by the prepared append's write lock"
     );
     let appended = outcome.appended?;
     let updated = outcome.lifecycle?;

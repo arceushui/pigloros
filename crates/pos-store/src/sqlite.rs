@@ -22535,6 +22535,56 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
 
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn prepared_append_rejects_a_failed_transaction_begin_before_callbacks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let mut store = open_store()?;
+        let timeline = store.create_timeline("failed-prepared-begin")?;
+        store.save_key_registry(&registry)?;
+        let payload_calls = std::cell::Cell::new(0_usize);
+        let sign_calls = std::cell::Cell::new(0_usize);
+        let mut prepare_payload = |_: &pos_core::TimelineEventEnvelopeInputV1| {
+            payload_calls.set(payload_calls.get() + 1);
+            Err::<CanonicalBytes, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let mut sign = |_: &mut KeyRegistryStateV1,
+                        _: &pos_core::TimelineEventEnvelopeV1,
+                        _: &CanonicalBytes| {
+            sign_calls.set(sign_calls.get() + 1);
+            Err::<pos_core::Signature, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let result = store.append_prepared_subject_encrypted_timeline_signed(
+            timeline.id(),
+            &registry,
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new("timeline.failed-prepared-begin"),
+                CanonicalBytes::from_static(b"ignored"),
+            ),
+            pos_core::PreparedSubjectAppendAuthorizationV1 {
+                encryption_identity: pos_core::KeyIdentityV1::new(
+                    "subject-owner",
+                    pos_core::KeyRoleV1::SubjectDataEncryption,
+                    1,
+                ),
+                encryption_material_digest: Hash::from_bytes([5; 32]),
+                signing_identity: identity,
+                signing_material_digest: material_digest,
+                signing_public_key: pos_core::PublicKey::from_bytes([4; 32]),
+            },
+            &mut prepare_payload,
+            &mut sign,
+        );
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(matches!(result, Err(CoreError::Storage(_))));
+        assert_eq!((payload_calls.get(), sign_calls.get()), (0, 0));
+        assert!(store.read_own(timeline.id(), SeqRange::all())?.is_empty());
+        Ok(())
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn sqlite_key_registry_transaction_boundaries_fail_closed(
