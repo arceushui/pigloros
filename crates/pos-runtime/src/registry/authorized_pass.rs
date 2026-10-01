@@ -15,15 +15,15 @@
 //! again before the store compares the basis.
 
 use pos_core::{
-    AuthorityErrorV1, AuthorityRegistrySnapshotV1, ErasureProtectedOperationV1, EventDraft, Hash,
-    KnowledgeSnapshotV1, ObservationSnapshotV1, PersistedAuthorityV1, ReplayClaimEvaluationV1, Seq,
-    TimelineId,
+    AuthorityRegistrySnapshotV1, ErasureProtectedOperationV1, EventDraft, Hash,
+    KnowledgeSnapshotV1, ObservationSnapshotV1, PersistedAuthorityV1, PluginId,
+    ReplayClaimEvaluationV1, Seq, TimelineId,
 };
 use pos_state::AuthorizedObservationV1;
 
 use super::{
-    invoke_driver, reject_host_owned_drafts, reject_unowned_plugin_drafts, validate_plugin_output,
-    AuthorizedDriverTargetV1, AuthorizedPendingStep, OperationContext, PendingStep, PluginEntry,
+    invoke_driver, reject_host_owned_drafts, reject_unowned_plugin_drafts, unauthorized,
+    validate_plugin_output, AuthorizedPendingStep, OperationContext, PendingStep, PluginEntry,
     PluginRegistry,
 };
 use crate::{driver::ObservationView, error::RuntimeError};
@@ -31,8 +31,9 @@ use crate::{driver::ObservationView, error::RuntimeError};
 /// One due Driver and the participant-authorized view the host derived for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizedDriverViewV1 {
-    /// The Driver's Plugin and the Timeline of the pass.
-    pub target: AuthorizedDriverTargetV1,
+    /// The due Driver's Plugin. The pass supplies the one Timeline that
+    /// every view must be derived from.
+    pub plugin_id: PluginId,
     /// The host-materialized OBS1 observation for this Driver alone.
     pub observation: AuthorizedObservationV1,
     /// The KNS1 knowledge snapshot derived from that observation.
@@ -102,64 +103,74 @@ impl PluginRegistry {
     ) -> Result<Vec<EventDraft>, RuntimeError> {
         self.ensure_live_execution()
             .and_then(|()| self.ensure_no_pending_step())
-            .and_then(|()| self.ensure_schedule_order(views))
-            .and_then(|()| release_views(timeline, observed_through, views, authorities))
-            .and_then(|snapshots| {
+            .and_then(|()| self.schedule_indices(views))
+            .and_then(|indices| {
+                release_views(timeline, observed_through, views, authorities)
+                    .map(|snapshots| (indices, snapshots))
+            })
+            .and_then(|(indices, snapshots)| {
                 self.with_erasure_mut_fence(
                     timeline,
                     ErasureProtectedOperationV1::PluginInput,
                     |registry| {
-                        registry.stage_released_views(timeline, observed_through, views, &snapshots)
+                        registry.stage_released_views(
+                            timeline,
+                            observed_through,
+                            &indices,
+                            views,
+                            &snapshots,
+                        )
                     },
                 )
             })
     }
 
-    /// Require registered Plugins in strictly ascending registration order.
-    fn ensure_schedule_order(&self, views: &[AuthorizedDriverViewV1]) -> Result<(), RuntimeError> {
+    /// Resolve each view's registered Plugin and require strictly ascending
+    /// registration order. Return the Plugins' registration indices.
+    fn schedule_indices(
+        &self,
+        views: &[AuthorizedDriverViewV1],
+    ) -> Result<Vec<usize>, RuntimeError> {
         views
             .iter()
             .map(|view| {
-                let plugin_id = view.target.plugin_id;
                 self.plugins
-                    .get_index_of(&plugin_id)
+                    .get_index_of(&view.plugin_id)
                     .ok_or_else(|| RuntimeError::NoDriver {
-                        name: plugin_id.to_string(),
+                        name: view.plugin_id.to_string(),
                     })
             })
             .collect::<Result<Vec<usize>, RuntimeError>>()
             .and_then(|indices| {
                 if indices.windows(2).all(|pair| pair[0] < pair[1]) {
-                    Ok(())
+                    Ok(indices)
                 } else {
-                    Err(AuthorityErrorV1::UnauthorizedSource.into())
+                    Err(unauthorized())
                 }
             })
     }
 
+    /// Invoke each released view's Driver at its resolved registration index.
     fn stage_released_views(
         &mut self,
         timeline: TimelineId,
         observed_through: Seq,
+        indices: &[usize],
         views: &[AuthorizedDriverViewV1],
         snapshots: &[ObservationSnapshotV1],
     ) -> Result<Vec<EventDraft>, RuntimeError> {
         self.restored_binding = None;
         let mut drafts = Vec::new();
         let mut staged = Vec::new();
-        for (view, snapshot) in views.iter().zip(snapshots) {
-            let plugin_id = view.target.plugin_id;
-            staged.push(plugin_id);
-            let invoked = self
-                .plugins
-                .get_mut(&plugin_id)
-                .ok_or(RuntimeError::Authority(
-                    AuthorityErrorV1::UnauthorizedSource,
-                ))
-                .and_then(|entry| {
-                    invoke_authorized_entry(entry, timeline, snapshot, &view.knowledge)
-                })
-                .and_then(|output| self.check_pass_output(drafts.len(), output));
+        for ((index, view), snapshot) in indices.iter().zip(views).zip(snapshots) {
+            staged.push(view.plugin_id);
+            let invoked = invoke_authorized_entry(
+                &mut self.plugins[*index],
+                timeline,
+                snapshot,
+                &view.knowledge,
+            )
+            .and_then(|output| self.check_pass_output(drafts.len(), output));
             match invoked {
                 Ok(output) => drafts.extend(output),
                 Err(error) => {
@@ -192,17 +203,10 @@ impl PluginRegistry {
         staged: usize,
         output: Vec<EventDraft>,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        let requested = u64::try_from(staged.saturating_add(output.len())).unwrap_or(u64::MAX);
         self.schemas
             .validate_batch(&output)
-            .and_then(|()| match self.resource_limit {
-                Some(limit) if requested > limit => Err(RuntimeError::ResourceExhausted {
-                    driver: "host-tick-budget".to_owned(),
-                    requested,
-                    limit,
-                }),
-                _ => Ok(output),
-            })
+            .and_then(|()| self.charge_pass_budget(staged, output.len()))
+            .map(|()| output)
     }
 }
 
@@ -237,7 +241,7 @@ fn invoke_authorized_entry(
         });
     };
     if !driver.subscriptions().is_empty() || !driver.event_subscriptions().is_empty() {
-        return Err(AuthorityErrorV1::UnauthorizedSource.into());
+        return Err(unauthorized());
     }
     let invoked = invoke_driver(
         driver.as_mut(),
@@ -257,7 +261,7 @@ fn paired(views: usize, authorities: &[AuthorizedViewAuthorityV1<'_>]) -> Result
     if views == authorities.len() {
         Ok(())
     } else {
-        Err(AuthorityErrorV1::UnauthorizedSource.into())
+        Err(unauthorized())
     }
 }
 
@@ -290,20 +294,19 @@ fn bind_view(
     view: &AuthorizedDriverViewV1,
     snapshot: &ObservationSnapshotV1,
 ) -> Result<ObservationSnapshotV1, RuntimeError> {
-    let bound = snapshot.plugin_id() == view.target.plugin_id
-        && view.target.timeline == timeline
+    let bound = snapshot.plugin_id() == view.plugin_id
         && snapshot.timeline_id() == timeline
         && snapshot.observed_through() == observed_through;
     view.knowledge
         .validate_observation_snapshot(snapshot)
+        .map_err(RuntimeError::Authority)
         .and_then(|()| {
             if bound {
                 Ok(snapshot.clone())
             } else {
-                Err(AuthorityErrorV1::UnauthorizedSource)
+                Err(unauthorized())
             }
         })
-        .map_err(RuntimeError::Authority)
 }
 
 /// Bind the base cut and every Driver's authorized view, in host schedule
@@ -320,7 +323,7 @@ fn authorized_view_digest(
     hasher.update(&observed_through.as_u64().to_be_bytes());
     hasher.update(&u64::try_from(views.len()).unwrap_or(u64::MAX).to_be_bytes());
     for (view, snapshot) in views.iter().zip(snapshots) {
-        hasher.update(&view.target.plugin_id.inner().to_bytes());
+        hasher.update(&view.plugin_id.inner().to_bytes());
         hasher.update(snapshot.digest().as_bytes());
         hasher.update(view.knowledge.digest().as_bytes());
     }

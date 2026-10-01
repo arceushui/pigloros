@@ -23,7 +23,9 @@ use pos_core::{
     PipelineSecurityRevisionsV1, Seq, TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
 };
 
-use super::{AuthorizedViewAuthorityV1, OperationContext, PendingStep, PluginRegistry};
+use super::{
+    unauthorized, AuthorizedViewAuthorityV1, OperationContext, PendingStep, PluginRegistry,
+};
 use crate::error::RuntimeError;
 
 /// Host-owned inputs that bind one staged scheduled pass to its admission basis.
@@ -119,6 +121,12 @@ impl PluginRegistry {
     /// the whole staged batch commits in host schedule order, or nothing
     /// does. Staged Driver state commits only after the batch commits.
     ///
+    /// Draft-level consent checks are not applied to authorized-view output,
+    /// unchanged from the removed single-Driver authorized path. Each
+    /// Driver's output is still vetted for host-owned and unowned Event types,
+    /// its output admission declaration, and its schema. Whether consent
+    /// checks apply to this output is decided by #482.
+    ///
     /// # Errors
     /// Returns [`RuntimeError::PendingDriverStep`] when no pass is staged. A
     /// closed authority error covers a pass that is not participant-authorized
@@ -140,12 +148,8 @@ impl PluginRegistry {
         let prepared = pending
             .authorized
             .as_ref()
-            .map_or(
-                Err(RuntimeError::Authority(
-                    pos_core::AuthorityErrorV1::UnauthorizedSource,
-                )),
-                |authorized| authorized.revalidate(authorities),
-            )
+            .ok_or_else(unauthorized)
+            .and_then(|authorized| authorized.revalidate(authorities))
             .and_then(|(observed_through, view_digest)| {
                 scheduled_basis(&pending, admission, observed_through, view_digest)
             });
@@ -187,6 +191,11 @@ impl PluginRegistry {
     /// the original receipt for the committed batch or admits the identical
     /// basis once. A protected pass is resubmitted inside the same consent
     /// token fence, at the commit head and time of the original attempt.
+    ///
+    /// For a participant-authorized pass, the store fence is the
+    /// recovery-time authority check: the retained basis binds the authority
+    /// and erasure revisions, which the store compares on resubmission.
+    /// Per-view authority is not re-run during recovery.
     ///
     /// # Errors
     /// Returns [`RuntimeError::NoScheduledAdmissionInDoubt`] when nothing is

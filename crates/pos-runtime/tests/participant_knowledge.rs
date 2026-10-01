@@ -20,9 +20,8 @@ use pos_core::{
     Seq, SeqRange, State, TimelineId, WallTime,
 };
 use pos_runtime::{
-    AuthorizedDriverTargetV1, AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, Driver,
-    ObservationView, PluginRegistry, RuntimeError, ScheduledAdmissionStoreV1,
-    ScheduledPassAdmissionV1, StepOutput,
+    AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, Driver, ObservationView, PluginRegistry,
+    RuntimeError, ScheduledAdmissionStoreV1, ScheduledPassAdmissionV1, StepOutput,
 };
 use pos_state::{
     AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
@@ -669,7 +668,7 @@ const fn view_authority<'a>(
 
 fn driver_view(fixture: &Fixture) -> AuthorizedDriverViewV1 {
     AuthorizedDriverViewV1 {
-        target: AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
+        plugin_id: fixture.plugin_id,
         observation: fixture.observation.clone(),
         knowledge: fixture.knowledge.clone(),
     }
@@ -975,9 +974,9 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
     let authority = current_authority(&fixture);
     assert!(error_text(stage_view(
         &mut mismatched,
-        fixture.timeline_id,
+        TimelineId::new(),
         AuthorizedDriverViewV1 {
-            target: AuthorizedDriverTargetV1::new(fixture.plugin_id, TimelineId::new()),
+            plugin_id: fixture.plugin_id,
             observation: fixture.observation.clone(),
             knowledge: fixture.knowledge.clone()
         },
@@ -1002,7 +1001,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         &mut wrong_knowledge,
         fixture.timeline_id,
         AuthorizedDriverViewV1 {
-            target: AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
+            plugin_id: fixture.plugin_id,
             observation: fixture.observation.clone(),
             knowledge: fixture_with_timeline(fixture.timeline_id).knowledge
         },
@@ -1095,7 +1094,7 @@ fn current_consent_is_required_before_driver_invocation() {
             &mut registry,
             fixture.timeline_id,
             AuthorizedDriverViewV1 {
-                target: AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
+                plugin_id: fixture.plugin_id,
                 observation: fixture.observation.clone(),
                 knowledge: fixture.knowledge.clone()
             },
@@ -1200,7 +1199,7 @@ fn revoked_authority_is_rejected_before_driver_invocation() {
             &mut registry,
             fixture.timeline_id,
             AuthorizedDriverViewV1 {
-                target: AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
+                plugin_id: fixture.plugin_id,
                 observation: fixture.observation.clone(),
                 knowledge: fixture.knowledge.clone()
             },

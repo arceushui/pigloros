@@ -856,8 +856,13 @@ fn reject_unowned_plugin_drafts(
     {
         Ok(())
     } else {
-        Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into())
+        Err(unauthorized())
     }
+}
+
+/// The closed authority error for an input whose source is not authorized.
+const fn unauthorized() -> RuntimeError {
+    RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource)
 }
 
 fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<(), RuntimeError> {
@@ -1002,25 +1007,10 @@ enum AnchoredSelection {
     Cadenced { now_ns: u128 },
 }
 
+/// Driver name reported when a pass exceeds the host Tick draft budget.
+const HOST_TICK_BUDGET_DRIVER: &str = "host-tick-budget";
+
 type AnchoredSelectionResult = (Vec<PluginId>, Vec<(PluginId, u128)>, Vec<ProjectionKey>);
-
-/// Exact Plugin and Timeline selected for one authorized Driver invocation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AuthorizedDriverTargetV1 {
-    plugin_id: PluginId,
-    timeline: pos_core::ids::TimelineId,
-}
-
-impl AuthorizedDriverTargetV1 {
-    /// Bind the Driver identity to its authorized Timeline.
-    #[must_use]
-    pub const fn new(plugin_id: PluginId, timeline: pos_core::ids::TimelineId) -> Self {
-        Self {
-            plugin_id,
-            timeline,
-        }
-    }
-}
 
 /// The central plugin registry.
 ///
@@ -1943,11 +1933,8 @@ impl PluginRegistry {
         } else {
             observations
         };
-        invoke_driver(driver.as_mut(), timeline, observations).and_then(|output| {
-            reject_host_owned_drafts(&output)?;
-            validate_plugin_output(entry, &output.drafts)?;
-            Ok(output)
-        })
+        invoke_driver(driver.as_mut(), timeline, observations)
+            .and_then(|output| validate_driver_output(entry, &output).map(|()| output))
     }
 
     fn collect_anchored_selection(
@@ -2072,29 +2059,20 @@ impl PluginRegistry {
             let result = self.invoke_selected_driver(id, timeline, &snapshot, committed_events);
             match result {
                 Ok(output) => {
-                    if let Err(error) = self.validate_protected_drafts(
-                        timeline,
-                        &operation,
-                        observed_through,
-                        &output.drafts,
-                    ) {
+                    if let Err(error) = self
+                        .validate_protected_drafts(
+                            timeline,
+                            &operation,
+                            observed_through,
+                            &output.drafts,
+                        )
+                        .and_then(|()| {
+                            self.charge_pass_budget(all_drafts.len(), output.drafts.len())
+                        })
+                    {
                         staged_driver_ids.push(id);
                         let _ = self.abort_drivers(&staged_driver_ids);
                         return Err(error);
-                    }
-                    let requested = u64::try_from(all_drafts.len())
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(u64::try_from(output.drafts.len()).unwrap_or(u64::MAX));
-                    if let Some(limit) = self.resource_limit {
-                        if requested > limit {
-                            staged_driver_ids.push(id);
-                            let _ = self.abort_drivers(&staged_driver_ids);
-                            return Err(RuntimeError::ResourceExhausted {
-                                driver: "host-tick-budget".to_owned(),
-                                requested,
-                                limit,
-                            });
-                        }
                     }
                     staged_driver_ids.push(id);
                     event_cursors.push((id, observed_through));
@@ -2119,6 +2097,20 @@ impl PluginRegistry {
             scheduled,
         });
         Ok(all_drafts)
+    }
+
+    /// Charge `added` drafts to a pass that has already staged `staged`,
+    /// against the host Tick draft budget.
+    fn charge_pass_budget(&self, staged: usize, added: usize) -> Result<(), RuntimeError> {
+        let requested = u64::try_from(staged.saturating_add(added)).unwrap_or(u64::MAX);
+        match self.resource_limit {
+            Some(limit) if requested > limit => Err(RuntimeError::ResourceExhausted {
+                driver: HOST_TICK_BUDGET_DRIVER.to_owned(),
+                requested,
+                limit,
+            }),
+            _ => Ok(()),
+        }
     }
 
     fn commit_pending_step(&mut self, pending: PendingStep) {
