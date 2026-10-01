@@ -5,8 +5,8 @@ use std::error::Error;
 use pos_core::Plugin;
 use pos_plugin_society::{SocietyReducer, SocietySignalProjectionPlugin};
 use pos_runtime::{
-    installed_plugin_role_v1, DomainImplementationKindV1, OutputPolicySourceV1,
-    OutputAdmissionErrorV1, OutputPolicyBindingV1, PluginAvailabilityV1, PluginIsolationV1,
+    installed_plugin_role_v1, DomainImplementationKindV1, OutputAdmissionErrorV1,
+    OutputPolicyBindingV1, OutputPolicySourceV1, PluginAvailabilityV1, PluginIsolationV1,
     PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError,
 };
 
