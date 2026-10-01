@@ -1236,7 +1236,9 @@ fn recipient_owner_public_contract_rolls_back_registry_write_and_directory_claim
 
     assert!(store.enroll_recipient_key(&owner).is_err());
     assert!(store.recover_recipient_keys(&owner)?.is_empty());
-    assert!(std::fs::read_dir(&directory)?.next().is_some());
+    // Recovery quarantines the rolled-back staged key and purges it in the
+    // same call, so no private key material survives the failed enrollment.
+    assert!(std::fs::read_dir(&directory)?.next().is_none());
 
     connection.execute_batch("DROP TRIGGER reject_recipient_registry_write;")?;
     assert!(store.recover_recipient_keys(&owner)?.is_empty());
