@@ -12,10 +12,7 @@ use pos_crypto::plugin_trust::{
     TrustedPluginRootAnchorV1, ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
 
-include!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/support/plugin_trust_records.rs"
-));
+include!("support/plugin_trust_records.rs");
 
 const PMF1_DIGEST: [u8; 32] = [0x11; 32];
 const RELEASE_DIGEST: [u8; 32] = [0x22; 32];
