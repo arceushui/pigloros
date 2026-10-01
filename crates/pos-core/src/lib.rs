@@ -42,6 +42,7 @@ pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
 pub mod plugin;
+pub mod recipient_key;
 pub mod retention;
 pub mod state;
 pub mod store;
@@ -276,6 +277,9 @@ pub use pipeline::{
 pub use plugin::{
     ActionApprover, ActionRejected, Capability, Plugin, ProposedAction,
     MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+};
+pub use recipient_key::{
+    recipient_owner_id_from_grantee, RecipientKeyDescriptorErrorV1, RecipientKeyDescriptorV1,
 };
 pub use state::{Reducer, State, StateRegistry};
 pub use store::{

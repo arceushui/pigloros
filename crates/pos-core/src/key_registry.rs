@@ -795,6 +795,12 @@ impl KeyRegistryStateV1 {
         Ok(KeyRegistrationOutcomeV1::Registered)
     }
 
+    /// Return every registered key record, including retained historical and
+    /// destroyed records.
+    pub fn key_records(&self) -> impl Iterator<Item = KeyRecordV1> + '_ {
+        self.records.values().copied()
+    }
+
     /// Return the active record for an owner-scoped `role`.
     #[must_use]
     pub fn active_key(&self, owner_id: &OwnerIdV1, role: KeyRoleV1) -> Option<KeyRecordV1> {
@@ -802,6 +808,15 @@ impl KeyRegistryStateV1 {
             .get(&(*owner_id, role))
             .and_then(|identity| self.records.get(identity))
             .copied()
+    }
+
+    /// Return the highest epoch ever registered for an owner-scoped `role`.
+    ///
+    /// This remains available after the highest identity becomes pending or
+    /// destroyed, so a later enrollment can advance without reusing an epoch.
+    #[must_use]
+    pub fn highest_epoch(&self, owner_id: &OwnerIdV1, role: KeyRoleV1) -> Option<u64> {
+        self.highest_epoch.get(&(*owner_id, role)).copied()
     }
 
     /// Return the record for an identity, including a destroyed record whose
