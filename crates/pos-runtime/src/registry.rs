@@ -73,6 +73,31 @@ fn local_manifest_slot(plugin_id: PluginId) -> String {
     format!("plugin-{plugin_id}")
 }
 
+/// Recover an exact owner-admission retry from durable state without a live
+/// Plugin registry or coordinator signer.
+///
+/// This is the recovery entry point after an unknown commit reply or process
+/// restart. The persistence boundary returns only the recorded transaction
+/// result for the exact unsigned request digest; conflicting operation reuse
+/// remains a closed error.
+///
+/// # Errors
+/// Returns request-shape, conflict, corruption, or storage errors reported by
+/// the request codec and owner persistence boundary.
+pub fn recover_manifest_owner_admission_retry_v1<
+    S: ManifestOwnerAdmissionPersistencePortV1,
+>(
+    request: &ManifestOwnerAdmissionRequestV1,
+    store: &S,
+) -> Result<Option<ManifestOwnerAdmissionCommitV1>, ManifestOwnerAdmissionErrorV1> {
+    let intent_digest = manifest_owner_admission_intent_digest_v1(request)?;
+    store.resolve_manifest_owner_admission_retry_v1(
+        request.catalog.as_input().owner_id,
+        request.operation_id,
+        intent_digest,
+    )
+}
+
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
@@ -1337,7 +1362,9 @@ impl PluginRegistry {
     /// this registry's current `AdmittedCompositionV1`. The trusted owner
     /// verifier then checks the owner pre-state and complete Timeline scopes,
     /// verifies native policy semantics, and signs each MSR1 before the store
-    /// commits the complete batch with its generation CAS.
+    /// commits the complete batch with its generation CAS. An exact durable
+    /// retry is resolved before this method consults the live registry or
+    /// coordinator verifier.
     ///
     /// # Errors
     /// Returns `OwnerRejected` for a stale or mismatched complete capability;
@@ -1351,6 +1378,9 @@ impl PluginRegistry {
         request: ManifestOwnerAdmissionRequestV1,
         store: &mut S,
     ) -> Result<ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1> {
+        if let Some(retry) = recover_manifest_owner_admission_retry_v1(&request, store)? {
+            return Ok(retry);
+        }
         let verifier = self
             .manifest_owner_admission_verifier
             .as_deref()
@@ -1372,18 +1402,16 @@ impl PluginRegistry {
                 {
                     return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
                 }
+                if !crate::output_admission::validate_manifest_opc1_copy_v1(
+                    &copies.opc1_bytes,
+                    &copies.eop1_bytes,
+                ) {
+                    return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
+                }
             }
         }
         let owner_id = request.catalog.as_input().owner_id;
-        let intent_digest = manifest_owner_admission_intent_digest_v1(&request)?;
         let current_state = store.read_manifest_owner_state_v1(owner_id)?;
-        if let Some(retry) = store.resolve_manifest_owner_admission_retry_v1(
-            owner_id,
-            request.operation_id,
-            intent_digest,
-        )? {
-            return Ok(retry);
-        }
         let prepared = prepare_manifest_owner_admission_v1(
             request,
             verifier,

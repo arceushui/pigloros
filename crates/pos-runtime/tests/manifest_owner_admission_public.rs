@@ -10,7 +10,9 @@ use pos_core::{
     PluginId, TimelineId, WorldArtifactKindV1, WorldArtifactLeafInputV1, WorldArtifactLeafV1,
     WorldConsumerSetInputV1, WorldConsumerSetV1, WorldProducerV1,
 };
-use pos_runtime::{AdmittedCompositionV1, PluginRegistry};
+use pos_runtime::{
+    recover_manifest_owner_admission_retry_v1, AdmittedCompositionV1, PluginRegistry,
+};
 use pos_store::{memory::MemoryStore, ManifestOwnerAdmissionPersistencePortV1};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -253,6 +255,10 @@ fn current_private_composition_is_committed_with_exact_policy_bytes() -> TestRes
     )?;
     assert_eq!(first.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
     let signed_after_apply = signed_count.get();
+    let recovered = recover_manifest_owner_admission_retry_v1(&input, &store)?
+        .ok_or("durable owner operation was not recovered")?;
+    assert_eq!(recovered.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+    assert_eq!(recovered.receipt_hashes, first.receipt_hashes);
     let retry = registry.commit_admitted_manifest_owner_admission_v1(
         &admitted,
         input.clone(),
@@ -296,6 +302,52 @@ fn current_private_composition_is_committed_with_exact_policy_bytes() -> TestRes
             .len(),
         2
     );
+    Ok(())
+}
+
+#[test]
+fn sqlite_owner_retry_recovers_without_registry_or_signer_after_reopen() -> TestResult {
+    let timeline_id = TimelineId::new();
+    let operation_id = hash(77);
+    let owner_verifier = verifier(timeline_id, operation_id);
+    let signed_count = Rc::clone(&owner_verifier.signed);
+    let (registry, _plugins, _owner, admitted) = setup(owner_verifier)?;
+    let sources = registry.admitted_manifest_policy_sources(&admitted)?;
+    let input = request(&admitted, &sources, timeline_id, operation_id)?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("runtime-owner-admission.sqlite");
+    let path = path.to_str().ok_or("non-UTF8 test path")?;
+
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    let applied = registry.commit_admitted_manifest_owner_admission_v1(
+        &admitted,
+        input.clone(),
+        &mut store,
+    )?;
+    assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
+    let signatures_before_reopen = signed_count.get();
+    drop(store);
+
+    let mut reopened = pos_store::sqlite::SqliteStore::open(path)?;
+    let retry = recover_manifest_owner_admission_retry_v1(&input, &reopened)?
+        .ok_or("SQLite owner operation was not recovered")?;
+    assert_eq!(retry.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+    assert_eq!(retry.receipt_hashes, applied.receipt_hashes);
+    assert_eq!(signed_count.get(), signatures_before_reopen);
+    let mut conflicting = input.clone();
+    conflicting.resulting_inventory_generation = hash(78);
+    assert_eq!(
+        recover_manifest_owner_admission_retry_v1(&conflicting, &reopened),
+        Err(ManifestOwnerAdmissionErrorV1::Conflict)
+    );
+
+    let without_authority = PluginRegistry::new().commit_admitted_manifest_owner_admission_v1(
+        &admitted,
+        input,
+        &mut reopened,
+    )?;
+    assert_eq!(without_authority.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+    assert_eq!(signed_count.get(), signatures_before_reopen);
     Ok(())
 }
 

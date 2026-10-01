@@ -687,41 +687,13 @@ fn validate_timeline_request(
     catalog: &ManifestAdmissionCatalogV1,
     timeline: &ManifestOwnerTimelineAdmissionRequestV1,
 ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-    let rows = &catalog.as_input().rows;
-    if timeline.scope == Hash::zero()
-        || timeline.wcs1.scope() != timeline.scope
-        || timeline.wcs1.producers().is_empty()
-        || timeline.policy_copies.len() != rows.len()
-        || timeline
-            .policy_copies
-            .windows(2)
-            .any(|pair| pair[0].plugin_id >= pair[1].plugin_id)
-    {
-        return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
-    }
-    let mut copy_ids = HashSet::with_capacity(timeline.policy_copies.len());
-    for copy in &timeline.policy_copies {
-        if !copy_ids.insert(copy.plugin_id) {
-            return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
-        }
-        let row = rows
-            .iter()
-            .find(|row| row.plugin_id == copy.plugin_id)
-            .ok_or(ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
-        if !valid_native_copy(catalog.as_input().owner_id, timeline.scope, row, copy) {
-            return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
-        }
-    }
-    for producer in timeline.wcs1.producers() {
-        let row = rows
-            .iter()
-            .find(|row| row.plugin_id == producer.plugin_id())
-            .ok_or(ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
-        if row.eop1_native_digest != producer.output_policy_hash() {
-            return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
-        }
-    }
-    Ok(())
+    validate_timeline_policy_copies(
+        catalog,
+        timeline.scope,
+        &timeline.wcs1,
+        &timeline.policy_copies,
+        None,
+    )
 }
 
 fn derive_binding(
@@ -791,46 +763,69 @@ fn validate_timeline_admission(
         || receipt.previous_visible_lcq1_hash != input.previous_visible_lcq1_hash
         || receipt.expected_inventory_generation != input.expected_inventory_generation
         || receipt.msb1_hash != timeline.binding.digest()
-        || timeline.policy_copies.len() != catalog.rows.len()
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
+    }
+    validate_timeline_policy_copies(
+        &input.catalog,
+        timeline.scope,
+        &timeline.wcs1,
+        &timeline.policy_copies,
+        Some(&timeline.binding),
+    )
+}
+
+fn validate_timeline_policy_copies(
+    catalog: &ManifestAdmissionCatalogV1,
+    scope: Hash,
+    wcs1: &WorldConsumerSetV1,
+    policy_copies: &[ManifestOwnerPolicyCopiesV1],
+    binding: Option<&ManifestSlotBindingV1>,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let catalog_input = catalog.as_input();
+    if scope == Hash::zero()
+        || wcs1.scope() != scope
+        || wcs1.producers().is_empty()
+        || policy_copies.len() != catalog_input.rows.len()
+        || policy_copies
+            .windows(2)
+            .any(|pair| pair[0].plugin_id >= pair[1].plugin_id)
+        || binding.is_some_and(|value| value.as_input().rows.len() != catalog_input.rows.len())
     {
         return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
     }
 
-    if timeline
-        .policy_copies
-        .windows(2)
-        .any(|pair| pair[0].plugin_id >= pair[1].plugin_id)
-    {
-        return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
-    }
-    let mut copy_ids = HashSet::with_capacity(timeline.policy_copies.len());
-    for copy in &timeline.policy_copies {
+    let mut copy_ids = HashSet::with_capacity(policy_copies.len());
+    for copy in policy_copies {
         if !copy_ids.insert(copy.plugin_id) {
             return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
         }
-        let row = catalog
+        let row = catalog_input
             .rows
             .iter()
             .find(|row| row.plugin_id == copy.plugin_id)
             .ok_or(ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
-        if !valid_native_copy(catalog.owner_id, timeline.scope, row, copy) {
+        if !valid_native_copy(catalog_input.owner_id, scope, row, copy) {
             return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
         }
-        let slot = binding
-            .rows
-            .iter()
-            .find(|binding_row| binding_row.plugin_id == row.plugin_id)
-            .ok_or(ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
-        if slot.stable_slot != row.stable_slot
-            || slot.closure_hash != row.closure_hash
-            || slot.eop1_wal1_hash != copy.eop1_leaf.digest()
-        {
-            return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
+        if let Some(binding) = binding {
+            let slot = binding
+                .as_input()
+                .rows
+                .iter()
+                .find(|binding_row| binding_row.plugin_id == row.plugin_id)
+                .ok_or(ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
+            if slot.stable_slot != row.stable_slot
+                || slot.closure_hash != row.closure_hash
+                || slot.eop1_wal1_hash != copy.eop1_leaf.digest()
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
+            }
         }
     }
 
-    for producer in timeline.wcs1.producers() {
-        let row = catalog
+    for producer in wcs1.producers() {
+        let row = catalog_input
             .rows
             .iter()
             .find(|row| row.plugin_id == producer.plugin_id())
