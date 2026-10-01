@@ -149,7 +149,7 @@ fn prepared_repro_manifest() -> Result<
             admission_registration: &admission_registration,
             transcript_registration: &transcript_registration,
             owner_id: &owner_id,
-            label_data_class: Some(ArtifactDataClassV1::PublicRecord),
+            label_data_class: None,
         })?;
     let root_address = root_registration.address();
     let inputs = [
