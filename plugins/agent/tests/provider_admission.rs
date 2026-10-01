@@ -224,7 +224,7 @@ fn provider_proposal_commits_only_through_host_admission() {
     let provider =
         FixtureAgentDecisionProvider::new(vec![accepted_proposal(), accepted_proposal()]);
     let calls = provider.call_count_handle();
-    let mut registry = PluginRegistry::new().with_erasure_gate(gate.clone());
+    let mut registry = PluginRegistry::new().with_erasure_gate(gate);
     let binding = ok(OutputPolicyBindingV1::from_installed_source(
         &plugin,
         InstalledOutputPolicySourceV1::Generated,

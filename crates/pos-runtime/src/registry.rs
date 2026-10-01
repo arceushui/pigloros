@@ -1134,8 +1134,9 @@ pub struct PluginRegistry {
     projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
     /// Scheduled pass whose admission outcome is unknown; only an exact
-    /// retry of its retained basis or an explicit abort may resolve it.
-    in_doubt_admission: Option<(PendingStep, pos_core::PipelineAdmissionBasisV1)>,
+    /// retry of its retained basis or an explicit abort may resolve it. Boxed
+    /// so the rarely used retained basis does not enlarge every registry.
+    in_doubt_admission: Option<Box<(PendingStep, pos_core::PipelineAdmissionBasisV1)>>,
     run_mode: RunMode,
     composition_mode: PluginExecutionModeV1,
     resource_limit: Option<u64>,
@@ -2702,7 +2703,7 @@ impl PluginRegistry {
     /// An in-doubt scheduled admission is abandoned as well; the host then
     /// rebuilds Driver state only from committed history.
     pub fn abort_step(&mut self) {
-        let in_doubt = self.in_doubt_admission.take().map(|(pending, _)| pending);
+        let in_doubt = self.in_doubt_admission.take().map(|in_doubt| in_doubt.0);
         for pending in self.pending_step.take().into_iter().chain(in_doubt) {
             let _ = self.abort_drivers(&pending.driver_ids);
         }

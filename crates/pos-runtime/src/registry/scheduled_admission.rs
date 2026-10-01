@@ -110,9 +110,10 @@ impl PluginRegistry {
         &mut self,
         port: &mut dyn PipelineAdmissionPortV1,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-        let Some((pending, basis)) = self.in_doubt_admission.take() else {
+        let Some(in_doubt) = self.in_doubt_admission.take() else {
             return Err(RuntimeError::NoScheduledAdmissionInDoubt);
         };
+        let (pending, basis) = *in_doubt;
         self.finish_scheduled_admission(port, pending, basis)
     }
 
@@ -131,7 +132,7 @@ impl PluginRegistry {
                 Ok(Some(receipt))
             }
             Err(error @ CoreError::StorageOutcomeUnknown(_)) => {
-                self.in_doubt_admission = Some((pending, basis));
+                self.in_doubt_admission = Some(Box::new((pending, basis)));
                 Err(RuntimeError::Store(error))
             }
             result => {
