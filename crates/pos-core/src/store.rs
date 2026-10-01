@@ -2661,6 +2661,23 @@ mod tests {
             .test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
 
+        let mut unsupported_catalog_store = TrivialStore::new();
+        assert_eq!(
+            EventStore::commit_artifact_registration_batch(
+                &mut unsupported_catalog_store,
+                crate::PreparedArtifactRegistrationBatchV1::empty_for_test(),
+            ),
+            Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+        );
+        assert_eq!(
+            EventStore::read_artifact_registration(
+                &unsupported_catalog_store,
+                &crate::OwnerIdV1::from_static("unsupported-event-store-test"),
+                Hash::zero(),
+            ),
+            Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+        );
+
         Ok(())
     }
 

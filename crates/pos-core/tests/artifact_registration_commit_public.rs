@@ -201,7 +201,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
     let prepared = prepare_artifact_registration_batch_v1(
         owner_id,
         root,
-        inputs,
+        inputs.clone(),
         &TestOnlyStructuralOwnerVerifier,
     )?;
     assert_eq!(prepared.owner_id(), &owner_id);
@@ -224,6 +224,23 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
             owner_id,
             root,
             missing_admission,
+            &TestOnlyStructuralOwnerVerifier,
+        ),
+        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    );
+
+    let transcript_input = inputs
+        .iter()
+        .find(|input| input.artifact_bytes.get(2..6) == Some(&b"MAT1"[..]))
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("MAT1 input was absent"))?;
+    let mut duplicate_transcript = inputs.clone();
+    duplicate_transcript.push(transcript_input);
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(
+            owner_id,
+            root,
+            duplicate_transcript,
             &TestOnlyStructuralOwnerVerifier,
         ),
         Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
@@ -602,7 +619,7 @@ fn registration_preparation_rejects_invalid_bytes_extraction_and_closure_shapes(
         prepare_artifact_registration_batch_v1(
             owner_id,
             root,
-            inputs,
+            inputs.clone(),
             &RejectingNativeDerivationVerifier,
         ),
         Err(ArtifactRegistrationPreparationErrorV1::OwnerRejected)

@@ -95,7 +95,7 @@ pub fn inspect_artifact_registration_graph_v1(
             return Err(ArtifactRegistrationGraphErrorV1::IdentityMismatch);
         }
     }
-    let root_node = by_address
+    let root_node = *by_address
         .get(&root)
         .ok_or(ArtifactRegistrationGraphErrorV1::InvalidRoot)?;
     if root_node.registration.fields().optionality != ArtifactOptionalityV1::Required {
@@ -109,7 +109,7 @@ pub fn inspect_artifact_registration_graph_v1(
         edges: 0,
         registration_bytes: 0,
     };
-    traversal.visit(root, 1)?;
+    traversal.visit(root, root_node, 1)?;
     if traversal.subtree_heights.len() != nodes.len() {
         return Err(ArtifactRegistrationGraphErrorV1::ExtraRegistration);
     }
@@ -134,6 +134,7 @@ impl GraphTraversal<'_> {
     fn visit(
         &mut self,
         address: Hash,
+        node: &ArtifactRegistrationGraphNodeV1,
         depth: usize,
     ) -> Result<usize, ArtifactRegistrationGraphErrorV1> {
         if self.visiting.contains(&address) {
@@ -148,10 +149,6 @@ impl GraphTraversal<'_> {
             }
             return Ok(height);
         }
-        let node = *self
-            .nodes
-            .get(&address)
-            .ok_or(ArtifactRegistrationGraphErrorV1::MissingChild)?;
         let fields = node.registration.fields();
         if fields.owner_reference != ArtifactRegistrationV1::owner_reference(&node.owner_id) {
             return Err(ArtifactRegistrationGraphErrorV1::OwnerMismatch);
@@ -190,7 +187,7 @@ impl GraphTraversal<'_> {
             {
                 return Err(ArtifactRegistrationGraphErrorV1::IdentityMismatch);
             }
-            height = height.max(1 + self.visit(edge.registration_address, depth + 1)?);
+            height = height.max(1 + self.visit(edge.registration_address, child, depth + 1)?);
         }
         // Do this after traversal so a corrupt catalog alias cannot conceal a
         // cycle that the traversal must reject independently.
