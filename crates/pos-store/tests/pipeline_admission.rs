@@ -692,8 +692,7 @@ fn fork_history_and_concurrent_attempts_serialize_on_the_logical_head() {
             outcomes.contains(&PipelineOutcomeV1::AdmissionConflict),
             "{name}"
         );
-        let store = ok(shared.lock());
-        assert_eq!(event_count(store.as_ref(), child), 8, "{name}");
+        assert_eq!(event_count(ok(shared.lock()).as_ref(), child), 8, "{name}");
     }
 }
 
