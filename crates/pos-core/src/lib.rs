@@ -213,9 +213,13 @@ pub use fork_admission_command::{
 };
 pub use fork_attribution::{
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,
-    ForkAttributionOriginV1, ForkReproManifestInputV1, ForkReproManifestV1,
-    SignedForkReproManifestV1, MAX_FORK_ADMISSION_RECORD_BYTES_V1,
-    MAX_FORK_MANIFEST_INTERVENTIONS_V1, MAX_FORK_REPRO_MANIFEST_BYTES_V1,
+    ForkAttributionOriginV1, ForkPublicationArtifactInputV1, ForkPublicationArtifactV1,
+    ForkPublicationBindingInputV1, ForkPublicationBindingV1, ForkPublicationOperationInputV1,
+    ForkPublicationOperationV1, ForkPublicationReceiptV1, ForkReproManifestInputV1,
+    ForkReproManifestV1, SignedForkReproManifestV1, MAX_FORK_ADMISSION_RECORD_BYTES_V1,
+    MAX_FORK_MANIFEST_INTERVENTIONS_V1, MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
+    MAX_FORK_PUBLICATION_BINDING_BYTES_V1, MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+    MAX_FORK_PUBLICATION_RECEIPT_BYTES_V1, MAX_FORK_REPRO_MANIFEST_BYTES_V1,
     MAX_SIGNED_FORK_REPRO_MANIFEST_BYTES_V1,
 };
 pub use fork_authentication::{

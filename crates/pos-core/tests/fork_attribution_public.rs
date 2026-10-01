@@ -1,7 +1,10 @@
 use pos_core::{
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,
-    ForkAttributionOriginV1, ForkReproManifestInputV1, ForkReproManifestV1, Hash, KeyIdentityV1,
-    KeyRoleV1, SignedForkReproManifestV1, TimelineId,
+    ForkAttributionOriginV1, ForkPublicationArtifactInputV1, ForkPublicationArtifactV1,
+    ForkPublicationBindingInputV1, ForkPublicationBindingV1, ForkPublicationOperationInputV1,
+    ForkPublicationOperationV1, ForkPublicationReceiptV1, ForkReproManifestInputV1,
+    ForkReproManifestV1, Hash, KeyIdentityV1, KeyRoleV1, PublicKey, SignedForkReproManifestV1,
+    TimelineId,
 };
 
 /// Bytes from the `FRM1` intervention array head to the end of the fixture
@@ -36,6 +39,227 @@ fn manifest(
     admission: &ForkAdmissionRecordV1,
 ) -> Result<ForkReproManifestV1, ForkAttributionCodecErrorV1> {
     ForkReproManifestV1::from_admission(admission, vec![5, 7], 7, hash(6))
+}
+
+fn publication_records(
+    admission: &ForkAdmissionRecordV1,
+) -> Result<
+    (
+        ForkPublicationOperationV1,
+        ForkPublicationBindingV1,
+        ForkPublicationArtifactV1,
+    ),
+    ForkAttributionCodecErrorV1,
+> {
+    let signed = SignedForkReproManifestV1::new_from_admission(
+        admission,
+        1,
+        manifest(admission)?,
+        pos_core::Signature::from_bytes([9; 64]),
+    )?;
+    let operation_id = hash(7);
+    let operation = ForkPublicationOperationV1::new(ForkPublicationOperationInputV1 {
+        operation_id,
+        child_timeline_id: admission.input().child_timeline_id,
+        final_logical_head: 7,
+        final_chain_head_hash: hash(6),
+        admission_digest: admission.digest(),
+        signing_identity: signed.identity(),
+        private_material_digest: hash(8),
+        public_verification_key: PublicKey::from_bytes([10; 32]),
+        signed_manifest_record_id: signed.record_id(),
+        origin: ForkAttributionOriginV1::Local,
+    })?;
+    let binding = ForkPublicationBindingV1::new(ForkPublicationBindingInputV1 {
+        child_timeline_id: admission.input().child_timeline_id,
+        final_logical_head: 7,
+        operation_id,
+        signed_manifest_record_id: signed.record_id(),
+    })?;
+    let artifact = ForkPublicationArtifactV1::new(ForkPublicationArtifactInputV1 {
+        signed_manifest_record_id: signed.record_id(),
+        operation_id,
+        signed_manifest_bytes: signed.to_canonical_cbor(),
+    })?;
+    Ok((operation, binding, artifact))
+}
+
+#[test]
+fn local_fpo1_fpb1_fpa1_and_derived_fpr1_round_trip_at_public_seam(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    assert_eq!(
+        &operation.to_canonical_cbor()[..6],
+        &[0x8e, 0x64, b'F', b'P', b'O', b'1']
+    );
+    assert_eq!(
+        &binding.to_canonical_cbor()[..6],
+        &[0x86, 0x64, b'F', b'P', b'B', b'1']
+    );
+    assert_eq!(
+        &artifact.to_canonical_cbor()[..6],
+        &[0x85, 0x64, b'F', b'P', b'A', b'1']
+    );
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&operation.to_canonical_cbor()),
+        Ok(operation.clone())
+    );
+    assert_eq!(
+        ForkPublicationBindingV1::from_canonical_cbor(&binding.to_canonical_cbor()),
+        Ok(binding)
+    );
+    assert_eq!(
+        ForkPublicationArtifactV1::from_canonical_cbor(&artifact.to_canonical_cbor()),
+        Ok(artifact)
+    );
+    let receipt = ForkPublicationReceiptV1::from_records(&operation, &binding)?;
+    assert_eq!(
+        &receipt.to_canonical_cbor()[..6],
+        &[0x86, 0x64, b'F', b'P', b'R', b'1']
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_codecs_reject_import_origin_and_mismatched_artifact(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, _binding, artifact) = publication_records(&admission)?;
+    let local = operation.to_canonical_cbor();
+    let origin_at = local.len() - 2;
+    assert_eq!(local[origin_at..], [0x81, 0x01]);
+    let mut bare_code_2 = local.clone();
+    bare_code_2[origin_at + 1] = 2;
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&bare_code_2),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    // ADR-099 authority-origin-v1 code 2: [2, bstr .size 32].
+    let mut imported = local[..origin_at].to_vec();
+    imported.extend_from_slice(&[0x82, 0x02, 0x58, 0x20]);
+    imported.extend_from_slice(&[0xab; 32]);
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&imported),
+        Err(ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable)
+    );
+    imported.push(0);
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&imported),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    let mut mismatched = artifact.input().clone();
+    mismatched.signed_manifest_record_id = hash(99);
+    assert_eq!(
+        ForkPublicationArtifactV1::new(mismatched),
+        Err(ForkAttributionCodecErrorV1::FieldMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_constructors_reject_zero_ids_and_foreign_signer_roles(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    let mut zero_operation = operation.input().clone();
+    zero_operation.private_material_digest = Hash::zero();
+    let mut wrong_role = operation.input().clone();
+    wrong_role.signing_identity.role = KeyRoleV1::TimelineIntegritySigning;
+    let mut zero_epoch = operation.input().clone();
+    zero_epoch.signing_identity.epoch = 0;
+    for input in [zero_operation, wrong_role, zero_epoch] {
+        assert_eq!(
+            ForkPublicationOperationV1::new(input),
+            Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+    let mut zero_binding = *binding.input();
+    zero_binding.signed_manifest_record_id = Hash::zero();
+    assert_eq!(
+        ForkPublicationBindingV1::new(zero_binding),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut zero_artifact = artifact.input().clone();
+    zero_artifact.operation_id = Hash::zero();
+    assert_eq!(
+        ForkPublicationArtifactV1::new(zero_artifact),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut foreign_head = *binding.input();
+    foreign_head.final_logical_head = 8;
+    assert_eq!(
+        ForkPublicationReceiptV1::from_records(
+            &operation,
+            &ForkPublicationBindingV1::new(foreign_head)?
+        ),
+        Err(ForkAttributionCodecErrorV1::FieldMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_operation_accepts_zero_genesis_chain_hash_of_empty_fork(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, _binding, _artifact) = publication_records(&admission)?;
+    let mut genesis = operation.input().clone();
+    genesis.final_chain_head_hash = Hash::zero();
+    let operation = ForkPublicationOperationV1::new(genesis)?;
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&operation.to_canonical_cbor()),
+        Ok(operation)
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_decoders_reject_role_codes_and_noncanonical_heads(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, _artifact) = publication_records(&admission)?;
+    let local = operation.to_canonical_cbor();
+    let role_at = local
+        .windows(b"creator-a".len())
+        .position(|bytes| bytes == b"creator-a")
+        .ok_or("encoded creator is absent")?
+        + b"creator-a".len();
+    assert_eq!(local[role_at..role_at + 2], [0x01, 0x01]);
+    for (role, expected) in [
+        (vec![0x02], ForkAttributionCodecErrorV1::FieldOutOfBounds),
+        (vec![0x17], ForkAttributionCodecErrorV1::InvalidEncoding),
+        (
+            vec![0x19, 0x01, 0x00],
+            ForkAttributionCodecErrorV1::InvalidEncoding,
+        ),
+    ] {
+        let mut bytes = local[..role_at].to_vec();
+        bytes.extend_from_slice(&role);
+        bytes.extend_from_slice(&local[role_at + 1..]);
+        assert_eq!(
+            ForkPublicationOperationV1::from_canonical_cbor(&bytes),
+            Err(expected)
+        );
+    }
+    // The final logical head 7 follows the marker, version, and fixed-width
+    // fields: FPO1 operation ID plus child Fork ID, FPB1 child Fork ID only.
+    let mut operation_head = local;
+    assert_eq!(operation_head[58], 7);
+    operation_head[58] = 0x18;
+    operation_head.insert(59, 7);
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&operation_head),
+        Err(ForkAttributionCodecErrorV1::NonCanonical)
+    );
+    let mut binding_head = binding.to_canonical_cbor();
+    assert_eq!(binding_head[24], 7);
+    binding_head[24] = 0x18;
+    binding_head.insert(25, 7);
+    assert_eq!(
+        ForkPublicationBindingV1::from_canonical_cbor(&binding_head),
+        Err(ForkAttributionCodecErrorV1::NonCanonical)
+    );
+    Ok(())
 }
 
 #[test]
