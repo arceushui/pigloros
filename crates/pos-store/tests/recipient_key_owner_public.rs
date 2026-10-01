@@ -335,6 +335,51 @@ fn recipient_owner_public_contract_quarantines_unregistered_staged_material(
     Ok(())
 }
 
+fn quarantined_file_count(
+    directory: &std::path::Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut count = 0;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type()?.is_file()
+            && name.starts_with(".recipient-")
+            && name.ends_with(".key.orphan")
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+#[test]
+fn recipient_owner_public_contract_bounds_each_quarantine_purge_and_skips_non_files(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (temporary, store, owner, descriptor) = enrolled_owner()?;
+    let directory = temporary.path().join("recipient-private");
+    for index in 0..257 {
+        std::fs::write(
+            directory.join(format!(".recipient-flood-{index}.key.orphan")),
+            [7_u8; 32],
+        )?;
+    }
+    let orphan_directory = directory.join(".recipient-directory.key.orphan");
+    std::fs::create_dir(&orphan_directory)?;
+    let unrelated = directory.join(".unrelated.orphan");
+    std::fs::write(&unrelated, [])?;
+
+    assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
+    assert_eq!(quarantined_file_count(&directory)?, 1);
+    assert!(orphan_directory.is_dir());
+
+    assert_eq!(store.recover_recipient_keys(&owner)?, vec![descriptor]);
+    assert_eq!(quarantined_file_count(&directory)?, 0);
+    assert!(orphan_directory.is_dir());
+    assert!(unrelated.is_file());
+    assert!(recipient_private_path(&directory, descriptor).is_file());
+    Ok(())
+}
+
 #[test]
 fn recipient_owner_public_contract_serializes_recovery_with_enrollment_staging(
 ) -> Result<(), Box<dyn std::error::Error>> {

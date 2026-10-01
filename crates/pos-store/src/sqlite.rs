@@ -17,7 +17,8 @@ use std::{
 };
 
 // The custody adapter relies on Linux-only `openat2` resolve flags and
-// `renameat2(RENAME_NOREPLACE)`; every other target gets the explicit stub.
+// `renameat2(RENAME_NOREPLACE)`; every other target gets the explicit stub,
+// which ADR-098 permits for targets without these durability guarantees.
 #[cfg(target_os = "linux")]
 mod recipient_owner;
 #[cfg(not(target_os = "linux"))]
