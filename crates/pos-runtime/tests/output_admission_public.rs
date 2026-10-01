@@ -397,11 +397,13 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         if member_length > 0 {
             let mut malformed = expected_bytes.clone();
             malformed[length_end] ^= 1;
-            assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-                &malformed,
-                &source.output_policy_bytes,
-            )
-            .is_err());
+            assert!(
+                pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+                    &malformed,
+                    &source.output_policy_bytes,
+                )
+                .is_err()
+            );
         }
         offset = length_end + member_length;
     }
@@ -409,42 +411,56 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     trailing.push(0);
     let mut impossible_length = Vec::from(&b"OPC1"[..]);
     impossible_length.extend_from_slice(&u64::MAX.to_be_bytes());
-    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-        b"bad",
-        &source.output_policy_bytes,
-    )
-    .is_err());
-    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-        b"OPC1",
-        &source.output_policy_bytes,
-    )
-    .is_err());
-    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-        &expected_bytes[..expected_bytes.len() - 1],
-        &source.output_policy_bytes,
-    )
-    .is_err());
-    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-        &trailing,
-        &source.output_policy_bytes,
-    )
-    .is_err());
-    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-        &impossible_length,
-        &source.output_policy_bytes,
-    )
-    .is_err());
-    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-        &expected_bytes,
-        b"wrong EOP1",
-    )
-    .is_err());
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            b"bad",
+            &source.output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            b"OPC1",
+            &source.output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &expected_bytes[..expected_bytes.len() - 1],
+            &source.output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &trailing,
+            &source.output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &impossible_length,
+            &source.output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &expected_bytes,
+            b"wrong EOP1",
+        )
+        .is_err()
+    );
     let oversized = vec![0; pos_runtime::MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 + 1];
-    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-        &oversized,
-        &source.output_policy_bytes,
-    )
-    .is_err());
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &oversized,
+            &source.output_policy_bytes,
+        )
+        .is_err()
+    );
     let fresh_plugin = FixturePlugin {
         id: PluginId::new(),
     };

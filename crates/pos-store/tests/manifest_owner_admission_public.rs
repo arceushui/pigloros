@@ -1,23 +1,19 @@
 use std::cell::Cell;
 
 use pos_core::{
+    manifest_owner_admission_intent_digest_v1,
     output_policy::{OutputPolicyInputV1, OutputPolicyV1},
-    ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, Hash,
-    ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
-    ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1,
-    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
-    ManifestOwnerAdmissionRequestV1,
-    ManifestOwnerAdmissionVerifierV1,
-    ManifestOwnerPolicyCopiesV1, ManifestOwnerTimelineAdmissionRequestV1,
-    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1,
-    PluginId, TimelineId, WorldArtifactKindV1, WorldArtifactLeafInputV1,
-    WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldProducerV1,
-    manifest_owner_admission_intent_digest_v1, prepare_manifest_owner_admission_v1,
-    MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    prepare_manifest_owner_admission_v1, ArtifactDataClassV1, ArtifactOptionalityV1,
+    ArtifactTransitionRuleV1, Hash, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
+    ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionErrorV1,
+    ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionRequestV1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
+    ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
+    ManifestSlotAdmissionReceiptV1, PluginId, TimelineId, WorldArtifactKindV1,
+    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
+    WorldProducerV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
-use pos_store::{
-    ManifestOwnerAdmissionPersistencePortV1, memory::MemoryStore,
-};
+use pos_store::{memory::MemoryStore, ManifestOwnerAdmissionPersistencePortV1};
 
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
@@ -96,10 +92,8 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
         request: &ManifestOwnerAdmissionRequestV1,
         current_state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
     ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-        let current_state_matches = match (
-            request.expected_configuration_generation,
-            current_state,
-        ) {
+        let current_state_matches = match (request.expected_configuration_generation, current_state)
+        {
             (None, None) => true,
             (Some(expected), Some(state)) => {
                 state.configuration_generation == expected
@@ -183,7 +177,11 @@ fn policy_and_closure(
     ];
     let mut closure = b"OPC1".to_vec();
     for member in members {
-        closure.extend_from_slice(&u64::try_from(member.len()).unwrap_or(u64::MAX).to_be_bytes());
+        closure.extend_from_slice(
+            &u64::try_from(member.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
         closure.extend_from_slice(&member);
     }
     Ok((policy, closure))
@@ -199,11 +197,12 @@ fn opc1_digest(bytes: &[u8]) -> Hash {
 fn catalog(
     owner_id: [u8; 32],
     generation: u64,
-) -> Result<
-    (ManifestAdmissionCatalogV1, Vec<(OutputPolicyV1, Vec<u8>)>),
-    Box<dyn std::error::Error>,
-> {
-    let source = vec![policy_and_closure(plugin(1), 1)?, policy_and_closure(plugin(2), 2)?];
+) -> Result<(ManifestAdmissionCatalogV1, Vec<(OutputPolicyV1, Vec<u8>)>), Box<dyn std::error::Error>>
+{
+    let source = vec![
+        policy_and_closure(plugin(1), 1)?,
+        policy_and_closure(plugin(2), 2)?,
+    ];
     let rows = source
         .iter()
         .enumerate()
@@ -474,8 +473,8 @@ fn memory_owner_admission_resolves_retries_conflicts_and_historical_rows() -> Te
     assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
     assert_eq!(applied.receipt_hashes.len(), 2);
 
-    let retry_owner = FixtureOwner::new(first_timelines.clone(), hash(41))
-        .with_signing_identity(hash(91), 0xa5);
+    let retry_owner =
+        FixtureOwner::new(first_timelines.clone(), hash(41)).with_signing_identity(hash(91), 0xa5);
     let retry_prepared =
         prepare_manifest_owner_admission_v1(genesis_request.clone(), &retry_owner, None)?;
     assert_ne!(
@@ -517,7 +516,10 @@ fn memory_owner_admission_resolves_retries_conflicts_and_historical_rows() -> Te
         )?),
         Err(ManifestOwnerAdmissionErrorV1::Conflict)
     );
-    assert_eq!(genesis_owner.signatures_issued.get(), signatures_before_conflict);
+    assert_eq!(
+        genesis_owner.signatures_issued.get(),
+        signatures_before_conflict
+    );
 
     let current = store
         .read_manifest_owner_state_v1(owner_id)?
@@ -531,7 +533,14 @@ fn memory_owner_admission_resolves_retries_conflicts_and_historical_rows() -> Te
         .ok_or("missing genesis admission row")?;
     assert_eq!(historical.timeline.policy_copies.len(), 2);
     assert_eq!(historical.timeline.wcs1.producers().len(), 1);
-    assert_eq!(historical.timeline.receipt.as_input().previous_visible_lcq1_hash, None);
+    assert_eq!(
+        historical
+            .timeline
+            .receipt
+            .as_input()
+            .previous_visible_lcq1_hash,
+        None
+    );
     assert_eq!(
         historical
             .timeline
@@ -582,13 +591,12 @@ fn memory_owner_admission_replaces_the_complete_timeline_set() -> TestResult {
         &replacement_timelines,
     )?;
     let replacement_owner = FixtureOwner::new(replacement_timelines.clone(), hash(51));
-    let replacement = store.commit_manifest_owner_admission_v1(
-        prepare_manifest_owner_admission_v1(
+    let replacement =
+        store.commit_manifest_owner_admission_v1(prepare_manifest_owner_admission_v1(
             replacement_request,
             &replacement_owner,
             Some(&previous),
-        )?,
-    )?;
+        )?)?;
     assert_eq!(replacement.configuration_generation, 2);
     let current = store
         .read_manifest_owner_state_v1(owner_id)?
@@ -615,8 +623,7 @@ fn memory_owner_admission_replaces_the_complete_timeline_set() -> TestResult {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reopen(
-) -> TestResult {
+fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reopen() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("owner-admission.sqlite");
     let owner_id = [19; 32];
@@ -666,9 +673,11 @@ fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reope
     connection.execute_batch("DROP TRIGGER fail_manifest_policy_copy")?;
     drop(connection);
 
-    let applied = store.commit_manifest_owner_admission_v1(
-        prepare_manifest_owner_admission_v1(input.clone(), &owner, None)?,
-    )?;
+    let applied = store.commit_manifest_owner_admission_v1(prepare_manifest_owner_admission_v1(
+        input.clone(),
+        &owner,
+        None,
+    )?)?;
     assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
     drop(store);
 
@@ -716,8 +725,7 @@ fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reope
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_owner_admission_replaces_complete_generation_and_recovers_after_reopen(
-) -> TestResult {
+fn sqlite_owner_admission_replaces_complete_generation_and_recovers_after_reopen() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("owner-admission-replacement.sqlite");
     let path = path.to_str().ok_or("non-UTF8 test path")?;
@@ -740,7 +748,10 @@ fn sqlite_owner_admission_replaces_complete_generation_and_recovers_after_reopen
     let mut store = SqliteStore::open(path)?;
     let genesis = prepare_manifest_owner_admission_v1(genesis_request, &genesis_owner, None)?;
     let genesis_result = store.commit_manifest_owner_admission_v1(genesis)?;
-    assert_eq!(genesis_result.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
+    assert_eq!(
+        genesis_result.kind,
+        ManifestOwnerAdmissionCommitKindV1::Applied
+    );
     let pre_replacement = store
         .read_manifest_owner_state_v1(owner_id)?
         .ok_or("SQLite owner state is missing before replacement")?;

@@ -4,11 +4,11 @@ use pos_core::{
     ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, Hash,
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1,
     ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionErrorV1,
-    ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1,
-    ManifestOwnerPolicyCopiesV1, ManifestOwnerTimelineAdmissionRequestV1,
-    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, OwnerIdV1, Plugin,
-    PluginId, TimelineId, WorldArtifactKindV1, WorldArtifactLeafInputV1, WorldArtifactLeafV1,
-    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldProducerV1,
+    ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
+    ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
+    ManifestSlotAdmissionReceiptV1, OwnerIdV1, Plugin, PluginId, TimelineId, WorldArtifactKindV1,
+    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
+    WorldProducerV1,
 };
 use pos_runtime::{
     recover_manifest_owner_admission_retry_v1, AdmittedCompositionV1, PluginRegistry,
@@ -39,7 +39,9 @@ impl Plugin for LocalPlugin {
     }
 }
 
-fn setup(owner_verifier: FixtureOwner) -> Result<
+fn setup(
+    owner_verifier: FixtureOwner,
+) -> Result<
     (
         PluginRegistry,
         [LocalPlugin; 2],
@@ -49,8 +51,12 @@ fn setup(owner_verifier: FixtureOwner) -> Result<
     Box<dyn Error>,
 > {
     let plugins = [
-        LocalPlugin { id: PluginId::new() },
-        LocalPlugin { id: PluginId::new() },
+        LocalPlugin {
+            id: PluginId::new(),
+        },
+        LocalPlugin {
+            id: PluginId::new(),
+        },
     ];
     let owner_id = OwnerIdV1::from_static("open-source-app");
     let mut registry = PluginRegistry::new_with_manifest_owner_admission_verifier(owner_verifier);
@@ -257,7 +263,10 @@ fn current_private_composition_is_committed_with_exact_policy_bytes() -> TestRes
     let signed_after_apply = signed_count.get();
     let recovered = recover_manifest_owner_admission_retry_v1(&input, &store)?
         .ok_or("durable owner operation was not recovered")?;
-    assert_eq!(recovered.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+    assert_eq!(
+        recovered.kind,
+        ManifestOwnerAdmissionCommitKindV1::ExactRetry
+    );
     assert_eq!(recovered.receipt_hashes, first.receipt_hashes);
     let retry = registry.commit_admitted_manifest_owner_admission_v1(
         &admitted,
@@ -288,12 +297,11 @@ fn current_private_composition_is_committed_with_exact_policy_bytes() -> TestRes
         ),
         Err(ManifestOwnerAdmissionErrorV1::Conflict)
     );
-    let stored = store
-        .read_manifest_owner_admission_v1(
-            *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes(),
-            1,
-            timeline_id,
-        )?;
+    let stored = store.read_manifest_owner_admission_v1(
+        *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes(),
+        1,
+        timeline_id,
+    )?;
     assert_eq!(
         stored
             .ok_or("committed native admission is missing")?
@@ -346,7 +354,10 @@ fn sqlite_owner_retry_recovers_without_registry_or_signer_after_reopen() -> Test
         input,
         &mut reopened,
     )?;
-    assert_eq!(without_authority.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+    assert_eq!(
+        without_authority.kind,
+        ManifestOwnerAdmissionCommitKindV1::ExactRetry
+    );
     assert_eq!(signed_count.get(), signatures_before_reopen);
     Ok(())
 }
@@ -367,17 +378,19 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
         request(&admitted, &sources, timeline_id, operation_id)?,
         &mut store,
     );
-    assert_eq!(stale_admission, Err(ManifestOwnerAdmissionErrorV1::OwnerRejected));
+    assert_eq!(
+        stale_admission,
+        Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
+    );
 
     let mut mismatched_catalog = request(&admitted, &sources, timeline_id, operation_id)?;
     let catalog = mismatched_catalog.catalog.as_input().clone();
-    mismatched_catalog.catalog = ManifestAdmissionCatalogV1::new(
-        ManifestAdmissionCatalogInputV1 {
+    mismatched_catalog.catalog =
+        ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
             owner_id: catalog.owner_id,
             configuration_generation: 2,
             rows: catalog.rows.clone(),
-        },
-    )?;
+        })?;
     assert_eq!(
         registry.commit_admitted_manifest_owner_admission_v1(
             &admitted,
@@ -408,22 +421,15 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
     }
     missing_source.timelines[0].policy_copies[0].plugin_id = unknown_plugin_id;
     assert_eq!(
-        registry.commit_admitted_manifest_owner_admission_v1(
-            &admitted,
-            missing_source,
-            &mut store,
-        ),
+        registry
+            .commit_admitted_manifest_owner_admission_v1(&admitted, missing_source, &mut store,),
         Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
     );
 
     let mut owner_rejects = request(&admitted, &sources, timeline_id, operation_id)?;
     owner_rejects.timelines.clear();
     assert_eq!(
-        registry.commit_admitted_manifest_owner_admission_v1(
-            &admitted,
-            owner_rejects,
-            &mut store,
-        ),
+        registry.commit_admitted_manifest_owner_admission_v1(&admitted, owner_rejects, &mut store,),
         Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
     );
 

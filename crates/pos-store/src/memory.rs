@@ -45,9 +45,10 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta},
     validate_artifact_registration_catalog_graph_v1, validate_closed_adapter_recording_v1,
-    AdapterCallReservationOutcomeV1, AdapterCallReservationV1, AdapterRecordingSessionV1,
-    AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1, AdapterTranscriptCallV1,
-    AdapterTranscriptV1, ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
+    validate_manifest_owner_admission_snapshot_v1, AdapterCallReservationOutcomeV1,
+    AdapterCallReservationV1, AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1,
+    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1,
+    ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
     ArtifactRegistrationGraphNodeV1, ArtifactRegistrationPersistenceErrorV1,
     ArtifactRegistrationPersistencePortV1, AuthorityCommitOutcomeV1, AuthorityMutationPermitV1,
     AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
@@ -10978,7 +10979,11 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
                 .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
             if snapshot.resulting_inventory_generation != state.inventory_generation
                 || snapshot.timeline.timeline_id != *timeline_id
-                || snapshot.timeline.receipt.as_input().previous_visible_lcq1_hash
+                || snapshot
+                    .timeline
+                    .receipt
+                    .as_input()
+                    .previous_visible_lcq1_hash
                     != state.previous_visible_lcq1_hash
                 || owner_operation.is_some_and(|operation| operation != snapshot.operation_id)
                 || owner_catalog.is_some_and(|catalog| catalog != snapshot.catalog.digest())
@@ -11086,10 +11091,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
             return Ok(result);
         }
 
-        match (
-            input.expected_configuration_generation,
-            current_state,
-        ) {
+        match (input.expected_configuration_generation, current_state) {
             (None, None) => {}
             (Some(expected_generation), Some(state))
                 if state.configuration_generation == expected_generation
@@ -11154,7 +11156,8 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
         };
 
         for (key, snapshot) in snapshots {
-            self.manifest_owner_admission_snapshots.insert(key, snapshot);
+            self.manifest_owner_admission_snapshots
+                .insert(key, snapshot);
         }
         self.manifest_owner_admission_states
             .insert(owner_id, next_state);
@@ -11217,8 +11220,16 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
             if stored_snapshot.operation_id != snapshot.operation_id
                 || stored_snapshot.resulting_inventory_generation
                     != snapshot.resulting_inventory_generation
-                || stored_snapshot.timeline.receipt.as_input().previous_visible_lcq1_hash
-                    != snapshot.timeline.receipt.as_input().previous_visible_lcq1_hash
+                || stored_snapshot
+                    .timeline
+                    .receipt
+                    .as_input()
+                    .previous_visible_lcq1_hash
+                    != snapshot
+                        .timeline
+                        .receipt
+                        .as_input()
+                        .previous_visible_lcq1_hash
                 || validate_manifest_owner_admission_snapshot_v1(stored_snapshot).is_err()
             {
                 return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
