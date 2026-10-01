@@ -80,7 +80,7 @@ fn append_prepared(
     store: &mut dyn EventStore,
     timeline: pos_core::TimelineId,
     registry: &KeyRegistryStateV1,
-    authorization: PreparedSubjectAppendAuthorizationV1,
+    authorization: &PreparedSubjectAppendAuthorizationV1,
     prepare_payload: &mut dyn FnMut(
         &TimelineEventEnvelopeInputV1,
     ) -> Result<CanonicalBytes, CoreError>,
@@ -94,7 +94,7 @@ fn append_prepared(
         timeline,
         registry,
         draft(b"placeholder"),
-        authorization,
+        *authorization,
         prepare_payload,
         sign,
     )
@@ -113,7 +113,7 @@ impl CallbackCounts {
         store: &mut dyn EventStore,
         timeline: pos_core::TimelineId,
         registry: &KeyRegistryStateV1,
-        authorization: PreparedSubjectAppendAuthorizationV1,
+        authorization: &PreparedSubjectAppendAuthorizationV1,
     ) -> Result<Event, CoreError> {
         let mut payload = |_: &TimelineEventEnvelopeInputV1| {
             self.payload.set(self.payload.get() + 1);
@@ -170,7 +170,7 @@ fn exercise_prepared_append(store: &mut dyn EventStore) -> Result<(), Box<dyn st
         store,
         timeline,
         &registry,
-        authorization,
+        &authorization,
         &mut payload,
         &mut sign,
     )?;
@@ -218,7 +218,7 @@ fn exercise_prepared_append_on_fork(
         store,
         child.id(),
         &registry,
-        authorization,
+        &authorization,
         &mut payload,
         &mut sign,
     )?;
@@ -313,7 +313,7 @@ fn reject_prepared_authorization(
         ),
     ] {
         let error = calls
-            .append(store, timeline, expected_registry, request)
+            .append(store, timeline, expected_registry, &request)
             .err()
             .ok_or("invalid prepared authorization was accepted")?;
         assert!(
@@ -339,7 +339,7 @@ fn reject_prepared_missing_timeline(
     let (_material, registry, _timeline, authorization) = prepared_fixture(store, true)?;
     let missing = pos_core::TimelineId::new();
     let calls = CallbackCounts::default();
-    let result = calls.append(store, missing, &registry, authorization);
+    let result = calls.append(store, missing, &registry, &authorization);
     assert!(matches!(result, Err(CoreError::TimelineNotFound(id)) if id == missing));
     calls.assert_not_invoked();
     Ok(())
@@ -358,7 +358,7 @@ fn reject_prepared_missing_registry(
     let (_material, registry, timeline, authorization) = prepared_fixture(store, false)?;
     let calls = CallbackCounts::default();
     assert!(calls
-        .append(store, timeline, &registry, authorization)
+        .append(store, timeline, &registry, &authorization)
         .is_err());
     calls.assert_not_invoked();
     assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
@@ -396,7 +396,7 @@ fn reject_prepared_pending_destruction(
     let calls = CallbackCounts::default();
     for expected in [&registry, &pending] {
         assert!(calls
-            .append(store, timeline, expected, authorization)
+            .append(store, timeline, expected, &authorization)
             .is_err());
     }
     calls.assert_not_invoked();
@@ -441,7 +441,7 @@ fn reject_prepared_rotated_role(
     store.save_key_registry(&registry)?;
     let calls = CallbackCounts::default();
     assert!(calls
-        .append(store, timeline, &registry, authorization)
+        .append(store, timeline, &registry, &authorization)
         .is_err());
     calls.assert_not_invoked();
     assert!(store.read_own(timeline, SeqRange::all())?.is_empty());
@@ -491,7 +491,7 @@ fn reject_prepared_callback_failures(
         store,
         timeline,
         &registry,
-        authorization,
+        &authorization,
         &mut failed_encryption,
         &mut forged_sign,
     )
@@ -501,7 +501,7 @@ fn reject_prepared_callback_failures(
         store,
         timeline,
         &registry,
-        authorization,
+        &authorization,
         &mut sealed,
         &mut failed_sign,
     )
@@ -511,7 +511,7 @@ fn reject_prepared_callback_failures(
         store,
         timeline,
         &registry,
-        authorization,
+        &authorization,
         &mut oversized,
         &mut forged_sign,
     )
@@ -522,7 +522,7 @@ fn reject_prepared_callback_failures(
         store,
         timeline,
         &registry,
-        authorization,
+        &authorization,
         &mut sealed,
         &mut forged_sign,
     )
@@ -538,7 +538,7 @@ fn reject_prepared_callback_failures(
         store,
         timeline,
         &registry,
-        authorization,
+        &authorization,
         &mut sealed,
         &mut sign,
     )?;
@@ -584,7 +584,7 @@ fn sqlite_prepared_append_rolls_back_insert_failure_and_allows_retry(
         &mut store,
         timeline,
         &registry,
-        authorization,
+        &authorization,
         &mut payload,
         &mut sign,
     )
@@ -604,7 +604,7 @@ fn sqlite_prepared_append_rolls_back_insert_failure_and_allows_retry(
         &mut store,
         timeline,
         &registry,
-        authorization,
+        &authorization,
         &mut payload,
         &mut sign,
     )?;
@@ -632,7 +632,7 @@ fn contend_lifecycle(
     store: &mut SqliteStore,
     contender: LifecycleContender,
     registry: &KeyRegistryStateV1,
-    authorization: PreparedSubjectAppendAuthorizationV1,
+    authorization: &PreparedSubjectAppendAuthorizationV1,
 ) -> Result<KeyRegistryStateV1, CoreError> {
     let destroyed = match contender {
         LifecycleContender::DestroySubject => Some((
@@ -684,13 +684,16 @@ fn write_lock_is_held(path: &str) -> Result<bool, CoreError> {
     probe
         .busy_timeout(std::time::Duration::ZERO)
         .map_err(|error| CoreError::Storage(error.to_string()))?;
-    match probe.execute_batch("BEGIN IMMEDIATE") {
-        Ok(()) => probe
-            .execute_batch("ROLLBACK")
-            .map(|()| false)
-            .map_err(|error| CoreError::Storage(error.to_string())),
-        Err(error) => Ok(error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)),
-    }
+    let held = match probe.execute_batch("BEGIN IMMEDIATE") {
+        Ok(()) => {
+            probe
+                .execute_batch("ROLLBACK")
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            false
+        }
+        Err(error) => error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy),
+    };
+    Ok(held)
 }
 
 struct PreparedRaceOutcome {
@@ -706,14 +709,14 @@ fn run_prepared_lifecycle_race(
     material: SigningKeyMaterial,
     registry: &KeyRegistryStateV1,
     timeline: pos_core::TimelineId,
-    authorization: PreparedSubjectAppendAuthorizationV1,
+    authorization: &PreparedSubjectAppendAuthorizationV1,
     contender: LifecycleContender,
     pause_in_sign: bool,
 ) -> Result<PreparedRaceOutcome, Box<dyn std::error::Error>> {
-    let mut appender = SqliteStore::open(path)?;
-    appender.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let mut append_store = SqliteStore::open(path)?;
+    append_store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     // Lifecycle writes on an unbound handle need no erasure inventory fence,
-    // so only the appender's `BEGIN IMMEDIATE` can hold this contender back.
+    // so only the append store's `BEGIN IMMEDIATE` can hold this contender back.
     let mut lifecycle_store = SqliteStore::open(path)?;
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -738,7 +741,7 @@ fn run_prepared_lifecycle_race(
                 registered_sign(&material, authorized, envelope, bytes)
             };
             append_prepared(
-                &mut appender,
+                &mut append_store,
                 timeline,
                 registry,
                 authorization,
@@ -801,7 +804,7 @@ fn assert_prepared_lifecycle_race(
         material,
         &registry,
         timeline,
-        authorization,
+        &authorization,
         contender,
         pause_in_sign,
     )?;
@@ -824,7 +827,7 @@ fn assert_prepared_lifecycle_race(
     let calls = CallbackCounts::default();
     for expected in [&registry, &updated] {
         assert!(calls
-            .append(&mut reopened, timeline, expected, authorization)
+            .append(&mut reopened, timeline, expected, &authorization)
             .is_err());
     }
     calls.assert_not_invoked();
