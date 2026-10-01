@@ -295,8 +295,8 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
     assert_inactive_adapter_recording_store(store, &session, &reservation, run_operation_id)?;
     open_adapter_recording_session(store, &session, run_operation_id)?;
     assert_invalid_adapter_call_reservations(store, &session, &reservation, run_operation_id)?;
-    let output = complete_adapter_recording_call(store, &session, &reservation, run_operation_id)?;
-    close_and_abort_adapter_recording(store, &session, &reservation, run_operation_id, output)
+    complete_adapter_recording_call(store, &session, &reservation, run_operation_id)?;
+    close_and_abort_adapter_recording(store, &session, &reservation, run_operation_id)
 }
 
 fn assert_invalid_adapter_recording_arguments(
@@ -512,7 +512,7 @@ fn complete_adapter_recording_call<S: pos_core::store::EventStore>(
     session: &AdapterRecordingSessionV1,
     reservation: &AdapterCallReservationV1,
     run_operation_id: Hash,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let owner_reference = session.owner_reference();
     let output = b"exact response".to_vec();
     store.adapter_recording_complete_call(owner_reference, run_operation_id, 0, output.clone())?;
@@ -536,11 +536,11 @@ fn complete_adapter_recording_call<S: pos_core::store::EventStore>(
     assert_eq!(
         store.adapter_recording_reserve_call(owner_reference, run_operation_id, completed_retry)?,
         AdapterCallReservationOutcomeV1::Completed {
-            output_bytes: output.clone(),
+            output_bytes: output,
             reserved_at_micros: 123,
         }
     );
-    Ok(output)
+    Ok(())
 }
 
 fn close_and_abort_adapter_recording<S: pos_core::store::EventStore>(
@@ -548,7 +548,6 @@ fn close_and_abort_adapter_recording<S: pos_core::store::EventStore>(
     session: &AdapterRecordingSessionV1,
     reservation: &AdapterCallReservationV1,
     run_operation_id: Hash,
-    output: Vec<u8>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let owner_reference = session.owner_reference();
     let transcript = store.adapter_recording_close_session(owner_reference, run_operation_id)?;
@@ -593,7 +592,6 @@ fn close_and_abort_adapter_recording<S: pos_core::store::EventStore>(
         store.adapter_recording_read_closed_session(owner_reference, aborted_id)?,
         None
     );
-    assert_eq!(output, b"exact response");
     Ok(())
 }
 
