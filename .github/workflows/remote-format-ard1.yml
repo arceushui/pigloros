@@ -1,0 +1,36 @@
+name: remote-format-ard1
+
+on:
+  push:
+    branches:
+      - redmine/432-ard1-registration
+    paths:
+      - .github/workflows/remote-format-ard1.yml
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: redmine/432-ard1-registration
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.97.1
+          components: rustfmt
+      - name: Format affected tests
+        run: cargo fmt --all
+      - name: Commit formatting
+        run: |
+          if git diff --quiet -- crates/pos-core/tests/artifact_registration_commit_public.rs crates/pos-store/tests/artifact_registration_persistence_public.rs; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/pos-core/tests/artifact_registration_commit_public.rs crates/pos-store/tests/artifact_registration_persistence_public.rs
+          git commit -m "style: format ARD1 coverage tests"
+          git push origin HEAD:redmine/432-ard1-registration
