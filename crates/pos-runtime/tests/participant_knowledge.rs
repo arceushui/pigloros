@@ -1402,7 +1402,7 @@ fn authorized_commit_preserves_driver_state_when_containment_fails_after_append(
     let (mut registry, state) = registry_with_mode(
         &fixture,
         false,
-        PluginRegistry::new().with_erasure_gate(Arc::clone(&gate)),
+        PluginRegistry::new().with_erasure_gate(Arc::<ErasureContainmentGateV1>::clone(&gate)),
     );
     let drafts = stage_current(&mut registry, &fixture).test_ok();
     let mut store = PoisonOnAppendStore { inner, gate };
