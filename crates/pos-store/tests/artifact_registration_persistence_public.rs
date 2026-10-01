@@ -473,12 +473,12 @@ fn assert_invalid_adapter_call_reservations<S: pos_core::store::EventStore>(
         Err(AdapterRecordingStoreErrorV1::InvalidCall)
     );
     let out_of_order_invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
-        global_call_index: 1,
+        global_call_index: 2,
         ..reservation.invocation().as_input().clone()
     })?;
     let out_of_order = AdapterCallReservationV1::new(
         reservation.plugin_id(),
-        1,
+        2,
         out_of_order_invocation,
         Hash::from_bytes([0x7c; 32]),
         124,
