@@ -45,7 +45,6 @@ pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
 pub mod plugin;
-<<<<<<< HEAD
 pub mod recipient_key;
 pub mod repro_manifest_root;
 pub mod retention;
