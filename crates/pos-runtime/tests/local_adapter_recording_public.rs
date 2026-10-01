@@ -824,10 +824,10 @@ fn local_adapter_session_maps_recorder_boundaries_to_closed_errors() -> TestResu
         Hash::from_bytes([32; 32]),
         &mut recorder,
     )?;
-    assert_eq!(
+    assert!(matches!(
         session.finish(),
         Err(LocalAdapterErrorV1::RecordingFailed)
-    );
+    ));
 
     let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
     let mut recorder = FailingRecordingStore {
