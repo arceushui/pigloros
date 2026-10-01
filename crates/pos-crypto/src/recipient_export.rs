@@ -1322,6 +1322,9 @@ mod tests {
         Ok(())
     }
 
+    /// A payload and the final-bit marker its chunks are sealed with.
+    type FinalBitCase<'a> = (&'a [u8], fn(usize, usize) -> bool);
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn rejects_chunks_sealed_with_a_tampered_final_bit() -> Result<(), RecipientExportErrorV1> {
@@ -1330,8 +1333,6 @@ mod tests {
         let double = encode_payload(&export(None, vec![3; CHUNK_BYTES]))?;
         assert_eq!(double.len().div_ceil(CHUNK_BYTES), 2);
         let mut rng = StdRng::from_seed([24; 32]);
-        // A payload and the final-bit marker its chunks are sealed with.
-        type FinalBitCase<'a> = (&'a [u8], fn(usize, usize) -> bool);
         let cases: [FinalBitCase<'_>; 3] = [
             // A sole chunk sealed as non-final.
             (&single, |_, _| false),
