@@ -257,7 +257,10 @@ fn invoke_authorized_entry(
 }
 
 /// Require exactly one current authority for each view.
-fn paired(views: usize, authorities: &[AuthorizedViewAuthorityV1<'_>]) -> Result<(), RuntimeError> {
+const fn paired(
+    views: usize,
+    authorities: &[AuthorizedViewAuthorityV1<'_>],
+) -> Result<(), RuntimeError> {
     if views == authorities.len() {
         Ok(())
     } else {
