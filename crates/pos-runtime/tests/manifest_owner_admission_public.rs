@@ -1,4 +1,10 @@
-use std::{cell::Cell, error::Error, rc::Rc};
+use std::{
+    error::Error,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use pos_core::{
     ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, Hash,
@@ -145,8 +151,8 @@ fn request(
 struct FixtureOwner {
     timeline_id: TimelineId,
     operation_id: Hash,
-    rejected: Rc<Cell<bool>>,
-    signed: Rc<Cell<usize>>,
+    rejected: Arc<AtomicBool>,
+    signed: Arc<AtomicUsize>,
 }
 
 impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
@@ -193,7 +199,7 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
         request: &ManifestOwnerAdmissionRequestV1,
         current_state: Option<&pos_core::ManifestOwnerAdmissionOwnerStateV1>,
     ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-        if !self.rejected.get()
+        if !self.rejected.load(Ordering::Relaxed)
             && request.operation_id == self.operation_id
             && request.expected_configuration_generation.is_none()
             && request.expected_inventory_generation.is_none()
@@ -210,7 +216,7 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
     ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
-        self.signed.set(self.signed.get().saturating_add(1));
+        self.signed.fetch_add(1, Ordering::Relaxed);
         draft
             .with_evidence_and_signature(hash(90), [90; 64])
             .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
@@ -238,8 +244,8 @@ fn verifier(timeline_id: TimelineId, operation_id: Hash) -> FixtureOwner {
     FixtureOwner {
         timeline_id,
         operation_id,
-        rejected: Rc::new(Cell::new(false)),
-        signed: Rc::new(Cell::new(0)),
+        rejected: Arc::new(AtomicBool::new(false)),
+        signed: Arc::new(AtomicUsize::new(0)),
     }
 }
 
@@ -248,7 +254,7 @@ fn current_private_composition_is_committed_with_exact_policy_bytes() -> TestRes
     let timeline_id = TimelineId::new();
     let operation_id = hash(73);
     let owner_verifier = verifier(timeline_id, operation_id);
-    let signed_count = Rc::clone(&owner_verifier.signed);
+    let signed_count = Arc::clone(&owner_verifier.signed);
     let (registry, _plugins, owner, admitted) = setup(owner_verifier)?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
     let input = request(&admitted, &sources, timeline_id, operation_id)?;
@@ -260,7 +266,7 @@ fn current_private_composition_is_committed_with_exact_policy_bytes() -> TestRes
         &mut store,
     )?;
     assert_eq!(first.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
-    let signed_after_apply = signed_count.get();
+    let signed_after_apply = signed_count.load(Ordering::Relaxed);
     let recovered = recover_manifest_owner_admission_retry_v1(&input, &store)?
         .ok_or("durable owner operation was not recovered")?;
     assert_eq!(
@@ -274,7 +280,7 @@ fn current_private_composition_is_committed_with_exact_policy_bytes() -> TestRes
         &mut store,
     )?;
     assert_eq!(retry.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
-    assert_eq!(signed_count.get(), signed_after_apply);
+    assert_eq!(signed_count.load(Ordering::Relaxed), signed_after_apply);
 
     let mut conflicting_retry = input;
     conflicting_retry.resulting_inventory_generation = hash(76);
@@ -286,7 +292,7 @@ fn current_private_composition_is_committed_with_exact_policy_bytes() -> TestRes
         ),
         Err(ManifestOwnerAdmissionErrorV1::Conflict)
     );
-    assert_eq!(signed_count.get(), signed_after_apply);
+    assert_eq!(signed_count.load(Ordering::Relaxed), signed_after_apply);
 
     let competing_operation = hash(75);
     assert_eq!(
@@ -318,7 +324,7 @@ fn sqlite_owner_retry_recovers_without_registry_or_signer_after_reopen() -> Test
     let timeline_id = TimelineId::new();
     let operation_id = hash(77);
     let owner_verifier = verifier(timeline_id, operation_id);
-    let signed_count = Rc::clone(&owner_verifier.signed);
+    let signed_count = Arc::clone(&owner_verifier.signed);
     let (registry, _plugins, _owner, admitted) = setup(owner_verifier)?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
     let input = request(&admitted, &sources, timeline_id, operation_id)?;
@@ -333,7 +339,7 @@ fn sqlite_owner_retry_recovers_without_registry_or_signer_after_reopen() -> Test
         &mut store,
     )?;
     assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
-    let signatures_before_reopen = signed_count.get();
+    let signatures_before_reopen = signed_count.load(Ordering::Relaxed);
     drop(store);
 
     let mut reopened = pos_store::sqlite::SqliteStore::open(path)?;
@@ -341,7 +347,10 @@ fn sqlite_owner_retry_recovers_without_registry_or_signer_after_reopen() -> Test
         .ok_or("SQLite owner operation was not recovered")?;
     assert_eq!(retry.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
     assert_eq!(retry.receipt_hashes, applied.receipt_hashes);
-    assert_eq!(signed_count.get(), signatures_before_reopen);
+    assert_eq!(
+        signed_count.load(Ordering::Relaxed),
+        signatures_before_reopen
+    );
     let mut conflicting = input.clone();
     conflicting.resulting_inventory_generation = hash(78);
     assert_eq!(
@@ -358,7 +367,10 @@ fn sqlite_owner_retry_recovers_without_registry_or_signer_after_reopen() -> Test
         without_authority.kind,
         ManifestOwnerAdmissionCommitKindV1::ExactRetry
     );
-    assert_eq!(signed_count.get(), signatures_before_reopen);
+    assert_eq!(
+        signed_count.load(Ordering::Relaxed),
+        signatures_before_reopen
+    );
     Ok(())
 }
 
@@ -367,8 +379,8 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
     let timeline_id = TimelineId::new();
     let operation_id = hash(74);
     let owner_verifier = verifier(timeline_id, operation_id);
-    let rejected_flag = Rc::clone(&owner_verifier.rejected);
-    let signed_count = Rc::clone(&owner_verifier.signed);
+    let rejected_flag = Arc::clone(&owner_verifier.rejected);
+    let signed_count = Arc::clone(&owner_verifier.signed);
     let (registry, _plugins, _owner, admitted) = setup(owner_verifier)?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
     let mut store = MemoryStore::new();
@@ -433,7 +445,7 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
         Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
     );
 
-    rejected_flag.set(true);
+    rejected_flag.store(true, Ordering::Relaxed);
     assert_eq!(
         registry.commit_admitted_manifest_owner_admission_v1(
             &admitted,
@@ -442,6 +454,6 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
         ),
         Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
     );
-    assert_eq!(signed_count.get(), 0);
+    assert_eq!(signed_count.load(Ordering::Relaxed), 0);
     Ok(())
 }
