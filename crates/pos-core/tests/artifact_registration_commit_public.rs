@@ -234,7 +234,7 @@ fn structural_fixture_prepares_only_a_complete_exact_repro_manifest_closure(
         .find(|input| input.artifact_bytes.get(2..6) == Some(&b"MAT1"[..]))
         .cloned()
         .ok_or_else(|| std::io::Error::other("MAT1 input was absent"))?;
-    let mut duplicate_transcript = inputs.clone();
+    let mut duplicate_transcript = inputs;
     duplicate_transcript.push(transcript_input);
     assert_eq!(
         prepare_artifact_registration_batch_v1(
@@ -438,65 +438,74 @@ fn complete_native_catalog_closure_revalidates_through_the_public_port(
     Ok(())
 }
 
+fn assert_preparation_error(
+    owner_id: OwnerIdV1,
+    root: Hash,
+    inputs: Vec<ArtifactRegistrationInputV1>,
+    owner_verifier: &dyn ArtifactRegistrationOwnerVerifierV1,
+    expected: ArtifactRegistrationPreparationErrorV1,
+) {
+    assert_eq!(
+        prepare_artifact_registration_batch_v1(owner_id, root, inputs, owner_verifier),
+        Err(expected)
+    );
+}
+
 #[test]
-fn registration_preparation_rejects_invalid_bytes_extraction_and_closure_shapes(
+fn registration_preparation_rejects_empty_and_oversized_graphs(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (owner_id, root, inputs) = repro_manifest_closure()?;
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            Vec::new(),
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::BoundExceeded)
+    assert_preparation_error(
+        owner_id,
+        root,
+        Vec::new(),
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::BoundExceeded,
     );
     let repeated_input = inputs
         .first()
         .cloned()
         .ok_or_else(|| std::io::Error::other("MAA1 input was absent"))?;
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            vec![repeated_input.clone(); MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1 + 1],
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::BoundExceeded)
+    assert_preparation_error(
+        owner_id,
+        root,
+        vec![repeated_input; MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1 + 1],
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::BoundExceeded,
     );
+    Ok(())
+}
 
+#[test]
+fn registration_preparation_rejects_malformed_and_mismatched_records(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
     let mut malformed_registration = inputs.clone();
     malformed_registration[0].registration_cbor = b"not ARD1".to_vec();
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            malformed_registration,
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::InvalidRegistration)
+    assert_preparation_error(
+        owner_id,
+        root,
+        malformed_registration,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidRegistration,
     );
     let mut mismatched_artifact = inputs.clone();
     mismatched_artifact[0].artifact_bytes.push(0);
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            mismatched_artifact,
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::InvalidRegistration)
+    assert_preparation_error(
+        owner_id,
+        root,
+        mismatched_artifact,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidRegistration,
     );
     let mut mismatched_owner = inputs.clone();
     mismatched_owner[0].owner_id = OwnerIdV1::from_static("another-wave8-owner");
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            mismatched_owner,
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::InvalidRegistration)
+    assert_preparation_error(
+        owner_id,
+        root,
+        mismatched_owner,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidRegistration,
     );
 
     let mut tampered_registration = inputs.clone();
@@ -507,17 +516,20 @@ fn registration_preparation_rejects_invalid_bytes_extraction_and_closure_shapes(
     tampered_registration[0].registration_cbor = ArtifactRegistrationV1::new(fields)?
         .canonical_cbor()
         .to_vec();
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            tampered_registration,
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::ExtractionMismatch)
+    assert_preparation_error(
+        owner_id,
+        root,
+        tampered_registration,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::ExtractionMismatch,
     );
+    Ok(())
+}
 
-    let mut unsupported_format = inputs.clone();
+#[test]
+fn registration_preparation_rejects_unsupported_native_formats(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, mut unsupported_format) = repro_manifest_closure()?;
     let unknown_bytes = b"unsupported ReproManifest native format".to_vec();
     let unknown_registration = ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
         artifact_class: ErasureArtifactClassV1::ReproManifest,
@@ -538,26 +550,32 @@ fn registration_preparation_rejects_invalid_bytes_extraction_and_closure_shapes(
         artifact_bytes: unknown_bytes,
         registration_cbor: unknown_registration.canonical_cbor().to_vec(),
     });
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            unsupported_format,
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)
+    assert_preparation_error(
+        owner_id,
+        root,
+        unsupported_format,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact,
     );
+    Ok(())
+}
 
+#[test]
+fn registration_preparation_rejects_duplicate_and_extra_graph_rows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
+    let repeated_input = inputs
+        .first()
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("MAA1 input was absent"))?;
     let mut duplicate_admission = inputs.clone();
     duplicate_admission.push(repeated_input);
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            duplicate_admission,
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    assert_preparation_error(
+        owner_id,
+        root,
+        duplicate_admission,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidGraph,
     );
 
     let mut extra_admission = inputs.clone();
@@ -574,55 +592,51 @@ fn registration_preparation_rejects_invalid_bytes_extraction_and_closure_shapes(
         artifact_bytes: other_bytes,
         registration_cbor: other_registration.canonical_cbor().to_vec(),
     });
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            extra_admission,
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    assert_preparation_error(
+        owner_id,
+        root,
+        extra_admission,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidGraph,
     );
+    Ok(())
+}
 
+#[test]
+fn registration_preparation_rejects_incomplete_roots_and_owner_failure(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (owner_id, root, inputs) = repro_manifest_closure()?;
     let mut missing_recording = inputs.clone();
     missing_recording.retain(|input| input.artifact_bytes.get(2..6) != Some(&b"WCR1"[..]));
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            missing_recording,
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    assert_preparation_error(
+        owner_id,
+        root,
+        missing_recording,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidGraph,
     );
     let mut missing_transcript = inputs.clone();
     missing_transcript.retain(|input| input.artifact_bytes.get(2..6) != Some(&b"MAT1"[..]));
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            missing_transcript,
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    assert_preparation_error(
+        owner_id,
+        root,
+        missing_transcript,
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidGraph,
     );
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            Hash::from_bytes([0x84; 32]),
-            inputs.clone(),
-            &TestOnlyStructuralOwnerVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+    assert_preparation_error(
+        owner_id,
+        Hash::from_bytes([0x84; 32]),
+        inputs.clone(),
+        &TestOnlyStructuralOwnerVerifier,
+        ArtifactRegistrationPreparationErrorV1::InvalidGraph,
     );
-    assert_eq!(
-        prepare_artifact_registration_batch_v1(
-            owner_id,
-            root,
-            inputs.clone(),
-            &RejectingNativeDerivationVerifier,
-        ),
-        Err(ArtifactRegistrationPreparationErrorV1::OwnerRejected)
+    assert_preparation_error(
+        owner_id,
+        root,
+        inputs,
+        &RejectingNativeDerivationVerifier,
+        ArtifactRegistrationPreparationErrorV1::OwnerRejected,
     );
     Ok(())
 }
