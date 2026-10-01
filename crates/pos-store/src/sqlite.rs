@@ -24666,7 +24666,7 @@ pub(super) mod key_registry_coverage {
             Err(AdapterRecordingStoreErrorV1::CorruptState)
         );
 
-        let (mut store, session, _) = closed_recording(152)?;
+        let (store, session, _) = closed_recording(152)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
         store.conn.execute(
@@ -24683,7 +24683,7 @@ pub(super) mod key_registry_coverage {
             Err(AdapterRecordingStoreErrorV1::CorruptState)
         );
 
-        let (mut store, session, _) = closed_recording(153)?;
+        let (store, session, _) = closed_recording(153)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
         store.conn.execute(
