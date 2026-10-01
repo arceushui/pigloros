@@ -18,17 +18,20 @@ use pos_store::{memory::MemoryStore, ManifestOwnerAdmissionPersistencePortV1};
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
+type TestResult = FixtureResult<()>;
+type PolicySource = (OutputPolicyV1, Vec<u8>);
+type CatalogFixture = (ManifestAdmissionCatalogV1, Vec<PolicySource>);
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
-fn plugin(byte: u8) -> PluginId {
+const fn plugin(byte: u8) -> PluginId {
     PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
 }
 
-fn timeline(byte: u8) -> TimelineId {
+const fn timeline(byte: u8) -> TimelineId {
     TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
 }
 
@@ -41,7 +44,7 @@ struct FixtureOwner {
 }
 
 impl FixtureOwner {
-    fn new(expected_timelines: Vec<TimelineId>, expected_operation: Hash) -> Self {
+    const fn new(expected_timelines: Vec<TimelineId>, expected_operation: Hash) -> Self {
         Self {
             expected_timelines,
             expected_operation,
@@ -51,7 +54,7 @@ impl FixtureOwner {
         }
     }
 
-    fn with_signing_identity(mut self, evidence: Hash, signature_byte: u8) -> Self {
+    const fn with_signing_identity(mut self, evidence: Hash, signature_byte: u8) -> Self {
         self.coordinator_evidence = evidence;
         self.signature_byte = signature_byte;
         self
@@ -193,11 +196,7 @@ fn opc1_digest(bytes: &[u8]) -> Hash {
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn catalog(
-    owner_id: [u8; 32],
-    generation: u64,
-) -> Result<(ManifestAdmissionCatalogV1, Vec<(OutputPolicyV1, Vec<u8>)>), Box<dyn std::error::Error>>
-{
+fn catalog(owner_id: [u8; 32], generation: u64) -> FixtureResult<CatalogFixture> {
     let source = vec![
         policy_and_closure(plugin(1), 1)?,
         policy_and_closure(plugin(2), 2)?,
@@ -228,9 +227,9 @@ fn catalog(
 fn policy_copies(
     scope: Hash,
     owner_id: [u8; 32],
-    source: &[(OutputPolicyV1, Vec<u8>)],
+    source: &[PolicySource],
     lease_hash: Hash,
-) -> Result<Vec<ManifestOwnerPolicyCopiesV1>, Box<dyn std::error::Error>> {
+) -> FixtureResult<Vec<ManifestOwnerPolicyCopiesV1>> {
     source
         .iter()
         .map(|(policy, closure)| {
@@ -272,6 +271,7 @@ fn policy_copies(
         .collect()
 }
 
+#[derive(Clone, Copy)]
 struct AdmissionTransition {
     owner_id: [u8; 32],
     generation: u64,
@@ -484,7 +484,7 @@ fn memory_owner_admission_resolves_retries_conflicts_and_historical_rows() -> Te
     assert_eq!(exact.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
     assert_eq!(exact.receipt_hashes, applied.receipt_hashes);
 
-    let mut conflicting_operation = genesis_request.clone();
+    let mut conflicting_operation = genesis_request;
     conflicting_operation.resulting_inventory_generation = hash(42);
     let conflicting =
         prepare_manifest_owner_admission_v1(conflicting_operation, &genesis_owner, None)?;
@@ -705,7 +705,7 @@ fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reope
         owner.signatures_issued.load(Ordering::SeqCst),
         signatures_before_retry
     );
-    let mut conflicting_input = input.clone();
+    let mut conflicting_input = input;
     conflicting_input.resulting_inventory_generation = hash(112);
     assert_eq!(
         reopened.resolve_manifest_owner_admission_retry_v1(
@@ -722,6 +722,39 @@ fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reope
         owner_id,
         operation_id,
     )?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+fn assert_competing_sqlite_owner_admission_conflicts(
+    store: &mut SqliteStore,
+    owner_id: [u8; 32],
+    pre_replacement: &ManifestOwnerAdmissionOwnerStateV1,
+) -> TestResult {
+    let competing_timelines = vec![timeline(25), timeline(26)];
+    let competing_operation = hash(155);
+    let competing_request = request(
+        AdmissionTransition {
+            owner_id,
+            generation: 2,
+            expected_generation: Some(1),
+            previous_receipt: None,
+            expected_inventory: Some(hash(150)),
+            resulting_inventory: hash(154),
+            operation_id: competing_operation,
+        },
+        &competing_timelines,
+    )?;
+    let competing_owner = FixtureOwner::new(competing_timelines, competing_operation);
+    let competing = prepare_manifest_owner_admission_v1(
+        competing_request,
+        &competing_owner,
+        Some(pre_replacement),
+    )?;
+    assert_eq!(
+        store.commit_manifest_owner_admission_v1(competing),
+        Err(ManifestOwnerAdmissionErrorV1::Conflict)
+    );
     Ok(())
 }
 
@@ -746,7 +779,7 @@ fn sqlite_owner_admission_replaces_complete_generation_and_recovers_after_reopen
         },
         &original_timelines,
     )?;
-    let genesis_owner = FixtureOwner::new(original_timelines.clone(), genesis_operation);
+    let genesis_owner = FixtureOwner::new(original_timelines, genesis_operation);
     let mut store = SqliteStore::open(path)?;
     let genesis = prepare_manifest_owner_admission_v1(genesis_request, &genesis_owner, None)?;
     let genesis_result = store.commit_manifest_owner_admission_v1(genesis)?;
@@ -783,30 +816,11 @@ fn sqlite_owner_admission_replaces_complete_generation_and_recovers_after_reopen
     assert_eq!(replaced.configuration_generation, 2);
     assert_eq!(replaced.receipt_hashes.len(), replacement_timelines.len());
 
-    let competing_timelines = vec![timeline(25), timeline(26)];
-    let competing_operation = hash(155);
-    let competing_request = request(
-        AdmissionTransition {
-            owner_id,
-            generation: 2,
-            expected_generation: Some(1),
-            previous_receipt: None,
-            expected_inventory: Some(hash(150)),
-            resulting_inventory: hash(154),
-            operation_id: competing_operation,
-        },
-        &competing_timelines,
+    assert_competing_sqlite_owner_admission_conflicts(
+        &mut store,
+        owner_id,
+        &pre_replacement,
     )?;
-    let competing_owner = FixtureOwner::new(competing_timelines.clone(), competing_operation);
-    let competing = prepare_manifest_owner_admission_v1(
-        competing_request,
-        &competing_owner,
-        Some(&pre_replacement),
-    )?;
-    assert_eq!(
-        store.commit_manifest_owner_admission_v1(competing),
-        Err(ManifestOwnerAdmissionErrorV1::Conflict)
-    );
     drop(store);
 
     let reopened = SqliteStore::open(path)?;
