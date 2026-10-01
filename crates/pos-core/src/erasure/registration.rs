@@ -705,7 +705,7 @@ impl<'a> Reader<'a> {
     fn dependencies(
         &mut self,
     ) -> Result<Vec<ArtifactKeyDependencyV1>, ArtifactRegistrationErrorV1> {
-        let count = self.bounded_array(u64::from(MAX_ARTIFACT_REGISTRATION_KEYS_V1))?;
+        let count = self.bounded_array(MAX_ARTIFACT_REGISTRATION_KEYS_V1 as u64)?;
         let mut dependencies = Vec::new();
         for _ in 0..count {
             self.array(5)?;
@@ -724,7 +724,7 @@ impl<'a> Reader<'a> {
     }
 
     fn children(&mut self) -> Result<Vec<ArtifactChildEdgeV1>, ArtifactRegistrationErrorV1> {
-        let count = self.bounded_array(u64::from(MAX_ARTIFACT_REGISTRATION_CHILDREN_V1))?;
+        let count = self.bounded_array(MAX_ARTIFACT_REGISTRATION_CHILDREN_V1 as u64)?;
         let mut children = Vec::new();
         for _ in 0..count {
             self.array(4)?;
