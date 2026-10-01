@@ -281,8 +281,6 @@ fn exercise_event_store_adapter_recording<S: pos_core::store::EventStore>(
     store: &mut S,
     run_operation_id: Hash,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use pos_core::store::EventStore;
-
     let (session, reservation) = adapter_recording_fixture(run_operation_id)?;
     let owner_reference = session.owner_reference();
     assert_eq!(
