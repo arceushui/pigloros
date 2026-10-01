@@ -368,8 +368,9 @@ impl ValidatedPluginManifestProjectionV1 {
             && validate_plugin_id(&self.plugin_id).is_ok()
             && self
                 .descriptor_digests
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
+                .iter()
+                .zip(self.descriptor_digests.iter().skip(1))
+                .all(|(earlier, later)| earlier < later)
     }
 }
 
@@ -601,9 +602,7 @@ impl<'a> Reader<'a> {
 
     fn bytes<const N: usize>(&mut self) -> Result<[u8; N], PluginTrustErrorV1> {
         let (major, length) = self.head()?;
-        if major != 2
-            || length != u64::try_from(N).map_err(|_| PluginTrustErrorV1::BoundsExceeded)?
-        {
+        if major != 2 || usize::try_from(length) != Ok(N) {
             return Err(PluginTrustErrorV1::InvalidEncoding);
         }
         self.take(N)?
