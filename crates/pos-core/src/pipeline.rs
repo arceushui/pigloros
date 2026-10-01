@@ -451,6 +451,57 @@ impl PipelineAdmissionBasisV1 {
     pub const fn batch(&self) -> &PipelineDraftBatchV1 {
         &self.batch
     }
+
+    /// Bind every field of this admission basis into one exact retry fingerprint.
+    ///
+    /// Two attempts with the same idempotency identity are the same retained
+    /// retry only when this digest is identical.
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.PipelineAdmissionBasis.v1\0");
+        let attempt = self.attempt;
+        let observation = attempt.observation;
+        hasher.update(&attempt.attempt_id.as_bytes());
+        hasher.update(&[ingress_tag(attempt.ingress)]);
+        hasher.update(&observation.timeline_id.inner().to_bytes());
+        hasher.update(&observation.observed_through.as_u64().to_be_bytes());
+        hasher.update(observation.snapshot_digest.as_bytes());
+        hasher.update(&attempt.idempotency.dedup_key.as_bytes());
+        hasher.update(&attempt.idempotency.scope.as_bytes());
+        hasher.update(self.tentative_result.evidence().digest().as_bytes());
+        match self.precondition {
+            PipelinePreconditionV1::ExpectedLogicalHead(seq) => {
+                hasher.update(&[1]);
+                hasher.update(&seq.as_u64().to_be_bytes());
+            }
+            PipelinePreconditionV1::DomainStateRevision(digest) => {
+                hasher.update(&[2]);
+                hasher.update(digest.as_bytes());
+            }
+        }
+        let revisions = self.security_revisions.as_draft();
+        for revision in [
+            revisions.authority,
+            revisions.consent,
+            revisions.capability,
+            revisions.delegation,
+            revisions.policy,
+            revisions.execution_profile,
+            revisions.erasure,
+        ] {
+            hasher.update(revision.as_bytes());
+        }
+        hasher.update(self.batch.digest.as_bytes());
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    }
+}
+
+const fn ingress_tag(ingress: PipelineIngressV1) -> u8 {
+    match ingress {
+        PipelineIngressV1::HumanProposedAction => 1,
+        PipelineIngressV1::ScheduledAiDriver => 2,
+    }
 }
 
 /// Store-assigned identity and Timeline Order for one committed Event.

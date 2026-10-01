@@ -505,3 +505,71 @@ fn draft_digest_binds_optional_ids_schema_and_explicit_wall_time() {
     );
     assert_eq!(SchemaVersion::V1.as_u32(), 1);
 }
+
+fn basis_with(
+    ingress: PipelineIngressV1,
+    tentative_result: TentativePipelineResultV1,
+    precondition: PipelinePreconditionV1,
+    drafts: Vec<EventDraft>,
+) -> PipelineAdmissionBasisV1 {
+    ok(PipelineAdmissionBasisV1::try_from_draft(
+        PipelineAdmissionBasisDraftV1 {
+            contract_version: PIPELINE_CONTRACT_VERSION_V1,
+            attempt: Some(attempt(ingress)),
+            tentative_result: Some(tentative_result),
+            precondition: Some(precondition),
+            security_revisions: Some(revisions()),
+            batch: Some(ok(PipelineDraftBatchV1::try_new(drafts))),
+        },
+    ))
+}
+
+#[test]
+fn basis_digest_binds_ingress_precondition_evidence_and_batch() {
+    let evidence = ok(PipelineEvidenceRefV1::try_new(hash(20)));
+    let head = PipelinePreconditionV1::ExpectedLogicalHead(Seq::from_u64(8));
+    let human = basis_with(
+        PipelineIngressV1::HumanProposedAction,
+        TentativePipelineResultV1::HumanDomainApproval(evidence),
+        head,
+        vec![draft(b"same")],
+    );
+    let ai = basis_with(
+        PipelineIngressV1::ScheduledAiDriver,
+        TentativePipelineResultV1::AiProviderValidation(evidence),
+        head,
+        vec![draft(b"same")],
+    );
+    let domain = basis_with(
+        PipelineIngressV1::HumanProposedAction,
+        TentativePipelineResultV1::HumanDomainApproval(evidence),
+        ok(PipelinePreconditionV1::try_domain_state_revision(hash(40))),
+        vec![draft(b"same")],
+    );
+    let other_batch = basis_with(
+        PipelineIngressV1::HumanProposedAction,
+        TentativePipelineResultV1::HumanDomainApproval(evidence),
+        head,
+        vec![draft(b"other")],
+    );
+    let other_evidence = basis_with(
+        PipelineIngressV1::HumanProposedAction,
+        TentativePipelineResultV1::HumanDomainApproval(ok(PipelineEvidenceRefV1::try_new(hash(
+            21,
+        )))),
+        head,
+        vec![draft(b"same")],
+    );
+
+    let same = basis_with(
+        PipelineIngressV1::HumanProposedAction,
+        TentativePipelineResultV1::HumanDomainApproval(evidence),
+        head,
+        vec![draft(b"same")],
+    );
+    assert_eq!(human.digest(), same.digest());
+    for different in [&ai, &domain, &other_batch, &other_evidence] {
+        assert_ne!(human.digest(), different.digest());
+    }
+    assert_ne!(human.digest(), Hash::zero());
+}

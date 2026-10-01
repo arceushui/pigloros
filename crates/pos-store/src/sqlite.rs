@@ -90,6 +90,8 @@ use crate::{
     ForkEventProvenanceAuthorityPortV1,
 };
 
+mod pipeline_admission;
+
 #[cfg(test)]
 thread_local! {
     /// Test-only fault injection: force [`SqliteStore::open_in_memory`] to fail.
@@ -1532,9 +1534,11 @@ impl SqliteStore {
                 if read_only {
                     self.validate_authority_schema_and_state()
                         .and_then(|()| self.validate_fork_admission_authority_schema())
+                        .and_then(|()| self.validate_pipeline_admission_schema())
                 } else {
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
+                        .and_then(|()| self.prepare_pipeline_admission_schema())
                 }
             })
     }
@@ -5754,6 +5758,7 @@ impl EventStore for SqliteStore {
                     params![id_str],
                 )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
+                pipeline_admission::delete_pipeline_admission_rows(&tx, &id_str)?;
                 let enrollment = Self::enrollment_state_in_transaction(&tx)?;
                 let enrollment_result = if enrollment.permits_geographic_admission_target(id) {
                     enrollment

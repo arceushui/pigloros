@@ -41,6 +41,7 @@ pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
+pub mod pipeline_admission;
 pub mod plugin;
 pub mod retention;
 pub mod state;
@@ -272,6 +273,10 @@ pub use pipeline::{
     PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, TentativePipelineResultV1,
     MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES, PIPELINE_CONTRACT_VERSION_V1,
+};
+pub use pipeline_admission::{
+    pipeline_authority_revision_v1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
+    PIPELINE_ADMISSION_FENCE_BYTES_V1,
 };
 pub use plugin::{
     ActionApprover, ActionRejected, Capability, Plugin, ProposedAction,
