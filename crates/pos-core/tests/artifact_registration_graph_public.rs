@@ -605,3 +605,65 @@ fn edge_budget_counts_each_distinct_registration_once() -> Result<(), Box<dyn st
     );
     Ok(())
 }
+
+#[test]
+fn registration_byte_ceiling_is_checked_through_the_public_inspector(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let owner_id = OwnerIdV1::new("a".repeat(128))?;
+    let shared_keys = (1..=2_048_u64)
+        .map(|epoch| ArtifactKeyDependencyV1 {
+            identity: KeyIdentityV1::from_parts(
+                owner_id,
+                KeyRoleV1::SubjectDataEncryption,
+                epoch,
+            ),
+            material_digest: Hash::from_bytes([1; 32]),
+            private_material_required: true,
+        })
+        .collect::<Vec<_>>();
+    let mut leaves = Vec::new();
+    for label in 10_000..10_192 {
+        leaves.push(node(
+            label,
+            owner_id,
+            ErasureArtifactClassV1::Export,
+            ArtifactOptionalityV1::Required,
+            Vec::new(),
+            shared_keys.clone(),
+        )?);
+    }
+    let child_edges = leaves.iter().map(|leaf| edge(leaf, true)).collect();
+    let within_root = node(
+        20_000,
+        owner_id,
+        ErasureArtifactClassV1::TimelineReplay,
+        ArtifactOptionalityV1::Required,
+        child_edges.clone(),
+        Vec::new(),
+    )?;
+    let within_root_address = within_root.address;
+    let mut graph = leaves;
+    graph.push(within_root);
+    let summary = inspect_artifact_registration_graph_v1(within_root_address, &graph)?;
+    assert_eq!(summary.registrations, 193);
+    assert_eq!(summary.edges, 192);
+    assert_eq!(summary.keys, MAX_ARTIFACT_GRAPH_KEYS_V1 / 2);
+    assert!(summary.registration_bytes <= MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1);
+
+    graph.pop().ok_or("within-limit root is missing")?;
+    let over_root = node(
+        20_000,
+        owner_id,
+        ErasureArtifactClassV1::TimelineReplay,
+        ArtifactOptionalityV1::Required,
+        child_edges,
+        shared_keys,
+    )?;
+    let over_root_address = over_root.address;
+    graph.push(over_root);
+    assert_eq!(
+        inspect_artifact_registration_graph_v1(over_root_address, &graph),
+        Err(ArtifactRegistrationGraphErrorV1::BoundExceeded)
+    );
+    Ok(())
+}
