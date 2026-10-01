@@ -374,6 +374,77 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     assert_artifact_identity_rejections(&source)?;
     let expected_bytes = canonical_fixture_closure_bytes(&source);
     assert!(expected_bytes.starts_with(b"OPC1"));
+    let decoded = pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        &expected_bytes,
+        &source.output_policy_bytes,
+    )?;
+    assert_eq!(decoded.to_canonical_bytes(), expected_bytes);
+    let mut offset = 4_usize;
+    for member in [
+        source.output_policy_bytes.as_slice(),
+        source.executable_budget_bytes.as_slice(),
+        source.implementation_artifact.as_slice(),
+        source.configuration_artifact.as_slice(),
+        source.profile_artifact.as_slice(),
+        source.retention_artifact.as_slice(),
+    ] {
+        let length_end = offset + 8;
+        let member_length = member.len();
+        assert_eq!(
+            u64::from_be_bytes(expected_bytes[offset..length_end].try_into()?),
+            u64::try_from(member_length)?
+        );
+        if member_length > 0 {
+            let mut malformed = expected_bytes.clone();
+            malformed[length_end] ^= 1;
+            assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+                &malformed,
+                &source.output_policy_bytes,
+            )
+            .is_err());
+        }
+        offset = length_end + member_length;
+    }
+    let mut trailing = expected_bytes.clone();
+    trailing.push(0);
+    let mut impossible_length = Vec::from(&b"OPC1"[..]);
+    impossible_length.extend_from_slice(&u64::MAX.to_be_bytes());
+    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        b"bad",
+        &source.output_policy_bytes,
+    )
+    .is_err());
+    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        b"OPC1",
+        &source.output_policy_bytes,
+    )
+    .is_err());
+    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        &expected_bytes[..expected_bytes.len() - 1],
+        &source.output_policy_bytes,
+    )
+    .is_err());
+    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        &trailing,
+        &source.output_policy_bytes,
+    )
+    .is_err());
+    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        &impossible_length,
+        &source.output_policy_bytes,
+    )
+    .is_err());
+    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        &expected_bytes,
+        b"wrong EOP1",
+    )
+    .is_err());
+    let oversized = vec![0; pos_runtime::MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 + 1];
+    assert!(pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        &oversized,
+        &source.output_policy_bytes,
+    )
+    .is_err());
     let fresh_plugin = FixturePlugin {
         id: PluginId::new(),
     };
