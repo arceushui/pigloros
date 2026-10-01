@@ -1002,6 +1002,7 @@ fn local_host_publishes_admits_and_refreshes_the_session_fence() {
         );
 
         let drafts = ok(registry.step_all_anchored(timeline, Seq::ZERO));
+        assert_eq!(drafts.len(), 2, "{name}");
         let head = ok(store.logical_head(timeline));
         let committed = receipt(host.admit(&mut registry, store.as_mut(), revisions, head, 1));
         assert_eq!(committed.committed_events().len(), 2, "{name}");

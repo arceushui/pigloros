@@ -8,20 +8,16 @@ macro_rules! forward_scheduled_admission_ports {
                 &mut self,
                 basis: &pos_core::PipelineAdmissionBasisV1,
             ) -> Result<pos_core::PipelineOutcomeV1, pos_core::CoreError> {
-                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::PipelineAdmissionPortV1>::admit_pipeline_batch(
-                    &mut *self.$field,
-                    basis,
-                )
+                use pos_core::PipelineAdmissionPortV1 as _;
+                self.$field.admit_pipeline_batch(basis)
             }
 
             fn purge_expired_pipeline_receipts_bounded(
                 &mut self,
                 limit: std::num::NonZeroUsize,
             ) -> Result<pos_core::store::PurgeOutcome, pos_core::CoreError> {
-                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::PipelineAdmissionPortV1>::purge_expired_pipeline_receipts_bounded(
-                    &mut *self.$field,
-                    limit,
-                )
+                use pos_core::PipelineAdmissionPortV1 as _;
+                self.$field.purge_expired_pipeline_receipts_bounded(limit)
             }
         }
 
@@ -40,21 +36,16 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 timeline: pos_core::TimelineId,
                 fence: pos_core::PipelineAdmissionFenceV1,
             ) -> Result<(), pos_core::CoreError> {
-                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::PipelineAdmissionFencePublisherV1>::set_pipeline_admission_fence(
-                    &mut *self.$field,
-                    timeline,
-                    fence,
-                )
+                use pos_core::PipelineAdmissionFencePublisherV1 as _;
+                self.$field.set_pipeline_admission_fence(timeline, fence)
             }
 
             fn pipeline_admission_fence(
                 &self,
                 timeline: pos_core::TimelineId,
             ) -> Result<Option<pos_core::PipelineAdmissionFenceV1>, pos_core::CoreError> {
-                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::PipelineAdmissionFencePublisherV1>::pipeline_admission_fence(
-                    &*self.$field,
-                    timeline,
-                )
+                use pos_core::PipelineAdmissionFencePublisherV1 as _;
+                self.$field.pipeline_admission_fence(timeline)
             }
         }
 
@@ -63,10 +54,8 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 &mut self,
                 binding: pos_core::AuthorityPersistenceBindingV1,
             ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
-                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::AuthorityPersistencePortV1>::bind_authority_persistence(
-                    &mut *self.$field,
-                    binding,
-                )
+                use pos_core::AuthorityPersistencePortV1 as _;
+                self.$field.bind_authority_persistence(binding)
             }
 
             fn issue_capability_grant(
@@ -75,11 +64,8 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 grant: &pos_core::CapabilityGrantV1,
             ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1>
             {
-                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::AuthorityPersistencePortV1>::issue_capability_grant(
-                    &mut *self.$field,
-                    permit,
-                    grant,
-                )
+                use pos_core::AuthorityPersistencePortV1 as _;
+                self.$field.issue_capability_grant(permit, grant)
             }
 
             fn revoke_capability_grant(
@@ -88,22 +74,16 @@ macro_rules! forward_scheduled_admission_fence_and_authority {
                 revocation: &pos_core::CapabilityRevocationV1,
             ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1>
             {
-                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::AuthorityPersistencePortV1>::revoke_capability_grant(
-                    &mut *self.$field,
-                    permit,
-                    revocation,
-                )
+                use pos_core::AuthorityPersistencePortV1 as _;
+                self.$field.revoke_capability_grant(permit, revocation)
             }
 
             fn load_authority(
                 &self,
                 leaf_grant_id: pos_core::Hash,
-            ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1>
-            {
-                <dyn pos_runtime::ScheduledAdmissionStoreV1 as pos_core::AuthorityPersistencePortV1>::load_authority(
-                    &*self.$field,
-                    leaf_grant_id,
-                )
+            ) -> Result<pos_core::PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
+                use pos_core::AuthorityPersistencePortV1 as _;
+                self.$field.load_authority(leaf_grant_id)
             }
         }
     };
