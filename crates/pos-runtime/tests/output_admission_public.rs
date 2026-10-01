@@ -1227,7 +1227,7 @@ fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult 
 }
 
 #[test]
-fn generated_binding_keeps_an_undeclared_profile_metadata_only() {
+fn generated_binding_keeps_an_undeclared_profile_metadata_only() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -1236,9 +1236,9 @@ fn generated_binding_keeps_an_undeclared_profile_metadata_only() {
         OutputPolicySourceV1::Generated,
         b"fixture-configuration",
         "undeclared-profile-v1",
-    )
-    .expect("Generated binds local metadata without an EPF1 artifact");
+    )?;
     assert!(binding.execution_profile_artifact().is_empty());
+    Ok(())
 }
 
 struct UpgradingPlugin {
