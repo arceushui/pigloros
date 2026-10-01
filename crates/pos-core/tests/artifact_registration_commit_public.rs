@@ -729,7 +729,6 @@ fn registration_preparation_rejects_incomplete_roots_and_owner_failure(
     Ok(())
 }
 
-
 fn fixture_input(
     inputs: &[ArtifactRegistrationInputV1],
     magic: &[u8],
@@ -792,7 +791,8 @@ fn adapter_registration_extraction_rejects_malformed_and_mismatched_inputs(
         AdapterTranscriptV1::from_canonical_cbor(&fixture.transcript.artifact_bytes)?;
     let mut inconsistent_transcript = transcript.as_input().clone();
     inconsistent_transcript.adapter_admission_digest = Hash::from_bytes([0x85; 32]);
-    let inconsistent_bytes = AdapterTranscriptV1::new(inconsistent_transcript)?.to_canonical_cbor();
+    let inconsistent_bytes =
+        AdapterTranscriptV1::new(inconsistent_transcript)?.to_canonical_cbor();
     assert!(extract_adapter_transcript_registration_v1(
         &inconsistent_bytes,
         &fixture.admission.artifact_bytes,
@@ -812,7 +812,8 @@ fn root_registration_extraction_rejects_each_invalid_child(
         ArtifactRegistrationV1::from_canonical_cbor(&fixture.admission.registration_cbor)?;
     let transcript_registration =
         ArtifactRegistrationV1::from_canonical_cbor(&fixture.transcript.registration_cbor)?;
-    let root_registration = ArtifactRegistrationV1::from_canonical_cbor(&fixture.root.registration_cbor)?;
+    let root_registration =
+        ArtifactRegistrationV1::from_canonical_cbor(&fixture.root.registration_cbor)?;
     let input = ReproManifestRootRegistrationInputV1 {
         root_bytes: &fixture.root.artifact_bytes,
         recording_receipt_bytes: &fixture.recording.artifact_bytes,
