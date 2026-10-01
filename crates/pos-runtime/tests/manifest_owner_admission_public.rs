@@ -22,6 +22,12 @@ use pos_runtime::{
 use pos_store::{memory::MemoryStore, ManifestOwnerAdmissionPersistencePortV1};
 
 type TestResult = Result<(), Box<dyn Error>>;
+type FixtureSetup = (
+    PluginRegistry,
+    [LocalPlugin; 2],
+    OwnerIdV1,
+    AdmittedCompositionV1,
+);
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -45,17 +51,7 @@ impl Plugin for LocalPlugin {
     }
 }
 
-fn setup(
-    owner_verifier: FixtureOwner,
-) -> Result<
-    (
-        PluginRegistry,
-        [LocalPlugin; 2],
-        OwnerIdV1,
-        AdmittedCompositionV1,
-    ),
-    Box<dyn Error>,
-> {
+fn setup(owner_verifier: FixtureOwner) -> Result<FixtureSetup, Box<dyn Error>> {
     let plugins = [
         LocalPlugin {
             id: PluginId::new(),
@@ -401,7 +397,7 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
         ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
             owner_id: catalog.owner_id,
             configuration_generation: 2,
-            rows: catalog.rows.clone(),
+            rows: catalog.rows,
         })?;
     assert_eq!(
         registry.commit_admitted_manifest_owner_admission_v1(
