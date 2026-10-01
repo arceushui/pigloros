@@ -1018,3 +1018,29 @@ fn sqlite_event_store_adapter_recording_port_covers_the_public_state_machine(
     let mut store = pos_store::sqlite::SqliteStore::open(path)?;
     exercise_event_store_adapter_recording(&mut store, Hash::from_bytes([0x7f; 32]))
 }
+
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_event_store_exposes_the_artifact_registration_port(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?;
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    let (owner_id, root_address, batch) = prepared_repro_manifest()?;
+    close_repro_manifest_recording(&mut store, &batch)?;
+    assert_eq!(
+        pos_core::store::EventStore::commit_artifact_registration_batch(&mut store, batch)?,
+        ArtifactRegistrationCommitOutcomeV1::Applied
+    );
+    assert!(pos_core::store::EventStore::read_artifact_registration(
+        &store,
+        &owner_id,
+        root_address,
+    )?
+    .is_some());
+    Ok(())
+}
