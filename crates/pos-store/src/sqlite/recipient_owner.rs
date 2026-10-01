@@ -560,6 +560,12 @@ impl SqliteStore {
     /// syncs the directory and commits the receipt from the stored inventory
     /// path and file identity instead of leaving the epoch pending forever.
     ///
+    /// A destruction receipt therefore attests that the inventory-bound name
+    /// is durably absent after an authorized destruction request. The name may
+    /// already have been absent before this call (for example, unlinked by an
+    /// interrupted earlier attempt); the receipt does not claim that this call
+    /// performed the unlink.
+    ///
     /// # Errors
     ///
     /// Returns a storage error if the requested identity is unavailable, its
@@ -1080,6 +1086,9 @@ fn is_quarantined_recipient_name(name: &[u8]) -> bool {
 /// Quarantine only renames material that no durable inventory row names, so
 /// a `.recipient-*.key.orphan` entry is never registered custody. Names are
 /// collected before unlinking so directory iteration is not mutated in place.
+/// Only regular files are purged: quarantine never produces any other entry
+/// type, so a matching directory, symlink, or special file is left in place
+/// rather than failing recovery or consuming the per-recovery purge budget.
 fn purge_quarantined_material(owner: &RecipientKeyOwnerV1) -> Result<(), CoreError> {
     rustix::fs::Dir::read_from(&owner.directory_file)
         .map_err(storage_error)
@@ -1087,10 +1096,7 @@ fn purge_quarantined_material(owner: &RecipientKeyOwnerV1) -> Result<(), CoreErr
             std::iter::from_fn(|| directory.read())
                 .filter_map(|entry| {
                     entry
-                        .map(|entry| {
-                            let name = entry.file_name();
-                            is_quarantined_recipient_name(name.to_bytes()).then(|| name.to_owned())
-                        })
+                        .and_then(|entry| quarantined_regular_file_name(owner, &entry))
                         .transpose()
                 })
                 .take(MAX_QUARANTINE_PURGE_PER_RECOVERY)
@@ -1104,6 +1110,19 @@ fn purge_quarantined_material(owner: &RecipientKeyOwnerV1) -> Result<(), CoreErr
             })
         })
         .and_then(|()| recipient_fsync(&owner.directory_file).map_err(storage_error))
+}
+
+fn quarantined_regular_file_name(
+    owner: &RecipientKeyOwnerV1,
+    entry: &rustix::fs::DirEntry,
+) -> Result<Option<std::ffi::CString>, rustix::io::Errno> {
+    let name = entry.file_name();
+    if !is_quarantined_recipient_name(name.to_bytes()) {
+        return Ok(None);
+    }
+    recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW).map(|metadata| {
+        ((metadata.st_mode & libc::S_IFMT) == libc::S_IFREG).then(|| name.to_owned())
+    })
 }
 
 fn quarantine_unregistered_owned_staged_material(
@@ -1336,6 +1355,9 @@ fn read_bound_private_key(
 /// unlink is durable, and the caller records the receipt from the stored
 /// inventory path and file identity. No material digest is re-derived for an
 /// absent file; the pending request already binds the registered digest.
+///
+/// The resulting receipt attests only that the inventory-bound name is absent
+/// after an authorized destruction request, not that this call unlinked it.
 fn delete_bound_private_key(
     owner: &RecipientKeyOwnerV1,
     path: &Path,

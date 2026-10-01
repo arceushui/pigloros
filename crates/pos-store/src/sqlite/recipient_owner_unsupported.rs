@@ -2,6 +2,11 @@
 //!
 //! The custody adapter depends on Linux-only `openat2` resolve flags and
 //! `renameat2(RENAME_NOREPLACE)`, so every other target fails closed here.
+//!
+//! This Linux-only narrowing is deliberate, not a portability gap: accepted
+//! ADR-098 allows a target without the required custody durability
+//! guarantees to report recipient custody as unsupported rather than weaken
+//! those guarantees.
 
 use std::path::PathBuf;
 
