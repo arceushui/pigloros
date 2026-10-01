@@ -240,9 +240,10 @@ pub use manifest_owner_admission::{
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
     ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
     ManifestOwnerTimelineAdmissionRequestV1, ManifestOwnerTimelineAdmissionV1,
-    ManifestSlotAdmissionReceiptDraftV1, PreparedManifestOwnerAdmissionV1,
+    ManifestSlotAdmissionReceiptDraftV1, OutputPolicyClosureEnvelopeErrorV1,
+    OutputPolicyClosureEnvelopeV1, PreparedManifestOwnerAdmissionV1,
     MAX_MANIFEST_OWNER_ADMISSION_NATIVE_BYTES_V1, MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1,
-    MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1, OUTPUT_POLICY_CLOSURE_MEMBER_COUNT_V1,
 };
 pub use manifest_owner_link::{
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,

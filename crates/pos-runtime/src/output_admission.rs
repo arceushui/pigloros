@@ -1174,36 +1174,19 @@ impl OutputPolicyClosureV1 {
         bytes: &[u8],
         expected_eop1: &[u8],
     ) -> Result<Self, OutputAdmissionErrorV1> {
-        const MEMBER_COUNT: usize = 6;
-        if bytes.len() > MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 || !bytes.starts_with(b"OPC1") {
+        if bytes.len() > MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 {
             return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" });
         }
-
-        let mut members = [&[][..]; MEMBER_COUNT];
-        let mut offset = 4_usize;
-        for member in &mut members {
-            let length_end = offset + 8;
-            let length_bytes = bytes
-                .get(offset..length_end)
-                .ok_or(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
-            let mut raw_length = [0_u8; 8];
-            raw_length.copy_from_slice(length_bytes);
-            let length = usize::try_from(u64::from_be_bytes(raw_length))
+        let envelope =
+            pos_core::OutputPolicyClosureEnvelopeV1::from_canonical_bytes_v1(bytes, expected_eop1)
                 .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
-            let member_end = length_end
-                .checked_add(length)
-                .ok_or(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
-            *member = bytes
-                .get(length_end..member_end)
-                .ok_or(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
-            offset = member_end;
-        }
-
-        if offset != bytes.len() || members[0] != expected_eop1 {
-            return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" });
-        }
         let closure = Self::from_artifacts_inner(
-            members[0], members[1], members[2], members[3], members[4], members[5],
+            envelope.eop1_bytes(),
+            envelope.executable_budget_bytes(),
+            envelope.implementation_artifact(),
+            envelope.configuration_artifact(),
+            envelope.execution_profile_artifact(),
+            envelope.retention_policy_artifact(),
         )?;
         Ok(closure)
     }
