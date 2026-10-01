@@ -14,10 +14,9 @@ use pos_core::{
 };
 use pos_plugin_society::{SocietyPlugin, SocietyReducer, SocietySignalProjectionPlugin};
 use pos_runtime::{
-    installed_plugin_role_v1, DomainImplementationKindV1, OutputPolicySourceV1,
-    ManifestRegistrationErrorV1, OutputAdmissionErrorV1, OutputPolicyBindingV1,
-    PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
-    RuntimeError,
+    installed_plugin_role_v1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
+    OutputAdmissionErrorV1, OutputPolicyBindingV1, OutputPolicySourceV1, PluginAvailabilityV1,
+    PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError,
 };
 
 fn generated_binding<P: Plugin>(

@@ -1549,12 +1549,11 @@ mod tests {
     #[test]
     fn generated_source_has_no_installed_execution_profile() {
         let profile_id = "deterministic-local-v1";
-        assert!(execution_profile_artifact_v1(
-            profile_id,
-            OutputPolicySourceV1::Generated
-        )
-        .or_resume()
-        .is_empty());
+        assert!(
+            execution_profile_artifact_v1(profile_id, OutputPolicySourceV1::Generated)
+                .or_resume()
+                .is_empty()
+        );
         for source in [
             OutputPolicySourceV1::Gateway,
             OutputPolicySourceV1::World,
@@ -1590,8 +1589,9 @@ mod tests {
             "society",
             "unrelated",
         ] {
-            assert!(!OutputPolicySourceV1::Experiment
-                .accepts_driver::<SourceProbeDriver>(plugin_name));
+            assert!(
+                !OutputPolicySourceV1::Experiment.accepts_driver::<SourceProbeDriver>(plugin_name)
+            );
         }
     }
 
@@ -1962,9 +1962,7 @@ mod tests {
                 OutputPolicySourceV1::Generated => &[],
                 OutputPolicySourceV1::Gateway => &["piglor_gateway::GatewayActionPlugin"],
                 OutputPolicySourceV1::World => &["pos_plugin_world::WorldPlugin"],
-                OutputPolicySourceV1::RuleAgent => {
-                    &["pos_plugin_rule_agent::RuleAgentPlugin"]
-                }
+                OutputPolicySourceV1::RuleAgent => &["pos_plugin_rule_agent::RuleAgentPlugin"],
                 OutputPolicySourceV1::Agent => &["pos_plugin_agent::AgentPlugin"],
                 OutputPolicySourceV1::SyntheticObservation => {
                     &["pos_plugin_synthetic_obs::SyntheticObsPlugin"]
@@ -1995,9 +1993,7 @@ mod tests {
                     &["world.action.v1", "world.observation.v1", "world.config.v1"]
                 }
                 OutputPolicySourceV1::RuleAgent => &["agent.decision"],
-                OutputPolicySourceV1::Agent => {
-                    &["agent.action", "runtime.recorded_output"]
-                }
+                OutputPolicySourceV1::Agent => &["agent.action", "runtime.recorded_output"],
                 OutputPolicySourceV1::SyntheticObservation => &["obs.synthetic"],
                 OutputPolicySourceV1::Society => &["society.signal"],
                 OutputPolicySourceV1::Experiment => &["proof.failure.sibling"],
@@ -2033,8 +2029,7 @@ mod tests {
                 OutputPolicySourceV1::Generated
                 | OutputPolicySourceV1::Gateway
                 | OutputPolicySourceV1::Agent => WorkloadProfileV1::Interactive,
-                OutputPolicySourceV1::RuleAgent
-                | OutputPolicySourceV1::SyntheticObservation => {
+                OutputPolicySourceV1::RuleAgent | OutputPolicySourceV1::SyntheticObservation => {
                     WorkloadProfileV1::Research
                 }
                 OutputPolicySourceV1::World
@@ -2124,8 +2119,7 @@ mod tests {
         assert!(OutputPolicySourceV1::Generated
             .build_policy(
                 &long_version_plugin,
-                OutputPolicySourceV1::Generated
-                    .implementation_artifact_hash(&long_version_plugin),
+                OutputPolicySourceV1::Generated.implementation_artifact_hash(&long_version_plugin),
                 Hash::from_bytes([8; 32]),
                 &budget,
             )

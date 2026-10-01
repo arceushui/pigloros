@@ -21,7 +21,7 @@ use crate::{
         DomainImplementationKindV1, PluginAvailabilityV1, PluginIsolationV1, PluginRegistrationV1,
     },
     error::RuntimeError,
-    output_admission::{OutputPolicySourceV1, OutputPolicyBindingV1},
+    output_admission::{OutputPolicyBindingV1, OutputPolicySourceV1},
 };
 
 /// Executable profile selected by every reviewed host catalogue entry.
@@ -121,10 +121,7 @@ pub(super) enum CatalogueEvidenceV1 {
 
 impl CatalogueEvidenceV1 {
     /// The binding source this evidence resolves for the selected entry.
-    pub(super) const fn binding_source(
-        self,
-        spec: OutputPolicySourceV1,
-    ) -> OutputPolicySourceV1 {
+    pub(super) const fn binding_source(self, spec: OutputPolicySourceV1) -> OutputPolicySourceV1 {
         match self {
             Self::Installed => spec,
             #[cfg(any(test, feature = "test-support"))]
@@ -330,13 +327,8 @@ pub(super) fn seal_catalogue_bundle<F: InstalledPluginFactoryV1>(
         })
     })
     .and_then(|configuration| {
-        OutputPolicyBindingV1::from_source(
-            &*plugin,
-            source,
-            &details,
-            CATALOGUE_PROFILE_ID_V1,
-        )
-        .map(|binding| (configuration, binding))
+        OutputPolicyBindingV1::from_source(&*plugin, source, &details, CATALOGUE_PROFILE_ID_V1)
+            .map(|binding| (configuration, binding))
     })
     .map_err(RuntimeError::from)
     .and_then(|(configuration, binding)| {

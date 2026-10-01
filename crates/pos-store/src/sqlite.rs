@@ -24967,11 +24967,14 @@ pub(super) mod key_registry_coverage {
 
     fn adapter_recording_fixture(
         run_byte: u8,
-    ) -> Result<(
-        AdapterRecordingSessionV1,
-        AdapterCallReservationV1,
-        PluginId,
-    ), Box<dyn std::error::Error>> {
+    ) -> Result<
+        (
+            AdapterRecordingSessionV1,
+            AdapterCallReservationV1,
+            PluginId,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         let owner_reference = Hash::from_bytes([41; 32]);
         let plugin_id = PluginId::new();
         let configuration = b"sqlite-recorder-config".to_vec();
@@ -25169,12 +25172,8 @@ pub(super) mod key_registry_coverage {
         let path = path.to_string_lossy().into_owned();
         let (session, reservation, plugin_id) = adapter_recording_fixture(47)?;
         let mut store = SqliteStore::open(&path)?;
-        let (owner_reference, run_operation_id, closed) = exercise_sqlite_adapter_recording(
-            &mut store,
-            &session,
-            &reservation,
-            plugin_id,
-        )?;
+        let (owner_reference, run_operation_id, closed) =
+            exercise_sqlite_adapter_recording(&mut store, &session, &reservation, plugin_id)?;
         drop(store);
 
         let mut reopened = SqliteStore::open(&path)?;
@@ -25195,16 +25194,13 @@ pub(super) mod key_registry_coverage {
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
         let mut store = open_store()?;
-        store
-            .open_adapter_recording_session(session.clone())?;
-        store
-            .reserve_adapter_call(owner_reference, run_operation_id, reservation)?;
+        store.open_adapter_recording_session(session.clone())?;
+        store.reserve_adapter_call(owner_reference, run_operation_id, reservation)?;
         assert_eq!(
             store.close_adapter_recording_session(owner_reference, run_operation_id),
             Err(AdapterRecordingStoreErrorV1::InvalidState)
         );
-        store
-            .abort_adapter_recording_session(owner_reference, run_operation_id)?;
+        store.abort_adapter_recording_session(owner_reference, run_operation_id)?;
         assert_eq!(
             store.close_adapter_recording_session(owner_reference, run_operation_id),
             Err(AdapterRecordingStoreErrorV1::InvalidState)
