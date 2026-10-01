@@ -114,7 +114,7 @@ fn grant(id: u8, issuance: u64, valid_until: u64) -> CapabilityGrantV1 {
         trust_domain: "local.test".to_owned(),
         scope: ok(CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
             resources: vec!["world".to_owned()],
-            actions: vec![DELEGATE_ACTION_V1.to_owned(), "act".to_owned()],
+            actions: vec!["act".to_owned(), DELEGATE_ACTION_V1.to_owned()],
             purposes: vec!["simulation".to_owned()],
             audiences: vec!["local-host".to_owned()],
             actor_entity_ids: vec![entity(10)],
@@ -866,7 +866,8 @@ fn sqlite_faults_roll_back_the_complete_batch_and_receipt() {
 
     execute(
         &path,
-        "UPDATE pipeline_admission_fences SET fence_bytes = X'02' || substr(fence_bytes, 2);",
+        "UPDATE pipeline_admission_fences
+         SET fence_bytes = CAST(X'02' || substr(fence_bytes, 2) AS BLOB);",
     );
     let mut corrupted = open_file(&path, &clock);
     assert!(corrupted.pipeline_admission_fence(first.timeline).is_err());
