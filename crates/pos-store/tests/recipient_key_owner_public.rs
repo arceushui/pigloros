@@ -1,4 +1,4 @@
-#![cfg(all(feature = "sqlite", unix))]
+#![cfg(all(feature = "sqlite", target_os = "linux"))]
 
 //! Public black-box contracts for role-4 recipient private-file custody.
 

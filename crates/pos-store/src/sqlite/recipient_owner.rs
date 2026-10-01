@@ -229,7 +229,7 @@ fn recipient_unlinkat(
     unlinkat(directory, name, flags)
 }
 
-/// An owner-managed Unix directory for one consent grantee's role-4 keys.
+/// An owner-managed Linux directory for one consent grantee's role-4 keys.
 #[derive(Debug)]
 pub struct RecipientKeyOwnerV1 {
     directory: PathBuf,
@@ -346,6 +346,8 @@ impl RecipientKeyOwnerV1 {
     ///
     /// Returns a storage error when the directory is unavailable or unsafe.
     pub fn open(directory: impl Into<PathBuf>, grantee_id: EntityId) -> Result<Self, CoreError> {
+        use std::os::unix::fs::MetadataExt;
+
         let directory = directory.into();
         let metadata = std::fs::symlink_metadata(&directory).map_err(storage_error)?;
         if !metadata.is_dir() {
@@ -353,64 +355,60 @@ impl RecipientKeyOwnerV1 {
                 "recipient key directory is not a directory".to_owned(),
             ));
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if metadata.mode() & 0o777 != 0o700 || metadata.file_type().is_symlink() {
-                return Err(CoreError::Storage(
-                    "recipient key directory is not private".to_owned(),
-                ));
-            }
-            recipient_openat2(
-                rustix::fs::CWD,
-                &directory,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-                Mode::empty(),
-                ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-            )
-            .map(File::from)
-            .map_err(storage_error)
-            .and_then(|directory_file| {
-                directory_file
-                    .metadata()
-                    .map_err(storage_error)
-                    .and_then(|retained_metadata| {
-                        if retained_metadata.uid() != metadata.uid()
-                            || retained_metadata.ino() != metadata.ino()
-                            || retained_metadata.dev() != metadata.dev()
-                        {
-                            return Err(CoreError::Storage(
-                                "recipient key directory changed while opening".to_owned(),
-                            ));
-                        }
-                        std::fs::symlink_metadata(&directory)
-                            .map_err(storage_error)
-                            .and_then(|current_metadata| {
-                                if !current_metadata.is_dir()
-                                    || current_metadata.file_type().is_symlink()
-                                    || current_metadata.mode() & 0o777 != 0o700
-                                    || current_metadata.uid() != retained_metadata.uid()
-                                    || current_metadata.ino() != retained_metadata.ino()
-                                    || current_metadata.dev() != retained_metadata.dev()
-                                {
-                                    return Err(CoreError::Storage(
-                                        "recipient key directory changed while opening".to_owned(),
-                                    ));
-                                }
-                                Ok(Self {
-                                    directory,
-                                    directory_file,
-                                    grantee_id,
-                                    directory_uid: metadata.uid(),
-                                    directory_identity:
-                                        RecipientPrivateDirectoryIdentityV1::from_metadata(
-                                            &retained_metadata,
-                                        ),
-                                })
-                            })
-                    })
-            })
+        if metadata.mode() & 0o777 != 0o700 || metadata.file_type().is_symlink() {
+            return Err(CoreError::Storage(
+                "recipient key directory is not private".to_owned(),
+            ));
         }
+        recipient_openat2(
+            rustix::fs::CWD,
+            &directory,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+        )
+        .map(File::from)
+        .map_err(storage_error)
+        .and_then(|directory_file| {
+            directory_file
+                .metadata()
+                .map_err(storage_error)
+                .and_then(|retained_metadata| {
+                    if retained_metadata.uid() != metadata.uid()
+                        || retained_metadata.ino() != metadata.ino()
+                        || retained_metadata.dev() != metadata.dev()
+                    {
+                        return Err(CoreError::Storage(
+                            "recipient key directory changed while opening".to_owned(),
+                        ));
+                    }
+                    std::fs::symlink_metadata(&directory)
+                        .map_err(storage_error)
+                        .and_then(|current_metadata| {
+                            if !current_metadata.is_dir()
+                                || current_metadata.file_type().is_symlink()
+                                || current_metadata.mode() & 0o777 != 0o700
+                                || current_metadata.uid() != retained_metadata.uid()
+                                || current_metadata.ino() != retained_metadata.ino()
+                                || current_metadata.dev() != retained_metadata.dev()
+                            {
+                                return Err(CoreError::Storage(
+                                    "recipient key directory changed while opening".to_owned(),
+                                ));
+                            }
+                            Ok(Self {
+                                directory,
+                                directory_file,
+                                grantee_id,
+                                directory_uid: metadata.uid(),
+                                directory_identity:
+                                    RecipientPrivateDirectoryIdentityV1::from_metadata(
+                                        &retained_metadata,
+                                    ),
+                            })
+                        })
+                })
+        })
     }
 }
 

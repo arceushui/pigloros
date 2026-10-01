@@ -16,9 +16,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(unix)]
+// The custody adapter relies on Linux-only `openat2` resolve flags and
+// `renameat2(RENAME_NOREPLACE)`; every other target gets the explicit stub.
+#[cfg(target_os = "linux")]
 mod recipient_owner;
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 #[path = "sqlite/recipient_owner_unsupported.rs"]
 mod recipient_owner;
 pub use recipient_owner::RecipientKeyOwnerV1;
