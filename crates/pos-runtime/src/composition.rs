@@ -4,7 +4,8 @@
 use std::{collections::HashSet, sync::Arc};
 
 use pos_core::{
-    manifest_owner_link::ManifestAdmissionCatalogV1, AdapterAdmissionV1, Hash, PluginId,
+    manifest_owner_link::{ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1},
+    AdapterAdmissionV1, Hash, PluginId,
 };
 
 /// Closed failures of the host's complete pre-registration manifest batch.
@@ -70,6 +71,25 @@ pub struct AdmittedManifestPolicySourceV1 {
 }
 
 impl AdmittedManifestPolicySourceV1 {
+    /// Build a native source after the Plugin registry validates the admitted roster.
+    pub(crate) fn from_registry(
+        row: &ManifestAdmissionCatalogRowV1,
+        eop1_bytes: Vec<u8>,
+        opc1_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            stable_slot: row.stable_slot.clone(),
+            plugin_id: row.plugin_id,
+            plugin_name: row.plugin_name.clone(),
+            plugin_version: row.plugin_version.clone(),
+            implementation_hash: row.implementation_hash,
+            eop1_native_digest: row.eop1_native_digest,
+            closure_hash: row.closure_hash,
+            eop1_bytes,
+            opc1_bytes,
+        }
+    }
+
     /// Stable slot bound by the complete registry capability.
     #[must_use]
     pub fn stable_slot(&self) -> &str {

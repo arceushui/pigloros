@@ -32,10 +32,9 @@ use crate::{
     composition::{
         AdmittedCompositionV1, AdmittedManifestPolicySourceV1, DomainImplementationKindV1,
         ManifestRegistrationErrorV1, PluginAvailabilityV1, PluginComposition,
-        PluginCompositionErrorV1, PluginExecutionModeV1,
-        PluginIsolationV1, PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema,
-        RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1,
-        ResolvedPluginCompositionV1, ResolvedPluginV1,
+        PluginCompositionErrorV1, PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1,
+        PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin, RequiredPluginCompositionV1,
+        RequiredPluginV1, ResolvedPluginCompositionV1, ResolvedPluginV1,
     },
     driver::{
         CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey,
@@ -84,9 +83,7 @@ fn local_manifest_slot(plugin_id: PluginId) -> String {
 /// # Errors
 /// Returns request-shape, conflict, corruption, or storage errors reported by
 /// the request codec and owner persistence boundary.
-pub fn recover_manifest_owner_admission_retry_v1<
-    S: ManifestOwnerAdmissionPersistencePortV1,
->(
+pub fn recover_manifest_owner_admission_retry_v1<S: ManifestOwnerAdmissionPersistencePortV1>(
     request: &ManifestOwnerAdmissionRequestV1,
     store: &S,
 ) -> Result<Option<ManifestOwnerAdmissionCommitV1>, ManifestOwnerAdmissionErrorV1> {
@@ -1415,17 +1412,9 @@ impl PluginRegistry {
             {
                 return Err(ManifestRegistrationErrorV1::IncompleteBatch);
             }
-            sources.push(AdmittedManifestPolicySourceV1 {
-                stable_slot: row.stable_slot.clone(),
-                plugin_id: row.plugin_id,
-                plugin_name: row.plugin_name.clone(),
-                plugin_version: row.plugin_version.clone(),
-                implementation_hash: row.implementation_hash,
-                eop1_native_digest: row.eop1_native_digest,
-                closure_hash: row.closure_hash,
-                eop1_bytes,
-                opc1_bytes,
-            });
+            sources.push(AdmittedManifestPolicySourceV1::from_registry(
+                row, eop1_bytes, opc1_bytes,
+            ));
         }
         sources.sort_unstable_by_key(AdmittedManifestPolicySourceV1::plugin_id);
         Ok(sources)
@@ -1490,11 +1479,8 @@ impl PluginRegistry {
         }
         let owner_id = request.catalog.as_input().owner_id;
         let current_state = store.read_manifest_owner_state_v1(owner_id)?;
-        let prepared = prepare_manifest_owner_admission_v1(
-            request,
-            verifier,
-            current_state.as_ref(),
-        )?;
+        let prepared =
+            prepare_manifest_owner_admission_v1(request, verifier, current_state.as_ref())?;
         store.commit_manifest_owner_admission_v1(prepared)
     }
 
