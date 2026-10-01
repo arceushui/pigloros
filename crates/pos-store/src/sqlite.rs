@@ -1145,6 +1145,8 @@ const MANIFEST_OWNER_ADMISSION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS ma
          CHECK (length(eop1_bytes) <= 16777216)
      );";
 
+const SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1: u32 = 1_048_576;
+
 /// Validated `(EOR1, optional FIA1, FOP1)` rows for one child suffix.
 type ForkEventSuffixV1 = Vec<(
     EventOriginRecordV1,
@@ -6851,10 +6853,10 @@ fn sqlite_validate_manifest_owner_generation_operation(
         operation_id,
         configuration_generation,
     )?;
-    if operation.1 != configuration_generation
-        || operation.2 != inventory_generation
-        || operation.3 != receipt_hashes.len()
-        || operation.4 != sqlite_manifest_owner_receipt_set_digest(receipt_hashes)
+    if operation.configuration_generation != configuration_generation
+        || operation.inventory_generation != inventory_generation
+        || operation.receipt_count != sqlite_manifest_owner_receipt_count(receipt_hashes.len())?
+        || operation.receipt_set_digest != sqlite_manifest_owner_receipt_set_digest(receipt_hashes)
         || generation_operation_count != 1
         || operation_receipts != receipt_hashes
     {
@@ -6863,11 +6865,19 @@ fn sqlite_validate_manifest_owner_generation_operation(
     Ok(())
 }
 
+struct SqliteManifestOwnerOperationV1 {
+    request_digest: Hash,
+    configuration_generation: u64,
+    inventory_generation: Hash,
+    receipt_count: i64,
+    receipt_set_digest: Hash,
+}
+
 fn sqlite_manifest_owner_operation(
     connection: &Connection,
     owner_id: [u8; 32],
     operation_id: Hash,
-) -> Result<Option<(Hash, u64, Hash, usize, Hash)>, ManifestOwnerAdmissionErrorV1> {
+) -> Result<Option<SqliteManifestOwnerOperationV1>, ManifestOwnerAdmissionErrorV1> {
     let row = connection
         .query_row(
             "SELECT request_digest, configuration_generation, inventory_generation,
@@ -6890,18 +6900,17 @@ fn sqlite_manifest_owner_operation(
     row.map(
         |(digest, generation, inventory, receipt_count, receipt_set_digest)| {
             if receipt_count < 1
-                || receipt_count > pos_core::MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1 as i64
+                || receipt_count > i64::from(SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1)
             {
                 return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
             }
-            let receipt_count = receipt_count as usize;
-            Ok((
-                manifest_owner_hash(digest)?,
-                manifest_owner_generation(generation)?,
-                manifest_owner_hash(inventory)?,
+            Ok(SqliteManifestOwnerOperationV1 {
+                request_digest: manifest_owner_hash(digest)?,
+                configuration_generation: manifest_owner_generation(generation)?,
+                inventory_generation: manifest_owner_hash(inventory)?,
                 receipt_count,
-                manifest_owner_hash(receipt_set_digest)?,
-            ))
+                receipt_set_digest: manifest_owner_hash(receipt_set_digest)?,
+            })
         },
     )
     .transpose()
@@ -7059,7 +7068,7 @@ fn sqlite_insert_manifest_owner_operation(
     intent_digest: Hash,
     receipt_hashes: &[Hash],
 ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-    let receipt_count = receipt_hashes.len() as i64;
+    let receipt_count = sqlite_manifest_owner_receipt_count(receipt_hashes.len())?;
     let receipt_set_digest = sqlite_manifest_owner_receipt_set_digest(receipt_hashes);
     connection
         .execute(
@@ -7092,24 +7101,18 @@ fn sqlite_resolve_manifest_owner_retry(
     operation_id: Hash,
     intent_digest: Hash,
 ) -> Result<Option<ManifestOwnerAdmissionCommitV1>, ManifestOwnerAdmissionErrorV1> {
-    let Some((
-        stored_digest,
-        configuration_generation,
-        inventory_generation,
-        receipt_count,
-        receipt_set_digest,
-    )) = sqlite_manifest_owner_operation(connection, owner_id, operation_id)?
+    let Some(operation) = sqlite_manifest_owner_operation(connection, owner_id, operation_id)?
     else {
         return Ok(None);
     };
-    if stored_digest != intent_digest {
+    if operation.request_digest != intent_digest {
         return Err(ManifestOwnerAdmissionErrorV1::Conflict);
     }
     let receipt_hashes = sqlite_manifest_owner_operation_receipts(
         connection,
         owner_id,
         operation_id,
-        configuration_generation,
+        operation.configuration_generation,
     )?;
     let row_count: i64 = connection
         .query_row(
@@ -7117,24 +7120,37 @@ fn sqlite_resolve_manifest_owner_retry(
              WHERE owner_id = ?1 AND configuration_generation = ?2",
             params![
                 owner_id.as_slice(),
-                configuration_generation.to_be_bytes().as_slice(),
+                operation.configuration_generation.to_be_bytes().as_slice(),
             ],
             |row| row.get(0),
         )
         .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let receipt_count = sqlite_manifest_owner_receipt_count(receipt_hashes.len())
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
     if receipt_hashes.is_empty()
-        || receipt_hashes.len() != receipt_count
-        || sqlite_manifest_owner_receipt_set_digest(&receipt_hashes) != receipt_set_digest
-        || row_count != receipt_hashes.len() as i64
+        || receipt_count != operation.receipt_count
+        || sqlite_manifest_owner_receipt_set_digest(&receipt_hashes) != operation.receipt_set_digest
+        || row_count != receipt_count
     {
         return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
     }
     Ok(Some(ManifestOwnerAdmissionCommitV1 {
         kind: ManifestOwnerAdmissionCommitKindV1::ExactRetry,
-        configuration_generation,
-        inventory_generation,
+        configuration_generation: operation.configuration_generation,
+        inventory_generation: operation.inventory_generation,
         receipt_hashes,
     }))
+}
+
+fn sqlite_manifest_owner_receipt_count(
+    receipt_count: usize,
+) -> Result<i64, ManifestOwnerAdmissionErrorV1> {
+    let receipt_count =
+        u32::try_from(receipt_count).map_err(|_| ManifestOwnerAdmissionErrorV1::BoundExceeded)?;
+    if receipt_count == 0 || receipt_count > SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1 {
+        return Err(ManifestOwnerAdmissionErrorV1::BoundExceeded);
+    }
+    Ok(i64::from(receipt_count))
 }
 
 fn sqlite_manifest_owner_receipt_set_digest(receipt_hashes: &[Hash]) -> Hash {
@@ -7436,8 +7452,8 @@ fn sqlite_validate_manifest_owner_snapshot(
     }
     let operation = sqlite_manifest_owner_operation(connection, owner_id, snapshot.operation_id)?
         .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
-    if operation.1 != configuration_generation
-        || operation.2 != snapshot.resulting_inventory_generation
+    if operation.configuration_generation != configuration_generation
+        || operation.inventory_generation != snapshot.resulting_inventory_generation
     {
         return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
     }
@@ -13608,6 +13624,27 @@ mod tests {
         verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
         ForkHostSigningKeyV1,
     };
+
+    #[test]
+    fn sqlite_manifest_owner_receipt_count_is_checked_and_bounded() {
+        assert_eq!(
+            sqlite_manifest_owner_receipt_count(0),
+            Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
+        );
+        assert_eq!(sqlite_manifest_owner_receipt_count(1), Ok(1));
+        assert_eq!(
+            sqlite_manifest_owner_receipt_count(1_048_576),
+            Ok(i64::from(SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1))
+        );
+        assert_eq!(
+            sqlite_manifest_owner_receipt_count(1_048_577),
+            Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
+        );
+        assert_eq!(
+            sqlite_manifest_owner_receipt_count(usize::MAX),
+            Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
+        );
+    }
 
     #[test]
     fn fork_admission_error_mapping_and_incomplete_graph_fail_closed(
