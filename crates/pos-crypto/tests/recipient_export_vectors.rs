@@ -171,8 +171,17 @@ fn golden_tep1_pins_one_unsigned_and_one_signed_event() -> TestResult {
     assert_eq!(decrypted.export.timeline.meta, source.timeline.meta);
     assert_eq!(decrypted.export.timeline.head, source.timeline.head);
     assert_eq!(decrypted.export.events, with_origins(source));
-    assert!(decrypted.export.events[0].signature.is_none());
-    assert!(decrypted.export.events[1].signature.is_some());
+    let events = &decrypted.export.events;
+    assert!(events
+        .first()
+        .ok_or("unsigned event is absent")?
+        .signature
+        .is_none());
+    assert!(events
+        .get(1)
+        .ok_or("signed event is absent")?
+        .signature
+        .is_some());
     Ok(())
 }
 
