@@ -1,21 +1,20 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-use pos_core::store::EventStore;
 use pos_core::{
     pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope,
     AppendIdentity, ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
     ArtifactStateV1, ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
     AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1,
-    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationRequestDraftV1,
-    AuthorizationRequestV1, CanonicalBytes, Capability, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, EntityId,
+    AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
+    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
+    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, EntityId,
     ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
     Event, EventDraft, Hash, Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1,
     MemoryPolicyRevisionV1, ObservationSnapshotV1, PersistedAuthorityV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
-    PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineEvidenceRefV1, PipelineOutcomeV1,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
+    PipelineCommitReceiptV1, PipelineEvidenceRefV1, PipelineOutcomeV1,
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
     PrincipalRefV1, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
     Seq, SeqRange, State, TimelineId, WallTime,
@@ -450,7 +449,7 @@ impl Plugin for DriverlessPlugin {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct DriverState {
     observed_digest: Option<Hash>,
     knowledge_digest: Option<Hash>,
@@ -859,7 +858,7 @@ impl AdmissionStore {
     }
 }
 
-/// A MemoryStore and a SQLite store, each prepared at the base cut.
+/// A `MemoryStore` and a `SQLite` store, each prepared at the base cut.
 fn admission_stores() -> Vec<(&'static str, AdmissionStore)> {
     vec![
         (
@@ -901,8 +900,9 @@ impl PipelineAdmissionPortV1 for RecordingPort<'_> {
     }
 }
 
-fn lock(state: &Arc<Mutex<DriverState>>) -> std::sync::MutexGuard<'_, DriverState> {
-    state
+/// Copy what a Driver recorded, releasing its lock at once.
+fn observed(state: &Arc<Mutex<DriverState>>) -> DriverState {
+    *state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -1004,7 +1004,7 @@ fn authorized_driver_rejects_mismatched_or_ambient_inputs_before_invocation() {
         AuthorizedDriverViewV1 {
             target: AuthorizedDriverTargetV1::new(fixture.plugin_id, fixture.timeline_id),
             observation: fixture.observation.clone(),
-            knowledge: fixture_with_timeline(fixture.timeline_id).knowledge.clone()
+            knowledge: fixture_with_timeline(fixture.timeline_id).knowledge
         },
         AuthorizedViewAuthorityV1 {
             artifact_evaluation: &observation_evaluation(&fixture.observation),
@@ -1080,7 +1080,7 @@ fn authority_is_revalidated_before_any_staged_draft_is_appended() {
         )),
         AuthorityErrorV1::CapabilityMissing
     );
-    let state = lock(&state);
+    let state = observed(&state);
     assert_eq!((state.aborts, state.commits), (1, 0));
 }
 
@@ -1137,7 +1137,7 @@ fn consent_revocation_after_staging_aborts_before_append() {
         )),
         AuthorityErrorV1::ConsentMissing
     );
-    let state = lock(&state);
+    let state = observed(&state);
     assert_eq!((state.aborts, state.commits), (1, 0));
 }
 
@@ -1165,7 +1165,7 @@ fn capability_removal_after_staging_aborts_without_append() {
             "{name}"
         );
         assert!(prepared.committed().is_empty(), "{name}");
-        let state = lock(&state);
+        let state = observed(&state);
         assert_eq!((state.aborts, state.commits), (1, 0), "{name}");
     }
 }
@@ -1270,7 +1270,7 @@ fn current_authority_fence_admits_then_commits_the_driver() {
             "{name}"
         );
         assert_eq!(prepared.committed().len(), 1, "{name}");
-        let state = lock(&state);
+        let state = observed(&state);
         assert_eq!((state.aborts, state.commits), (0, 1), "{name}");
     }
 }
@@ -1299,7 +1299,7 @@ fn erased_observation_between_stage_and_commit_aborts_without_appending() {
             "{name}"
         );
         assert!(prepared.committed().is_empty(), "{name}");
-        let state = lock(&state);
+        let state = observed(&state);
         assert_eq!((state.aborts, state.commits), (1, 0), "{name}");
     }
 }
@@ -1373,7 +1373,7 @@ fn authorized_staging_and_commit_failures_are_closed_and_abortable() {
         view_authority(&fixture, &evaluation, &authority),
     ))
     .contains("scheduled pass was not admitted: PolicyIndeterminate"));
-    assert_eq!(lock(&state).aborts, 1);
+    assert_eq!(observed(&state).aborts, 1);
     assert!(error_text(admit_unfenced(
         &mut registry,
         view_authority(&fixture, &evaluation, &authority),
@@ -1515,7 +1515,7 @@ fn authorized_commit_rejects_a_legacy_pending_step() {
         )),
         AuthorityErrorV1::UnauthorizedSource
     );
-    assert_eq!(lock(&state).aborts, 1);
+    assert_eq!(observed(&state).aborts, 1);
 }
 
 #[test]
@@ -1555,7 +1555,7 @@ fn authorized_staging_requires_the_registry_erasure_gate() {
     let mut registry = registry.without_erasure_gate();
 
     assert!(error_text(stage_current(&mut registry, &fixture)).contains("erasure containment gate"));
-    assert_eq!(lock(&state).observed_digest, None);
+    assert_eq!(observed(&state).observed_digest, None);
 }
 
 /// Two participant Drivers registered in host schedule order.
@@ -1652,7 +1652,7 @@ fn each_scheduled_driver_observes_only_its_own_authorized_view() {
                 .observation
                 .authoritative_snapshot(&other_evaluation)
                 .test_ok();
-            let state = lock(state);
+            let state = observed(state);
             assert_eq!(state.observed_digest, Some(own_snapshot.digest()), "{name}");
             assert_ne!(
                 state.observed_digest,
@@ -1687,7 +1687,10 @@ fn each_scheduled_driver_observes_only_its_own_authorized_view() {
             .collect();
         assert_eq!(
             committed,
-            vec![lock(&first_state).emitted, lock(&second_state).emitted],
+            vec![
+                observed(&first_state).emitted,
+                observed(&second_state).emitted
+            ],
             "{name}: one batch in host schedule order"
         );
 
@@ -1746,7 +1749,7 @@ fn late_revocation_of_one_view_aborts_the_whole_scheduled_pass() {
         );
         assert!(prepared.committed().is_empty(), "{name}");
         for state in &states {
-            let state = lock(state);
+            let state = observed(state);
             assert_eq!((state.aborts, state.commits), (1, 0), "{name}");
         }
     }
@@ -1775,9 +1778,9 @@ fn a_failing_driver_aborts_every_driver_staged_by_the_pass() {
         )),
         AuthorityErrorV1::UnauthorizedSource
     );
-    assert!(lock(&first_state).observed_digest.is_some());
-    assert_eq!(lock(&first_state).aborts, 1);
-    assert_eq!(lock(&second_state).observed_digest, None);
+    assert!(observed(&first_state).observed_digest.is_some());
+    assert_eq!(observed(&first_state).aborts, 1);
+    assert_eq!(observed(&second_state).observed_digest, None);
     assert!(error_text(admit_unfenced(
         &mut registry,
         view_authority(&first, &first_evaluation, &first_authority),
@@ -1827,7 +1830,7 @@ fn views_must_follow_host_schedule_order_and_share_the_base_cut() {
         AuthorityErrorV1::UnauthorizedSource
     );
     for state in &states {
-        assert_eq!(lock(state).observed_digest, None);
+        assert_eq!(observed(state).observed_digest, None);
     }
 }
 
@@ -1846,7 +1849,7 @@ fn authorized_admission_requires_one_current_authority_per_view() {
         )),
         AuthorityErrorV1::UnauthorizedSource
     );
-    let state = lock(&state);
+    let state = observed(&state);
     assert_eq!((state.aborts, state.commits), (1, 0));
 }
 
@@ -1863,6 +1866,6 @@ fn an_empty_authorized_pass_commits_without_admission() {
         .admit_authorized_scheduled_pass(&mut MemoryStore::new(), &unfenced_admission(), &[])
         .test_ok()
         .is_none());
-    assert_eq!(lock(&state).observed_digest, None);
+    assert_eq!(observed(&state).observed_digest, None);
     assert!(stage_current(&mut registry, &fixture).is_ok());
 }
