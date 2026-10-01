@@ -1067,3 +1067,156 @@ fn sqlite_catalog_commit_requires_the_complete_schema() -> Result<(), Box<dyn st
     );
     Ok(())
 }
+
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_catalog_reads_fail_closed_for_missing_and_malformed_durable_rows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?
+        .to_owned();
+    let (owner_id, root_address, batch) = prepared_repro_manifest()?;
+    let mut store = pos_store::sqlite::SqliteStore::open(&path)?;
+    close_repro_manifest_recording(&mut store, &batch)?;
+    store.commit_artifact_registration_batch(batch)?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "DELETE FROM artifact_registrations WHERE registration_address = ?1",
+        [root_address.as_bytes().as_slice()],
+    )?;
+    drop(connection);
+
+    let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+    assert_eq!(
+        reopened.read_artifact_registration(&owner_id, root_address),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?
+        .to_owned();
+    let (owner_id, root_address, batch) = prepared_repro_manifest()?;
+    let mut store = pos_store::sqlite::SqliteStore::open(&path)?;
+    close_repro_manifest_recording(&mut store, &batch)?;
+    store.commit_artifact_registration_batch(batch)?;
+    assert_eq!(
+        store.read_artifact_registration(&OwnerIdV1::from_static("another-owner"), root_address)?,
+        None
+    );
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "UPDATE artifact_registrations SET artifact_class = 99
+         WHERE registration_address = ?1",
+        [root_address.as_bytes().as_slice()],
+    )?;
+    drop(connection);
+
+    let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+    assert_eq!(
+        reopened.read_artifact_registration(&owner_id, root_address),
+        Err(pos_core::ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_catalog_read_treats_an_absent_schema_as_an_empty_catalog(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?
+        .to_owned();
+    let store = pos_store::sqlite::SqliteStore::open(&path)?;
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch(
+        "DROP TABLE artifact_registration_operations;
+         DROP TABLE artifact_registrations",
+    )?;
+    assert_eq!(
+        store.read_artifact_registration(
+            &OwnerIdV1::from_static("missing-schema-owner"),
+            Hash::from_bytes([0x92; 32]),
+        )?,
+        None
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_adapter_recording_rejects_malformed_durable_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?
+        .to_owned();
+    let (session, reservation) = adapter_recording_fixture(Hash::from_bytes([0x93; 32]))?;
+    let owner_reference = session.owner_reference();
+    let run_operation_id = session.run_operation_id();
+    let mut store = pos_store::sqlite::SqliteStore::open(&path)?;
+    store.open_adapter_recording_session(session)?;
+    store.reserve_adapter_call(owner_reference, run_operation_id, reservation)?;
+    store.complete_adapter_call(
+        owner_reference,
+        run_operation_id,
+        0,
+        b"exact response".to_vec(),
+    )?;
+    store.close_adapter_recording_session(owner_reference, run_operation_id)?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute(
+        "UPDATE adapter_recording_sessions SET transcript_cbor = NULL
+         WHERE owner_reference = ?1 AND run_operation_id = ?2",
+        rusqlite::params![
+            owner_reference.as_bytes().as_slice(),
+            run_operation_id.as_bytes().as_slice(),
+        ],
+    )?;
+    drop(connection);
+
+    let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+    assert_eq!(
+        reopened.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+        Err(AdapterRecordingStoreErrorV1::CorruptState)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_adapter_recording_requires_its_complete_schema(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?
+        .to_owned();
+    let (session, _) = adapter_recording_fixture(Hash::from_bytes([0x94; 32]))?;
+    let mut store = pos_store::sqlite::SqliteStore::open(&path)?;
+    let connection = rusqlite::Connection::open(&path)?;
+    connection.execute_batch("DROP TABLE adapter_recording_calls")?;
+    assert_eq!(
+        store.open_adapter_recording_session(session),
+        Err(AdapterRecordingStoreErrorV1::StorageFailure)
+    );
+    Ok(())
+}
