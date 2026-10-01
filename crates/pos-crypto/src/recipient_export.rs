@@ -1133,6 +1133,19 @@ mod tests {
         export_id: [u8; 16],
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<u8>, RecipientExportErrorV1> {
+        encrypt_payload_marking_final(payload, recipient, export_id, rng, |index, count| {
+            index + 1 == count
+        })
+    }
+
+    /// Seal `payload` with a caller-chosen AAD final bit for each chunk.
+    fn encrypt_payload_marking_final(
+        payload: &[u8],
+        recipient: RecipientKeyDescriptorV1,
+        export_id: [u8; 16],
+        rng: &mut impl CryptoRng,
+        is_final: fn(usize, usize) -> bool,
+    ) -> Result<Vec<u8>, RecipientExportErrorV1> {
         let payload_length =
             u64::try_from(payload.len()).map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?;
         let chunk_count = u32::try_from(payload.len().div_ceil(CHUNK_BYTES))
@@ -1169,9 +1182,11 @@ mod tests {
                             header_digest,
                             u32::try_from(index)
                                 .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
-                            index + 1
-                                == usize::try_from(chunk_count)
+                            is_final(
+                                index,
+                                usize::try_from(chunk_count)
                                     .map_err(|_| RecipientExportErrorV1::FieldOutOfBounds)?,
+                            ),
                         ),
                     )
                     .map_err(|_| RecipientExportErrorV1::EncryptionFailed)
@@ -1304,6 +1319,41 @@ mod tests {
             decrypt_timeline_export_v1(&encrypted.encode(), [5; 16], recipient, &private),
             Err(RecipientExportErrorV1::AuthenticationFailed)
         ));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn rejects_chunks_sealed_with_a_tampered_final_bit() -> Result<(), RecipientExportErrorV1> {
+        let (recipient, private) = recipient()?;
+        let single = encode_payload(&export(None, b"source".to_vec()))?;
+        let double = encode_payload(&export(None, vec![3; CHUNK_BYTES]))?;
+        assert_eq!(double.len().div_ceil(CHUNK_BYTES), 2);
+        let mut rng = StdRng::from_seed([24; 32]);
+        let cases: [(&[u8], fn(usize, usize) -> bool); 3] = [
+            // A sole chunk sealed as non-final.
+            (&single, |_, _| false),
+            // The last of two chunks sealed as non-final.
+            (&double, |_, _| false),
+            // A non-final chunk sealed as final.
+            (&double, |_, _| true),
+        ];
+        for (payload, is_final) in cases {
+            let encoded =
+                encrypt_payload_marking_final(payload, recipient, [5; 16], &mut rng, is_final)?;
+            assert_eq!(
+                RecipientTimelineExportV1::decode(&encoded)?
+                    .ciphertext_chunks
+                    .len(),
+                payload.len().div_ceil(CHUNK_BYTES)
+            );
+            assert!(matches!(
+                decrypt_timeline_export_v1(&encoded, [5; 16], recipient, &private),
+                Err(RecipientExportErrorV1::AuthenticationFailed)
+            ));
+        }
+        let honest = encrypt_payload(&double, recipient, [5; 16], &mut rng)?;
+        assert!(decrypt_timeline_export_v1(&honest, [5; 16], recipient, &private).is_ok());
         Ok(())
     }
 
