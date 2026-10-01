@@ -816,11 +816,7 @@ fn sqlite_owner_admission_replaces_complete_generation_and_recovers_after_reopen
     assert_eq!(replaced.configuration_generation, 2);
     assert_eq!(replaced.receipt_hashes.len(), replacement_timelines.len());
 
-    assert_competing_sqlite_owner_admission_conflicts(
-        &mut store,
-        owner_id,
-        &pre_replacement,
-    )?;
+    assert_competing_sqlite_owner_admission_conflicts(&mut store, owner_id, &pre_replacement)?;
     drop(store);
 
     let reopened = SqliteStore::open(path)?;
