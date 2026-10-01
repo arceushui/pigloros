@@ -4,7 +4,7 @@ use pos_core::{
     ArtifactRegistrationGraphErrorV1, ArtifactRegistrationGraphNodeV1, ArtifactRegistrationV1,
     ArtifactTransitionRuleV1, ErasureArtifactClassV1, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1,
     MAX_ARTIFACT_GRAPH_DEPTH_V1, MAX_ARTIFACT_GRAPH_EDGES_V1, MAX_ARTIFACT_GRAPH_KEYS_V1,
-    MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
+    MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1, MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
 };
 
 fn node(
@@ -628,7 +628,8 @@ fn registration_byte_ceiling_is_checked_through_the_public_inspector(
             shared_keys.clone(),
         )?);
     }
-    let child_edges = leaves.iter().map(|leaf| edge(leaf, true)).collect();
+    let child_edges: Vec<ArtifactChildEdgeV1> =
+        leaves.iter().map(|leaf| edge(leaf, true)).collect();
     let within_root = node(
         20_000,
         owner_id,
