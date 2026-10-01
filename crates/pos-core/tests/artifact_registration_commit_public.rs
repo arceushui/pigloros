@@ -1070,7 +1070,8 @@ fn persisted_catalog_rejects_a_semantically_wrong_admission_registration(
 
     let changed_admission =
         registration_with_data_class(&admission, ArtifactDataClassV1::StructuralAuditMetadata)?;
-    fixture.rows[admission_index] = catalog_row_with_registration(&admission, changed_admission.clone())?;
+    fixture.rows[admission_index] =
+        catalog_row_with_registration(&admission, changed_admission.clone())?;
     let changed_transcript = registration_with_child_address(
         &transcript,
         admission.registration_address(),
@@ -1131,8 +1132,7 @@ fn persisted_catalog_rejects_an_unknown_repro_manifest_format(
     let root = fixture.rows[root_index].clone();
 
     let unknown_admission = unknown_repro_manifest_row(&admission)?;
-    fixture.rows[admission_index] =
-        catalog_row_with_registration(&unknown_admission, unknown_admission.registration().clone())?;
+    fixture.rows[admission_index] = unknown_admission.clone();
     let changed_transcript = registration_with_child_address(
         &transcript,
         admission.registration_address(),
