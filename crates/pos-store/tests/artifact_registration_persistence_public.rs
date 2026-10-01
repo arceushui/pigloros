@@ -1259,105 +1259,123 @@ fn closed_sqlite_adapter_recording(
 }
 
 #[cfg(feature = "sqlite")]
-#[test]
-fn sqlite_adapter_recording_rejects_durable_row_corruption_and_bounds(
+fn assert_sqlite_closed_adapter_recording_corruption(
+    run_byte: u8,
+    mutate: impl FnOnce(&rusqlite::Connection, Hash, Hash) -> rusqlite::Result<()>,
+    read_closed: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_database, path, session, _) =
-        closed_sqlite_adapter_recording(Hash::from_bytes([0x95; 32]))?;
+        closed_sqlite_adapter_recording(Hash::from_bytes([run_byte; 32]))?;
     let owner_reference = session.owner_reference();
     let run_operation_id = session.run_operation_id();
     let connection = rusqlite::Connection::open(&path)?;
-    connection.execute(
-        "UPDATE adapter_recording_calls SET global_call_index = 1
-         WHERE owner_reference = ?1 AND run_operation_id = ?2",
-        rusqlite::params![
-            owner_reference.as_bytes().as_slice(),
-            run_operation_id.as_bytes().as_slice(),
-        ],
-    )?;
+    mutate(&connection, owner_reference, run_operation_id)?;
     drop(connection);
-    let mut reopened = pos_store::sqlite::SqliteStore::open(&path)?;
-    assert_eq!(
-        reopened.close_adapter_recording_session(owner_reference, run_operation_id),
-        Err(AdapterRecordingStoreErrorV1::CorruptState)
-    );
+    let result = if read_closed {
+        let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+        reopened
+            .read_closed_adapter_recording_session(owner_reference, run_operation_id)
+            .map(|_| ())
+    } else {
+        let mut reopened = pos_store::sqlite::SqliteStore::open(&path)?;
+        reopened
+            .close_adapter_recording_session(owner_reference, run_operation_id)
+            .map(|_| ())
+    };
+    assert_eq!(result, Err(AdapterRecordingStoreErrorV1::CorruptState));
+    Ok(())
+}
 
-    let (_database, path, session, _) =
-        closed_sqlite_adapter_recording(Hash::from_bytes([0x96; 32]))?;
-    let owner_reference = session.owner_reference();
-    let run_operation_id = session.run_operation_id();
-    let connection = rusqlite::Connection::open(&path)?;
-    connection.execute(
-        "UPDATE adapter_recording_calls SET output_bytes = ?1
-         WHERE owner_reference = ?2 AND run_operation_id = ?3",
-        rusqlite::params![
-            b"changed durable response".as_slice(),
-            owner_reference.as_bytes().as_slice(),
-            run_operation_id.as_bytes().as_slice(),
-        ],
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_adapter_recording_rejects_sequence_and_output_corruption(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_closed_adapter_recording_corruption(
+        0x95,
+        |connection, owner_reference, run_operation_id| {
+            connection
+                .execute(
+                    "UPDATE adapter_recording_calls SET global_call_index = 1
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                    rusqlite::params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                    ],
+                )
+                .map(|_| ())
+        },
+        false,
     )?;
-    drop(connection);
-    let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
-    assert_eq!(
-        reopened.read_closed_adapter_recording_session(owner_reference, run_operation_id),
-        Err(AdapterRecordingStoreErrorV1::CorruptState)
-    );
-
-    let (_database, path, session, _) =
-        closed_sqlite_adapter_recording(Hash::from_bytes([0x97; 32]))?;
-    let owner_reference = session.owner_reference();
-    let run_operation_id = session.run_operation_id();
-    let connection = rusqlite::Connection::open(&path)?;
-    connection.execute(
-        "UPDATE adapter_recording_sessions SET world_handle_cbor = ?1
-         WHERE owner_reference = ?2 AND run_operation_id = ?3",
-        rusqlite::params![
-            b"malformed WRH1".as_slice(),
-            owner_reference.as_bytes().as_slice(),
-            run_operation_id.as_bytes().as_slice(),
-        ],
+    assert_sqlite_closed_adapter_recording_corruption(
+        0x96,
+        |connection, owner_reference, run_operation_id| {
+            connection
+                .execute(
+                    "UPDATE adapter_recording_calls SET output_bytes = ?1
+                     WHERE owner_reference = ?2 AND run_operation_id = ?3",
+                    rusqlite::params![
+                        b"changed durable response".as_slice(),
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                    ],
+                )
+                .map(|_| ())
+        },
+        true,
     )?;
-    drop(connection);
-    let reopened = pos_store::sqlite::SqliteStore::open(&path)?;
-    assert_eq!(
-        reopened.read_closed_adapter_recording_session(owner_reference, run_operation_id),
-        Err(AdapterRecordingStoreErrorV1::CorruptState)
-    );
+    Ok(())
+}
 
-    let (_database, path, session, _) =
-        closed_sqlite_adapter_recording(Hash::from_bytes([0x98; 32]))?;
-    let owner_reference = session.owner_reference();
-    let run_operation_id = session.run_operation_id();
-    let connection = rusqlite::Connection::open(&path)?;
-    connection.execute_batch("PRAGMA ignore_check_constraints = ON;")?;
-    connection.execute(
-        "UPDATE adapter_recording_calls SET plugin_id = ?1
-         WHERE owner_reference = ?2 AND run_operation_id = ?3",
-        rusqlite::params![
-            b"short plugin id".as_slice(),
-            owner_reference.as_bytes().as_slice(),
-            run_operation_id.as_bytes().as_slice(),
-        ],
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_adapter_recording_rejects_session_and_column_corruption(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_sqlite_closed_adapter_recording_corruption(
+        0x97,
+        |connection, owner_reference, run_operation_id| {
+            connection
+                .execute(
+                    "UPDATE adapter_recording_sessions SET world_handle_cbor = ?1
+                     WHERE owner_reference = ?2 AND run_operation_id = ?3",
+                    rusqlite::params![
+                        b"malformed WRH1".as_slice(),
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                    ],
+                )
+                .map(|_| ())
+        },
+        true,
     )?;
-    connection.execute_batch("PRAGMA ignore_check_constraints = OFF;")?;
-    drop(connection);
-    let mut reopened = pos_store::sqlite::SqliteStore::open(&path)?;
-    assert_eq!(
-        reopened.close_adapter_recording_session(owner_reference, run_operation_id),
-        Err(AdapterRecordingStoreErrorV1::CorruptState)
-    );
+    assert_sqlite_closed_adapter_recording_corruption(
+        0x98,
+        |connection, owner_reference, run_operation_id| {
+            connection.execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+            connection.execute(
+                "UPDATE adapter_recording_calls SET plugin_id = ?1
+                 WHERE owner_reference = ?2 AND run_operation_id = ?3",
+                rusqlite::params![
+                    b"short plugin id".as_slice(),
+                    owner_reference.as_bytes().as_slice(),
+                    run_operation_id.as_bytes().as_slice(),
+                ],
+            )?;
+            connection.execute_batch("PRAGMA ignore_check_constraints = OFF;")
+        },
+        false,
+    )?;
+    Ok(())
+}
 
-    let database = tempfile::NamedTempFile::new()?;
-    let path = database
-        .path()
-        .to_str()
-        .ok_or_else(|| std::io::Error::other("temporary path is not UTF-8"))?
-        .to_owned();
-    let (session, reservation) = adapter_recording_fixture(Hash::from_bytes([0x99; 32]))?;
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_adapter_recording_rejects_durable_bounds(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (_database, path, session, reservation) =
+        closed_sqlite_adapter_recording(Hash::from_bytes([0x99; 32]))?;
     let owner_reference = session.owner_reference();
     let run_operation_id = session.run_operation_id();
     let mut store = pos_store::sqlite::SqliteStore::open(&path)?;
-    store.open_adapter_recording_session(session)?;
     let over_limit_invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
         global_call_index: u64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)?,
         ..reservation.invocation().as_input().clone()
@@ -1370,14 +1388,12 @@ fn sqlite_adapter_recording_rejects_durable_row_corruption_and_bounds(
         reservation.reserved_at_micros(),
     )?;
     assert_eq!(
-        store.reserve_adapter_call(owner_reference, run_operation_id, over_limit_reservation,),
+        store.reserve_adapter_call(owner_reference, run_operation_id, over_limit_reservation),
         Err(AdapterRecordingStoreErrorV1::InvalidCall)
     );
     assert_eq!(
-        store.complete_adapter_call(owner_reference, run_operation_id, u64::MAX, Vec::new(),),
+        store.complete_adapter_call(owner_reference, run_operation_id, u64::MAX, Vec::new()),
         Err(AdapterRecordingStoreErrorV1::InvalidCall)
     );
-    store.abort_adapter_recording_session(owner_reference, run_operation_id)?;
-    drop(database);
     Ok(())
-}
+}}
