@@ -39,6 +39,37 @@ fn registry_snapshot_requires_exact_version_one() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+#[test]
+fn destroyed_high_water_epoch_requires_the_next_enrollment_epoch(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut registry, identity, material_digest) = registered_state()?;
+    let request =
+        KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([8; 32]));
+    registry.begin_key_destruction(request)?;
+    registry.complete_key_destruction(request, deletion_receipt(&request))?;
+
+    assert_eq!(
+        registry.highest_epoch(&identity.owner_id, identity.role),
+        Some(identity.epoch)
+    );
+    assert_eq!(registry.active_key(&identity.owner_id, identity.role), None);
+    let successor = KeyIdentityV1::new(
+        identity.owner_id,
+        identity.role,
+        identity.epoch.checked_add(1).ok_or("test epoch overflow")?,
+    );
+    registry.register_key(KeyRegistrationV1::new(
+        successor,
+        Hash::from_bytes([9; 32]),
+        Some(PublicKey::from_bytes([10; 32])),
+    ))?;
+    assert_eq!(
+        registry.highest_epoch(&identity.owner_id, identity.role),
+        Some(successor.epoch)
+    );
+    Ok(())
+}
+
 struct RegistryStore {
     registry: Option<KeyRegistryStateV1>,
     timeline: Option<Timeline>,
