@@ -357,8 +357,96 @@ fn assert_artifact_identity_rejections(source: &FixtureBinding) -> TestResult {
     Ok(())
 }
 
+fn assert_canonical_closure_member_lengths(
+    expected_bytes: &[u8],
+    members: [&[u8]; 6],
+) -> TestResult {
+    let mut offset = 4_usize;
+    for member in members {
+        let length_end = offset + 8;
+        let member_length = member.len();
+        assert_eq!(
+            u64::from_be_bytes(expected_bytes[offset..length_end].try_into()?),
+            u64::try_from(member_length)?
+        );
+        if member_length > 0 {
+            let mut malformed = expected_bytes.to_vec();
+            malformed[length_end] ^= 1;
+            assert!(
+                pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+                    &malformed,
+                    members[0],
+                )
+                .is_err()
+            );
+        }
+        offset = length_end + member_length;
+    }
+    Ok(())
+}
+
+fn assert_canonical_closure_rejects_invalid_wire(
+    expected_bytes: &[u8],
+    output_policy_bytes: &[u8],
+) {
+    let mut trailing = expected_bytes.to_vec();
+    trailing.push(0);
+    let mut impossible_length = Vec::from(&b"OPC1"[..]);
+    impossible_length.extend_from_slice(&u64::MAX.to_be_bytes());
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            b"bad",
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            b"OPC1",
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &expected_bytes[..expected_bytes.len() - 1],
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &trailing,
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &impossible_length,
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            expected_bytes,
+            b"wrong EOP1",
+        )
+        .is_err()
+    );
+    let oversized = vec![0; pos_runtime::MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 + 1];
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &oversized,
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+}
+
 #[test]
-fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult {
+fn verified_output_policy_closure_artifacts_are_validated() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -372,6 +460,15 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     assert_artifact_shape_rejections(&source);
     assert_artifact_size_rejections(&source);
     assert_artifact_identity_rejections(&source)?;
+    Ok(())
+}
+
+#[test]
+fn verified_output_policy_closure_round_trips_and_rejects_malformed_wire() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let source = verified_binding(&plugin)?;
     let expected_bytes = canonical_fixture_closure_bytes(&source);
     assert!(expected_bytes.starts_with(b"OPC1"));
     let decoded = pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
@@ -379,92 +476,31 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         &source.output_policy_bytes,
     )?;
     assert_eq!(decoded.to_canonical_bytes(), expected_bytes);
-    let mut offset = 4_usize;
-    for member in [
-        source.output_policy_bytes.as_slice(),
-        source.executable_budget_bytes.as_slice(),
-        source.implementation_artifact.as_slice(),
-        source.configuration_artifact.as_slice(),
-        source.profile_artifact.as_slice(),
-        source.retention_artifact.as_slice(),
-    ] {
-        let length_end = offset + 8;
-        let member_length = member.len();
-        assert_eq!(
-            u64::from_be_bytes(expected_bytes[offset..length_end].try_into()?),
-            u64::try_from(member_length)?
-        );
-        if member_length > 0 {
-            let mut malformed = expected_bytes.clone();
-            malformed[length_end] ^= 1;
-            assert!(
-                pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-                    &malformed,
-                    &source.output_policy_bytes,
-                )
-                .is_err()
-            );
-        }
-        offset = length_end + member_length;
-    }
-    let mut trailing = expected_bytes.clone();
-    trailing.push(0);
-    let mut impossible_length = Vec::from(&b"OPC1"[..]);
-    impossible_length.extend_from_slice(&u64::MAX.to_be_bytes());
-    assert!(
-        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-            b"bad",
-            &source.output_policy_bytes,
-        )
-        .is_err()
+    assert_canonical_closure_member_lengths(
+        &expected_bytes,
+        [
+            source.output_policy_bytes.as_slice(),
+            source.executable_budget_bytes.as_slice(),
+            source.implementation_artifact.as_slice(),
+            source.configuration_artifact.as_slice(),
+            source.profile_artifact.as_slice(),
+            source.retention_artifact.as_slice(),
+        ],
+    )?;
+    assert_canonical_closure_rejects_invalid_wire(
+        &expected_bytes,
+        &source.output_policy_bytes,
     );
-    assert!(
-        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-            b"OPC1",
-            &source.output_policy_bytes,
-        )
-        .is_err()
-    );
-    assert!(
-        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-            &expected_bytes[..expected_bytes.len() - 1],
-            &source.output_policy_bytes,
-        )
-        .is_err()
-    );
-    assert!(
-        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-            &trailing,
-            &source.output_policy_bytes,
-        )
-        .is_err()
-    );
-    assert!(
-        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-            &impossible_length,
-            &source.output_policy_bytes,
-        )
-        .is_err()
-    );
-    assert!(
-        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-            &expected_bytes,
-            b"wrong EOP1",
-        )
-        .is_err()
-    );
-    let oversized = vec![0; pos_runtime::MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 + 1];
-    assert!(
-        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
-            &oversized,
-            &source.output_policy_bytes,
-        )
-        .is_err()
-    );
-    let fresh_plugin = FixturePlugin {
+    Ok(())
+}
+
+#[test]
+fn verified_output_policy_closure_is_retained_with_stable_identity() -> TestResult {
+    let plugin = FixturePlugin {
         id: PluginId::new(),
     };
-
+    let source = verified_binding(&plugin)?;
+    let expected_bytes = canonical_fixture_closure_bytes(&source);
     let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
@@ -480,6 +516,9 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         .ok_or_else(|| std::io::Error::other("verified closure was not retained"))?;
     assert_eq!(retained, expected_bytes);
 
+    let fresh_plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
     let fresh_source = verified_binding(&fresh_plugin)?;
     let mut fresh_registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
@@ -499,7 +538,6 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         registry.replay_policy_closure_identities().next(),
         fresh_registry.replay_policy_closure_identities().next()
     );
-
     Ok(())
 }
 
