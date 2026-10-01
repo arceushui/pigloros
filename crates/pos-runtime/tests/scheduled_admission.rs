@@ -283,7 +283,9 @@ fn entries(log: &Log) -> Vec<String> {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn record(log: &Log, entry: String) {
-    let _ = log.lock().map(|mut entries| entries.push(entry));
+    log.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(entry);
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -332,7 +334,7 @@ impl Driver for ScriptedDriver {
             .map_or(u64::MAX, |anchor| anchor.observed_through().as_u64());
         record(&self.log, format!("{}:step@{anchor}", self.name));
         match self.fail {
-            Some(true) => std::panic::panic_any("scripted Driver trap"),
+            Some(true) => std::panic::resume_unwind(Box::new("scripted Driver trap")),
             Some(false) => Err(RuntimeError::NoDriver {
                 name: self.name.to_owned(),
             }),
@@ -796,12 +798,18 @@ fn cadence_commits_only_after_admission_and_empty_passes_admit_no_event() {
 
     ok(registry.tick_cadenced_anchored(host.timeline, 100, Seq::ZERO));
     publish(&mut store, host.timeline, stale_consent(host.revisions), 10);
-    let _ = err(host.admit(&mut registry, &mut store, 1));
+    let stale = err(host.admit(&mut registry, &mut store, 1));
+    assert!(stale.to_string().ends_with("AdmissionConflict"), "{stale}");
     publish(&mut store, host.timeline, host.revisions, 10);
 
     let due = ok(registry.tick_cadenced_anchored(host.timeline, 100, Seq::ZERO));
     assert_eq!(due.len(), 1, "an aborted pass must not advance cadence");
-    let _ = receipt(host.admit(&mut registry, &mut store, 2));
+    assert_eq!(
+        receipt(host.admit(&mut registry, &mut store, 2))
+            .committed_events()
+            .len(),
+        1
+    );
 
     let idle = ok(registry.tick_cadenced_anchored(host.timeline, 105, Seq::from_u64(1)));
     assert!(idle.is_empty());
@@ -828,7 +836,13 @@ fn nested_fork_pass_commits_in_stitched_timeline_order() {
         let mut registry = host.registry();
         register(&mut registry, driver("first", vec![b"a1", b"a2"], &log));
         ok(registry.step_all_anchored(host.timeline, Seq::ZERO));
-        let _ = receipt(host.admit(&mut registry, store.as_mut(), 1));
+        assert_eq!(
+            receipt(host.admit(&mut registry, store.as_mut(), 1))
+                .committed_events()
+                .len(),
+            2,
+            "{name}"
+        );
 
         let child = ok(store.fork(host.timeline, Seq::from_u64(2), "child")).id();
         human_event(store.as_mut(), child);
