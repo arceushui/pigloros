@@ -9,7 +9,7 @@ publish.workspace = true
 # Backend features — sqlite is on by default; disable with --no-default-features
 [features]
 default = ["sqlite"]
-sqlite = ["dep:rusqlite"]
+sqlite = ["dep:rusqlite", "dep:pos-conformance"]
 
 [dependencies]
 pos-core = { path = "../pos-core" }
@@ -22,7 +22,11 @@ rusqlite = { workspace = true, optional = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+pos-conformance = { path = "../pos-conformance", optional = true }
+
 [dev-dependencies]
+ed25519-dalek = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
 tempfile = "3"
 
