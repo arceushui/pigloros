@@ -938,6 +938,7 @@ dependencies = [
  "pos-store",
  "serde_json",
  "thiserror",
+ "ulid",
 ]
 
 [[package]]
