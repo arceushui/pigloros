@@ -13,6 +13,17 @@ use pos_core::{
 /// plus 32 bytes).
 const FRM1_SUFFIX_FROM_INTERVENTIONS_BYTES: usize = 3 + 1 + 2 + 32;
 
+/// Offset of the version uint in every publication record: the one-byte array
+/// head plus the five-byte text marker (`0x64` and four ASCII bytes).
+const PUBLICATION_VERSION_AT: usize = 1 + 5;
+
+/// Offset of the first record ID byte in `FPA1`: the version byte follows
+/// [`PUBLICATION_VERSION_AT`], then the two-byte `bstr .size 32` head.
+const FPA1_RECORD_ID_AT: usize = PUBLICATION_VERSION_AT + 1 + 2;
+
+/// Type-erased public decoder for one publication record kind.
+type PublicationDecodeV1 = fn(&[u8]) -> Result<(), ForkAttributionCodecErrorV1>;
+
 const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
@@ -259,6 +270,91 @@ fn publication_decoders_reject_role_codes_and_noncanonical_heads(
         ForkPublicationBindingV1::from_canonical_cbor(&binding_head),
         Err(ForkAttributionCodecErrorV1::NonCanonical)
     );
+    Ok(())
+}
+
+#[test]
+fn publication_decoders_reject_version_trailing_byte_and_oversize_input(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    let codecs: [(Vec<u8>, usize, PublicationDecodeV1); 3] = [
+        (
+            operation.to_canonical_cbor(),
+            pos_core::MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+            |bytes| ForkPublicationOperationV1::from_canonical_cbor(bytes).map(drop),
+        ),
+        (
+            binding.to_canonical_cbor(),
+            pos_core::MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
+            |bytes| ForkPublicationBindingV1::from_canonical_cbor(bytes).map(drop),
+        ),
+        (
+            artifact.to_canonical_cbor(),
+            pos_core::MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
+            |bytes| ForkPublicationArtifactV1::from_canonical_cbor(bytes).map(drop),
+        ),
+    ];
+    for (canonical, maximum, decode) in codecs {
+        assert_eq!(decode(&canonical), Ok(()));
+        assert_eq!(canonical[PUBLICATION_VERSION_AT], 1);
+        let mut version = canonical.clone();
+        version[PUBLICATION_VERSION_AT] = 2;
+        assert_eq!(
+            decode(&version),
+            Err(ForkAttributionCodecErrorV1::UnsupportedVersion)
+        );
+        let mut trailing = canonical;
+        trailing.push(0);
+        assert_eq!(
+            decode(&trailing),
+            Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            decode(&vec![0; maximum + 1]),
+            Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn fpa1_decoder_rejects_record_id_disagreeing_with_nested_fsm1(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (_operation, _binding, artifact) = publication_records(&admission)?;
+    let mut patched = artifact.to_canonical_cbor();
+    let record_id = FPA1_RECORD_ID_AT..FPA1_RECORD_ID_AT + 32;
+    assert_eq!(
+        patched[FPA1_RECORD_ID_AT - 2..FPA1_RECORD_ID_AT],
+        [0x58, 0x20]
+    );
+    assert_eq!(
+        patched[record_id.clone()],
+        *artifact.input().signed_manifest_record_id.as_bytes()
+    );
+    patched[record_id].fill(0xab);
+    assert_eq!(
+        ForkPublicationArtifactV1::from_canonical_cbor(&patched),
+        Err(ForkAttributionCodecErrorV1::FieldMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn worst_case_derived_fpr1_fits_its_exported_bound() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, _artifact) = publication_records(&admission)?;
+    let mut widest_operation = operation.input().clone();
+    widest_operation.final_logical_head = u64::MAX;
+    let mut widest_binding = *binding.input();
+    widest_binding.final_logical_head = u64::MAX;
+    let receipt = ForkPublicationReceiptV1::from_records(
+        &ForkPublicationOperationV1::new(widest_operation)?,
+        &ForkPublicationBindingV1::new(widest_binding)?,
+    )?;
+    assert_eq!(receipt.final_logical_head, u64::MAX);
+    assert!(receipt.to_canonical_cbor().len() <= pos_core::MAX_FORK_PUBLICATION_RECEIPT_BYTES_V1);
     Ok(())
 }
 

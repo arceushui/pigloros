@@ -18,7 +18,11 @@ pub const MAX_FORK_PUBLICATION_OPERATION_BYTES_V1: usize = 1_024;
 pub const MAX_FORK_PUBLICATION_BINDING_BYTES_V1: usize = 192;
 /// Maximum accepted `FPA1` bytes.
 pub const MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1: usize = 17_024;
-/// Maximum accepted derived `FPR1` bytes.
+/// Upper bound on the derived `FPR1` encoding produced by
+/// [`ForkPublicationReceiptV1::to_canonical_cbor`].
+///
+/// `FPR1` is encode-only under ADR-099: no decoder accepts caller `FPR1` bytes,
+/// so this bounds derived output rather than gating decoder input.
 pub const MAX_FORK_PUBLICATION_RECEIPT_BYTES_V1: usize = 192;
 /// Maximum intervention coordinates in one `FRM1`.
 pub const MAX_FORK_MANIFEST_INTERVENTIONS_V1: usize = 1_024;
@@ -869,6 +873,7 @@ fn text(out: &mut Vec<u8>, value: &str) {
     head(out, 3, value.len() as u64);
     out.extend_from_slice(value.as_bytes());
 }
+
 /// Encode ADR-099 `authority-origin-v1`; only the local `[1]` form exists in V1.
 fn authority_origin(out: &mut Vec<u8>, origin: ForkAttributionOriginV1) {
     match origin {
@@ -878,6 +883,7 @@ fn authority_origin(out: &mut Vec<u8>, origin: ForkAttributionOriginV1) {
         }
     }
 }
+
 fn array(out: &mut Vec<u8>, value: u64) {
     head(out, 4, value);
 }
