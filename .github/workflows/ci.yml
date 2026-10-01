@@ -63,7 +63,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      rust: ${{ steps.scope.outputs.rust || steps.full.outputs.rust }}
+      rust: ${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || steps.full.outputs.rust }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -73,10 +73,19 @@ jobs:
       - name: Detect Rust-affecting changes
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: scope
+        # The changed-file lookup calls the GitHub API, which can briefly refuse
+        # diffs under load. Fall back to the full gate set instead of failing.
+        continue-on-error: true
         if: github.event_name == 'pull_request' && hashFiles('.github/rust-scope.yml') != ''
         with:
           filters: .github/rust-scope.yml
           predicate-quantifier: some-with-excludes
+      - name: Use full scope when change detection is unavailable
+        id: fallback
+        if: steps.scope.outcome == 'failure'
+        run: |
+          echo '::warning::Changed-file detection failed; running the full gate set.'
+          printf 'rust=true\n' >> "$GITHUB_OUTPUT"
       - name: Use full scope for non-pull-request events
         id: full
         if: github.event_name != 'pull_request' || hashFiles('.github/rust-scope.yml') == ''
