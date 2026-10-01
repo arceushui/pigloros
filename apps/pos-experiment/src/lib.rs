@@ -109,15 +109,22 @@ fn open_store_with_gate(
     config: StoreConfig,
     gate: Option<Arc<ErasureContainmentGateV1>>,
 ) -> Result<Box<dyn ScheduledAdmissionStoreV1>, pos_core::CoreError> {
-    let mut store: Box<dyn ScheduledAdmissionStoreV1> = match config {
-        StoreConfig::Memory => Box::new(pos_store::memory::MemoryStore::new()),
-        StoreConfig::Sqlite { path } => Box::new(pos_store::sqlite::SqliteStore::open(&path)?),
-        StoreConfig::SqliteInMemory => Box::new(pos_store::sqlite::SqliteStore::open_in_memory()?),
-    };
+    let mut store = open_admission_store(config)?;
     if let Some(gate) = gate {
         store.bind_erasure_gate(gate)?;
     }
     Ok(store)
+}
+
+/// Open the concrete store that also provides the scheduled-admission ports.
+fn open_admission_store(
+    config: StoreConfig,
+) -> Result<Box<dyn ScheduledAdmissionStoreV1>, pos_core::CoreError> {
+    Ok(match config {
+        StoreConfig::Memory => Box::new(pos_store::memory::MemoryStore::new()),
+        StoreConfig::Sqlite { path } => Box::new(pos_store::sqlite::SqliteStore::open(&path)?),
+        StoreConfig::SqliteInMemory => Box::new(pos_store::sqlite::SqliteStore::open_in_memory()?),
+    })
 }
 
 fn bind_registry_erasure_gate(
@@ -921,8 +928,8 @@ fn append_driver_drafts(
     registry: &mut PluginRegistry,
     observed_through: pos_core::clock::Seq,
 ) -> Result<u64, ExperimentError> {
-    let revisions = observe_scheduled_admission(store, registry, timeline_id)?;
-    let drafts = step_driver_with_completed_prefix(store, timeline_id, registry, observed_through)?;
+    let (revisions, drafts) =
+        observe_and_step_drivers(store, timeline_id, registry, observed_through)?;
     if let Err(error) = registry.schemas.validate_batch(&drafts) {
         registry.abort_step();
         return Err(error.into());
@@ -935,6 +942,20 @@ fn append_driver_drafts(
     } else {
         append_nonempty_driver_drafts(store, timeline_id, registry, revisions)
     }
+}
+
+/// Observe the admission state, then stage the pass against the completed
+/// prefix, so the pass binds the revisions in force at its base snapshot.
+fn observe_and_step_drivers(
+    store: &mut dyn ScheduledAdmissionStoreV1,
+    timeline_id: pos_core::ids::TimelineId,
+    registry: &mut PluginRegistry,
+    observed_through: pos_core::clock::Seq,
+) -> Result<(PipelineSecurityRevisionsV1, Vec<EventDraft>), ExperimentError> {
+    observe_scheduled_admission(store, registry, timeline_id).and_then(|revisions| {
+        step_driver_with_completed_prefix(store, timeline_id, registry, observed_through)
+            .map(|drafts| (revisions, drafts))
+    })
 }
 
 fn append_nonempty_driver_drafts(
@@ -2013,6 +2034,29 @@ impl ExperimentSession {
         }
     }
 
+    /// Observe the admission revisions, then stage the pass.
+    ///
+    /// The revisions are observed before any Driver runs, so the pass binds
+    /// the security state in force at its base snapshot. Nothing is staged
+    /// yet, so an observation failure leaves the session healthy; a staging
+    /// failure aborts the step and faults the session.
+    fn stage_scheduled_pass(
+        &mut self,
+        request: StepRequest,
+        committed_events: &[pos_core::Event],
+    ) -> Result<(PipelineSecurityRevisionsV1, Vec<EventDraft>), ExperimentError> {
+        let revisions = lock_store(&self.store).and_then(|mut store| {
+            observe_scheduled_admission(&mut **store, &self.registry, self.timeline.id())
+        })?;
+        self.select_step_drafts(request, committed_events)
+            .map(|drafts| (revisions, drafts))
+            .map_err(|error| {
+                self.registry.abort_step();
+                self.health = SessionHealth::Faulted;
+                error.into()
+            })
+    }
+
     fn step_boundary(&mut self, request: StepRequest) -> Result<TickOutcome, ExperimentError> {
         if let Some(revocation) = self.consent_revocation_pending.take() {
             return self.commit_host_closure(revocation);
@@ -2024,20 +2068,7 @@ impl ExperimentSession {
 
         let (folded_events, committed_events) = self.prepare_tick()?;
 
-        // The admission revisions are observed before any Driver runs, so the
-        // pass binds the security state in force at its base snapshot. Nothing
-        // is staged yet, so an observation failure leaves the session healthy.
-        let revisions = lock_store(&self.store).and_then(|mut store| {
-            observe_scheduled_admission(&mut **store, &self.registry, self.timeline.id())
-        })?;
-        let drafts = match self.select_step_drafts(request, &committed_events) {
-            Ok(drafts) => drafts,
-            Err(error) => {
-                self.registry.abort_step();
-                self.health = SessionHealth::Faulted;
-                return Err(error.into());
-            }
-        };
+        let (revisions, drafts) = self.stage_scheduled_pass(request, &committed_events)?;
         if drafts
             .iter()
             .any(|draft| self.revoked_subjects.contains(&draft.entity))
