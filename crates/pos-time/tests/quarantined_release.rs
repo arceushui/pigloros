@@ -17,9 +17,9 @@ use pos_core::trusted_clock::{
 use pos_core::trusted_clock_fixture::TrustedClockFixtureV1;
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    CanonicalBytes, Capability, EntityId, ErasureReferenceV1, ErasureReplayClaimV1, Event,
-    EventDraft, Hash, Kind, Plugin, PluginId, PrincipalRefV1, Reducer, Seq, State, TimelineId,
-    WallTime, WorldReplayClosureV1,
+    CanonicalBytes, Capability, EntityId, ErasureGate, ErasureReferenceV1, ErasureReplayClaimV1,
+    Event, EventDraft, Hash, Kind, Plugin, PluginId, PrincipalRefV1, Reducer, Seq, State,
+    TimelineId, WallTime, WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ExecutorHealthV1, GuardedFoldWindowV1,
@@ -27,7 +27,7 @@ use pos_runtime::{
     NoActionApproverV1, StagedFoldErrorV1, StagedFoldExecutorV1, StagedFoldPlanV1,
     VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
 };
-use pos_state::{ProjectionRegistry, ProtectedProjectionProviderV1};
+use pos_state::{ProjectionRegistry, ProtectedProjectionProviderV1, RecordedConsumerV1};
 use pos_store::StoreConfig;
 use pos_time::{ProtectedFoldV1, ProtectedReleaseV1, ReleaseHealthV1};
 use std::{
@@ -194,6 +194,37 @@ fn release<'p>(
     }
 }
 
+fn tick_event() -> Event {
+    Event {
+        id: pos_core::EventId::new(),
+        entity: EntityId::new(),
+        event_type: Kind::new("test.tick"),
+        payload: CanonicalBytes::from_vec(Vec::new()),
+        wall_time: WallTime::from_micros(1),
+        seq: Seq::from_u64(1),
+        causation_id: None,
+        correlation_id: None,
+        schema_version: pos_core::SchemaVersion::V1,
+        signature: None,
+        signature_identity: None,
+        origin: None,
+        payload_hash: Hash::from_bytes([0; 32]),
+    }
+}
+
+fn blocking_registry(
+    consumer: &RecordedConsumerV1,
+    gate: Arc<dyn ErasureGate>,
+) -> ProjectionRegistry {
+    let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+    test_ok(registry.register_installed_reducer(
+        consumer.plugin_id(),
+        "count",
+        Box::new(BlockingReducer(Arc::new(AtomicBool::new(true)))),
+    ));
+    registry
+}
+
 #[test]
 fn protected_release_fails_closed_before_any_premise_read_while_quarantined() {
     let released = Arc::new(AtomicBool::new(false));
@@ -208,21 +239,7 @@ fn protected_release_fails_closed_before_any_premise_read_while_quarantined() {
     let guard = guarded(&mut port);
     let window = GuardedFoldWindowV1::new(&guard);
     let mut late = ScriptedGuardMonotonicSourceV1::new([Duration::from_millis(26_500)]);
-    let draft_event = Event {
-        id: pos_core::EventId::new(),
-        entity: EntityId::new(),
-        event_type: Kind::new("test.tick"),
-        payload: CanonicalBytes::from_vec(Vec::new()),
-        wall_time: WallTime::from_micros(1),
-        seq: Seq::from_u64(1),
-        causation_id: None,
-        correlation_id: None,
-        schema_version: pos_core::SchemaVersion::V1,
-        signature: None,
-        signature_identity: None,
-        origin: None,
-        payload_hash: Hash::from_bytes([0; 32]),
-    };
+    let draft_event = tick_event();
     let source = ProjectionSourceV1::bound(TimelineId::new(), None);
     let plan = StagedFoldPlanV1::new(vec![consumer], vec![draft_event], source);
     let shared: Arc<dyn ProtectedProjectionProviderV1 + Send + Sync> = provider.clone();
@@ -263,18 +280,8 @@ fn protected_release_fails_closed_before_any_premise_read_while_quarantined() {
         provider: &provider,
         consumers: &consumers,
     };
-    let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
-    test_ok(registry.register_installed_reducer(
-        consumer.plugin_id(),
-        "count",
-        Box::new(BlockingReducer(Arc::new(AtomicBool::new(true)))),
-    ));
-    let mut other = ProjectionRegistry::new().with_erasure_gate(gate);
-    test_ok(other.register_installed_reducer(
-        consumer.plugin_id(),
-        "count",
-        Box::new(BlockingReducer(Arc::new(AtomicBool::new(true)))),
-    ));
+    let mut registry = blocking_registry(&consumer, Arc::clone(&gate));
+    let mut other = blocking_registry(&consumer, gate);
     let mut reads = test_ok(host.read_sender());
 
     let health = ReleaseHealthV1::new();
