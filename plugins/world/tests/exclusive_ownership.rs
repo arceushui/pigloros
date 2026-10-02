@@ -1,8 +1,10 @@
 //! ADR-024 Revision 1 Decision 2 (user answer 2): the latent
 //! `world.action.v1` overlap fails closed when a composition installs
 //! `WorldPlugin` together with another declarer (the Gateway action Plugin or
-//! the human-action fixture). Order independence of the shared check is
-//! proven in `pos-runtime`'s `event_type_ownership` tests.
+//! the human-action fixture). The Gateway action Plugin case, which the
+//! ADR audit names, runs in `piglor-gateway`'s unit tests because that
+//! Plugin is private to the Gateway. Order independence of the shared check
+//! is proven in `pos-runtime`'s `event_type_ownership` tests.
 
 use pos_core::{Capability, Kind, Plugin, PluginId};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION_V1};

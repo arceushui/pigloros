@@ -214,6 +214,39 @@ mod coverage_tests {
         }
     }
 
+    /// ADR-024 Revision 1 audit: `WorldPlugin` and the Gateway action Plugin
+    /// both declare `world.action.v1`, so a composition that installs both
+    /// fails closed on the second claimant and keeps the first.
+    #[test]
+    fn world_plugin_and_gateway_action_plugin_cannot_share_world_actions() {
+        let mut registry = PluginRegistry::new();
+        registry
+            .register_generated(
+                &GatewayActionPlugin {
+                    id: PluginId::new(),
+                },
+                None,
+                None,
+            )
+            .test_ok();
+        let error = registry
+            .register_generated(&super::WorldPlugin::new(), None, None)
+            .err()
+            .map(|error| error.to_string());
+        assert_eq!(
+            error,
+            Some(
+                RuntimeError::Composition(
+                    pos_runtime::PluginCompositionErrorV1::DuplicateEventTypeOwner {
+                        event_type: EVENT_TYPE_ACTION.to_owned(),
+                    }
+                )
+                .to_string()
+            )
+        );
+        assert_eq!(registry.len(), 1);
+    }
+
     #[test]
     fn output_binding_tracks_delegated_world_source() {
         let plugin = GatewayActionPlugin {
