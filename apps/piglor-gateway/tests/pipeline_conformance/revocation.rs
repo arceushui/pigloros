@@ -289,8 +289,9 @@ fn outcome(result: Result<PipelineOutcomeV1, CoreError>) -> String {
     }
 }
 
-/// PCF-REV-001: a revocation the host learned is persisted with its records;
-/// it stales an earlier basis even at an unchanged chain, and a revocation
+/// PCF-REV-001: a revocation the host learned is persisted with its records.
+///
+/// It stales an earlier basis even at an unchanged chain, and a revocation
 /// of the chain's root is composed at the store as `AuthorityRevoked`.
 #[must_use]
 pub fn learned_revocation_is_persisted() -> Capture {
