@@ -3729,23 +3729,31 @@ mod tests {
         event.signature = Some(Signature::from_bytes([0; 64]));
     }
 
-    /// The same local classified-Event tampers, expressed for each adapter.
-    ///
+    /// One local classified-Event tamper, expressed for each adapter.
+    struct ClassifiedEventTamperV1 {
+        name: &'static str,
+        memory: fn(&mut Event),
+        #[cfg(feature = "sqlite")]
+        sqlite: &'static str,
+    }
+
     /// ADR-105 r6 R6.5 P8/P9: the stored Event keeps the `FOP1` `WallTime`,
     /// and ADR-099 local append stores it unsigned.
-    const CLASSIFIED_EVENT_TAMPERS: [(&str, fn(&mut Event), &str); 2] = [
-        (
-            "wall-time",
-            tamper_wall_time,
-            "UPDATE events SET wall_time = 11 WHERE event_id = (\
-             SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
-        ),
-        (
-            "signature",
-            tamper_signature,
-            "UPDATE events SET signature = zeroblob(64) WHERE event_id = (\
-             SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
-        ),
+    const CLASSIFIED_EVENT_TAMPERS: [ClassifiedEventTamperV1; 2] = [
+        ClassifiedEventTamperV1 {
+            name: "wall-time",
+            memory: tamper_wall_time,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET wall_time = 11 WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "signature",
+            memory: tamper_signature,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET signature = zeroblob(64) WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
     ];
 
     /// Read a `MemoryStore` suffix after one host-internal Event is tampered.
@@ -3768,9 +3776,10 @@ mod tests {
 
     #[test]
     fn memory_classified_suffix_rejects_tampered_local_event() -> Result<(), Box<dyn Error>> {
-        for (name, tamper, _) in CLASSIFIED_EVENT_TAMPERS {
+        for tamper in CLASSIFIED_EVENT_TAMPERS {
+            let name = tamper.name;
             assert_eq!(
-                memory_tampered_suffix_error(tamper)?,
+                memory_tampered_suffix_error(tamper.memory)?,
                 Some(ForkEventAuthorityErrorV1::CorruptAuthority),
                 "{name} must make the MemoryStore suffix unavailable"
             );
@@ -3786,7 +3795,8 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let operation_id = Hash::from_bytes([47; 32]).as_bytes().to_vec();
-        for (name, tamper, statement) in CLASSIFIED_EVENT_TAMPERS {
+        for tamper in CLASSIFIED_EVENT_TAMPERS {
+            let name = tamper.name;
             let path = directory.path().join(format!("tampered-{name}.sqlite"));
             let fixture = {
                 let mut store = sqlite_store_at(&path)?;
@@ -3801,9 +3811,9 @@ mod tests {
                 fixture
             };
             let connection = Connection::open(&path)?;
-            let changed = connection.execute(statement, params![operation_id])?;
+            let changed = connection.execute(tamper.sqlite, params![operation_id])?;
             assert_eq!(changed, 1, "{name} fixture must be present");
-            let memory = memory_tampered_suffix_error(tamper)?;
+            let memory = memory_tampered_suffix_error(tamper.memory)?;
             assert_eq!(memory, Some(ForkEventAuthorityErrorV1::CorruptAuthority));
             assert_eq!(
                 sqlite_store_at(&path)?
