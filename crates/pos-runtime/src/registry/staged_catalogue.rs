@@ -314,9 +314,11 @@ impl ProtectedProjectionProviderV1 for HostProjectionProviderV1 {
     }
 }
 
-/// Fold a host-captured Event range into one detached candidate exactly as
-/// `PluginRegistry::fold_events` folds the visible registry: the host drops
-/// consent-closed markers, then the candidate applies the live fold step.
+/// Fold a host-captured Event range into one detached candidate.
+///
+/// This matches how `PluginRegistry::fold_events` folds the visible registry:
+/// the host drops consent-closed markers, then the candidate applies the live
+/// fold step.
 pub fn fold_detached_candidate_v1(candidate: &mut DetachedProjectionCandidateV1, events: &[Event]) {
     candidate.fold_events(&super::host_projection_events(events));
 }
