@@ -209,6 +209,9 @@ pub fn pipeline_delegation_revision_v1(authority: &PersistedAuthorityV1) -> Hash
         hasher.update(grant.grant_id().as_bytes());
         hasher.update(&[grant.delegation_depth(), grant.max_delegation_depth()]);
     }
+    // Deliberately Timeline-wide: an unrelated grant's revocation on the same
+    // authority Timeline also moves this revision (over-invalidation, never a
+    // missed revocation).
     for revocation in authority.revocations() {
         hasher.update(b"R");
         hasher.update(revocation.grant_id().as_bytes());

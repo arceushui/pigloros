@@ -8,10 +8,10 @@ use pos_core::{
     pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
     AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityGranteeV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, CoreError, DelegateClassV1, EntityId,
-    ErasureContainmentGateV1, EventDraft, EventStore, Hash, Kind, PersistedAuthorityV1,
+    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1,
+    CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, CoreError, DelegateClassV1,
+    EntityId, ErasureContainmentGateV1, EventDraft, EventStore, Hash, Kind, PersistedAuthorityV1,
     PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
     PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
     PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
@@ -205,8 +205,17 @@ fn view(
     grants: &Grants,
     revoked: &[&CapabilityGrantV1],
     leaf: &CapabilityGrantV1,
+) -> AuthorityViewV1 {
+    ok(history(grants, revoked).view(leaf.grant_id()))
+}
+
+/// The chain a store resolves for that same history.
+fn resolved(
+    grants: &Grants,
+    revoked: &[&CapabilityGrantV1],
+    leaf: &CapabilityGrantV1,
 ) -> PersistedAuthorityV1 {
-    ok(history(grants, revoked).resolve(leaf.grant_id()))
+    view(grants, revoked, leaf).authority().clone()
 }
 
 /// The complete security revisions for one persisted authority.
@@ -294,25 +303,25 @@ fn a_view_replays_its_revocation_records_and_their_ancestors_idempotently() {
     // The sibling's view names a revocation of the child, so it also carries
     // the child and the child's unrevoked parent that the epoch depends on.
     let learned = view(&grants, &[&grants.child], &grants.sibling);
-    assert_eq!(learned.revocation_epoch(), 1);
+    assert_eq!(learned.authority().revocation_epoch(), 1);
     assert_eq!(
-        learned.revocations().cloned().collect::<Vec<_>>(),
+        learned.authority().revocations(),
         [revocation(&grants.child, 4, 1)]
     );
     for (name, mut store) in stores() {
         let authority = host(&grants);
         let persisted = ok(authority.persist_authority(store.as_mut(), &learned));
-        assert_eq!(persisted, learned, "{name}");
+        assert_eq!(&persisted, learned.authority(), "{name}");
         // An exact retry and a record the store already holds are unchanged.
         assert_eq!(
-            ok(authority.persist_authority(store.as_mut(), &learned)),
-            learned,
+            &ok(authority.persist_authority(store.as_mut(), &learned)),
+            learned.authority(),
             "{name}"
         );
         let child = ok(store.load_authority(grants.child.grant_id()));
         assert_eq!(
             child,
-            view(&grants, &[&grants.child], &grants.child),
+            resolved(&grants, &[&grants.child], &grants.child),
             "{name}"
         );
         assert_eq!(
@@ -333,12 +342,12 @@ fn a_grant_issued_after_a_revocation_replays_after_it_in_timeline_order() {
     let authority = host_for(&[root, child, sibling, &late]);
     let mut state = history(&grants, &[&grants.child]);
     ok(state.issue_grant(ok(authority.authorize_grant(&late)), late.clone()));
-    let late_view = ok(state.resolve(late.grant_id()));
-    assert_eq!(late_view.revocations().count(), 1);
+    let late_view = ok(state.view(late.grant_id()));
+    assert_eq!(late_view.authority().revocations().len(), 1);
     for (name, mut store) in stores() {
         assert_eq!(
-            ok(authority.persist_authority(store.as_mut(), &late_view)),
-            late_view,
+            &ok(authority.persist_authority(store.as_mut(), &late_view)),
+            late_view.authority(),
             "{name}"
         );
     }
@@ -366,6 +375,15 @@ fn a_view_another_host_cannot_attest_or_that_conflicts_fails_closed() {
             Err(AuthorityPersistenceErrorV1::Unavailable),
             "{name}"
         );
+        // The failed replay leaves its valid Timeline-Order prefix: the root
+        // grant committed before the unattested child was refused.
+        let prefix = ok(unattested.load_authority(grants.root.grant_id()));
+        assert_eq!(prefix.head_position(), Seq::from_u64(1), "{name}");
+        assert_eq!(prefix.chain().grants().len(), 1, "{name}");
+        assert!(
+            unattested.load_authority(grants.child.grant_id()).is_err(),
+            "{name}"
+        );
 
         // A store bound to another host refuses the whole view.
         ok(bound.bind_authority_persistence(host(&grants).persistence_binding()));
@@ -389,11 +407,44 @@ fn a_view_another_host_cannot_attest_or_that_conflicts_fails_closed() {
 }
 
 #[test]
+fn a_partially_diverged_view_fails_closed_after_its_shared_prefix() {
+    let grants = Grants::new();
+    for (name, mut store) in stores() {
+        let authority = host(&grants);
+        // The store's history revoked the sibling at epoch 1; the view's
+        // history shares every grant but revoked the child at that epoch.
+        let stored = resolved(&grants, &[&grants.sibling], &grants.child);
+        assert_eq!(
+            ok(authority.persist_authority(
+                store.as_mut(),
+                &view(&grants, &[&grants.sibling], &grants.child)
+            )),
+            stored,
+            "{name}"
+        );
+        assert_eq!(
+            authority.persist_authority(
+                store.as_mut(),
+                &view(&grants, &[&grants.child], &grants.sibling)
+            ),
+            Err(AuthorityPersistenceErrorV1::StaleEpoch),
+            "{name}"
+        );
+        // Nothing of the diverged history was merged.
+        assert_eq!(
+            ok(store.load_authority(grants.child.grant_id())),
+            stored,
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn equal_epoch_revocation_states_have_distinct_delegation_revisions() {
     let grants = Grants::new();
-    let unrevoked = view(&grants, &[], &grants.sibling);
-    let child_revoked = view(&grants, &[&grants.child], &grants.sibling);
-    let root_revoked = view(&grants, &[&grants.root], &grants.sibling);
+    let unrevoked = resolved(&grants, &[], &grants.sibling);
+    let child_revoked = resolved(&grants, &[&grants.child], &grants.sibling);
+    let root_revoked = resolved(&grants, &[&grants.root], &grants.sibling);
     assert_eq!(
         child_revoked.revocation_epoch(),
         root_revoked.revocation_epoch()
@@ -412,8 +463,8 @@ fn equal_epoch_revocation_states_have_distinct_delegation_revisions() {
 
     // Delegation edges are bound too: a chain differs from its own prefix.
     assert_ne!(
-        pipeline_delegation_revision_v1(&view(&grants, &[], &grants.root)),
-        pipeline_delegation_revision_v1(&view(&grants, &[], &grants.child))
+        pipeline_delegation_revision_v1(&resolved(&grants, &[], &grants.root)),
+        pipeline_delegation_revision_v1(&resolved(&grants, &[], &grants.child))
     );
 }
 
@@ -447,7 +498,7 @@ fn a_learned_revocation_is_persisted_and_stales_or_revokes_the_basis_at_commit()
             store.as_mut(),
             &view(&grants, &[&grants.sibling], &grants.child),
         ));
-        assert_eq!(learned.revocations().count(), 1, "{name}");
+        assert_eq!(learned.revocations().len(), 1, "{name}");
         assert_eq!(
             ok(store.admit_pipeline_batch(&basis(timeline, 2, 0, published))),
             PipelineOutcomeV1::AdmissionConflict,
@@ -515,9 +566,12 @@ fn sqlite_hosts_racing_a_revocation_never_commit_after_it_is_persisted() {
     };
     let admitted = ok(admitting.join());
     let persisted = ok(revoking.join());
-    // A host that lost on contention persists the same view again.
-    let persisted =
-        persisted.or_else(|_| host(&grants).persist_authority(&mut open_file(&path), &revoked));
+    // Only a host that lost on lock contention (its store transaction could
+    // not begin) persists the same view again; any other failure is a defect.
+    let persisted = persisted.or_else(|error| {
+        assert_eq!(error, AuthorityPersistenceErrorV1::Unavailable);
+        host(&grants).persist_authority(&mut open_file(&path), &revoked)
+    });
     assert!(ok(persisted).chain().grants()[0]
         .revocation_fence()
         .is_some());
@@ -530,7 +584,7 @@ fn sqlite_hosts_racing_a_revocation_never_commit_after_it_is_persisted() {
     let mut open = open_file(&path);
     let reloaded =
         ok(host(&grants).persist_authority(&mut open, &view(&grants, &[], &grants.child)));
-    assert_eq!(reloaded, revoked);
+    assert_eq!(&reloaded, revoked.authority());
     assert_eq!(
         ok(open.admit_pipeline_batch(&basis(timeline, 2, 0, stale))),
         PipelineOutcomeV1::AuthorityRevoked

@@ -9,9 +9,9 @@ use std::{num::NonZeroUsize, sync::Arc};
 use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, CapabilityGrantDraftV1,
-    CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1,
-    CapabilityScopeV1, EntityId, ErasureRecoveryLimitsV1, Hash, Kind, PersistedAuthorityV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, CanonicalBytes,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, ErasureRecoveryLimitsV1, Hash, Kind,
     PrincipalRefV1, ProposedAction, Seq, TimelineId, WallTime,
 };
 use pos_runtime::ErasureExecutionHostV1;
@@ -969,20 +969,28 @@ impl AuthorityHistory {
             root,
             sibling,
         };
-        // The evaluator trusts the exact resolved records it evaluates, so the
-        // registry also attests the root as resolved after the sibling's
-        // revocation advanced the Timeline's epoch.
-        let resolved = history.view(&[&history.sibling])?.chain().grants()[0].binding_digest()?;
-        history.registry = history_registry(
-            &history.authenticated,
-            issued.into_iter().chain([resolved]).collect(),
-        )?;
+        history.registry = history.registry_attesting_resolved(issued)?;
         Ok(history)
+    }
+
+    /// The evaluator trusts the exact resolved records it evaluates, so the
+    /// registry also attests the root as resolved after the sibling's
+    /// revocation advanced the Timeline's epoch.
+    fn registry_attesting_resolved(
+        &self,
+        issued: Vec<Hash>,
+    ) -> TestResult<AuthorityRegistrySnapshotV1> {
+        let resolved =
+            self.view(&[&self.sibling])?.authority().chain().grants()[0].binding_digest()?;
+        history_registry(
+            &self.authenticated,
+            issued.into_iter().chain([resolved]).collect(),
+        )
     }
 
     /// The root's view after the grants were issued and `revoked` revoked at
     /// fences 3, 4, … with epochs 1, 2, ….
-    fn view(&self, revoked: &[&CapabilityGrantV1]) -> TestResult<PersistedAuthorityV1> {
+    fn view(&self, revoked: &[&CapabilityGrantV1]) -> TestResult<AuthorityViewV1> {
         let host = AuthorityPersistenceHostV1::new(&self.registry);
         let mut state = AuthorityPersistenceStateV1::new();
         for grant in [&self.root, &self.sibling] {
@@ -999,10 +1007,10 @@ impl AuthorityHistory {
             })?;
             state.revoke_grant(host.authorize_revocation(grant, &revocation)?, revocation)?;
         }
-        Ok(state.resolve(self.root.grant_id())?)
+        Ok(state.view(self.root.grant_id())?)
     }
 
-    fn authorization(&self, view: PersistedAuthorityV1) -> GatewayAuthorization {
+    fn authorization(&self, view: AuthorityViewV1) -> GatewayAuthorization {
         GatewayAuthorization::new(
             Arc::new(LocalAuthenticationAdapter::new(self.authenticated.clone())),
             view,
@@ -1018,7 +1026,7 @@ async fn a_revocation_the_host_learned_is_persisted_with_the_admission() -> Test
         let actor = EntityId::new();
         let history = AuthorityHistory::new(actor)?;
         let learned = history.view(&[&history.sibling])?;
-        assert_eq!(learned.revocations().count(), 1, "{name}");
+        assert_eq!(learned.authority().revocations().len(), 1, "{name}");
         let fixture = fixture_with(
             host(&backend.config)?,
             history.authorization(learned.clone()),
@@ -1041,7 +1049,7 @@ async fn a_revocation_the_host_learned_is_persisted_with_the_admission() -> Test
                 .with_scheduled_admission(|ports| {
                     ports.load_authority(history.root.grant_id())
                 })??;
-            assert_eq!(persisted, learned, "{name}");
+            assert_eq!(&persisted, learned.authority(), "{name}");
         }
     }
     Ok(())
@@ -1075,7 +1083,7 @@ async fn a_revocation_another_host_persisted_is_rejected_by_the_store() -> TestR
     let persisted = host(&config)?
         .command_sender()?
         .with_scheduled_admission(|ports| other.persist_authority(ports, &revoked))??;
-    assert_eq!(persisted, revoked);
+    assert_eq!(&persisted, revoked.authority());
 
     let restarted = Fixture {
         gateway: gateway_with_erasure_host_and_authorization(
