@@ -6976,7 +6976,7 @@ fn sqlite_adapter_recording_state(
 
 /// Classifies a recorder row read failure: a durable column holding the wrong
 /// SQL type is corrupt state, while any other failure is storage failure.
-fn adapter_recording_row_error(error: rusqlite::Error) -> AdapterRecordingStoreErrorV1 {
+fn adapter_recording_row_error(error: &rusqlite::Error) -> AdapterRecordingStoreErrorV1 {
     match error {
         rusqlite::Error::InvalidColumnType(..)
         | rusqlite::Error::FromSqlConversionFailure(..)
@@ -7017,7 +7017,7 @@ fn sqlite_load_adapter_recording_session(
             },
         )
         .optional()
-        .map_err(adapter_recording_row_error)?;
+        .map_err(|error| adapter_recording_row_error(&error))?;
     let Some((handle_bytes, admission_bytes, state, transcript_bytes)) = stored else {
         return Ok(None);
     };
@@ -7090,7 +7090,7 @@ fn sqlite_adapter_recording_transcript(
             idempotency_bytes,
             reserved_at,
             output_bytes,
-        ) = row.map_err(adapter_recording_row_error)?;
+        ) = row.map_err(|error| adapter_recording_row_error(&error))?;
         let expected_global_index = i64::try_from(expected_global_index)
             .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
         if global_index != expected_global_index {
@@ -25528,11 +25528,11 @@ pub(super) mod key_registry_coverage {
     #[test]
     fn adapter_recording_row_error_keeps_non_type_failures_as_storage_failures() {
         assert_eq!(
-            adapter_recording_row_error(rusqlite::Error::QueryReturnedNoRows),
+            adapter_recording_row_error(&rusqlite::Error::QueryReturnedNoRows),
             AdapterRecordingStoreErrorV1::StorageFailure
         );
         assert_eq!(
-            adapter_recording_row_error(rusqlite::Error::IntegralValueOutOfRange(0, -1)),
+            adapter_recording_row_error(&rusqlite::Error::IntegralValueOutOfRange(0, -1)),
             AdapterRecordingStoreErrorV1::CorruptState
         );
     }
