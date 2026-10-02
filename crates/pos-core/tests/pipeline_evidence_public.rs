@@ -1,7 +1,8 @@
 use pos_core::{
     CanonicalBytes, EntityId, Event, EventId, Hash, Kind, PipelineAttemptIdV1,
     PipelineCommitEvidenceV1, PipelineCommitReceiptV1, PipelineCommittedRangeV1, PipelineIngressV1,
-    PipelineProjectionCutV1, SchemaVersion, Seq, TimelineId, WallTime,
+    PipelineProjectionCutV1, ScheduledObservationProfileV1, SchemaVersion, Seq, TimelineId,
+    WallTime,
 };
 use ulid::Ulid;
 
@@ -52,6 +53,7 @@ fn commit_evidence_names_the_exact_committed_range_without_a_fold() {
     let receipt = receipt(timeline_id, 3, 5);
     let evidence = PipelineCommitEvidenceV1::committed(
         PipelineIngressV1::HumanProposedAction,
+        ScheduledObservationProfileV1::NonParticipant,
         receipt.clone(),
     );
 
@@ -61,6 +63,10 @@ fn commit_evidence_names_the_exact_committed_range_without_a_fold() {
     assert_eq!(range.first(), Seq::from_u64(3));
     assert_eq!(range.last(), Seq::from_u64(5));
     assert_eq!(evidence.ingress(), PipelineIngressV1::HumanProposedAction);
+    assert_eq!(
+        evidence.observation_profile(),
+        ScheduledObservationProfileV1::NonParticipant
+    );
     assert_eq!(evidence.receipt(), &receipt);
     assert_eq!(evidence.projection_cut(), None);
 }
@@ -70,6 +76,7 @@ fn only_a_completed_fold_containing_the_whole_range_is_bound() {
     let timeline_id = timeline(1);
     let evidence = PipelineCommitEvidenceV1::committed(
         PipelineIngressV1::ScheduledAiDriver,
+        ScheduledObservationProfileV1::ParticipantBound,
         receipt(timeline_id, 3, 5),
     );
 
@@ -98,6 +105,11 @@ fn only_a_completed_fold_containing_the_whole_range_is_bound() {
     assert_eq!(complete.folded_through(), Seq::from_u64(5));
     let folded = evidence.with_completed_fold(complete);
     assert_eq!(folded.projection_cut(), Some(complete));
+    assert_eq!(
+        folded.observation_profile(),
+        ScheduledObservationProfileV1::ParticipantBound,
+        "binding a fold never changes the observation profile"
+    );
 
     let later = PipelineProjectionCutV1::new(timeline_id, Seq::from_u64(8));
     assert!(later.contains(folded.committed_range()));

@@ -8,6 +8,14 @@
 //! completed fold that contains the complete committed range. State-dependent
 //! evaluation therefore waits for, and names, that cut.
 //!
+//! Every evidence value carries the [`ScheduledObservationProfileV1`] of the
+//! host that produced it (ADR-021 Revision 3, Decision 6). Evidence tagged
+//! [`ScheduledObservationProfileV1::NonParticipant`] never claims ADR-059
+//! participant authority: its observations were consent-gated and
+//! subscription-scoped, not participant-authorized. Rejecting a
+//! non-participant artifact presented as participant-authorized is owned by
+//! the #321 conformance fixtures.
+//!
 //! Neither value carries an append, approval, or policy capability, and
 //! neither has a serialization contract:
 //!
@@ -30,7 +38,9 @@ impl PipelineCommittedRangeV1 {
     /// Derive the committed range named by one receipt.
     ///
     /// A receipt is validated as a non-empty contiguous range when the store
-    /// builds it, so its first and last Events bound the range exactly.
+    /// builds it, so its first and last Events bound the range exactly. The
+    /// `Seq::ZERO` fallback is unreachable: an admitted draft batch is never
+    /// empty, and a retained receipt rejects an empty Event range.
     #[must_use]
     pub fn of_receipt(receipt: &PipelineCommitReceiptV1) -> Self {
         let events = receipt.committed_events();
@@ -100,23 +110,44 @@ impl PipelineProjectionCutV1 {
     }
 }
 
-/// One committed attempt, its ingress path, and, once folded, the first
-/// completed Projection cut that contains its complete committed range.
+/// The ADR-021 Revision 3 scheduled observation profile of the host whose
+/// commit an evidence value describes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledObservationProfileV1 {
+    /// Consent-gated, subscription-scoped observation in a host with no
+    /// Participant, such as an experiment session. Evidence in this profile
+    /// never claims ADR-059 participant authority or non-interference.
+    NonParticipant,
+    /// ADR-059 authorized derived views in a participant-bound host (planned
+    /// Wave 9 Scenario Room host; no current host produces this profile).
+    ParticipantBound,
+}
+
+/// One committed attempt, its ingress path, its scheduled observation
+/// profile, and, once folded, the first completed Projection cut that
+/// contains its complete committed range.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PipelineCommitEvidenceV1 {
     ingress: PipelineIngressV1,
+    observation_profile: ScheduledObservationProfileV1,
     receipt: PipelineCommitReceiptV1,
     committed_range: PipelineCommittedRangeV1,
     projection_cut: Option<PipelineProjectionCutV1>,
 }
 
 impl PipelineCommitEvidenceV1 {
-    /// Record a committed attempt whose resulting state is not yet folded.
+    /// Record a committed attempt whose resulting state is not yet folded,
+    /// tagged with the observation profile of the host that admitted it.
     #[must_use]
-    pub fn committed(ingress: PipelineIngressV1, receipt: PipelineCommitReceiptV1) -> Self {
+    pub fn committed(
+        ingress: PipelineIngressV1,
+        observation_profile: ScheduledObservationProfileV1,
+        receipt: PipelineCommitReceiptV1,
+    ) -> Self {
         let committed_range = PipelineCommittedRangeV1::of_receipt(&receipt);
         Self {
             ingress,
+            observation_profile,
             receipt,
             committed_range,
             projection_cut: None,
@@ -144,6 +175,12 @@ impl PipelineCommitEvidenceV1 {
     #[must_use]
     pub const fn ingress(&self) -> PipelineIngressV1 {
         self.ingress
+    }
+
+    /// The observation profile of the host that admitted the attempt.
+    #[must_use]
+    pub const fn observation_profile(&self) -> ScheduledObservationProfileV1 {
+        self.observation_profile
     }
 
     #[must_use]

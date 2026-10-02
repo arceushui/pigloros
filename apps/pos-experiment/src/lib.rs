@@ -16,10 +16,10 @@ include!("host_store.rs");
 pub mod pipeline_evaluation;
 
 pub use pipeline_evaluation::{
-    CalibrationReportEvaluatorV1, CommittedRangeIntegrityEvaluatorV1, PipelineEvaluationClassV1,
-    PipelineEvaluationInputV1, PipelineEvaluationOutcomeV1, PipelineEvaluationRecordV1,
-    PipelineEvaluationScopeV1, PipelineEvaluationUnavailableV1, PipelineEvaluatorOutputV1,
-    PipelineEvaluatorV1, PipelineEventIntegrityV1,
+    CalibrationReportEvaluatorV1, CommittedRangeIntegrityEvaluatorV1, PipelineEvaluationInputV1,
+    PipelineEvaluationOutcomeV1, PipelineEvaluationRecordV1, PipelineEvaluationScopeV1,
+    PipelineEvaluationUnavailableV1, PipelineEvaluatorOutputV1, PipelineEvaluatorV1,
+    PipelineEventIntegrityV1,
 };
 
 use pos_core::{
@@ -276,6 +276,17 @@ fn is_public_event_type(event_type: &Kind) -> bool {
         && pos_core::required_modality_for_event(event_type) == 0
         && !event_type.as_str().starts_with("timeline.fork.")
         && !event_type.as_str().starts_with("retention.")
+}
+
+/// Keep only the public Events of a read, in Timeline Order.
+///
+/// Shared by every session read that hands Events outside the host:
+/// [`ExperimentSession::source_events`] and both evaluator inputs.
+fn retain_public_events(events: Vec<pos_core::Event>) -> Vec<pos_core::Event> {
+    events
+        .into_iter()
+        .filter(|event| is_public_event_type(&event.event_type))
+        .collect()
 }
 
 fn reject_protected_events(events: &[pos_core::Event]) -> Result<(), ExperimentError> {
@@ -931,14 +942,8 @@ fn admit_scheduled_pass(
     commit_head: pos_core::clock::Seq,
     commit_now_secs: u64,
 ) -> Result<u64, ExperimentError> {
-    LocalScheduledAdmissionHostV1::shared()
-        .and_then(|host| host.admit(registry, store, revisions, commit_head, commit_now_secs))
-        .map(|receipt| {
-            receipt.map_or(0, |receipt| {
-                u64::try_from(receipt.committed_events().len()).unwrap_or(u64::MAX)
-            })
-        })
-        .map_err(map_runtime_error)
+    admit_scheduled_pass_receipt(store, registry, revisions, commit_head, commit_now_secs)
+        .map(|receipt| committed_event_count(receipt.as_ref()))
 }
 
 /// Admit a session's staged scheduled pass and return its commit receipt.
@@ -1908,12 +1913,7 @@ impl ExperimentSession {
     /// Returns a store or shared-store locking error if the completed prefix
     /// cannot be read.
     pub fn source_events(&self) -> Result<Vec<pos_core::Event>, ExperimentError> {
-        self.source_events_with_control().map(|events| {
-            events
-                .into_iter()
-                .filter(|event| is_public_event_type(&event.event_type))
-                .collect()
-        })
+        self.source_events_with_control().map(retain_public_events)
     }
 
     pub(crate) fn source_events_with_control(
@@ -2095,7 +2095,9 @@ impl ExperimentSession {
         let committed = committed_event_count(receipt.as_ref());
         if let Some(receipt) = receipt {
             self.pipeline_evidence = Some(pos_core::PipelineCommitEvidenceV1::committed(
-                ingress, receipt,
+                ingress,
+                pos_core::ScheduledObservationProfileV1::NonParticipant,
+                receipt,
             ));
         }
         committed
@@ -2119,6 +2121,12 @@ impl ExperimentSession {
     /// folded that complete range, the Projection cut. A failed fold leaves
     /// the evidence without a cut; the commit receipt alone never claims
     /// that the resulting state was folded. A Fork starts without evidence.
+    ///
+    /// The slot holds the last committed attempt only. A later commit
+    /// replaces it, and an attempt that commits nothing leaves it unchanged.
+    /// The evidence is tagged
+    /// [`ScheduledObservationProfileV1::NonParticipant`](pos_core::ScheduledObservationProfileV1::NonParticipant):
+    /// an experiment session never claims ADR-059 participant authority.
     #[must_use]
     pub const fn last_pipeline_evidence(&self) -> Option<&pos_core::PipelineCommitEvidenceV1> {
         self.pipeline_evidence.as_ref()
@@ -2135,19 +2143,18 @@ impl ExperimentSession {
         &mut self,
         evaluator: Box<dyn PipelineEvaluatorV1>,
     ) -> Result<(), ExperimentError> {
-        self.pipeline_evaluators
-            .register(evaluator)
-            .then_some(())
-            .ok_or(ExperimentError::DuplicatePipelineEvaluator)
+        self.pipeline_evaluators.register(evaluator)
     }
 
     /// Evaluate the most recent committed attempt with one registered
     /// evaluator under the host-owned ADR-060 claim evaluation.
     ///
-    /// Event-only evaluation reads only the committed range and may run as
-    /// soon as it committed, even after a failed fold. State-dependent
-    /// evaluation reads the public source prefix through the evidence's
-    /// Projection cut and is unavailable until that cut exists. Evaluation is
+    /// Event-only evaluation reads only the public Events of the committed
+    /// range and may run as soon as it committed, even after a failed fold.
+    /// State-dependent evaluation also reads the public source prefix, from
+    /// the first Timeline Event through the evidence's Projection cut, and is
+    /// unavailable until that cut exists. Both reads use the same public
+    /// filter as [`Self::source_events`]. Evaluation is
     /// advisory: it never appends, approves, or resubmits, and the record
     /// never strengthens the claim it was given. Returns `Ok(None)` before
     /// any attempt committed.
@@ -2181,8 +2188,12 @@ impl ExperimentSession {
             )
     }
 
-    /// Read the committed range and, for a state-dependent evaluation, the
-    /// public source prefix folded through its cut.
+    /// Read the public Events of the committed range and, for a
+    /// state-dependent evaluation, the public source prefix through its cut.
+    ///
+    /// The committed range is filtered too: a Plugin-owned protected Event
+    /// type can commit inside a consent token fence, and an evaluator holds
+    /// no consent capability.
     fn read_evaluation_inputs(
         &self,
         range: pos_core::PipelineCommittedRangeV1,
@@ -2195,11 +2206,10 @@ impl ExperimentSession {
                         read_completed_prefix(&**store, range.timeline_id(), through)
                     })
                     .map(|prefix| {
-                        let public = prefix
-                            .into_iter()
-                            .filter(|event| is_public_event_type(&event.event_type))
-                            .collect();
-                        (committed, public)
+                        (
+                            retain_public_events(committed),
+                            retain_public_events(prefix),
+                        )
                     })
             })
         })

@@ -15,18 +15,19 @@ use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactRedactionStateV1,
     ArtifactStateV1, ArtifactTransitionRuleV1, AuthorityCommitOutcomeV1, AuthorityMutationPermitV1,
     AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
-    CapabilityGrantV1, CapabilityRevocationV1, ConsentAuthority, CoreError, ErasureArtifactClassV1,
-    ErasureContainmentGateV1, ErasureKeyRoleV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
-    PersistedAuthorityV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineIngressV1, PipelineOutcomeV1,
-    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Timeline,
+    CapabilityGrantV1, CapabilityRevocationV1, ConsentAuthority, ConsentGrantedV1, CoreError,
+    ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureKeyRoleV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, Hash, PersistedAuthorityV1, PipelineAdmissionBasisV1,
+    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
+    PipelineIngressV1, PipelineOutcomeV1, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, ScheduledObservationProfileV1, Timeline, MODALITY_PERSONA,
 };
 use pos_experiment::{
     CalibrationReportEvaluatorV1, CommittedRangeIntegrityEvaluatorV1, Experiment, ExperimentConfig,
-    ExperimentError, ExperimentSession, PipelineEvaluationClassV1, PipelineEvaluationInputV1,
-    PipelineEvaluationOutcomeV1, PipelineEvaluationRecordV1, PipelineEvaluationScopeV1,
-    PipelineEvaluationUnavailableV1, PipelineEvaluatorOutputV1, PipelineEvaluatorV1,
-    PipelineEventIntegrityV1, StopCondition, TickOutcome,
+    ExperimentError, ExperimentSession, PipelineEvaluationInputV1, PipelineEvaluationOutcomeV1,
+    PipelineEvaluationRecordV1, PipelineEvaluationScopeV1, PipelineEvaluationUnavailableV1,
+    PipelineEvaluatorOutputV1, PipelineEvaluatorV1, PipelineEventIntegrityV1, StopCondition,
+    TickOutcome,
 };
 use pos_plugin_eval::{
     draft_outcome, draft_prediction, CalibrationReport, EvalPlugin, EvalReducer,
@@ -54,6 +55,7 @@ impl<T> TestValueExt<T> for Option<T> {
 }
 
 const EVIDENCE_EVENT: &str = "fixture.evidence";
+const PERSONA_EVENT: &str = "persona.evidence";
 const INTEGRITY: &str = "committed-range-integrity";
 const CALIBRATION: &str = "calibration-report";
 const REPORT: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0x41; 32]);
@@ -78,6 +80,30 @@ impl Plugin for EvidencePlugin {
             owned_event_types: vec![Kind::new(EVIDENCE_EVENT)],
             owned_entity_kinds: Vec::new(),
             has_driver: true,
+            has_reducer: false,
+        }
+    }
+}
+
+/// Owns one Persona-modality Event type, which is never public.
+struct PersonaEvidencePlugin {
+    id: PluginId,
+}
+
+impl Plugin for PersonaEvidencePlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "persona-evidence"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new(PERSONA_EVENT)],
+            owned_entity_kinds: Vec::new(),
+            has_driver: false,
             has_reducer: false,
         }
     }
@@ -312,6 +338,10 @@ fn assert_human_and_ai_evidence(store_config: StoreConfig) {
     let last = committed.last().test_ok();
     assert_eq!(human.ingress(), PipelineIngressV1::HumanProposedAction);
     assert_eq!(
+        human.observation_profile(),
+        ScheduledObservationProfileV1::NonParticipant
+    );
+    assert_eq!(
         human.committed_range().timeline_id(),
         session.timeline().id()
     );
@@ -324,6 +354,11 @@ fn assert_human_and_ai_evidence(store_config: StoreConfig) {
 
     let record = evaluate(&session, INTEGRITY, &exact());
     assert_eq!(record.evaluator(), INTEGRITY);
+    assert_eq!(
+        record.observation_profile(),
+        ScheduledObservationProfileV1::NonParticipant,
+        "an experiment record never claims participant authority"
+    );
     assert_eq!(record.committed_range(), human.committed_range());
     assert_eq!(record.projection_cut(), None, "event-only names no cut");
     assert_eq!(record.replay_claim(), ErasureReplayClaimV1::Exact);
@@ -346,6 +381,10 @@ fn assert_human_and_ai_evidence(store_config: StoreConfig) {
     ));
     let ai = session.last_pipeline_evidence().test_ok().clone();
     assert_eq!(ai.ingress(), PipelineIngressV1::ScheduledAiDriver);
+    assert_eq!(
+        ai.observation_profile(),
+        ScheduledObservationProfileV1::NonParticipant
+    );
     let range = ai.committed_range();
     assert_eq!(range.first().as_u64() + 1, range.last().as_u64());
     assert!(range.first() > human.committed_range().last());
@@ -407,6 +446,10 @@ fn calibration_report_waits_for_and_names_the_folding_cut() {
     let evidence = session.last_pipeline_evidence().test_ok().clone();
     let record = evaluate(&session, CALIBRATION, &exact());
     assert_eq!(record.evaluator(), CALIBRATION);
+    assert_eq!(
+        record.observation_profile(),
+        ScheduledObservationProfileV1::NonParticipant
+    );
     assert_eq!(record.committed_range(), evidence.committed_range());
     assert_eq!(record.projection_cut(), evidence.projection_cut());
     assert!(record
@@ -602,14 +645,6 @@ fn evaluators_cannot_mutate_the_world_widen_their_class_or_resubmit() {
         unavailable(&forged),
         Some(PipelineEvaluationUnavailableV1::InvalidEvaluatorOutput)
     );
-    assert_eq!(
-        PipelineEvaluationClassV1::CalibrationReport.scope(),
-        PipelineEvaluationScopeV1::StateDependent
-    );
-    assert_eq!(
-        PipelineEvaluationClassV1::EventIntegrity.scope(),
-        PipelineEvaluationScopeV1::EventOnly
-    );
 
     let tampered = evaluate(&session, "tampering", &exact());
     assert!(matches!(
@@ -698,6 +733,65 @@ fn closed_consent_scope_refuses_evaluation() {
         session.evaluate_pipeline_evidence(INTEGRITY, &exact()),
         Err(ExperimentError::ConsentRevokedV1)
     ));
+}
+
+#[test]
+fn evaluator_inputs_withhold_protected_committed_events() {
+    let fixture = Fixture::new();
+    let mut experiment = fixture.experiment("pipeline-protected", StoreConfig::Memory);
+    experiment
+        .register_generated_with_approver(
+            &PersonaEvidencePlugin {
+                id: PluginId::new(),
+            },
+            None,
+            None,
+            Some(Box::new(CountingApprover {
+                approvals: Arc::clone(&fixture.approvals),
+            })),
+            [Kind::new(PERSONA_EVENT)],
+        )
+        .test_ok();
+    let session = experiment.start().test_ok();
+    let authority = ConsentAuthority::new();
+    let token = authority.record_grant_on_timeline(
+        session.timeline().id(),
+        &ConsentGrantedV1 {
+            subject_id: fixture.actor,
+            grantee_id: EntityId::new(),
+            purpose: "pipeline-protected-evidence".to_owned(),
+            modalities: MODALITY_PERSONA,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        },
+    );
+    let mut session = session
+        .with_consent_authority(authority)
+        .with_protected_token(token);
+    session
+        .register_pipeline_evaluator(Box::new(CommittedRangeIntegrityEvaluatorV1))
+        .test_ok();
+
+    let protected = fixture.proposal(PERSONA_EVENT, CanonicalBytes::from_static(b"protected"));
+    assert_eq!(session.submit_action(&protected).test_ok(), 1);
+    let evidence = session.last_pipeline_evidence().test_ok();
+    assert_eq!(evidence.receipt().committed_events().len(), 1);
+    assert!(evidence.projection_cut().is_some());
+    assert!(session.source_events().test_ok().is_empty());
+
+    // The evaluator never sees the protected Event, so the range cannot be
+    // reported intact from the public view.
+    assert_eq!(
+        integrity(&evaluate(&session, INTEGRITY, &exact())),
+        Some(PipelineEventIntegrityV1 {
+            checked_events: 0,
+            intact: false,
+        })
+    );
 }
 
 // ── Fold failure ───────────────────────────────────────────────────────────

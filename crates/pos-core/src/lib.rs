@@ -282,6 +282,7 @@ pub use pipeline_admission::{
 };
 pub use pipeline_evidence::{
     PipelineCommitEvidenceV1, PipelineCommittedRangeV1, PipelineProjectionCutV1,
+    ScheduledObservationProfileV1,
 };
 pub use plugin::{
     ActionApprover, ActionRejected, Capability, Plugin, ProposedAction,

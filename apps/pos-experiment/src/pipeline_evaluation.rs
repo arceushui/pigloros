@@ -2,27 +2,41 @@
 //!
 //! An [`ExperimentSession`](crate::ExperimentSession) records one
 //! [`PipelineCommitEvidenceV1`] for the most recent committed human or AI
-//! attempt and binds it to the Projection cut that folded it. Evaluation then
-//! runs only through a [`PipelineEvaluatorV1`] Adapter the host registered
+//! attempt and binds it to the Projection cut that folded it. The evidence
+//! slot holds the last committed attempt only: each later commit replaces it,
+//! an attempt that commits nothing leaves it unchanged, and an earlier
+//! attempt can no longer be evaluated once replaced. Evaluation then runs
+//! only through a [`PipelineEvaluatorV1`] Adapter the host registered
 //! explicitly. There is no default evaluator: an unregistered name yields
 //! [`PipelineEvaluationUnavailableV1::MissingEvaluator`].
 //!
+//! An experiment session is a non-participant host (ADR-021 Revision 3,
+//! Decision 6). Its evidence and every [`PipelineEvaluationRecordV1`] carry
+//! [`ScheduledObservationProfileV1::NonParticipant`], so neither the
+//! evaluator input, the evaluation artifact, nor a Calibration Report ever
+//! claims ADR-059 participant authority. Rejecting a non-participant artifact
+//! presented as participant-authorized is owned by #321.
+//!
 //! Evaluation is advisory and non-authoritative. An evaluator receives only
-//! immutable copies of the committed range and, for state-dependent
-//! evaluation, the public source prefix folded through the named cut. It
-//! holds no store, registry, approver, admission, or policy capability, and
-//! its closed [`PipelineEvaluatorOutputV1`] cannot express an action, an
-//! Event draft, a Preference change, or a knowledge grant. Evaluation never
-//! resubmits a committed attempt.
+//! immutable copies of the public Events of the committed range and, for
+//! state-dependent evaluation, the public source prefix read through the
+//! named Projection cut; the host withholds consent, geographic, modality,
+//! Fork, and retention Events from both. It holds no store, registry,
+//! approver, admission, or policy capability, and its closed
+//! [`PipelineEvaluatorOutputV1`] cannot express an action, an Event draft, a
+//! Preference change, or a knowledge grant. Evaluation never resubmits a
+//! committed attempt.
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 
 use pos_core::{
     ArtifactRedactionStateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash,
     PipelineCommitEvidenceV1, PipelineCommittedRangeV1, PipelineProjectionCutV1,
-    ReplayClaimEvaluationV1, Seq,
+    ReplayClaimEvaluationV1, ScheduledObservationProfileV1, Seq,
 };
 use pos_plugin_eval::CalibrationReport;
+
+use crate::ExperimentError;
 
 /// Which committed evidence an evaluator depends on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,7 +49,7 @@ pub enum PipelineEvaluationScopeV1 {
 
 /// Separately classified evaluation artifacts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PipelineEvaluationClassV1 {
+enum PipelineEvaluationClassV1 {
     /// Event-only integrity of the committed range.
     EventIntegrity,
     /// A Plugin-defined state-dependent evaluation.
@@ -46,8 +60,7 @@ pub enum PipelineEvaluationClassV1 {
 
 impl PipelineEvaluationClassV1 {
     /// The evaluation scope that may produce this class.
-    #[must_use]
-    pub const fn scope(self) -> PipelineEvaluationScopeV1 {
+    const fn scope(self) -> PipelineEvaluationScopeV1 {
         match self {
             Self::EventIntegrity => PipelineEvaluationScopeV1::EventOnly,
             Self::StateEvaluation | Self::CalibrationReport => {
@@ -60,9 +73,12 @@ impl PipelineEvaluationClassV1 {
 /// Event-only integrity of one committed range against its receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PipelineEventIntegrityV1 {
-    /// Number of committed Events checked.
+    /// Number of committed public Events checked.
     pub checked_events: u64,
-    /// Whether every Event identity and Timeline sequence matched the receipt.
+    /// Whether every receipt Event was supplied with its identity and
+    /// Timeline sequence. A range holding a protected Event the host withheld
+    /// is never reported intact: its integrity cannot be established from the
+    /// public view.
     pub intact: bool,
 }
 
@@ -93,6 +109,10 @@ impl PipelineEvaluatorOutputV1 {
 }
 
 /// Immutable, minimized input supplied by the host to one evaluator.
+///
+/// It carries the evidence's [`ScheduledObservationProfileV1`] through
+/// [`Self::evidence`]; a non-participant input never presents its
+/// observations as participant-authorized.
 pub struct PipelineEvaluationInputV1<'a> {
     evidence: &'a PipelineCommitEvidenceV1,
     claim: &'a ReplayClaimEvaluationV1,
@@ -133,14 +153,14 @@ impl<'a> PipelineEvaluationInputV1<'a> {
         self.claim
     }
 
-    /// The Events of the committed range, in Timeline Order.
+    /// The public Events of the committed range, in Timeline Order.
     #[must_use]
     pub const fn committed_events(&self) -> &[Event] {
         self.committed_events
     }
 
-    /// Public source Events folded through the named Projection cut; empty
-    /// for an event-only evaluator.
+    /// Public source Events read through the named Projection cut, from the
+    /// first Timeline Event to the cut; empty for an event-only evaluator.
     #[must_use]
     pub const fn folded_prefix(&self) -> &[Event] {
         self.folded_prefix
@@ -188,10 +208,27 @@ pub enum PipelineEvaluationOutcomeV1 {
     Unavailable(PipelineEvaluationUnavailableV1),
 }
 
-/// Advisory evaluation record bound to its committed range and cut.
+impl From<PipelineEvaluatorOutputV1> for PipelineEvaluationOutcomeV1 {
+    /// Classify one evaluator output without checking its declared scope.
+    fn from(output: PipelineEvaluatorOutputV1) -> Self {
+        match output {
+            PipelineEvaluatorOutputV1::EventIntegrity(integrity) => Self::EventIntegrity(integrity),
+            PipelineEvaluatorOutputV1::StateEvaluation(digest) => Self::StateEvaluation(digest),
+            PipelineEvaluatorOutputV1::CalibrationReport(report) => Self::CalibrationReport(report),
+            PipelineEvaluatorOutputV1::InsufficientEvidence => Self::InsufficientEvidence,
+            PipelineEvaluatorOutputV1::EvidenceUnavailable => {
+                unavailable(PipelineEvaluationUnavailableV1::EvidenceUnavailable)
+            }
+        }
+    }
+}
+
+/// Advisory evaluation record bound to its committed range, cut, and
+/// observation profile.
 #[derive(Clone, Debug)]
 pub struct PipelineEvaluationRecordV1 {
     evaluator: &'static str,
+    observation_profile: ScheduledObservationProfileV1,
     committed_range: PipelineCommittedRangeV1,
     projection_cut: Option<PipelineProjectionCutV1>,
     replay_claim: ErasureReplayClaimV1,
@@ -204,6 +241,14 @@ impl PipelineEvaluationRecordV1 {
     #[must_use]
     pub const fn evaluator(&self) -> &'static str {
         self.evaluator
+    }
+
+    /// Observation profile of the evaluated evidence. A
+    /// [`ScheduledObservationProfileV1::NonParticipant`] record never claims
+    /// ADR-059 participant authority.
+    #[must_use]
+    pub const fn observation_profile(&self) -> ScheduledObservationProfileV1 {
+        self.observation_profile
     }
 
     /// The committed Event range the evaluation is bound to.
@@ -320,13 +365,20 @@ pub(crate) struct PreparedPipelineEvaluationV1<'a> {
 }
 
 impl PipelineEvaluatorRegistryV1 {
-    /// Register one evaluator; a duplicate name is refused.
-    pub(crate) fn register(&mut self, evaluator: Box<dyn PipelineEvaluatorV1>) -> bool {
+    /// Register one evaluator.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::DuplicatePipelineEvaluator`] when an
+    /// evaluator with the same name is already registered.
+    pub(crate) fn register(
+        &mut self,
+        evaluator: Box<dyn PipelineEvaluatorV1>,
+    ) -> Result<(), ExperimentError> {
         match self.evaluators.entry(evaluator.name()) {
-            std::collections::btree_map::Entry::Occupied(_) => false,
-            std::collections::btree_map::Entry::Vacant(slot) => {
+            Entry::Occupied(_) => Err(ExperimentError::DuplicatePipelineEvaluator),
+            Entry::Vacant(slot) => {
                 slot.insert(evaluator);
-                true
+                Ok(())
             }
         }
     }
@@ -383,7 +435,8 @@ impl PreparedPipelineEvaluationV1<'_> {
         self.state_dependent() && self.cut().is_none()
     }
 
-    /// The last Event of the folded prefix this evaluation reads, if any.
+    /// The last Event of the public source prefix this evaluation reads
+    /// through its cut, if any.
     pub(crate) fn folded_through(&self) -> Option<Seq> {
         self.cut().map(PipelineProjectionCutV1::folded_through)
     }
@@ -405,23 +458,7 @@ impl PreparedPipelineEvaluationV1<'_> {
         let outcome = if output.class().is_some_and(|class| class.scope() != scope) {
             unavailable(PipelineEvaluationUnavailableV1::InvalidEvaluatorOutput)
         } else {
-            match output {
-                PipelineEvaluatorOutputV1::EventIntegrity(integrity) => {
-                    PipelineEvaluationOutcomeV1::EventIntegrity(integrity)
-                }
-                PipelineEvaluatorOutputV1::StateEvaluation(digest) => {
-                    PipelineEvaluationOutcomeV1::StateEvaluation(digest)
-                }
-                PipelineEvaluatorOutputV1::CalibrationReport(report) => {
-                    PipelineEvaluationOutcomeV1::CalibrationReport(report)
-                }
-                PipelineEvaluatorOutputV1::InsufficientEvidence => {
-                    PipelineEvaluationOutcomeV1::InsufficientEvidence
-                }
-                PipelineEvaluatorOutputV1::EvidenceUnavailable => {
-                    unavailable(PipelineEvaluationUnavailableV1::EvidenceUnavailable)
-                }
-            }
+            output.into()
         };
         record(
             self.evaluator.name(),
@@ -459,6 +496,7 @@ const fn record(
 ) -> PipelineEvaluationRecordV1 {
     PipelineEvaluationRecordV1 {
         evaluator,
+        observation_profile: evidence.observation_profile(),
         committed_range: evidence.committed_range(),
         projection_cut,
         replay_claim: claim.replay_claim(),

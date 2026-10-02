@@ -17,6 +17,7 @@ use pos_core::{
     state::{Reducer, State},
     store::EventStore,
     store::SeqRange,
+    ErasureArtifactClassV1, ErasureReferenceV1, ReplayClaimEvaluationV1,
 };
 use serde::{Deserialize, Serialize};
 
@@ -177,10 +178,7 @@ pub struct CalibrationReport {
 
 impl CalibrationReport {
     /// Consume the host-owned artifact evaluation without strengthening this report.
-    pub const fn apply_artifact_evaluation(
-        &mut self,
-        evaluation: &pos_core::ReplayClaimEvaluationV1,
-    ) {
+    pub const fn apply_artifact_evaluation(&mut self, evaluation: &ReplayClaimEvaluationV1) {
         self.replay_claim = self.replay_claim.weakened_to(evaluation.replay_claim());
         self.redaction_state = self
             .redaction_state
@@ -395,14 +393,11 @@ fn compute_ece(bins: &[ReliabilityBin], total: u64) -> f64 {
 pub fn compute_report(
     store: &dyn EventStore,
     timeline_id: TimelineId,
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    artifact_digest: ErasureReferenceV1,
+    evaluation: &ReplayClaimEvaluationV1,
 ) -> Result<CalibrationReport, EvalError> {
     evaluation
-        .require_authoritative_use(
-            pos_core::ErasureArtifactClassV1::CalibrationReport,
-            artifact_digest,
-        )
+        .require_authoritative_use(ErasureArtifactClassV1::CalibrationReport, artifact_digest)
         .map_err(|_| EvalError::ArtifactUnavailable)
         .and_then(|()| compute_report_authorized(store, timeline_id))
 }
@@ -418,14 +413,11 @@ pub fn compute_report(
 /// authoritative, or [`EvalError::Decode`] if a payload cannot be decoded.
 pub fn compute_report_from_events(
     events: &[Event],
-    artifact_digest: pos_core::ErasureReferenceV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
+    artifact_digest: ErasureReferenceV1,
+    evaluation: &ReplayClaimEvaluationV1,
 ) -> Result<CalibrationReport, EvalError> {
     evaluation
-        .require_authoritative_use(
-            pos_core::ErasureArtifactClassV1::CalibrationReport,
-            artifact_digest,
-        )
+        .require_authoritative_use(ErasureArtifactClassV1::CalibrationReport, artifact_digest)
         .map_err(|_| EvalError::ArtifactUnavailable)
         .and_then(|()| report_from_events(events))
 }
