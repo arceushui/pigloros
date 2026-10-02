@@ -26,7 +26,7 @@ use pos_runtime::{
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore, StoreConfig};
 
 /// Unwrap a fixture step, failing the runner with the unexpected error.
-pub(super) trait TestOk<T> {
+pub trait TestOk<T> {
     fn test_ok(self) -> T;
 }
 
@@ -45,7 +45,8 @@ impl<T> TestOk<T> for Option<T> {
 }
 
 /// The error of a step that must fail, or a runner failure if it succeeds.
-pub(super) fn expect_err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
+#[must_use]
+pub fn expect_err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
     result.map_or_else(
         |error| error,
         |value| std::panic::resume_unwind(Box::new(format!("expected a failure, got {value:?}"))),
@@ -53,7 +54,8 @@ pub(super) fn expect_err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
 }
 
 /// The capture tag of a scheduled observation profile.
-pub(super) const fn profile_tag(profile: ScheduledObservationProfileV1) -> &'static str {
+#[must_use]
+pub const fn profile_tag(profile: ScheduledObservationProfileV1) -> &'static str {
     match profile {
         ScheduledObservationProfileV1::NonParticipant => "non-participant",
         ScheduledObservationProfileV1::ParticipantBound => "participant-bound",
@@ -61,7 +63,8 @@ pub(super) const fn profile_tag(profile: ScheduledObservationProfileV1) -> &'sta
 }
 
 /// `MemoryStore` and in-memory `SQLite`, each bound to an open erasure gate.
-pub(super) fn stores() -> Vec<(&'static str, Box<dyn ScheduledAdmissionStoreV1>)> {
+#[must_use]
+pub fn stores() -> Vec<(&'static str, Box<dyn ScheduledAdmissionStoreV1>)> {
     let mut stores: Vec<(&'static str, Box<dyn ScheduledAdmissionStoreV1>)> = vec![
         ("memory", Box::new(MemoryStore::new())),
         ("sqlite", Box::new(SqliteStore::open(":memory:").test_ok())),
@@ -75,7 +78,8 @@ pub(super) fn stores() -> Vec<(&'static str, Box<dyn ScheduledAdmissionStoreV1>)
 }
 
 /// A registry bound to an open erasure gate and, when given, a consent authority.
-pub(super) fn gated_registry(authority: Option<&ConsentAuthority>) -> PluginRegistry {
+#[must_use]
+pub fn gated_registry(authority: Option<&ConsentAuthority>) -> PluginRegistry {
     let mut registry = PluginRegistry::new()
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
     if let Some(authority) = authority {
@@ -85,11 +89,12 @@ pub(super) fn gated_registry(authority: Option<&ConsentAuthority>) -> PluginRegi
 }
 
 /// The registered Calibration Report artifact used by every evaluation.
-pub(super) const REPORT: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0x41; 32]);
+pub const REPORT: ErasureReferenceV1 = ErasureReferenceV1::from_digest([0x41; 32]);
 
 /// `MemoryStore` and a `SQLite` file for an experiment session; the
 /// returned directory keeps the file alive.
-pub(super) fn experiment_stores() -> (tempfile::TempDir, Vec<(&'static str, StoreConfig)>) {
+#[must_use]
+pub fn experiment_stores() -> (tempfile::TempDir, Vec<(&'static str, StoreConfig)>) {
     let directory = tempfile::tempdir().test_ok();
     let path = directory
         .path()
@@ -106,7 +111,8 @@ pub(super) fn experiment_stores() -> (tempfile::TempDir, Vec<(&'static str, Stor
 }
 
 /// An exact, retained host claim for the [`REPORT`] artifact.
-pub(super) fn exact_claim() -> ReplayClaimEvaluationV1 {
+#[must_use]
+pub fn exact_claim() -> ReplayClaimEvaluationV1 {
     ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::Exact,
         &[ArtifactClaimInputV1 {
@@ -127,7 +133,8 @@ pub(super) fn exact_claim() -> ReplayClaimEvaluationV1 {
 }
 
 /// A Persona-modality consent capability for `subject` on `timeline`.
-pub(super) fn persona_token(
+#[must_use]
+pub fn persona_token(
     authority: &ConsentAuthority,
     timeline: TimelineId,
     subject: EntityId,
@@ -150,12 +157,14 @@ pub(super) fn persona_token(
 }
 
 /// Every committed Event of `timeline`.
-pub(super) fn events(store: &dyn ScheduledAdmissionStoreV1, timeline: TimelineId) -> Vec<Event> {
+#[must_use]
+pub fn events(store: &dyn ScheduledAdmissionStoreV1, timeline: TimelineId) -> Vec<Event> {
     store.read(timeline, SeqRange::all()).test_ok()
 }
 
 /// The committed Events of one type.
-pub(super) fn of_type<'a>(events: &'a [Event], event_type: &str) -> Vec<&'a Event> {
+#[must_use]
+pub fn of_type<'a>(events: &'a [Event], event_type: &str) -> Vec<&'a Event> {
     events
         .iter()
         .filter(|event| event.event_type.as_str() == event_type)
@@ -164,7 +173,11 @@ pub(super) fn of_type<'a>(events: &'a [Event], event_type: &str) -> Vec<&'a Even
 
 /// Stage one anchored pass over the complete committed prefix, protected
 /// by `token` when one is given.
-pub(super) fn stage(
+///
+/// # Errors
+///
+/// Returns the runtime error that discarded the staged pass.
+pub fn stage(
     registry: &mut PluginRegistry,
     store: &dyn ScheduledAdmissionStoreV1,
     timeline: TimelineId,
@@ -184,7 +197,11 @@ pub(super) fn stage(
 
 /// Observe, stage and atomically admit one scheduled pass through the local
 /// host. Returns the number of committed drafts.
-pub(super) fn pass(
+///
+/// # Errors
+///
+/// Returns the runtime error that discarded or refused the pass.
+pub fn pass(
     registry: &mut PluginRegistry,
     store: &mut dyn ScheduledAdmissionStoreV1,
     timeline: TimelineId,
@@ -202,15 +219,16 @@ pub(super) fn pass(
 }
 
 /// A fixture Plugin that owns a fixed set of Event types.
-pub(super) struct FixturePlugin {
-    pub(super) id: PluginId,
-    pub(super) name: &'static str,
-    pub(super) owned: Vec<&'static str>,
-    pub(super) has_driver: bool,
+pub struct FixturePlugin {
+    pub id: PluginId,
+    pub name: &'static str,
+    pub owned: Vec<&'static str>,
+    pub has_driver: bool,
 }
 
 impl FixturePlugin {
-    pub(super) fn new(name: &'static str, owned: &[&'static str], has_driver: bool) -> Self {
+    #[must_use]
+    pub fn new(name: &'static str, owned: &[&'static str], has_driver: bool) -> Self {
         Self {
             id: PluginId::new(),
             name,
@@ -240,7 +258,7 @@ impl Plugin for FixturePlugin {
 
 /// The owning domain policy. It counts every invocation and denies the
 /// payload `deny`.
-pub(super) struct CountingApprover(pub(super) Arc<AtomicUsize>);
+pub struct CountingApprover(pub Arc<AtomicUsize>);
 
 impl ActionApprover for CountingApprover {
     fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
@@ -258,17 +276,18 @@ impl ActionApprover for CountingApprover {
 
 /// A scheduled Driver that counts its invocations and, while enabled,
 /// emits a fixed draft vector or fails.
-pub(super) struct ScriptedDriver {
-    pub(super) name: &'static str,
-    pub(super) drafts: Vec<EventDraft>,
-    pub(super) steps: Arc<AtomicUsize>,
-    pub(super) aborts: Arc<AtomicUsize>,
-    pub(super) enabled: Arc<AtomicBool>,
-    pub(super) failing: Arc<AtomicBool>,
+pub struct ScriptedDriver {
+    pub name: &'static str,
+    pub drafts: Vec<EventDraft>,
+    pub steps: Arc<AtomicUsize>,
+    pub aborts: Arc<AtomicUsize>,
+    pub enabled: Arc<AtomicBool>,
+    pub failing: Arc<AtomicBool>,
 }
 
 impl ScriptedDriver {
-    pub(super) fn new(name: &'static str, drafts: Vec<EventDraft>) -> Self {
+    #[must_use]
+    pub fn new(name: &'static str, drafts: Vec<EventDraft>) -> Self {
         Self {
             name,
             drafts,
@@ -306,7 +325,8 @@ impl Driver for ScriptedDriver {
 }
 
 /// One fixed draft of `event_type` for `entity`.
-pub(super) fn draft(entity: EntityId, event_type: &str, payload: &'static [u8]) -> EventDraft {
+#[must_use]
+pub fn draft(entity: EntityId, event_type: &str, payload: &'static [u8]) -> EventDraft {
     EventDraft::new(
         entity,
         Kind::new(event_type),
@@ -315,7 +335,7 @@ pub(super) fn draft(entity: EntityId, event_type: &str, payload: &'static [u8]) 
 }
 
 /// A port that commits through the real store but loses the acknowledgement.
-pub(super) struct LostOutcomePort<'a>(pub(super) &'a mut dyn ScheduledAdmissionStoreV1);
+pub struct LostOutcomePort<'a>(pub &'a mut dyn ScheduledAdmissionStoreV1);
 
 impl PipelineAdmissionPortV1 for LostOutcomePort<'_> {
     fn admit_pipeline_batch(
@@ -347,7 +367,7 @@ impl PipelineAdmissionPortV1 for LostOutcomePort<'_> {
 }
 
 /// A port whose store write fails after a successful receipt lookup.
-pub(super) struct FailingWritePort<'a>(pub(super) &'a mut dyn ScheduledAdmissionStoreV1);
+pub struct FailingWritePort<'a>(pub &'a mut dyn ScheduledAdmissionStoreV1);
 
 impl PipelineAdmissionPortV1 for FailingWritePort<'_> {
     fn admit_pipeline_batch(
@@ -378,8 +398,8 @@ impl PipelineAdmissionPortV1 for FailingWritePort<'_> {
 
 /// A port that records each basis it is offered and admits none of them.
 #[derive(Default)]
-pub(super) struct RecordingPort {
-    pub(super) offered: Vec<PipelineAdmissionBasisV1>,
+pub struct RecordingPort {
+    pub offered: Vec<PipelineAdmissionBasisV1>,
 }
 
 impl PipelineAdmissionPortV1 for RecordingPort {

@@ -203,7 +203,8 @@ fn incumbent_registry() -> PluginRegistry {
 
 /// PCF-REG-001: a second claimant of an owned type is rejected on every
 /// public registration path and leaves the registry unchanged.
-pub(super) fn second_claimant_rejected() -> Capture {
+#[must_use]
+pub fn second_claimant_rejected() -> Capture {
     let mut capture = Capture::default();
     let probes = ["alpha.only", "shared.type", "beta.only"];
     for path in PATHS {
@@ -223,7 +224,8 @@ pub(super) fn second_claimant_rejected() -> Capture {
 
 /// PCF-REG-002: a declaration that lists one type twice is rejected on every
 /// public registration path and leaves the registry unchanged.
-pub(super) fn duplicate_declaration_rejected() -> Capture {
+#[must_use]
+pub fn duplicate_declaration_rejected() -> Capture {
     let mut capture = Capture::default();
     let probes = ["dup.type"];
     for path in PATHS {
@@ -243,7 +245,8 @@ pub(super) fn duplicate_declaration_rejected() -> Capture {
 
 /// PCF-REG-003: a claim on a non-claimable host type is rejected on every
 /// public registration path and leaves the registry unchanged.
-pub(super) fn host_type_not_claimable() -> Capture {
+#[must_use]
+pub fn host_type_not_claimable() -> Capture {
     let mut capture = Capture::default();
     let probes = [EVENT_TYPE_CONSENT_REVOKED_V1];
     for path in PATHS {
@@ -276,7 +279,8 @@ fn race(first: &dyn Plugin, second: &dyn Plugin) -> (String, Vec<String>) {
 
 /// PCF-REG-004: overlapping Plugins fail closed whatever their registration
 /// order.
-pub(super) fn order_independent() -> Capture {
+#[must_use]
+pub fn order_independent() -> Capture {
     let mut capture = Capture::default();
     let alpha = FixturePlugin::new("alpha", &["alpha.only", "shared.type"], false);
     let beta = FixturePlugin::new("beta", &["beta.only", "shared.type"], false);
@@ -292,7 +296,8 @@ pub(super) fn order_independent() -> Capture {
 /// PCF-REG-005: the latent first-party overlaps fail closed in either order:
 /// two `AgentPlugin` registrations, two declarers of `world.action.v1`, and
 /// two declarers of `society.signal`.
-pub(super) fn latent_overlaps_fail_closed() -> Capture {
+#[must_use]
+pub fn latent_overlaps_fail_closed() -> Capture {
     let mut capture = Capture::default();
     let (agent, agent_owner) = race(&AgentPlugin::new(), &AgentPlugin::new());
     capture.record("none", "agent.second", agent);
@@ -332,7 +337,8 @@ fn recorder_description(registry: &PluginRegistry) -> Option<String> {
 
 /// PCF-REG-006: one `AgentPlugin` claims the Recorder type and keeps the
 /// host schema; a second claimant is rejected.
-pub(super) fn recorder_single_claimant() -> Capture {
+#[must_use]
+pub fn recorder_single_claimant() -> Capture {
     let mut capture = Capture::default();
     let mut registry = gated_registry(None);
     let host_schema = recorder_description(&registry);
@@ -360,7 +366,8 @@ pub(super) fn recorder_single_claimant() -> Capture {
 }
 
 /// PCF-EVAL-001: Persona owns no `eval.*` type.
-pub(super) fn persona_owns_no_eval_type() -> Capture {
+#[must_use]
+pub fn persona_owns_no_eval_type() -> Capture {
     let mut capture = Capture::default();
     let mut owned: Vec<String> = PersonaPlugin::new()
         .capability()

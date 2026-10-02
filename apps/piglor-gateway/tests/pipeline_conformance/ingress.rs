@@ -173,7 +173,8 @@ fn range(evidence: &PipelineCommitEvidenceV1) -> String {
 
 /// PCF-ING-001: a human request and an AI scheduled pass commit the same
 /// action meaning through their own ingress and trust paths.
-pub(super) fn ingress_parity() -> Capture {
+#[must_use]
+pub fn ingress_parity() -> Capture {
     let mut capture = Capture::default();
     let (_directory, configs) = experiment_stores();
     for (store, config) in configs {
@@ -246,7 +247,8 @@ pub(super) fn ingress_parity() -> Capture {
 
 /// PCF-ING-002: the human path commits only through host admission and
 /// returns the store's receipt.
-pub(super) fn human_admission_receipt() -> Capture {
+#[must_use]
+pub fn human_admission_receipt() -> Capture {
     let mut capture = Capture::default();
     for (store, backend) in stores() {
         let mut fixture = host_fixture(backend, None);
@@ -281,7 +283,8 @@ pub(super) fn human_admission_receipt() -> Capture {
 /// PCF-FP-002: domain approval precedes the store comparison, which checks
 /// revisions, then the observation, then the budget; a store write failure
 /// is typed. Nothing commits.
-pub(super) fn store_failure_precedence() -> Capture {
+#[must_use]
+pub fn store_failure_precedence() -> Capture {
     let mut capture = Capture::default();
     for (store, backend) in stores() {
         let mut fixture = host_fixture(backend, None);
@@ -346,7 +349,8 @@ pub(super) fn store_failure_precedence() -> Capture {
 
 /// PCF-FP-003: a failing Driver discards every Driver's output of the
 /// scheduled pass; the next pass commits the whole batch in schedule order.
-pub(super) fn scheduled_pass_discard() -> Capture {
+#[must_use]
+pub fn scheduled_pass_discard() -> Capture {
     let mut capture = Capture::default();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("discard").test_ok().id();
@@ -399,7 +403,8 @@ pub(super) fn scheduled_pass_discard() -> Capture {
 
 /// PCF-REC-001: after a disconnect following the commit, an exact retry on
 /// the restarted store returns the original receipt without approval.
-pub(super) fn disconnect_after_commit() -> Capture {
+#[must_use]
+pub fn disconnect_after_commit() -> Capture {
     let mut capture = Capture::default();
     let directory = tempfile::tempdir().test_ok();
     let path = directory
@@ -456,7 +461,8 @@ pub(super) fn disconnect_after_commit() -> Capture {
 
 /// PCF-REC-002: a lost commit acknowledgement on either ingress path is
 /// recovered from committed evidence without rerunning approval or a Driver.
-pub(super) fn lost_acknowledgement_recovery() -> Capture {
+#[must_use]
+pub fn lost_acknowledgement_recovery() -> Capture {
     let mut capture = Capture::default();
     for (store, backend) in stores() {
         let mut fixture = host_fixture(backend, None);
@@ -554,7 +560,8 @@ pub(super) fn lost_acknowledgement_recovery() -> Capture {
 
 /// PCF-REC-003: an exact retry returns the retained receipt without
 /// approval; the same key for another attempt is a typed conflict.
-pub(super) fn exact_retry_and_conflict() -> Capture {
+#[must_use]
+pub fn exact_retry_and_conflict() -> Capture {
     let mut capture = Capture::default();
     for (store, backend) in stores() {
         let mut fixture = host_fixture(backend, None);
@@ -600,7 +607,8 @@ pub(super) fn exact_retry_and_conflict() -> Capture {
 
 /// PCF-RPL-001: Replay folds committed Events and never resubmits a
 /// proposal to its approver or reruns a Driver.
-pub(super) fn replay_never_resubmits() -> Capture {
+#[must_use]
+pub fn replay_never_resubmits() -> Capture {
     let mut capture = Capture::default();
     for (store, backend) in stores() {
         let entity = EntityId::new();
@@ -664,7 +672,8 @@ pub(super) fn replay_never_resubmits() -> Capture {
 
 /// PCF-EVL-001: evaluation names its range and cut, carries the
 /// non-participant profile, and cannot append, approve or change evidence.
-pub(super) fn evaluation_non_authority() -> Capture {
+#[must_use]
+pub fn evaluation_non_authority() -> Capture {
     let mut capture = Capture::default();
     let (_directory, configs) = experiment_stores();
     for (store, config) in configs {
