@@ -38,6 +38,8 @@ const GUARD_WAIT: Fence = Fence::WaitBudgetExceeded(WaitPhaseV1::Guard);
 const SEQ_SQL: &str = "SELECT reservation_seq FROM trusted_clock_high_water";
 const LATCHED_SQL: &str = "SELECT latched FROM trusted_clock_overrun_latch";
 const ACK_SQL: &str = "SELECT ack_seq FROM trusted_clock_overrun_acknowledgements";
+const ACK_INSERT: &str = "INSERT INTO trusted_clock_overrun_acknowledgements VALUES
+    (1, 1, zeroblob(32), zeroblob(32), zeroblob(32), 0, 1)";
 
 fn ok<T, Error: Debug>(value: Result<T, Error>) -> T {
     value.unwrap_or_else(|error| {
@@ -268,14 +270,56 @@ fn unreadable_or_mistyped_rows_fail_closed() -> TestResult {
              last_overrun_at_micros);
          INSERT INTO trusted_clock_overrun_latch VALUES (1, 'one', 0, 0, 0, 0, 0)",
     ];
-    for corruption in corruptions {
+    let expected = [
+        Fence::DurabilityUnavailable,
+        Fence::DurabilityUnavailable,
+        Fence::HighWaterCorrupt,
+        Fence::HighWaterCorrupt,
+    ];
+    for (corruption, expected) in corruptions.into_iter().zip(expected) {
         let directory = TempDir::new()?;
         let mut authority = initialized(&directory);
         let raw = Connection::open(authority_path(&directory))?;
         raw.execute_batch(corruption)?;
         let refused = reserve(&mut authority, T0).err();
-        assert_eq!(refused, Some(Fence::HighWaterCorrupt));
+        assert_eq!(refused, Some(expected));
     }
+    Ok(())
+}
+
+#[test]
+fn acknowledgement_rows_are_append_only() -> TestResult {
+    let directory = TempDir::new()?;
+    let path = authority_path(&directory);
+    let _authority = SqliteTrustedClockAuthorityV1::open(&path)?;
+    let raw = Connection::open(&path)?;
+    raw.execute_batch(ACK_INSERT)?;
+    let replace = ACK_INSERT.replace("INSERT", "INSERT OR REPLACE");
+    let rewrites = [
+        "UPDATE trusted_clock_overrun_acknowledgements SET reason_code = 2",
+        "DELETE FROM trusted_clock_overrun_acknowledgements",
+        replace.as_str(),
+    ];
+    for rewrite in rewrites {
+        let refused = raw
+            .execute_batch(rewrite)
+            .err()
+            .map(|error| error.to_string());
+        let message = refused.unwrap_or_default();
+        assert!(message.contains("append-only"), "{rewrite}: {message}");
+    }
+    assert_eq!(integer(&raw, ACK_SQL), 1);
+    let reason = integer(
+        &raw,
+        "SELECT reason_code FROM trusted_clock_overrun_acknowledgements",
+    );
+    assert_eq!(reason, 1);
+    raw.execute_batch(&ACK_INSERT.replace("(1,", "(2,"))?;
+    let count = integer(
+        &raw,
+        "SELECT count(*) FROM trusted_clock_overrun_acknowledgements",
+    );
+    assert_eq!(count, 2);
     Ok(())
 }
 

@@ -62,6 +62,8 @@ struct MemoryTransactionV1 {
 /// Every handle from [`Self::handle`] shares one authority lock and one set of
 /// rows, so reservations and guards on different handles serialize exactly as
 /// `SQLite` connections on one file do. Durability is the identity's lifetime.
+/// Acknowledgements are append-only: a commit only extends them, and no
+/// method updates or removes one.
 #[derive(Debug, Default)]
 pub struct MemoryTrustedClockAuthorityV1 {
     shared: Arc<MemoryAuthorityV1>,

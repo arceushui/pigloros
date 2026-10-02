@@ -30,6 +30,15 @@ ALLOWED = {
     "crates/pos-state/src/imports.rs": "use pos_core::trusted_clock::ReleaseGuardPortV1;\n",
     "crates/pos-store/src/alias.rs": "use pos_core::trusted_clock::ReleaseGuardPortV1 as Guard;\n",
     "target/debug/build/generated.rs": STORE_IMPL,
+    "crates/pos-state/src/nested.rs": (
+        "/* outer /* inner */ impl TrustedClockStorePortV1 for Forged {} */\n"
+    ),
+    "crates/pos-state/src/lifetime.rs": (
+        "fn f<'a>(_: &'a str) {}\n// impl ReleaseGuardPortV1 for Forged {}\n"
+    ),
+    "crates/pos-state/src/quoted_doc.rs": (
+        "/// It's \"quoted\": impl ReleaseGuardPortV1 for Forged {}\nfn f() {}\n"
+    ),
 }
 
 REJECTED = {
@@ -40,6 +49,28 @@ REJECTED = {
     "crates/x/src/target/forged.rs": STORE_IMPL,
     "crates/pos-state/src/aliased.rs": ALIASED_IMPL,
     "crates/pos-state/src/renamed.rs": "use pos_core::trusted_clock::TrustedClockStorePortV1 as S;\n",
+    "crates/pos-state/src/string_opener.rs": (
+        'const S: &str = "/*"; ' + STORE_IMPL.rstrip("\n") + " // */\n"
+    ),
+    "crates/pos-state/src/url.rs": 'const U: &str = "http://x"; ' + GUARD_IMPL,
+    "crates/pos-state/src/escaped.rs": (
+        'const S: &str = "\\"/*"; ' + GUARD_IMPL.rstrip("\n") + " // */\n"
+    ),
+    "crates/pos-state/src/raw_string.rs": (
+        'const S: &str = r#"/* "still" raw"#;\n' + STORE_IMPL + 'const T: &str = "*/";\n'
+    ),
+    "crates/pos-state/src/byte_string.rs": (
+        'const S: &[u8] = br"/*";\n' + GUARD_IMPL + "// */\n"
+    ),
+    "crates/pos-state/src/char_quote.rs": (
+        "const C: char = '\"'; const S: &str = \"/*\"; " + STORE_IMPL.rstrip("\n") + " // */\n"
+    ),
+    "crates/pos-state/src/char_escape.rs": (
+        "const C: char = '\\''; const S: &str = \"/*\"; " + GUARD_IMPL.rstrip("\n") + " // */\n"
+    ),
+    "crates/pos-state/src/byte_char.rs": (
+        "const C: u8 = b'\"'; const S: &str = \"/*\"; " + GUARD_IMPL.rstrip("\n") + " // */\n"
+    ),
 }
 
 

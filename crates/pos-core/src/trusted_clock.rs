@@ -15,17 +15,17 @@
 //!
 //! The handoff token cannot be constructed outside this module:
 //!
-//! ```compile_fail
+//! ```compile_fail,E0451
 //! let _token = pos_core::trusted_clock::HandoffTokenV1 { _private: () };
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0624
 //! let _token = pos_core::trusted_clock::HandoffTokenV1::mint();
 //! ```
 //!
 //! Staged output exposes no accessor:
 //!
-//! ```compile_fail
+//! ```compile_fail,E0616
 //! use pos_core::trusted_clock::{StagedArtifactBytesV1, StagedProtectedOutputV1};
 //! let staged = StagedProtectedOutputV1::stage(StagedArtifactBytesV1::new(vec![1]));
 //! let _bytes = staged.value;
@@ -33,7 +33,7 @@
 //!
 //! Handoff targets and time sources are sealed:
 //!
-//! ```compile_fail
+//! ```compile_fail,E0277
 //! struct Forged;
 //! impl pos_core::trusted_clock::ProtectedHandoffTargetV1 for Forged {
 //!     type Committed = ();
@@ -41,7 +41,7 @@
 //! }
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0277
 //! use pos_core::trusted_clock::{TrustedClockErrorV1, TrustedWallSourceV1};
 //! struct Forged;
 //! impl TrustedWallSourceV1 for Forged {
@@ -60,7 +60,7 @@
 //!
 //! Fence values cannot be forged:
 //!
-//! ```compile_fail
+//! ```compile_fail,E0451
 //! let _expiries = pos_core::trusted_clock::ApplicableExpiriesV1 {
 //!     domain: [0; 16],
 //!     reservation_seq: 0,
@@ -68,7 +68,7 @@
 //! };
 //! ```
 //!
-//! ```compile_fail
+//! ```compile_fail,E0451
 //! let _use = pos_core::trusted_clock::AuthorizedArtifactUseV1 { value: (), overrun: None };
 //! ```
 //!
@@ -153,7 +153,7 @@ pub enum TrustedClockErrorV1 {
     SourceUnavailable,
     /// A record row is missing in an initialized catalog.
     HighWaterMissing,
-    /// A record row failed a constraint, could not be read, or is duplicated.
+    /// A record row failed a constraint, could not be decoded, or is duplicated.
     HighWaterCorrupt,
     /// A record carries a format version other than 1.
     UnsupportedFormat,
@@ -198,6 +198,8 @@ pub enum TrustedClockPortErrorV1 {
     Busy,
     /// Any other storage failure.
     Storage,
+    /// A stored row was read but could not be decoded into its record type.
+    Corrupt,
 }
 
 /// Kind of a detected post-handoff overrun.
@@ -651,7 +653,8 @@ pub trait TrustedClockStorePortV1 {
     /// Read every stored row inside the open transaction.
     ///
     /// # Errors
-    /// Returns a port error when a row cannot be read or decoded.
+    /// Returns [`TrustedClockPortErrorV1::Corrupt`] when a row cannot be
+    /// decoded, or another port error when it cannot be read.
     fn read_rows(&mut self) -> Result<TrustedClockRowsV1, TrustedClockPortErrorV1>;
 
     /// Generate 16 fresh random clock-domain bytes.
@@ -709,7 +712,8 @@ pub trait ReleaseGuardPortV1 {
     /// Re-read every stored row under the held lock.
     ///
     /// # Errors
-    /// Returns a port error when a row cannot be read or decoded.
+    /// Returns [`TrustedClockPortErrorV1::Corrupt`] when a row cannot be
+    /// decoded, or another port error when it cannot be read.
     fn reread_rows(&mut self) -> Result<TrustedClockRowsV1, TrustedClockPortErrorV1>;
 
     /// Roll back the release transaction and release the lock.
@@ -790,10 +794,6 @@ const fn validate_latch(
     }
 }
 
-const fn read_error(_: TrustedClockPortErrorV1) -> TrustedClockErrorV1 {
-    TrustedClockErrorV1::HighWaterCorrupt
-}
-
 const fn write_error(_: TrustedClockPortErrorV1) -> TrustedClockErrorV1 {
     TrustedClockErrorV1::ReservationCommitFailed
 }
@@ -802,11 +802,23 @@ const fn durability_error(_: TrustedClockPortErrorV1) -> TrustedClockErrorV1 {
     TrustedClockErrorV1::DurabilityUnavailable
 }
 
-const fn wait_error(error: TrustedClockPortErrorV1, phase: WaitPhaseV1) -> TrustedClockErrorV1 {
+/// Map a lock or read failure: a busy lock is charged to the wait budget of
+/// `phase`, an undecodable row is corrupt, and any other storage failure
+/// leaves the authority store unavailable.
+const fn port_outcome(error: TrustedClockPortErrorV1, phase: WaitPhaseV1) -> TrustedClockErrorV1 {
     match error {
         TrustedClockPortErrorV1::Busy => TrustedClockErrorV1::WaitBudgetExceeded(phase),
         TrustedClockPortErrorV1::Storage => TrustedClockErrorV1::DurabilityUnavailable,
+        TrustedClockPortErrorV1::Corrupt => TrustedClockErrorV1::HighWaterCorrupt,
     }
+}
+
+const fn reservation_port_error(error: TrustedClockPortErrorV1) -> TrustedClockErrorV1 {
+    port_outcome(error, WaitPhaseV1::Reservation)
+}
+
+const fn guard_port_error(error: TrustedClockPortErrorV1) -> TrustedClockErrorV1 {
+    port_outcome(error, WaitPhaseV1::Guard)
 }
 
 fn sample_trusted(wall: &mut dyn TrustedWallSourceV1) -> Result<i64, TrustedClockErrorV1> {
@@ -895,7 +907,7 @@ fn begin_reservation_tx(
 ) -> Result<(), TrustedClockErrorV1> {
     store
         .begin_immediate(timeout)
-        .map_err(|error| wait_error(error, WaitPhaseV1::Reservation))
+        .map_err(reservation_port_error)
 }
 
 fn require_durability(store: &mut dyn TrustedClockStorePortV1) -> Result<(), TrustedClockErrorV1> {
@@ -1015,7 +1027,7 @@ fn reserve_in_transaction(
     wall: &mut dyn TrustedWallSourceV1,
     g0: MonotonicMarkV1,
 ) -> Result<ReserveStepV1, TrustedClockErrorV1> {
-    let rows = store.read_rows().map_err(read_error)?;
+    let rows = store.read_rows().map_err(reservation_port_error)?;
     let (rows, presampled) = migrate_missing_rows(store, wall, rows)?;
     let (high_water, latch) = validate_rows(&rows)?;
     if latch.latched {
@@ -1070,7 +1082,11 @@ fn migrate_missing_rows(
     if !rows.high_water.is_empty() && !rows.overrun_latch.is_empty() {
         return Ok((rows, None));
     }
-    if store.authoritative_catalog_entries().map_err(read_error)? != 0 {
+    if store
+        .authoritative_catalog_entries()
+        .map_err(reservation_port_error)?
+        != 0
+    {
         return Err(TrustedClockErrorV1::HighWaterMissing);
     }
     let sampled = sample_trusted(wall)?;
@@ -1127,10 +1143,10 @@ pub fn open_release_guard<'host>(
 ) -> Result<ReleaseGuardV1<'host>, TrustedClockErrorV1> {
     let before = mono.mark();
     port.begin_guard(wait.remaining())
-        .map_err(|error| wait_error(error, WaitPhaseV1::Guard))?;
+        .map_err(guard_port_error)?;
     let acquired = mono.mark();
     let checked = charge_wait(wait, WaitPhaseV1::Guard, before, acquired)
-        .and_then(|()| port.reread_rows().map_err(read_error))
+        .and_then(|()| port.reread_rows().map_err(guard_port_error))
         .and_then(|rows| guarded_high_water(&rows, &reservation));
     match checked {
         Ok(high_water) => Ok(ReleaseGuardV1 {
@@ -1446,7 +1462,7 @@ pub fn commit_pending_overrun_latch(
 fn latch_in_transaction(
     store: &mut dyn TrustedClockStorePortV1,
 ) -> Result<Option<[u8; 16]>, TrustedClockErrorV1> {
-    let rows = store.read_rows().map_err(read_error)?;
+    let rows = store.read_rows().map_err(reservation_port_error)?;
     let (high_water, latch) = validate_rows(&rows)?;
     let wrote = write_pending_latch(store, &high_water, &latch)?;
     Ok(wrote.then_some(high_water.domain))
@@ -1480,7 +1496,7 @@ fn acknowledge_in_transaction(
     wall: &mut dyn TrustedWallSourceV1,
     request: &TrustedClockOverrunAcknowledgementV1<'_>,
 ) -> Result<(), TrustedClockErrorV1> {
-    let rows = store.read_rows().map_err(read_error)?;
+    let rows = store.read_rows().map_err(reservation_port_error)?;
     let (high_water, latch) = validate_rows(&rows)?;
     let sampled = sample_trusted(wall)?;
     if sampled < high_water.high_water {

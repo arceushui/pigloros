@@ -4,6 +4,9 @@
 //! acknowledgements with `synchronous=FULL`. The guard connection holds the
 //! file's single write lock from `BEGIN IMMEDIATE` until teardown and never
 //! commits. Both connections open the same authority file.
+//!
+//! The acknowledgement table is append-only: triggers abort every `UPDATE`,
+//! `DELETE` and replacing `INSERT` on it.
 
 use super::fresh_clock_domain;
 use pos_core::trusted_clock::{
@@ -49,6 +52,22 @@ CREATE TABLE IF NOT EXISTS trusted_clock_overrun_acknowledgements (
     acknowledged_at_micros          INTEGER NOT NULL CHECK (acknowledged_at_micros >= 0),
     reason_code                     INTEGER NOT NULL CHECK (reason_code IN (1, 2, 3))
 ) STRICT;
+CREATE TRIGGER IF NOT EXISTS trusted_clock_overrun_acknowledgements_no_replace
+    BEFORE INSERT ON trusted_clock_overrun_acknowledgements
+    WHEN EXISTS (SELECT 1 FROM trusted_clock_overrun_acknowledgements WHERE ack_seq = NEW.ack_seq)
+BEGIN
+    SELECT RAISE(ABORT, 'trusted_clock_overrun_acknowledgements is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS trusted_clock_overrun_acknowledgements_no_update
+    BEFORE UPDATE ON trusted_clock_overrun_acknowledgements
+BEGIN
+    SELECT RAISE(ABORT, 'trusted_clock_overrun_acknowledgements is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS trusted_clock_overrun_acknowledgements_no_delete
+    BEFORE DELETE ON trusted_clock_overrun_acknowledgements
+BEGIN
+    SELECT RAISE(ABORT, 'trusted_clock_overrun_acknowledgements is append-only');
+END;
 COMMIT;";
 
 const HIGH_WATER_SELECT: &str = "SELECT format_version, clock_domain, high_water_micros,
@@ -167,10 +186,10 @@ fn collect_rows(statement: &mut Statement<'_>) -> rusqlite::Result<Vec<Vec<Value
 }
 
 fn select(connection: &Connection, sql: &str) -> PortResult<Vec<Vec<Value>>> {
-    let selected = connection
+    connection
         .prepare(sql)
-        .and_then(|mut statement| collect_rows(&mut statement));
-    storage(selected)
+        .and_then(|mut statement| collect_rows(&mut statement))
+        .map_err(|error| port_error(&error))
 }
 
 fn high_water_row(values: &[Value]) -> PortResult<TrustedClockHighWaterRowV1> {
@@ -184,7 +203,7 @@ fn high_water_row(values: &[Value]) -> PortResult<TrustedClockHighWaterRowV1> {
                 reservation_seq,
             })
         }
-        _ => Err(TrustedClockPortErrorV1::Storage),
+        _ => Err(TrustedClockPortErrorV1::Corrupt),
     }
 }
 
@@ -200,7 +219,7 @@ const fn latch_row(values: &[Value]) -> PortResult<TrustedClockOverrunLatchRowV1
                 last_overrun_at_micros,
             })
         }
-        _ => Err(TrustedClockPortErrorV1::Storage),
+        _ => Err(TrustedClockPortErrorV1::Corrupt),
     }
 }
 

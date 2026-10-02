@@ -28,6 +28,8 @@ pub enum TrustedClockFixtureFaultV1 {
     BeginStorage,
     CatalogError,
     ReadError,
+    ReadBusy,
+    ReadCorrupt,
     DomainError,
     WriteHighWater,
     WriteLatch,
@@ -36,6 +38,17 @@ pub enum TrustedClockFixtureFaultV1 {
     GuardBusy,
     GuardStorage,
     GuardRead,
+    GuardReadBusy,
+}
+
+impl TrustedClockFixtureFaultV1 {
+    const fn port_error(self) -> TrustedClockPortErrorV1 {
+        match self {
+            Self::ReadBusy | Self::GuardReadBusy => TrustedClockPortErrorV1::Busy,
+            Self::ReadCorrupt => TrustedClockPortErrorV1::Corrupt,
+            _ => TrustedClockPortErrorV1::Storage,
+        }
+    }
 }
 
 type FixtureTransactionV1 = (TrustedClockRowsV1, Vec<TrustedClockAcknowledgementRowV1>);
@@ -98,7 +111,7 @@ impl TrustedClockFixtureV1 {
 
     fn fault(&self, fault: Fault) -> Result<(), TrustedClockPortErrorV1> {
         if self.state.borrow_mut().faults.remove(&fault) {
-            Err(TrustedClockPortErrorV1::Storage)
+            Err(fault.port_error())
         } else {
             Ok(())
         }
@@ -149,6 +162,8 @@ impl TrustedClockStorePortV1 for TrustedClockFixtureV1 {
 
     fn read_rows(&mut self) -> Result<TrustedClockRowsV1, TrustedClockPortErrorV1> {
         self.fault(Fault::ReadError)?;
+        self.fault(Fault::ReadBusy)?;
+        self.fault(Fault::ReadCorrupt)?;
         let state = self.state.borrow();
         let rows = state.transaction.as_ref().map_or(&state.rows, |tx| &tx.0);
         Ok(rows.clone())
@@ -215,6 +230,7 @@ impl ReleaseGuardPortV1 for TrustedClockFixtureV1 {
 
     fn reread_rows(&mut self) -> Result<TrustedClockRowsV1, TrustedClockPortErrorV1> {
         self.fault(Fault::GuardRead)?;
+        self.fault(Fault::GuardReadBusy)?;
         Ok(self.rows())
     }
 

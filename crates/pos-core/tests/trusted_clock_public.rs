@@ -453,7 +453,9 @@ fn reservation_faults_fail_closed_without_changing_rows() {
         (Fault::DurabilityError, DURABILITY),
         (Fault::BeginBusy, RESERVATION_WAIT),
         (Fault::BeginStorage, DURABILITY),
-        (Fault::ReadError, CORRUPT),
+        (Fault::ReadError, DURABILITY),
+        (Fault::ReadBusy, RESERVATION_WAIT),
+        (Fault::ReadCorrupt, CORRUPT),
         (Fault::WriteHighWater, COMMIT_FAILED),
         (Fault::Commit, COMMIT_FAILED),
     ];
@@ -470,7 +472,7 @@ fn reservation_faults_fail_closed_without_changing_rows() {
 #[test]
 fn migration_faults_fail_closed_without_creating_rows() {
     let cases = [
-        (Fault::CatalogError, CORRUPT),
+        (Fault::CatalogError, DURABILITY),
         (Fault::DomainError, DURABILITY),
         (Fault::WriteHighWater, COMMIT_FAILED),
         (Fault::WriteLatch, COMMIT_FAILED),
@@ -713,7 +715,8 @@ fn guard_wait_and_port_faults_release_the_lock() -> TestResult {
     let cases = [
         (Fault::GuardBusy, GUARD_WAIT),
         (Fault::GuardStorage, DURABILITY),
-        (Fault::GuardRead, CORRUPT),
+        (Fault::GuardRead, DURABILITY),
+        (Fault::GuardReadBusy, GUARD_WAIT),
     ];
     for (fault, expected) in cases {
         let fixture = TrustedClockFixtureV1::new();
@@ -1006,7 +1009,8 @@ fn acknowledgement_faults_fail_closed() {
     let cases = [
         (Fault::DurabilityMismatch, DURABILITY),
         (Fault::BeginBusy, RESERVATION_WAIT),
-        (Fault::ReadError, CORRUPT),
+        (Fault::ReadError, DURABILITY),
+        (Fault::ReadBusy, RESERVATION_WAIT),
         (Fault::WriteLatch, COMMIT_FAILED),
         (Fault::AppendAcknowledgement, COMMIT_FAILED),
         (Fault::Commit, DURABILITY),
@@ -1078,7 +1082,8 @@ fn latch_commit_failures_keep_the_pending_flag() -> TestResult {
     let cases = [
         (Fault::DurabilityError, DURABILITY),
         (Fault::BeginBusy, RESERVATION_WAIT),
-        (Fault::ReadError, CORRUPT),
+        (Fault::ReadError, DURABILITY),
+        (Fault::ReadCorrupt, CORRUPT),
         (Fault::Commit, DURABILITY),
     ];
     for (fault, expected) in cases {
