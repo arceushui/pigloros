@@ -313,20 +313,20 @@ fn sqlite_local_cut_owner_request_cursor(
     Ok(cursor)
 }
 
-fn sqlite_decode_local_cut_owner_request(
-    bytes: &[u8],
-) -> Result<(LocalCutOwnerRequestV1, Hash), LocalCutOwnerErrorV1> {
-    let mut cursor = sqlite_local_cut_owner_request_cursor(bytes)?;
-    let operation_id = cursor.hash()?;
-    let seal_bytes = cursor.blob(4096)?;
-    let seal = LocalCutSealV2::from_canonical_cbor(seal_bytes)
-        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
-    let manifest_hash = cursor.hash()?;
+fn sqlite_decode_local_cut_owner_records(
+    cursor: &mut SqliteLocalCutOwnerCursorV1<'_>,
+) -> Result<Vec<Vec<u8>>, LocalCutOwnerErrorV1> {
     let record_count = cursor.count()?;
     let mut records = Vec::with_capacity(record_count);
     for _ in 0..record_count {
         records.push(cursor.blob(1_048_576)?.to_vec());
     }
+    Ok(records)
+}
+
+fn sqlite_decode_local_cut_owner_composition_rows(
+    cursor: &mut SqliteLocalCutOwnerCursorV1<'_>,
+) -> Result<Vec<LocalCutCompositionBindingRowV1>, LocalCutOwnerErrorV1> {
     let composition_count = cursor.count()?;
     let mut composition_rows = Vec::with_capacity(composition_count);
     for _ in 0..composition_count {
@@ -346,6 +346,12 @@ fn sqlite_decode_local_cut_owner_request(
             participant_native_state_hash: cursor.hash()?,
         });
     }
+    Ok(composition_rows)
+}
+
+fn sqlite_decode_local_cut_owner_recording_contexts(
+    cursor: &mut SqliteLocalCutOwnerCursorV1<'_>,
+) -> Result<Vec<LocalCutRecordingContextRowV1>, LocalCutOwnerErrorV1> {
     let context_count = cursor.count()?;
     let mut recording_context_rows = Vec::with_capacity(context_count);
     for _ in 0..context_count {
@@ -356,13 +362,38 @@ fn sqlite_decode_local_cut_owner_request(
             predecessor_wcb_hash: cursor.optional_hash()?,
         });
     }
+    Ok(recording_context_rows)
+}
+
+/// Read the six LCC1 table references in their encoded order.
+fn sqlite_read_local_cut_owner_tables(
+    cursor: &mut SqliteLocalCutOwnerCursorV1<'_>,
+) -> Result<[LocalCutTableRefV1; 6], LocalCutOwnerErrorV1> {
+    Ok([
+        sqlite_read_local_cut_owner_table(cursor)?,
+        sqlite_read_local_cut_owner_table(cursor)?,
+        sqlite_read_local_cut_owner_table(cursor)?,
+        sqlite_read_local_cut_owner_table(cursor)?,
+        sqlite_read_local_cut_owner_table(cursor)?,
+        sqlite_read_local_cut_owner_table(cursor)?,
+    ])
+}
+
+fn sqlite_decode_local_cut_owner_request(
+    bytes: &[u8],
+) -> Result<(LocalCutOwnerRequestV1, Hash), LocalCutOwnerErrorV1> {
+    let mut cursor = sqlite_local_cut_owner_request_cursor(bytes)?;
+    let operation_id = cursor.hash()?;
+    let seal_bytes = cursor.blob(4096)?;
+    let seal = LocalCutSealV2::from_canonical_cbor(seal_bytes)
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    let manifest_hash = cursor.hash()?;
+    let records = sqlite_decode_local_cut_owner_records(&mut cursor)?;
+    let composition_rows = sqlite_decode_local_cut_owner_composition_rows(&mut cursor)?;
+    let recording_context_rows = sqlite_decode_local_cut_owner_recording_contexts(&mut cursor)?;
     let partition_ledger_seq = cursor.u64()?;
-    let result_heads_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
-    let participant_successor_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
-    let cpu_completion_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
-    let action_disposition_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
-    let candidate_bases_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
-    let invocation_bridges_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
+    let [result_heads_table, participant_successor_table, cpu_completion_table, action_disposition_table, candidate_bases_table, invocation_bridges_table] =
+        sqlite_read_local_cut_owner_tables(&mut cursor)?;
     let result_inventory_generation = cursor.hash()?;
     let release_fence_proof_digest = cursor.hash()?;
     if !cursor.is_finished() {
