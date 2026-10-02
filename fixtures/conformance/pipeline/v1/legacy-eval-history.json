@@ -1,0 +1,93 @@
+{
+  "magic": "PLH1",
+  "version": 1,
+  "description": "Legacy eval.prediction / eval.outcome Events as the pre-ADR-024-R1 Persona composition emitted them: no causation, legacy pred-<n> ids, no outcome label. Entities are ULIDs from the given integers. expected_report is the canonical text of the Calibration Report, one field per line with floats in shortest round-trip form; the values are exact binary fractions computed by hand from the Events.",
+  "subjects": {
+    "subject-a": 4096,
+    "subject-b": 8192
+  },
+  "events": [
+    {
+      "event_type": "eval.prediction",
+      "entity": 4096,
+      "entity_id": "subject-a",
+      "predicted_prob": 0.75,
+      "prediction_id": "pred-0"
+    },
+    {
+      "event_type": "eval.outcome",
+      "entity": 4096,
+      "prediction_id": "pred-0",
+      "outcome": true
+    },
+    {
+      "event_type": "eval.prediction",
+      "entity": 4096,
+      "entity_id": "subject-a",
+      "predicted_prob": 0.25,
+      "prediction_id": "pred-1"
+    },
+    {
+      "event_type": "eval.outcome",
+      "entity": 4096,
+      "prediction_id": "pred-1",
+      "outcome": false
+    },
+    {
+      "event_type": "eval.prediction",
+      "entity": 8192,
+      "entity_id": "subject-b",
+      "predicted_prob": 0.5,
+      "prediction_id": "pred-2"
+    },
+    {
+      "event_type": "eval.outcome",
+      "entity": 8192,
+      "prediction_id": "pred-2",
+      "outcome": true
+    },
+    {
+      "event_type": "eval.prediction",
+      "entity": 8192,
+      "entity_id": "subject-b",
+      "predicted_prob": 0.5,
+      "prediction_id": "pred-3"
+    },
+    {
+      "event_type": "eval.outcome",
+      "entity": 8192,
+      "prediction_id": "pred-3",
+      "outcome": false
+    },
+    {
+      "event_type": "eval.prediction",
+      "entity": 4096,
+      "entity_id": "subject-a",
+      "predicted_prob": 0.75,
+      "prediction_id": "pred-4"
+    }
+  ],
+  "expected_report": [
+    "replay_claim=Exact",
+    "redaction_state=None",
+    "brier_score=0.15625",
+    "crps=0.15625",
+    "lift_vs_personal_base_rate=0.84375",
+    "ece=0.125",
+    "lift_vs_population_avg=0.09375",
+    "lift_vs_persistence=0.09375",
+    "n_predictions=5",
+    "n_resolved=4",
+    "n_predictor_supplied=0",
+    "bin[0]=0.0..0.1 mean=0.0 fraction=0.0 n=0",
+    "bin[1]=0.1..0.2 mean=0.0 fraction=0.0 n=0",
+    "bin[2]=0.2..0.3 mean=0.25 fraction=0.0 n=1",
+    "bin[3]=0.3..0.4 mean=0.0 fraction=0.0 n=0",
+    "bin[4]=0.4..0.5 mean=0.0 fraction=0.0 n=0",
+    "bin[5]=0.5..0.6 mean=0.5 fraction=0.5 n=2",
+    "bin[6]=0.6..0.7 mean=0.0 fraction=0.0 n=0",
+    "bin[7]=0.7..0.8 mean=0.75 fraction=1.0 n=1",
+    "bin[8]=0.8..0.9 mean=0.0 fraction=0.0 n=0",
+    "bin[9]=0.9..1.0 mean=0.0 fraction=0.0 n=0"
+  ]
+}
