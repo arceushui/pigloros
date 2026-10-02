@@ -57,6 +57,9 @@ point is restricted instead:
   collaborator triage access or above only if they should be able to merge.
 - Do not configure Dependabot or any other app to add `ready-to-merge`.
   Dependabot pull requests merge like any other: review, then add the label.
+- Members of the Trunk organization (`piglor`) can also submit from the
+  Trunk web app, browser extension or CLI. Keep the maintainer as the only
+  member, and keep **Allowed Bot Submitters** empty so no bot can submit.
 
 A new push to a queued pull request cancels it in Trunk ("PR pushed to"). If
 an author pushes after you labelled the pull request, remove the label, review
@@ -116,5 +119,6 @@ these.
 - Keep Trunk's merge method compatible with linear history (squash or rebase).
 - **Trunk merge queue settings:** **GitHub commands** disabled (no
   `/trunk` comment commands); label enqueueing enabled with the label
-  `ready-to-merge`. GitHub comments and statuses can stay enabled.
+  `ready-to-merge`; **Allowed Bot Submitters** empty. GitHub comments and
+  statuses can stay enabled.
 - **Label:** create the `ready-to-merge` label once (Issues → Labels).
