@@ -29761,11 +29761,13 @@ mod local_cut_owner_coverage {
                 closure_hash: opc1_digest(closure),
             })
             .collect();
-        Ok(ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
-            owner_id: OWNER,
-            configuration_generation: generation,
-            rows,
-        })?)
+        Ok(ManifestAdmissionCatalogV1::new(
+            ManifestAdmissionCatalogInputV1 {
+                owner_id: OWNER,
+                configuration_generation: generation,
+                rows,
+            },
+        )?)
     }
 
     fn policy_leaf(
@@ -29883,7 +29885,10 @@ mod local_cut_owner_coverage {
     }
 
     fn table(row_count: u64, byte: u8) -> Fallible<LocalCutTableRefV1> {
-        Ok(LocalCutTableRefV1::new(row_count, (row_count != 0).then(|| hash(byte)))?)
+        Ok(LocalCutTableRefV1::new(
+            row_count,
+            (row_count != 0).then(|| hash(byte)),
+        )?)
     }
 
     fn request_from_parts(parts: RequestParts) -> Fallible<LocalCutOwnerRequestV1> {
@@ -30077,7 +30082,13 @@ mod local_cut_owner_coverage {
         owner: &ManifestOwnerAdmissionOwnerStateV1,
         snapshots: &[ManifestOwnerAdmissionSnapshotV1],
     ) -> Fallible<PreparedLocalCutOwnerCommitV1> {
-        Ok(prepare_local_cut_owner_commit_v1(request, current_state, owner, snapshots, &CutOwner)?)
+        Ok(prepare_local_cut_owner_commit_v1(
+            request,
+            current_state,
+            owner,
+            snapshots,
+            &CutOwner,
+        )?)
     }
 
     fn committed() -> Fallible<Committed> {
@@ -30218,7 +30229,11 @@ mod local_cut_owner_coverage {
     ) -> Fallible<PreparedManifestOwnerAdmissionV1> {
         let request =
             admission_request(2, Some(current), &SUCCESSOR_TIMELINES, hash(141), hash(142))?;
-        Ok(prepare_manifest_owner_admission_v1(request, &AdmissionOwner, Some(current))?)
+        Ok(prepare_manifest_owner_admission_v1(
+            request,
+            &AdmissionOwner,
+            Some(current),
+        )?)
     }
 
     #[test]
@@ -30437,7 +30452,9 @@ mod local_cut_owner_coverage {
     #[test]
     fn owner_reads_report_missing_row_tables() -> TestResult {
         let store = SqliteStore::open_in_memory()?;
-        store.conn.execute_batch("DROP TABLE local_cut_owner_cuts")?;
+        store
+            .conn
+            .execute_batch("DROP TABLE local_cut_owner_cuts")?;
         assert_eq!(
             store.read_local_cut_owner_state_v1(OWNER),
             Err(LocalError::StorageFailure)

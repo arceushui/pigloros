@@ -2388,9 +2388,11 @@ fn rebind_manifest_rows(
 
 fn commit_fixture_cut(fixture: LocalCutFixture) -> CutResult<pos_core::LocalCutOwnerCommitV1> {
     let mut store = fixture.store;
-    fixture
-        .registry
-        .commit_admitted_local_cut_owner_v1(&fixture.admitted, fixture.request, &mut store)
+    fixture.registry.commit_admitted_local_cut_owner_v1(
+        &fixture.admitted,
+        fixture.request,
+        &mut store,
+    )
 }
 
 #[test]
