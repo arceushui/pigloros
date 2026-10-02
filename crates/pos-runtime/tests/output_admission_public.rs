@@ -2,13 +2,14 @@
 
 use pos_core::{
     event::{CanonicalBytes, EventDraft, Kind},
+    store::EventStore,
     Capability, Plugin, PluginId,
 };
 use pos_runtime::{
     installed_plugin_role_v1, validate_output_policy_artifacts_v1, DomainImplementationKindV1,
-    Driver, InstalledOutputPolicySourceV1, ObservationView, OutputAdmissionErrorV1,
-    PluginAvailabilityV1, PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry,
-    RuntimeError, StepOutput, TickScheduler,
+    Driver, InstalledOutputPolicySourceV1, LocalScheduledAdmissionHostV1, ObservationView,
+    OutputAdmissionErrorV1, PluginAvailabilityV1, PluginIsolationV1, PluginPinV1,
+    PluginRegistrationV1, PluginRegistry, RuntimeError, StepOutput, TickScheduler,
 };
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -682,14 +683,18 @@ fn failed_scheduler_pass_does_not_advance_earlier_driver_cadence() -> TestResult
     let mut scheduler = TickScheduler::new(registry);
     assert!(matches!(
         scheduler.tick(timeline, 0),
-        Err(RuntimeError::OutputAdmission(_))
+        Err(RuntimeError::Authority(
+            pos_core::AuthorityErrorV1::UnauthorizedSource
+        ))
     ));
     assert_eq!(scheduler.tick(timeline, 0)?.len(), 2);
     Ok(())
 }
 
+/// The undeclared type is outside the Plugin's owned types, so public cadence
+/// and live stepping reject it through the shared Driver output vetting (#484).
 #[test]
-fn public_tick_and_step_report_output_admission_failures() -> TestResult {
+fn public_tick_and_step_reject_unowned_driver_output() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -700,11 +705,15 @@ fn public_tick_and_step_report_output_admission_failures() -> TestResult {
     let timeline = pos_core::TimelineId::new();
     assert!(matches!(
         registry.tick_cadenced(timeline, 0),
-        Err(RuntimeError::OutputAdmission(_))
+        Err(RuntimeError::Authority(
+            pos_core::AuthorityErrorV1::UnauthorizedSource
+        ))
     ));
     assert!(matches!(
         registry.step_all(timeline),
-        Err(RuntimeError::OutputAdmission(_))
+        Err(RuntimeError::Authority(
+            pos_core::AuthorityErrorV1::UnauthorizedSource
+        ))
     ));
     Ok(())
 }
@@ -1084,30 +1093,52 @@ fn registered_with_sized_output(
     Ok((registry, limit))
 }
 
-fn gated_store() -> Result<Box<dyn pos_core::store::EventStore>, Box<dyn Error>> {
-    let mut store = pos_store::open_store(pos_store::StoreConfig::Memory)?;
+fn gated_store() -> Result<pos_store::memory::MemoryStore, Box<dyn Error>> {
+    let mut store = pos_store::memory::MemoryStore::new();
     store.bind_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ))?;
     Ok(store)
 }
 
-/// A rejected step leaves nothing staged: forcing the rejected draft through
-/// the append seam fails and the Timeline stays empty.
+/// Register the fixture output schema the host validates before admission.
+fn register_output_schema(registry: &mut PluginRegistry) {
+    registry
+        .schemas
+        .register(pos_runtime::schema::EventTypeSchema {
+            event_type: Kind::new("plugin.output"),
+            description: "verified fixture output".to_owned(),
+            json_schema: None,
+        });
+}
+
+/// Admit the staged pass through the local host and return its committed
+/// Event count.
+fn admit_staged(
+    registry: &mut PluginRegistry,
+    store: &mut pos_store::memory::MemoryStore,
+    timeline: pos_core::TimelineId,
+) -> Result<usize, Box<dyn Error>> {
+    let host = LocalScheduledAdmissionHostV1::shared()?;
+    let revisions = host.observe(registry, store, timeline)?;
+    let head = store.logical_head(timeline)?;
+    let receipt = host
+        .admit(registry, store, revisions, head, 0)?
+        .ok_or("expected a committed batch")?;
+    Ok(receipt.committed_events().len())
+}
+
+/// A rejected step leaves nothing staged: admission fails because no pass is
+/// pending, and the Timeline stays empty.
 fn assert_rejected_output_is_not_persisted(
     registry: &mut PluginRegistry,
-    store: &mut dyn pos_core::store::EventStore,
+    store: &mut pos_store::memory::MemoryStore,
     timeline: pos_core::TimelineId,
-    rejected: &EventDraft,
 ) -> TestResult {
-    assert!(registry
-        .append_and_commit_step_at(
-            store,
-            pos_core::Seq::ZERO,
-            0,
-            std::slice::from_ref(rejected)
-        )
-        .is_err());
+    let error = admit_staged(registry, store, timeline)
+        .err()
+        .ok_or("expected the rejected draft to be refused")?;
+    assert!(error.to_string().contains("Driver step is already pending"));
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::ZERO);
     Ok(())
 }
@@ -1124,10 +1155,9 @@ fn verified_step_appends_output_at_the_exact_event_byte_limit() -> TestResult {
     let drafts = registry.step_all_anchored(timeline, pos_core::Seq::ZERO)?;
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].payload.len(), usize::try_from(limit)?);
-    let events =
-        registry.append_and_commit_step_at(store.as_mut(), pos_core::Seq::ZERO, 0, &drafts)?;
-    assert_eq!(events.len(), 1);
-    assert_eq!(store.logical_head(timeline)?, events[0].seq);
+    register_output_schema(&mut registry);
+    assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
+    assert_eq!(store.logical_head(timeline)?, pos_core::Seq::from_u64(1));
     Ok(())
 }
 
@@ -1149,8 +1179,7 @@ fn verified_step_rejects_output_one_byte_over_the_event_limit_before_append() ->
             limit: recorded,
         })) if event_type == "plugin.output" && requested == requested_bytes && recorded == limit
     ));
-    let draft = sized_draft("plugin.output", requested_bytes);
-    assert_rejected_output_is_not_persisted(&mut registry, store.as_mut(), timeline, &draft)
+    assert_rejected_output_is_not_persisted(&mut registry, &mut store, timeline)
 }
 
 /// Emits one valid draft followed by one draft over the event byte limit on
@@ -1214,13 +1243,15 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
 
     let drafts = registry.step_all_anchored(timeline, pos_core::Seq::ZERO)?;
     assert_eq!(drafts.len(), 1);
-    let events =
-        registry.append_and_commit_step_at(store.as_mut(), pos_core::Seq::ZERO, 0, &drafts)?;
-    assert_eq!(events.len(), 1);
-    assert_eq!(store.logical_head(timeline)?, events[0].seq);
+    register_output_schema(&mut registry);
+    assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
+    assert_eq!(store.logical_head(timeline)?, pos_core::Seq::from_u64(1));
     Ok(())
 }
 
+/// A verified declaration names exactly the Plugin's owned Event types, so an
+/// undeclared type is also unowned. The Driver output vetting shared by every
+/// path rejects it as an unauthorized source before the budget check (#484).
 #[test]
 fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult {
     let plugin = FixturePlugin {
@@ -1232,12 +1263,11 @@ fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult 
 
     assert!(matches!(
         registry.step_all_anchored(timeline, pos_core::Seq::ZERO),
-        Err(RuntimeError::OutputAdmission(OutputAdmissionErrorV1::MissingDeclaration {
-            ref event_type,
-        })) if event_type == "plugin.undeclared"
+        Err(RuntimeError::Authority(
+            pos_core::AuthorityErrorV1::UnauthorizedSource
+        ))
     ));
-    let draft = sized_draft("plugin.undeclared", 1);
-    assert_rejected_output_is_not_persisted(&mut registry, store.as_mut(), timeline, &draft)
+    assert_rejected_output_is_not_persisted(&mut registry, &mut store, timeline)
 }
 
 #[test]

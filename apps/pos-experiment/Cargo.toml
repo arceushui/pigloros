@@ -14,7 +14,9 @@ pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-store = { path = "../../crates/pos-store" }
 pos-state = { path = "../../crates/pos-state" }
-pos-runtime = { path = "../../crates/pos-runtime" }
+pos-runtime = { path = "../../crates/pos-runtime", features = [
+  "local-admission-host",
+] }
 pos-conformance = { path = "../../crates/pos-conformance" }
 pos-reference = { path = "../../crates/pos-reference" }
 pos-plugin-eval = { path = "../../plugins/eval" }
@@ -37,6 +39,14 @@ tempfile = "3"
 
 [[test]]
 name = "agent_provider_replay"
+required-features = ["test-support"]
+
+[[test]]
+name = "pipeline_evaluation"
+required-features = ["test-support"]
+
+[[test]]
+name = "scheduled_draft_ownership"
 required-features = ["test-support"]
 
 [lints]

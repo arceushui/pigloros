@@ -31,6 +31,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/erasure_tests.rs",
     "src/system_bus/tests.rs",
     "src/e2e_determinism.rs",
+    "src/action_admission_tests.rs",
 )
 EXCLUSION_ARGS = "".join(f"--exclude '{path}' " for path in TEST_ONLY_EXCLUSIONS)
 GENERATE_BASELINE_COMMAND = (

@@ -213,6 +213,41 @@ pub struct PipelineSecurityRevisionsDraftV1 {
     pub erasure: Hash,
 }
 
+/// Number of security revisions bound by one V1 admission basis.
+pub(crate) const PIPELINE_SECURITY_REVISION_COUNT_V1: usize = 7;
+
+impl PipelineSecurityRevisionsDraftV1 {
+    /// Return every revision in the one canonical V1 order shared by the
+    /// admission-basis digest and the persisted admission fence.
+    pub(crate) const fn ordered(self) -> [Hash; PIPELINE_SECURITY_REVISION_COUNT_V1] {
+        [
+            self.authority,
+            self.consent,
+            self.capability,
+            self.delegation,
+            self.policy,
+            self.execution_profile,
+            self.erasure,
+        ]
+    }
+
+    /// Rebuild a draft from revisions in the canonical V1 order.
+    pub(crate) const fn from_ordered(
+        [authority, consent, capability, delegation, policy, execution_profile, erasure]: [Hash;
+            PIPELINE_SECURITY_REVISION_COUNT_V1],
+    ) -> Self {
+        Self {
+            authority,
+            consent,
+            capability,
+            delegation,
+            policy,
+            execution_profile,
+            erasure,
+        }
+    }
+}
+
 /// Exact security revision set bound by one admission basis.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PipelineSecurityRevisionsV1(PipelineSecurityRevisionsDraftV1);
@@ -225,14 +260,7 @@ impl PipelineSecurityRevisionsV1 {
     pub fn try_from_draft(
         draft: PipelineSecurityRevisionsDraftV1,
     ) -> Result<Self, PipelineContractErrorV1> {
-        if draft.authority == Hash::zero()
-            || draft.consent == Hash::zero()
-            || draft.capability == Hash::zero()
-            || draft.delegation == Hash::zero()
-            || draft.policy == Hash::zero()
-            || draft.execution_profile == Hash::zero()
-            || draft.erasure == Hash::zero()
-        {
+        if draft.ordered().contains(&Hash::zero()) {
             Err(PipelineContractErrorV1::Incomplete)
         } else {
             Ok(Self(draft))
@@ -451,6 +479,56 @@ impl PipelineAdmissionBasisV1 {
     pub const fn batch(&self) -> &PipelineDraftBatchV1 {
         &self.batch
     }
+
+    /// Bind every field of this admission basis into one exact retry fingerprint.
+    ///
+    /// Two attempts with the same idempotency identity are the same retained
+    /// retry only when this digest is identical.
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PiglorOS.PipelineAdmissionBasis.v1\0");
+        let attempt = self.attempt;
+        let observation = attempt.observation;
+        hasher.update(&attempt.attempt_id.as_bytes());
+        hasher.update(&[ingress_tag(attempt.ingress)]);
+        hasher.update(&observation.timeline_id.inner().to_bytes());
+        hasher.update(&observation.observed_through.as_u64().to_be_bytes());
+        hasher.update(observation.snapshot_digest.as_bytes());
+        hasher.update(&attempt.idempotency.dedup_key.as_bytes());
+        hasher.update(&attempt.idempotency.scope.as_bytes());
+        hasher.update(&[tentative_result_tag(self.tentative_result)]);
+        hasher.update(self.tentative_result.evidence().digest().as_bytes());
+        match self.precondition {
+            PipelinePreconditionV1::ExpectedLogicalHead(seq) => {
+                hasher.update(&[1]);
+                hasher.update(&seq.as_u64().to_be_bytes());
+            }
+            PipelinePreconditionV1::DomainStateRevision(digest) => {
+                hasher.update(&[2]);
+                hasher.update(digest.as_bytes());
+            }
+        }
+        for revision in self.security_revisions.as_draft().ordered() {
+            hasher.update(revision.as_bytes());
+        }
+        hasher.update(self.batch.digest.as_bytes());
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    }
+}
+
+const fn ingress_tag(ingress: PipelineIngressV1) -> u8 {
+    match ingress {
+        PipelineIngressV1::HumanProposedAction => 1,
+        PipelineIngressV1::ScheduledAiDriver => 2,
+    }
+}
+
+const fn tentative_result_tag(result: TentativePipelineResultV1) -> u8 {
+    match result {
+        TentativePipelineResultV1::HumanDomainApproval(_) => 1,
+        TentativePipelineResultV1::AiProviderValidation(_) => 2,
+    }
 }
 
 /// Store-assigned identity and Timeline Order for one committed Event.
@@ -510,6 +588,49 @@ impl PipelineCommitReceiptV1 {
         {
             return Err(PipelineContractErrorV1::CommittedBatchMismatch);
         }
+        Self::try_from_ordered_events(
+            basis.attempt.attempt_id,
+            committed_timeline_id,
+            basis.batch.digest,
+            events,
+        )
+    }
+
+    /// Rebuild the original receipt of one retained committed attempt.
+    ///
+    /// A store adapter calls this for an exact retry it recognizes from its
+    /// retained receipt record alone, without the original admission basis,
+    /// so recovery never reruns domain approval or provider validation. The
+    /// record supplies the attempt identity and draft-batch digest bound when
+    /// the batch committed; `events` are the Events that commit assigned.
+    ///
+    /// # Errors
+    /// Returns a closed error for an empty, non-contiguous, or invalidly
+    /// identified Event range.
+    pub fn try_from_retained_events(
+        attempt_id: PipelineAttemptIdV1,
+        committed_timeline_id: TimelineId,
+        draft_batch_digest: Hash,
+        events: &[Event],
+    ) -> Result<Self, PipelineContractErrorV1> {
+        if events.is_empty() {
+            return Err(PipelineContractErrorV1::CommittedBatchMismatch);
+        }
+        Self::try_from_ordered_events(
+            attempt_id,
+            committed_timeline_id,
+            draft_batch_digest,
+            events,
+        )
+    }
+
+    /// Validate Timeline Order and identity, then bind the committed range.
+    fn try_from_ordered_events(
+        attempt_id: PipelineAttemptIdV1,
+        timeline_id: TimelineId,
+        draft_batch_digest: Hash,
+        events: &[Event],
+    ) -> Result<Self, PipelineContractErrorV1> {
         if events.first().is_some_and(|event| event.seq == Seq::ZERO)
             || events.windows(2).any(|pair| {
                 pair[0]
@@ -529,9 +650,9 @@ impl PipelineCommitReceiptV1 {
             return Err(PipelineContractErrorV1::InvalidCommittedIdentity);
         }
         Ok(Self {
-            attempt_id: basis.attempt.attempt_id,
-            timeline_id: committed_timeline_id,
-            draft_batch_digest: basis.batch.digest,
+            attempt_id,
+            timeline_id,
+            draft_batch_digest,
             committed_events: events
                 .iter()
                 .map(|event| CommittedPipelineEventV1 {
@@ -604,6 +725,16 @@ fn draft_content_bytes(draft: &EventDraft) -> usize {
         .saturating_add(16)
         .saturating_add(4)
         .saturating_add(draft.wall_time.map_or(0, |_| 8))
+}
+
+/// Canonical digest of an exact Event draft vector.
+///
+/// It binds every [`EventDraft`] field, in order, with the same encoding
+/// [`PipelineDraftBatchV1::digest`] uses, so a host can bind evidence to a
+/// staged vector before the batch is constructed.
+#[must_use]
+pub fn pipeline_draft_vector_digest_v1(drafts: &[EventDraft]) -> Hash {
+    digest_drafts(drafts)
 }
 
 fn digest_drafts(drafts: &[EventDraft]) -> Hash {

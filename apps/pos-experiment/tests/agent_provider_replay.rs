@@ -21,8 +21,13 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, PluginId, TimelineId},
     plugin::{ActionApprover, ActionRejected, Capability, Plugin, ProposedAction},
-    store::EventStore,
-    ConsentAuthority, ConsentGrantedV1, CoreError, ErasureContainmentGateV1, Timeline,
+    store::{EventStore, PurgeOutcome},
+    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, CapabilityGrantV1,
+    CapabilityRevocationV1, ConsentAuthority, ConsentGrantedV1, CoreError,
+    ErasureContainmentGateV1, Hash, PersistedAuthorityV1, PipelineAdmissionBasisV1,
+    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
+    PipelineOutcomeV1, Timeline,
 };
 use pos_experiment::{
     BacktestConfig, BacktestRunner, Experiment, ExperimentConfig, ExperimentError,
@@ -654,6 +659,94 @@ impl EventStore for SharedMemoryAdapter {
             )),
             _ => self.store().logical_head(id),
         }
+    }
+}
+
+/// Scheduled passes reach the shared store only through admission, so the
+/// injected append fault and batch log apply to the admitted batch.
+impl PipelineAdmissionPortV1 for SharedMemoryAdapter {
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        let should_fail = {
+            let mut control = self.control();
+            control
+                .append_batch_sizes
+                .push(basis.batch().drafts().len());
+            std::mem::take(&mut control.fail_next_append)
+        };
+        if should_fail {
+            Err(CoreError::Storage("injected append failure".to_owned()))
+        } else {
+            self.store().admit_pipeline_batch(basis)
+        }
+    }
+
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        self.store().purge_expired_pipeline_receipts_bounded(limit)
+    }
+
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: pos_core::TimelineId,
+        key: pos_core::AppendDedupKey,
+        attempt_id: pos_core::PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
+        self.store()
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+impl PipelineAdmissionFencePublisherV1 for SharedMemoryAdapter {
+    fn set_pipeline_admission_fence(
+        &mut self,
+        timeline: TimelineId,
+        fence: PipelineAdmissionFenceV1,
+    ) -> Result<(), CoreError> {
+        self.store().set_pipeline_admission_fence(timeline, fence)
+    }
+
+    fn pipeline_admission_fence(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<PipelineAdmissionFenceV1>, CoreError> {
+        self.store().pipeline_admission_fence(timeline)
+    }
+}
+
+impl AuthorityPersistencePortV1 for SharedMemoryAdapter {
+    fn bind_authority_persistence(
+        &mut self,
+        binding: AuthorityPersistenceBindingV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        self.store().bind_authority_persistence(binding)
+    }
+
+    fn issue_capability_grant(
+        &mut self,
+        permit: AuthorityMutationPermitV1,
+        grant: &CapabilityGrantV1,
+    ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        self.store().issue_capability_grant(permit, grant)
+    }
+
+    fn revoke_capability_grant(
+        &mut self,
+        permit: AuthorityMutationPermitV1,
+        revocation: &CapabilityRevocationV1,
+    ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        self.store().revoke_capability_grant(permit, revocation)
+    }
+
+    fn load_authority(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
+        self.store().load_authority(leaf_grant_id)
     }
 }
 
