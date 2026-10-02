@@ -32,7 +32,8 @@ use serde_json::{json, Value};
 use support::TestOk;
 
 /// The immutable profile manifest and its pinned SHA-256.
-const MANIFEST: &[u8] = include_bytes!("../../../fixtures/conformance/pipeline/v1/manifest.json");
+const MANIFEST: &[u8] =
+    include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
 const MANIFEST_SHA256: &str = "cb24a44aa6c20d29455816086027b191ac47dfca618698dde3658888ea3673a7";
 
 /// Every runner of profile version 1, by case identifier.
