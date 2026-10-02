@@ -5,7 +5,7 @@
 //! lightweight in Wave 3 — a plugin can provide a JSON Schema string for richer
 //! validation in future waves.
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 
 use pos_core::event::{EventDraft, Kind};
 
@@ -36,12 +36,52 @@ impl SchemaRegistry {
         Self::default()
     }
 
-    /// Register an event type schema.
+    /// Register a new event type schema.
     ///
-    /// Silently overwrites if the same event type is re-registered (last writer wins).
-    pub fn register(&mut self, schema: EventTypeSchema) {
-        self.schemas
-            .insert(schema.event_type.as_str().to_owned(), schema);
+    /// This is the only insert path, and it never overwrites (ADR-024
+    /// Revision 1 Decision 4): an existing entry is kept and the insert fails
+    /// closed. Hosts may call it directly for a host-owned type that no
+    /// Plugin registration owns.
+    ///
+    /// # Errors
+    /// Returns [`crate::PluginCompositionErrorV1::DuplicateEventTypeOwner`]
+    /// when the event type already has a schema.
+    pub fn register(&mut self, schema: EventTypeSchema) -> Result<(), RuntimeError> {
+        self.insert_vacant(schema).map_err(|event_type| {
+            RuntimeError::Composition(crate::PluginCompositionErrorV1::DuplicateEventTypeOwner {
+                event_type,
+            })
+        })
+    }
+
+    /// The one insert path: insert into a vacant entry, or keep the existing
+    /// entry and return its event type.
+    fn insert_vacant(&mut self, schema: EventTypeSchema) -> Result<(), String> {
+        match self.schemas.entry(schema.event_type.as_str().to_owned()) {
+            Entry::Occupied(occupied) => Err(occupied.key().clone()),
+            Entry::Vacant(vacant) => {
+                vacant.insert(schema);
+                Ok(())
+            }
+        }
+    }
+
+    /// Build a registry holding exactly the host pre-registered schemas.
+    pub(crate) fn with_host_schemas(schemas: impl IntoIterator<Item = EventTypeSchema>) -> Self {
+        let mut registry = Self::new();
+        for schema in schemas {
+            registry.register_claimed(schema);
+        }
+        registry
+    }
+
+    /// Record the schema of a type whose ownership the registry has already
+    /// settled, through the same non-overwriting insert path as
+    /// [`Self::register`]. The only entry that can already exist is a host
+    /// schema a Plugin may claim (the Recorder type); it is kept and never
+    /// replaced, so the occupied result carries no new fact.
+    pub(crate) fn register_claimed(&mut self, schema: EventTypeSchema) {
+        self.insert_vacant(schema).unwrap_or_default();
     }
 
     /// Returns `true` if the event type is registered.
@@ -166,7 +206,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn registered_type_passes_validation() {
         let mut reg = SchemaRegistry::new();
-        reg.register(schema("world.observation"));
+        reg.register(schema("world.observation")).test_ok();
         reg.validate(&draft("world.observation")).test_ok();
     }
 
@@ -174,7 +214,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn unregistered_type_fails_validation() {
         let mut reg = SchemaRegistry::new();
-        reg.register(schema("world.observation"));
+        reg.register(schema("world.observation")).test_ok();
         let err = reg.validate(&draft("agent.action")).test_err();
         assert!(matches!(err, RuntimeError::UnknownEventType(ref t) if t == "agent.action"));
     }
@@ -183,7 +223,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn validate_batch_fails_on_first_unknown() {
         let mut reg = SchemaRegistry::new();
-        reg.register(schema("a.ok"));
+        reg.register(schema("a.ok")).test_ok();
         let drafts = vec![draft("a.ok"), draft("b.unknown"), draft("a.ok")];
         let err = reg.validate_batch(&drafts).test_err();
         assert!(matches!(err, RuntimeError::UnknownEventType(ref t) if t == "b.unknown"));
@@ -193,8 +233,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn validate_batch_passes_all_known() {
         let mut reg = SchemaRegistry::new();
-        reg.register(schema("a.event"));
-        reg.register(schema("b.event"));
+        reg.register(schema("a.event")).test_ok();
+        reg.register(schema("b.event")).test_ok();
         let drafts = vec![draft("a.event"), draft("b.event"), draft("a.event")];
         reg.validate_batch(&drafts).test_ok();
     }
@@ -204,35 +244,61 @@ mod tests {
     fn len_and_is_empty() {
         let mut reg = SchemaRegistry::new();
         assert!(reg.is_empty());
-        reg.register(schema("x"));
+        reg.register(schema("x")).test_ok();
         assert_eq!(reg.len(), 1);
         assert!(!reg.is_empty());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn re_register_overwrites() {
+    fn re_register_fails_closed_and_keeps_the_first_schema() {
         let mut reg = SchemaRegistry::new();
         reg.register(EventTypeSchema {
             event_type: Kind::new("x"),
             description: "first".to_owned(),
             json_schema: None,
-        });
-        reg.register(EventTypeSchema {
-            event_type: Kind::new("x"),
-            description: "second".to_owned(),
-            json_schema: Some("{}".to_owned()),
-        });
+        })
+        .test_ok();
+        let error = reg
+            .register(EventTypeSchema {
+                event_type: Kind::new("x"),
+                description: "second".to_owned(),
+                json_schema: Some("{}".to_owned()),
+            })
+            .test_err();
+        assert_eq!(
+            error.to_string(),
+            RuntimeError::Composition(crate::PluginCompositionErrorV1::DuplicateEventTypeOwner {
+                event_type: "x".to_owned(),
+            })
+            .to_string()
+        );
         assert_eq!(reg.len(), 1);
         let s = reg.iter().next().test_ok();
-        assert_eq!(s.description, "second");
+        assert_eq!(s.description, "first");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn claimed_registration_keeps_an_existing_schema() {
+        let mut reg = SchemaRegistry::with_host_schemas([schema("host.type")]);
+        reg.register_claimed(EventTypeSchema {
+            event_type: Kind::new("host.type"),
+            description: "plugin claim".to_owned(),
+            json_schema: None,
+        });
+        reg.register_claimed(schema("plugin.type"));
+        assert_eq!(reg.len(), 2);
+        assert!(reg
+            .iter()
+            .any(|entry| entry.description == "schema for host.type"));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn contains_returns_correct_values() {
         let mut reg = SchemaRegistry::new();
-        reg.register(schema("known"));
+        reg.register(schema("known")).test_ok();
         assert!(reg.contains("known"));
         assert!(!reg.contains("unknown"));
     }

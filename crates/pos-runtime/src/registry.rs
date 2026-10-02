@@ -157,10 +157,86 @@ fn extend_unique_subscriptions(
     }
 }
 
+/// One host pre-registered Event type (ADR-024 Revision 1 Decision 3).
+struct HostEventTypeV1 {
+    event_type: &'static str,
+    description: &'static str,
+    /// Whether one Plugin registration may claim the type. A claim records
+    /// ownership and keeps the host schema.
+    claimable: bool,
+}
+
+/// The host pre-registered Event types. Only the Recorder type is claimable.
+const HOST_EVENT_TYPES: [HostEventTypeV1; 2] = [
+    HostEventTypeV1 {
+        event_type: RECORDER_EVENT_TYPE,
+        description: "Internal: nondeterministic output recorded by the Recorder",
+        claimable: true,
+    },
+    HostEventTypeV1 {
+        event_type: pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
+        description: "Gateway-owned durable consent revocation marker",
+        claimable: false,
+    },
+];
+
+/// Whether a Plugin registration may claim this type: every type that is not
+/// host pre-registered, plus the closed claimable host set.
+fn plugin_claimable_event_type(kind: &Kind) -> bool {
+    HOST_EVENT_TYPES
+        .iter()
+        .find(|host| host.event_type == kind.as_str())
+        .is_none_or(|host| host.claimable)
+}
+
 fn driver_visible_event(event: &Event) -> bool {
     !pos_core::is_consent_event_type(&event.event_type)
         && !pos_core::is_geographic_event_type(&event.event_type)
         && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+}
+
+/// Whether a committed Event of a consent-sensitive type may reach a
+/// verified-prefix Driver in this pass (ADR-039; ADR-021 Revision 3
+/// Decision 1; ADR-024 Revision 1 Decision 5). A sensitive Event is visible
+/// only inside a protected pass whose validated token names its entity and
+/// grants its modality. A public pass sees none.
+///
+/// Only Drivers that read the full verified prefix are filtered. A
+/// cursor-based Driver keeps its previous view: filtering it here would let
+/// its Event cursor pass a hidden Event, which it would then never receive.
+/// Consent-gating cursor subscriptions without that loss is #494.
+fn consent_visible_event(operation: &OperationContext, event: &Event) -> bool {
+    !pos_core::is_consent_sensitive_event_type(&event.event_type)
+        || matches!(operation, OperationContext::Protected { token, .. }
+            if token.subject_id() == event.entity
+                && token.authorize_event_type(&event.event_type).is_ok())
+}
+
+/// The committed Events one Driver may observe through its Event
+/// subscriptions: its subscribed types, minus host-owned consent and
+/// geographic Events, and, for a verified-prefix Driver only, minus
+/// consent-sensitive Events this pass may not show it.
+///
+/// A Driver without Event subscriptions observes no committed Event, so the
+/// prefix is neither filtered nor copied for it.
+fn subscribed_driver_events(
+    committed_events: &[Event],
+    event_subscriptions: &[Kind],
+    verified_prefix_required: bool,
+    operation: &OperationContext,
+) -> Vec<Event> {
+    if event_subscriptions.is_empty() {
+        return Vec::new();
+    }
+    committed_events
+        .iter()
+        .filter(|event| {
+            event_subscriptions.contains(&event.event_type)
+                && driver_visible_event(event)
+                && (!verified_prefix_required || consent_visible_event(operation, event))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Vet one Driver's output with the single chain every Driver output path
@@ -1512,19 +1588,15 @@ impl PluginRegistry {
 
     fn new_with_mode(run_mode: RunMode, composition_mode: PluginExecutionModeV1) -> Self {
         let erasure_gate = Arc::new(ErasureContainmentGateV1::new_fail_closed());
-        let mut schemas = SchemaRegistry::new();
-        // Auto-register the Recorder's internal event type so that
-        // Recorder::to_draft() output passes SchemaRegistry::validate().
-        schemas.register(EventTypeSchema {
-            event_type: pos_core::event::Kind::new(RECORDER_EVENT_TYPE),
-            description: "Internal: nondeterministic output recorded by the Recorder".to_owned(),
-            json_schema: None,
-        });
-        schemas.register(EventTypeSchema {
-            event_type: pos_core::event::Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
-            description: "Gateway-owned durable consent revocation marker".to_owned(),
-            json_schema: None,
-        });
+        // Auto-register the host types, including the Recorder's internal
+        // event type so that Recorder::to_draft() output passes
+        // SchemaRegistry::validate().
+        let schemas =
+            SchemaRegistry::with_host_schemas(HOST_EVENT_TYPES.map(|host| EventTypeSchema {
+                event_type: pos_core::event::Kind::new(host.event_type),
+                description: host.description.to_owned(),
+                json_schema: None,
+            }));
         Self {
             plugins: IndexMap::new(),
             manifest_batch: None,
@@ -1707,9 +1779,7 @@ impl PluginRegistry {
         if events.iter().any(|event| {
             pos_core::is_consent_event_type(&event.event_type)
                 || pos_core::is_geographic_event_type(&event.event_type)
-                || pos_core::required_modality_for_event(&event.event_type) != 0
-                || event.event_type.as_str().starts_with("timeline.fork.")
-                || event.event_type.as_str().starts_with("retention.")
+                || pos_core::is_consent_sensitive_event_type(&event.event_type)
         }) {
             return Err(RuntimeError::ConsentOperationUnavailable);
         }
@@ -1809,10 +1879,9 @@ impl PluginRegistry {
             let subject = protected_token.map_or(draft.entity, ConsentCapabilityToken::subject_id);
             match protected_token {
                 Some(token) => {
-                    let sensitive = pos_core::required_modality_for_event(&draft.event_type) != 0
-                        || draft.event_type.as_str().starts_with("timeline.fork.")
-                        || draft.event_type.as_str().starts_with("retention.");
-                    if sensitive && draft.entity != token.subject_id() {
+                    if pos_core::is_consent_sensitive_event_type(&draft.event_type)
+                        && draft.entity != token.subject_id()
+                    {
                         return Err(RuntimeError::Consent(pos_core::ConsentError::NoConsent));
                     }
                     token
@@ -1889,13 +1958,14 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         snapshot: &ObservationSnapshot,
         committed_events: &[Event],
+        operation: &OperationContext,
     ) -> Result<StepOutput, RuntimeError> {
         let Some(entry) = self.plugins.get_mut(&id) else {
             return Err(RuntimeError::NoDriver {
                 name: id.to_string(),
             });
         };
-        Self::invoke_entry_driver(entry, timeline, snapshot, committed_events)
+        Self::invoke_entry_driver(entry, timeline, snapshot, committed_events, operation)
     }
 
     fn invoke_entry_driver(
@@ -1903,6 +1973,7 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         snapshot: &ObservationSnapshot,
         committed_events: &[Event],
+        operation: &OperationContext,
     ) -> Result<StepOutput, RuntimeError> {
         let Some(driver) = entry.driver.as_mut() else {
             return Err(RuntimeError::NoDriver {
@@ -1925,25 +1996,20 @@ impl PluginRegistry {
                 committed_events,
             )?;
         }
-        let visible_events: Vec<Event> = committed_events
-            .iter()
-            .filter(|event| driver_visible_event(event))
-            .cloned()
-            .collect();
+        let subscribed_events = subscribed_driver_events(
+            committed_events,
+            driver.event_subscriptions(),
+            verified_prefix_required,
+            operation,
+        );
         let observations = snapshot.view_for_events_after(
             driver.subscriptions(),
-            &visible_events,
+            &subscribed_events,
             driver.event_subscriptions(),
             entry.event_cursor,
         );
         let observations = if verified_prefix_required {
-            observations.with_verified_prefix_events(
-                visible_events
-                    .iter()
-                    .filter(|event| driver.event_subscriptions().contains(&event.event_type))
-                    .cloned()
-                    .collect(),
-            )
+            observations.with_verified_prefix_events(subscribed_events.clone())
         } else {
             observations
         };
@@ -2070,7 +2136,8 @@ impl PluginRegistry {
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
         for id in driver_ids {
-            let result = self.invoke_selected_driver(id, timeline, &snapshot, committed_events);
+            let result =
+                self.invoke_selected_driver(id, timeline, &snapshot, committed_events, &operation);
             match result {
                 Ok(output) => {
                     if let Err(error) = self
@@ -2788,7 +2855,7 @@ impl PluginRegistry {
         if self.manifest_batch.is_some() {
             return Err(ManifestRegistrationErrorV1::BatchState.into());
         }
-        let context = self.registration_context(plugin)?;
+        let context = self.owned_registration_context(plugin)?;
         if !binding.verifies_erased_owner_instance(plugin) {
             return Err(RuntimeError::OutputAdmission(
                 crate::OutputAdmissionErrorV1::PluginMismatch,
@@ -2882,6 +2949,79 @@ impl PluginRegistry {
         Ok((id, name, plugin.capability()))
     }
 
+    /// Resolve the registration context, then apply the reserved-type checks
+    /// and the shared exclusive-ownership check before any other
+    /// registration check or registry mutation (ADR-024 Revision 1 Decision 2).
+    ///
+    /// The order is fixed: a `PluginId` already in the registry fails first
+    /// with [`RuntimeError::DuplicatePlugin`], so registering the same Plugin
+    /// twice reports the duplicate registration, not a duplicate owner of
+    /// its own types. Only a distinct registration that claims an owned
+    /// type reaches [`PluginCompositionErrorV1::DuplicateEventTypeOwner`].
+    fn owned_registration_context(
+        &self,
+        plugin: &dyn Plugin,
+    ) -> Result<(PluginId, String, Capability), RuntimeError> {
+        self.registration_context(plugin).and_then(|context| {
+            Self::validate_reserved_owned_event_types(&context.1, &context.2)
+                .and_then(|()| {
+                    self.validate_exclusive_event_types(&context.2.owned_event_types)
+                        .map_err(RuntimeError::from)
+                })
+                .map(|()| context)
+        })
+    }
+
+    /// The one shared ownership check of every registration path that
+    /// installs owned Event types (ADR-024 Revision 1 Decisions 1-3, 7).
+    ///
+    /// It rejects a type listed twice in one declaration, a type another
+    /// registration already owns, and a host pre-registered type that no
+    /// Plugin may claim. It reads the registry only, so a rejection leaves
+    /// the registry unchanged, whichever overlapping Plugin registers first.
+    fn validate_exclusive_event_types(
+        &self,
+        owned_event_types: &[Kind],
+    ) -> Result<(), PluginCompositionErrorV1> {
+        owned_event_types
+            .iter()
+            .enumerate()
+            .find(|&(index, kind)| {
+                owned_event_types[..index].contains(kind)
+                    || !plugin_claimable_event_type(kind)
+                    || self
+                        .plugins
+                        .values()
+                        .any(|entry| entry.owned_event_types.contains(kind))
+            })
+            .map_or(Ok(()), |(_, kind)| {
+                Err(PluginCompositionErrorV1::DuplicateEventTypeOwner {
+                    event_type: kind.as_str().to_owned(),
+                })
+            })
+    }
+
+    /// Verify a test-support output admission and claim the Event types its
+    /// declarations derive, through the same shared ownership check.
+    #[cfg(any(test, feature = "test-support"))]
+    fn claim_test_admission(
+        &self,
+        admission: Result<OutputAdmissionV1, crate::OutputAdmissionErrorV1>,
+    ) -> Result<(OutputAdmissionV1, Vec<Kind>), RuntimeError> {
+        admission.map_err(RuntimeError::from).and_then(|admission| {
+            let owned_event_types: Vec<Kind> = admission
+                .policy()
+                .fields()
+                .output_declarations
+                .iter()
+                .map(|declaration| Kind::new(declaration.event_type()))
+                .collect();
+            self.validate_exclusive_event_types(&owned_event_types)
+                .map_err(RuntimeError::from)
+                .map(|()| (admission, owned_event_types))
+        })
+    }
+
     fn validate_registration_roles(
         &self,
         registration: &PluginRegistrationV1,
@@ -2963,7 +3103,6 @@ impl PluginRegistry {
         options: RegistrationOptions,
     ) -> Result<(), RuntimeError> {
         let (id, name, cap) = context;
-        Self::validate_reserved_owned_event_types(&name, &cap)?;
 
         if cap.has_driver != driver.is_some() {
             return Err(RuntimeError::CapabilityMismatch {
@@ -3002,16 +3141,9 @@ impl PluginRegistry {
             });
         }
 
-        if approver.is_some() {
-            if let Some(kind) = cap.owned_event_types.iter().find(|kind| {
-                approver_event_types.contains(*kind) && self.approver_map.contains_key(*kind)
-            }) {
-                return Err(RuntimeError::CapabilityMismatch {
-                    name,
-                    reason: format!("an action approver route already exists for '{kind}'"),
-                });
-            }
-        }
+        // Approver routes are plugin-owned types, and the shared ownership
+        // check has already rejected any type another registration owns, so
+        // a second approver route for one type cannot reach this point.
 
         let version = plugin.version().to_owned();
 
@@ -3020,7 +3152,7 @@ impl PluginRegistry {
 
         // Register event type schemas
         for kind in &cap.owned_event_types {
-            self.schemas.register(EventTypeSchema {
+            self.schemas.register_claimed(EventTypeSchema {
                 event_type: kind.clone(),
                 description: format!("owned by plugin '{name}'"),
                 json_schema: None,
@@ -3196,21 +3328,16 @@ impl PluginRegistry {
             artifacts.retention_policy_artifact(),
         )?;
         let plugin_version = closure.output_policy().fields().plugin_version.clone();
-        let admission =
-            OutputAdmissionV1::try_new_verified(plugin_id, &plugin_version, closure, owner_token)?;
+        let (admission, owned_event_types) = self.claim_test_admission(
+            OutputAdmissionV1::try_new_verified(plugin_id, &plugin_version, closure, owner_token),
+        )?;
         let name = driver.name().to_owned();
         self.plugins.insert(
             plugin_id,
             PluginEntry {
                 name,
                 version: plugin_version,
-                owned_event_types: admission
-                    .policy()
-                    .fields()
-                    .output_declarations
-                    .iter()
-                    .map(|declaration| Kind::new(declaration.event_type()))
-                    .collect(),
+                owned_event_types,
                 driver: Some(driver),
                 approver: None,
                 last_tick: None,
@@ -3274,20 +3401,16 @@ impl PluginRegistry {
                 name: driver.name().to_owned(),
             });
         }
-        let admission = OutputAdmissionV1::try_new(plugin_id, plugin_version, policy, budget)?;
+        let (admission, owned_event_types) = self.claim_test_admission(
+            OutputAdmissionV1::try_new(plugin_id, plugin_version, policy, budget),
+        )?;
         let name = driver.name().to_owned();
         self.plugins.insert(
             plugin_id,
             PluginEntry {
                 name,
                 version: plugin_version.to_owned(),
-                owned_event_types: admission
-                    .policy()
-                    .fields()
-                    .output_declarations
-                    .iter()
-                    .map(|declaration| Kind::new(declaration.event_type()))
-                    .collect(),
+                owned_event_types,
                 driver: Some(driver),
                 approver: None,
                 last_tick: None,
@@ -3798,6 +3921,14 @@ mod tests {
         event_types: &[&str],
         driver: Box<dyn Driver>,
     ) {
+        try_register_output_driver(registry, event_types, driver).test_ok();
+    }
+
+    fn try_register_output_driver(
+        registry: &mut PluginRegistry,
+        event_types: &[&str],
+        driver: Box<dyn Driver>,
+    ) -> Result<(), RuntimeError> {
         let plugin_id = PluginId::new();
         let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -3861,9 +3992,35 @@ mod tests {
             output_declarations: declarations,
         })
         .test_ok();
-        registry
-            .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
-            .test_ok();
+        registry.register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
+    }
+
+    /// ADR-024 Revision 1: the policy-derived test-support path runs the
+    /// shared ownership check and leaves the registry unchanged on rejection.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn policy_derived_test_driver_rejects_an_owned_event_type() {
+        let mut registry = gated_registry();
+        register_output_driver(
+            &mut registry,
+            &["shared.output"],
+            Box::new(NamedNoopDriver("first-owner")),
+        );
+        let revision = registry.registration_revision;
+        let error = try_register_output_driver(
+            &mut registry,
+            &["other.output", "shared.output"],
+            Box::new(NamedNoopDriver("second-owner")),
+        )
+        .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::Composition(PluginCompositionErrorV1::DuplicateEventTypeOwner {
+                ref event_type
+            }) if event_type == "shared.output"
+        ));
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.registration_revision, revision);
     }
 
     struct NamedNoopDriver(&'static str);
@@ -6708,7 +6865,13 @@ mod tests {
         let mut registry = PluginRegistry::new();
         let snapshot = ObservationSnapshot::default();
         let missing = registry
-            .invoke_selected_driver(PluginId::new(), TimelineId::new(), &snapshot, &[])
+            .invoke_selected_driver(
+                PluginId::new(),
+                TimelineId::new(),
+                &snapshot,
+                &[],
+                &OperationContext::Public,
+            )
             .test_err();
         assert!(matches!(missing, RuntimeError::NoDriver { .. }));
 
@@ -6716,7 +6879,13 @@ mod tests {
         let plugin_id = plugin.id;
         registry.register_generated(&plugin, None, None).test_ok();
         let absent = registry
-            .invoke_selected_driver(plugin_id, TimelineId::new(), &snapshot, &[])
+            .invoke_selected_driver(
+                plugin_id,
+                TimelineId::new(),
+                &snapshot,
+                &[],
+                &OperationContext::Public,
+            )
             .test_err();
         assert!(matches!(absent, RuntimeError::NoDriver { .. }));
     }
@@ -6753,7 +6922,8 @@ mod tests {
                 id,
                 timeline.id(),
                 &ObservationSnapshot::default(),
-                &[]
+                &[],
+                &OperationContext::Public,
             ),
             Err(RuntimeError::MissingSnapshotAnchor { .. })
         ));
@@ -6774,7 +6944,13 @@ mod tests {
             )
             .test_ok();
         assert!(matches!(
-            registry.invoke_selected_driver(id, timeline.id(), &snapshot, &committed),
+            registry.invoke_selected_driver(
+                id,
+                timeline.id(),
+                &snapshot,
+                &committed,
+                &OperationContext::Public,
+            ),
             Err(RuntimeError::InvalidRecoveryEvidence { .. })
         ));
     }
@@ -6866,6 +7042,7 @@ mod tests {
                 TimelineId::new(),
                 &ObservationSnapshot::default(),
                 &[ordinary, consent, location, cell],
+                &OperationContext::Public,
             )
             .test_ok();
 
@@ -8062,7 +8239,12 @@ mod tests {
                 [Kind::new("action.type")],
             )
             .test_err();
-        assert!(matches!(duplicate, RuntimeError::CapabilityMismatch { .. }));
+        assert!(matches!(
+            duplicate,
+            RuntimeError::Composition(PluginCompositionErrorV1::DuplicateEventTypeOwner {
+                ref event_type
+            }) if event_type == "action.type"
+        ));
 
         let no_approver = plugin_with_caps("missing_approver", &["missing.type"], false, false);
         let missing = reg

@@ -166,6 +166,41 @@ impl Driver for ObservationProbeDriver {
     }
 }
 
+/// One `AgentPlugin` registration drives several entities (ADR-024 Revision 1
+/// Decision 7): the fast entity steps every pass, the slow entity every
+/// second committed pass of this registration's single Driver.
+struct MultiEntityAgentDriver {
+    fast: AgentDriver,
+    slow: AgentDriver,
+    committed_passes: u64,
+}
+
+impl Driver for MultiEntityAgentDriver {
+    fn name(&self) -> &'static str {
+        "multi-entity-agent"
+    }
+
+    fn tick_interval(&self) -> Duration {
+        Duration::from_millis(100)
+    }
+
+    fn step(
+        &mut self,
+        timeline: TimelineId,
+        observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let mut drafts = self.fast.step(timeline, observations)?.drafts;
+        if self.committed_passes.is_multiple_of(2) {
+            drafts.extend(self.slow.step(timeline, ObservationView::empty())?.drafts);
+        }
+        Ok(StepOutput::new(drafts))
+    }
+
+    fn commit_step(&mut self) {
+        self.committed_passes += 1;
+    }
+}
+
 struct HumanActionDriver {
     entity: EntityId,
     payload: CanonicalBytes,
@@ -458,7 +493,7 @@ fn gateway_authorization_for(
     state
         .issue_grant(host.authorize_grant(&grant).test_ok()?, grant.clone())
         .test_ok()?;
-    let authority = state.resolve(grant.grant_id()).test_ok()?;
+    let authority = state.view(grant.grant_id()).test_ok()?;
     Ok(GatewayAuthorization::new(
         Arc::new(LocalAuthenticationAdapter::new(authenticated)),
         authority,
@@ -654,12 +689,12 @@ fn register_experiment(
     let human = FixturePlugin::new("human-action", true, false)
         .with_owned_event_type(Kind::new("world.action.v1"));
     let human_action = human_action_payload(scenario)?;
-    let fast = AgentPlugin::new();
+    // One AgentPlugin registration owns `agent.action` and the Recorder type
+    // and drives both agent entities.
+    let agent = AgentPlugin::new();
     let probe = FixturePlugin::new("observation-probe", true, false);
-    let slow = AgentPlugin::new();
     let human_binding = owned_event_type_binding(&human)?;
-    let fast_binding = agent_output_binding(&fast)?;
-    let slow_binding = agent_output_binding(&slow)?;
+    let agent_binding = agent_output_binding(&agent)?;
     let mut experiment = Experiment::new(ExperimentConfig {
         name: "multi-rate-host".to_owned(),
         stop: StopCondition::MaxTicks(10),
@@ -682,40 +717,33 @@ fn register_experiment(
         .test_ok()?;
     experiment
         .register_with_verified_output_policy(
-            &fast,
-            fast_binding,
+            &agent,
+            agent_binding,
             Some(Box::new(AgentReducer)),
-            Some(Box::new(AgentDriver::new(
-                scenario.fast_entity,
-                Box::new(BarrierPolicy {
-                    inner: RoundRobinPolicy::new(vec!["fast".to_owned()]),
-                    decisions: Arc::clone(&scenario.fast_decisions),
-                    snapshot_ready: Some(scenario.snapshot_ready.take().test_ok()?),
-                    release: Mutex::new(scenario.release_rx.take().test_ok()?),
-                }),
-                vec!["fast".to_owned()],
-            ))),
-        )
-        .test_ok()?;
-    register_probe(&mut experiment, scenario, &probe)?;
-    experiment
-        .register_with_verified_output_policy(
-            &slow,
-            slow_binding,
-            Some(Box::new(AgentReducer)),
-            Some(Box::new(
-                AgentDriver::new(
+            Some(Box::new(MultiEntityAgentDriver {
+                fast: AgentDriver::new(
+                    scenario.fast_entity,
+                    Box::new(BarrierPolicy {
+                        inner: RoundRobinPolicy::new(vec!["fast".to_owned()]),
+                        decisions: Arc::clone(&scenario.fast_decisions),
+                        snapshot_ready: Some(scenario.snapshot_ready.take().test_ok()?),
+                        release: Mutex::new(scenario.release_rx.take().test_ok()?),
+                    }),
+                    vec!["fast".to_owned()],
+                ),
+                slow: AgentDriver::new(
                     scenario.slow_entity,
                     Box::new(CountingPolicy {
                         inner: RoundRobinPolicy::new(vec!["slow".to_owned()]),
                         decisions: Arc::clone(&scenario.slow_decisions),
                     }),
                     vec!["slow".to_owned()],
-                )
-                .with_tick_interval(Duration::from_millis(200)),
-            )),
+                ),
+                committed_passes: 0,
+            })),
         )
         .test_ok()?;
+    register_probe(&mut experiment, scenario, &probe)?;
     let authority = ConsentAuthority::new();
     let grant = ConsentGrantedV1 {
         subject_id: scenario.human_entity,

@@ -6,22 +6,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope,
-    AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1,
-    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, CanonicalBytes, Capability, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, CoreError, DelegateClassV1, EntityId,
-    ErasureContainmentGateV1, Event, EventDraft, EventStore, Hash, Kind, PipelineAdmissionBasisV1,
+    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1,
+    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1,
+    ConsentRevokedV1, CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, Event,
+    EventDraft, EventStore, Hash, Kind, PersistedAuthorityV1, PipelineAdmissionBasisV1,
     PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
     PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
     PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
     PluginId, PrincipalRefV1, Reducer, Seq, SeqRange, State, TimelineId, DELEGATE_ACTION_V1,
 };
 use pos_runtime::{
-    schema::EventTypeSchema, Driver, LocalScheduledAdmissionHostV1, ObservationView,
-    PluginRegistry, ProjectionKey, RuntimeError, ScheduledAdmissionStoreV1,
-    ScheduledPassAdmissionV1, StepOutput,
+    Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
+    RuntimeError, ScheduledAdmissionStoreV1, ScheduledPassAdmissionV1, StepOutput,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use ulid::Ulid;
@@ -132,13 +132,13 @@ fn authority_host() -> AuthorityPersistenceHostV1 {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn revisions(authority: Hash, erasure: Hash) -> PipelineSecurityRevisionsV1 {
+fn revisions(authority: &PersistedAuthorityV1, erasure: Hash) -> PipelineSecurityRevisionsV1 {
     ok(PipelineSecurityRevisionsV1::try_from_draft(
         PipelineSecurityRevisionsDraftV1 {
-            authority,
+            authority: pipeline_authority_revision_v1(authority),
             consent: hash(11),
             capability: hash(12),
-            delegation: hash(13),
+            delegation: pipeline_delegation_revision_v1(authority),
             policy: hash(14),
             execution_profile: hash(15),
             erasure,
@@ -196,7 +196,7 @@ impl Host {
         let root = root_grant();
         ok(store.issue_capability_grant(ok(authority.authorize_grant(&root)), &root));
         let current = revisions(
-            pipeline_authority_revision_v1(&ok(store.load_authority(hash(1)))),
+            &ok(store.load_authority(hash(1))),
             pipeline_erasure_revision_v1(gate.inventory_generation().ok()),
         );
         publish(store, timeline, current, budget);
@@ -415,12 +415,8 @@ fn register(registry: &mut PluginRegistry, driver: ScriptedDriver) {
         event_type: driver.event_type,
         reducer: false,
     };
+    // Registration records the owned type's schema; it is never re-registered.
     ok(registry.register_generated(&plugin, None, Some(Box::new(driver))));
-    registry.schemas.register(EventTypeSchema {
-        event_type: Kind::new(plugin.event_type),
-        description: "scheduled AI Driver output".to_owned(),
-        json_schema: None,
-    });
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1006,6 +1002,14 @@ fn local_host_publishes_admits_and_refreshes_the_session_fence() {
             "{name}"
         );
         assert_eq!(budget(store.as_ref(), timeline), Some(u64::MAX), "{name}");
+        // The delegation revision is the persisted chain's, so a revocation
+        // persisted in the session store moves the fence (#483).
+        let persisted = ok(store.load_authority(host.authority_grant()));
+        assert_eq!(
+            revisions.as_draft().delegation,
+            pipeline_delegation_revision_v1(&persisted),
+            "{name}"
+        );
         assert_eq!(
             ok(host.observe(&registry, store.as_mut(), timeline)),
             revisions,

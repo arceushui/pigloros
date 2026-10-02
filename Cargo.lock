@@ -4644,6 +4644,8 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "pos-core",
+ "pos-plugin-persona",
+ "pos-runtime",
  "pos-store",
  "serde",
  "serde_json",
@@ -4688,9 +4690,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "pos-core",
- "pos-plugin-eval",
  "pos-runtime",
- "pos-store",
  "serde",
  "serde_json",
 ]

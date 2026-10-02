@@ -30,8 +30,9 @@ use pos_experiment::{
     TickOutcome,
 };
 use pos_plugin_eval::{
-    draft_outcome, draft_prediction, CalibrationReport, EvalPlugin, EvalReducer,
-    EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
+    draft_outcome, draft_prediction, CalibrationReport, EvalDerivationConfigV1,
+    EvalDerivationDriver, EvalDiagnosticsV1, EvalPlugin, EvalReducer, EVENT_TYPE_OUTCOME,
+    EVENT_TYPE_PREDICTION,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use pos_store::{memory::MemoryStore, SeqRange, StoreConfig};
@@ -195,7 +196,10 @@ impl Fixture {
             .register_generated_with_approver(
                 &EvalPlugin::new(),
                 Some(Box::new(EvalReducer)),
-                None,
+                Some(Box::new(EvalDerivationDriver::new(
+                    EvalDerivationConfigV1::new(64).test_ok(),
+                    EvalDiagnosticsV1::default(),
+                ))),
                 Some(Box::new(CountingApprover {
                     approvals: Arc::clone(&self.approvals),
                 })),
@@ -587,6 +591,7 @@ impl PipelineEvaluatorV1 for ForgingEvaluator {
             lift_vs_persistence: 1.0,
             n_predictions: 1_000,
             n_resolved: 1_000,
+            n_predictor_supplied: 0,
             reliability_bins: Vec::new(),
         }))
     }

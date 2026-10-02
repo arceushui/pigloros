@@ -7,8 +7,12 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use pos_core::{
-    AuthorityPersistenceHostV1, AuthorityRegistrySnapshotV1, CanonicalBytes, EntityId,
-    ErasureRecoveryLimitsV1, Hash, Kind, ProposedAction, Seq, TimelineId,
+    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
+    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, CanonicalBytes,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, EntityId, ErasureRecoveryLimitsV1, Hash, Kind,
+    PrincipalRefV1, ProposedAction, Seq, TimelineId, WallTime,
 };
 use pos_runtime::ErasureExecutionHostV1;
 use pos_store::StoreConfig;
@@ -17,7 +21,8 @@ use tokio::sync::broadcast;
 use crate::{
     authorization::{
         test_authorization_for, test_authorization_reject_after_first_for,
-        test_expired_authorization_for, test_revoked_authority_for,
+        test_expired_authorization_for, test_revoked_authority_for, GatewayAuthorizationRequest,
+        LocalAuthenticationAdapter,
     },
     executor, gateway_empty_action_registry, gateway_with_erasure_host_and_authorization,
     AdmittedAction, Gateway, GatewayAuthorization, GatewayError, GatewayLimits, HumanActionRequest,
@@ -871,5 +876,243 @@ async fn a_stopped_store_executor_reports_its_stable_error() -> TestResult {
 
     assert!(matches!(outcome, GatewayError::StoreExecutorClosed));
     drop(fixture);
+    Ok(())
+}
+
+const HISTORY_REGISTRY: Hash = Hash::from_bytes([3; 32]);
+const HISTORY_POLICY: Hash = Hash::from_bytes([4; 32]);
+
+/// One authority history shared by the Gateway and another host (#483): a
+/// root grant for the actor and an unrelated sibling root on the same
+/// authority Timeline, both attested by one registry.
+struct AuthorityHistory {
+    authenticated: AuthenticatedPrincipalResultV1,
+    root: CapabilityGrantV1,
+    sibling: CapabilityGrantV1,
+    registry: AuthorityRegistrySnapshotV1,
+}
+
+fn history_grant(
+    actor: EntityId,
+    principal: &PrincipalRefV1,
+    timeline: TimelineId,
+    id: u8,
+    issuance: u64,
+) -> TestResult<CapabilityGrantV1> {
+    Ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+        grant_id: Hash::from_bytes([id; 32]),
+        grantor: principal.clone(),
+        grantee: AuthorityGranteeV1::Principal(principal.clone()),
+        trust_domain: "gateway.test".to_owned(),
+        scope: CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+            resources: vec!["timeline.events".to_owned(), EVENT_TYPE_ACTION.to_owned()],
+            actions: vec!["read".to_owned(), CAPABILITY.to_owned()],
+            purposes: vec!["action".to_owned(), "read".to_owned()],
+            audiences: vec!["gateway".to_owned()],
+            actor_entity_ids: vec![actor],
+            subject_ids: Vec::new(),
+            participant_ids: Vec::new(),
+            plugin_id: None,
+            principal_roles: vec![AuthorityRoleV1::Actor],
+            max_uses: 1,
+            budget: 1,
+            environment_constraints: Vec::new(),
+        })?,
+        valid_from_position: Seq::from_u64(issuance),
+        valid_until_position: Seq::from_u64(50),
+        parent_grant_id: None,
+        delegation_depth: 0,
+        max_delegation_depth: 0,
+        permitted_delegate_classes: Vec::new(),
+        consent_references: Vec::new(),
+        policy_revision: HISTORY_POLICY,
+        issuance_timeline: timeline,
+        issuance_seq: Seq::from_u64(issuance),
+        revocation_epoch: 0,
+        revocation_fence: None,
+        authority_registry_digest: HISTORY_REGISTRY,
+    })?)
+}
+
+fn history_registry(
+    authenticated: &AuthenticatedPrincipalResultV1,
+    mut bindings: Vec<Hash>,
+) -> TestResult<AuthorityRegistrySnapshotV1> {
+    bindings.sort_unstable();
+    Ok(AuthorityRegistrySnapshotV1::try_new(
+        HISTORY_REGISTRY,
+        vec![authenticated.registry_binding_digest()],
+        bindings,
+        Vec::new(),
+    )?)
+}
+
+impl AuthorityHistory {
+    fn new(actor: EntityId) -> TestResult<Self> {
+        let principal = PrincipalRefV1::try_new([1; 16], "gateway.test")?;
+        let authenticated =
+            AuthenticatedPrincipalResultV1::try_from_draft(AuthenticatedPrincipalDraftV1 {
+                principal: principal.clone(),
+                adapter_id: "fixture".to_owned(),
+                assurance: AssuranceLevelV1::try_new(1)?,
+                issued_at: WallTime::from_micros(1),
+                expires_at: WallTime::from_micros(u64::MAX),
+                binding_digest: Hash::from_bytes([2; 32]),
+            })?;
+        let timeline = TimelineId::new();
+        let root = history_grant(actor, &principal, timeline, 5, 1)?;
+        let sibling = history_grant(actor, &principal, timeline, 6, 2)?;
+        let issued = vec![root.binding_digest()?, sibling.binding_digest()?];
+        let mut history = Self {
+            registry: history_registry(&authenticated, issued.clone())?,
+            authenticated,
+            root,
+            sibling,
+        };
+        history.registry = history.registry_attesting_resolved(issued)?;
+        Ok(history)
+    }
+
+    /// The evaluator trusts the exact resolved records it evaluates, so the
+    /// registry also attests the root as resolved after the sibling's
+    /// revocation advanced the Timeline's epoch.
+    fn registry_attesting_resolved(
+        &self,
+        issued: Vec<Hash>,
+    ) -> TestResult<AuthorityRegistrySnapshotV1> {
+        let resolved =
+            self.view(&[&self.sibling])?.authority().chain().grants()[0].binding_digest()?;
+        history_registry(
+            &self.authenticated,
+            issued.into_iter().chain([resolved]).collect(),
+        )
+    }
+
+    /// The root's view after the grants were issued and `revoked` revoked at
+    /// fences 3, 4, … with epochs 1, 2, ….
+    fn view(&self, revoked: &[&CapabilityGrantV1]) -> TestResult<AuthorityViewV1> {
+        let host = AuthorityPersistenceHostV1::new(&self.registry);
+        let mut state = AuthorityPersistenceStateV1::new();
+        for grant in [&self.root, &self.sibling] {
+            state.issue_grant(host.authorize_grant(grant)?, grant.clone())?;
+        }
+        for (offset, grant) in (0_u64..).zip(revoked) {
+            let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+                grant_id: grant.grant_id(),
+                authority_timeline: grant.issuance_timeline(),
+                fence_position: Seq::from_u64(3 + offset),
+                revocation_epoch: 1 + offset,
+                policy_revision: HISTORY_POLICY,
+                authority_registry_digest: HISTORY_REGISTRY,
+            })?;
+            state.revoke_grant(host.authorize_revocation(grant, &revocation)?, revocation)?;
+        }
+        Ok(state.view(self.root.grant_id())?)
+    }
+
+    fn authorization(&self, view: AuthorityViewV1) -> GatewayAuthorization {
+        GatewayAuthorization::new(
+            Arc::new(LocalAuthenticationAdapter::new(self.authenticated.clone())),
+            view,
+            self.registry.clone(),
+        )
+    }
+}
+
+#[tokio::test]
+async fn a_revocation_the_host_learned_is_persisted_with_the_admission() -> TestResult {
+    for backend in backends()? {
+        let name = backend.name;
+        let actor = EntityId::new();
+        let history = AuthorityHistory::new(actor)?;
+        let learned = history.view(&[&history.sibling])?;
+        assert_eq!(learned.authority().revocations().len(), 1, "{name}");
+        let fixture = fixture_with(
+            host(&backend.config)?,
+            history.authorization(learned.clone()),
+            actor,
+            EntityId::new(),
+        )
+        .await?;
+
+        // The view's revocation record is replayed under host permits before
+        // the fence is published, so the admission commits against it.
+        admitted(submit(&fixture, 1, Some("learned"), None).await?)?;
+        assert_eq!(committed_events(&fixture).await?, 1, "{name}");
+        fixture.gateway.shutdown().await?;
+        drop(fixture);
+
+        // Another process reading the same store finds the persisted record.
+        if matches!(backend.config, StoreConfig::Sqlite { .. }) {
+            let persisted = host(&backend.config)?
+                .command_sender()?
+                .with_scheduled_admission(|ports| {
+                    ports.load_authority(history.root.grant_id())
+                })??;
+            assert_eq!(&persisted, learned.authority(), "{name}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_revocation_another_host_persisted_is_rejected_by_the_store() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let config = StoreConfig::Sqlite {
+        path: directory
+            .path()
+            .join("shared-authority.sqlite")
+            .to_str()
+            .ok_or("temporary path is not UTF-8")?
+            .to_owned(),
+    };
+    let actor = EntityId::new();
+    let body = EntityId::new();
+    let history = AuthorityHistory::new(actor)?;
+    let authorization = history.authorization(history.view(&[])?);
+    let first = fixture_with(host(&config)?, authorization.clone(), actor, body).await?;
+    admitted(submit(&first, 1, Some("before"), None).await?)?;
+    let timeline = first.timeline;
+    first.gateway.shutdown().await?;
+    drop(first);
+
+    // Another host process persists a revocation of the Gateway's root grant
+    // in the same store, under its own persistence identity.
+    let revoked = history.view(&[&history.root])?;
+    let other = AuthorityPersistenceHostV1::new(&history.registry);
+    let persisted = host(&config)?
+        .command_sender()?
+        .with_scheduled_admission(|ports| other.persist_authority(ports, &revoked))??;
+    assert_eq!(&persisted, revoked.authority());
+
+    let restarted = Fixture {
+        gateway: gateway_with_erasure_host_and_authorization(
+            host(&config)?,
+            [body],
+            authorization.clone(),
+        )?,
+        authorization,
+        timeline,
+        actor,
+        body,
+    };
+    // The Gateway's own view still authorizes the request in memory, so only
+    // the store's composition of the persisted revocation can reject it.
+    assert!(restarted
+        .authorization
+        .authorize(GatewayAuthorizationRequest::action(
+            actor,
+            timeline,
+            EVENT_TYPE_ACTION,
+            CAPABILITY,
+            WallTime::from_micros(10),
+        ))
+        .is_ok());
+    let outcome = rejected(submit(&restarted, 2, Some("after"), None).await?)?;
+    assert!(matches!(outcome, GatewayError::AuthorizationDenied));
+    assert_eq!(committed_events(&restarted).await?, 1);
+    assert_eq!(restarted.authorization.audits().len(), 1);
+    restarted.gateway.shutdown().await?;
+    drop(restarted);
     Ok(())
 }

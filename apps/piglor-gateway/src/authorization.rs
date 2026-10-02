@@ -11,7 +11,7 @@
 use pos_core::{
     AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationDecisionV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, AuthorizationDecisionV1,
     AuthorizationRequestDraftV1, AuthorizationRequestV1, ConsentEvidenceV1, EntityId, EventId,
     Hash, PersistedAuthorityV1, PluginId, PrincipalRefV1, Seq, TimelineId, WallTime,
 };
@@ -415,7 +415,7 @@ impl GatewayAuthorizationDecision {
 #[derive(Clone)]
 pub struct GatewayAuthorization {
     adapter: Arc<dyn GatewayAuthenticationAdapter>,
-    authority: Arc<RwLock<PersistedAuthorityV1>>,
+    authority: Arc<RwLock<Arc<AuthorityViewV1>>>,
     registry: AuthorityRegistrySnapshotV1,
     persistence: AuthorityPersistenceHostV1,
     revocation_state_current: bool,
@@ -428,7 +428,7 @@ impl GatewayAuthorization {
     #[must_use]
     pub fn new(
         adapter: Arc<dyn GatewayAuthenticationAdapter>,
-        authority: PersistedAuthorityV1,
+        authority: AuthorityViewV1,
         registry: AuthorityRegistrySnapshotV1,
     ) -> Self {
         Self::new_with_revocation_state(adapter, authority, registry, true)
@@ -443,13 +443,13 @@ impl GatewayAuthorization {
     #[must_use]
     pub fn new_with_revocation_state(
         adapter: Arc<dyn GatewayAuthenticationAdapter>,
-        authority: PersistedAuthorityV1,
+        authority: AuthorityViewV1,
         registry: AuthorityRegistrySnapshotV1,
         revocation_state_current: bool,
     ) -> Self {
         Self {
             adapter,
-            authority: Arc::new(RwLock::new(authority)),
+            authority: Arc::new(RwLock::new(Arc::new(authority))),
             persistence: AuthorityPersistenceHostV1::new(&registry),
             registry,
             revocation_state_current,
@@ -478,10 +478,11 @@ impl GatewayAuthorization {
             .and_then(|authenticated| {
                 self.authority
                     .read()
-                    .map(|authority| authority.clone())
+                    .map(|view| Arc::clone(&view))
                     .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
-                    .and_then(|authority| {
-                        core_request(&request, &authenticated, &authority, &self.registry)
+                    .and_then(|view| {
+                        let authority = view.authority();
+                        core_request(&request, &authenticated, authority, &self.registry)
                             .map_err(|_| GatewayAuthorizationError::RequestUnavailable)
                             .map(|core_request| GatewayAuthorizationDecision {
                                 request,
@@ -525,13 +526,13 @@ impl GatewayAuthorization {
     /// host authority lock is poisoned and cannot be replaced safely.
     pub async fn replace_authority(
         &self,
-        authority: PersistedAuthorityV1,
+        authority: AuthorityViewV1,
     ) -> Result<(), GatewayAuthorizationError> {
         let _guard = self.commit_lock.write().await;
         self.authority
             .write()
             .map(|mut current| {
-                *current = authority;
+                *current = Arc::new(authority);
             })
             .map_err(|_| GatewayAuthorizationError::AuthorityUnavailable)
     }
@@ -582,54 +583,39 @@ impl GatewayAuthorization {
         Arc::clone(&self.commit_lock).read_owned().await
     }
 
-    /// Persist the current authority chain in the admission store and load
-    /// it back as the store resolves it.
+    /// Persist every immutable record behind the current authority view in
+    /// the admission store and load the chain back as the store resolves it.
     ///
     /// This Gateway is the trusted composition root for its pinned registry,
-    /// so it binds the store to its own persistence host and issues every
-    /// grant of the current root-to-leaf chain (an exact retry is
-    /// unchanged). The returned leaf grant names the persisted chain the
-    /// store composes at its admission serialization point. Call it under
+    /// so it binds the store to its own persistence host and replays the
+    /// view's grants and revocation records in Timeline Order, each under its
+    /// own host permit (an exact retry, or a record another host already
+    /// persisted, is unchanged). A revocation this host learned through
+    /// [`Self::replace_authority`] therefore becomes a persisted record that
+    /// the store composes at its admission serialization point, and a
+    /// revocation another host persisted is returned in the loaded chain.
+    /// The returned leaf grant names that persisted chain. Call it under
     /// [`Self::commit_fence`], so an authority replacement cannot interleave.
     ///
     /// # Errors
-    /// Returns a closed persistence error when the authority lock is
-    /// poisoned, the chain is empty, the store is bound to another host, or
-    /// a grant cannot be persisted for this registry.
+    /// Returns a closed persistence error when the store is bound to another
+    /// host, or a record cannot be persisted for this registry or conflicts
+    /// with the persisted state.
     pub(crate) fn persist_authority(
         &self,
         store: &mut dyn AuthorityPersistencePortV1,
     ) -> Result<(Hash, PersistedAuthorityV1), AuthorityPersistenceErrorV1> {
         // Replacement only swaps a complete snapshot, so a poisoned lock
-        // still holds a whole chain.
-        let grants = self
-            .authority
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .chain()
-            .grants()
-            .to_vec();
-        store
-            .bind_authority_persistence(self.persistence.persistence_binding())
-            .and_then(|()| {
-                grants.iter().try_for_each(|grant| {
-                    self.persistence
-                        .authorize_grant(grant)
-                        .and_then(|permit| store.issue_capability_grant(permit, grant))
-                        .map(|_| ())
-                })
-            })
-            .and_then(|()| {
-                grants
-                    .last()
-                    .map(pos_core::CapabilityGrantV1::grant_id)
-                    .ok_or(AuthorityPersistenceErrorV1::Unavailable)
-            })
-            .and_then(|leaf| {
-                store
-                    .load_authority(leaf)
-                    .map(|authority| (leaf, authority))
-            })
+        // still holds a whole view; only its shared handle is cloned.
+        let view = Arc::clone(
+            &self
+                .authority
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        self.persistence
+            .persist_authority(store, &view)
+            .map(|persisted| (persisted.leaf_grant_id(), persisted))
     }
 
     /// The pinned authority registry digest and revocation-freshness claim
@@ -854,7 +840,7 @@ pub(crate) fn test_authorization_reject_after_first_for(actor: EntityId) -> Gate
 }
 
 #[cfg(test)]
-pub(crate) fn test_revoked_authority_for(actor: EntityId) -> PersistedAuthorityV1 {
+pub(crate) fn test_revoked_authority_for(actor: EntityId) -> AuthorityViewV1 {
     tests::fixture_revoked_authority_with_actor(actor)
 }
 
@@ -916,8 +902,8 @@ mod tests {
         authenticated: AuthenticatedPrincipalResultV1,
         actor: EntityId,
         target_timeline: TimelineId,
-        authority: PersistedAuthorityV1,
-        revoked_authority: PersistedAuthorityV1,
+        authority: AuthorityViewV1,
+        revoked_authority: AuthorityViewV1,
     }
 
     fn fixture() -> Fixture {
@@ -1001,7 +987,7 @@ mod tests {
         state
             .issue_grant(host.authorize_grant(&grant).test_ok(), grant.clone())
             .test_ok();
-        let authority = state.resolve(grant.grant_id()).test_ok();
+        let authority = state.view(grant.grant_id()).test_ok();
         let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
             grant_id: grant.grant_id(),
             authority_timeline,
@@ -1017,7 +1003,7 @@ mod tests {
                 revocation,
             )
             .test_ok();
-        let revoked_authority = state.resolve(grant.grant_id()).test_ok();
+        let revoked_authority = state.view(grant.grant_id()).test_ok();
         let authorization = GatewayAuthorization::new(
             Arc::new(LocalAuthenticationAdapter::new(authenticated.clone())),
             authority.clone(),
@@ -1065,6 +1051,7 @@ mod tests {
             .test_ok();
         let grant_binding = fixture
             .authority
+            .authority()
             .chain()
             .grants()
             .iter()
@@ -1110,7 +1097,7 @@ mod tests {
         )
     }
 
-    pub(super) fn fixture_revoked_authority_with_actor(actor: EntityId) -> PersistedAuthorityV1 {
+    pub(super) fn fixture_revoked_authority_with_actor(actor: EntityId) -> AuthorityViewV1 {
         fixture_with_actor(actor).revoked_authority
     }
 

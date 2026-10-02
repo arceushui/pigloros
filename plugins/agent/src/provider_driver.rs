@@ -572,11 +572,14 @@ mod tests {
                 Box::new(driver),
             )
             .test_ok();
-        registry.schemas.register(EventTypeSchema {
-            event_type: Kind::new(EVENT_TYPE_ACTION),
-            description: "host-constructed Agent action".to_owned(),
-            json_schema: None,
-        });
+        registry
+            .schemas
+            .register(EventTypeSchema {
+                event_type: Kind::new(EVENT_TYPE_ACTION),
+                description: "host-constructed Agent action".to_owned(),
+                json_schema: None,
+            })
+            .test_ok();
         let mut store = pos_store::memory::MemoryStore::new();
         store
             .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))

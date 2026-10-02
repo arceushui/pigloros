@@ -89,32 +89,32 @@ pub use authority::{
     AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityMutationPermitV1,
     AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1,
     AuthorityPersistencePortV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, AuthorizationDecisionV1, AuthorizationOutcomeV1, AuthorizationRequestDraftV1,
-    AuthorizationRequestV1, BeliefRecordDraftV1, BeliefRecordV1, CapabilityGrantDraftV1,
-    CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1,
-    CapabilityScopeV1, ConfidenceV1, ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1,
-    ConsentGrantStatusV1, DelegateClassV1, DelegationChainV1, KnowledgeSnapshotDraftV1,
-    KnowledgeSnapshotV1, MemoryPolicyRevisionV1, ObservationArtifactV1, ObservationRecordDraftV1,
-    ObservationRecordV1, ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1,
-    PersistedAuthorityV1, PreferenceValueRevisionV1, PrincipalRefV1, DELEGATE_ACTION_V1,
-    MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SCOPE_MEMBERS,
-    MAX_AUTHORITY_SELECTORS, MAX_AUTHORITY_TEXT_BYTES, MAX_CAPABILITY_CONSENT_REFERENCES,
-    MAX_CAPABILITY_RECORD_BYTES, MAX_DECISION_RECORD_BYTES, MAX_KNOWLEDGE_SNAPSHOT_BYTES,
-    MAX_KNOWLEDGE_SNAPSHOT_RECORDS, MAX_OBSERVATION_ARTIFACT_BYTES, MAX_OBSERVATION_RECORD_BYTES,
-    MAX_OBSERVATION_SNAPSHOT_BYTES, MAX_OBSERVATION_SNAPSHOT_RECORDS,
-    MAX_PERSISTED_AUTHORITY_GRANTS, MAX_PERSISTED_AUTHORITY_STATE_BYTES,
-    MAX_PRINCIPAL_RECORD_BYTES,
+    AuthorityRoleV1, AuthorityViewV1, AuthorizationDecisionV1, AuthorizationOutcomeV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, BeliefRecordDraftV1, BeliefRecordV1,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, ConfidenceV1, ConsentEvidenceV1,
+    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1,
+    DelegationChainV1, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
+    ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
+    ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
+    PreferenceValueRevisionV1, PrincipalRefV1, DELEGATE_ACTION_V1, MAX_AUTHORITY_DELEGATION_DEPTH,
+    MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_SELECTORS,
+    MAX_AUTHORITY_TEXT_BYTES, MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CAPABILITY_RECORD_BYTES,
+    MAX_DECISION_RECORD_BYTES, MAX_KNOWLEDGE_SNAPSHOT_BYTES, MAX_KNOWLEDGE_SNAPSHOT_RECORDS,
+    MAX_OBSERVATION_ARTIFACT_BYTES, MAX_OBSERVATION_RECORD_BYTES, MAX_OBSERVATION_SNAPSHOT_BYTES,
+    MAX_OBSERVATION_SNAPSHOT_RECORDS, MAX_PERSISTED_AUTHORITY_GRANTS,
+    MAX_PERSISTED_AUTHORITY_STATE_BYTES, MAX_PRINCIPAL_RECORD_BYTES,
 };
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
 };
 pub use consent::{
-    is_consent_event_type, required_modality_for_event, ConsentAppendPermit, ConsentAuthority,
-    ConsentCapabilityToken, ConsentCodecError, ConsentError, ConsentGate, ConsentGrantedV1,
-    ConsentRevocationFoldListener, ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1,
-    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE,
-    MAX_CONSENT_HISTORY_EVENTS, MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT,
-    MODALITY_PERSONA,
+    is_consent_event_type, is_consent_sensitive_event_type, required_modality_for_event,
+    ConsentAppendPermit, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError, ConsentError,
+    ConsentGate, ConsentGrantedV1, ConsentRevocationFoldListener, ConsentRevocationReservation,
+    ConsentRevokedV1, FieldStateV1, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_CONSENT_HISTORY_EVENTS, MODALITY_EXPORT, MODALITY_LOCATION,
+    MODALITY_MODEL_FIT, MODALITY_PERSONA,
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
@@ -282,7 +282,7 @@ pub use pipeline::{
     MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES, PIPELINE_CONTRACT_VERSION_V1,
 };
 pub use pipeline_admission::{
-    pipeline_authority_revision_v1, pipeline_erasure_revision_v1,
+    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
     PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
     PipelineReceiptLookupV1, PIPELINE_ADMISSION_FENCE_BYTES_V1,
 };

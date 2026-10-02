@@ -26,7 +26,7 @@ struct FixtureBinding {
     retention_artifact: Vec<u8>,
 }
 
-fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Error>> {
+fn verified_binding<P: Plugin>(plugin: &P) -> Result<FixtureBinding, Box<dyn Error>> {
     let configuration_details = b"fixture-configuration";
     let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
@@ -47,9 +47,9 @@ fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Er
     })
 }
 
-fn register_verified_fixture_driver<D: Driver + 'static>(
+fn register_verified_fixture_driver<P: Plugin, D: Driver + 'static>(
     registry: &mut PluginRegistry,
-    plugin: &FixturePlugin,
+    plugin: &P,
     driver: D,
 ) -> TestResult {
     registry.register_with_verified_output_policy(
@@ -542,6 +542,34 @@ impl Plugin for FixturePlugin {
     }
 }
 
+/// A second Plugin owning its own Event type: under exclusive ownership two
+/// registrations in one registry never share an owned type (ADR-024 R1).
+struct SecondFixturePlugin {
+    id: PluginId,
+}
+
+impl Plugin for SecondFixturePlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "second-fixture"
+    }
+
+    fn version(&self) -> &'static str {
+        "1.0.0"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("second.output")],
+            has_driver: true,
+            ..Capability::default()
+        }
+    }
+}
+
 struct ForeignCapabilityPlugin {
     id: PluginId,
 }
@@ -652,7 +680,7 @@ impl Driver for RejectOnceDriver {
             self.reject_next = false;
             "plugin.undeclared"
         } else {
-            "plugin.output"
+            "second.output"
         };
         Ok(StepOutput::new(vec![draft(event_type, b"accepted")]))
     }
@@ -667,7 +695,7 @@ fn failed_scheduler_pass_does_not_advance_earlier_driver_cadence() -> TestResult
     let first = FixturePlugin {
         id: PluginId::new(),
     };
-    let second = FixturePlugin {
+    let second = SecondFixturePlugin {
         id: PluginId::new(),
     };
     let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
@@ -1101,17 +1129,6 @@ fn gated_store() -> Result<pos_store::memory::MemoryStore, Box<dyn Error>> {
     Ok(store)
 }
 
-/// Register the fixture output schema the host validates before admission.
-fn register_output_schema(registry: &mut PluginRegistry) {
-    registry
-        .schemas
-        .register(pos_runtime::schema::EventTypeSchema {
-            event_type: Kind::new("plugin.output"),
-            description: "verified fixture output".to_owned(),
-            json_schema: None,
-        });
-}
-
 /// Admit the staged pass through the local host and return its committed
 /// Event count.
 fn admit_staged(
@@ -1155,7 +1172,6 @@ fn verified_step_appends_output_at_the_exact_event_byte_limit() -> TestResult {
     let drafts = registry.step_all_anchored(timeline, pos_core::Seq::ZERO)?;
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].payload.len(), usize::try_from(limit)?);
-    register_output_schema(&mut registry);
     assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::from_u64(1));
     Ok(())
@@ -1243,7 +1259,6 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
 
     let drafts = registry.step_all_anchored(timeline, pos_core::Seq::ZERO)?;
     assert_eq!(drafts.len(), 1);
-    register_output_schema(&mut registry);
     assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::from_u64(1));
     Ok(())
