@@ -1,7 +1,7 @@
 //! ADR-024 Revision 1 Decision 5 through the public runtime seams: Persona
 //! emits its own prediction source, and Eval's non-participant scheduled
 //! Driver appends `eval.*` in a later pass through the host's atomic
-//! `ScheduledAiDriver` admission. Every case runs on `MemoryStore` and SQLite.
+//! `ScheduledAiDriver` admission. Every case runs on `MemoryStore` and `SqliteStore`.
 
 use std::sync::Arc;
 
