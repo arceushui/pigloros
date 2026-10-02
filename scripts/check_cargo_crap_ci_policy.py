@@ -15,12 +15,12 @@ UPLOAD_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0
 DOWNLOAD_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 BASELINE_RESOLVER = "scripts/resolve_cargo_crap_baseline.sh"
 SCOPED_JOB_IF = (
-    "${{ always() && needs.preflight-gate.result == 'success' && "
+    "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
     "(needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
 SCOPED_CARGO_CRAP_JOB_IF = (
-    "${{ always() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
+    "${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || "
     "github.event_name != 'pull_request') }}"
 )
 TEST_ONLY_EXCLUSIONS = (
@@ -93,7 +93,7 @@ def check_staged_main_job(jobs: dict, name: str, needs: list[str]) -> None:
     condition = job.get("if")
     require(isinstance(condition, str), f"{name} must have a job condition")
     require(
-        condition.startswith("${{ always() && "),
+        condition.startswith("${{ !cancelled() && "),
         f"{name} must opt into evaluation after optional skipped ancestors",
     )
     for dependency in needs:

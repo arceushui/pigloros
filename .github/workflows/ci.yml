@@ -149,9 +149,9 @@ jobs:
     name: fmt
     needs: [ci_change_scope, preflight-gate]
     # preflight-gate intentionally accepts the push-only skip of trunk-pr.
-    # always() prevents that optional ancestor from propagating a skip here;
+    # !cancelled() prevents that optional ancestor from propagating a skip here;
     # the explicit result check still stops the stage after a failed preflight.
-    if: ${{ always() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -171,7 +171,7 @@ jobs:
       - ci_change_scope
       - cargo-crap
     if: >-
-      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
@@ -192,7 +192,7 @@ jobs:
   test:
     name: test
     needs: [ci_change_scope, preflight-gate]
-    if: ${{ always() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -221,7 +221,7 @@ jobs:
       - ci_change_scope
       - cargo-crap
     if: >-
-      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
@@ -296,7 +296,7 @@ jobs:
       - conformance-fixtures
       - cargo-crap
     if: >-
-      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.conformance-fixtures.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
@@ -413,7 +413,7 @@ jobs:
   clippy:
     name: clippy
     needs: [ci_change_scope, preflight-gate]
-    if: ${{ always() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -437,7 +437,7 @@ jobs:
   coverage:
     name: coverage
     needs: [ci_change_scope, preflight-gate]
-    if: ${{ always() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -558,7 +558,7 @@ jobs:
       - core-gate
     # The push-only Trunk skip is an accepted preflight ancestor. Evaluate the
     # explicit direct dependencies instead of inheriting that skipped state.
-    if: ${{ always() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.core-gate.result == 'success' && needs.coverage.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -655,7 +655,7 @@ jobs:
       - ci_change_scope
       - cargo-crap
     if: >-
-      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
@@ -690,7 +690,7 @@ jobs:
       - ci_change_scope
       - cargo-crap
     if: >-
-      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
@@ -709,7 +709,7 @@ jobs:
       - ci_change_scope
       - cargo-crap
     if: >-
-      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     permissions:
@@ -749,7 +749,7 @@ jobs:
       - ci_change_scope
       - standard-gate
       - mutation-checks
-    if: ${{ always() && needs.standard-gate.result == 'success' && (needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && needs.standard-gate.result == 'success' && (needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -896,7 +896,7 @@ jobs:
       - ci_change_scope
       - cargo-crap
     if: >-
-      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
@@ -935,7 +935,7 @@ jobs:
       - ci_change_scope
       - cargo-crap
     if: >-
-      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.cargo-crap.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
@@ -961,7 +961,7 @@ jobs:
       - ci_change_scope
       - world-client-wasm
     if: >-
-      ${{ always() && needs.ci_change_scope.result == 'success' &&
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
       needs.world-client-wasm.result == 'success' &&
       (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
