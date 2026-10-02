@@ -12259,8 +12259,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn memory_adapter_recording_rejects_retained_corruption(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn memory_adapter_recording_rejects_retained_corruption() -> Result<(), Box<dyn std::error::Error>> {
         let (mut store, session) = closed_memory_adapter_recording(181)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
