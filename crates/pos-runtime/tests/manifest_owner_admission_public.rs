@@ -14,7 +14,7 @@ use pos_core::{
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
     ManifestSlotAdmissionReceiptV1, OwnerIdV1, Plugin, PluginId, TimelineId, WorldArtifactKindV1,
     WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
-    WorldProducerV1,
+    WorldConsumerV1, WorldProducerV1,
 };
 use pos_runtime::{
     recover_manifest_owner_admission_retry_v1, AdmittedCompositionV1, PluginRegistry,
@@ -121,7 +121,12 @@ fn request(
     let producer = sources.first().ok_or("empty admitted Plugin set")?;
     let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
         scope,
-        consumers: Vec::new(),
+        consumers: vec![WorldConsumerV1::new(
+            "local-observer".to_owned(),
+            hash(79),
+            hash(80),
+            hash(81),
+        )?],
         producers: vec![WorldProducerV1::new(
             producer.plugin_id(),
             producer.eop1_native_digest(),
