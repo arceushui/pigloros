@@ -25890,11 +25890,11 @@ pub(super) mod key_registry_coverage {
         }
 
         fn blob(bytes: &[u8]) -> String {
-            let hex = |nibble: u8| char::from_digit(u32::from(nibble), 16).unwrap_or('0');
+            const HEX: &[u8; 16] = b"0123456789abcdef";
             let mut literal = String::from("X'");
             for byte in bytes {
-                literal.push(hex(byte >> 4));
-                literal.push(hex(byte & 0x0f));
+                literal.push(char::from(HEX[usize::from(byte >> 4)]));
+                literal.push(char::from(HEX[usize::from(byte & 0x0f)]));
             }
             literal.push('\'');
             literal
