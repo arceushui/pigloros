@@ -296,6 +296,69 @@ fn persona_sources_are_derived_by_eval_in_a_later_pass_exactly_once() {
     }
 }
 
+/// ADR-024 Revision 1: a legacy Timeline whose `eval.*` records Persona
+/// emitted before the amendment folds under the exclusive-ownership
+/// registry, is never re-derived, and reports exactly as before.
+#[test]
+fn a_legacy_persona_emitted_eval_timeline_folds_and_reports_unchanged() {
+    for (name, mut store) in stores() {
+        let timeline = store.create_timeline("legacy").test_ok().id();
+        let entity = EntityId::new();
+        let authority = ConsentAuthority::new();
+        store
+            .append(
+                timeline,
+                &[
+                    pos_plugin_eval::draft_prediction(entity, "legacy", 0.8, "pred-0"),
+                    pos_plugin_eval::draft_outcome(entity, "pred-0", true),
+                    pos_plugin_eval::draft_prediction(entity, "legacy", 0.3, "pred-1"),
+                    pos_plugin_eval::draft_outcome(entity, "pred-1", false),
+                    pos_plugin_eval::draft_prediction(entity, "legacy", 0.6, "pred-2"),
+                ],
+            )
+            .test_ok();
+        let legacy = events(store.as_ref(), timeline);
+        let digest = ErasureReferenceV1::from_digest([221; 32]);
+        let before = compute_report_from_events(&legacy, digest, &report_claim()).test_ok();
+        assert_eq!(before.n_predictions, 3, "{name}");
+        assert_eq!(before.n_resolved, 2, "{name}");
+        assert_eq!(before.n_predictor_supplied, 0, "{name}");
+
+        // The new composition folds the legacy records into Eval's reducer.
+        let token = persona_token(&authority, timeline, entity);
+        let diagnostics = EvalDiagnosticsV1::default();
+        let mut registry = persona_and_eval(&authority, entity, &diagnostics);
+        registry.fold_events(timeline, &legacy);
+        let head = store.logical_head(timeline).test_ok();
+        let folded = registry
+            .projection_state_for_reducer(timeline, head, 0, &token, "eval", entity)
+            .test_ok()
+            .map(|state| {
+                (
+                    state
+                        .get("n_predictions")
+                        .and_then(serde_json::Value::as_u64),
+                    state.get("n_outcomes").and_then(serde_json::Value::as_u64),
+                )
+            });
+        assert_eq!(folded, Some((Some(3), Some(2))), "{name}");
+
+        // A scheduled pass commits only Persona's own Events: Eval never
+        // re-derives a legacy record, and the report is unchanged.
+        assert_eq!(pass(&mut registry, store.as_mut(), timeline, &token), 2);
+        let committed = events(store.as_ref(), timeline);
+        assert_eq!(
+            of_type(&committed, EVENT_TYPE_PREDICTION).len(),
+            3,
+            "{name}"
+        );
+        assert_eq!(of_type(&committed, EVENT_TYPE_OUTCOME).len(), 2, "{name}");
+        let after = compute_report_from_events(&committed, digest, &report_claim()).test_ok();
+        assert_eq!(format!("{after:?}"), format!("{before:?}"), "{name}");
+        assert!(diagnostics.findings().is_empty(), "{name}");
+    }
+}
+
 #[test]
 fn restart_discard_and_fork_never_derive_a_source_twice_or_skip_one() {
     for (name, mut store) in stores() {

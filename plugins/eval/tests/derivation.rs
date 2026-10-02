@@ -310,6 +310,89 @@ fn an_unknown_or_unreadable_source_version_fails_closed() {
     ));
 }
 
+fn prediction_for(cause: EventId) -> EventDraft {
+    caused(
+        EVENT_TYPE_PREDICTION,
+        cause,
+        encoded(&PredictionPayload {
+            entity_id: "derived".to_owned(),
+            predicted_prob: 0.5,
+            prediction_id: format!("eval:src:{cause}"),
+        }),
+    )
+}
+
+fn outcome_for(cause: EventId) -> EventDraft {
+    caused(
+        EVENT_TYPE_OUTCOME,
+        cause,
+        encoded(&OutcomePayload {
+            prediction_id: format!("eval:src:{cause}"),
+            outcome: true,
+            evidence: Some(OutcomeEvidenceV1::PredictorSupplied),
+        }),
+    )
+}
+
+fn raw_source(prefix: &mut Vec<Event>, entity: EntityId, payload: CanonicalBytes) -> EventId {
+    commit(
+        prefix,
+        EventDraft::new(entity, Kind::new(EVENT_TYPE_PREDICTION_SOURCE), payload),
+    )
+}
+
+/// User decision A (2026-10-02): only a still-eligible source is decoded, so
+/// a malformed or newer-version source that already has its prediction never
+/// blocks a pass. An eligible bad source still fails closed until ADR-024
+/// Revision 2 (#493) quarantines it.
+#[test]
+fn an_already_derived_unreadable_or_newer_source_never_blocks_a_pass() {
+    let entity = EntityId::new();
+    let newer_payload = encoded(&PredictionSourceV1 {
+        version: PREDICTION_SOURCE_VERSION_V1 + 1,
+        predicted_prob: 0.5,
+        outcome: PredictionOutcomeV1::Observed(true),
+    });
+    let mut prefix = Vec::new();
+    let newer_paired = raw_source(&mut prefix, entity, newer_payload.clone());
+    let newer_pending = raw_source(&mut prefix, entity, newer_payload);
+    let unreadable_pending = raw_source(&mut prefix, entity, CanonicalBytes::from_vec(vec![0xff]));
+    let unreadable_orphan = raw_source(&mut prefix, entity, CanonicalBytes::from_vec(vec![0xfe]));
+    let healthy = source(&mut prefix, entity, PredictionOutcomeV1::Observed(false));
+    commit(&mut prefix, prediction_for(newer_paired));
+    commit(&mut prefix, outcome_for(newer_paired));
+    commit(&mut prefix, prediction_for(newer_pending));
+    commit(&mut prefix, prediction_for(unreadable_pending));
+    commit(&mut prefix, outcome_for(unreadable_orphan));
+
+    let derivation = derive_eval_units(&prefix, &config(64)).test_ok();
+
+    // A predicted source whose outcome cannot be read counts as carrying no
+    // outcome; an orphan outcome is quarantined without decoding its source.
+    assert_eq!(
+        derivation.findings,
+        vec![EvalIntegrityFindingV1 {
+            source: unreadable_orphan,
+            kind: EvalIntegrityFindingKindV1::OrphanOutcome,
+        }]
+    );
+    assert_eq!(
+        sources_of(&derivation.drafts),
+        vec![
+            (EVENT_TYPE_PREDICTION.to_owned(), healthy),
+            (EVENT_TYPE_OUTCOME.to_owned(), healthy),
+        ]
+    );
+
+    // The same unreadable payload still fails closed while it is eligible.
+    let mut eligible = Vec::new();
+    raw_source(&mut eligible, entity, CanonicalBytes::from_vec(vec![0xff]));
+    assert!(matches!(
+        derive_eval_units(&eligible, &config(64)),
+        Err(EvalError::Decode(_))
+    ));
+}
+
 #[test]
 fn the_configuration_admits_at_least_one_whole_unit_and_pins_its_mapping() {
     assert!(matches!(

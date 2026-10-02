@@ -10,6 +10,12 @@
 //! pinned [`EvalDerivationConfigV1`]: a source is eligible exactly when the
 //! prefix holds no `eval.prediction` whose `causation_id` names it. Replay
 //! never runs the derivation; it folds the committed `eval.*` Events.
+//!
+//! Only eligible sources are decoded in full. A source that already has its
+//! `eval.prediction` can never block a pass, even when its payload is
+//! malformed or carries a newer version. An eligible source that cannot be
+//! read still fails the pass closed. Quarantining it with a typed finding
+//! instead is ADR-024 Revision 2 (#493).
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -122,15 +128,20 @@ enum SourceStateV1 {
     Partial(EvalIntegrityFindingKindV1),
 }
 
-const fn source_state(
+/// Classify one source from the `eval.*` records that name it.
+///
+/// `expects_outcome` is read only for a source that has a prediction and no
+/// outcome. It never fails: a source whose payload cannot be read there is
+/// treated as carrying no outcome, so an already-derived source never blocks.
+fn source_state(
     has_prediction: bool,
     has_outcome: bool,
-    expects_outcome: bool,
+    expects_outcome: impl FnOnce() -> bool,
 ) -> SourceStateV1 {
     match (has_prediction, has_outcome) {
         (false, false) => SourceStateV1::Eligible,
         (false, true) => SourceStateV1::Partial(EvalIntegrityFindingKindV1::OrphanOutcome),
-        (true, false) if expects_outcome => {
+        (true, false) if expects_outcome() => {
             SourceStateV1::Partial(EvalIntegrityFindingKindV1::MissingOutcome)
         }
         (true, _) => SourceStateV1::Derived,
@@ -206,43 +217,49 @@ fn derived_unit(source: &Event, payload: &PredictionSourceV1) -> Vec<EventDraft>
 /// not fit, the budget closes, so a capped pass always derives the earliest
 /// eligible sources in Timeline Order.
 struct UnitBudgetV1 {
-    remaining: Option<usize>,
+    /// Drafts still available in this pass.
+    remaining: usize,
+    /// Set when a unit did not fit; no later unit is admitted.
+    closed: bool,
 }
 
 impl UnitBudgetV1 {
     fn admit(&mut self, unit_len: usize) -> bool {
-        let fits = self
-            .remaining
-            .is_some_and(|remaining| unit_len <= remaining);
-        self.remaining = self
-            .remaining
-            .filter(|_| fits)
-            .map(|remaining| remaining - unit_len);
-        fits
+        if self.closed || unit_len > self.remaining {
+            self.closed = true;
+            return false;
+        }
+        self.remaining -= unit_len;
+        true
     }
 }
 
 impl EvalDerivationV1 {
-    /// Account for one source: emit its whole unit when eligible and within
-    /// budget, or record a quarantined partial pair.
+    /// Account for one source: decode and emit its whole unit when eligible
+    /// and within budget, or record a quarantined partial pair.
+    ///
+    /// Only an eligible source is decoded here, so only an eligible source
+    /// can fail the pass.
     fn consider(
         &mut self,
         source: &Event,
-        payload: &PredictionSourceV1,
         state: SourceStateV1,
         budget: &mut UnitBudgetV1,
-    ) {
+    ) -> Result<(), EvalError> {
         match state {
-            SourceStateV1::Eligible => {
-                let unit = derived_unit(source, payload);
+            SourceStateV1::Eligible => decode_source(source).map(|payload| {
+                let unit = derived_unit(source, &payload);
                 let fits = budget.admit(unit.len());
                 self.drafts.extend(unit.into_iter().filter(|_| fits));
-            }
-            SourceStateV1::Partial(kind) => self.findings.push(EvalIntegrityFindingV1 {
-                source: source.id,
-                kind,
             }),
-            SourceStateV1::Derived => {}
+            SourceStateV1::Partial(kind) => {
+                self.findings.push(EvalIntegrityFindingV1 {
+                    source: source.id,
+                    kind,
+                });
+                Ok(())
+            }
+            SourceStateV1::Derived => Ok(()),
         }
     }
 }
@@ -254,10 +271,16 @@ impl EvalDerivationV1 {
 /// an outcome, one `eval.outcome`, both caused by the source and carrying
 /// its entity. Partial pairs are quarantined as findings and never repaired.
 ///
+/// Each call scans the whole prefix, so one pass costs O(history): time and
+/// memory grow with the number of committed sources and `eval.*` records,
+/// not with the number still eligible. The budget caps the drafts of one
+/// pass, not that scan.
+///
 /// # Errors
 /// Returns [`EvalError::Decode`] or [`EvalError::UnknownSourceVersion`] when
-/// a source payload cannot be read, so a version change never silently skips
-/// an outcome.
+/// an eligible source payload cannot be read, so a version change never
+/// silently skips an outcome. A source that already has its prediction is
+/// never decoded in full and never fails the call.
 pub fn derive_eval_units(
     prefix: &[Event],
     config: &EvalDerivationConfigV1,
@@ -266,21 +289,24 @@ pub fn derive_eval_units(
     let resolved = caused_sources(prefix, EVENT_TYPE_OUTCOME);
     let mut derivation = EvalDerivationV1::default();
     let mut budget = UnitBudgetV1 {
-        remaining: usize::try_from(config.max_drafts_per_pass).ok(),
+        remaining: usize::try_from(config.max_drafts_per_pass).unwrap_or(usize::MAX),
+        closed: false,
     };
-    for source in prefix
+    prefix
         .iter()
         .filter(|event| event.event_type.as_str() == EVENT_TYPE_PREDICTION_SOURCE)
-    {
-        let payload = decode_source(source)?;
-        let state = source_state(
-            predicted.contains(&source.id),
-            resolved.contains(&source.id),
-            payload.outcome != PredictionOutcomeV1::Absent,
-        );
-        derivation.consider(source, &payload, state, &mut budget);
-    }
-    Ok(derivation)
+        .try_for_each(|source| {
+            let state = source_state(
+                predicted.contains(&source.id),
+                resolved.contains(&source.id),
+                || {
+                    decode_source(source)
+                        .is_ok_and(|payload| payload.outcome != PredictionOutcomeV1::Absent)
+                },
+            );
+            derivation.consider(source, state, &mut budget)
+        })
+        .map(|()| derivation)
 }
 
 /// Non-durable, non-Timeline diagnostics channel for Eval's Driver.
@@ -313,10 +339,23 @@ impl EvalDiagnosticsV1 {
 /// It subscribes to Persona's prediction source and to Eval's own types,
 /// requires the host-verified committed prefix of exactly those types, and
 /// keeps no state that can change its output.
+///
+/// Its output policy declares the `Authoritative` authority class at
+/// fidelity `L0`. ADR-049 places committed reducer inputs that Replay needs
+/// in `Authoritative` and treats `ReproducibleDerived` output as re-derived
+/// on Replay; ADR-024 Revision 1 says Replay folds the committed `eval.*`
+/// Events and never re-derives them. `Authoritative/L0` is the class that
+/// satisfies both.
 pub struct EvalDerivationDriver {
     config: EvalDerivationConfigV1,
     subscriptions: [Kind; 3],
     diagnostics: EvalDiagnosticsV1,
+    /// The findings of the pass staged by the latest successful `step`.
+    ///
+    /// Invariant: the host calls `commit_step` only after it commits the
+    /// pass that same `step` staged, so `commit_step` publishes exactly that
+    /// pass's findings. A discarded pass is never published: its findings
+    /// are replaced by the next `step` before any later commit.
     staged_findings: Option<Vec<EvalIntegrityFindingV1>>,
 }
 
