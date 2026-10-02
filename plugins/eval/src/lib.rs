@@ -60,13 +60,6 @@ pub enum EvalError {
     /// ADR-060 forbids this artifact from authoritative evaluator input.
     #[error("calibration artifact is unavailable for authoritative use")]
     ArtifactUnavailable,
-    /// A prediction source carries a version Eval's pinned mapping does not
-    /// support. It fails closed so an outcome is never silently skipped.
-    #[error("unsupported prediction source version {version}")]
-    UnknownSourceVersion {
-        /// The source payload's version.
-        version: u32,
-    },
     /// The derivation configuration cannot admit one whole unit per pass.
     #[error("derivation budget must admit at least one whole prediction unit")]
     InvalidConfiguration,
@@ -258,10 +251,11 @@ impl Plugin for EvalPlugin {
         "eval"
     }
 
-    /// Version 0.2.0 adds the derivation Driver, so its pinned identity
+    /// Version 0.2.0 added the derivation Driver; version 0.3.0 quarantines
+    /// bad eligible sources (ADR-024 Revision 2), so its pinned identity
     /// never matches an earlier Eval pin.
     fn version(&self) -> &'static str {
-        "0.2.0"
+        "0.3.0"
     }
 
     /// Eval owns exactly `eval.prediction` and `eval.outcome` and supplies
@@ -791,7 +785,7 @@ mod tests {
         assert_eq!(cap.owned_entity_kinds, vec![ENTITY_KIND.to_owned()]);
         assert!(cap.has_driver);
         assert!(cap.has_reducer);
-        assert_eq!(plugin.version(), "0.2.0");
+        assert_eq!(plugin.version(), "0.3.0");
     }
 
     // ── EvalReducer tests ─────────────────────────────────────────────────────
