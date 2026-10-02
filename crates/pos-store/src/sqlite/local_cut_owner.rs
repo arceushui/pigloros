@@ -695,16 +695,26 @@ fn sqlite_insert_local_cut_owner_cut(
 ) -> Result<LocalCutOwnerCommitV1, LocalCutOwnerErrorV1> {
     let request = batch.request();
     let owner_id = batch.successor_state().owner_id;
-    let cut_id = request.seal.as_input().cut_id;
-    if sqlite_local_cut_owner_cut_by_id(connection, owner_id, cut_id)?.is_some()
-        || sqlite_local_cut_owner_cut_by_operation(connection, owner_id, request.operation_id)?
-            .is_some()
-    {
+    let cut_id_bytes = request.seal.as_input().cut_id.to_be_bytes();
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM local_cut_owner_cuts
+                 WHERE owner_id = ?1 AND (cut_id = ?2 OR operation_id = ?3)
+             )",
+            params![
+                owner_id.as_slice(),
+                cut_id_bytes.as_slice(),
+                request.operation_id.as_bytes().as_slice(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    if exists {
         return Err(LocalCutOwnerErrorV1::Conflict);
     }
     let result = batch.applied_result();
     let request_bytes = sqlite_local_cut_owner_request_bytes(request);
-    let cut_id_bytes = cut_id.to_be_bytes();
     connection
         .execute(
             "INSERT INTO local_cut_owner_cuts
@@ -2111,11 +2121,17 @@ mod local_cut_owner_coverage {
         let damaged_lookup = after_cut_update(connection, damaged, &[], by_operation)?;
         assert_eq!(damaged_lookup, corrupt);
         assert_eq!(after_cut_update(connection, damaged, &[], retry)?, corrupt);
-        assert_eq!(insert(connection), Some(LocalError::Conflict));
-        assert_eq!(after_cut_update(connection, damaged, &[], insert)?, corrupt);
+        let conflict = Some(LocalError::Conflict);
+        assert_eq!(insert(connection), conflict);
         let moved = [9_u64.to_be_bytes().to_vec()];
         let moved_insert = after_cut_update(connection, "cut_id = ?1", &moved, insert)?;
-        assert_eq!(moved_insert, corrupt);
+        assert_eq!(moved_insert, conflict);
+        let renamed = [hash(119).as_bytes().to_vec()];
+        let renamed_insert = after_cut_update(connection, "operation_id = ?1", &renamed, insert)?;
+        assert_eq!(renamed_insert, conflict);
+        deny_read(connection, "local_cut_owner_cuts", "operation_id", 0)?;
+        assert_eq!(insert(connection), Some(LocalError::StorageFailure));
+        clear_authorizer(connection)?;
         Ok(())
     }
 
