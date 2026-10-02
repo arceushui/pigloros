@@ -439,17 +439,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn world_live_observations_replay_without_backend_at_exact_seq_boundaries() {
-        let fixture = ProtectedFixture::new("world", world_reducer);
-        let (mut host, timeline, bodies, action, committed) = committed_world_step();
-        let gate = host.containment_gate();
-
+    /// The two committed observations, checked against the action that caused
+    /// them.
+    fn checked_world_observations<'a>(
+        committed: &'a [Event],
+        bodies: &[EntityId; 2],
+        action: &Event,
+    ) -> Vec<&'a Event> {
         let observations: Vec<_> = committed
             .iter()
             .filter(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .collect();
-        assert_committed_world_step_shape(&committed);
+        assert_committed_world_step_shape(committed);
         assert_eq!(observations.len(), 2);
         assert_eq!(observations[0].entity, bodies[0]);
         assert_eq!(observations[1].entity, bodies[1]);
@@ -464,6 +465,16 @@ mod tests {
             (observed.vel_lin_x, observed.vel_lin_y, observed.vel_lin_z),
             (1.0, 0.0, 2.0)
         );
+        observations
+    }
+
+    #[test]
+    fn world_live_observations_replay_without_backend_at_exact_seq_boundaries() {
+        let fixture = ProtectedFixture::new("world", world_reducer);
+        let (mut host, timeline, bodies, action, committed) = committed_world_step();
+        let gate = host.containment_gate();
+
+        let observations = checked_world_observations(&committed, &bodies, &action);
 
         let mut live = world_registry(gate.clone());
         live.apply_event(timeline, &action);
