@@ -25006,6 +25006,7 @@ pub(super) mod key_registry_coverage {
         assert!(matches!(serialization, Err(CoreError::Serialization(_))));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn adapter_recording_fixture(
         run_byte: u8,
     ) -> Result<
@@ -25077,6 +25078,7 @@ pub(super) mod key_registry_coverage {
         Ok((session, reservation, plugin_id))
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn resume_sqlite_adapter_recording(
         store: &mut SqliteStore,
         session: &AdapterRecordingSessionV1,
@@ -25105,6 +25107,7 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verify_sqlite_adapter_call_retries(
         store: &mut SqliteStore,
         owner_reference: Hash,
@@ -25181,6 +25184,7 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn exercise_sqlite_adapter_recording(
         store: &mut SqliteStore,
         session: &AdapterRecordingSessionV1,
@@ -25205,6 +25209,7 @@ pub(super) mod key_registry_coverage {
         Ok((owner_reference, run_operation_id, closed))
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn sqlite_adapter_recording_resumes_and_closes_durable_exact_calls(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -25229,6 +25234,7 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn sqlite_adapter_recording_abort_prevents_close() -> Result<(), Box<dyn std::error::Error>> {
         let (session, reservation, _) = adapter_recording_fixture(49)?;
@@ -25256,6 +25262,7 @@ pub(super) mod key_registry_coverage {
         );
         Ok(())
     }
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn artifact_registration_helper_boundaries_are_closed() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -25318,6 +25325,7 @@ pub(super) mod key_registry_coverage {
         store.conn.execute_batch("ROLLBACK")?;
         Ok(())
     }
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn closed_adapter_recording(
         run_byte: u8,
     ) -> Result<
@@ -25344,6 +25352,7 @@ pub(super) mod key_registry_coverage {
         Ok((store, session, reservation))
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_closed_recording_rejects_call_mutation(
         run_byte: u8,
         mutation: &str,
@@ -25377,6 +25386,7 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_closed_recording_rejects_session_mutation(
         run_byte: u8,
         mutation: &str,
@@ -25398,6 +25408,7 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn sqlite_adapter_recording_durable_rows_reject_corruption(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -25421,6 +25432,7 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn sqlite_adapter_recording_durable_column_bounds_are_rejected(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -25457,6 +25469,7 @@ pub(super) mod key_registry_coverage {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn sqlite_adapter_recording_reservation_bounds_are_rejected(
     ) -> Result<(), Box<dyn std::error::Error>> {
