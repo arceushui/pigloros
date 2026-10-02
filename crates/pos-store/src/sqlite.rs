@@ -10019,6 +10019,68 @@ fn with_fork_authority_transaction<T>(
     finish_fork_authority_transaction(conn, operation())
 }
 
+/// Apply one authority mutation to the persisted state.
+///
+/// Persisted grants and revocations are immutable, so once a mutation is
+/// `Unchanged` it stays `Unchanged`. An exact retry is therefore answered from
+/// one committed read without taking the write lock (#491). Any other outcome,
+/// including an error, is decided again under `BEGIN IMMEDIATE`, and only a
+/// `Committed` outcome rewrites the authority state there. Other connections
+/// sharing the file thus observe no `PRAGMA data_version` change for a replay.
+fn commit_authority_mutation(
+    conn: &Connection,
+    mutate: impl Fn(
+        &mut AuthorityPersistenceStateV1,
+    ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1>,
+) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+    if authority_mutation_is_unchanged(conn, &mutate) {
+        return Ok(AuthorityCommitOutcomeV1::Unchanged);
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
+        .and_then(|()| {
+            let result = read_authority_state(conn).and_then(|mut state| {
+                mutate(&mut state)
+                    .and_then(|outcome| write_committed_authority_state(conn, &state, outcome))
+            });
+            finish_transaction(
+                conn,
+                result,
+                |_, _| AuthorityPersistenceErrorV1::Unavailable,
+                |_, _| AuthorityPersistenceErrorV1::Unavailable,
+            )
+        })
+}
+
+/// Whether the mutation is an exact retry in the committed state.
+///
+/// Only a connection outside any transaction answers without the write lock;
+/// inside an outer transaction every mutation keeps failing closed exactly as
+/// its nested `BEGIN IMMEDIATE` does.
+fn authority_mutation_is_unchanged(
+    conn: &Connection,
+    mutate: &impl Fn(
+        &mut AuthorityPersistenceStateV1,
+    ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1>,
+) -> bool {
+    conn.is_autocommit()
+        && read_authority_state(conn).and_then(|mut state| mutate(&mut state))
+            == Ok(AuthorityCommitOutcomeV1::Unchanged)
+}
+
+/// Rewrite the authority state only for a `Committed` outcome; an `Unchanged`
+/// outcome found under the write lock (a concurrent retry) writes nothing.
+fn write_committed_authority_state(
+    conn: &Connection,
+    state: &AuthorityPersistenceStateV1,
+    outcome: AuthorityCommitOutcomeV1,
+) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+    (outcome == AuthorityCommitOutcomeV1::Committed)
+        .then(|| write_authority_state(conn, state))
+        .transpose()
+        .map(|_| outcome)
+}
+
 impl AuthorityPersistencePortV1 for SqliteStore {
     fn bind_authority_persistence(
         &mut self,
@@ -10041,24 +10103,7 @@ impl AuthorityPersistencePortV1 for SqliteStore {
         if self.authority_persistence_binding != Some(permit.persistence_binding()) {
             return Err(AuthorityPersistenceErrorV1::Unavailable);
         }
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
-            .and_then(|()| {
-                let result = read_authority_state(&self.conn).and_then(|mut state| {
-                    state
-                        .issue_grant(permit, grant.clone())
-                        .and_then(|outcome| {
-                            write_authority_state(&self.conn, &state).map(|()| outcome)
-                        })
-                });
-                finish_transaction(
-                    &self.conn,
-                    result,
-                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
-                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
-                )
-            })
+        commit_authority_mutation(&self.conn, |state| state.issue_grant(permit, grant.clone()))
     }
 
     fn revoke_capability_grant(
@@ -10069,24 +10114,9 @@ impl AuthorityPersistencePortV1 for SqliteStore {
         if self.authority_persistence_binding != Some(permit.persistence_binding()) {
             return Err(AuthorityPersistenceErrorV1::Unavailable);
         }
-        self.conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|_| AuthorityPersistenceErrorV1::Unavailable)
-            .and_then(|()| {
-                let result = read_authority_state(&self.conn).and_then(|mut state| {
-                    state
-                        .revoke_grant(permit, revocation.clone())
-                        .and_then(|outcome| {
-                            write_authority_state(&self.conn, &state).map(|()| outcome)
-                        })
-                });
-                finish_transaction(
-                    &self.conn,
-                    result,
-                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
-                    |_, _| AuthorityPersistenceErrorV1::Unavailable,
-                )
-            })
+        commit_authority_mutation(&self.conn, |state| {
+            state.revoke_grant(permit, revocation.clone())
+        })
     }
 
     fn load_authority(

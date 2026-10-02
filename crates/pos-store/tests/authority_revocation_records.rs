@@ -1,23 +1,26 @@
 //! Persisted authority views carry their revocation records into the
-//! admission store, and the delegation revision binds them (#483).
+//! admission store, and the delegation revision binds them (#483). Replaying a
+//! view the store already holds writes no authority state (#491).
 
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 
 use pos_core::{
     pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
-    AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityGranteeV1,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityCommitOutcomeV1, AuthorityGranteeV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1,
     CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
     CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, CoreError, DelegateClassV1,
-    EntityId, ErasureContainmentGateV1, EventDraft, EventStore, Hash, Kind, PersistedAuthorityV1,
-    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
-    PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
-    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1, Seq, SeqRange,
-    TentativePipelineResultV1, TimelineId, DELEGATE_ACTION_V1, PIPELINE_CONTRACT_VERSION_V1,
+    EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
+    ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1, EventDraft, EventStore,
+    Hash, Kind, PersistedAuthorityV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
+    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
+    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineDraftBatchV1,
+    PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1,
+    PipelinePreconditionV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    PrincipalRefV1, Seq, SeqRange, TentativePipelineResultV1, TimelineId, DELEGATE_ACTION_V1,
+    PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -594,4 +597,138 @@ fn sqlite_hosts_racing_a_revocation_never_commit_after_it_is_persisted() {
         PipelineOutcomeV1::AuthorityRevoked
     );
     assert_eq!(event_count(&open_file(&path), timeline), before);
+}
+
+fn data_version(connection: &rusqlite::Connection) -> i64 {
+    ok(connection.query_row("PRAGMA data_version", [], |row| row.get(0)))
+}
+
+/// Make every later authority-state write on the file abort.
+fn reject_authority_state_writes(path: &Path) {
+    ok(ok(rusqlite::Connection::open(path)).execute_batch(
+        "CREATE TRIGGER reject_authority_insert BEFORE INSERT ON authority_state
+         BEGIN SELECT RAISE(ABORT, 'authority state written'); END;
+         CREATE TRIGGER reject_authority_update BEFORE UPDATE ON authority_state
+         BEGIN SELECT RAISE(ABORT, 'authority state written'); END;",
+    ));
+}
+
+#[test]
+fn every_record_of_a_persisted_view_replays_unchanged_on_both_stores() {
+    let grants = Grants::new();
+    let learned = view(&grants, &[&grants.child], &grants.sibling);
+    let revoked = revocation(&grants.child, 4, 1);
+    for (name, mut store) in stores() {
+        let authority = host(&grants);
+        let persisted = ok(authority.persist_authority(store.as_mut(), &learned));
+        for grant in grants.all() {
+            assert_eq!(
+                ok(store.issue_capability_grant(ok(authority.authorize_grant(grant)), grant)),
+                AuthorityCommitOutcomeV1::Unchanged,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            ok(store.revoke_capability_grant(
+                ok(authority.authorize_revocation(&grants.child, &revoked)),
+                &revoked
+            )),
+            AuthorityCommitOutcomeV1::Unchanged,
+            "{name}"
+        );
+        assert_eq!(
+            ok(store.load_authority(grants.sibling.grant_id())),
+            persisted,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_idempotent_sqlite_replay_writes_no_authority_state_and_keeps_other_connections_open() {
+    let grants = Grants::new();
+    let directory = ok(tempdir());
+    let path = directory.path().join("unchanged-replay.db");
+    let learned = view(&grants, &[&grants.sibling], &grants.child);
+    let (timeline, published) = {
+        let mut store = open_file(&path);
+        let timeline = ok(store.create_timeline("unchanged-replay")).id();
+        let persisted = ok(host(&grants).persist_authority(&mut store, &learned));
+        let published = revisions(&persisted, None);
+        publish(&mut store, timeline, published);
+        (timeline, published)
+    };
+    reject_authority_state_writes(&path);
+    let mut replaying = open_file(&path);
+    let observer = ok(rusqlite::Connection::open(&path));
+    let mut admitting = open_file(&path);
+    let before = data_version(&observer);
+
+    // Another host replays every record of a view the file already holds.
+    // Any authority-state write would abort, so success proves none ran.
+    assert_eq!(
+        &ok(host(&grants).persist_authority(&mut replaying, &learned)),
+        learned.authority()
+    );
+    // No other connection observes a commit, so a store whose erasure gate is
+    // bound to the file's data version keeps admitting instead of failing
+    // closed.
+    assert_eq!(data_version(&observer), before);
+    assert!(is_commit(
+        &admitting.admit_pipeline_batch(&basis(timeline, 1, 0, published))
+    ));
+}
+
+#[test]
+fn an_unchanged_sqlite_replay_needs_no_write_lock_but_a_new_record_does() {
+    let grants = Grants::new();
+    let directory = ok(tempdir());
+    let path = directory.path().join("replay-lock.db");
+    let current = view(&grants, &[], &grants.child);
+    let learned = view(&grants, &[&grants.sibling], &grants.child);
+    let authority = host(&grants);
+    let mut store = open_file(&path);
+    let persisted = ok(authority.persist_authority(&mut store, &current));
+
+    let writer = ok(rusqlite::Connection::open(&path));
+    ok(writer.execute_batch("BEGIN IMMEDIATE"));
+    assert_eq!(
+        ok(authority.persist_authority(&mut store, &current)),
+        persisted
+    );
+    // A record the file lacks still waits for the write lock and fails closed
+    // when it cannot take it.
+    assert_eq!(
+        authority.persist_authority(&mut store, &learned),
+        Err(AuthorityPersistenceErrorV1::Unavailable)
+    );
+    ok(writer.execute_batch("ROLLBACK"));
+    assert_eq!(
+        &ok(authority.persist_authority(&mut store, &learned)),
+        learned.authority()
+    );
+}
+
+#[test]
+fn a_sqlite_store_inside_a_transaction_still_refuses_an_unchanged_replay() {
+    let grants = Grants::new();
+    let directory = ok(tempdir());
+    let path = directory.path().join("replay-in-transaction.db");
+    let current = view(&grants, &[], &grants.child);
+    let authority = host(&grants);
+    let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+    let persisted = ok(authority.persist_authority(&mut store, &current));
+
+    let interval = ok(store.begin_protected_effect_interval());
+    assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
+    assert_eq!(
+        authority.persist_authority(&mut store, &current),
+        Err(AuthorityPersistenceErrorV1::Unavailable)
+    );
+    ok(store
+        .finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback));
+    assert_eq!(
+        ok(authority.persist_authority(&mut store, &current)),
+        persisted
+    );
 }
