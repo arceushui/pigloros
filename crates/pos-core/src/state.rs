@@ -66,6 +66,23 @@ impl StateRegistry {
         self.states.keys().copied()
     }
 
+    /// Return every cached entity State, in no particular order.
+    pub fn entries(&self) -> impl Iterator<Item = (&EntityId, &State)> + '_ {
+        self.states.iter()
+    }
+
+    /// Number of entities with cached state.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
+
+    /// Whether no entity has cached state.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
+
     pub fn apply(&mut self, reducer: &dyn Reducer, event: &Event) {
         // Geographic evidence is owned by the Core visibility boundary.  A
         // generic StateRegistry must never hand it to a plugin reducer, even
@@ -196,6 +213,18 @@ mod tests {
         assert!(registry.get(&entity).is_none());
         let default = registry.get_or_default(&entity);
         assert!(default.fields.is_empty());
+    }
+
+    #[test]
+    fn registry_reports_its_cached_entities() {
+        let entity = EntityId::new();
+        let mut registry = StateRegistry::new();
+        assert!(registry.is_empty());
+        registry.apply(&CountReducer, &make_event(entity));
+        assert_eq!(registry.len(), 1);
+        assert!(!registry.is_empty());
+        let entries: Vec<_> = registry.entries().map(|(id, _)| *id).collect();
+        assert_eq!(entries, vec![entity]);
     }
 
     #[test]

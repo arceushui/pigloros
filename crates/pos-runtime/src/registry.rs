@@ -266,7 +266,7 @@ fn plugin_claimable_event_type(kind: &Kind) -> bool {
 
 /// The host's projection input: every Event except the consent-closed
 /// control marker. The visible registry and detached candidates share it.
-fn host_projection_events(events: &[Event]) -> Vec<Event> {
+pub(crate) fn host_projection_events(events: &[Event]) -> Vec<Event> {
     events
         .iter()
         .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)

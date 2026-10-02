@@ -127,7 +127,9 @@ const MICROS_PER_SECOND: u64 = 1_000_000;
 const MAX_TRUSTED_MICROS: u64 = i64::MAX.unsigned_abs();
 const PRINCIPAL_DIGEST_DOMAIN: &[u8] = b"pigloros.trusted-clock.operator-principal.v1\0";
 
-mod sealed {
+/// Seal shared with [`crate::staged_install`], whose handoff targets must be
+/// declared beside it (ADR-113 §2).
+pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
@@ -1239,6 +1241,13 @@ impl ReleaseGuardV1<'_> {
     #[must_use]
     pub const fn reservation(&self) -> &TrustedClockReservationV1 {
         &self.reservation
+    }
+
+    /// The guard start `g0`: the monotonic mark at the first acquired owner
+    /// lock, or else at the reservation's own lock acquisition.
+    #[must_use]
+    pub const fn guard_started_at(&self) -> MonotonicMarkV1 {
+        self.reservation.g0
     }
 
     /// The high-water re-read under this guard.

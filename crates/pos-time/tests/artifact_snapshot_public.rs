@@ -1,6 +1,8 @@
+//! Protected Snapshot capture and verification stay `Unavailable` until #502
+//! (ADR-113 §9, acceptance case 16), on MemoryStore and SQLite.
+
 use pos_core::{
-    ErasureGate, ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash, Reducer, State, TimelineId,
-    WorldReplayClosureV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash, Reducer, State, WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -8,7 +10,7 @@ use pos_runtime::{
 };
 use pos_state::ProjectionRegistry;
 use pos_store::StoreConfig;
-use pos_time::{snapshot, verify_snapshot_consistency};
+use pos_time::{snapshot, verify_snapshot_consistency, Snapshot, SnapshotError};
 use std::sync::Arc;
 
 trait TestValueExt<T> {
@@ -25,7 +27,17 @@ impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
     }
 }
 
-struct NoopReducer;
+struct CountReducer;
+
+impl Reducer for CountReducer {
+    fn initial(&self) -> State {
+        State::new()
+    }
+
+    fn apply(&self, state: &mut State, _: &Event) {
+        state.set("seen", serde_json::json!(true));
+    }
+}
 
 struct ExactVerifier;
 
@@ -45,174 +57,8 @@ impl WorldReplayVerifierV1 for ExactVerifier {
     }
 }
 
-impl Reducer for NoopReducer {
-    fn initial(&self) -> State {
-        State::new()
-    }
-
-    fn apply(&self, _: &mut State, _: &Event) {}
-}
-
-fn registry(gate: &Arc<dyn ErasureGate>) -> ProjectionRegistry {
-    let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(gate));
-    // The public closure fixture authorizes the "count" consumer.
-    registry.register("count", Box::new(NoopReducer));
-    registry
-}
-
 #[test]
-fn snapshot_verification_requires_installed_world_verifier() {
-    let mut host = ErasureExecutionHostV1::open_verified_empty(
-        StoreConfig::Memory,
-        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-    )
-    .test_ok();
-    let gate = host.containment_gate();
-    let timeline = host
-        .command_sender()
-        .test_ok()
-        .create_timeline("artifact-snapshot")
-        .test_ok();
-    let mut capture_registry = registry(&gate);
-    let mut reads = host.read_sender().test_ok();
-    let (_, generation) = reads
-        .read_bounded_at_generation(
-            timeline.id(),
-            pos_core::store::SeqRange::all(),
-            pos_core::store::EventReadBounds::new(8, 32, 4, 4),
-            None,
-        )
-        .test_ok();
-    let closure = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
-        timeline.id(),
-        Hash::from_bytes(generation.digest()),
-    )
-    .test_ok();
-    let result = snapshot(&mut reads, timeline.id(), &mut capture_registry, &closure);
-    assert!(matches!(
-        result,
-        Err(pos_core::CoreError::ArtifactUnavailable)
-    ));
-
-    let mut rejected_registry = registry(&gate);
-    let empty_snapshot = pos_time::Snapshot {
-        timeline: timeline.id(),
-        at_seq: pos_core::clock::Seq::ZERO,
-        registry: std::collections::HashMap::new(),
-        inventory_generation: generation.digest(),
-    };
-    let result = verify_snapshot_consistency(
-        &mut reads,
-        &empty_snapshot,
-        &mut rejected_registry,
-        &closure,
-    );
-    assert!(matches!(
-        result,
-        Err(pos_time::SnapshotError::ArtifactUnavailable)
-    ));
-}
-
-#[test]
-fn snapshot_error_preserves_artifact_unavailability_as_a_typed_error() {
-    assert!(matches!(
-        pos_time::SnapshotError::from(pos_core::CoreError::ArtifactUnavailable),
-        pos_time::SnapshotError::ArtifactUnavailable
-    ));
-    assert!(matches!(
-        pos_time::SnapshotError::from(pos_core::CoreError::Storage("probe".to_owned())),
-        pos_time::SnapshotError::Store(pos_core::CoreError::Storage(_))
-    ));
-}
-
-#[test]
-fn snapshot_and_verification_map_unknown_timeline_fence_errors() {
-    let composition = ErasureCoordinatorCompositionV1::closed()
-        .with_world_replay_verifier(Arc::new(ExactVerifier));
-    let mut host = ErasureExecutionHostV1::open_with_authority(
-        StoreConfig::Memory,
-        &composition,
-        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-    )
-    .test_ok();
-    let gate = host.containment_gate();
-    let known_timeline = host
-        .command_sender()
-        .test_ok()
-        .create_timeline("known-snapshot-control")
-        .test_ok();
-    let unknown_timeline = TimelineId::new();
-    let mut reads = host.read_sender().test_ok();
-    let (_, inventory_generation) = reads
-        .read_bounded_at_generation(
-            known_timeline.id(),
-            pos_core::store::SeqRange::all(),
-            pos_core::store::EventReadBounds::new(8, 32, 4, 4),
-            None,
-        )
-        .test_ok();
-    let generation = Hash::from_bytes(inventory_generation.digest());
-    let known_closure = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
-        known_timeline.id(),
-        generation,
-    )
-    .test_ok();
-    let unknown_closure =
-        WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
-            unknown_timeline,
-            generation,
-        )
-        .test_ok();
-    let mut known_registry = registry(&gate);
-    let known_snapshot = snapshot(
-        &mut reads,
-        known_timeline.id(),
-        &mut known_registry,
-        &known_closure,
-    )
-    .test_ok();
-    let mut known_verification_registry = registry(&gate);
-    verify_snapshot_consistency(
-        &mut reads,
-        &known_snapshot,
-        &mut known_verification_registry,
-        &known_closure,
-    )
-    .test_ok();
-
-    let mut snapshot_registry = registry(&gate);
-    assert!(matches!(
-        snapshot(
-            &mut reads,
-            unknown_timeline,
-            &mut snapshot_registry,
-            &unknown_closure,
-        ),
-        Err(pos_core::CoreError::ErasureContainmentUnavailable)
-    ));
-
-    let mut verification_registry = registry(&gate);
-    let unknown_snapshot = pos_time::Snapshot {
-        timeline: unknown_timeline,
-        at_seq: pos_core::clock::Seq::ZERO,
-        registry: std::collections::HashMap::new(),
-        inventory_generation: [0; 32],
-    };
-    assert!(matches!(
-        verify_snapshot_consistency(
-            &mut reads,
-            &unknown_snapshot,
-            &mut verification_registry,
-            &unknown_closure,
-        ),
-        Err(pos_time::SnapshotError::Store(
-            pos_core::CoreError::ErasureContainmentUnavailable
-        ))
-    ));
-}
-
-#[test]
-fn snapshot_verification_rejects_old_or_missing_host_generation() {
+fn protected_snapshot_capture_and_verification_are_unavailable() {
     for config in [StoreConfig::Memory, StoreConfig::SqliteInMemory] {
         let composition = ErasureCoordinatorCompositionV1::closed()
             .with_world_replay_verifier(Arc::new(ExactVerifier));
@@ -223,74 +69,76 @@ fn snapshot_verification_rejects_old_or_missing_host_generation() {
         )
         .test_ok();
         let gate = host.containment_gate();
-        let timeline = host
-            .command_sender()
-            .test_ok()
-            .create_timeline("snapshot-source")
-            .test_ok();
-        let mut reads = host.read_sender().test_ok();
-        let (_, capture_generation) = reads
-            .read_bounded_at_generation(
-                timeline.id(),
-                pos_core::store::SeqRange::all(),
-                pos_core::store::EventReadBounds::new(8, 32, 4, 4),
-                None,
-            )
-            .test_ok();
-        let capture_closure =
-            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
-                timeline.id(),
-                Hash::from_bytes(capture_generation.digest()),
-            )
-            .test_ok();
-        let mut capture_registry = registry(&gate);
-        let captured = snapshot(
-            &mut reads,
-            timeline.id(),
-            &mut capture_registry,
-            &capture_closure,
+        let entity = pos_core::EntityId::new();
+        let (timeline, events) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("snapshot-source").test_ok().id();
+            let draft = pos_core::EventDraft::new(
+                entity,
+                pos_core::Kind::new("test.tick"),
+                pos_core::CanonicalBytes::from_vec(Vec::new()),
+            );
+            let events = commands.append(timeline, &[draft]).test_ok();
+            (timeline, events)
+        };
+        let reads = host.read_sender().test_ok();
+        let closure = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+            timeline,
+            Hash::from_bytes([3; 32]),
         )
         .test_ok();
-        assert_eq!(captured.inventory_generation, capture_generation.digest());
-        let encoded = serde_json::to_value(&captured).test_ok();
-        let mut missing_generation = encoded.clone();
-        let removed_generation = missing_generation
-            .as_object_mut()
-            .and_then(|fields| fields.remove("inventory_generation"));
-        assert!(removed_generation.is_some());
-        assert!(serde_json::from_value::<pos_time::Snapshot>(missing_generation).is_err());
-        let mut null_generation = encoded;
-        null_generation["inventory_generation"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<pos_time::Snapshot>(null_generation).is_err());
+        let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry.register("count", Box::new(CountReducer));
+        registry.fold_events(timeline, &events);
+        let before = registry.state_for(timeline, &entity).test_ok();
+        assert!(before.is_some());
 
-        host.command_sender()
-            .test_ok()
-            .create_timeline("inventory-successor")
-            .test_ok();
-        let mut reads = host.read_sender().test_ok();
-        let (_, successor_generation) = reads
-            .read_bounded_at_generation(
-                timeline.id(),
-                pos_core::store::SeqRange::all(),
-                pos_core::store::EventReadBounds::new(8, 32, 4, 4),
-                None,
-            )
-            .test_ok();
-        let successor_closure =
-            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
-                timeline.id(),
-                Hash::from_bytes(successor_generation.digest()),
-            )
-            .test_ok();
-        let mut verification_registry = registry(&gate);
         assert!(matches!(
-            verify_snapshot_consistency(
-                &mut reads,
-                &captured,
-                &mut verification_registry,
-                &successor_closure,
-            ),
-            Err(pos_time::SnapshotError::StaleGeneration)
+            snapshot(&reads, timeline, &registry, &closure),
+            Err(pos_core::CoreError::ArtifactUnavailable)
         ));
+        let captured = Snapshot {
+            timeline,
+            at_seq: pos_core::clock::Seq::ZERO,
+            registry: std::collections::HashMap::new(),
+            inventory_generation: [3; 32],
+        };
+        assert!(matches!(
+            verify_snapshot_consistency(&reads, &captured, &registry, &closure),
+            Err(SnapshotError::ArtifactUnavailable)
+        ));
+        assert_eq!(registry.state_for(timeline, &entity).test_ok(), before);
     }
+}
+
+#[test]
+fn snapshot_error_preserves_artifact_unavailability_as_a_typed_error() {
+    assert!(matches!(
+        SnapshotError::from(pos_core::CoreError::ArtifactUnavailable),
+        SnapshotError::ArtifactUnavailable
+    ));
+    assert!(matches!(
+        SnapshotError::from(pos_core::CoreError::Storage("probe".to_owned())),
+        SnapshotError::Store(pos_core::CoreError::Storage(_))
+    ));
+}
+
+#[test]
+fn snapshot_wire_format_requires_the_inventory_generation() {
+    let captured = Snapshot {
+        timeline: pos_core::TimelineId::new(),
+        at_seq: pos_core::clock::Seq::ZERO,
+        registry: std::collections::HashMap::new(),
+        inventory_generation: [5; 32],
+    };
+    let encoded = serde_json::to_value(&captured).test_ok();
+    let mut missing_generation = encoded.clone();
+    let removed_generation = missing_generation
+        .as_object_mut()
+        .and_then(|fields| fields.remove("inventory_generation"));
+    assert!(removed_generation.is_some());
+    assert!(serde_json::from_value::<Snapshot>(missing_generation).is_err());
+    let mut null_generation = encoded;
+    null_generation["inventory_generation"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<Snapshot>(null_generation).is_err());
 }

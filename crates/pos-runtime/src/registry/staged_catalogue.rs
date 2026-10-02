@@ -6,14 +6,15 @@
 //! admission fails closed; fixtures are admitted only through
 //! `test-support`. Every candidate the provider opens builds each admitted
 //! reducer fresh through [`InstalledPluginFactoryV1::build`] from the
-//! retained frozen configuration and keeps only its `reducer`.
+//! retained frozen configuration, re-checks that the built Plugin is the
+//! recorded one, and keeps only its `reducer`.
 
 use std::{any::type_name, collections::HashSet, sync::Arc, time::Duration};
 
-use pos_core::{Event, Hash, Plugin, Reducer};
+use pos_core::{staged_install::ProjectionSourceV1, Event, Hash, Plugin, Reducer};
 use pos_state::{
-    DetachedProjectionCandidateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1,
-    RecordedConsumerV1,
+    CandidateBoundsV1, CandidateReducerV1, DetachedProjectionCandidateV1, InitialStateV1,
+    ProjectionCandidateErrorV1, ProtectedProjectionProviderV1, RecordedConsumerV1,
 };
 
 use super::InstalledPluginFactoryV1;
@@ -119,6 +120,16 @@ pub struct StagedReducerAdmissionV1 {
 }
 
 impl StagedReducerAdmissionV1 {
+    /// The candidate bounds this record admits.
+    #[must_use]
+    pub const fn candidate_bounds(&self) -> CandidateBoundsV1 {
+        CandidateBoundsV1 {
+            callback_bound: self.callback_bound,
+            growth_per_payload_byte: self.growth_bound.per_payload_byte,
+            growth_constant_bytes: self.growth_bound.constant_bytes,
+        }
+    }
+
     /// Admitted bound on the duration of one Reducer callback.
     #[must_use]
     pub const fn callback_bound(&self) -> Duration {
@@ -226,14 +237,44 @@ fn staged_reducer_identity<P: Plugin>(
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-/// Builds one fresh reducer from the retained frozen configuration.
-type StagedReducerBuilderV1 = Box<dyn Fn() -> Option<Box<dyn Reducer>> + Send + Sync>;
+/// The parts of one fresh build a candidate keeps or re-checks.
+struct BuiltReducerV1 {
+    name: &'static str,
+    version: &'static str,
+    reducer: Option<Box<dyn Reducer>>,
+}
 
-/// One admitted entry: its recorded identity, record and fresh builder.
+/// Builds one fresh product from the retained frozen configuration.
+type StagedReducerBuilderV1 = Box<dyn Fn() -> BuiltReducerV1 + Send + Sync>;
+
+/// One admitted entry: its recorded identity and Plugin, record and fresh
+/// builder.
 struct AdmittedStagedReducerV1 {
     consumer: RecordedConsumerV1,
+    name: &'static str,
+    version: &'static str,
     admission: StagedReducerAdmissionV1,
     build: StagedReducerBuilderV1,
+}
+
+impl AdmittedStagedReducerV1 {
+    /// Build a fresh reducer and re-check that the built Plugin is the
+    /// recorded one. The built Plugin and approver are dropped unused.
+    fn candidate_reducer(&self) -> Result<CandidateReducerV1, ProjectionCandidateErrorV1> {
+        let built = (self.build)();
+        let recorded = built.name == self.name && built.version == self.version;
+        built
+            .reducer
+            .filter(|_| recorded)
+            .map(|reducer| CandidateReducerV1 {
+                consumer: self.consumer,
+                name: self.name,
+                reducer,
+                bounds: self.admission.candidate_bounds(),
+                observation_policy: None,
+            })
+            .ok_or(ProjectionCandidateErrorV1::PluginMismatch)
+    }
 }
 
 /// Host catalogue implementation of [`ProtectedProjectionProviderV1`].
@@ -323,8 +364,17 @@ impl HostProjectionProviderV1 {
         }
         self.entries.push(AdmittedStagedReducerV1 {
             consumer,
+            name: product.plugin.name(),
+            version: product.plugin.version(),
             admission,
-            build: Box::new(move || F::build(&frozen_configuration).reducer),
+            build: Box::new(move || {
+                let product = F::build(&frozen_configuration);
+                BuiltReducerV1 {
+                    name: product.plugin.name(),
+                    version: product.plugin.version(),
+                    reducer: product.reducer,
+                }
+            }),
         });
         Ok(consumer)
     }
@@ -370,14 +420,17 @@ impl ProtectedProjectionProviderV1 for HostProjectionProviderV1 {
     fn open_candidate(
         &self,
         recorded_consumers: &[RecordedConsumerV1],
+        initial_state: InitialStateV1,
+        source: ProjectionSourceV1,
     ) -> Result<DetachedProjectionCandidateV1, ProjectionCandidateErrorV1> {
         let entries = self.admitted_set(recorded_consumers)?;
         entries
             .into_iter()
-            .map(|entry| (entry.build)().map(|reducer| (entry.consumer, reducer)))
-            .collect::<Option<Vec<_>>>()
-            .ok_or(ProjectionCandidateErrorV1::PluginMismatch)
-            .and_then(DetachedProjectionCandidateV1::from_reducers)
+            .map(AdmittedStagedReducerV1::candidate_reducer)
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|reducers| {
+                DetachedProjectionCandidateV1::from_reducers(reducers, initial_state, source)
+            })
     }
 }
 

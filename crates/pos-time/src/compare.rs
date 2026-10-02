@@ -1,125 +1,186 @@
-//! Fork-comparison: diff two timelines that share a common ancestor.
-
-use std::collections::HashSet;
+//! Fork-comparison: install both arms of two timelines that share a common
+//! ancestor and report the entities whose State differs.
 
 use pos_core::store::{EventReadBounds, SeqRange};
+use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1};
 use pos_core::{
     CoreError, EntityId, ErasureProtectedOperationV1, Event, Seq, TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{ErasureReadSenderV1, WorldReplayUseV1};
-use pos_state::ProjectionRegistry;
+use pos_state::{ProjectionRegistry, RevokedSubjectsV1, StagedProjectionV1};
 
-/// The result of comparing two diverged timelines.
+use crate::{ProtectedFoldV1, ProtectedReleaseV1};
+
+/// The State-only result of comparing two diverged timelines.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ForkDiff {
     /// Seq of the common ancestor (the fork point).
     pub fork_seq: Seq,
-    /// Events in timeline A after the fork point (not in B).
-    pub only_in_a: Vec<Event>,
-    /// Events in timeline B after the fork point (not in A).
-    pub only_in_b: Vec<Event>,
-    /// `EntityId`s whose state differs between A and B at their respective heads.
+    /// `EntityId`s whose installed State differs between A and B, over the
+    /// union of entity IDs in both, sorted by raw `EntityId` bytes.
     pub diverged_entities: Vec<EntityId>,
 }
 
 /// Compare two timelines that share a common ancestor at `fork_seq`.
 ///
 /// `fork_seq` is the last sequence number the two timelines share.
-/// Both histories are read; events after `fork_seq` are returned as the fork diff.
 ///
 /// `registry_a` and `registry_b` are separate [`ProjectionRegistry`] instances —
 /// one per fork arm — so that each arm's reducers accumulate state in isolation
 /// and plugins on different forks never clobber each other's keys.
 ///
-/// Steps:
-/// 1. Read complete histories from `a` and `b`.
-/// 2. Collect the post-fork `only_in_a` and `only_in_b` events.
-/// 3. Fold each complete history through its own registry.
-/// 4. Compare final state for every entity in either history.
+/// Steps, inside `release`'s guard and both Timelines' fences:
+/// 1. Verify and read both complete histories, and check the shared prefix.
+/// 2. Fold each history on the staged executor for its arm's consumers.
+/// 3. Re-verify both, then prepare both installs as one pair and hand them
+///    over under one ADR-112 handoff token: both arms install or neither.
+/// 4. Report the entities whose installed State differs. No Event is
+///    returned.
 ///
 /// # Errors
-/// Fails closed when protected-use authorization, native evidence, read bounds,
-/// or final rechecks are unavailable. Host errors are mapped to
+/// Fails closed when protected-use authorization, native evidence, read
+/// bounds, the staged folds, the install checks, the handoff or final
+/// rechecks are unavailable. Host errors are mapped to
 /// [`CoreError::ArtifactUnavailable`], [`CoreError::ErasureAccessFrozen`], or
-/// [`CoreError::ErasureContainmentUnavailable`], not exposed as raw store errors.
+/// [`CoreError::ErasureContainmentUnavailable`]. Neither registry changes,
+/// except that each arm forgets the revoked subjects of its own range when
+/// that range was read and verified.
 pub fn compare(
     sender: &mut ErasureReadSenderV1<'_>,
     timelines: [TimelineId; 2],
     fork_seq: Seq,
     registries: [&mut ProjectionRegistry; 2],
     closures: [&WorldReplayClosureV1; 2],
+    release: ProtectedReleaseV1<'_>,
+    folds: [&ProtectedFoldV1<'_>; 2],
 ) -> Result<ForkDiff, CoreError> {
     if fork_seq.as_u64() == u64::MAX {
         return Err(CoreError::ArtifactUnavailable);
     }
+    pos_runtime::require_staged_release().map_err(crate::unavailable)?;
     let [a, b] = timelines;
     let [registry_a, registry_b] = registries;
     let consumer_ids = crate::consumer_selection(registry_a)
         .and_then(|ids_a| crate::consumer_selection(registry_b).map(|ids_b| [ids_a, ids_b]))?;
-    registry_a.try_with_state_transaction(|candidate_a| {
-        registry_b.try_with_state_transaction(|candidate_b| {
-            let mut comparison_outcome = Err(CoreError::ArtifactUnavailable);
-            let mut second_timeline_fence_result = Err(CoreError::ArtifactUnavailable);
-            let mut first_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-                let mut second_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-                    comparison_outcome = compare_in_fences(
-                        sender,
-                        [a, b],
-                        fork_seq,
-                        [&mut *candidate_a, &mut *candidate_b],
-                        closures,
-                        &consumer_ids,
-                    );
+    let request = CompareRequestV1 {
+        timelines,
+        fork_seq,
+        closures,
+        folds,
+        consumer_ids: &consumer_ids,
+    };
+    let ProtectedReleaseV1 { guard, expiries } = release;
+    let mut guard = Some(guard);
+    let mut revoked: [Option<RevokedSubjectsV1>; 2] = [None, None];
+    let mut comparison_outcome = Err(CoreError::ArtifactUnavailable);
+    let mut second_timeline_fence_result = Err(CoreError::ArtifactUnavailable);
+    let mut first_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
+        let mut second_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
+            if let Some(guard) = guard.take() {
+                let target = CompareTargetV1 {
+                    registries: [&mut *registry_a, &mut *registry_b],
+                    guard,
+                    expiries: &expiries,
+                    revoked: &mut revoked,
                 };
-                second_timeline_fence_result = sender
-                    .with_protected_effect_fence(
-                        b,
-                        ErasureProtectedOperationV1::Export,
-                        &mut second_timeline_effect,
-                    )
-                    .map_err(crate::host_error_to_core);
-            };
-            sender
-                .with_protected_effect_fence(
-                    a,
-                    ErasureProtectedOperationV1::Export,
-                    &mut first_timeline_effect,
-                )
-                .map_err(crate::host_error_to_core)
-                .and(second_timeline_fence_result)
-                .and(comparison_outcome)
-        })
-    })
+                comparison_outcome = compare_in_fences(sender, &request, target);
+            }
+        };
+        second_timeline_fence_result = sender
+            .with_protected_effect_fence(
+                b,
+                ErasureProtectedOperationV1::Export,
+                &mut second_timeline_effect,
+            )
+            .map_err(crate::host_error_to_core);
+    };
+    let fenced = sender
+        .with_protected_effect_fence(
+            a,
+            ErasureProtectedOperationV1::Export,
+            &mut first_timeline_effect,
+        )
+        .map_err(crate::host_error_to_core)
+        .and(second_timeline_fence_result)
+        .and(comparison_outcome);
+    // Teardown before the failure-path forget of each arm.
+    drop(guard);
+    let [revoked_a, revoked_b] = revoked;
+    let fenced = crate::forget_on_failure(fenced, registry_a, revoked_a.as_ref());
+    crate::forget_on_failure(fenced, registry_b, revoked_b.as_ref())
 }
 
-/// Bind, verify, read, compare, and re-verify both Timelines inside their fences.
-fn compare_in_fences(
-    sender: &mut ErasureReadSenderV1<'_>,
+/// One protected Compare request.
+struct CompareRequestV1<'r> {
     timelines: [TimelineId; 2],
     fork_seq: Seq,
-    registries: [&mut ProjectionRegistry; 2],
-    closures: [&WorldReplayClosureV1; 2],
-    consumer_ids: &[Vec<String>; 2],
+    closures: [&'r WorldReplayClosureV1; 2],
+    folds: [&'r ProtectedFoldV1<'r>; 2],
+    consumer_ids: &'r [Vec<String>; 2],
+}
+
+/// Both visible registries, the held guard and each arm's failure-path record.
+struct CompareTargetV1<'t, 'g> {
+    registries: [&'t mut ProjectionRegistry; 2],
+    guard: ReleaseGuardV1<'g>,
+    expiries: &'t ApplicableExpiriesV1,
+    revoked: &'t mut [Option<RevokedSubjectsV1>; 2],
+}
+
+/// Bind, verify, read, fold, re-verify and hand both arms over inside their
+/// fences, then compute the diverged entities.
+fn compare_in_fences(
+    sender: &mut ErasureReadSenderV1<'_>,
+    request: &CompareRequestV1<'_>,
+    target: CompareTargetV1<'_, '_>,
 ) -> Result<ForkDiff, CoreError> {
-    let [a, b] = timelines;
-    comparison_use(sender, a, &consumer_ids[0]).and_then(|requested_a| {
-        comparison_use(sender, b, &consumer_ids[1]).and_then(|requested_b| {
-            let requested_uses = [&requested_a, &requested_b];
-            require_comparison_artifacts(sender, closures, requested_uses).and_then(|read_bounds| {
-                compare_with_sender(sender, requested_uses, fork_seq, registries, read_bounds)
-                    .and_then(|diff| {
-                        require_comparison_artifacts(sender, closures, requested_uses).and_then(
-                            |final_bounds| {
-                                if final_bounds == read_bounds {
-                                    Ok(diff)
-                                } else {
-                                    Err(CoreError::ArtifactUnavailable)
-                                }
-                            },
-                        )
-                    })
-            })
-        })
+    let CompareTargetV1 {
+        registries: [registry_a, registry_b],
+        guard,
+        expiries,
+        revoked,
+    } = target;
+    let [a, b] = request.timelines;
+    let [closure_a, closure_b] = request.closures;
+    let requested_a = comparison_use(sender, a, &request.consumer_ids[0])?;
+    let requested_b = comparison_use(sender, b, &request.consumer_ids[1])?;
+    let requested_uses = [&requested_a, &requested_b];
+    let read_bounds = require_comparison_artifacts(sender, request.closures, requested_uses)?;
+    let events_a = crate::read_complete_world_replay(sender, &requested_a, read_bounds[0])?;
+    revoked[0] = Some(RevokedSubjectsV1::from_verified_events(&events_a));
+    let events_b = crate::read_complete_world_replay(sender, &requested_b, read_bounds[1])?;
+    revoked[1] = Some(RevokedSubjectsV1::from_verified_events(&events_b));
+    require_shared_fork(request.fork_seq, &events_a, &events_b)?;
+    let [fold_a, fold_b] = request.folds;
+    let staged_a = crate::fold_staged(
+        fold_a,
+        &guard,
+        &events_a,
+        crate::verified_source(a, closure_a),
+    )?;
+    let staged_b = crate::fold_staged(
+        fold_b,
+        &guard,
+        &events_b,
+        crate::verified_source(b, closure_b),
+    )?;
+    let final_bounds = require_comparison_artifacts(sender, request.closures, requested_uses)?;
+    if final_bounds != read_bounds {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    crate::handoff_reserve(&guard)?;
+    let diverged_entities = StagedProjectionV1::diverged_entities(&staged_a, &staged_b);
+    let prepared =
+        ProjectionRegistry::prepare_install_pair(registry_a, staged_a, registry_b, staged_b)
+            .map_err(crate::unavailable)?;
+    // One token commits both arms; the displaced maps are dropped after the
+    // handoff returns, and only then is the diff released.
+    pos_runtime::handoff(guard, expiries, prepared)
+        .map(drop)
+        .map_err(crate::unavailable)?;
+    Ok(ForkDiff {
+        fork_seq: request.fork_seq,
+        diverged_entities,
     })
 }
 
@@ -150,53 +211,13 @@ fn comparison_use(
     )
 }
 
-fn compare_with_sender(
-    sender: &mut ErasureReadSenderV1<'_>,
-    requested_uses: [&WorldReplayUseV1; 2],
+/// Require both complete histories to share exactly the prefix through
+/// `fork_seq` and to diverge after it.
+fn require_shared_fork(
     fork_seq: Seq,
-    registries: [&mut ProjectionRegistry; 2],
-    read_bounds: [EventReadBounds; 2],
-) -> Result<ForkDiff, CoreError> {
-    let [requested_a, requested_b] = requested_uses;
-    let [registry_a, registry_b] = registries;
-    crate::read_complete_world_replay(sender, requested_a, read_bounds[0]).and_then(|events_a| {
-        crate::read_complete_world_replay(sender, requested_b, read_bounds[1]).and_then(
-            |events_b| {
-                compare_events(
-                    requested_a.timeline_id(),
-                    requested_b.timeline_id(),
-                    fork_seq,
-                    registry_a,
-                    registry_b,
-                    events_a,
-                    events_b,
-                )
-            },
-        )
-    })
-}
-
-fn compare_events(
-    a: TimelineId,
-    b: TimelineId,
-    fork_seq: Seq,
-    registry_a: &mut ProjectionRegistry,
-    registry_b: &mut ProjectionRegistry,
-    events_a: Vec<Event>,
-    events_b: Vec<Event>,
-) -> Result<ForkDiff, CoreError> {
-    compare_event_prefix_and_state(a, b, fork_seq, registry_a, registry_b, events_a, events_b)
-}
-
-fn compare_event_prefix_and_state(
-    a: TimelineId,
-    b: TimelineId,
-    fork_seq: Seq,
-    registry_a: &mut ProjectionRegistry,
-    registry_b: &mut ProjectionRegistry,
-    events_a: Vec<Event>,
-    events_b: Vec<Event>,
-) -> Result<ForkDiff, CoreError> {
+    events_a: &[Event],
+    events_b: &[Event],
+) -> Result<(), CoreError> {
     let prefix_a = &events_a[..events_a.partition_point(|event| event.seq <= fork_seq)];
     let prefix_b = &events_b[..events_b.partition_point(|event| event.seq <= fork_seq)];
     // A zero Fork point has no shared Event with which to establish lineage;
@@ -209,66 +230,7 @@ fn compare_event_prefix_and_state(
     {
         return Err(CoreError::ArtifactUnavailable);
     }
-    registry_a.clear_state();
-    registry_b.clear_state();
-    registry_a.fold_events(a, &events_a);
-    registry_b.fold_events(b, &events_b);
-    let all_entities: HashSet<EntityId> = events_a
-        .iter()
-        .chain(events_b.iter())
-        .map(|event| event.entity)
-        .collect();
-    registry_a
-        .state_snapshot(a)
-        .map_err(|_| CoreError::ArtifactUnavailable)
-        .and_then(|snap_a| {
-            registry_b
-                .state_snapshot(b)
-                .map_err(|_| CoreError::ArtifactUnavailable)
-                .map(|snap_b| {
-                    // Entities whose state differs across any registered reducer.
-                    let diverged_entities: Vec<EntityId> = all_entities
-                        .into_iter()
-                        .filter(|eid| {
-                            // Check all reducer names present in either snapshot.
-                            let names: HashSet<&String> =
-                                snap_a.keys().chain(snap_b.keys()).collect();
-                            names.iter().any(|name| {
-                                let reg_a = snap_a.get(*name).cloned().unwrap_or_default();
-                                let reg_b = snap_b.get(*name).cloned().unwrap_or_default();
-                                reg_a.get_or_default(eid) != reg_b.get_or_default(eid)
-                            })
-                        })
-                        .collect();
-
-                    ForkDiff {
-                        fork_seq,
-                        only_in_a: events_a
-                            .into_iter()
-                            .filter(|event| event.seq > fork_seq)
-                            .collect(),
-                        only_in_b: events_b
-                            .into_iter()
-                            .filter(|event| event.seq > fork_seq)
-                            .collect(),
-                        diverged_entities,
-                    }
-                })
-        })
-}
-
-#[cfg(test)]
-fn compare_from_store(
-    store: &dyn pos_core::store::EventStore,
-    a: TimelineId,
-    b: TimelineId,
-    fork_seq: Seq,
-    registry_a: &mut ProjectionRegistry,
-    registry_b: &mut ProjectionRegistry,
-) -> Result<ForkDiff, CoreError> {
-    let events_a = store.read(a, SeqRange::all())?;
-    let events_b = store.read(b, SeqRange::all())?;
-    compare_events(a, b, fork_seq, registry_a, registry_b, events_a, events_b)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -289,35 +251,16 @@ mod tests {
         }
     }
 
-    impl<T> TestValueExt<T> for Option<T> {
-        fn test_ok(self) -> T {
-            self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
-        }
-    }
-
-    trait TestErrorExt<T, E> {
-        fn test_err(self) -> E;
-    }
-
-    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
-        fn test_err(self) -> E {
-            match self {
-                Ok(value) => std::panic::resume_unwind(Box::new(format!(
-                    "unexpected successful compare fixture value: {value:?}"
-                ))),
-                Err(error) => error,
-            }
-        }
-    }
     use super::*;
+    use crate::test_support::{with_release, ProtectedFixture};
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
-        store::EventStore,
-        ErasureContainmentGateV1, Event, Reducer, State,
+        EventId, Hash, PluginId, Reducer, SchemaVersion, State, WallTime,
     };
+    use pos_runtime::ErasureExecutionHostV1;
     use pos_state::ProjectionRegistry;
-    use pos_store::{open_store, StoreConfig};
+    use pos_store::StoreConfig;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -326,6 +269,30 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     struct CountReducer;
+
+    impl Reducer for CountReducer {
+        fn initial(&self) -> State {
+            let mut s = State::new();
+            s.set("n", serde_json::json!(0u64));
+            s
+        }
+
+        fn apply(&self, state: &mut State, _event: &Event) {
+            let n = state
+                .get("n")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            state.set("n", serde_json::json!(n + 1));
+        }
+    }
+
+    fn count_reducer() -> Box<dyn Reducer> {
+        Box::new(CountReducer)
+    }
+
+    fn count_fixture() -> ProtectedFixture {
+        ProtectedFixture::new("count", count_reducer)
+    }
 
     struct RecordGenerationVerifier {
         observations: Mutex<Vec<(TimelineId, pos_core::ErasureReferenceV1)>>,
@@ -410,29 +377,6 @@ mod tests {
         }
     }
 
-    impl Reducer for CountReducer {
-        fn initial(&self) -> State {
-            let mut s = State::new();
-            s.set("n", serde_json::json!(0u64));
-            s
-        }
-
-        fn apply(&self, state: &mut State, _event: &Event) {
-            let n = state
-                .get("n")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            state.set("n", serde_json::json!(n + 1));
-        }
-    }
-
-    fn make_registry() -> ProjectionRegistry {
-        let mut reg = ProjectionRegistry::new()
-            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
-        reg.register("count", Box::new(CountReducer));
-        reg
-    }
-
     fn draft(entity: EntityId) -> EventDraft {
         EventDraft::new(
             entity,
@@ -442,50 +386,84 @@ mod tests {
     }
 
     fn count_for(reg: &ProjectionRegistry, timeline: TimelineId, entity: EntityId) -> u64 {
-        reg.state_snapshot(timeline)
+        reg.state_for(timeline, &entity)
             .test_ok()
-            .get("count")
-            .and_then(|r| r.get(&entity))
-            .and_then(|s| s.get("n"))
-            .and_then(serde_json::Value::as_u64)
+            .and_then(|s| s.get("n").and_then(serde_json::Value::as_u64))
             .unwrap_or(0)
     }
 
-    fn open_test_store() -> Box<dyn EventStore> {
-        let mut store = open_store(StoreConfig::Memory).test_ok();
-        store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
-            .test_ok();
-        store
+    fn compare_with(
+        fixture: &ProtectedFixture,
+        reads: &mut ErasureReadSenderV1<'_>,
+        timelines: [TimelineId; 2],
+        fork_seq: Seq,
+        registries: [&mut ProjectionRegistry; 2],
+        closures: [&WorldReplayClosureV1; 2],
+    ) -> Result<ForkDiff, CoreError> {
+        let (fold_a, fold_b) = (fixture.fold(), fixture.fold());
+        with_release(|release| {
+            super::compare(
+                reads,
+                timelines,
+                fork_seq,
+                registries,
+                closures,
+                release,
+                [&fold_a, &fold_b],
+            )
+        })
     }
 
-    fn compare(
-        store: &dyn EventStore,
-        a: TimelineId,
-        b: TimelineId,
-        fork_seq: Seq,
-        registry_a: &mut ProjectionRegistry,
-        registry_b: &mut ProjectionRegistry,
-    ) -> Result<ForkDiff, CoreError> {
-        compare_from_store(store, a, b, fork_seq, registry_a, registry_b)
+    /// Forks of one parent: `shared` Events, then `extra_a` and `extra_b`
+    /// Events on each fork, all for `entities` in turn.
+    fn forked(
+        host: &mut ErasureExecutionHostV1,
+        entities: &[EntityId],
+        shared: usize,
+        extra: [usize; 2],
+    ) -> (TimelineId, TimelineId, Seq) {
+        let drafts = |count: usize| -> Vec<EventDraft> {
+            (0..count)
+                .map(|index| draft(entities[index % entities.len()]))
+                .collect()
+        };
+        let mut commands = host.command_sender().test_ok();
+        let parent = commands.create_timeline("compare-parent").test_ok();
+        let committed = commands.append(parent.id(), &drafts(shared)).test_ok();
+        let fork_seq = committed[shared - 1].seq;
+        let fork_a = commands
+            .fork_timeline(parent.id(), fork_seq, "compare-a")
+            .test_ok();
+        let fork_b = commands
+            .fork_timeline(parent.id(), fork_seq, "compare-b")
+            .test_ok();
+        for (fork, count) in [(fork_a.id(), extra[0]), (fork_b.id(), extra[1])] {
+            if count > 0 {
+                commands.append(fork, &drafts(count)).test_ok();
+            }
+        }
+        (fork_a.id(), fork_b.id(), fork_seq)
     }
 
     // ── tests ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn public_compare_rejects_either_empty_consumer_selection() {
+        let fixture = count_fixture();
         let mut host = pos_runtime::ErasureExecutionHostV1::open_verified_empty(
             StoreConfig::Memory,
             pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
         )
         .test_ok();
+        let gate = host.containment_gate();
         let mut reads = host.read_sender().test_ok();
         let closure = pos_core::WorldReplayClosureV1::test_fixture().test_ok();
         let timelines = [TimelineId::new(), TimelineId::new()];
         let mut empty_a = ProjectionRegistry::new();
-        let mut valid_b = make_registry();
+        let mut valid_b = fixture.registry(Arc::clone(&gate));
         assert!(matches!(
-            super::compare(
+            compare_with(
+                &fixture,
                 &mut reads,
                 timelines,
                 Seq::ZERO,
@@ -494,10 +472,11 @@ mod tests {
             ),
             Err(CoreError::ArtifactUnavailable)
         ));
-        let mut valid_a = make_registry();
+        let mut valid_a = fixture.registry(gate);
         let mut empty_b = ProjectionRegistry::new();
         assert!(matches!(
-            super::compare(
+            compare_with(
+                &fixture,
                 &mut reads,
                 timelines,
                 Seq::ZERO,
@@ -510,76 +489,80 @@ mod tests {
 
     #[test]
     fn compare_rejects_histories_without_a_shared_fork_point() {
-        let mut store = open_test_store();
-        let a = store.create_timeline("unrelated-a").test_ok();
-        let b = store.create_timeline("unrelated-b").test_ok();
+        let fixture = count_fixture();
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
         let entity = EntityId::new();
-        store.append(a.id(), &[draft(entity)]).test_ok();
-        store.append(b.id(), &[draft(entity)]).test_ok();
-
-        let mut registry_a = make_registry();
-        let mut registry_b = make_registry();
+        let (a, b) = {
+            let mut commands = host.command_sender().test_ok();
+            let a = commands.create_timeline("unrelated-a").test_ok().id();
+            let b = commands.create_timeline("unrelated-b").test_ok().id();
+            commands.append(a, &[draft(entity)]).test_ok();
+            commands.append(b, &[draft(entity)]).test_ok();
+            (a, b)
+        };
+        let closure_a = crate::test_support::closure_for_host(&mut host, a);
+        let closure_b = crate::test_support::closure_for_host(&mut host, b);
+        let mut registry_a = fixture.registry(Arc::clone(&gate));
+        let mut registry_b = fixture.registry(gate);
+        let mut reads = host.read_sender().test_ok();
         assert!(matches!(
-            compare(
-                store.as_ref(),
-                a.id(),
-                b.id(),
+            compare_with(
+                &fixture,
+                &mut reads,
+                [a, b],
                 Seq::from_u64(1),
-                &mut registry_a,
-                &mut registry_b,
+                [&mut registry_a, &mut registry_b],
+                [&closure_a, &closure_b],
             ),
             Err(CoreError::ArtifactUnavailable)
         ));
-        assert_eq!(
-            registry_a
-                .state_for_reducer(a.id(), "count", &entity)
-                .test_ok(),
-            None
-        );
-        assert_eq!(
-            registry_b
-                .state_for_reducer(b.id(), "count", &entity)
-                .test_ok(),
-            None
-        );
+        assert_eq!(count_for(&registry_a, a, entity), 0);
+        assert_eq!(count_for(&registry_b, b, entity), 0);
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn compare_identical_timelines_no_diff() {
-        // Fork a timeline, append nothing to either fork. Diff should be empty.
-        let mut store = open_test_store();
-        let parent = store.create_timeline("parent").test_ok();
+        let fixture = count_fixture();
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
         let entity = EntityId::new();
-
-        // Append some shared events to the parent.
-        let drafts: Vec<EventDraft> = (0..3).map(|_| draft(entity)).collect();
-        let committed = store.append(parent.id(), &drafts).test_ok();
-        let fork_seq = committed.last().test_ok().seq;
-
-        // Fork twice at the same point.
-        let fork_a = store.fork(parent.id(), fork_seq, "a").test_ok();
-        let fork_b = store.fork(parent.id(), fork_seq, "b").test_ok();
-
-        // No additional events on either fork.
-        let diff = compare(
-            store.as_ref(),
-            fork_a.id(),
-            fork_b.id(),
+        let (fork_a, fork_b, fork_seq) = forked(&mut host, &[entity], 3, [0, 0]);
+        let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
+        let mut registry_a = fixture.registry(Arc::clone(&gate));
+        let mut registry_b = fixture.registry(gate);
+        let mut reads = host.read_sender().test_ok();
+        let diff = compare_with(
+            &fixture,
+            &mut reads,
+            [fork_a, fork_b],
             fork_seq,
-            &mut make_registry(),
-            &mut make_registry(),
+            [&mut registry_a, &mut registry_b],
+            [&closure_a, &closure_b],
         )
         .test_ok();
 
-        assert!(diff.only_in_a.is_empty());
-        assert!(diff.only_in_b.is_empty());
         assert!(diff.diverged_entities.is_empty());
         assert_eq!(diff.fork_seq, fork_seq);
+        assert_eq!(count_for(&registry_a, fork_a, entity), 3);
+        assert_eq!(count_for(&registry_b, fork_b, entity), 3);
+        assert!(matches!(
+            compare_with(
+                &fixture,
+                &mut reads,
+                [fork_a, fork_b],
+                Seq::from_u64(fork_seq.as_u64() + 1),
+                [&mut registry_a, &mut registry_b],
+                [&closure_a, &closure_b],
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
     }
 
     #[test]
     fn public_compare_holds_one_host_generation_across_both_forks() {
+        let fixture = count_fixture();
         let verifier = Arc::new(RecordGenerationVerifier {
             observations: Mutex::new(Vec::new()),
         });
@@ -592,21 +575,8 @@ mod tests {
         )
         .test_ok();
         let gate = host.containment_gate();
-        let (fork_a, fork_b, fork_seq) = {
-            let mut commands = host.command_sender().test_ok();
-            let parent = commands.create_timeline("hosted-compare").test_ok();
-            let entity = EntityId::new();
-            let shared = commands.append(parent.id(), &[draft(entity)]).test_ok();
-            let fork_seq = shared[0].seq;
-            let fork_a = commands
-                .fork_timeline(parent.id(), fork_seq, "hosted-a")
-                .test_ok();
-            let fork_b = commands
-                .fork_timeline(parent.id(), fork_seq, "hosted-b")
-                .test_ok();
-            commands.append(fork_a.id(), &[draft(entity)]).test_ok();
-            (fork_a.id(), fork_b.id(), fork_seq)
-        };
+        let entity = EntityId::new();
+        let (fork_a, fork_b, fork_seq) = forked(&mut host, &[entity], 1, [1, 0]);
         let (_, generation) = host
             .read_sender()
             .test_ok()
@@ -617,14 +587,13 @@ mod tests {
                 None,
             )
             .test_ok();
-        let mut registry_a = ProjectionRegistry::new().with_erasure_gate(gate.clone());
-        registry_a.register("count", Box::new(CountReducer));
-        let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
-        registry_b.register("count", Box::new(CountReducer));
+        let mut registry_a = fixture.registry(gate.clone());
+        let mut registry_b = fixture.registry(gate);
         let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
         let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
         let mut reads = host.read_sender().test_ok();
-        let diff = super::compare(
+        let diff = compare_with(
+            &fixture,
             &mut reads,
             [fork_a, fork_b],
             fork_seq,
@@ -632,8 +601,7 @@ mod tests {
             [&closure_a, &closure_b],
         )
         .test_ok();
-        assert_eq!(diff.only_in_a.len(), 1);
-        assert!(diff.only_in_b.is_empty());
+        assert_eq!(diff.diverged_entities, vec![entity]);
         assert_eq!(
             verifier.observations.lock().test_ok().as_slice(),
             &[
@@ -645,38 +613,24 @@ mod tests {
         );
     }
 
+    /// Case 15 (success): both arms install under one handoff and the diff
+    /// has only `fork_seq` and the diverged entities, sorted by raw bytes.
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_compare_uses_an_installed_world_verifier() {
+        let fixture = count_fixture();
         let mut host = crate::test_support::open_exact_host();
         let gate = host.containment_gate();
-        let (fork_a, fork_b, fork_seq, earlier_seq, entity) = {
-            let mut commands = host.command_sender().test_ok();
-            let parent = commands.create_timeline("verified-compare").test_ok();
-            let entity = EntityId::new();
-            let shared = commands
-                .append(parent.id(), &[draft(entity), draft(entity)])
-                .test_ok();
-            let fork_seq = shared[1].seq;
-            let fork_a = commands
-                .fork_timeline(parent.id(), fork_seq, "verified-a")
-                .test_ok();
-            let fork_b = commands
-                .fork_timeline(parent.id(), fork_seq, "verified-b")
-                .test_ok();
-            commands
-                .append(fork_a.id(), &[draft(entity), draft(entity)])
-                .test_ok();
-            (fork_a.id(), fork_b.id(), fork_seq, shared[0].seq, entity)
-        };
+        let mut entities = [EntityId::new(), EntityId::new(), EntityId::new()];
+        entities.reverse();
+        let (fork_a, fork_b, fork_seq) = forked(&mut host, &entities, 3, [5, 0]);
+        let earlier_seq = Seq::from_u64(fork_seq.as_u64() - 1);
         let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
         let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
-        let mut registry_a = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
-        registry_a.register("count", Box::new(CountReducer));
-        let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
-        registry_b.register("count", Box::new(CountReducer));
+        let mut registry_a = fixture.registry(Arc::clone(&gate));
+        let mut registry_b = fixture.registry(gate);
         let mut reads = host.read_sender().test_ok();
-        let diff = super::compare(
+        let diff = compare_with(
+            &fixture,
             &mut reads,
             [fork_a, fork_b],
             fork_seq,
@@ -684,14 +638,16 @@ mod tests {
             [&closure_a, &closure_b],
         )
         .test_ok();
-        assert_eq!(diff.only_in_a.len(), 2);
-        assert!(diff.only_in_b.is_empty());
-        assert!(diff.diverged_entities.contains(&entity));
-        assert_eq!(count_for(&registry_a, fork_a, entity), 4);
-        assert_eq!(count_for(&registry_b, fork_b, entity), 2);
-        for invalid_fork_seq in [earlier_seq, Seq::ZERO] {
+        let mut expected = entities.to_vec();
+        expected.sort_unstable_by_key(|entity| entity.inner().to_bytes());
+        assert_eq!(diff.diverged_entities, expected);
+        assert_eq!(diff.fork_seq, fork_seq);
+        assert_eq!(count_for(&registry_a, fork_a, entities[0]), 3);
+        assert_eq!(count_for(&registry_b, fork_b, entities[0]), 1);
+        for invalid_fork_seq in [earlier_seq, Seq::ZERO, Seq::from_u64(7)] {
             assert!(matches!(
-                super::compare(
+                compare_with(
+                    &fixture,
                     &mut reads,
                     [fork_a, fork_b],
                     invalid_fork_seq,
@@ -702,17 +658,8 @@ mod tests {
             ));
         }
         assert!(matches!(
-            super::compare(
-                &mut reads,
-                [fork_a, fork_b],
-                Seq::from_u64(4),
-                [&mut registry_a, &mut registry_b],
-                [&closure_a, &closure_b],
-            ),
-            Err(CoreError::ArtifactUnavailable)
-        ));
-        assert!(matches!(
-            super::compare(
+            compare_with(
+                &fixture,
                 &mut reads,
                 [fork_a, fork_b],
                 Seq::from_u64(u64::MAX),
@@ -721,10 +668,44 @@ mod tests {
             ),
             Err(CoreError::ArtifactUnavailable)
         ));
+        assert_eq!(count_for(&registry_a, fork_a, entities[0]), 3);
+    }
+
+    /// Case 15 (failure): when one arm cannot be prepared, neither arm is
+    /// installed.
+    #[test]
+    fn public_compare_installs_neither_arm_when_one_cannot_be_prepared() {
+        let fixture = count_fixture();
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let entity = EntityId::new();
+        let (fork_a, fork_b, fork_seq) = forked(&mut host, &[entity], 1, [1, 2]);
+        let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
+        let mut registry_a = fixture.registry(Arc::clone(&gate));
+        let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
+        registry_b
+            .register_installed_reducer(PluginId::new(), "count", count_reducer())
+            .test_ok();
+        let mut reads = host.read_sender().test_ok();
+        assert!(matches!(
+            compare_with(
+                &fixture,
+                &mut reads,
+                [fork_a, fork_b],
+                fork_seq,
+                [&mut registry_a, &mut registry_b],
+                [&closure_a, &closure_b],
+            ),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert_eq!(count_for(&registry_a, fork_a, entity), 0);
+        assert_eq!(count_for(&registry_b, fork_b, entity), 0);
     }
 
     #[test]
     fn public_compare_rolls_back_when_final_verification_fails() {
+        let fixture = count_fixture();
         let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
             .with_world_replay_verifier(Arc::new(RejectThirdVerification {
                 calls: AtomicUsize::new(0),
@@ -736,31 +717,16 @@ mod tests {
         )
         .test_ok();
         let gate = host.containment_gate();
-        let (fork_a, fork_b, fork_seq, entity) = {
-            let mut commands = host.command_sender().test_ok();
-            let parent = commands.create_timeline("rollback-parent").test_ok();
-            let entity = EntityId::new();
-            let shared = commands.append(parent.id(), &[draft(entity)]).test_ok();
-            let fork_seq = shared[0].seq;
-            let fork_a = commands
-                .fork_timeline(parent.id(), fork_seq, "rollback-a")
-                .test_ok();
-            let fork_b = commands
-                .fork_timeline(parent.id(), fork_seq, "rollback-b")
-                .test_ok();
-            commands.append(fork_a.id(), &[draft(entity)]).test_ok();
-            commands.append(fork_b.id(), &[draft(entity)]).test_ok();
-            (fork_a.id(), fork_b.id(), fork_seq, entity)
-        };
+        let entity = EntityId::new();
+        let (fork_a, fork_b, fork_seq) = forked(&mut host, &[entity], 1, [1, 1]);
         let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
         let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
-        let mut registry_a = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
-        registry_a.register("count", Box::new(CountReducer));
-        let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
-        registry_b.register("count", Box::new(CountReducer));
+        let mut registry_a = fixture.registry(Arc::clone(&gate));
+        let mut registry_b = fixture.registry(gate);
         let mut reads = host.read_sender().test_ok();
         assert!(matches!(
-            super::compare(
+            compare_with(
+                &fixture,
                 &mut reads,
                 [fork_a, fork_b],
                 fork_seq,
@@ -769,22 +735,13 @@ mod tests {
             ),
             Err(CoreError::ArtifactUnavailable)
         ));
-        assert_eq!(
-            registry_a
-                .state_for_reducer(fork_a, "count", &entity)
-                .test_ok(),
-            None
-        );
-        assert_eq!(
-            registry_b
-                .state_for_reducer(fork_b, "count", &entity)
-                .test_ok(),
-            None
-        );
+        assert_eq!(count_for(&registry_a, fork_a, entity), 0);
+        assert_eq!(count_for(&registry_b, fork_b, entity), 0);
     }
 
     #[test]
     fn public_compare_rolls_back_when_final_read_bounds_change() {
+        let fixture = count_fixture();
         let verifier = Arc::new(ChangeBoundsOnThirdVerification {
             calls: AtomicUsize::new(0),
         });
@@ -797,31 +754,16 @@ mod tests {
         )
         .test_ok();
         let gate = host.containment_gate();
-        let (fork_a, fork_b, fork_seq, entity) = {
-            let mut commands = host.command_sender().test_ok();
-            let parent = commands.create_timeline("bounds-parent").test_ok();
-            let entity = EntityId::new();
-            let shared = commands.append(parent.id(), &[draft(entity)]).test_ok();
-            let fork_seq = shared[0].seq;
-            let fork_a = commands
-                .fork_timeline(parent.id(), fork_seq, "bounds-a")
-                .test_ok();
-            let fork_b = commands
-                .fork_timeline(parent.id(), fork_seq, "bounds-b")
-                .test_ok();
-            commands.append(fork_a.id(), &[draft(entity)]).test_ok();
-            commands.append(fork_b.id(), &[draft(entity)]).test_ok();
-            (fork_a.id(), fork_b.id(), fork_seq, entity)
-        };
+        let entity = EntityId::new();
+        let (fork_a, fork_b, fork_seq) = forked(&mut host, &[entity], 1, [1, 1]);
         let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
         let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
-        let mut registry_a = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
-        registry_a.register("count", Box::new(CountReducer));
-        let mut registry_b = ProjectionRegistry::new().with_erasure_gate(gate);
-        registry_b.register("count", Box::new(CountReducer));
+        let mut registry_a = fixture.registry(Arc::clone(&gate));
+        let mut registry_b = fixture.registry(gate);
         let mut reads = host.read_sender().test_ok();
         assert!(matches!(
-            super::compare(
+            compare_with(
+                &fixture,
                 &mut reads,
                 [fork_a, fork_b],
                 fork_seq,
@@ -830,145 +772,37 @@ mod tests {
             ),
             Err(CoreError::ArtifactUnavailable)
         ));
-        assert_eq!(
-            registry_a
-                .state_for_reducer(fork_a, "count", &entity)
-                .test_ok(),
-            None
-        );
-        assert_eq!(
-            registry_b
-                .state_for_reducer(fork_b, "count", &entity)
-                .test_ok(),
-            None
-        );
+        assert_eq!(count_for(&registry_a, fork_a, entity), 0);
+        assert_eq!(count_for(&registry_b, fork_b, entity), 0);
         assert_eq!(verifier.calls.load(Ordering::SeqCst), 4);
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn compare_diverged_timelines_detects_differences() {
-        let mut store = open_test_store();
-        let parent = store.create_timeline("parent").test_ok();
-        let shared_entity = EntityId::new();
-
-        // Append 2 shared events.
-        let shared_drafts: Vec<EventDraft> = (0..2).map(|_| draft(shared_entity)).collect();
-        let committed = store.append(parent.id(), &shared_drafts).test_ok();
-        let fork_seq = committed.last().test_ok().seq;
-
-        // Fork into A and B.
-        let fork_a = store.fork(parent.id(), fork_seq, "branch-a").test_ok();
-        let fork_b = store.fork(parent.id(), fork_seq, "branch-b").test_ok();
-
-        // Append different counts to each fork for the same entity.
-        let drafts_a: Vec<EventDraft> = (0..2).map(|_| draft(shared_entity)).collect();
-        let drafts_b: Vec<EventDraft> = (0..3).map(|_| draft(shared_entity)).collect();
-
-        store.append(fork_a.id(), &drafts_a).test_ok();
-        store.append(fork_b.id(), &drafts_b).test_ok();
-
-        let diff = compare(
-            store.as_ref(),
-            fork_a.id(),
-            fork_b.id(),
-            fork_seq,
-            &mut make_registry(),
-            &mut make_registry(),
-        )
-        .test_ok();
-
-        // Each side should have its own post-fork events.
-        assert_eq!(diff.only_in_a.len(), 2);
-        assert_eq!(diff.only_in_b.len(), 3);
-
-        // shared_entity has different counts on A (2) vs B (3) -> diverged.
-        assert!(diff.diverged_entities.contains(&shared_entity));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn compare_isolated_registries_no_clobber() {
-        // Two registries must not share state even when both see events for the
-        // same entity. This exercises the isolation guarantee that motivated the
-        // fix from a single shared reducers slice.
-        let mut store = open_test_store();
-        let parent = store.create_timeline("parent").test_ok();
-        let entity = EntityId::new();
-
-        let shared: Vec<EventDraft> = (0..2).map(|_| draft(entity)).collect();
-        let committed = store.append(parent.id(), &shared).test_ok();
-        let fork_seq = committed.last().test_ok().seq;
-
-        let fork_a = store.fork(parent.id(), fork_seq, "iso-a").test_ok();
-        let fork_b = store.fork(parent.id(), fork_seq, "iso-b").test_ok();
-
-        // Only A gets new events; B stays at the fork point.
-        let new_a: Vec<EventDraft> = (0..3).map(|_| draft(entity)).collect();
-        store.append(fork_a.id(), &new_a).test_ok();
-
-        let mut reg_a = make_registry();
-        let mut reg_b = make_registry();
-
-        let diff = compare(
-            store.as_ref(),
-            fork_a.id(),
-            fork_b.id(),
-            fork_seq,
-            &mut reg_a,
-            &mut reg_b,
-        )
-        .test_ok();
-
-        // B has no post-fork events.
-        assert_eq!(diff.only_in_b.len(), 0);
-        // A has three additional events, so the final entity state diverges.
-        assert!(diff.diverged_entities.contains(&entity));
-
-        // Complete-history replay includes the two shared events on both arms.
-        let count_a = count_for(&reg_a, fork_a.id(), entity);
-        let count_b = count_for(&reg_b, fork_b.id(), entity);
-        let _ = count_for(&reg_b, fork_b.id(), EntityId::new());
-
-        assert_eq!(count_a, 5, "reg_a should have folded the full A history");
-        assert_eq!(count_b, 2, "reg_b should have folded the shared history");
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn compare_unknown_timeline_returns_store_error() {
-        let store = open_test_store();
-        let mut reg_a = make_registry();
-        let mut reg_b = make_registry();
-        let err = compare(
-            store.as_ref(),
-            TimelineId::new(),
-            TimelineId::new(),
-            Seq::ZERO,
-            &mut reg_a,
-            &mut reg_b,
-        )
-        .test_err();
-        assert!(matches!(err, CoreError::TimelineNotFound(_)));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn compare_second_timeline_missing_returns_error() {
-        // Covers the `events_b` read error path (first timeline exists).
-        let mut store = open_test_store();
-        let a = store.create_timeline("a").test_ok();
-        let mut reg_a = make_registry();
-        let mut reg_b = make_registry();
-        let err = compare(
-            store.as_ref(),
-            a.id(),
-            TimelineId::new(),
-            Seq::ZERO,
-            &mut reg_a,
-            &mut reg_b,
-        )
-        .test_err();
-        assert!(matches!(err, CoreError::TimelineNotFound(_)));
+    fn shared_fork_requires_one_common_prefix_and_divergence_after_it() {
+        let event = |seq: u64| Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("test.tick"),
+            payload: CanonicalBytes::from_vec(Vec::new()),
+            wall_time: WallTime::from_micros(seq),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let (first, second) = (event(1), event(2));
+        let a = [first.clone(), event(2)];
+        let b = [first.clone(), event(2)];
+        let one = Seq::from_u64(1);
+        assert!(require_shared_fork(one, &a, &b).is_ok());
+        assert!(require_shared_fork(Seq::ZERO, &a, &b).is_err());
+        assert!(require_shared_fork(one, &a, &[event(1)]).is_err());
+        assert!(require_shared_fork(Seq::from_u64(3), &[first.clone()], &[first.clone()]).is_err());
+        let same_after = [first.clone(), second.clone()];
+        assert!(require_shared_fork(one, &same_after, &[first, second]).is_err());
     }
 }

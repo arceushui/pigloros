@@ -1,24 +1,32 @@
 //! Detached protected candidates fold exactly like the visible registry
-//! (ADR-113 §3, acceptance case 14 for the shared fold step).
+//! (ADR-113 §3, acceptance case 14 for the shared fold step) and account
+//! their staged size incrementally (§4 E5, acceptance cases 10 and 20).
 
 use pos_core::{
-    CanonicalBytes, ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Event, EventId, Hash,
-    Kind, PluginId, Reducer, SchemaVersion, Seq, State, TimelineId, WallTime,
-    EVENT_TYPE_CONSENT_REVOKED_V1, GEOGRAPHIC_EVENT_TYPE,
+    staged_install::ProjectionSourceV1, CanonicalBytes, ConsentRevokedV1, EntityId,
+    ErasureContainmentGateV1, Event, EventId, Hash, Kind, PluginId, Reducer, SchemaVersion, Seq,
+    State, TimelineId, WallTime, EVENT_TYPE_CONSENT_REVOKED_V1, GEOGRAPHIC_EVENT_TYPE,
 };
 use pos_state::{
-    DetachedProjectionCandidateV1, ProjectionCandidateErrorV1, ProjectionRegistry,
-    ProtectedProjectionProviderV1, RecordedConsumerV1,
+    CandidateBoundsV1, CandidateReducerV1, DetachedProjectionCandidateV1, InitialStateV1,
+    ProjectionCandidateErrorV1, ProjectionRegistry, ProtectedProjectionProviderV1,
+    RecordedConsumerV1, StagedLimitErrorV1, MAX_STAGED_ENTITIES_PER_CONSUMER_V1,
+    MAX_STAGED_OUTPUT_BYTES_V1,
 };
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::Arc, time::Duration};
 
 const COUNTED: &str = "fixture.counted";
 const REJECTED: &str = "fixture.rejected";
+const BLOB: &str = "fixture.blob";
 
 fn test_ok<T, E: Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
         std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
     })
+}
+
+fn test_some<T>(value: Option<T>) -> T {
+    value.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
 }
 
 /// Counts every projected Event and rejects one Event type (ADR-090).
@@ -57,6 +65,22 @@ impl Reducer for LastTypeReducer {
     }
 }
 
+/// Stores a string as long as the payload's little-endian `u64` length.
+struct BlobReducer;
+
+impl Reducer for BlobReducer {
+    fn initial(&self) -> State {
+        State::new()
+    }
+
+    fn apply(&self, state: &mut State, event: &Event) {
+        let mut length = [0_u8; 8];
+        length.copy_from_slice(&event.payload.as_slice()[..8]);
+        let length = usize::try_from(u64::from_le_bytes(length)).unwrap_or(0);
+        state.set("b", serde_json::json!("a".repeat(length)));
+    }
+}
+
 fn event(entity: EntityId, kind: &str, payload: CanonicalBytes, seq: u64) -> Event {
     Event {
         id: EventId::new(),
@@ -73,6 +97,18 @@ fn event(entity: EntityId, kind: &str, payload: CanonicalBytes, seq: u64) -> Eve
         origin: None,
         payload_hash: Hash::from_bytes([0; 32]),
     }
+}
+
+fn counted(entity: EntityId, seq: u64) -> Event {
+    event(entity, COUNTED, CanonicalBytes::from_vec(Vec::new()), seq)
+}
+
+/// A blob Event whose staged entity size is exactly `staged_bytes`: 16 for
+/// the identifier, 1 for the field name and 2 for the JSON quotes.
+fn blob(entity: EntityId, staged_bytes: u64) -> Event {
+    let length = staged_bytes - 19;
+    let payload = CanonicalBytes::from_vec(length.to_le_bytes().to_vec());
+    event(entity, BLOB, payload, 1)
 }
 
 fn revocation(subject: EntityId, seq: u64) -> Event {
@@ -107,21 +143,69 @@ fn consumer(byte: u8) -> RecordedConsumerV1 {
     RecordedConsumerV1::new(PluginId::new(), Hash::from_bytes([byte; 32]))
 }
 
+const fn bounds(constant: u64) -> CandidateBoundsV1 {
+    CandidateBoundsV1 {
+        callback_bound: Duration::from_millis(250),
+        growth_per_payload_byte: 0,
+        growth_constant_bytes: constant,
+    }
+}
+
+fn source() -> ProjectionSourceV1 {
+    ProjectionSourceV1::bound(TimelineId::new(), None)
+}
+
+fn built(consumer: RecordedConsumerV1, reducer: impl Reducer + 'static) -> CandidateReducerV1 {
+    built_with(consumer, reducer, bounds(4096))
+}
+
+fn built_with(
+    consumer: RecordedConsumerV1,
+    reducer: impl Reducer + 'static,
+    bounds: CandidateBoundsV1,
+) -> CandidateReducerV1 {
+    CandidateReducerV1 {
+        consumer,
+        name: "fixture",
+        reducer: Box::new(reducer),
+        bounds,
+        observation_policy: None,
+    }
+}
+
+fn assemble(reducers: Vec<CandidateReducerV1>) -> DetachedProjectionCandidateV1 {
+    test_ok(DetachedProjectionCandidateV1::from_reducers(
+        reducers,
+        InitialStateV1::Empty,
+        source(),
+    ))
+}
+
 fn candidate_for(
     counting: RecordedConsumerV1,
     typed: RecordedConsumerV1,
 ) -> DetachedProjectionCandidateV1 {
-    test_ok(DetachedProjectionCandidateV1::from_reducers(vec![
+    assemble(vec![
         built(counting, CountingReducer),
         built(typed, LastTypeReducer),
-    ]))
+    ])
 }
 
-fn built(
-    consumer: RecordedConsumerV1,
-    reducer: impl Reducer + 'static,
-) -> (RecordedConsumerV1, Box<dyn Reducer>) {
-    (consumer, Box::new(reducer))
+/// Fold with accounting, as the staged executor does without its clock.
+fn fold_accounted(
+    candidate: &mut DetachedProjectionCandidateV1,
+    events: &[Event],
+) -> Result<(), StagedLimitErrorV1> {
+    for event in events {
+        candidate.fold_event_with(event, |mut turn| {
+            turn.apply();
+            turn.account()
+        })?;
+        if candidate.exact_pass_due() {
+            candidate.exact_pass()?;
+        }
+    }
+    candidate.exact_pass()
 }
 
 #[test]
@@ -160,6 +244,7 @@ fn candidate_fold_equals_the_live_registry_fold() {
     assert_eq!(kept_count, Some(2));
     assert!(candidate.state_for(typed.plugin_id(), &revoked).is_none());
     assert!(candidate.state_for(PluginId::new(), &kept).is_none());
+    assert_eq!(candidate.revocations(), &[revoked]);
 }
 
 #[test]
@@ -168,8 +253,7 @@ fn candidates_own_independent_ordered_reducer_state() {
     let entity = EntityId::new();
     let mut folded = candidate_for(counting, typed);
     let fresh = candidate_for(counting, typed);
-    let counted = event(entity, COUNTED, CanonicalBytes::from_vec(Vec::new()), 1);
-    folded.fold_events(&[counted]);
+    folded.fold_events(&[counted(entity, 1)]);
 
     assert!(folded.state_for(counting.plugin_id(), &entity).is_some());
     assert!(fresh.state_for(counting.plugin_id(), &entity).is_none());
@@ -181,12 +265,15 @@ fn candidates_own_independent_ordered_reducer_state() {
 fn a_consumer_cannot_be_assembled_twice() {
     let (counting, typed) = (consumer(5), consumer(8));
     let duplicate = RecordedConsumerV1::new(counting.plugin_id(), Hash::from_bytes([6; 32]));
-    let repeated_later = DetachedProjectionCandidateV1::from_reducers(vec![
+    let open = |reducers| {
+        DetachedProjectionCandidateV1::from_reducers(reducers, InitialStateV1::Empty, source())
+    };
+    let repeated_later = open(vec![
         built(counting, CountingReducer),
         built(typed, LastTypeReducer),
         built(duplicate, LastTypeReducer),
     ]);
-    let repeated_adjacent = DetachedProjectionCandidateV1::from_reducers(vec![
+    let repeated_adjacent = open(vec![
         built(typed, LastTypeReducer),
         built(counting, CountingReducer),
         built(duplicate, LastTypeReducer),
@@ -195,13 +282,130 @@ fn a_consumer_cannot_be_assembled_twice() {
     assert_eq!(repeated_later.err(), mismatch);
     assert_eq!(repeated_adjacent.err(), mismatch);
 
-    let distinct = test_ok(DetachedProjectionCandidateV1::from_reducers(vec![
+    let distinct = assemble(vec![
         built(typed, LastTypeReducer),
         built(counting, CountingReducer),
-    ]));
+    ]);
     assert_eq!(distinct.consumers(), vec![typed, counting]);
-    let empty = test_ok(DetachedProjectionCandidateV1::from_reducers(Vec::new()));
+    let empty = assemble(Vec::new());
     assert!(empty.consumers().is_empty());
+}
+
+#[test]
+fn a_candidate_is_bound_to_one_timeline_source() {
+    let bound = source();
+    let candidate = test_ok(DetachedProjectionCandidateV1::from_reducers(
+        vec![built(consumer(9), CountingReducer)],
+        InitialStateV1::Empty,
+        bound,
+    ));
+    assert_eq!(candidate.source(), bound);
+    for unbound in [ProjectionSourceV1::default(), ProjectionSourceV1::mixed()] {
+        let refused = DetachedProjectionCandidateV1::from_reducers(
+            vec![built(consumer(9), CountingReducer)],
+            InitialStateV1::Empty,
+            unbound,
+        );
+        assert_eq!(
+            refused.err(),
+            Some(ProjectionCandidateErrorV1::SourceMismatch)
+        );
+    }
+}
+
+#[test]
+fn staged_results_exist_only_after_a_current_exact_pass() {
+    let (counting, typed) = (consumer(10), consumer(11));
+    let (kept, revoked) = (EntityId::new(), EntityId::new());
+    let mut candidate = candidate_for(counting, typed);
+    assert!(candidate.take_staged().is_none());
+
+    test_ok(fold_accounted(&mut candidate, &mixed_events(kept, revoked)));
+    let accounting = candidate.accounting();
+    assert_eq!(accounting.exact_passes(), 1);
+    assert_eq!(accounting.upper_bound(), accounting.last_exact());
+    let staged = test_some(candidate.take_staged());
+    assert_eq!(staged.consumers(), &[counting, typed]);
+    assert_eq!(staged.source(), candidate.source());
+    assert_eq!(staged.revoked_subjects(), &[revoked]);
+    assert!(candidate.take_staged().is_none());
+
+    candidate.fold_events(&[counted(kept, 9)]);
+    assert!(candidate.take_staged().is_none());
+}
+
+#[test]
+fn growth_beyond_the_declared_bound_fails_the_exact_pass() {
+    let entity = EntityId::new();
+    let mut within = assemble(vec![built_with(consumer(12), CountingReducer, bounds(64))]);
+    test_ok(fold_accounted(
+        &mut within,
+        &[counted(entity, 1), counted(entity, 2)],
+    ));
+
+    let mut over = assemble(vec![built_with(consumer(13), CountingReducer, bounds(0))]);
+    let growing: Vec<Event> = (1..=10).map(|seq| counted(entity, seq)).collect();
+    assert_eq!(
+        fold_accounted(&mut over, &growing),
+        Err(StagedLimitErrorV1::GrowthBoundExceeded)
+    );
+
+    let mut unaccounted = assemble(vec![built(consumer(14), CountingReducer)]);
+    unaccounted.fold_events(&[counted(entity, 1)]);
+    assert_eq!(
+        unaccounted.exact_pass(),
+        Err(StagedLimitErrorV1::GrowthBoundExceeded)
+    );
+}
+
+#[test]
+fn the_staged_output_limit_is_exact() {
+    let mut at_limit = assemble(vec![built(consumer(15), BlobReducer)]);
+    test_ok(fold_accounted(
+        &mut at_limit,
+        &[blob(EntityId::new(), MAX_STAGED_OUTPUT_BYTES_V1)],
+    ));
+    assert_eq!(
+        at_limit.accounting().last_exact(),
+        MAX_STAGED_OUTPUT_BYTES_V1
+    );
+
+    let mut over = assemble(vec![built(consumer(16), BlobReducer)]);
+    let event = blob(EntityId::new(), MAX_STAGED_OUTPUT_BYTES_V1 + 1);
+    test_ok(over.fold_event_with(&event, |mut turn| {
+        turn.apply();
+        turn.account()
+    }));
+    assert!(over.exact_pass_due());
+    assert_eq!(
+        over.exact_pass(),
+        Err(StagedLimitErrorV1::StagedOutputExceeded)
+    );
+    assert!(over.take_staged().is_none());
+}
+
+#[test]
+fn the_entity_limit_is_exact() {
+    let at_limit: Vec<Event> = (0..MAX_STAGED_ENTITIES_PER_CONSUMER_V1)
+        .map(|_| counted(EntityId::new(), 1))
+        .collect();
+    let mut candidate = assemble(vec![built(consumer(17), CountingReducer)]);
+    test_ok(fold_accounted(&mut candidate, &at_limit));
+    assert_eq!(
+        fold_accounted(&mut candidate, &[counted(EntityId::new(), 2)]),
+        Err(StagedLimitErrorV1::EntityLimitExceeded)
+    );
+}
+
+#[test]
+fn exact_passes_stay_within_their_bound_for_one_growing_entity() {
+    let entity = EntityId::new();
+    let events: Vec<Event> = (1..=10_000).map(|seq| counted(entity, seq)).collect();
+    let mut candidate = assemble(vec![built(consumer(18), CountingReducer)]);
+    test_ok(fold_accounted(&mut candidate, &events));
+    // Σ declared growth is 4096 × 10,000 bytes, far below the 64 MiB limit,
+    // so the final pass is the only one.
+    assert_eq!(candidate.accounting().exact_passes(), 1);
 }
 
 /// A provider is object-safe and is held as a shared trait object.
@@ -211,21 +415,26 @@ impl ProtectedProjectionProviderV1 for EmptyProvider {
     fn open_candidate(
         &self,
         recorded_consumers: &[RecordedConsumerV1],
+        initial_state: InitialStateV1,
+        source: ProjectionSourceV1,
     ) -> Result<DetachedProjectionCandidateV1, ProjectionCandidateErrorV1> {
-        recorded_consumers
-            .is_empty()
-            .then(DetachedProjectionCandidateV1::default)
-            .ok_or(ProjectionCandidateErrorV1::NotAdmitted)
+        if recorded_consumers.is_empty() {
+            DetachedProjectionCandidateV1::from_reducers(Vec::new(), initial_state, source)
+        } else {
+            Err(ProjectionCandidateErrorV1::NotAdmitted)
+        }
     }
 }
 
 #[test]
 fn providers_are_object_safe() {
     let provider: Arc<dyn ProtectedProjectionProviderV1 + Send + Sync> = Arc::new(EmptyProvider);
-    let empty = test_ok(provider.open_candidate(&[]));
+    let empty = test_ok(provider.open_candidate(&[], InitialStateV1::Empty, source()));
     assert!(empty.consumers().is_empty());
     assert_eq!(
-        provider.open_candidate(&[consumer(7)]).err(),
+        provider
+            .open_candidate(&[consumer(7)], InitialStateV1::Empty, source())
+            .err(),
         Some(ProjectionCandidateErrorV1::NotAdmitted)
     );
 }
