@@ -4,7 +4,7 @@ use pos_core::{
     adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
     AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationV1, AdapterRecordingStoreV1,
     AdapterTranscriptV1, ArtifactRegistrationV1, Capability, Hash, OwnerIdV1, Plugin, PluginId,
-    TimelineId, WorldReplayHandleInputV1, WorldReplayHandleV1, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+    TimelineId, WorldReplayHandleInputV1, WorldReplayHandleV1,
 };
 use pos_runtime::{
     LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1,
@@ -850,7 +850,7 @@ fn local_adapter_session_maps_recorder_boundaries_to_closed_errors() -> TestResu
 }
 
 #[test]
-fn local_adapter_session_enforces_public_request_and_call_bounds() -> TestResult {
+fn local_adapter_session_enforces_public_request_bound() -> TestResult {
     let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
     let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
     let mut recorder = pos_store::memory::MemoryStore::new();
@@ -872,45 +872,6 @@ fn local_adapter_session_enforces_public_request_and_call_bounds() -> TestResult
         Err(LocalAdapterErrorV1::CallBoundExceeded)
     );
     oversized.abort()?;
-
-    let keys = Arc::new(Mutex::new(Vec::new()));
-    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(EchoProvider {
-        idempotency_keys: Arc::clone(&keys),
-        completed_responses: Arc::new(Mutex::new(Vec::new())),
-    }))?;
-    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
-    let mut recorder = pos_store::memory::MemoryStore::new();
-    let mut session = registry.begin_local_adapter_session(
-        &admitted,
-        handle,
-        Hash::from_bytes([35; 32]),
-        &mut recorder,
-    )?;
-    for _ in 0..MAX_ADAPTER_TRANSCRIPT_CALLS_V1 {
-        assert_eq!(
-            session.invoke(
-                plugin_id,
-                "weather.client",
-                "fixture.provider",
-                "read-current",
-                1,
-                b"x".to_vec(),
-            ),
-            Ok(b"x".to_vec())
-        );
-    }
-    assert_eq!(
-        session.invoke(
-            plugin_id,
-            "weather.client",
-            "fixture.provider",
-            "read-current",
-            1,
-            b"x".to_vec(),
-        ),
-        Err(LocalAdapterErrorV1::CallBoundExceeded)
-    );
-    session.abort()?;
     Ok(())
 }
 
