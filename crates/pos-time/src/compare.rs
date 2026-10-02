@@ -874,7 +874,12 @@ mod tests {
         assert!(require_shared_fork(one, &a, &b).is_ok());
         assert!(require_shared_fork(Seq::ZERO, &a, &b).is_err());
         assert!(require_shared_fork(one, &a, &[event(1)]).is_err());
-        assert!(require_shared_fork(Seq::from_u64(3), &[first.clone()], &[first.clone()]).is_err());
+        assert!(require_shared_fork(
+            Seq::from_u64(3),
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&first),
+        )
+        .is_err());
         let same_after = [first.clone(), second.clone()];
         assert!(require_shared_fork(one, &same_after, &[first, second]).is_err());
     }

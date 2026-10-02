@@ -308,7 +308,10 @@ fn read_complete_world_replay(
 pub mod test_support {
     use std::{
         fmt::Debug,
-        sync::{Arc, Mutex, MutexGuard, PoisonError},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
     };
 
     use pos_core::retention::{
@@ -340,7 +343,19 @@ pub mod test_support {
     const DAY_MICROS: u64 = 86_400_000_000;
 
     /// Serializes folds on the process-global staged executor.
-    static EXECUTOR_SERIAL: Mutex<()> = Mutex::new(());
+    static EXECUTOR_SERIAL: AtomicBool = AtomicBool::new(false);
+
+    /// Holds [`EXECUTOR_SERIAL`] until dropped.
+    ///
+    /// A plain flag guard rather than a `MutexGuard`, so a fixture that holds it
+    /// for a whole test is not reported as a lock held longer than needed.
+    pub(crate) struct SerialGuard;
+
+    impl Drop for SerialGuard {
+        fn drop(&mut self) {
+            EXECUTOR_SERIAL.store(false, Ordering::Release);
+        }
+    }
 
     pub(crate) struct FixturePlugin {
         id: PluginId,
@@ -397,7 +412,7 @@ pub mod test_support {
     /// One admitted staged consumer and the executor, held under the lock
     /// that serializes folds in this test process.
     pub(crate) struct ProtectedFixture {
-        _serial: Option<MutexGuard<'static, ()>>,
+        _serial: Option<SerialGuard>,
         executor: StagedFoldExecutorV1,
         provider: Arc<HostProjectionProviderV1>,
         consumers: Vec<RecordedConsumerV1>,
@@ -428,7 +443,7 @@ pub mod test_support {
         }
 
         fn admitted(
-            serial: Option<MutexGuard<'static, ()>>,
+            serial: Option<SerialGuard>,
             name: &'static str,
             reducer: fn() -> Box<dyn Reducer>,
             policy: Option<ProjectionObservationPolicyV1>,
@@ -512,10 +527,14 @@ pub mod test_support {
         test_ok(AuthenticatedPrincipalResultV1::try_from_draft(draft))
     }
 
-    fn serial() -> MutexGuard<'static, ()> {
-        EXECUTOR_SERIAL
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    fn serial() -> SerialGuard {
+        while EXECUTOR_SERIAL
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::thread::yield_now();
+        }
+        SerialGuard
     }
 
     /// An observation policy permitting the `n` field.
