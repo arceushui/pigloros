@@ -10,9 +10,9 @@ use pos_core::{
     validate_closed_adapter_recording_v1, AdapterAdmissionEntryV1, AdapterAdmissionInputV1,
     AdapterAdmissionV1, AdapterCallReservationOutcomeV1, AdapterCallReservationV1,
     AdapterEffectModeV1, AdapterInvocationInputV1, AdapterInvocationV1, AdapterRecordingSessionV1,
-    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1, Hash, PluginId,
-    WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_BYTES_V1,
-    MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1, Hash,
+    ManifestAdmissionCatalogV1, PluginId, WorldReplayHandleV1, MAX_ADAPTER_CALL_BYTES_V1,
+    MAX_ADAPTER_TRANSCRIPT_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 
 use super::{PluginEntry, PluginRegistry};
@@ -348,6 +348,10 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
         Ok(())
     }
 
+    /// Reserve, invoke and durably record one admitted adapter call.
+    ///
+    /// `invoke` passes `now` in rather than reading the clock here, so tests
+    /// can drive the pre-epoch `ClockUnavailable` branch deterministically.
     fn record_call(
         &mut self,
         adapter_index: usize,
@@ -642,7 +646,7 @@ impl PluginRegistry {
 
     pub(super) fn adapter_admission_for_catalog(
         &self,
-        catalog: &pos_core::ManifestAdmissionCatalogV1,
+        catalog: &ManifestAdmissionCatalogV1,
     ) -> Result<AdapterAdmissionV1, LocalAdapterErrorV1> {
         let registered_plugins: Vec<_> = catalog
             .as_input()
