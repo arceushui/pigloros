@@ -102,15 +102,6 @@ const fn nonempty(value: &[u8]) -> Result<&[u8], Error> {
     }
 }
 
-/// Encode `null / bstr`.
-pub(super) fn encode_optional_record(out: &mut Vec<u8>, value: Option<&[u8]>) {
-    if let Some(value) = value {
-        bytes(out, value);
-    } else {
-        out.push(NULL);
-    }
-}
-
 /// Encode `null / bstr .size N`.
 pub(super) fn encode_optional_fixed<const N: usize>(out: &mut Vec<u8>, value: Option<[u8; N]>) {
     if let Some(value) = value {

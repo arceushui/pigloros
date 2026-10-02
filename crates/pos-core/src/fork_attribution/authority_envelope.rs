@@ -149,13 +149,22 @@ impl ForkAttributionClosureLeafTypeV1 {
         )
     }
 
-    /// Require a present record within its bound, or the absent form only
-    /// where the type permits it.
-    const fn check(self, record: &[u8]) -> Result<(), Error> {
-        if record.len() > self.maximum_bytes() || (record.is_empty() && !self.may_be_absent()) {
+    /// Require a present record to be nonempty and within its bound.
+    const fn check_present(self, record: &[u8]) -> Result<(), Error> {
+        if record.is_empty() || record.len() > self.maximum_bytes() {
             Err(Error::FieldOutOfBounds)
         } else {
             Ok(())
+        }
+    }
+
+    /// Accept the empty absent form only where the type permits it; any other
+    /// record must satisfy [`Self::check_present`].
+    const fn check(self, record: &[u8]) -> Result<(), Error> {
+        if record.is_empty() && self.may_be_absent() {
+            Ok(())
+        } else {
+            self.check_present(record)
         }
     }
 
@@ -717,9 +726,8 @@ impl ClosureWriter {
         self.records(Leaf::AppendOperation, &input.append_operations);
     }
 
-    /// Check one leaf's bound and append its digest to the root preimage.
+    /// Append one leaf digest to the root preimage.
     fn push_leaf(&mut self, kind: ForkAttributionClosureLeafTypeV1, record: &[u8]) {
-        self.bounded = self.bounded.and(kind.check(record));
         self.root.update(leaf_digest(kind, record).as_bytes());
     }
 
@@ -731,14 +739,21 @@ impl ClosureWriter {
             .update(&u32::try_from(count).unwrap_or(u32::MAX).to_be_bytes());
     }
 
+    /// Write one present record, keeping the first violated bound.
     fn record(&mut self, kind: ForkAttributionClosureLeafTypeV1, record: &[u8]) {
         bytes(&mut self.out, record);
+        self.bounded = self.bounded.and_then(|()| kind.check_present(record));
         self.push_leaf(kind, record);
     }
 
+    /// Write a present record, or `null` with the typed empty leaf.
     fn optional(&mut self, kind: ForkAttributionClosureLeafTypeV1, record: Option<&[u8]>) {
-        authority_wire::encode_optional_record(&mut self.out, record);
-        self.push_leaf(kind, record.unwrap_or_default());
+        if let Some(record) = record {
+            self.record(kind, record);
+        } else {
+            self.out.push(authority_wire::NULL);
+            self.push_leaf(kind, &[]);
+        }
     }
 
     fn records(&mut self, kind: ForkAttributionClosureLeafTypeV1, records: &[Vec<u8>]) {
