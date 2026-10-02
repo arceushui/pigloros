@@ -6,9 +6,10 @@ use std::sync::{
 };
 
 use pos_core::{
-    AppendDedupKey, AppendDedupScope, AppendIdentity, ConsentAuthority, ConsentRevokedV1, EntityId,
-    ErasureContainmentGateV1, Event, Hash, PipelineAttemptIdV1, PipelineEvidenceRefV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Reducer, Seq, State, TimelineId,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, Capability, ConsentAuthority,
+    ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Event, Hash, Kind, PipelineAttemptIdV1,
+    PipelineEvidenceRefV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
+    PluginId, Reducer, Seq, State, TimelineId,
 };
 use pos_runtime::{
     Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
@@ -40,6 +41,29 @@ impl Reducer for CountingReducer {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         state.set("count", serde_json::json!(count + 1));
+    }
+}
+
+/// A reducer-only Plugin that owns the observed Projection type.
+struct ProjectionPlugin {
+    id: PluginId,
+}
+
+impl Plugin for ProjectionPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "projection"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new(PROJECTION)],
+            has_reducer: true,
+            ..Capability::default()
+        }
     }
 }
 
@@ -154,7 +178,9 @@ pub fn non_participant_pass_is_subscription_scoped() -> Capture {
         let mut registry = gated_registry(None);
         registry
             .register_generated(
-                &FixturePlugin::new("projection", &[PROJECTION], false),
+                &ProjectionPlugin {
+                    id: PluginId::new(),
+                },
                 Some(Box::new(CountingReducer)),
                 None,
             )
@@ -252,6 +278,11 @@ pub fn late_revocation_or_freeze_aborts_the_pass() -> Capture {
         let authority = ConsentAuthority::new();
         let token = persona_token(&authority, timeline, subject);
         let (mut registry, aborts) = late_registry(gated_registry(Some(&authority)), subject);
+        // A committed Event puts the Logical Head at 1, so a revocation
+        // fenced at that head invalidates the token at the commit head.
+        backend
+            .append(timeline, &[draft(subject, "late.seed", b"seed")])
+            .test_ok();
         let revisions = host
             .observe(&registry, backend.as_mut(), timeline)
             .test_ok();
@@ -264,7 +295,7 @@ pub fn late_revocation_or_freeze_aborts_the_pass() -> Capture {
                     subject_id: subject,
                     grantee_id: token.grantee_id(),
                     grant_seq: token.grant_seq(),
-                    fence_seq: 1,
+                    fence_seq: head.as_u64(),
                 },
             )
             .test_ok();
