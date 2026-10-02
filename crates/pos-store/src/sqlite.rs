@@ -6974,6 +6974,19 @@ fn sqlite_adapter_recording_state(
         .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)
 }
 
+/// Classifies a recorder row read failure: a durable column holding the wrong
+/// SQL type is corrupt state, while any other failure is storage failure.
+fn adapter_recording_row_error(error: rusqlite::Error) -> AdapterRecordingStoreErrorV1 {
+    match error {
+        rusqlite::Error::InvalidColumnType(..)
+        | rusqlite::Error::FromSqlConversionFailure(..)
+        | rusqlite::Error::IntegralValueOutOfRange(..) => {
+            AdapterRecordingStoreErrorV1::CorruptState
+        }
+        _ => AdapterRecordingStoreErrorV1::StorageFailure,
+    }
+}
+
 struct SqliteLoadedAdapterRecordingSessionV1 {
     session: AdapterRecordingSessionV1,
     state: i64,
@@ -7004,7 +7017,7 @@ fn sqlite_load_adapter_recording_session(
             },
         )
         .optional()
-        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        .map_err(adapter_recording_row_error)?;
     let Some((handle_bytes, admission_bytes, state, transcript_bytes)) = stored else {
         return Ok(None);
     };
@@ -7077,7 +7090,7 @@ fn sqlite_adapter_recording_transcript(
             idempotency_bytes,
             reserved_at,
             output_bytes,
-        ) = row.map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        ) = row.map_err(adapter_recording_row_error)?;
         let expected_global_index = i64::try_from(expected_global_index)
             .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
         if global_index != expected_global_index {
@@ -25510,6 +25523,18 @@ pub(super) mod key_registry_coverage {
         );
         store.abort_adapter_recording_session(owner_reference, run_operation_id)?;
         Ok(())
+    }
+
+    #[test]
+    fn adapter_recording_row_error_keeps_non_type_failures_as_storage_failures() {
+        assert_eq!(
+            adapter_recording_row_error(rusqlite::Error::QueryReturnedNoRows),
+            AdapterRecordingStoreErrorV1::StorageFailure
+        );
+        assert_eq!(
+            adapter_recording_row_error(rusqlite::Error::IntegralValueOutOfRange(0, -1)),
+            AdapterRecordingStoreErrorV1::CorruptState
+        );
     }
 
     #[test]
