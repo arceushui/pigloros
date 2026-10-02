@@ -6976,7 +6976,7 @@ fn sqlite_adapter_recording_state(
 
 /// Classifies a recorder row read failure: a durable column holding the wrong
 /// SQL type is corrupt state, while any other failure is storage failure.
-fn adapter_recording_row_error(error: &rusqlite::Error) -> AdapterRecordingStoreErrorV1 {
+const fn adapter_recording_row_error(error: &rusqlite::Error) -> AdapterRecordingStoreErrorV1 {
     match error {
         rusqlite::Error::InvalidColumnType(..)
         | rusqlite::Error::FromSqlConversionFailure(..)
