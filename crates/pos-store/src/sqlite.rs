@@ -6771,11 +6771,8 @@ fn sqlite_read_manifest_owner_current_state(
         .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
     {
         Some(local_cut_state) => {
-            local_cut_state
-                .validate()
-                .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
-            if local_cut_state.owner_id != owner_id
-                || local_cut_state.configuration_generation != generation
+            // The raw read already validated the row and keyed it by `owner_id`.
+            if local_cut_state.configuration_generation != generation
                 || local_cut_state.previous_visible_lcq1_hash != previous_visible_lcq1_hash
                 || local_cut_state.inventory_generation != inventory_generation
                 || local_cut_state.timelines != generation_rows.timelines
@@ -6826,19 +6823,15 @@ fn sqlite_read_manifest_owner_generation(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
     drop(statement);
-    if timeline_bytes.is_empty()
-        || timeline_bytes.len() > pos_core::MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1
-    {
+    if timeline_bytes.len() > pos_core::MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1 {
         return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
     }
 
     let mut timelines = Vec::with_capacity(timeline_bytes.len());
-    let mut operation_id = None;
+    let mut generation_identity = None;
     let mut catalog_digest = None;
     let mut scopes = HashSet::with_capacity(timeline_bytes.len());
     let mut receipt_hashes = Vec::with_capacity(timeline_bytes.len());
-    let mut inventory_generation = None;
-    let mut previous_visible_lcq1_hash = None;
     for bytes in timeline_bytes {
         let raw: [u8; 16] = bytes
             .try_into()
@@ -6851,43 +6844,35 @@ fn sqlite_read_manifest_owner_generation(
             timeline_id,
         )?
         .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
-        if operation_id.is_some_and(|stored| stored != snapshot.operation_id)
-            || catalog_digest.is_some_and(|stored| stored != snapshot.catalog.digest())
-            || inventory_generation
-                .is_some_and(|stored| stored != snapshot.resulting_inventory_generation)
-            || previous_visible_lcq1_hash.is_some_and(|stored| {
-                stored
-                    != snapshot
-                        .timeline
-                        .receipt
-                        .as_input()
-                        .previous_visible_lcq1_hash
-            })
-            || !scopes.insert(snapshot.timeline.scope)
-        {
-            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
-        }
-        operation_id = Some(snapshot.operation_id);
-        catalog_digest = Some(snapshot.catalog.digest());
-        inventory_generation = Some(snapshot.resulting_inventory_generation);
-        previous_visible_lcq1_hash = Some(
+        let identity = (
+            snapshot.operation_id,
+            snapshot.resulting_inventory_generation,
             snapshot
                 .timeline
                 .receipt
                 .as_input()
                 .previous_visible_lcq1_hash,
         );
+        if generation_identity.is_some_and(|stored| stored != identity)
+            || catalog_digest.is_some_and(|stored| stored != snapshot.catalog.digest())
+            || !scopes.insert(snapshot.timeline.scope)
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        generation_identity = Some(identity);
+        catalog_digest = Some(snapshot.catalog.digest());
         receipt_hashes.push(snapshot.timeline.receipt.digest());
         timelines.push(timeline_id);
     }
+    // A generation without admission rows has no identity and is corrupt.
+    let (operation_id, inventory_generation, previous_visible_lcq1_hash) =
+        generation_identity.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
     Ok(SqliteManifestOwnerAdmissionGenerationV1 {
-        operation_id: operation_id.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
+        operation_id,
         timelines,
         receipt_hashes,
-        inventory_generation: inventory_generation
-            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
-        previous_visible_lcq1_hash: previous_visible_lcq1_hash
-            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
+        inventory_generation,
+        previous_visible_lcq1_hash,
     })
 }
 
