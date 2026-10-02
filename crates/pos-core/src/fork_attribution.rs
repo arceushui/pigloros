@@ -176,8 +176,7 @@ impl ForkAdmissionRecordV1 {
         wire.version()?;
         let operation_id = wire.hash()?;
         let principal_owner_binding_digest = wire.hash()?;
-        let creator = OwnerIdV1::new(wire.text(128)?)
-            .map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)?;
+        let creator = wire.owner()?;
         let parent_timeline_id = wire.timeline()?;
         let child_timeline_id = wire.timeline()?;
         let room_revision_descriptor_hash = wire.hash()?;
@@ -533,8 +532,7 @@ impl SignedForkReproManifestV1 {
         wire.array(7)?;
         wire.magic("FSM1")?;
         wire.version()?;
-        let owner = OwnerIdV1::new(wire.text(128)?)
-            .map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)?;
+        let owner = wire.owner()?;
         let role = KeyRoleV1::from_code(
             u8::try_from(wire.uint()?).map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)?,
         )
@@ -999,8 +997,9 @@ impl<'a> Reader<'a> {
         }
         self.take(length)
     }
-    /// Read an owner whose emptiness is judged by `OwnerIdV1` itself.
+    /// Read a 1..=128-byte owner, leaving emptiness to `OwnerIdV1` itself.
     fn owner(&mut self) -> Result<OwnerIdV1, ForkAttributionCodecErrorV1> {
+        // A length that does not fit `usize` is necessarily over the bound.
         let length = usize::try_from(self.head(3)?).unwrap_or(usize::MAX);
         if length > 128 {
             return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
