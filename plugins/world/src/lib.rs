@@ -2082,7 +2082,6 @@ mod tests {
     };
     use pos_runtime::{PluginRegistry, SnapshotAnchor, TimelineHistorySegment};
     use pos_store::{open_store as open_unbound_store, StoreConfig};
-    #[cfg(target_os = "linux")]
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -3592,6 +3591,154 @@ mod tests {
             )
             .test_ok();
         registry
+    }
+
+    struct SubstituteBackend(Arc<AtomicUsize>);
+
+    impl WorldBackend for SubstituteBackend {
+        fn name(&self) -> &'static str {
+            "substitute-test-backend"
+        }
+
+        fn step(&self, bodies: &[Body], timestep_micros: u32) -> Vec<WorldObservation> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            SimpleKinematicBackend::new().step(bodies, timestep_micros)
+        }
+    }
+
+    fn recorded_world_history(ids: [EntityId; 2], timeline: TimelineId) -> Vec<Event> {
+        let action = WorldActionV1 {
+            actor_entity_id: ids[0],
+            body_entity_id: ids[0],
+            action_kind: ActionKindV1::TargetVelocity,
+            params_cbor: encode_actuator_pair_v1(1.0, 2.0).test_ok(),
+            action_scope: ACTION_SCOPE_SINGLE_BODY,
+            catalogue_version: 1,
+            tick: 0,
+        };
+        let action =
+            make_versioned_event(1, ids[0], EVENT_TYPE_ACTION_V1, action.encode().test_ok());
+        let mut registry = recovery_registry(ids);
+        registry
+            .restore_driver_state(
+                &[TimelineHistorySegment::new(timeline, action.seq)],
+                std::slice::from_ref(&action),
+            )
+            .test_ok();
+        let drafts = registry
+            .step_all_anchored_with_events(timeline, action.seq, std::slice::from_ref(&action))
+            .test_ok();
+        // This fixture has synthetic history, not a durable store for the new drafts.
+        registry.abort_step();
+        let mut events = vec![action];
+        for (index, draft) in drafts.iter().enumerate() {
+            let mut event = make_versioned_event(
+                u64::try_from(index).test_ok() + 2,
+                draft.entity,
+                draft.event_type.as_str(),
+                draft.payload.clone(),
+            );
+            event.causation_id = draft.causation_id;
+            events.push(event);
+        }
+        events
+    }
+
+    fn replayed_world_states(
+        driver: WorldDriver,
+        ids: [EntityId; 2],
+        timeline: TimelineId,
+        events: &[Event],
+    ) -> Vec<Option<State>> {
+        let mut replay = PluginRegistry::new_replay()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
+        replay
+            .register_generated(
+                &WorldPlugin::new().with_bodies(ids),
+                Some(Box::new(WorldReducer)),
+                Some(Box::new(driver)),
+            )
+            .test_ok();
+        let head = events.last().test_ok().seq;
+        replay.fold_events(timeline, events);
+        assert!(matches!(
+            replay.step_all_anchored_with_events(timeline, head, events),
+            Err(RuntimeError::ModeMismatch { .. })
+        ));
+        let projections = replay
+            .into_authorized_projections(timeline, head, 0, None, Some(events))
+            .test_ok();
+        ids.iter()
+            .map(|body| {
+                projections
+                    .state_for_reducer(timeline, "world", body)
+                    .test_ok()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn world_replay_ignores_substituted_backend_identity() {
+        let mut ids = [EntityId::new(), EntityId::new()];
+        ids.sort_unstable();
+        let timeline = TimelineId::new();
+        let events = recorded_world_history(ids, timeline);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
+                .count(),
+            2
+        );
+
+        let bodies: Vec<_> = ids
+            .into_iter()
+            .map(|entity_id| Body {
+                entity_id,
+                rotation: BodyRotationV1::default(),
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
+            })
+            .collect();
+        let recorded = replayed_world_states(
+            WorldDriver::new(
+                bodies.clone(),
+                Box::new(SimpleKinematicBackend::new()),
+                sample_config(),
+            ),
+            ids,
+            timeline,
+            &events,
+        );
+        assert!(recorded.iter().all(Option::is_some));
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let substitute_config = WorldConfigV1 {
+            timestep_micros: 500_000,
+            gravity_y: 0.0,
+            backend_id: "substitute-kinematic".to_owned(),
+            backend_version: "9.9.9".to_owned(),
+            backend_content_hash: [9u8; 32],
+            sensor_min_resolution_mm: 200,
+            ..sample_config()
+        };
+        assert_ne!(substitute_config, sample_config());
+        let substituted = replayed_world_states(
+            WorldDriver::new(
+                bodies,
+                Box::new(SubstituteBackend(Arc::clone(&calls))),
+                substitute_config,
+            ),
+            ids,
+            timeline,
+            &events,
+        );
+        assert_eq!(substituted, recorded);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     fn recovery_observation(seq: u64, body_id: EntityId, tick: u64, step_index: u64) -> Event {
