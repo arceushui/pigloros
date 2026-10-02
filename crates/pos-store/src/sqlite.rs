@@ -101,6 +101,8 @@ use crate::{
     ForkEventProvenanceAuthorityPortV1,
 };
 
+mod pipeline_admission;
+
 #[cfg(test)]
 thread_local! {
     /// Test-only fault injection: force [`SqliteStore::open_in_memory`] to fail.
@@ -1544,9 +1546,11 @@ impl SqliteStore {
                 if read_only {
                     self.validate_authority_schema_and_state()
                         .and_then(|()| self.validate_fork_admission_authority_schema())
+                        .and_then(|()| self.validate_pipeline_admission_schema())
                 } else {
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
+                        .and_then(|()| self.prepare_pipeline_admission_schema())
                 }
             })
     }
@@ -5390,8 +5394,17 @@ impl EventStore for SqliteStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
+        // Admitted-batch receipts share the subject-scoped cleanup group, so a
+        // consent revocation also releases the subject's action retry keys.
         let mut stmt = tx
-            .prepare("SELECT dedup_key FROM append_identities WHERE scope_key = ?1 ORDER BY expires_at, dedup_key LIMIT ?2")
+            .prepare(
+                "SELECT dedup_key FROM (
+                     SELECT dedup_key, expires_at FROM append_identities WHERE scope_key = ?1
+                     UNION ALL
+                     SELECT dedup_key, expires_at FROM pipeline_admission_receipts
+                     WHERE scope_key = ?1
+                 ) ORDER BY expires_at, dedup_key LIMIT ?2",
+            )
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let keys: Result<Vec<Vec<u8>>, _> = stmt
             .query_map(
@@ -5405,15 +5418,12 @@ impl EventStore for SqliteStore {
         let keys = keys.map_err(|error| CoreError::Storage(error.to_string()))?;
         drop(stmt);
         for key in &keys {
-            tx.execute(
-                "DELETE FROM append_identities WHERE scope_key = ?1 AND dedup_key = ?2",
-                params![scope.as_bytes().as_slice(), key],
-            )
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            pipeline_admission::delete_scoped_identity(&tx, scope, key)?;
         }
         let more_may_remain = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM append_identities WHERE scope_key = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM append_identities WHERE scope_key = ?1)
+                     OR EXISTS(SELECT 1 FROM pipeline_admission_receipts WHERE scope_key = ?1)",
                 params![scope.as_bytes().as_slice()],
                 |row| row.get::<_, i64>(0),
             )
@@ -5850,6 +5860,7 @@ impl EventStore for SqliteStore {
                     params![id_str],
                 )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
+                pipeline_admission::delete_pipeline_admission_rows(&tx, &id_str)?;
                 let enrollment = Self::enrollment_state_in_transaction(&tx)?;
                 let enrollment_result = if enrollment.permits_geographic_admission_target(id) {
                     enrollment

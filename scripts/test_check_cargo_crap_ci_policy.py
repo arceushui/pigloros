@@ -28,6 +28,7 @@ EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "src/erasure_tests.rs",
     "src/system_bus/tests.rs",
     "src/e2e_determinism.rs",
+    "src/action_admission_tests.rs",
 )
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:

@@ -273,6 +273,36 @@ impl ObservationSnapshot {
         Self { anchor, states }
     }
 
+    /// Bind the snapshot's own base cut and every captured authorized state
+    /// into one order-independent snapshot digest.
+    ///
+    /// Only an anchored snapshot has a base cut to bind, so an unanchored
+    /// snapshot yields `None`.
+    #[must_use]
+    pub(crate) fn anchored_digest(&self) -> Option<(Seq, pos_core::Hash)> {
+        self.anchor.map(|anchor| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"PiglorOS.ScheduledObservationSnapshot.v1\0");
+            hasher.update(&anchor.timeline_id.inner().to_bytes());
+            hasher.update(&anchor.observed_through.as_u64().to_be_bytes());
+            let ordered: std::collections::BTreeMap<[u8; 16], Vec<u8>> = self
+                .states
+                .iter()
+                .map(|(key, state)| (key.entity_id().inner().to_bytes(), canonical_state(state)))
+                .collect();
+            hasher.update(&(ordered.len() as u64).to_be_bytes());
+            for (entity, state) in ordered {
+                hasher.update(&entity);
+                hasher.update(&(state.len() as u64).to_be_bytes());
+                hasher.update(&state);
+            }
+            (
+                anchor.observed_through,
+                pos_core::Hash::from_bytes(*hasher.finalize().as_bytes()),
+            )
+        })
+    }
+
     #[must_use]
     pub(crate) fn view_for<'a>(&'a self, subscriptions: &[ProjectionKey]) -> ObservationView<'a> {
         self.view_for_events(subscriptions, &[], &[])
@@ -325,6 +355,21 @@ impl ObservationSnapshot {
             verified_prefix_events: None,
         }
     }
+}
+
+/// Encode one captured State as canonical JSON with its fields in key order.
+///
+/// The encoding is total: `serde_json::Map` is key-ordered because the
+/// workspace does not enable `preserve_order`, and rendering a JSON `Value`
+/// cannot fail because every object key is already a string. No fallback
+/// value can therefore stand in for a State.
+fn canonical_state(state: &State) -> Vec<u8> {
+    let fields: serde_json::Map<String, serde_json::Value> = state
+        .fields
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    serde_json::Value::Object(fields).to_string().into_bytes()
 }
 
 /// Read-only projection states materialized for one driver tick.

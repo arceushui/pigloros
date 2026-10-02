@@ -893,9 +893,9 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn persona_eval_driver_closes_eval_loop() {
+        use pos_core::store::EventStore;
         use pos_plugin_eval::{compute_report, EvalPlugin, EvalReducer};
-        use pos_runtime::PluginRegistry;
-        use pos_store::{open_store, StoreConfig};
+        use pos_runtime::{LocalScheduledAdmissionHostV1, PluginRegistry};
 
         let model = PersonaModel::new(vec![
             ("nature".to_owned(), 0.8),
@@ -905,7 +905,7 @@ mod tests {
         ]);
         let entity = EntityId::new();
 
-        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let mut store = pos_store::memory::MemoryStore::new();
         store
             .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
@@ -943,13 +943,15 @@ mod tests {
         registry
             .register_generated(&eval, Some(Box::new(EvalReducer)), None)
             .test_ok();
+        let host = LocalScheduledAdmissionHostV1::shared().test_ok();
         for _ in 0..5 {
+            let revisions = host.observe(&registry, &mut store, tl.id()).test_ok();
             let drafts = registry
                 .step_all_anchored_protected(tl.id(), Seq::ZERO, token.clone(), 0, &[])
                 .test_ok();
             registry.schemas.validate_batch(&drafts).test_ok();
-            registry
-                .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &drafts)
+            let head = store.logical_head(tl.id()).test_ok();
+            host.admit(&mut registry, &mut store, revisions, head, 0)
                 .test_ok();
         }
 
@@ -971,7 +973,7 @@ mod tests {
             }],
         )
         .test_ok();
-        let report = compute_report(store.as_ref(), tl.id(), digest, &evaluation).test_ok();
+        let report = compute_report(&store, tl.id(), digest, &evaluation).test_ok();
         assert_eq!(report.n_predictions, 5);
         assert_eq!(report.n_resolved, 5);
         assert!(report.brier_score >= 0.0);

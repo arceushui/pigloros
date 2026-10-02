@@ -87,6 +87,8 @@ use crate::{
     ForkEventProvenanceAuthorityPortV1,
 };
 
+mod pipeline_admission;
+
 #[cfg(test)]
 thread_local! {
     /// Test-only evidence that bounded reads inspect only selected Event slots.
@@ -219,6 +221,11 @@ pub struct MemoryStore {
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
     authority_state: AuthorityPersistenceStateV1,
+    /// Host-published ADR-021 admission fences keyed by Timeline.
+    pipeline_admission_fences: HashMap<TimelineId, pos_core::PipelineAdmissionFenceV1>,
+    /// Retained ADR-021 admitted-batch receipts keyed by opaque idempotency key.
+    pipeline_admission_receipts:
+        HashMap<AppendDedupKey, pipeline_admission::PipelineReceiptRecordV1>,
     /// Opaque trusted-host capability bound to authority mutations.
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     /// ADR-106 bootstrap root, one-use challenges, session, and rollback fence.
@@ -399,6 +406,7 @@ fn delete_visible_timeline_impl(store: &mut MemoryStore, id: TimelineId) -> Resu
                 }
             }
             store.append_identities = retained_identities;
+            store.forget_pipeline_admission_timeline(id);
             store.geographic_timelines.remove(&id);
             if store
                 .owntracks_enrollment
@@ -583,6 +591,8 @@ impl MemoryStore {
             erasure_topology_store_binding: None,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
+            pipeline_admission_fences: HashMap::new(),
+            pipeline_admission_receipts: HashMap::new(),
             authority_persistence_binding: None,
             fork_admission_authority: ForkAdmissionAuthorityStateV1::default(),
             fork_admission_authority_enabled: true,
@@ -4894,17 +4904,26 @@ impl EventStore for MemoryStore {
         scope: AppendDedupScope,
         limit: std::num::NonZeroUsize,
     ) -> Result<PurgeOutcome, CoreError> {
+        // Admitted-batch receipts share the subject-scoped cleanup group, so a
+        // consent revocation also releases the subject's action retry keys.
         let mut matching: Vec<_> = self
             .append_identities
             .iter()
             .filter(|(_, record)| record.scope == scope)
             .map(|(key, record)| (record.expires_at, *key))
+            .chain(
+                self.pipeline_admission_receipts
+                    .iter()
+                    .filter(|(_, record)| record.scope == scope)
+                    .map(|(key, record)| (record.expires_at, *key)),
+            )
             .collect();
         matching.sort_unstable_by_key(|(expires_at, key)| (*expires_at, key.as_bytes()));
         let more_may_remain = matching.len() > limit.get();
         let removed = matching.len().min(limit.get());
         for (_, key) in matching.into_iter().take(removed) {
             self.append_identities.remove(&key);
+            self.pipeline_admission_receipts.remove(&key);
         }
         if more_may_remain {
             if !self.pending_append_identity_cleanup.contains(&scope) {

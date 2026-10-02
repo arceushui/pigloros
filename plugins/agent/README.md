@@ -94,6 +94,9 @@ decorated store adapter.
   content hashes are host-owned.
 - The provider cannot choose an entity, Timeline, Event type, catalogue, or
   provenance and cannot persist anything directly.
+- A live scheduled pass reaches the Timeline only through the host's atomic
+  admitted-batch transaction (ADR-021): the store assigns Event identity and
+  Timeline Order, and staged Driver state commits only after the batch does.
 - Raw provider responses, prompts, completions, credentials, and error text are
   never persisted. Live stores only bounded host fields, hashes, the normalized
   result, and an optional response digest.

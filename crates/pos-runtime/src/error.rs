@@ -134,19 +134,23 @@ pub enum RuntimeError {
     #[error("protected operation failed its erasure containment fence: {0}")]
     ErasureContainment(ErasureContainmentErrorV1),
 
-    #[error(
-        "erasure containment failed after appending {event_count} Event(s); committed Driver state must be quarantined: {source}"
-    )]
-    ErasureContainmentAfterCommit {
-        event_count: usize,
-        source: ErasureContainmentErrorV1,
-    },
-
     #[error("participant observation authority failed closed: {0}")]
     Authority(#[from] pos_core::AuthorityErrorV1),
 
     #[error("participant-authorized Driver work requires a fresh authority fence")]
     AuthorityFenceRequired,
+
+    #[error("scheduled admission authority persistence failed closed: {0}")]
+    AuthorityPersistence(pos_core::AuthorityPersistenceErrorV1),
+
+    #[error("scheduled pass admission basis is invalid: {0}")]
+    PipelineContract(pos_core::PipelineContractErrorV1),
+
+    #[error("scheduled pass was not admitted: {}", outcome_discriminant(.0))]
+    ScheduledPassNotAdmitted(Box<pos_core::PipelineOutcomeV1>),
+
+    #[error("no scheduled pass admission is in doubt")]
+    NoScheduledAdmissionInDoubt,
 
     #[error(
         "driver '{driver}' cadence overflow: previous={previous_ns}ns, interval={interval_ns}ns"
@@ -186,6 +190,26 @@ pub enum RuntimeError {
 
     #[error("recorder mode mismatch: expected {expected}, got {got}")]
     ModeMismatch { expected: String, got: String },
+}
+
+/// Name only the outcome discriminant so a rendered error never carries
+/// receipt data such as Event identities or digests.
+const fn outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
+    use pos_core::PipelineOutcomeV1 as Outcome;
+    match outcome {
+        Outcome::Rejected => "Rejected",
+        Outcome::InvalidObservation => "InvalidObservation",
+        Outcome::AuthorityRevoked => "AuthorityRevoked",
+        Outcome::AuthorityExpired => "AuthorityExpired",
+        Outcome::PolicyIndeterminate => "PolicyIndeterminate",
+        Outcome::ResourceExhausted => "ResourceExhausted",
+        Outcome::InvalidPluginResult => "InvalidPluginResult",
+        Outcome::InvalidProviderResult => "InvalidProviderResult",
+        Outcome::DomainConflict => "DomainConflict",
+        Outcome::AdmissionConflict => "AdmissionConflict",
+        Outcome::Committed(_) => "Committed",
+        Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
+    }
 }
 
 #[cfg(test)]

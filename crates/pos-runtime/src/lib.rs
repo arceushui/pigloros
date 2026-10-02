@@ -34,6 +34,7 @@ pub mod output_admission;
 pub mod recorder;
 pub mod registry;
 pub mod reviewed_policy;
+pub mod scheduled_admission_host;
 pub mod scheduler;
 pub mod schema;
 pub mod world_profile;
@@ -65,8 +66,10 @@ pub use output_admission::{
 };
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{
-    AuthorizedDriverTargetV1, HostCatalogueEntryV1, InstalledPluginFactoryV1,
-    InstalledPluginProductV1, OperationContext, PluginRegistry,
+    AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, HostCatalogueEntryV1,
+    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
+    InstalledPluginFactoryV1, InstalledPluginProductV1, OperationContext, PluginRegistry,
+    ScheduledPassAdmissionV1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
@@ -75,6 +78,9 @@ pub use reviewed_policy::{
     MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1, MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1,
     MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1,
 };
+#[cfg(feature = "local-admission-host")]
+pub use scheduled_admission_host::LocalScheduledAdmissionHostV1;
+pub use scheduled_admission_host::{ScheduledAdmissionPortsV1, ScheduledAdmissionStoreV1};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
 pub use world_profile::HostWorldProfileV1;
