@@ -36,7 +36,7 @@ use super::{
 /// The immutable legacy-history fixture and its pinned SHA-256.
 const LEGACY_HISTORY: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/legacy-eval-history.json");
-pub(super) const LEGACY_HISTORY_SHA256: &str =
+pub const LEGACY_HISTORY_SHA256: &str =
     "27a9d670b8ea91dfc667f97f1728fdb80dcf485cd80b48a359e783201632617d";
 const LEGACY_MAGIC: &str = "PLH1";
 const LEGACY_VERSION: u64 = 1;
@@ -158,7 +158,8 @@ fn exactly_once(events: &[Event]) -> String {
 
 /// PCF-ING-004: a first-party Persona Driver and a third-party fixture Driver
 /// that emit an Eval-owned type are rejected identically; nothing commits.
-pub(super) fn unowned_output_parity() -> Capture {
+#[must_use]
+pub fn unowned_output_parity() -> Capture {
     let mut capture = Capture::default();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("unowned-output").test_ok().id();
@@ -223,7 +224,8 @@ pub(super) fn unowned_output_parity() -> Capture {
 /// PCF-EVAL-002: a committed source yields exactly one whole unit in the
 /// next eligible pass, caused by the source and carrying its entity and
 /// `eval:src:<EventId>`.
-pub(super) fn derivation_units() -> Capture {
+#[must_use]
+pub fn derivation_units() -> Capture {
     let mut capture = Capture::default();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("persona-eval").test_ok().id();
@@ -275,7 +277,8 @@ fn append_sources(
 /// PCF-EVAL-003: derivation is a pure function of the committed prefix,
 /// so a discarded pass, a restart and both branches of a Fork at a Tick
 /// Boundary derive every source exactly once.
-pub(super) fn exactly_once_across_restart_discard_and_fork() -> Capture {
+#[must_use]
+pub fn exactly_once_across_restart_discard_and_fork() -> Capture {
     let mut capture = Capture::default();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("restart").test_ok().id();
@@ -331,7 +334,8 @@ pub(super) fn exactly_once_across_restart_discard_and_fork() -> Capture {
 
 /// PCF-EVAL-004: a budget-capped pass derives whole units for the earliest
 /// eligible sources and never splits a pair.
-pub(super) fn budget_never_splits_a_pair() -> Capture {
+#[must_use]
+pub fn budget_never_splits_a_pair() -> Capture {
     let mut capture = Capture::default();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("capped").test_ok().id();
@@ -375,7 +379,8 @@ pub(super) fn budget_never_splits_a_pair() -> Capture {
 
 /// PCF-EVAL-005: Eval's subscriptions are consent-gated; a pass observes
 /// only the sources of the subject its token names.
-pub(super) fn subscriptions_are_consent_gated() -> Capture {
+#[must_use]
+pub fn subscriptions_are_consent_gated() -> Capture {
     let mut capture = Capture::default();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("consent-gated").test_ok().id();
@@ -422,7 +427,8 @@ pub(super) fn subscriptions_are_consent_gated() -> Capture {
 
 /// PCF-EVAL-006: Replay folds the committed prefix and never runs the
 /// derivation; a later live pass still derives the sources once.
-pub(super) fn replay_never_derives() -> Capture {
+#[must_use]
+pub fn replay_never_derives() -> Capture {
     let mut capture = Capture::default();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("replay").test_ok().id();
@@ -469,7 +475,8 @@ pub(super) fn replay_never_derives() -> Capture {
 
 /// PCF-EVAL-007: derived outcomes are labelled predictor-supplied, and the
 /// Calibration Report counts them as such.
-pub(super) fn predictor_supplied_label() -> Capture {
+#[must_use]
+pub fn predictor_supplied_label() -> Capture {
     let mut capture = Capture::default();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("label").test_ok().id();
@@ -510,7 +517,8 @@ pub(super) fn predictor_supplied_label() -> Capture {
 /// PCF-EVAL-008: an injected orphan `eval.outcome` is quarantined: (a) other
 /// sources still derive, (b) no duplicate outcome is emitted, and (c)
 /// another Driver's output in the same pass still commits.
-pub(super) fn injected_orphan_outcome() -> Capture {
+#[must_use]
+pub fn injected_orphan_outcome() -> Capture {
     let mut capture = Capture::default();
     for (store, mut backend) in stores() {
         let timeline = backend.create_timeline("orphan").test_ok().id();
@@ -583,7 +591,7 @@ pub(super) fn injected_orphan_outcome() -> Capture {
 }
 
 /// The parsed immutable legacy-history fixture.
-pub(super) struct LegacyHistory {
+pub struct LegacyHistory {
     drafts: Vec<EventDraft>,
     subjects: BTreeMap<String, EntityId>,
     expected_report: Vec<String>,
@@ -652,7 +660,11 @@ fn legacy_draft(value: &Value, index: usize) -> Result<EventDraft, ConformanceEr
 }
 
 /// Parse the legacy history, failing closed on any unknown version or field.
-pub(super) fn parse_legacy_history(bytes: &[u8]) -> Result<LegacyHistory, ConformanceError> {
+///
+/// # Errors
+///
+/// Returns the first structural deviation of the fixture.
+pub fn parse_legacy_history(bytes: &[u8]) -> Result<LegacyHistory, ConformanceError> {
     let root: Value = serde_json::from_slice(bytes).map_err(|_| invalid("not JSON"))?;
     let object = root.as_object().ok_or_else(|| invalid("not an object"))?;
     require_version(object, LEGACY_MAGIC, LEGACY_VERSION)?;
@@ -739,7 +751,8 @@ fn reducer_count(state: &pos_core::State, key: &str) -> u64 {
 /// PCF-EVAL-009: Persona-emitted legacy `eval.*` history folds under the new
 /// composition, yields a byte-identical Calibration Report, and is never
 /// re-derived.
-pub(super) fn legacy_history() -> Capture {
+#[must_use]
+pub fn legacy_history() -> Capture {
     let mut capture = Capture::default();
     verify_pinned(LEGACY_HISTORY, LEGACY_HISTORY_SHA256).test_ok();
     let history = parse_legacy_history(LEGACY_HISTORY).test_ok();
@@ -809,7 +822,8 @@ fn emitted(outcome: TickOutcome) -> String {
 
 /// PCF-EVAL-010: derived-evaluation evidence and its Calibration Report carry
 /// the ADR-021 Revision 3 non-participant profile tag.
-pub(super) fn derived_evaluation_profile_tag() -> Capture {
+#[must_use]
+pub fn derived_evaluation_profile_tag() -> Capture {
     let mut capture = Capture::default();
     let (_directory, configs) = experiment_stores();
     for (store, store_config) in configs {

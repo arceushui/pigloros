@@ -450,7 +450,8 @@ fn admit_authorized(
 /// PCF-R3-001: a participant-authorized pass offered to the anchored
 /// admission path fails with `AuthorityFenceRequired`; nothing reaches the
 /// store and the staged Driver is aborted.
-pub(super) fn participant_pass_needs_its_fence() -> Capture {
+#[must_use]
+pub fn participant_pass_needs_its_fence() -> Capture {
     let mut capture = Capture::default();
     let participant = participant();
     let (mut registry, aborts) = participant_registry(&participant, false);
@@ -468,7 +469,8 @@ pub(super) fn participant_pass_needs_its_fence() -> Capture {
 /// stage while an anchored pass is pending, the authorized admission of an
 /// anchored pass, and a subscription-scoped Driver offered to the authorized
 /// path all fail closed before anything reaches the store.
-pub(super) fn one_pass_one_profile() -> Capture {
+#[must_use]
+pub fn one_pass_one_profile() -> Capture {
     let mut capture = Capture::default();
     let participant = participant();
     let (mut registry, aborts) = participant_registry(&participant, false);
@@ -506,7 +508,8 @@ fn anchored_digest(timeline: TimelineId, cut: u64) -> Hash {
 /// PCF-R3-003: for the same cut and state, the anchored and the authorized
 /// observation digests bound into the admission basis come from disjoint
 /// domains.
-pub(super) fn digest_domain_separation() -> Capture {
+#[must_use]
+pub fn digest_domain_separation() -> Capture {
     let mut capture = Capture::default();
     let participant = participant();
     let (mut registry, _) = participant_registry(&participant, false);

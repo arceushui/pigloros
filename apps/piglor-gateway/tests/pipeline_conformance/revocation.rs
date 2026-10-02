@@ -292,7 +292,8 @@ fn outcome(result: Result<PipelineOutcomeV1, CoreError>) -> String {
 /// PCF-REV-001: a revocation the host learned is persisted with its records;
 /// it stales an earlier basis even at an unchanged chain, and a revocation
 /// of the chain's root is composed at the store as `AuthorityRevoked`.
-pub(super) fn learned_revocation_is_persisted() -> Capture {
+#[must_use]
+pub fn learned_revocation_is_persisted() -> Capture {
     let mut capture = Capture::default();
     let grants = Grants::new();
     for (store, mut backend) in stores() {
@@ -342,7 +343,8 @@ pub(super) fn learned_revocation_is_persisted() -> Capture {
 
 /// PCF-REV-002: two revocation states with equal epochs yield different
 /// delegation revisions, and the delegation edges of a chain are bound.
-pub(super) fn equal_epochs_distinct_revisions() -> Capture {
+#[must_use]
+pub fn equal_epochs_distinct_revisions() -> Capture {
     let mut capture = Capture::default();
     let grants = Grants::new();
     let unrevoked = grants.resolved(&[], &grants.sibling);
@@ -380,7 +382,8 @@ pub(super) fn equal_epochs_distinct_revisions() -> Capture {
 /// PCF-REV-003: on `SQLite`, a revocation another connection persists while
 /// one host admits never lets a stale basis commit after it, on that
 /// connection or a fresh one.
-pub(super) fn cross_connection_staleness() -> Capture {
+#[must_use]
+pub fn cross_connection_staleness() -> Capture {
     let mut capture = Capture::default();
     let grants = Grants::new();
     let directory = tempfile::tempdir().test_ok();
