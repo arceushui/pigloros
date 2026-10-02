@@ -13166,3 +13166,527 @@ mod coverage_entrypoints {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod manifest_owner_admission_coverage {
+    use super::*;
+    use pos_core::{
+        output_policy::{OutputPolicyInputV1, OutputPolicyV1},
+        prepare_manifest_owner_admission_v1, ArtifactDataClassV1, ArtifactOptionalityV1,
+        ArtifactTransitionRuleV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
+        ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
+        ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
+        ManifestSlotAdmissionReceiptV1, PluginId, WorldArtifactKindV1, WorldArtifactLeafInputV1,
+        WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+        WorldProducerV1,
+    };
+
+    type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
+    type TestResult = FixtureResult<()>;
+    type PolicySource = (OutputPolicyV1, Vec<u8>);
+    type Corruption = fn(&mut MemoryStore) -> TestResult;
+
+    const OWNER: [u8; 32] = [0x4d; 32];
+    const CORRUPT_STATE: Result<(), ManifestOwnerAdmissionErrorV1> =
+        Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+
+    const fn hash(byte: u8) -> Hash {
+        Hash::from_bytes([byte; 32])
+    }
+
+    const fn plugin(byte: u8) -> PluginId {
+        PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+    }
+
+    const fn owned_timeline(byte: u8) -> TimelineId {
+        TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+    }
+
+    struct CoverageOwner;
+
+    impl ManifestOwnerAdmissionVerifierV1 for CoverageOwner {
+        fn verify_complete_composition(
+            &self,
+            _catalog: &ManifestAdmissionCatalogV1,
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+
+        fn verify_complete_owned_scope_set(
+            &self,
+            _owner_id: [u8; 32],
+            _timelines: &[ManifestOwnerTimelineAdmissionRequestV1],
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+
+        fn verify_coordinator_receipt(
+            &self,
+            _receipt: &ManifestSlotAdmissionReceiptV1,
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+
+        fn verify_owner_prestate_and_allocation(
+            &self,
+            _request: &ManifestOwnerAdmissionRequestV1,
+            _current_state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+
+        fn sign_coordinator_receipt(
+            &self,
+            draft: ManifestSlotAdmissionReceiptDraftV1,
+        ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+            draft
+                .with_evidence_and_signature(hash(90), [0x5a; 64])
+                .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
+        }
+
+        fn verify_native_policy_copies(
+            &self,
+            _timeline_id: TimelineId,
+            _scope: Hash,
+            _copies: &ManifestOwnerPolicyCopiesV1,
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+    }
+
+    fn policy_and_closure(plugin_id: PluginId, fixture_seed: u8) -> FixtureResult<PolicySource> {
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "1.0.0".to_owned(),
+            implementation_hash: hash(fixture_seed + 30),
+            base_configuration_digest: hash(fixture_seed + 40),
+            executable_profile_hash: hash(fixture_seed + 50),
+            retention_policy_hash: hash(fixture_seed + 60),
+            policy_revision: 1,
+            output_declarations: Vec::new(),
+        })?;
+        let members = [
+            policy.to_canonical_cbor(),
+            b"EBP1-fixture".to_vec(),
+            b"implementation-fixture".to_vec(),
+            b"CFG1-fixture".to_vec(),
+            Vec::new(),
+            b"RTP1-fixture".to_vec(),
+        ];
+        let mut closure = b"OPC1".to_vec();
+        for member in members {
+            closure.extend_from_slice(
+                &u64::try_from(member.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            closure.extend_from_slice(&member);
+        }
+        Ok((policy, closure))
+    }
+
+    fn opc1_digest(bytes: &[u8]) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
+        hasher.update(bytes);
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    }
+
+    fn catalog(generation: u64) -> FixtureResult<(ManifestAdmissionCatalogV1, Vec<PolicySource>)> {
+        let source = vec![
+            policy_and_closure(plugin(1), 1)?,
+            policy_and_closure(plugin(2), 2)?,
+        ];
+        let rows = source
+            .iter()
+            .enumerate()
+            .map(|(index, (policy, closure))| ManifestAdmissionCatalogRowV1 {
+                stable_slot: if index == 0 { "slot-a" } else { "slot-b" }.to_owned(),
+                plugin_id: policy.fields().plugin_id,
+                plugin_name: "same-name".to_owned(),
+                plugin_version: policy.fields().plugin_version.clone(),
+                implementation_hash: policy.fields().implementation_hash,
+                eop1_native_digest: policy.digest(),
+                closure_hash: opc1_digest(closure),
+            })
+            .collect();
+        Ok((
+            ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
+                owner_id: OWNER,
+                configuration_generation: generation,
+                rows,
+            })?,
+            source,
+        ))
+    }
+
+    fn leaf(
+        scope: Hash,
+        kind: WorldArtifactKindV1,
+        native_digest: Hash,
+        native_len: usize,
+        lease_hash: Hash,
+    ) -> FixtureResult<WorldArtifactLeafV1> {
+        Ok(WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
+            scope,
+            kind,
+            native_digest,
+            native_byte_length: u64::try_from(native_len).unwrap_or(u64::MAX),
+            owner: OWNER,
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            optionality: ArtifactOptionalityV1::Required,
+            transition: ArtifactTransitionRuleV1::PreserveExact,
+            source_lease_hash: lease_hash,
+            key_dependencies: Vec::new(),
+            child_node_hashes: Vec::new(),
+        })?)
+    }
+
+    fn policy_copies(
+        scope: Hash,
+        source: &[PolicySource],
+        lease_hash: Hash,
+    ) -> FixtureResult<Vec<ManifestOwnerPolicyCopiesV1>> {
+        source
+            .iter()
+            .map(|(policy, closure)| {
+                let eop1_bytes = policy.to_canonical_cbor();
+                let eop1_leaf = leaf(
+                    scope,
+                    WorldArtifactKindV1::OutputPolicy,
+                    policy.digest(),
+                    eop1_bytes.len(),
+                    lease_hash,
+                )?;
+                let opc1_leaf = leaf(
+                    scope,
+                    WorldArtifactKindV1::OutputPolicyClosure,
+                    opc1_digest(closure),
+                    closure.len(),
+                    lease_hash,
+                )?;
+                Ok(ManifestOwnerPolicyCopiesV1 {
+                    plugin_id: policy.fields().plugin_id,
+                    eop1_bytes,
+                    eop1_leaf,
+                    opc1_bytes: closure.clone(),
+                    opc1_leaf,
+                })
+            })
+            .collect()
+    }
+
+    fn timeline_request(
+        index: usize,
+        timeline_id: TimelineId,
+        sources: &[PolicySource],
+    ) -> FixtureResult<ManifestOwnerTimelineAdmissionRequestV1> {
+        let offset = u8::try_from(index).unwrap_or(u8::MAX);
+        let scope = hash(70 + offset);
+        let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+            scope,
+            consumers: vec![WorldConsumerV1::new(
+                "local-observer".to_owned(),
+                hash(130),
+                hash(131),
+                hash(132),
+            )?],
+            producers: vec![WorldProducerV1::new(plugin(1), sources[0].0.digest())?],
+            optional_view_roots: Vec::new(),
+        })?;
+        Ok(ManifestOwnerTimelineAdmissionRequestV1 {
+            timeline_id,
+            scope,
+            wcs1,
+            policy_copies: policy_copies(scope, sources, hash(80 + offset))?,
+        })
+    }
+
+    /// Prepare the successor of `current` (or genesis) owning `timeline_ids`.
+    fn prepared(
+        current: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+        timeline_ids: &[TimelineId],
+    ) -> FixtureResult<PreparedManifestOwnerAdmissionV1> {
+        let generation = current.map_or(1, |state| state.configuration_generation + 1);
+        let seed = u8::try_from(generation).unwrap_or(u8::MAX);
+        let (catalog, sources) = catalog(generation)?;
+        let timelines = timeline_ids
+            .iter()
+            .enumerate()
+            .map(|(index, timeline_id)| timeline_request(index, *timeline_id, &sources))
+            .collect::<FixtureResult<Vec<_>>>()?;
+        let request = ManifestOwnerAdmissionRequestV1 {
+            operation_id: hash(40 + seed),
+            catalog,
+            expected_configuration_generation: current.map(|state| state.configuration_generation),
+            previous_visible_lcq1_hash: current.and_then(|state| state.previous_visible_lcq1_hash),
+            expected_inventory_generation: current.map(|state| state.inventory_generation),
+            resulting_inventory_generation: hash(50 + seed),
+            timelines,
+        };
+        let batch = prepare_manifest_owner_admission_v1(request, &CoverageOwner, current)?;
+        Ok(batch)
+    }
+
+    const fn genesis_timelines() -> [TimelineId; 2] {
+        [owned_timeline(1), owned_timeline(2)]
+    }
+
+    /// Store holding generation 1 (operation `hash(41)`, Timelines 1 and 2).
+    fn genesis_store() -> FixtureResult<MemoryStore> {
+        let mut store = MemoryStore::new();
+        store.commit_manifest_owner_admission_v1(prepared(None, &genesis_timelines())?)?;
+        Ok(store)
+    }
+
+    /// Store holding generation 1 and its replacement generation 2
+    /// (operation `hash(42)`, Timelines 3 and 4).
+    fn replaced_store() -> FixtureResult<MemoryStore> {
+        let mut store = genesis_store()?;
+        let current = store
+            .read_manifest_owner_state_v1(OWNER)?
+            .ok_or("missing genesis owner state")?;
+        let replacement = prepared(Some(&current), &[owned_timeline(3), owned_timeline(4)])?;
+        store.commit_manifest_owner_admission_v1(replacement)?;
+        Ok(store)
+    }
+
+    fn genesis_with(corrupt: Corruption) -> FixtureResult<MemoryStore> {
+        let mut store = genesis_store()?;
+        corrupt(&mut store)?;
+        Ok(store)
+    }
+
+    fn state_mut(
+        store: &mut MemoryStore,
+    ) -> FixtureResult<&mut MemoryManifestOwnerAdmissionStateV1> {
+        store
+            .manifest_owner_admission_states
+            .get_mut(&OWNER)
+            .ok_or_else(|| "missing owner state".into())
+    }
+
+    fn operation_mut(
+        store: &mut MemoryStore,
+        operation_id: Hash,
+    ) -> FixtureResult<&mut MemoryManifestOwnerAdmissionOperationV1> {
+        store
+            .manifest_owner_admission_operations
+            .get_mut(&(OWNER, operation_id))
+            .ok_or_else(|| "missing owner operation".into())
+    }
+
+    fn snapshot_mut(
+        store: &mut MemoryStore,
+        generation: u64,
+        timeline_id: TimelineId,
+    ) -> FixtureResult<&mut ManifestOwnerAdmissionSnapshotV1> {
+        store
+            .manifest_owner_admission_snapshots
+            .get_mut(&(OWNER, generation, timeline_id))
+            .ok_or_else(|| "missing owner snapshot".into())
+    }
+
+    fn intent(store: &MemoryStore, operation_id: Hash) -> FixtureResult<Hash> {
+        store
+            .manifest_owner_admission_operations
+            .get(&(OWNER, operation_id))
+            .map(|operation| operation.intent_digest)
+            .ok_or_else(|| "missing owner operation".into())
+    }
+
+    #[test]
+    fn owner_rows_without_a_state_row_are_corrupt() -> TestResult {
+        let mut store = genesis_store()?;
+        assert_eq!(store.read_manifest_owner_state_v1([0x4e; 32]), Ok(None));
+
+        store.manifest_owner_admission_states.remove(&OWNER);
+        assert_eq!(
+            store.read_manifest_owner_state_v1(OWNER).map(drop),
+            CORRUPT_STATE
+        );
+
+        store.manifest_owner_admission_snapshots.clear();
+        assert_eq!(
+            store.read_manifest_owner_state_v1(OWNER).map(drop),
+            CORRUPT_STATE
+        );
+        let genesis_intent = intent(&store, hash(41))?;
+        assert_eq!(
+            store
+                .resolve_manifest_owner_admission_retry_v1(OWNER, hash(41), genesis_intent)
+                .map(drop),
+            CORRUPT_STATE
+        );
+        let retry = prepared(None, &genesis_timelines())?;
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(retry).map(drop),
+            CORRUPT_STATE
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn current_owner_state_rejects_each_inconsistent_retained_row() -> TestResult {
+        let corruptions: [Corruption; 6] = [
+            |store| {
+                state_mut(store)?.timelines.clear();
+                Ok(())
+            },
+            |store| {
+                state_mut(store)?.timelines.insert(owned_timeline(9));
+                Ok(())
+            },
+            |store| {
+                let state = state_mut(store)?;
+                state.timelines.remove(&owned_timeline(2));
+                state.timelines.insert(owned_timeline(9));
+                Ok(())
+            },
+            |store| {
+                state_mut(store)?.inventory_generation = hash(99);
+                Ok(())
+            },
+            |store| {
+                store
+                    .manifest_owner_admission_operations
+                    .remove(&(OWNER, hash(41)))
+                    .ok_or("missing owner operation")?;
+                Ok(())
+            },
+            |store| {
+                operation_mut(store, hash(41))?.result.kind =
+                    ManifestOwnerAdmissionCommitKindV1::ExactRetry;
+                Ok(())
+            },
+        ];
+        for corrupt in corruptions {
+            let store = genesis_with(corrupt)?;
+            assert_eq!(
+                store.read_manifest_owner_state_v1(OWNER).map(drop),
+                CORRUPT_STATE
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retry_resolves_and_rejects_historical_generation_rows() -> TestResult {
+        let store = replaced_store()?;
+        for operation_id in [hash(41), hash(42)] {
+            let retry = store
+                .resolve_manifest_owner_admission_retry_v1(
+                    OWNER,
+                    operation_id,
+                    intent(&store, operation_id)?,
+                )?
+                .ok_or("missing exact retry")?;
+            assert_eq!(retry.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+        }
+
+        let corruptions: [Corruption; 3] = [
+            |store| {
+                operation_mut(store, hash(41))?.result.receipt_hashes.clear();
+                Ok(())
+            },
+            |store| {
+                snapshot_mut(store, 1, owned_timeline(1))?.resulting_inventory_generation =
+                    hash(99);
+                Ok(())
+            },
+            |store| {
+                store
+                    .manifest_owner_admission_snapshots
+                    .remove(&(OWNER, 1, owned_timeline(2)))
+                    .ok_or("missing owner snapshot")?;
+                Ok(())
+            },
+        ];
+        for corrupt in corruptions {
+            let mut damaged_store = replaced_store()?;
+            corrupt(&mut damaged_store)?;
+            let genesis_intent = intent(&damaged_store, hash(41))?;
+            assert_eq!(
+                damaged_store
+                    .resolve_manifest_owner_admission_retry_v1(OWNER, hash(41), genesis_intent)
+                    .map(drop),
+                CORRUPT_STATE
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn commit_rejects_an_occupied_successor_generation_row() -> TestResult {
+        let mut store = genesis_store()?;
+        let current = store
+            .read_manifest_owner_state_v1(OWNER)?
+            .ok_or("missing genesis owner state")?;
+        let stray = snapshot_mut(&mut store, 1, owned_timeline(1))?.clone();
+        store
+            .manifest_owner_admission_snapshots
+            .insert((OWNER, 2, owned_timeline(3)), stray);
+        let replacement = prepared(Some(&current), &[owned_timeline(3), owned_timeline(4)])?;
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(replacement),
+            Err(ManifestOwnerAdmissionErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn historical_read_rejects_each_inconsistent_generation_row() -> TestResult {
+        let store = genesis_store()?;
+        assert_eq!(
+            store.read_manifest_owner_admission_v1(OWNER, 3, owned_timeline(1)),
+            Ok(None)
+        );
+
+        let corruptions: [Corruption; 6] = [
+            |store| {
+                snapshot_mut(store, 1, owned_timeline(1))?.resulting_inventory_generation =
+                    Hash::zero();
+                Ok(())
+            },
+            |store| {
+                store
+                    .manifest_owner_admission_operations
+                    .remove(&(OWNER, hash(41)))
+                    .ok_or("missing owner operation")?;
+                Ok(())
+            },
+            |store| {
+                operation_mut(store, hash(41))?.result.inventory_generation = hash(99);
+                Ok(())
+            },
+            |store| {
+                let duplicate = operation_mut(store, hash(41))?.clone();
+                store
+                    .manifest_owner_admission_operations
+                    .insert((OWNER, hash(77)), duplicate);
+                Ok(())
+            },
+            |store| {
+                snapshot_mut(store, 1, owned_timeline(2))?.resulting_inventory_generation =
+                    hash(99);
+                Ok(())
+            },
+            |store| {
+                operation_mut(store, hash(41))?.result.receipt_hashes.reverse();
+                Ok(())
+            },
+        ];
+        for corrupt in corruptions {
+            let store = genesis_with(corrupt)?;
+            assert_eq!(
+                store
+                    .read_manifest_owner_admission_v1(OWNER, 1, owned_timeline(1))
+                    .map(drop),
+                CORRUPT_STATE
+            );
+        }
+        Ok(())
+    }
+}
