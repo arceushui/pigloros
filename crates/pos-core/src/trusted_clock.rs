@@ -53,7 +53,7 @@
 //!
 //! A target cannot be committed without a token:
 //!
-//! ```compile_fail
+//! ```compile_fail,E0061
 //! use pos_core::trusted_clock::{ProtectedHandoffTargetV1, StagedArtifactBytesV1};
 //! let _bytes = StagedArtifactBytesV1::new(vec![1]).commit();
 //! ```
@@ -70,6 +70,33 @@
 //!
 //! ```compile_fail
 //! let _use = pos_core::trusted_clock::AuthorizedArtifactUseV1 { value: (), overrun: None };
+//! ```
+//!
+//! ```compile_fail,E0451
+//! let _reservation = pos_core::trusted_clock::TrustedClockReservationV1 {
+//!     domain: [0; 16],
+//!     seq: 0,
+//!     sampled: 0,
+//!     decision_bound: i64::MAX,
+//!     g0: todo!(),
+//! };
+//! ```
+//!
+//! ```compile_fail,E0451
+//! let _guard = pos_core::trusted_clock::ReleaseGuardV1 {
+//!     port: todo!(),
+//!     reservation: todo!(),
+//!     high_water: 0,
+//! };
+//! ```
+//!
+//! ```compile_fail,E0277
+//! struct Forged;
+//! impl pos_core::trusted_clock::GuardMonotonicSourceV1 for Forged {
+//!     fn mark(&mut self) -> pos_core::trusted_clock::MonotonicMarkV1 {
+//!         todo!()
+//!     }
+//! }
 //! ```
 
 use crate::authority::{AuthenticatedPrincipalResultV1, ConsentGrantRefV1, PrincipalRefV1};
@@ -334,10 +361,10 @@ pub fn wall_time_from_epoch_duration(duration: Duration) -> Result<WallTime, Tru
 /// Returns [`TrustedClockErrorV1::SourceUnavailable`] before the epoch or above
 /// `i64::MAX` microseconds.
 pub fn wall_time_from_system_time(time: SystemTime) -> Result<WallTime, TrustedClockErrorV1> {
-    match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => wall_time_from_epoch_duration(duration),
-        Err(_) => Err(TrustedClockErrorV1::SourceUnavailable),
-    }
+    time.duration_since(UNIX_EPOCH).map_or(
+        Err(TrustedClockErrorV1::SourceUnavailable),
+        wall_time_from_epoch_duration,
+    )
 }
 
 /// Sealed trusted wall source.
@@ -862,6 +889,15 @@ fn commit_or_rollback(
     committed.or(Err(error))
 }
 
+fn begin_reservation_tx(
+    store: &mut dyn TrustedClockStorePortV1,
+    timeout: Duration,
+) -> Result<(), TrustedClockErrorV1> {
+    store
+        .begin_immediate(timeout)
+        .map_err(|error| wait_error(error, WaitPhaseV1::Reservation))
+}
+
 fn require_durability(store: &mut dyn TrustedClockStorePortV1) -> Result<(), TrustedClockErrorV1> {
     match store.verify_durability_pragmas() {
         Ok(true) => Ok(()),
@@ -923,7 +959,10 @@ enum ReserveStepV1 {
 /// Commit a durable trusted-clock reservation before the release transaction.
 ///
 /// `owner_lock_g0` is the mark taken when the first owner lock was acquired;
-/// without owner locks `g0` is the reservation's `BEGIN IMMEDIATE`.
+/// without owner locks `g0` is the reservation's `BEGIN IMMEDIATE`. A
+/// supplied mark later than the reservation's own acquisition start would
+/// silently extend the guard budget, so it is refused with
+/// [`TrustedClockErrorV1::Rollback`] before the lock is requested.
 ///
 /// # Errors
 /// Returns the ADR-112 fail-closed outcome. Nothing changes except a committed
@@ -937,9 +976,10 @@ pub fn reserve_trusted_clock(
 ) -> Result<TrustedClockReservationV1, TrustedClockErrorV1> {
     require_durability(store)?;
     let before = mono.mark();
-    store
-        .begin_immediate(wait.remaining())
-        .map_err(|error| wait_error(error, WaitPhaseV1::Reservation))?;
+    if owner_lock_g0 > Some(before) {
+        return Err(TrustedClockErrorV1::Rollback);
+    }
+    begin_reservation_tx(store, wait.remaining())?;
     let acquired = mono.mark();
     let g0 = owner_lock_g0.unwrap_or(acquired);
     let step = charge_wait(wait, WaitPhaseV1::Reservation, before, acquired)
@@ -1110,10 +1150,10 @@ fn guarded_high_water(
     reservation: &TrustedClockReservationV1,
 ) -> Result<i64, TrustedClockErrorV1> {
     let (high_water, latch) = validate_rows(rows)?;
-    if high_water.domain != reservation.domain
-        || high_water.seq < reservation.seq
-        || high_water.high_water < reservation.sampled
-    {
+    let other_domain = high_water.domain != reservation.domain;
+    let older_sequence = high_water.seq < reservation.seq;
+    let older_sample = high_water.high_water < reservation.sampled;
+    if other_domain || older_sequence || older_sample {
         return Err(TrustedClockErrorV1::AuthorityRegressed);
     }
     if latch.latched || pending_overrun(high_water.domain).is_some() {
@@ -1385,9 +1425,7 @@ pub fn commit_pending_overrun_latch(
     store: &mut dyn TrustedClockStorePortV1,
 ) -> Result<bool, TrustedClockErrorV1> {
     require_durability(store)?;
-    store
-        .begin_immediate(TRUSTED_CLOCK_WAIT_BUDGET)
-        .map_err(|error| wait_error(error, WaitPhaseV1::Reservation))?;
+    begin_reservation_tx(store, TRUSTED_CLOCK_WAIT_BUDGET)?;
     match latch_in_transaction(store) {
         Ok(Some(domain)) => {
             commit_or_rollback(store, TrustedClockErrorV1::DurabilityUnavailable)?;
@@ -1427,9 +1465,7 @@ pub fn acknowledge_trusted_clock_overrun(
     request: &TrustedClockOverrunAcknowledgementV1<'_>,
 ) -> Result<(), TrustedClockErrorV1> {
     require_durability(store)?;
-    store
-        .begin_immediate(TRUSTED_CLOCK_WAIT_BUDGET)
-        .map_err(|error| wait_error(error, WaitPhaseV1::Reservation))?;
+    begin_reservation_tx(store, TRUSTED_CLOCK_WAIT_BUDGET)?;
     match acknowledge_in_transaction(store, wall, request) {
         Ok(()) => commit_or_rollback(store, TrustedClockErrorV1::DurabilityUnavailable),
         Err(error) => {

@@ -7,6 +7,12 @@
 //! No ARD1 artifact catalog exists in these stores yet, so both adapters
 //! report zero authoritative catalog entries and the one-time migration may
 //! create missing rows. The catalog owner (#432) must report its real count.
+//!
+//! [`MemoryTrustedClockAuthorityV1`] is a production `MemoryStore` authority
+//! with real cross-thread lock semantics shared across handles; `pos_core`'s
+//! `TrustedClockFixtureV1` is a single-threaded `test-support` fixture that
+//! injects one-shot port faults. Both exist because the fence must be proven
+//! against a truthful adapter and against every port failure path.
 
 use pos_core::trusted_clock::{
     ReleaseGuardPortV1, TrustedClockAcknowledgementRowV1, TrustedClockHighWaterRowV1,
@@ -25,6 +31,8 @@ pub use sqlite::SqliteTrustedClockAuthorityV1;
 fn fresh_clock_domain() -> Result<[u8; 16], TrustedClockPortErrorV1> {
     let mut domain = [0; 16];
     let filled = SysRng.try_fill_bytes(&mut domain);
+    // `.or(Err(..))` instead of `.map_err(|_| ..)`: the error arm cannot be
+    // provoked in tests, and a closure would leave an uncovered region.
     filled
         .map(|()| domain)
         .or(Err(TrustedClockPortErrorV1::Storage))
@@ -95,6 +103,11 @@ impl MemoryTrustedClockAuthorityV1 {
     }
 
     fn acquire(&mut self, timeout: Duration) -> Result<(), TrustedClockPortErrorV1> {
+        if self.holds_writer {
+            // A nested begin on a handle that already holds the writer lock
+            // is a storage error, exactly as a nested `BEGIN` is in `SQLite`.
+            return Err(TrustedClockPortErrorV1::Storage);
+        }
         let start = Instant::now();
         let deadline = start.checked_add(timeout).unwrap_or(start);
         let mut state = lock(&self.shared);
@@ -216,7 +229,6 @@ impl ReleaseGuardPortV1 for MemoryTrustedClockAuthorityV1 {
     }
 
     fn rollback_and_release(&mut self) {
-        self.transaction = None;
-        self.release();
+        TrustedClockStorePortV1::rollback(self);
     }
 }

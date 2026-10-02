@@ -14,6 +14,10 @@ CHECKER = ROOT / "scripts/check_trusted_clock_port_impls.py"
 STORE_IMPL = "impl TrustedClockStorePortV1 for Forged {}\n"
 GUARD_IMPL = "impl pos_core::trusted_clock::ReleaseGuardPortV1 for Forged {}\n"
 GENERIC_IMPL = "impl<'a> ReleaseGuardPortV1\n    for Forged<'a> {}\n"
+ALIASED_IMPL = (
+    "use pos_core::trusted_clock::{ReleaseGuardPortV1 as Guard};\n"
+    "impl Guard for Forged {}\n"
+)
 GATE = '#![cfg(any(test, feature = "test-support"))]\n'
 
 ALLOWED = {
@@ -23,6 +27,8 @@ ALLOWED = {
     "crates/pos-state/src/docs.rs": "// impl ReleaseGuardPortV1 for Forged {}\n",
     "crates/pos-state/src/block.rs": "/* impl TrustedClockStorePortV1 for Forged {} */\n",
     "crates/pos-state/src/uses.rs": "fn f(_: &mut dyn ReleaseGuardPortV1) {}\n",
+    "crates/pos-state/src/imports.rs": "use pos_core::trusted_clock::ReleaseGuardPortV1;\n",
+    "crates/pos-store/src/alias.rs": "use pos_core::trusted_clock::ReleaseGuardPortV1 as Guard;\n",
     "target/debug/build/generated.rs": STORE_IMPL,
 }
 
@@ -31,6 +37,9 @@ REJECTED = {
     "crates/pos-time/src/forged.rs": STORE_IMPL,
     "crates/pos-core/src/generic.rs": GENERIC_IMPL,
     "crates/pos-core/src/ungated.rs": '#[cfg(feature = "test-support")]\n' + STORE_IMPL,
+    "crates/x/src/target/forged.rs": STORE_IMPL,
+    "crates/pos-state/src/aliased.rs": ALIASED_IMPL,
+    "crates/pos-state/src/renamed.rs": "use pos_core::trusted_clock::TrustedClockStorePortV1 as S;\n",
 }
 
 

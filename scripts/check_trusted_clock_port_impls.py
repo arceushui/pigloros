@@ -7,6 +7,11 @@ can obtain a real handoff token. Implementations may live only in
 `crates/pos-store`, `crates/pos-runtime`, or a `test-support` fixture file
 whose module is gated by the inner attribute
 `#![cfg(any(test, feature = "test-support"))]`.
+
+Renaming a port with `use ... as` outside those paths is rejected too, so an
+alias cannot hide an implementation from the `impl` pattern. Only top-level
+build and tooling directories are skipped; a nested directory named `target`
+inside a crate is still scanned.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ IMPL = re.compile(
     r"\bimpl\b(?:\s*<[^{;]*?>)?[^{;]*?\b(?:" + "|".join(PORTS) + r")\b(?:\s*<[^{;]*?>)?\s+for\b",
     re.DOTALL,
 )
+ALIAS = re.compile(r"\buse\b[^;]*?\b(?:" + "|".join(PORTS) + r")\s+as\b", re.DOTALL)
 LINE_COMMENT = re.compile(r"//[^\n]*")
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 SKIPPED_PARTS = {"target", ".git", ".trunk", "node_modules"}
@@ -44,13 +50,17 @@ def violations(root: Path) -> list[str]:
     found: list[str] = []
     for path in sorted(root.rglob("*.rs")):
         relative_parts = path.relative_to(root).parts
-        if SKIPPED_PARTS.intersection(relative_parts):
+        if relative_parts[0] in SKIPPED_PARTS:
             continue
         relative = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8", errors="replace")
         code = strip_comments(text)
-        if IMPL.search(code) and not allowed(relative, text):
+        if allowed(relative, text):
+            continue
+        if IMPL.search(code):
             found.append(f"{relative}: trusted-clock port implemented outside the trusted host")
+        if ALIAS.search(code):
+            found.append(f"{relative}: trusted-clock port aliased outside the trusted host")
     return found
 
 

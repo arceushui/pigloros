@@ -688,6 +688,27 @@ fn owner_lock_g0_starts_the_guard_budget_before_the_reservation() -> TestResult 
 }
 
 #[test]
+fn owner_lock_g0_after_the_reservation_start_is_refused() -> TestResult {
+    let fixture = initialized(T0);
+    let before = fixture.rows();
+    let mut store = fixture.clone();
+    let ten = Duration::from_secs(10);
+    let mut mono = mono_at(&[ten, ZERO, ZERO]);
+    let g0 = mono.mark();
+    let mut wall = ScriptedTrustedWallSourceV1::from_micros([T0 + 1]);
+    let mut wait = WaitBudgetV1::new();
+    let refused = reserve_trusted_clock(&mut store, &mut wall, &mut mono, &mut wait, Some(g0));
+    assert_eq!(refused.err(), Some(Fence::Rollback));
+    assert_eq!(fixture.rows(), before);
+    assert!(!fixture.writer_held());
+    let mut same = mono_at(&[ten, ten, ten]);
+    let g0 = same.mark();
+    let reserved = reserve_trusted_clock(&mut store, &mut wall, &mut same, &mut wait, Some(g0))?;
+    assert_eq!(reserved.sampled_at(), WallTime::from_micros(T0 + 1));
+    Ok(())
+}
+
+#[test]
 fn guard_wait_and_port_faults_release_the_lock() -> TestResult {
     let cases = [
         (Fault::GuardBusy, GUARD_WAIT),

@@ -120,7 +120,13 @@ fn port_error(error: &rusqlite::Error) -> TrustedClockPortErrorV1 {
 }
 
 fn storage<T>(result: rusqlite::Result<T>) -> PortResult<T> {
+    // `.or(Err(..))` instead of `.map_err(|_| ..)`: a closure would add a
+    // region that is uncovered whenever a caller's error arm is unreachable.
     result.or(Err(TrustedClockPortErrorV1::Storage))
+}
+
+fn executed(result: rusqlite::Result<usize>) -> PortResult<()> {
+    storage(result).map(|_changed| ())
 }
 
 fn pragma<T: FromSql>(connection: &Connection, sql: &str) -> rusqlite::Result<T> {
@@ -182,7 +188,7 @@ fn high_water_row(values: &[Value]) -> PortResult<TrustedClockHighWaterRowV1> {
     }
 }
 
-fn latch_row(values: &[Value]) -> PortResult<TrustedClockOverrunLatchRowV1> {
+const fn latch_row(values: &[Value]) -> PortResult<TrustedClockOverrunLatchRowV1> {
     match *values {
         [Value::Integer(format_version), Value::Integer(latched), Value::Integer(overrun_count), Value::Integer(last_overrun_reservation), Value::Integer(last_overrun_kind), Value::Integer(last_overrun_at_micros)] => {
             Ok(TrustedClockOverrunLatchRowV1 {
@@ -247,7 +253,7 @@ impl TrustedClockStorePortV1 for SqliteTrustedClockAuthorityV1 {
                 row.reservation_seq,
             ],
         );
-        storage(written).map(|_changed| ())
+        executed(written)
     }
 
     fn write_overrun_latch(&mut self, row: &TrustedClockOverrunLatchRowV1) -> PortResult<()> {
@@ -262,7 +268,7 @@ impl TrustedClockStorePortV1 for SqliteTrustedClockAuthorityV1 {
                 row.last_overrun_at_micros,
             ],
         );
-        storage(written).map(|_changed| ())
+        executed(written)
     }
 
     fn append_acknowledgement(&mut self, row: &TrustedClockAcknowledgementRowV1) -> PortResult<()> {
@@ -277,7 +283,7 @@ impl TrustedClockStorePortV1 for SqliteTrustedClockAuthorityV1 {
                 row.reason_code,
             ],
         );
-        storage(written).map(|_changed| ())
+        executed(written)
     }
 
     fn commit(&mut self) -> PortResult<()> {

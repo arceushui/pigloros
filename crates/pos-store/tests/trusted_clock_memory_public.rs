@@ -195,7 +195,20 @@ fn dropping_a_handle_releases_its_lock() {
 }
 
 #[test]
-fn ports_report_rows_only_inside_a_transaction() -> TestResult {
+fn a_nested_begin_is_a_storage_error() {
+    let authority = MemoryTrustedClockAuthorityV1::new();
+    let mut handle = authority.handle();
+    assert_eq!(handle.begin_immediate(ZERO), Ok(()));
+    assert_eq!(handle.begin_immediate(ZERO), Err(STORAGE));
+    assert_eq!(handle.begin_guard(ZERO), Err(STORAGE));
+    handle.rollback();
+    assert_eq!(handle.begin_guard(ZERO), Ok(()));
+    handle.rollback_and_release();
+    assert_eq!(handle.begin_immediate(ZERO), Ok(()));
+}
+
+#[test]
+fn ports_report_rows_only_inside_a_transaction() {
     let authority = MemoryTrustedClockAuthorityV1::new();
     let mut store = authority.handle();
     let high_water = TrustedClockHighWaterRowV1 {
@@ -223,10 +236,9 @@ fn ports_report_rows_only_inside_a_transaction() -> TestResult {
     assert_eq!(appended, Err(STORAGE));
     assert_eq!(store.commit(), Err(STORAGE));
     assert_eq!(store.reread_rows(), Ok(TrustedClockRowsV1::default()));
-    let domain = store.generate_clock_domain()?;
+    let domain = ok(store.generate_clock_domain());
     assert_ne!(domain, [0; 16]);
     assert!(authority.acknowledgements().is_empty());
-    Ok(())
 }
 
 #[test]

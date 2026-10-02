@@ -201,12 +201,17 @@ fn a_held_writer_lock_bounds_reservation_and_guard_waits() -> TestResult {
     let refused = reserve(&mut authority, T0).err();
     let waited = started.elapsed();
     assert_eq!(refused, Some(RESERVATION_WAIT));
-    assert!(waited < Duration::from_secs(5));
+    // The raw writer holds the lock until ROLLBACK, far longer than the
+    // 250 ms wait budget, so the refusal must come from the budget.
+    assert!(waited < Duration::from_secs(1));
     raw.execute_batch("ROLLBACK")?;
     let reservation = reserve(&mut authority, T0)?;
     raw.execute_batch("BEGIN IMMEDIATE")?;
+    let started = Instant::now();
     let refused = release(&mut authority, reservation, T0).err();
+    let waited = started.elapsed();
     assert_eq!(refused, Some(GUARD_WAIT));
+    assert!(waited < Duration::from_secs(1));
     raw.execute_batch("ROLLBACK")?;
     let reservation = reserve(&mut authority, T0)?;
     let released = release(&mut authority, reservation, T0)?;
