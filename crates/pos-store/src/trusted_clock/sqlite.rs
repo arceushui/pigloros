@@ -109,8 +109,7 @@ fn connect(path: &str) -> Result<Connection, CoreError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_CREATE
         | OpenFlags::SQLITE_OPEN_URI;
-    Connection::open_with_flags(path, flags)
-        .map_err(|error| CoreError::Storage(error.to_string()))
+    Connection::open_with_flags(path, flags).map_err(|error| CoreError::Storage(error.to_string()))
 }
 
 fn port_error(error: &rusqlite::Error) -> TrustedClockPortErrorV1 {
@@ -170,40 +169,31 @@ fn select(connection: &Connection, sql: &str) -> PortResult<Vec<Vec<Value>>> {
 
 fn high_water_row(values: &[Value]) -> PortResult<TrustedClockHighWaterRowV1> {
     match *values {
-        [
-            Value::Integer(format_version),
-            Value::Blob(ref clock_domain),
-            Value::Integer(high_water_micros),
-            Value::Integer(reserved_until_micros),
-            Value::Integer(reservation_seq),
-        ] => Ok(TrustedClockHighWaterRowV1 {
-            format_version,
-            clock_domain: clock_domain.clone(),
-            high_water_micros,
-            reserved_until_micros,
-            reservation_seq,
-        }),
+        [Value::Integer(format_version), Value::Blob(ref clock_domain), Value::Integer(high_water_micros), Value::Integer(reserved_until_micros), Value::Integer(reservation_seq)] => {
+            Ok(TrustedClockHighWaterRowV1 {
+                format_version,
+                clock_domain: clock_domain.clone(),
+                high_water_micros,
+                reserved_until_micros,
+                reservation_seq,
+            })
+        }
         _ => Err(TrustedClockPortErrorV1::Storage),
     }
 }
 
 fn latch_row(values: &[Value]) -> PortResult<TrustedClockOverrunLatchRowV1> {
     match *values {
-        [
-            Value::Integer(format_version),
-            Value::Integer(latched),
-            Value::Integer(overrun_count),
-            Value::Integer(last_overrun_reservation),
-            Value::Integer(last_overrun_kind),
-            Value::Integer(last_overrun_at_micros),
-        ] => Ok(TrustedClockOverrunLatchRowV1 {
-            format_version,
-            latched,
-            overrun_count,
-            last_overrun_reservation,
-            last_overrun_kind,
-            last_overrun_at_micros,
-        }),
+        [Value::Integer(format_version), Value::Integer(latched), Value::Integer(overrun_count), Value::Integer(last_overrun_reservation), Value::Integer(last_overrun_kind), Value::Integer(last_overrun_at_micros)] => {
+            Ok(TrustedClockOverrunLatchRowV1 {
+                format_version,
+                latched,
+                overrun_count,
+                last_overrun_reservation,
+                last_overrun_kind,
+                last_overrun_at_micros,
+            })
+        }
         _ => Err(TrustedClockPortErrorV1::Storage),
     }
 }
