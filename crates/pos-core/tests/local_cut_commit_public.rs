@@ -246,3 +246,69 @@ fn lcq1_decoder_rejects_invalid_noncanonical_and_oversized_forms() -> TestResult
     );
     Ok(())
 }
+
+#[test]
+fn lcc1_and_lcq1_decoders_reject_every_truncated_prefix() -> TestResult {
+    let commit = commit()?;
+    let commit_bytes = commit.to_canonical_cbor();
+    for end in 0..commit_bytes.len() {
+        assert_eq!(
+            LocalCutCommitV1::from_canonical_cbor(&commit_bytes[..end]),
+            Err(LocalCutCommitErrorV1::InvalidEncoding),
+            "LCC1 prefix of {end} bytes"
+        );
+    }
+
+    let receipt_bytes = receipt(&commit)?.to_canonical_cbor();
+    for end in 0..receipt_bytes.len() {
+        assert_eq!(
+            LocalCutReceiptV1::from_canonical_cbor(&receipt_bytes[..end]),
+            Err(LocalCutCommitErrorV1::InvalidEncoding),
+            "LCQ1 prefix of {end} bytes"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn lcc1_decoder_rejects_wrong_major_types_and_fixed_lengths() -> TestResult {
+    let canonical = commit()?.to_canonical_cbor();
+    let table_offset = first_table_offset(&canonical)?;
+    let invalid_edits = [
+        (1, 0x04),
+        (1, 0x43),
+        (6, 0x41),
+        (7, 0x18),
+        (8, 0x1f),
+        (41, 0x41),
+        (table_offset, 0x02),
+        (table_offset + 1, 0x41),
+    ];
+    for (index, byte) in invalid_edits {
+        let mut edited = canonical.clone();
+        edited[index] = byte;
+        assert_eq!(
+            LocalCutCommitV1::from_canonical_cbor(&edited),
+            Err(LocalCutCommitErrorV1::InvalidEncoding),
+            "LCC1 byte {index} set to {byte:#04x}"
+        );
+    }
+
+    let mut trailing = canonical.clone();
+    trailing.push(0);
+    assert_eq!(
+        LocalCutCommitV1::from_canonical_cbor(&trailing),
+        Err(LocalCutCommitErrorV1::InvalidEncoding)
+    );
+
+    let mut oversized_rows = canonical;
+    oversized_rows.splice(
+        table_offset + 1..table_offset + 2,
+        [0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    );
+    assert_eq!(
+        LocalCutCommitV1::from_canonical_cbor(&oversized_rows),
+        Err(LocalCutCommitErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
