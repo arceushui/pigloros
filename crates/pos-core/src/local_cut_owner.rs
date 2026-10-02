@@ -442,7 +442,7 @@ pub fn prepare_local_cut_owner_commit_v1(
     // The request shape already rejected every zero LCC1 identity, and the
     // seal address is a BLAKE3 digest, so the commit fields are structurally valid.
     let seal_hash = request.seal.digest();
-    let commit = LocalCutCommitV1::from_owner_validated(LocalCutCommitInputV1 {
+    let commit = LocalCutCommitV1::from_owner_validated(&LocalCutCommitInputV1 {
         owner_id: request.seal.as_input().owner_id,
         cut_id: request.seal.as_input().cut_id,
         partition_ledger_seq: request.partition_ledger_seq,

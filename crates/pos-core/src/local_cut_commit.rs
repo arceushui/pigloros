@@ -105,8 +105,8 @@ impl LocalCutCommitV1 {
     /// The owner preparation path admits only nonzero owner, cut, ledger,
     /// manifest, inventory, and release-fence values, and derives the seal
     /// address as a BLAKE3 digest, so [`Self::new`] cannot reject its input.
-    pub(crate) const fn from_owner_validated(input: LocalCutCommitInputV1) -> Self {
-        Self(input)
+    pub(crate) const fn from_owner_validated(input: &LocalCutCommitInputV1) -> Self {
+        Self(*input)
     }
 
     /// Borrow the exact validated LCC1 fields.
