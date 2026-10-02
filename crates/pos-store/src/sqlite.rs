@@ -27708,3 +27708,808 @@ pub(super) mod key_registry_coverage {
         }
     }
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod manifest_owner_admission_coverage {
+    use super::*;
+    use pos_core::{
+        output_policy::{OutputPolicyInputV1, OutputPolicyV1},
+        prepare_manifest_owner_admission_v1, ArtifactDataClassV1, ArtifactOptionalityV1,
+        ArtifactTransitionRuleV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
+        ManifestOwnerAdmissionErrorV1 as AdmissionError, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerAdmissionVerifierV1, ManifestOwnerTimelineAdmissionRequestV1,
+        ManifestSlotAdmissionReceiptDraftV1, WorldArtifactKindV1, WorldArtifactLeafInputV1,
+        WorldConsumerSetInputV1, WorldConsumerV1, WorldProducerV1,
+    };
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+    type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+    type TestResult = Fallible<()>;
+    type PolicySource = (OutputPolicyV1, Vec<u8>);
+    type Retry = Result<Option<ManifestOwnerAdmissionCommitV1>, AdmissionError>;
+
+    const OWNER: [u8; 32] = [41; 32];
+    const STORAGE: AdmissionError = AdmissionError::StorageFailure;
+    const CORRUPT: AdmissionError = AdmissionError::CorruptState;
+    const CONFLICT: AdmissionError = AdmissionError::Conflict;
+    const BOUND: AdmissionError = AdmissionError::BoundExceeded;
+
+    const STATE: &str = "manifest_owner_admission_state";
+    const OPERATIONS: &str = "manifest_owner_admission_operations";
+    const ADMISSIONS: &str = "manifest_owner_admissions";
+    const COPIES: &str = "manifest_owner_policy_copies";
+    const ALL: &str = "1";
+    const FIRST_SCOPE: &str = "timeline_id = X'01010101010101010101010101010101'";
+    const SECOND_SCOPE: &str = "timeline_id = X'02020202020202020202020202020202'";
+    const FIRST_COPY: &str = "timeline_id = X'01010101010101010101010101010101' \
+                              AND plugin_id = X'01010101010101010101010101010101'";
+    const UNCHECKED: &str = "PRAGMA ignore_check_constraints = ON; PRAGMA foreign_keys = OFF";
+    const CHECKED: &str = "PRAGMA ignore_check_constraints = OFF";
+    const ABORT: &str = "ABORT, 'injected owner admission fault'";
+    const IGNORE: &str = "IGNORE";
+
+    const DROP_COPIES: &str = "DROP TABLE manifest_owner_policy_copies";
+    const DROP_ADMISSIONS: &str = "DROP TABLE manifest_owner_policy_copies; \
+                                   DROP TABLE manifest_owner_admissions";
+    const UNREADABLE_ORPHANS: &str = "DELETE FROM manifest_owner_admission_state; \
+                                      DROP TABLE manifest_owner_policy_copies";
+    const DELETE_STATE: &str = "DELETE FROM manifest_owner_admission_state";
+    const EMPTY_ADMISSIONS: &str = "DELETE FROM manifest_owner_policy_copies; \
+                                    DELETE FROM manifest_owner_admissions";
+    const MISSING_COPY: &str = "DELETE FROM manifest_owner_policy_copies \
+                                WHERE plugin_id = X'01010101010101010101010101010101'";
+    const DELETE_OPERATIONS: &str = "DELETE FROM manifest_owner_admission_operations";
+    const UNREADABLE_OPERATION: &str =
+        "UPDATE manifest_owner_admission_operations SET request_digest = 7";
+    const SHORT_RECEIPT_COUNT: &str =
+        "UPDATE manifest_owner_admission_operations SET receipt_count = 1";
+
+    const GENESIS: Transition = Transition {
+        generation: 1,
+        expected_generation: None,
+        expected_inventory: None,
+        resulting_inventory: hash(40),
+        operation_id: hash(41),
+    };
+    const REPLACEMENT: Transition = Transition {
+        generation: 2,
+        expected_generation: Some(1),
+        expected_inventory: Some(hash(40)),
+        resulting_inventory: hash(50),
+        operation_id: hash(51),
+    };
+
+    const STATE_TYPES: [&str; 3] = [
+        "configuration_generation = 7",
+        "previous_visible_lcq1_hash = 7",
+        "inventory_generation = 7",
+    ];
+    const ADMISSION_TYPES: [&str; 10] = [
+        "timeline_id = 7",
+        "scope = 7",
+        "wcs1_hash = 7",
+        "catalog_cbor = 7",
+        "wcs1_cbor = 7",
+        "binding_cbor = 7",
+        "receipt_cbor = 7",
+        "operation_id = 7",
+        "expected_inventory_generation = 7",
+        "resulting_inventory_generation = 7",
+    ];
+    const COPY_TYPES: [&str; 5] = [
+        "plugin_id = 7",
+        "eop1_bytes = 7",
+        "eop1_leaf_cbor = 7",
+        "opc1_bytes = 7",
+        "opc1_leaf_cbor = 7",
+    ];
+    const OPERATION_TYPES: [&str; 5] = [
+        "request_digest = 7",
+        "configuration_generation = 7",
+        "inventory_generation = 7",
+        "receipt_count = 'x'",
+        "receipt_set_digest = 7",
+    ];
+
+    const STATE_SHAPES: [&str; 6] = [
+        "configuration_generation = X'00'",
+        "configuration_generation = zeroblob(8)",
+        "previous_visible_lcq1_hash = X'00'",
+        "previous_visible_lcq1_hash = CAST(hex(zeroblob(16)) AS BLOB)",
+        "inventory_generation = X'00'",
+        "inventory_generation = zeroblob(32)",
+    ];
+    const ADMISSION_SHAPES: [&str; 11] = [
+        "timeline_id = X'00'",
+        "scope = X'00'",
+        "wcs1_hash = X'00'",
+        "wcs1_hash = zeroblob(32)",
+        "catalog_cbor = X'FF'",
+        "wcs1_cbor = X'FF'",
+        "binding_cbor = X'FF'",
+        "receipt_cbor = X'FF'",
+        "operation_id = X'00'",
+        "expected_inventory_generation = X'00'",
+        "resulting_inventory_generation = X'00'",
+    ];
+    const COPY_SHAPES: [&str; 3] = [
+        "plugin_id = X'00'",
+        "eop1_leaf_cbor = X'FF'",
+        "opc1_leaf_cbor = X'FF'",
+    ];
+    const OPERATION_SHAPES: [&str; 5] = [
+        "request_digest = X'00'",
+        "configuration_generation = X'00'",
+        "inventory_generation = X'00'",
+        "inventory_generation = zeroblob(32)",
+        "receipt_set_digest = X'00'",
+    ];
+
+    const STRUCTURE_FAULTS: [(&str, AdmissionError); 7] = [
+        (UNREADABLE_ORPHANS, STORAGE),
+        (DROP_ADMISSIONS, STORAGE),
+        (DROP_COPIES, STORAGE),
+        (DELETE_STATE, CORRUPT),
+        (EMPTY_ADMISSIONS, CORRUPT),
+        (MISSING_COPY, CORRUPT),
+        (DELETE_OPERATIONS, CORRUPT),
+    ];
+    const RETRY_FAULTS: [(&str, AdmissionError); 4] = [
+        (UNREADABLE_OPERATION, STORAGE),
+        (DROP_ADMISSIONS, STORAGE),
+        (EMPTY_ADMISSIONS, CORRUPT),
+        (SHORT_RECEIPT_COUNT, CORRUPT),
+    ];
+    const RECEIPT_FAULTS: [(&str, AdmissionError); 3] = [
+        ("timeline_id = 7", STORAGE),
+        ("timeline_id = X'00'", CORRUPT),
+        ("scope = 7", STORAGE),
+    ];
+    const INSERT_FAULTS: [(&str, AdmissionError); 3] = [
+        (ADMISSIONS, STORAGE),
+        (STATE, CONFLICT),
+        (OPERATIONS, STORAGE),
+    ];
+
+    #[derive(Clone, Copy)]
+    struct Transition {
+        generation: u64,
+        expected_generation: Option<u64>,
+        expected_inventory: Option<Hash>,
+        resulting_inventory: Hash,
+        operation_id: Hash,
+    }
+
+    // Accepts every owner check so these tests isolate the SQLite port.
+    struct AcceptingOwner;
+
+    impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
+        fn verify_complete_composition(
+            &self,
+            _catalog: &ManifestAdmissionCatalogV1,
+        ) -> Result<(), AdmissionError> {
+            Ok(())
+        }
+
+        fn verify_complete_owned_scope_set(
+            &self,
+            _owner_id: [u8; 32],
+            _timelines: &[ManifestOwnerTimelineAdmissionRequestV1],
+        ) -> Result<(), AdmissionError> {
+            Ok(())
+        }
+
+        fn verify_coordinator_receipt(
+            &self,
+            _receipt: &ManifestSlotAdmissionReceiptV1,
+        ) -> Result<(), AdmissionError> {
+            Ok(())
+        }
+
+        fn verify_owner_prestate_and_allocation(
+            &self,
+            _request: &ManifestOwnerAdmissionRequestV1,
+            _current_state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+        ) -> Result<(), AdmissionError> {
+            Ok(())
+        }
+
+        fn sign_coordinator_receipt(
+            &self,
+            draft: ManifestSlotAdmissionReceiptDraftV1,
+        ) -> Result<ManifestSlotAdmissionReceiptV1, AdmissionError> {
+            draft
+                .with_evidence_and_signature(hash(90), [0x5a; 64])
+                .map_err(|_| AdmissionError::OwnerRejected)
+        }
+
+        fn verify_native_policy_copies(
+            &self,
+            _timeline_id: TimelineId,
+            _scope: Hash,
+            _copies: &ManifestOwnerPolicyCopiesV1,
+        ) -> Result<(), AdmissionError> {
+            Ok(())
+        }
+    }
+
+    const fn hash(byte: u8) -> Hash {
+        Hash::from_bytes([byte; 32])
+    }
+
+    const fn plugin(byte: u8) -> PluginId {
+        PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+    }
+
+    const fn timeline(byte: u8) -> TimelineId {
+        TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+    }
+
+    fn policy_and_closure(plugin_id: PluginId, seed: u8) -> Fallible<PolicySource> {
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "1.0.0".to_owned(),
+            implementation_hash: hash(seed + 30),
+            base_configuration_digest: hash(seed + 40),
+            executable_profile_hash: hash(seed + 50),
+            retention_policy_hash: hash(seed + 60),
+            policy_revision: 1,
+            output_declarations: Vec::new(),
+        })?;
+        let members = [
+            policy.to_canonical_cbor(),
+            b"EBP1-fixture".to_vec(),
+            b"implementation-fixture".to_vec(),
+            b"CFG1-fixture".to_vec(),
+            Vec::new(),
+            b"RTP1-fixture".to_vec(),
+        ];
+        let mut closure = b"OPC1".to_vec();
+        for member in members {
+            let length = u64::try_from(member.len()).unwrap_or(u64::MAX);
+            closure.extend_from_slice(&length.to_be_bytes());
+            closure.extend_from_slice(&member);
+        }
+        Ok((policy, closure))
+    }
+
+    fn opc1_digest(bytes: &[u8]) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
+        hasher.update(bytes);
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    }
+
+    fn catalog(generation: u64) -> Fallible<(ManifestAdmissionCatalogV1, Vec<PolicySource>)> {
+        let sources = vec![
+            policy_and_closure(plugin(1), 1)?,
+            policy_and_closure(plugin(2), 2)?,
+        ];
+        let rows = sources
+            .iter()
+            .enumerate()
+            .map(|(index, (policy, closure))| ManifestAdmissionCatalogRowV1 {
+                stable_slot: if index == 0 { "slot-a" } else { "slot-b" }.to_owned(),
+                plugin_id: policy.fields().plugin_id,
+                plugin_name: "same-name".to_owned(),
+                plugin_version: policy.fields().plugin_version.clone(),
+                implementation_hash: policy.fields().implementation_hash,
+                eop1_native_digest: policy.digest(),
+                closure_hash: opc1_digest(closure),
+            })
+            .collect();
+        let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
+            owner_id: OWNER,
+            configuration_generation: generation,
+            rows,
+        })?;
+        Ok((catalog, sources))
+    }
+
+    fn leaf(
+        scope: Hash,
+        kind: WorldArtifactKindV1,
+        native: &[u8],
+        native_digest: Hash,
+        lease: Hash,
+    ) -> Fallible<WorldArtifactLeafV1> {
+        let leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
+            scope,
+            kind,
+            native_digest,
+            native_byte_length: u64::try_from(native.len()).unwrap_or(u64::MAX),
+            owner: OWNER,
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            optionality: ArtifactOptionalityV1::Required,
+            transition: ArtifactTransitionRuleV1::PreserveExact,
+            source_lease_hash: lease,
+            key_dependencies: Vec::new(),
+            child_node_hashes: Vec::new(),
+        })?;
+        Ok(leaf)
+    }
+
+    fn policy_copies(
+        scope: Hash,
+        sources: &[PolicySource],
+        lease: Hash,
+    ) -> Fallible<Vec<ManifestOwnerPolicyCopiesV1>> {
+        sources
+            .iter()
+            .map(|(policy, closure)| {
+                let eop1_bytes = policy.to_canonical_cbor();
+                let eop1_leaf = leaf(
+                    scope,
+                    WorldArtifactKindV1::OutputPolicy,
+                    &eop1_bytes,
+                    policy.digest(),
+                    lease,
+                )?;
+                let opc1_leaf = leaf(
+                    scope,
+                    WorldArtifactKindV1::OutputPolicyClosure,
+                    closure,
+                    opc1_digest(closure),
+                    lease,
+                )?;
+                Ok(ManifestOwnerPolicyCopiesV1 {
+                    plugin_id: policy.fields().plugin_id,
+                    eop1_bytes,
+                    eop1_leaf,
+                    opc1_bytes: closure.clone(),
+                    opc1_leaf,
+                })
+            })
+            .collect()
+    }
+
+    fn request(
+        transition: Transition,
+        timeline_ids: &[TimelineId],
+    ) -> Fallible<ManifestOwnerAdmissionRequestV1> {
+        let (catalog, sources) = catalog(transition.generation)?;
+        let producer = sources.first().ok_or("missing fixture policy")?.0.digest();
+        let mut timelines = Vec::with_capacity(timeline_ids.len());
+        for (index, timeline_id) in timeline_ids.iter().enumerate() {
+            let offset = u8::try_from(index)?;
+            let scope = hash(70 + offset);
+            let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+                scope,
+                consumers: vec![WorldConsumerV1::new(
+                    "local-observer".to_owned(),
+                    hash(130),
+                    hash(131),
+                    hash(132),
+                )?],
+                producers: vec![WorldProducerV1::new(plugin(1), producer)?],
+                optional_view_roots: Vec::new(),
+            })?;
+            timelines.push(ManifestOwnerTimelineAdmissionRequestV1 {
+                timeline_id: *timeline_id,
+                scope,
+                wcs1,
+                policy_copies: policy_copies(scope, &sources, hash(80 + offset))?,
+            });
+        }
+        Ok(ManifestOwnerAdmissionRequestV1 {
+            operation_id: transition.operation_id,
+            catalog,
+            expected_configuration_generation: transition.expected_generation,
+            previous_visible_lcq1_hash: None,
+            expected_inventory_generation: transition.expected_inventory,
+            resulting_inventory_generation: transition.resulting_inventory,
+            timelines,
+        })
+    }
+
+    fn genesis_request() -> Fallible<ManifestOwnerAdmissionRequestV1> {
+        request(GENESIS, &[timeline(1), timeline(2)])
+    }
+
+    fn changed_genesis_request() -> Fallible<ManifestOwnerAdmissionRequestV1> {
+        let mut changed = genesis_request()?;
+        changed.resulting_inventory_generation = hash(42);
+        Ok(changed)
+    }
+
+    fn prepare(
+        admission: ManifestOwnerAdmissionRequestV1,
+        state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+    ) -> Fallible<PreparedManifestOwnerAdmissionV1> {
+        prepare_manifest_owner_admission_v1(admission, &AcceptingOwner, state).map_err(Into::into)
+    }
+
+    fn admitted_store() -> Fallible<SqliteStore> {
+        let mut store = SqliteStore::open_in_memory()?;
+        store.commit_manifest_owner_admission_v1(prepare(genesis_request()?, None)?)?;
+        Ok(store)
+    }
+
+    fn run_sql(store: &SqliteStore, sql: &str) -> rusqlite::Result<()> {
+        store.conn.execute_batch(sql)
+    }
+
+    // Foreign keys stay off afterwards so later reads see the corrupt rows.
+    fn run_unchecked(store: &SqliteStore, sql: &str) -> rusqlite::Result<()> {
+        run_sql(store, UNCHECKED)?;
+        let result = run_sql(store, sql);
+        run_sql(store, CHECKED)?;
+        result
+    }
+
+    fn corrupt(table: &str, assignment: &str, filter: &str) -> String {
+        format!("UPDATE {table} SET {assignment} WHERE {filter}")
+    }
+
+    fn trigger(event: &str, table: &str, action: &str) -> String {
+        format!("CREATE TRIGGER fault BEFORE {event} ON {table} BEGIN SELECT RAISE({action}); END")
+    }
+
+    fn deny_action(
+        store: &SqliteStore,
+        denied: fn(&AuthAction<'_>) -> bool,
+    ) -> rusqlite::Result<()> {
+        store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+            if denied(&context.action) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))
+    }
+
+    fn deny_reads(
+        store: &SqliteStore,
+        table: &'static str,
+        column: &'static str,
+        allowed: usize,
+    ) -> rusqlite::Result<()> {
+        let mut seen = 0_usize;
+        store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+            if let AuthAction::Read {
+                table_name,
+                column_name,
+            } = context.action
+            {
+                let matches_column = table_name == table && column_name == column;
+                if matches_column {
+                    seen += 1;
+                    if seen > allowed {
+                        return Authorization::Deny;
+                    }
+                }
+            }
+            Authorization::Allow
+        }))
+    }
+
+    fn allow_all(store: &SqliteStore) -> rusqlite::Result<()> {
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+    }
+
+    const fn begins_transaction(action: &AuthAction<'_>) -> bool {
+        matches!(
+            action,
+            AuthAction::Transaction {
+                operation: TransactionOperation::Begin
+            }
+        )
+    }
+
+    // SQLite authorizes COMMIT as a transaction step that rusqlite cannot name.
+    const fn commits_transaction(action: &AuthAction<'_>) -> bool {
+        matches!(
+            action,
+            AuthAction::Transaction {
+                operation: TransactionOperation::Unknown
+            }
+        )
+    }
+
+    const fn releases_savepoint(action: &AuthAction<'_>) -> bool {
+        matches!(
+            action,
+            AuthAction::Savepoint {
+                operation: TransactionOperation::Release,
+                ..
+            }
+        )
+    }
+
+    const fn rolls_back_savepoint(action: &AuthAction<'_>) -> bool {
+        matches!(
+            action,
+            AuthAction::Savepoint {
+                operation: TransactionOperation::Rollback,
+                ..
+            }
+        )
+    }
+
+    fn retry(store: &SqliteStore, digest: Hash) -> Retry {
+        store.resolve_manifest_owner_admission_retry_v1(OWNER, GENESIS.operation_id, digest)
+    }
+
+    fn resolve(store: &SqliteStore, digest: Hash) -> Retry {
+        sqlite_resolve_manifest_owner_retry(&store.conn, OWNER, GENESIS.operation_id, digest)
+    }
+
+    fn operation_receipts(store: &SqliteStore) -> Result<Vec<Hash>, AdmissionError> {
+        sqlite_manifest_owner_operation_receipts(&store.conn, OWNER, GENESIS.operation_id, 1)
+    }
+
+    fn validate_generation(
+        store: &SqliteStore,
+        operation_id: Hash,
+        receipts: &[Hash],
+    ) -> Result<(), AdmissionError> {
+        sqlite_validate_manifest_owner_generation_operation(
+            &store.conn,
+            OWNER,
+            1,
+            GENESIS.resulting_inventory,
+            operation_id,
+            receipts,
+        )
+    }
+
+    fn assert_port_fails(store: &mut SqliteStore, expected: AdmissionError) -> TestResult {
+        let prepared = prepare(genesis_request()?, None)?;
+        assert_eq!(store.read_manifest_owner_state_v1(OWNER), Err(expected));
+        assert_eq!(retry(store, prepared.intent_digest()), Err(expected));
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(prepared),
+            Err(expected)
+        );
+        Ok(())
+    }
+
+    fn assert_read_faults(
+        table: &str,
+        filter: &str,
+        assignments: &[&str],
+        expected: AdmissionError,
+    ) -> TestResult {
+        for assignment in assignments {
+            let mut store = admitted_store()?;
+            run_unchecked(&store, &corrupt(table, assignment, filter))?;
+            assert_port_fails(&mut store, expected)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn owner_reads_map_unreadable_columns_to_storage_failures() -> TestResult {
+        assert_read_faults(STATE, ALL, &STATE_TYPES, STORAGE)?;
+        assert_read_faults(ADMISSIONS, FIRST_SCOPE, &ADMISSION_TYPES, STORAGE)?;
+        assert_read_faults(COPIES, FIRST_COPY, &COPY_TYPES, STORAGE)?;
+        assert_read_faults(OPERATIONS, ALL, &OPERATION_TYPES, STORAGE)
+    }
+
+    #[test]
+    fn owner_reads_map_malformed_columns_to_corrupt_state() -> TestResult {
+        assert_read_faults(STATE, ALL, &STATE_SHAPES, CORRUPT)?;
+        assert_read_faults(ADMISSIONS, FIRST_SCOPE, &ADMISSION_SHAPES, CORRUPT)?;
+        assert_read_faults(COPIES, FIRST_COPY, &COPY_SHAPES, CORRUPT)?;
+        assert_read_faults(OPERATIONS, ALL, &OPERATION_SHAPES, CORRUPT)
+    }
+
+    #[test]
+    fn owner_reads_map_missing_schema_and_rows() -> TestResult {
+        for (fault, expected) in STRUCTURE_FAULTS {
+            let mut store = admitted_store()?;
+            run_unchecked(&store, fault)?;
+            assert_port_fails(&mut store, expected)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn historical_reads_map_missing_unreadable_and_corrupt_rows() -> TestResult {
+        let store = admitted_store()?;
+        assert_eq!(
+            store.read_manifest_owner_admission_v1(OWNER, 1, timeline(9)),
+            Ok(None)
+        );
+        run_unchecked(&store, &corrupt(ADMISSIONS, "scope = 7", FIRST_SCOPE))?;
+        assert_eq!(
+            store.read_manifest_owner_admission_v1(OWNER, 1, timeline(1)),
+            Err(STORAGE)
+        );
+        // The requested row decodes, but its generation sibling is corrupt.
+        let store = admitted_store()?;
+        let sibling = corrupt(ADMISSIONS, "scope = X'00'", SECOND_SCOPE);
+        run_unchecked(&store, &sibling)?;
+        assert_eq!(
+            store.read_manifest_owner_admission_v1(OWNER, 1, timeline(1)),
+            Err(CORRUPT)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn owner_port_transactions_map_begin_and_commit_failures() -> TestResult {
+        let mut store = admitted_store()?;
+        let prepared = prepare(genesis_request()?, None)?;
+        let digest = prepared.intent_digest();
+        for denied in [begins_transaction, commits_transaction] {
+            deny_action(&store, denied)?;
+            let state = store.read_manifest_owner_state_v1(OWNER);
+            let resolved = retry(&store, digest);
+            allow_all(&store)?;
+            assert_eq!(state, Err(STORAGE));
+            assert_eq!(resolved, Err(STORAGE));
+            assert!(store.conn.is_autocommit());
+        }
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let begin = store.commit_manifest_owner_admission_v1(prepared);
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert_eq!(begin, Err(STORAGE));
+        Ok(())
+    }
+
+    #[test]
+    fn commits_recover_exact_retries_and_reject_changed_intents() -> TestResult {
+        let mut store = SqliteStore::open_in_memory()?;
+        let prepared = prepare(genesis_request()?, None)?;
+        let applied = store.commit_manifest_owner_admission_v1(prepared.clone())?;
+        let exact = store.commit_manifest_owner_admission_v1(prepared)?;
+        assert_eq!(exact.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+        assert_eq!(exact.receipt_hashes, applied.receipt_hashes);
+        let changed = prepare(changed_genesis_request()?, None)?;
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(changed),
+            Err(CONFLICT)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn commits_map_insert_and_state_write_faults() -> TestResult {
+        for (table, expected) in INSERT_FAULTS {
+            let mut store = SqliteStore::open_in_memory()?;
+            run_sql(&store, &trigger("INSERT", table, ABORT))?;
+            let prepared = prepare(genesis_request()?, None)?;
+            assert_eq!(
+                store.commit_manifest_owner_admission_v1(prepared),
+                Err(expected)
+            );
+            assert_eq!(store.read_manifest_owner_state_v1(OWNER), Ok(None));
+        }
+        for (action, expected) in [(ABORT, STORAGE), (IGNORE, CONFLICT)] {
+            let mut store = admitted_store()?;
+            let current = store.read_manifest_owner_state_v1(OWNER)?;
+            let replacement = request(REPLACEMENT, &[timeline(3), timeline(4)])?;
+            let prepared = prepare(replacement, current.as_ref())?;
+            run_sql(&store, &trigger("UPDATE", STATE, action))?;
+            assert_eq!(
+                store.commit_manifest_owner_admission_v1(prepared),
+                Err(expected)
+            );
+            assert_eq!(store.read_manifest_owner_state_v1(OWNER)?, current);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn commits_inside_an_outer_transaction_finish_their_savepoint() -> TestResult {
+        let mut store = SqliteStore::open_in_memory()?;
+        let prepared = prepare(genesis_request()?, None)?;
+        run_sql(&store, "BEGIN")?;
+        deny_action(&store, releases_savepoint)?;
+        let unreleased = store.commit_manifest_owner_admission_v1(prepared.clone());
+        allow_all(&store)?;
+        run_sql(&store, "ROLLBACK")?;
+        assert_eq!(unreleased, Err(STORAGE));
+
+        run_sql(&store, "BEGIN")?;
+        let applied = store.commit_manifest_owner_admission_v1(prepared)?;
+        run_sql(&store, "COMMIT")?;
+        assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
+
+        let changed = prepare(changed_genesis_request()?, None)?;
+        run_sql(&store, "BEGIN")?;
+        let rejected = store.commit_manifest_owner_admission_v1(changed.clone());
+        deny_action(&store, rolls_back_savepoint)?;
+        let stranded = store.commit_manifest_owner_admission_v1(changed);
+        allow_all(&store)?;
+        run_sql(&store, "ROLLBACK")?;
+        assert_eq!(rejected, Err(CONFLICT));
+        assert_eq!(stranded, Err(STORAGE));
+        assert!(store.read_manifest_owner_state_v1(OWNER)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn generation_operation_validation_maps_direct_faults() -> TestResult {
+        let store = admitted_store()?;
+        let receipts = operation_receipts(&store)?;
+        let operation = GENESIS.operation_id;
+        assert_eq!(validate_generation(&store, operation, &receipts), Ok(()));
+        assert_eq!(
+            validate_generation(&store, hash(99), &receipts),
+            Err(CORRUPT)
+        );
+        assert_eq!(validate_generation(&store, operation, &[]), Err(BOUND));
+        // Sweep the denial past the operation lookup into the generation count.
+        let mut failures = 0_usize;
+        for allowed in 0..8 {
+            deny_reads(&store, OPERATIONS, "configuration_generation", allowed)?;
+            let result = validate_generation(&store, operation, &receipts);
+            allow_all(&store)?;
+            if let Err(error) = result {
+                assert_eq!(error, STORAGE);
+                failures += 1;
+            }
+        }
+        assert!(failures > 1);
+
+        let store = admitted_store()?;
+        run_unchecked(&store, UNREADABLE_OPERATION)?;
+        assert_eq!(
+            validate_generation(&store, operation, &receipts),
+            Err(STORAGE)
+        );
+        let store = admitted_store()?;
+        run_unchecked(&store, DROP_ADMISSIONS)?;
+        assert_eq!(
+            validate_generation(&store, operation, &receipts),
+            Err(STORAGE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retry_resolution_maps_direct_faults() -> TestResult {
+        let digest = prepare(genesis_request()?, None)?.intent_digest();
+        let store = admitted_store()?;
+        // Sweep the denial past the receipt reads into the row count.
+        let mut failures = 0_usize;
+        for allowed in 0..8 {
+            deny_reads(&store, ADMISSIONS, "configuration_generation", allowed)?;
+            let result = resolve(&store, digest);
+            allow_all(&store)?;
+            if let Err(error) = result {
+                assert_eq!(error, STORAGE);
+                failures += 1;
+            }
+        }
+        assert!(failures > 1);
+        assert!(matches!(resolve(&store, digest), Ok(Some(_))));
+        for (fault, expected) in RETRY_FAULTS {
+            let store = admitted_store()?;
+            run_unchecked(&store, fault)?;
+            assert_eq!(resolve(&store, digest), Err(expected));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_listing_maps_direct_faults() -> TestResult {
+        for (assignment, expected) in RECEIPT_FAULTS {
+            let store = admitted_store()?;
+            run_unchecked(&store, &corrupt(ADMISSIONS, assignment, FIRST_SCOPE))?;
+            assert_eq!(operation_receipts(&store), Err(expected));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn owner_writers_cover_visible_hashes_and_empty_receipt_sets() -> TestResult {
+        let store = SqliteStore::open_in_memory()?;
+        let mut input = prepare(genesis_request()?, None)?.input().clone();
+        input.previous_visible_lcq1_hash = Some(hash(77));
+        assert_eq!(
+            sqlite_write_manifest_owner_state(&store.conn, &input),
+            Ok(())
+        );
+        assert_eq!(
+            sqlite_insert_manifest_owner_operation(&store.conn, &input, hash(78), &[]),
+            Err(BOUND)
+        );
+        Ok(())
+    }
+}
