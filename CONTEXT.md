@@ -27,6 +27,7 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **Snapshot** | `pos-time` | A point-in-time capture of projected state, used to accelerate Replay. |
 | **Tick Boundary** | `pos-experiment` | The host-owned coordination point that folds one complete contiguous Timeline range before or after an atomic driver step. Events are never folded while `step_all` is active. |
 | **Fold Cursor** | `pos-experiment` | The last logical Timeline sequence incorporated into live projections. It advances only after a complete validated range is folded and is independent of the local Timeline head. |
+| **Projection Cut** | `pos-core`, `pos-experiment` | One completed fold of a Timeline, named by its Fold Cursor at a Tick Boundary (ADR-021 §5). State-dependent evaluation waits for, and records, the first cut that contains a committed Event range. A commit receipt alone never names a cut. |
 | **ObservationSnapshot** | `pos-runtime` | Immutable projection state captured after a tick's pre-step fold and shared by every due Driver for that atomic step. |
 | **Simulation Time** | `pos-runtime`, `pos-experiment` | Monotonic host-supplied nanoseconds used only to decide Driver cadence eligibility. Distinct from Event `wall_time` and optional wall-clock demo pacing. |
 

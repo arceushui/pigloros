@@ -11,6 +11,17 @@
 
 include!("host_store.rs");
 
+// Public module reachability keeps the crate-only evaluator registry
+// compatible with both `unreachable_pub` and Clippy's `redundant_pub_crate`.
+pub mod pipeline_evaluation;
+
+pub use pipeline_evaluation::{
+    CalibrationReportEvaluatorV1, CommittedRangeIntegrityEvaluatorV1, PipelineEvaluationInputV1,
+    PipelineEvaluationOutcomeV1, PipelineEvaluationRecordV1, PipelineEvaluationScopeV1,
+    PipelineEvaluationUnavailableV1, PipelineEvaluatorOutputV1, PipelineEvaluatorV1,
+    PipelineEventIntegrityV1,
+};
+
 use pos_core::{
     clock::WallTime,
     crypto::Hash,
@@ -265,6 +276,17 @@ fn is_public_event_type(event_type: &Kind) -> bool {
         && pos_core::required_modality_for_event(event_type) == 0
         && !event_type.as_str().starts_with("timeline.fork.")
         && !event_type.as_str().starts_with("retention.")
+}
+
+/// Keep only the public Events of a read, in Timeline Order.
+///
+/// Shared by every session read that hands Events outside the host:
+/// [`ExperimentSession::source_events`] and both evaluator inputs.
+fn retain_public_events(events: Vec<pos_core::Event>) -> Vec<pos_core::Event> {
+    events
+        .into_iter()
+        .filter(|event| is_public_event_type(&event.event_type))
+        .collect()
 }
 
 fn reject_protected_events(events: &[pos_core::Event]) -> Result<(), ExperimentError> {
@@ -613,6 +635,8 @@ pub struct ExperimentSession {
     revoked_subjects: HashSet<EntityId>,
     consent_revocation_pending: Option<PendingHostClosure>,
     operation_token: Option<ConsentCapabilityToken>,
+    pipeline_evidence: Option<pos_core::PipelineCommitEvidenceV1>,
+    pipeline_evaluators: pipeline_evaluation::PipelineEvaluatorRegistryV1,
 }
 
 /// Result of one interactive tick-boundary attempt.
@@ -731,6 +755,8 @@ pub enum ExperimentError {
     ConsentRevokedV1,
     #[error("action was not admitted: {0}")]
     ActionNotAdmitted(Box<pos_runtime::HumanActionAdmissionErrorV1>),
+    #[error("a pipeline evaluator with this name is already registered")]
+    DuplicatePipelineEvaluator,
     #[error("cadence time regressed from {previous_ns}ns to {requested_ns}ns")]
     CadenceTimeRegressed {
         previous_ns: u128,
@@ -916,14 +942,31 @@ fn admit_scheduled_pass(
     commit_head: pos_core::clock::Seq,
     commit_now_secs: u64,
 ) -> Result<u64, ExperimentError> {
+    admit_scheduled_pass_receipt(store, registry, revisions, commit_head, commit_now_secs)
+        .map(|receipt| committed_event_count(receipt.as_ref()))
+}
+
+/// Admit a session's staged scheduled pass and return its commit receipt.
+///
+/// The receipt names only the committed range; the session binds it to a
+/// Projection cut after the boundary folds that range.
+fn admit_scheduled_pass_receipt(
+    store: &mut dyn ScheduledAdmissionStoreV1,
+    registry: &mut PluginRegistry,
+    revisions: PipelineSecurityRevisionsV1,
+    commit_head: pos_core::clock::Seq,
+    commit_now_secs: u64,
+) -> Result<Option<pos_core::PipelineCommitReceiptV1>, ExperimentError> {
     LocalScheduledAdmissionHostV1::shared()
         .and_then(|host| host.admit(registry, store, revisions, commit_head, commit_now_secs))
-        .map(|receipt| {
-            receipt.map_or(0, |receipt| {
-                u64::try_from(receipt.committed_events().len()).unwrap_or(u64::MAX)
-            })
-        })
         .map_err(map_runtime_error)
+}
+
+/// Number of Events one optional admission receipt committed.
+fn committed_event_count(receipt: Option<&pos_core::PipelineCommitReceiptV1>) -> u64 {
+    receipt.map_or(0, |receipt| {
+        u64::try_from(receipt.committed_events().len()).unwrap_or(u64::MAX)
+    })
 }
 
 fn append_driver_drafts(
@@ -972,7 +1015,7 @@ fn admit_human_action(
     registry: &PluginRegistry,
     proposal: &pos_core::ProposedAction,
     timeline_id: pos_core::ids::TimelineId,
-) -> Result<usize, ExperimentError> {
+) -> Result<pos_core::PipelineCommitReceiptV1, ExperimentError> {
     observe_scheduled_admission(store, registry, timeline_id)
         .and_then(|revisions| {
             store
@@ -988,7 +1031,7 @@ fn admit_human_action(
                         .map_err(map_human_admission_error)
                 })
         })
-        .map(|receipt| receipt.receipt().committed_events().len())
+        .map(|receipt| receipt.receipt().clone())
 }
 
 fn map_human_admission_error(error: pos_runtime::HumanActionAdmissionErrorV1) -> ExperimentError {
@@ -1072,6 +1115,27 @@ fn chain_head(
             }
         })
         .map_err(ExperimentError::from)
+}
+
+/// Read exactly the contiguous Events of one committed range.
+fn read_committed_range(
+    store: &dyn pos_core::store::EventStore,
+    range: pos_core::PipelineCommittedRangeV1,
+) -> Result<Vec<Event>, ExperimentError> {
+    store
+        .read(
+            range.timeline_id(),
+            pos_store::SeqRange::bounded(range.first(), range.last()),
+        )
+        .map_err(ExperimentError::from)
+        .and_then(|events| {
+            validate_captured_range(
+                pos_core::clock::Seq::from_u64(range.first().as_u64().saturating_sub(1)),
+                range.last(),
+                &events,
+            )
+            .map(|()| events)
+        })
 }
 
 fn lock_store(
@@ -1474,6 +1538,8 @@ impl Experiment {
             revoked_subjects: HashSet::new(),
             consent_revocation_pending: None,
             operation_token: None,
+            pipeline_evidence: None,
+            pipeline_evaluators: pipeline_evaluation::PipelineEvaluatorRegistryV1::default(),
         })
     }
 
@@ -1629,6 +1695,8 @@ impl Experiment {
             revoked_subjects,
             consent_revocation_pending: None,
             operation_token: None,
+            pipeline_evidence: None,
+            pipeline_evaluators: pipeline_evaluation::PipelineEvaluatorRegistryV1::default(),
         })
     }
 
@@ -1845,12 +1913,7 @@ impl ExperimentSession {
     /// Returns a store or shared-store locking error if the completed prefix
     /// cannot be read.
     pub fn source_events(&self) -> Result<Vec<pos_core::Event>, ExperimentError> {
-        self.source_events_with_control().map(|events| {
-            events
-                .into_iter()
-                .filter(|event| is_public_event_type(&event.event_type))
-                .collect()
-        })
+        self.source_events_with_control().map(retain_public_events)
     }
 
     pub(crate) fn source_events_with_control(
@@ -1901,6 +1964,7 @@ impl ExperimentSession {
         emitted_count: usize,
     ) -> Result<u64, ExperimentError> {
         self.fold_captured_range_or_fault(after)?;
+        self.bind_pipeline_projection_cut();
         self.total_events = self.boundary.folded_through.as_u64();
         Ok(u64::try_from(emitted_count).unwrap_or(u64::MAX))
     }
@@ -1999,9 +2063,14 @@ impl ExperimentSession {
         proposal: &pos_core::ProposedAction,
     ) -> Result<u64, ExperimentError> {
         let timeline_id = self.timeline.id();
-        let committed = lock_store(&self.store).and_then(|mut store| {
+        let receipt = lock_store(&self.store).and_then(|mut store| {
             admit_human_action(store.as_mut(), &self.registry, proposal, timeline_id)
         })?;
+        let committed = receipt.committed_events().len();
+        self.record_pipeline_commit(
+            pos_core::PipelineIngressV1::HumanProposedAction,
+            Some(receipt),
+        );
         let after = match lock_store(&self.store).and_then(|store| {
             capture_pending_range(&**store, timeline_id, self.boundary.folded_through)
         }) {
@@ -2012,6 +2081,138 @@ impl ExperimentSession {
             }
         };
         self.finish_append_after(&after, committed)
+    }
+
+    /// Record the receipt of one committed attempt as unfolded evidence.
+    ///
+    /// Returns the number of committed Events. The evidence names no
+    /// Projection cut until the boundary folds the complete range.
+    fn record_pipeline_commit(
+        &mut self,
+        ingress: pos_core::PipelineIngressV1,
+        receipt: Option<pos_core::PipelineCommitReceiptV1>,
+    ) -> u64 {
+        let committed = committed_event_count(receipt.as_ref());
+        if let Some(receipt) = receipt {
+            self.pipeline_evidence = Some(pos_core::PipelineCommitEvidenceV1::committed(
+                ingress,
+                pos_core::ScheduledObservationProfileV1::NonParticipant,
+                receipt,
+            ));
+        }
+        committed
+    }
+
+    /// Bind the completed fold cursor to evidence still awaiting its fold.
+    fn bind_pipeline_projection_cut(&mut self) {
+        let cut = pos_core::PipelineProjectionCutV1::new(
+            self.timeline.id(),
+            self.boundary.folded_through,
+        );
+        self.pipeline_evidence = self
+            .pipeline_evidence
+            .take()
+            .map(|evidence| evidence.with_completed_fold(cut));
+    }
+
+    /// Evidence for the most recent committed human or AI attempt.
+    ///
+    /// It names the exact committed Event range and, once the Tick Boundary
+    /// folded that complete range, the Projection cut. A failed fold leaves
+    /// the evidence without a cut; the commit receipt alone never claims
+    /// that the resulting state was folded. A Fork starts without evidence.
+    ///
+    /// The slot holds the last committed attempt only. A later commit
+    /// replaces it, and an attempt that commits nothing leaves it unchanged.
+    /// The evidence is tagged
+    /// [`ScheduledObservationProfileV1::NonParticipant`](pos_core::ScheduledObservationProfileV1::NonParticipant):
+    /// an experiment session never claims ADR-059 participant authority.
+    #[must_use]
+    pub const fn last_pipeline_evidence(&self) -> Option<&pos_core::PipelineCommitEvidenceV1> {
+        self.pipeline_evidence.as_ref()
+    }
+
+    /// Register one evaluation Adapter for this session explicitly.
+    ///
+    /// There is no default evaluator, and a Fork starts with none.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::DuplicatePipelineEvaluator`] when an
+    /// evaluator with the same name is already registered.
+    pub fn register_pipeline_evaluator(
+        &mut self,
+        evaluator: Box<dyn PipelineEvaluatorV1>,
+    ) -> Result<(), ExperimentError> {
+        self.pipeline_evaluators.register(evaluator)
+    }
+
+    /// Evaluate the most recent committed attempt with one registered
+    /// evaluator under the host-owned ADR-060 claim evaluation.
+    ///
+    /// Event-only evaluation reads only the public Events of the committed
+    /// range and may run as soon as it committed, even after a failed fold.
+    /// State-dependent evaluation also reads the public source prefix, from
+    /// the first Timeline Event through the evidence's Projection cut, and is
+    /// unavailable until that cut exists. Both reads use the same public
+    /// filter as [`Self::source_events`]. Evaluation is
+    /// advisory: it never appends, approves, or resubmits, and the record
+    /// never strengthens the claim it was given. Returns `Ok(None)` before
+    /// any attempt committed.
+    ///
+    /// # Errors
+    /// Returns [`ExperimentError::ConsentRevokedV1`] once the session's
+    /// consent scope is closed or closing, or a store error when the
+    /// committed evidence cannot be read.
+    pub fn evaluate_pipeline_evidence(
+        &self,
+        evaluator: &'static str,
+        claim: &pos_core::ReplayClaimEvaluationV1,
+    ) -> Result<Option<PipelineEvaluationRecordV1>, ExperimentError> {
+        if self.consent_revoked || self.consent_revocation_pending.is_some() {
+            return Err(ExperimentError::ConsentRevokedV1);
+        }
+        let Some(evidence) = self.pipeline_evidence.as_ref() else {
+            return Ok(None);
+        };
+        self.pipeline_evaluators
+            .prepare(evaluator, evidence, claim)
+            .map_or_else(
+                |record| Ok(Some(*record)),
+                |prepared| {
+                    self.read_evaluation_inputs(
+                        evidence.committed_range(),
+                        prepared.folded_through(),
+                    )
+                    .map(|(committed, prefix)| Some(prepared.run(&committed, &prefix)))
+                },
+            )
+    }
+
+    /// Read the public Events of the committed range and, for a
+    /// state-dependent evaluation, the public source prefix through its cut.
+    ///
+    /// The committed range is filtered too: a Plugin-owned protected Event
+    /// type can commit inside a consent token fence, and an evaluator holds
+    /// no consent capability.
+    fn read_evaluation_inputs(
+        &self,
+        range: pos_core::PipelineCommittedRangeV1,
+        folded_through: Option<pos_core::clock::Seq>,
+    ) -> Result<(Vec<Event>, Vec<Event>), ExperimentError> {
+        lock_store(&self.store).and_then(|store| {
+            read_committed_range(&**store, range).and_then(|committed| {
+                folded_through
+                    .map_or(Ok(Vec::new()), |through| {
+                        read_completed_prefix(&**store, range.timeline_id(), through)
+                    })
+                    .map(|prefix| {
+                        (
+                            retain_public_events(committed),
+                            retain_public_events(prefix),
+                        )
+                    })
+            })
+        })
     }
 
     /// Close this host session at the next Tick Boundary.
@@ -2179,7 +2380,7 @@ impl ExperimentSession {
                 let head = store
                     .logical_head(self.timeline.id())
                     .map_err(ExperimentError::from)?;
-                admit_scheduled_pass(
+                admit_scheduled_pass_receipt(
                     &mut **store,
                     &mut self.registry,
                     revisions,
@@ -2187,7 +2388,10 @@ impl ExperimentSession {
                     current_now_secs(),
                 )
             }) {
-                Ok(count) => count,
+                Ok(receipt) => self.record_pipeline_commit(
+                    pos_core::PipelineIngressV1::ScheduledAiDriver,
+                    receipt,
+                ),
                 Err(error) => {
                     self.registry.abort_step();
                     self.health = SessionHealth::Faulted;
@@ -2217,6 +2421,7 @@ impl ExperimentSession {
         let after_count = self.fold_captured_range_or_fault(&after)?;
         folded_events = folded_events.saturating_add(after_count.0);
         self.timeline = after.timeline;
+        self.bind_pipeline_projection_cut();
         self.total_events = self.total_events.saturating_add(folded_events);
         self.ticks = self.ticks.saturating_add(1);
 
@@ -2543,6 +2748,8 @@ impl ExperimentSession {
             revoked_subjects: self.revoked_subjects.clone(),
             consent_revocation_pending: self.consent_revocation_pending,
             operation_token: self.operation_token.clone(),
+            pipeline_evidence: None,
+            pipeline_evaluators: pipeline_evaluation::PipelineEvaluatorRegistryV1::default(),
         })
     }
 
