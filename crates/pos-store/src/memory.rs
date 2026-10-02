@@ -45,6 +45,7 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta},
     validate_artifact_registration_catalog_graph_v1, validate_closed_adapter_recording_v1,
+    validate_local_cut_owner_result_v1, validate_local_cut_owner_successor_v1,
     validate_manifest_owner_admission_snapshot_v1, AdapterCallReservationOutcomeV1,
     AdapterCallReservationV1, AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1,
     AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1,
@@ -11418,28 +11419,6 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
     }
 }
 
-fn validate_memory_local_cut_result(
-    owner_id: [u8; 32],
-    cut_id: u64,
-    result: &LocalCutOwnerCommitV1,
-) -> Result<(), LocalCutOwnerErrorV1> {
-    let seal = result.seal.as_input();
-    let commit = result.commit.as_input();
-    let receipt = result.receipt.as_input();
-    if result.kind != LocalCutOwnerCommitKindV1::Applied
-        || seal.owner_id != owner_id
-        || seal.cut_id != cut_id
-        || commit.owner_id != owner_id
-        || commit.cut_id != cut_id
-        || commit.seal_hash != result.seal.digest()
-        || receipt.commit_record_hash != result.commit.digest()
-        || result.receipt.digest() == Hash::zero()
-    {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
-    Ok(())
-}
-
 fn validate_memory_local_cut_operation(
     owner_id: [u8; 32],
     operation_id: Hash,
@@ -11450,7 +11429,7 @@ fn validate_memory_local_cut_operation(
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
     let cut_id = operation.request.seal.as_input().cut_id;
-    validate_memory_local_cut_result(owner_id, cut_id, &operation.result)?;
+    validate_local_cut_owner_result_v1(owner_id, cut_id, &operation.result)?;
     let commit = operation.result.commit.as_input();
     if operation.request.operation_id != operation_id
         || operation.result.seal != operation.request.seal
@@ -11503,7 +11482,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
             if *stored_owner != owner_id {
                 continue;
             }
-            validate_memory_local_cut_result(owner_id, *cut_id, result)?;
+            validate_local_cut_owner_result_v1(owner_id, *cut_id, result)?;
             if *cut_id > state.last_visible_cut_id {
                 return Err(LocalCutOwnerErrorV1::CorruptState);
             }
@@ -11572,9 +11551,6 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         let operation_id = batch.request().operation_id;
         let intent_digest = batch.intent_digest();
         let result = batch.applied_result();
-        // The prepared batch is immutable: its intent digest, successor state,
-        // and applied result were derived and validated together by
-        // prepare_local_cut_owner_commit_v1.
         let current_state = self.read_local_cut_owner_state_v1(owner_id)?;
         if let Some(retry) =
             self.resolve_local_cut_owner_retry_v1(owner_id, operation_id, intent_digest)?
@@ -11585,42 +11561,12 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
             .read_manifest_owner_state_v1(owner_id)
             .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?
             .ok_or(LocalCutOwnerErrorV1::Conflict)?;
+        validate_local_cut_owner_successor_v1(&batch, &admission, current_state.as_ref())?;
         let request = batch.request();
-        let seal = request.seal.as_input();
         let successor = batch.successor_state();
-        if seal.owner_id != owner_id
-            || seal.configuration_generation != admission.configuration_generation
-            || seal.previous_visible_receipt_hash != admission.previous_visible_lcq1_hash
-            || seal.expected_inventory_generation != admission.inventory_generation
-            || successor.configuration_generation != admission.configuration_generation
-            || successor.previous_visible_lcq1_hash != Some(result.receipt.digest())
-            || successor.inventory_generation != request.result_inventory_generation
-            || successor.timelines != admission.timelines
-        {
-            return Err(LocalCutOwnerErrorV1::Conflict);
-        }
-        match current_state {
-            Some(state) => {
-                let expected_tick = state
-                    .last_visible_tick
-                    .checked_add(1)
-                    .ok_or(LocalCutOwnerErrorV1::Conflict)?;
-                if successor.last_visible_cut_id <= state.last_visible_cut_id
-                    || successor.last_visible_tick != expected_tick
-                    || successor.membership_epoch != state.membership_epoch
-                {
-                    return Err(LocalCutOwnerErrorV1::Conflict);
-                }
-            }
-            None => {
-                if successor.last_visible_tick != 1 || successor.membership_epoch != 0 {
-                    return Err(LocalCutOwnerErrorV1::Conflict);
-                }
-            }
-        }
         // The owner-state read bounds every retained cut by the last visible cut,
         // and the successor cut is strictly newer, so this key is unused.
-        let cut_id = seal.cut_id;
+        let cut_id = request.seal.as_input().cut_id;
         let operation = MemoryLocalCutOwnerOperationV1 {
             intent_digest,
             request: request.clone(),
