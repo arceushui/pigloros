@@ -1122,12 +1122,22 @@ impl PluginRegistry {
         let adapter_admission = self
             .adapter_admission_for_catalog(&catalog)
             .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
-        Ok(AdmittedCompositionV1 {
+        Ok(self.bind_admitted_composition(catalog, adapter_admission))
+    }
+
+    /// Bind a validated catalog and its adapter admission to this registry's
+    /// current identity and registration revision.
+    fn bind_admitted_composition(
+        &self,
+        catalog: ManifestAdmissionCatalogV1,
+        adapter_admission: pos_core::AdapterAdmissionV1,
+    ) -> AdmittedCompositionV1 {
+        AdmittedCompositionV1 {
             registry_identity: Arc::clone(&self.manifest_identity),
             registration_revision: self.registration_revision,
             catalog,
             adapter_admission,
-        })
+        }
     }
 
     /// Admit every Plugin already registered in this local registry.
@@ -1196,12 +1206,7 @@ impl PluginRegistry {
         }
         self.registration_revision += 1;
         self.manifest_batch = Some(catalog.clone());
-        Ok(AdmittedCompositionV1 {
-            registry_identity: Arc::clone(&self.manifest_identity),
-            registration_revision: self.registration_revision,
-            catalog,
-            adapter_admission,
-        })
+        Ok(self.bind_admitted_composition(catalog, adapter_admission))
     }
 
     /// Revalidate the same static batch for a later owner generation.
