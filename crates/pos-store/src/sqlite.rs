@@ -27752,6 +27752,7 @@ mod manifest_owner_admission_coverage {
     const SECOND_SCOPE: &str = "timeline_id = X'02020202020202020202020202020202'";
     const FIRST_COPY: &str = "timeline_id = X'01010101010101010101010101010101' \
                               AND plugin_id = X'01010101010101010101010101010101'";
+    // Bypasses CHECK and foreign-key guards to plant rows only a tampered file could hold.
     const UNCHECKED: &str = "PRAGMA ignore_check_constraints = ON; PRAGMA foreign_keys = OFF";
     const CHECKED: &str = "PRAGMA ignore_check_constraints = OFF";
     const ABORT: &str = "ABORT, 'injected owner admission fault'";
@@ -27788,11 +27789,13 @@ mod manifest_owner_admission_coverage {
         operation_id: hash(51),
     };
 
+    // Non-BLOB owner-state columns: decoding fails, so the port reports StorageFailure.
     const STATE_TYPES: [&str; 3] = [
         "configuration_generation = 7",
         "previous_visible_lcq1_hash = 7",
         "inventory_generation = 7",
     ];
+    // Non-BLOB admission-row columns: decoding fails, so the port reports StorageFailure.
     const ADMISSION_TYPES: [&str; 10] = [
         "timeline_id = 7",
         "scope = 7",
@@ -27805,6 +27808,7 @@ mod manifest_owner_admission_coverage {
         "expected_inventory_generation = 7",
         "resulting_inventory_generation = 7",
     ];
+    // Non-BLOB policy-copy columns: decoding fails, so the port reports StorageFailure.
     const COPY_TYPES: [&str; 5] = [
         "plugin_id = 7",
         "eop1_bytes = 7",
@@ -27812,6 +27816,7 @@ mod manifest_owner_admission_coverage {
         "opc1_bytes = 7",
         "opc1_leaf_cbor = 7",
     ];
+    // Mistyped operation-row columns: decoding fails, so the port reports StorageFailure.
     const OPERATION_TYPES: [&str; 5] = [
         "request_digest = 7",
         "configuration_generation = 7",
@@ -27820,6 +27825,7 @@ mod manifest_owner_admission_coverage {
         "receipt_set_digest = 7",
     ];
 
+    // Wrong-length or zero owner-state values: rows decode but the port reports CorruptState.
     const STATE_SHAPES: [&str; 6] = [
         "configuration_generation = X'00'",
         "configuration_generation = zeroblob(8)",
@@ -27828,6 +27834,7 @@ mod manifest_owner_admission_coverage {
         "inventory_generation = X'00'",
         "inventory_generation = zeroblob(32)",
     ];
+    // Wrong-length ids or digests and undecodable CBOR in admission rows: CorruptState.
     const ADMISSION_SHAPES: [&str; 11] = [
         "timeline_id = X'00'",
         "scope = X'00'",
@@ -27841,11 +27848,13 @@ mod manifest_owner_admission_coverage {
         "expected_inventory_generation = X'00'",
         "resulting_inventory_generation = X'00'",
     ];
+    // Wrong-length Plugin id and undecodable leaf CBOR in policy copies: CorruptState.
     const COPY_SHAPES: [&str; 3] = [
         "plugin_id = X'00'",
         "eop1_leaf_cbor = X'FF'",
         "opc1_leaf_cbor = X'FF'",
     ];
+    // Wrong-length or zero digests and generations in operation rows: CorruptState.
     const OPERATION_SHAPES: [&str; 5] = [
         "request_digest = X'00'",
         "configuration_generation = X'00'",
@@ -27854,6 +27863,7 @@ mod manifest_owner_admission_coverage {
         "receipt_set_digest = X'00'",
     ];
 
+    // Dropped tables (StorageFailure) and missing rows of a committed generation (CorruptState).
     const STRUCTURE_FAULTS: [(&str, AdmissionError); 7] = [
         (UNREADABLE_ORPHANS, STORAGE),
         (DROP_ADMISSIONS, STORAGE),
@@ -27863,17 +27873,20 @@ mod manifest_owner_admission_coverage {
         (MISSING_COPY, CORRUPT),
         (DELETE_OPERATIONS, CORRUPT),
     ];
+    // Operation and admission damage that exact-retry resolution must not replay.
     const RETRY_FAULTS: [(&str, AdmissionError); 4] = [
         (UNREADABLE_OPERATION, STORAGE),
         (DROP_ADMISSIONS, STORAGE),
         (EMPTY_ADMISSIONS, CORRUPT),
         (SHORT_RECEIPT_COUNT, CORRUPT),
     ];
+    // Admission-row damage met while listing one operation's receipt hashes.
     const RECEIPT_FAULTS: [(&str, AdmissionError); 3] = [
         ("timeline_id = 7", STORAGE),
         ("timeline_id = X'00'", CORRUPT),
         ("scope = 7", STORAGE),
     ];
+    // Tables whose INSERT an injected trigger aborts mid-commit, with the mapped error.
     const INSERT_FAULTS: [(&str, AdmissionError); 3] = [
         (ADMISSIONS, STORAGE),
         (STATE, CONFLICT),
@@ -28107,6 +28120,31 @@ mod manifest_owner_admission_coverage {
             run_unchecked(&store, &corrupt(table, assignment, filter))?;
             assert_port_fails(&mut store, expected)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn checked_schema_rejects_representative_fault_writes() -> TestResult {
+        let store = admitted_store()?;
+        let writes = [
+            corrupt(STATE, STATE_TYPES[0], ALL),
+            corrupt(STATE, STATE_SHAPES[0], ALL),
+            corrupt(ADMISSIONS, ADMISSION_TYPES[0], FIRST_SCOPE),
+            corrupt(ADMISSIONS, ADMISSION_SHAPES[0], FIRST_SCOPE),
+            corrupt(COPIES, COPY_SHAPES[0], FIRST_COPY),
+            corrupt(OPERATIONS, OPERATION_TYPES[0], ALL),
+            corrupt(OPERATIONS, OPERATION_SHAPES[0], ALL),
+        ];
+        for write in writes {
+            let error = run_sql(&store, &write)
+                .err()
+                .ok_or("checked schema accepted a fault write")?;
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+        assert!(store.read_manifest_owner_state_v1(OWNER)?.is_some());
         Ok(())
     }
 
