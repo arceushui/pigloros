@@ -12360,8 +12360,15 @@ mod coverage_entrypoints {
         Ok(())
     }
 
-    type CatalogFixture = (PreparedArtifactRegistrationBatchV1, AdapterRecordingSessionV1);
-    type CommittedCatalog = (MemoryStore, PreparedArtifactRegistrationBatchV1, (Hash, Hash));
+    type CatalogFixture = (
+        PreparedArtifactRegistrationBatchV1,
+        AdapterRecordingSessionV1,
+    );
+    type CommittedCatalog = (
+        MemoryStore,
+        PreparedArtifactRegistrationBatchV1,
+        (Hash, Hash),
+    );
 
     // This fixture isolates the memory catalog port. Its synthetic WCR1
     // registration is not Wave 8 owner-verification evidence.
@@ -12555,11 +12562,13 @@ mod coverage_entrypoints {
             (root_bytes, root_registration),
         ]
         .into_iter()
-        .map(|(artifact_bytes, registration)| ArtifactRegistrationInputV1 {
-            owner_id,
-            artifact_bytes,
-            registration_cbor: registration.canonical_cbor().to_vec(),
-        })
+        .map(
+            |(artifact_bytes, registration)| ArtifactRegistrationInputV1 {
+                owner_id,
+                artifact_bytes,
+                registration_cbor: registration.canonical_cbor().to_vec(),
+            },
+        )
         .collect();
         let batch = prepare_artifact_registration_batch_v1(
             owner_id,

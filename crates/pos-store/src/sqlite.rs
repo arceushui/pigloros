@@ -25662,7 +25662,8 @@ pub(super) mod key_registry_coverage {
                 owner_id: &OwnerIdV1,
                 artifact_class: ErasureArtifactClassV1,
                 artifact_bytes: &[u8],
-            ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+            ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1>
+            {
                 if artifact_class != ErasureArtifactClassV1::TimelineReplay
                     || WorldRecordingReceiptV1::from_canonical_cbor(artifact_bytes).is_err()
                 {
@@ -25676,7 +25677,8 @@ pub(super) mod key_registry_coverage {
                 &self,
                 _owner_id: &OwnerIdV1,
                 _label: &str,
-            ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+            ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1>
+            {
                 Ok(ArtifactDataClassV1::PublicRecord)
             }
 
@@ -25780,8 +25782,8 @@ pub(super) mod key_registry_coverage {
                 ErasureArtifactClassV1::TimelineReplay,
                 &recording_bytes,
             )?;
-            let root_registration =
-                extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
+            let root_registration = extract_repro_manifest_root_registration_v1(
+                ReproManifestRootRegistrationInputV1 {
                     root_bytes: &root_bytes,
                     recording_receipt_bytes: &recording_bytes,
                     recording_registration: &recording_registration,
@@ -25791,7 +25793,8 @@ pub(super) mod key_registry_coverage {
                     transcript_registration: &transcript_registration,
                     owner_id: &owner_id,
                     label_data_class: None,
-                })?;
+                },
+            )?;
             let root_address = root_registration.address();
             let mut inputs = Vec::new();
             for (artifact_bytes, registration) in [
@@ -25910,9 +25913,7 @@ pub(super) mod key_registry_coverage {
             address: Hash,
         ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, CatalogError> {
             ArtifactRegistrationPersistencePortV1::read_artifact_registration(
-                store,
-                owner_id,
-                address,
+                store, owner_id, address,
             )
         }
 

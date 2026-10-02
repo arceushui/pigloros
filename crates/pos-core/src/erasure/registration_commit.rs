@@ -1132,7 +1132,11 @@ mod tests {
         input: &ArtifactRegistrationInputV1,
     ) -> Result<ArtifactRegistrationCatalogRowV1, ArtifactRegistrationErrorV1> {
         let registration = ArtifactRegistrationV1::from_canonical_cbor(&input.registration_cbor)?;
-        Ok(catalog_row(input.owner_id, &input.artifact_bytes, registration))
+        Ok(catalog_row(
+            input.owner_id,
+            &input.artifact_bytes,
+            registration,
+        ))
     }
 
     fn catalog_rows() -> Result<CatalogRows, Box<dyn std::error::Error>> {
@@ -1152,8 +1156,11 @@ mod tests {
         let mut artifact_bytes = b"\x84\x44".to_vec();
         artifact_bytes.extend_from_slice(magic);
         artifact_bytes.extend_from_slice(b" is not a canonical record");
-        let registration =
-            loose_registration(&owner_id, ErasureArtifactClassV1::ReproManifest, &artifact_bytes)?;
+        let registration = loose_registration(
+            &owner_id,
+            ErasureArtifactClassV1::ReproManifest,
+            &artifact_bytes,
+        )?;
         Ok(catalog_row(owner_id, &artifact_bytes, registration))
     }
 
@@ -1162,7 +1169,10 @@ mod tests {
         let closure = complete_closure()?;
         let prepared = prepare(closure.owner_id, closure.root, closure.inputs())?;
         assert_eq!(prepared.root_registration_address(), closure.root);
-        assert_eq!(prepared.root_operation_id(), Hash::from_bytes(RUN_OPERATION_ID));
+        assert_eq!(
+            prepared.root_operation_id(),
+            Hash::from_bytes(RUN_OPERATION_ID)
+        );
         assert_eq!(prepared.records().len(), 4);
         Ok(())
     }
@@ -1226,7 +1236,11 @@ mod tests {
             &admission_registration,
         )?;
         let mut inputs = closure.inputs();
-        inputs.push(registration_input(closure.owner_id, other_bytes, &other_registration));
+        inputs.push(registration_input(
+            closure.owner_id,
+            other_bytes,
+            &other_registration,
+        ));
         assert_eq!(
             prepare(closure.owner_id, closure.root, inputs),
             Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
@@ -1270,8 +1284,11 @@ mod tests {
             ErasureArtifactClassV1::ReproManifest,
             &transcript_bytes,
         )?;
-        let manifest_registration =
-            loose_registration(&owner_id, ErasureArtifactClassV1::ReproManifest, &manifest_bytes)?;
+        let manifest_registration = loose_registration(
+            &owner_id,
+            ErasureArtifactClassV1::ReproManifest,
+            &manifest_bytes,
+        )?;
         let root = manifest_registration.address();
         // The root is derived first, so its own MAT1 extraction reports the foreign MAA1.
         let inputs = vec![
@@ -1320,8 +1337,14 @@ mod tests {
     #[test]
     fn catalog_rows_reject_missing_native_dependencies() -> TestResult {
         let rows = catalog_rows()?;
-        assert_eq!(validate_transcript_catalog_row(&rows.transcript, &rows.all()), Ok(()));
-        assert_eq!(validate_root_catalog_row(&rows.manifest, &rows.all()), Ok(()));
+        assert_eq!(
+            validate_transcript_catalog_row(&rows.transcript, &rows.all()),
+            Ok(())
+        );
+        assert_eq!(
+            validate_root_catalog_row(&rows.manifest, &rows.all()),
+            Ok(())
+        );
         assert_eq!(
             validate_transcript_catalog_row(&rows.transcript, &rows.without(b"MAA1")),
             Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
