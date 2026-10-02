@@ -18,9 +18,9 @@ use pos_core::{
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{
-    begin_immediate_scope, finish_transaction, sqlite_manifest_owner_has_rows,
-    sqlite_read_manifest_owner_current_state, SqliteImmediateScopeV1,
-    SqliteManifestOwnerAdmissionGenerationV1, SqliteStore,
+    begin_immediate_scope, finish_owner_scope, sqlite_manifest_owner_has_rows,
+    sqlite_read_manifest_owner_current_state, SqliteManifestOwnerAdmissionGenerationV1,
+    SqliteStore,
 };
 
 pub(super) const LOCAL_CUT_OWNER_SCHEMA_SQL: &str =
@@ -842,37 +842,6 @@ fn sqlite_update_manifest_owner_state_after_local_cut(
     }
 }
 
-fn finish_local_cut_owner_scope<T>(
-    connection: &Connection,
-    scope: SqliteImmediateScopeV1,
-    result: Result<T, LocalCutOwnerErrorV1>,
-) -> Result<T, LocalCutOwnerErrorV1> {
-    match scope {
-        SqliteImmediateScopeV1::Transaction => finish_transaction(
-            connection,
-            result,
-            |_, _| LocalCutOwnerErrorV1::StorageFailure,
-            |_, _| LocalCutOwnerErrorV1::StorageFailure,
-        ),
-        SqliteImmediateScopeV1::Savepoint => match result {
-            Ok(value) => connection
-                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
-                .map(|()| value)
-                .map_err(|_| LocalCutOwnerErrorV1::StorageFailure),
-            Err(error) => {
-                let rollback = connection.execute_batch(
-                    "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
-                     RELEASE SAVEPOINT pigloros_protected_effect",
-                );
-                match rollback {
-                    Ok(()) => Err(error),
-                    Err(_) => Err(LocalCutOwnerErrorV1::StorageFailure),
-                }
-            }
-        },
-    }
-}
-
 impl LocalCutOwnerPersistencePortV1 for SqliteStore {
     fn read_local_cut_owner_state_v1(
         &self,
@@ -952,7 +921,12 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
             sqlite_update_manifest_owner_state_after_local_cut(&self.conn, &admission, &applied)?;
             Ok(applied)
         })();
-        finish_local_cut_owner_scope(&self.conn, scope, result)
+        finish_owner_scope(
+            &self.conn,
+            scope,
+            result,
+            LocalCutOwnerErrorV1::StorageFailure,
+        )
     }
 
     fn read_local_cut_owner_commit_v1(
@@ -2330,20 +2304,20 @@ mod local_cut_owner_coverage {
         connection.execute_batch("BEGIN")?;
         let scope = begin_immediate_scope(&connection)?;
         assert_eq!(
-            finish_local_cut_owner_scope(&connection, scope, Ok(3)),
+            finish_owner_scope(&connection, scope, Ok(3), LocalError::StorageFailure),
             Ok(3)
         );
         let scope = begin_immediate_scope(&connection)?;
         let rejected: Result<(), LocalError> = Err(LocalError::Conflict);
         assert_eq!(
-            finish_local_cut_owner_scope(&connection, scope, rejected),
+            finish_owner_scope(&connection, scope, rejected, LocalError::StorageFailure),
             rejected
         );
         for result in [Ok(()), rejected] {
             let scope = begin_immediate_scope(&connection)?;
             connection.execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")?;
             assert_eq!(
-                finish_local_cut_owner_scope(&connection, scope, result),
+                finish_owner_scope(&connection, scope, result, LocalError::StorageFailure),
                 Err(LocalError::StorageFailure)
             );
         }

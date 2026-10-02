@@ -6652,7 +6652,12 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
                 receipt_hashes,
             })
         })();
-        finish_manifest_owner_admission_scope(&self.conn, scope, result)
+        finish_owner_scope(
+            &self.conn,
+            scope,
+            result,
+            ManifestOwnerAdmissionErrorV1::StorageFailure,
+        )
     }
 
     fn read_manifest_owner_admission_v1(
@@ -6699,23 +6704,25 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
     }
 }
 
-fn finish_manifest_owner_admission_scope<T>(
+/// Finish an owner-boundary scope, reporting any lost outcome as `storage_failure`.
+fn finish_owner_scope<T, E: Copy>(
     connection: &Connection,
     scope: SqliteImmediateScopeV1,
-    result: Result<T, ManifestOwnerAdmissionErrorV1>,
-) -> Result<T, ManifestOwnerAdmissionErrorV1> {
+    result: Result<T, E>,
+    storage_failure: E,
+) -> Result<T, E> {
     match scope {
         SqliteImmediateScopeV1::Transaction => finish_transaction(
             connection,
             result,
-            |_, _| ManifestOwnerAdmissionErrorV1::StorageFailure,
-            |_, _| ManifestOwnerAdmissionErrorV1::StorageFailure,
+            |_, _| storage_failure,
+            |_, _| storage_failure,
         ),
         SqliteImmediateScopeV1::Savepoint => match result {
             Ok(value) => connection
                 .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
                 .map(|()| value)
-                .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure),
+                .map_err(|_| storage_failure),
             Err(error) => {
                 let rollback = connection.execute_batch(
                     "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
@@ -6723,7 +6730,7 @@ fn finish_manifest_owner_admission_scope<T>(
                 );
                 match rollback {
                     Ok(()) => Err(error),
-                    Err(_) => Err(ManifestOwnerAdmissionErrorV1::StorageFailure),
+                    Err(_) => Err(storage_failure),
                 }
             }
         },
