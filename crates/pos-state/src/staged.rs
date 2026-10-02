@@ -1,11 +1,11 @@
 //! Staged protected projection results and their install checks (ADR-113 §2).
 
 use pos_core::{
-    staged_install::ProjectionSourceV1, ConsentRevokedV1, EntityId, Event, PluginId, StateRegistry,
+    staged_install::ProjectionSourceV1, ConsentRevokedV1, EntityId, Event, State,
     EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 
-use crate::{ProjectionObservationPolicyV1, RecordedConsumerV1};
+use crate::{ProjectionCandidateErrorV1, RecordedConsumerV1, StagedProjectionV1};
 
 /// Closed failures of [`crate::ProjectionRegistry::prepare_install`]. The
 /// visible registry is unchanged on every failure.
@@ -19,41 +19,7 @@ pub enum InstallErrorV1 {
     SlotMismatch,
 }
 
-/// One staged consumer's private State map and the identity it must match.
-pub(super) struct StagedSlotV1 {
-    pub(super) plugin_id: PluginId,
-    pub(super) name: &'static str,
-    pub(super) observation_policy: Option<ProjectionObservationPolicyV1>,
-    pub(super) registry: StateRegistry,
-}
-
-/// The complete result of one staged fold.
-///
-/// It holds no reducer instance and exposes no State; its maps reach a
-/// visible registry only through [`crate::ProjectionRegistry::prepare_install`]
-/// and ADR-112's checked handoff. It cannot be cloned.
-pub struct StagedProjectionV1 {
-    consumers: Vec<RecordedConsumerV1>,
-    source: ProjectionSourceV1,
-    slots: Vec<StagedSlotV1>,
-    revocations: Vec<EntityId>,
-}
-
 impl StagedProjectionV1 {
-    pub(super) const fn new(
-        consumers: Vec<RecordedConsumerV1>,
-        source: ProjectionSourceV1,
-        slots: Vec<StagedSlotV1>,
-        revocations: Vec<EntityId>,
-    ) -> Self {
-        Self {
-            consumers,
-            source,
-            slots,
-            revocations,
-        }
-    }
-
     /// The recorded consumers, in fold order.
     #[must_use]
     pub fn consumers(&self) -> &[RecordedConsumerV1] {
@@ -72,45 +38,47 @@ impl StagedProjectionV1 {
         &self.revocations
     }
 
-    /// The entities whose State differs between two staged results, slot by
-    /// slot, over the union of their entity IDs, sorted by raw `EntityId`
-    /// bytes. An absent entity or slot counts as default State. The result
-    /// holds IDs only.
-    #[must_use]
-    pub fn diverged_entities(&self, other: &Self) -> Vec<EntityId> {
-        let empty = &StateRegistry::new();
-        let mut diverged: Vec<EntityId> = (0..self.slots.len().max(other.slots.len()))
-            .flat_map(move |index| {
-                let mine = slot_registry(&self.slots, index, empty);
-                let theirs = slot_registry(&other.slots, index, empty);
+    /// The entities whose State differs between two staged results, matched
+    /// consumer by consumer on their Plugin identity, over the union of their
+    /// entity IDs, sorted by raw `EntityId` bytes. An absent entity counts as
+    /// empty State. The result holds IDs only.
+    ///
+    /// # Errors
+    /// Returns [`ProjectionCandidateErrorV1::ConsumerSetMismatch`] when the
+    /// two results were folded for different consumer sets.
+    pub fn diverged_entities(
+        &self,
+        other: &Self,
+    ) -> Result<Vec<EntityId>, ProjectionCandidateErrorV1> {
+        let pairs = self
+            .slots
+            .iter()
+            .map(|mine| {
+                other
+                    .slots
+                    .iter()
+                    .find(|theirs| theirs.plugin_id == mine.plugin_id)
+                    .map(|theirs| (&mine.registry, &theirs.registry))
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|pairs| pairs.len() == other.slots.len())
+            .ok_or(ProjectionCandidateErrorV1::ConsumerSetMismatch)?;
+        let empty = State::new();
+        let mut diverged: Vec<EntityId> = pairs
+            .into_iter()
+            .flat_map(|(mine, theirs)| {
+                let empty = &empty;
                 mine.entity_ids()
                     .chain(theirs.entity_ids())
                     .filter(move |entity| {
-                        mine.get_or_default(entity) != theirs.get_or_default(entity)
+                        mine.get(entity).unwrap_or(empty) != theirs.get(entity).unwrap_or(empty)
                     })
             })
             .collect();
         diverged.sort_unstable_by_key(|entity| entity.inner().to_bytes());
         diverged.dedup();
-        diverged
+        Ok(diverged)
     }
-
-    pub(super) fn slots(&self) -> &[StagedSlotV1] {
-        &self.slots
-    }
-
-    pub(super) fn into_install_parts(self) -> (ProjectionSourceV1, Vec<StateRegistry>) {
-        let maps = self.slots.into_iter().map(|slot| slot.registry).collect();
-        (self.source, maps)
-    }
-}
-
-fn slot_registry<'s>(
-    slots: &'s [StagedSlotV1],
-    index: usize,
-    empty: &'s StateRegistry,
-) -> &'s StateRegistry {
-    slots.get(index).map_or(empty, |slot| &slot.registry)
 }
 
 /// Subject IDs of the `consent.revoked.v1` Events in one verified range.

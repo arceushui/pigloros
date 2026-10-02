@@ -29,7 +29,7 @@ use pos_runtime::{
 };
 use pos_state::{ProjectionRegistry, ProtectedProjectionProviderV1};
 use pos_store::StoreConfig;
-use pos_time::{ProtectedFoldV1, ProtectedReleaseV1};
+use pos_time::{ProtectedFoldV1, ProtectedReleaseV1, ReleaseHealthV1};
 use std::{
     fmt::Debug,
     sync::{
@@ -146,7 +146,10 @@ fn guarded(port: &mut TrustedClockFixtureV1) -> ReleaseGuardV1<'_> {
     ))
 }
 
-fn release(port: &mut TrustedClockFixtureV1) -> ProtectedReleaseV1<'_> {
+fn release<'p>(
+    port: &'p mut TrustedClockFixtureV1,
+    health: &'p ReleaseHealthV1,
+) -> ProtectedReleaseV1<'p> {
     let guard = guarded(port);
     let far = test_ok(SystemTrustedWallSourceV1.sample()).as_micros() + 1_000 * DAY;
     let policy = test_ok(WorldRetentionPolicyV1::new(WorldRetentionPolicyInputV1 {
@@ -184,7 +187,11 @@ fn release(port: &mut TrustedClockFixtureV1) -> ProtectedReleaseV1<'_> {
         access: Some(&access),
     };
     let expiries = test_ok(guard.applicable_expiries(&premises));
-    ProtectedReleaseV1 { guard, expiries }
+    ProtectedReleaseV1 {
+        guard,
+        expiries,
+        health,
+    }
 }
 
 #[test]
@@ -217,7 +224,7 @@ fn protected_release_fails_closed_before_any_premise_read_while_quarantined() {
         payload_hash: Hash::from_bytes([0; 32]),
     };
     let source = ProjectionSourceV1::bound(TimelineId::new(), None);
-    let plan = StagedFoldPlanV1::new(vec![consumer], &[draft_event], source);
+    let plan = StagedFoldPlanV1::new(vec![consumer], vec![draft_event], source);
     let shared: Arc<dyn ProtectedProjectionProviderV1 + Send + Sync> = provider.clone();
     let abandoned = executor.fold(&window, &mut late, shared, plan);
     assert_eq!(abandoned.err(), Some(StagedFoldErrorV1::DeadlineExceeded));
@@ -270,19 +277,20 @@ fn protected_release_fails_closed_before_any_premise_read_while_quarantined() {
     ));
     let mut reads = test_ok(host.read_sender());
 
+    let health = ReleaseHealthV1::new();
     let mut port = TrustedClockFixtureV1::new();
     let replayed = pos_time::replay(
         &mut reads,
         timeline,
         &mut registry,
         &closure,
-        release(&mut port),
+        release(&mut port, &health),
         &fold,
     );
-    assert_eq!(
-        replayed.err(),
-        Some(pos_core::CoreError::ArtifactUnavailable)
-    );
+    assert!(matches!(
+        replayed,
+        Err(pos_core::CoreError::ArtifactUnavailable)
+    ));
     let mut port = TrustedClockFixtureV1::new();
     let compared = pos_time::compare(
         &mut reads,
@@ -290,7 +298,7 @@ fn protected_release_fails_closed_before_any_premise_read_while_quarantined() {
         Seq::from_u64(1),
         [&mut registry, &mut other],
         [&closure, &closure],
-        release(&mut port),
+        release(&mut port, &health),
         [&fold, &fold],
     );
     assert!(matches!(
@@ -298,6 +306,7 @@ fn protected_release_fails_closed_before_any_premise_read_while_quarantined() {
         Err(pos_core::CoreError::ArtifactUnavailable)
     ));
     assert_eq!(premise_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(health.guard_release_late(), None);
 
     released.store(true, Ordering::SeqCst);
 }

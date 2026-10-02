@@ -4871,7 +4871,6 @@ dependencies = [
  "pos-runtime",
  "pos-state",
  "pos-store",
- "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

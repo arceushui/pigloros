@@ -4,13 +4,14 @@
 //! authority, so replay cannot submit new human actions. It returns no
 //! Events (ADR-113 §8).
 
+use pos_core::staged_install::PreparedInstallV1;
 use pos_core::store::SeqRange;
-use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1};
+use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1, StagedProtectedOutputV1};
 use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId, WorldReplayClosureV1};
 use pos_runtime::ErasureReadSenderV1;
 use pos_state::{ProjectionRegistry, RevokedSubjectsV1};
 
-use crate::{ProtectedFoldV1, ProtectedReleaseV1};
+use crate::{ProtectedFoldV1, ProtectedReleaseV1, ReleaseHealthV1};
 
 /// Replay **all** events on `timeline` and install the resulting State in
 /// `registry`.
@@ -83,16 +84,21 @@ fn replay_range(
 ) -> Result<(), CoreError> {
     pos_runtime::require_staged_release().map_err(crate::unavailable)?;
     let consumer_ids = crate::consumer_selection(registry)?;
-    let ProtectedReleaseV1 { guard, expiries } = release;
+    let ProtectedReleaseV1 {
+        guard,
+        expiries,
+        health,
+    } = release;
     let mut guard = Some(guard);
     let mut revoked = None;
     let mut outcome = Err(CoreError::ArtifactUnavailable);
     let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        if let Some(guard) = guard.take() {
+        if let Some(held) = guard.take() {
             let target = ReplayTargetV1 {
                 registry: &mut *registry,
-                guard,
+                guard: held,
                 expiries: &expiries,
+                health,
                 revoked: &mut revoked,
             };
             outcome = replay_in_fence(sender, request, &consumer_ids, target);
@@ -105,9 +111,9 @@ fn replay_range(
             &mut effect,
         )
         .map_err(crate::host_error_to_core);
-    // Teardown: a guard the effect never took is rolled back and released
-    // before the failure-path forget.
-    drop(guard);
+    // P2 and teardown of a guard the effect never took, before the
+    // failure-path forget.
+    crate::teardown(guard, health);
     crate::forget_on_failure(fenced.and(outcome), registry, revoked.as_ref())
 }
 
@@ -117,10 +123,12 @@ struct ReplayTargetV1<'t, 'g> {
     registry: &'t mut ProjectionRegistry,
     guard: ReleaseGuardV1<'g>,
     expiries: &'t ApplicableExpiriesV1,
+    health: &'t ReleaseHealthV1,
     revoked: &'t mut Option<RevokedSubjectsV1>,
 }
 
-/// Verify, read, fold, re-verify and hand one Replay over inside its fence.
+/// Stage one Replay inside its fence, then hand it over; on any failure
+/// before the handoff, run P2 and tear the guard down.
 fn replay_in_fence(
     sender: &mut ErasureReadSenderV1<'_>,
     request: &ReplayRequestV1<'_>,
@@ -131,8 +139,33 @@ fn replay_in_fence(
         registry,
         guard,
         expiries,
+        health,
         revoked,
     } = target;
+    let prepared = match prepare_replay(sender, request, consumer_ids, &guard, revoked, registry) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            crate::teardown(Some(guard), health);
+            return Err(error);
+        }
+    };
+    // ADR-112's overrun signal is recorded, and the displaced maps are
+    // dropped, after the handoff returns.
+    pos_runtime::handoff(guard, expiries, prepared)
+        .map(|used| health.record_overrun(used.overrun_signal()))
+        .map_err(crate::unavailable)
+}
+
+/// Verify, read, fold and re-verify one Replay inside its fence, check the
+/// handoff reserve, and prepare the install into `registry`.
+fn prepare_replay<'r>(
+    sender: &mut ErasureReadSenderV1<'_>,
+    request: &ReplayRequestV1<'_>,
+    consumer_ids: &[String],
+    guard: &ReleaseGuardV1<'_>,
+    revoked: &mut Option<RevokedSubjectsV1>,
+    registry: &'r mut ProjectionRegistry,
+) -> Result<StagedProtectedOutputV1<PreparedInstallV1<'r>>, CoreError> {
     let requested_use = crate::observed_world_replay_use(
         sender,
         request.timeline,
@@ -144,19 +177,13 @@ fn replay_in_fence(
     let events = crate::read_complete_world_replay(sender, &requested_use, read_bounds)?;
     *revoked = Some(RevokedSubjectsV1::from_verified_events(&events));
     let source = crate::verified_source(request.timeline, request.closure);
-    let staged = crate::fold_staged(request.fold, &guard, &events, source)?;
+    let staged = crate::fold_staged(request.fold, guard, events, source)?;
     let final_bounds = crate::require_world_replay(sender, request.closure, &requested_use)?;
     if final_bounds != read_bounds {
         return Err(CoreError::ArtifactUnavailable);
     }
-    crate::handoff_reserve(&guard)?;
-    let prepared = registry
-        .prepare_install(staged)
-        .map_err(crate::unavailable)?;
-    // The displaced maps are dropped after the handoff returns.
-    pos_runtime::handoff(guard, expiries, prepared)
-        .map(drop)
-        .map_err(crate::unavailable)
+    crate::handoff_reserve(guard)?;
+    registry.prepare_install(staged).map_err(crate::unavailable)
 }
 
 #[cfg(test)]
@@ -183,7 +210,8 @@ mod tests {
         }
     }
 
-    use crate::test_support::{with_release, ProtectedFixture};
+    use crate::test_support::{count_policy, with_release, with_release_health, ProtectedFixture};
+    use crate::ReleaseHealthV1;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::{EntityId, TimelineId},
@@ -774,6 +802,59 @@ mod tests {
                 .test_ok(),
             None
         );
+    }
+
+    /// A live slot with an observation policy installs a staged result
+    /// whose admitted entry carries the same policy, copied at open, and
+    /// refuses one whose slot has no policy. Neither release reports a
+    /// health signal.
+    #[test]
+    fn public_replay_installs_into_a_policy_bearing_live_slot() {
+        let fixture = ProtectedFixture::observable("count", count_reducer, count_policy());
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("observable-slot").test_ok();
+            let entity = EntityId::new();
+            commands
+                .append(timeline.id(), &[draft(entity), draft(entity)])
+                .test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut registry = fixture.registry(Arc::clone(&gate));
+        let mut reads = host.read_sender().test_ok();
+        let health = ReleaseHealthV1::new();
+        with_release_health(&health, |release| {
+            super::replay(
+                &mut reads,
+                timeline,
+                &mut registry,
+                &closure,
+                release,
+                &fixture.fold(),
+            )
+        })
+        .test_ok();
+        assert_eq!(count_for(&registry, timeline, &entity), 2);
+        assert_eq!(health.overrun_signal(), None);
+        assert_eq!(health.guard_release_late(), None);
+
+        let mut without_policy = fixture.registry_with_policy(gate, None);
+        let refused = with_release_health(&health, |release| {
+            super::replay(
+                &mut reads,
+                timeline,
+                &mut without_policy,
+                &closure,
+                release,
+                &fixture.fold(),
+            )
+        });
+        assert!(matches!(refused, Err(CoreError::ArtifactUnavailable)));
+        assert_eq!(count_for(&without_policy, timeline, &entity), 0);
+        assert_eq!(health.guard_release_late(), None);
     }
 
     /// A consumer the host provider never admitted fails the staged fold

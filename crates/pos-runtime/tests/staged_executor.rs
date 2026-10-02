@@ -25,6 +25,7 @@ use pos_runtime::{
     GuardedFoldWindowV1, HostProjectionProviderV1, InstalledPluginFactoryV1,
     InstalledPluginProductV1, NoActionApproverV1, StagedFoldErrorV1, StagedFoldExecutorV1,
     StagedFoldPlanV1, GUARD_RELEASE_LATE_SIGNAL, MAX_STAGED_INPUT_BYTES_V1,
+    STAGED_FOLD_WORKER_NAME_V1,
 };
 use pos_state::{
     InitialStateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1, RecordedConsumerV1,
@@ -349,7 +350,7 @@ struct Clocks {
 fn fold_in(
     provider: &Arc<HostProjectionProviderV1>,
     consumers: &[RecordedConsumerV1],
-    events: &[Event],
+    events: Vec<Event>,
     source: ProjectionSourceV1,
     clocks: Clocks,
 ) -> Result<StagedProjectionV1, StagedFoldErrorV1> {
@@ -378,7 +379,13 @@ fn fold(
     consumer: RecordedConsumerV1,
     events: &[Event],
 ) -> Result<StagedProjectionV1, StagedFoldErrorV1> {
-    fold_in(provider, &[consumer], events, source(), Clocks::default())
+    fold_in(
+        provider,
+        &[consumer],
+        events.to_vec(),
+        source(),
+        Clocks::default(),
+    )
 }
 
 fn assert_ready() {
@@ -424,42 +431,52 @@ fn plans_failing_admission_never_reach_a_callback() {
     let events = [counted(EntityId::new(), 1)];
     let mismatch = StagedFoldErrorV1::ConsumerSetMismatch;
 
-    let none = fold_in(&provider, &[], &events, source(), Clocks::default());
+    let none = fold_in(&provider, &[], events.to_vec(), source(), Clocks::default());
     assert_eq!(test_err(none), mismatch);
     let many: Vec<RecordedConsumerV1> = (0..65)
         .map(|_| RecordedConsumerV1::new(PluginId::new(), consumer.reducer_identity()))
         .collect();
-    let too_many = fold_in(&provider, &many, &events, source(), Clocks::default());
+    let too_many = fold_in(
+        &provider,
+        &many,
+        events.to_vec(),
+        source(),
+        Clocks::default(),
+    );
     assert_eq!(test_err(too_many), mismatch);
     let late = Clocks {
         guard: Some(ms(28_000)),
         ..Clocks::default()
     };
-    let expired = fold_in(&provider, &[consumer], &events, source(), late);
+    let expired = fold_in(&provider, &[consumer], events.to_vec(), source(), late);
     assert_eq!(test_err(expired), StagedFoldErrorV1::DeadlineExceeded);
     assert_eq!(builds.load(Ordering::SeqCst), 1);
     assert_ready();
 }
 
 /// Case 10 (input): 256 MiB of canonical Event bytes pass, one more fails.
+///
+/// Each plan takes its one large payload by move, and the zeroed buffer is
+/// never written, so the test copies no payload.
 #[test]
 fn the_input_limit_is_exact() {
     let _serial = serial();
     let (provider, consumer) = counting();
     let entity = EntityId::new();
-    let half = MAX_STAGED_INPUT_BYTES_V1 / 2 - COUNTED.len() as u64;
-    let payload = CanonicalBytes::from_vec(vec![0; usize::try_from(half).unwrap_or(0)]);
-    let mut events = vec![
-        event(entity, COUNTED, payload.clone(), 1),
-        event(entity, COUNTED, payload, 2),
-    ];
-    test_ok(fold(&provider, consumer, &events));
+    let limit = MAX_STAGED_INPUT_BYTES_V1 - COUNTED.len() as u64;
+    let largest = || {
+        let payload = vec![0; usize::try_from(limit).unwrap_or(usize::MAX)];
+        event(entity, COUNTED, CanonicalBytes::from_vec(payload), 1)
+    };
+    let fold_owned =
+        |events: Vec<Event>| fold_in(&provider, &[consumer], events, source(), Clocks::default());
+    test_ok(fold_owned(vec![largest()]));
 
-    events.push(event(entity, "", CanonicalBytes::from_vec(vec![1]), 3));
-    assert_eq!(
-        test_err(fold(&provider, consumer, &events)),
-        StagedFoldErrorV1::InputExceeded
-    );
+    let over = vec![
+        largest(),
+        event(entity, "", CanonicalBytes::from_vec(vec![1]), 2),
+    ];
+    assert_eq!(test_err(fold_owned(over)), StagedFoldErrorV1::InputExceeded);
     assert_ready();
 }
 
@@ -476,7 +493,7 @@ fn candidate_open_failures_are_closed_errors() {
     let repeated = fold_in(
         &provider,
         &[consumer, consumer],
-        &events,
+        events.to_vec(),
         source(),
         Clocks::default(),
     );
@@ -484,7 +501,7 @@ fn candidate_open_failures_are_closed_errors() {
     let unbound = fold_in(
         &provider,
         &[consumer],
-        &events,
+        events.to_vec(),
         ProjectionSourceV1::default(),
         Clocks::default(),
     );
@@ -586,7 +603,7 @@ fn callback_bounds_and_the_fold_deadline_are_enforced_cooperatively() {
             worker: Some(worker),
             guard: None,
         };
-        fold_in(&provider, &[consumer], &events, source(), clocks)
+        fold_in(&provider, &[consumer], events.clone(), source(), clocks)
     };
 
     let slow = fold_with(vec![ms(0), ms(0), ms(0), ms(0), ms(10), ms(311)]);
@@ -661,14 +678,41 @@ fn staged_limits_fail_the_fold_deterministically() {
 
 /// Case 20: one growing entity triggers an exact pass only when the
 /// declared upper bound crosses 64 MiB, plus the final pass.
+///
+/// The worker takes one mark before and one after the open and every
+/// callback, and one before every exact pass. With 20,000 Events that is
+/// 40,002 marks plus one per pass. Scripting the deadline at mark 40,004
+/// fails the fold, and at mark 40,005 it does not, so exactly two passes
+/// run: the one crossing 64 MiB and the final one.
 #[test]
 fn exact_passes_run_only_when_the_upper_bound_crosses_the_limit() {
+    const EVENTS: usize = 20_000;
+    const MARKS: usize = 2 + 2 * EVENTS + 2;
     let _serial = serial();
     let (provider, consumer) = counting();
     let entity = EntityId::new();
     // The fixture admission declares 4096 bytes per `apply`; 20,000 applies
     // cross 64 MiB once.
-    let staged = test_ok(fold(&provider, consumer, &counted_run(entity, 20_000)));
+    let deadline_at = |mark: usize| {
+        let mut worker = vec![ms(0); mark - 1];
+        worker.push(ms(26_900));
+        let clocks = Clocks {
+            worker: Some(worker),
+            guard: None,
+        };
+        fold_in(
+            &provider,
+            &[consumer],
+            counted_run(entity, EVENTS as u64),
+            source(),
+            clocks,
+        )
+    };
+    assert_eq!(
+        test_err(deadline_at(MARKS)),
+        StagedFoldErrorV1::DeadlineExceeded
+    );
+    let staged = test_ok(deadline_at(MARKS + 1));
     assert_eq!(staged.consumers(), &[consumer]);
     assert_ready();
 }
@@ -715,18 +759,26 @@ fn a_second_fold_is_refused_while_one_runs() {
 fn the_panic_hook_and_worker_are_installed_once() {
     let _serial = serial();
     let first = test_ok(StagedFoldExecutorV1::acquire());
-    let threads = thread_count();
+    assert_eq!(worker_threads(), 1);
     drop(first);
     let second = test_ok(StagedFoldExecutorV1::acquire());
-    assert_eq!(thread_count(), threads);
+    assert_eq!(worker_threads(), 1);
     assert!(format!("{second:?}").starts_with("StagedFoldExecutorV1"));
 
     let outside = std::thread::spawn(|| assert!(black_box(false), "outside a staged callback"));
     assert!(outside.join().is_err());
 }
 
-fn thread_count() -> usize {
-    std::fs::read_dir("/proc/self/task").map_or(0, Iterator::count)
+/// Threads of this process named as the staged-fold worker. Other test
+/// threads start and end concurrently, so only the worker's name counts.
+fn worker_threads() -> usize {
+    std::fs::read_dir("/proc/self/task").map_or(0, |tasks| {
+        tasks
+            .filter_map(Result::ok)
+            .filter_map(|task| std::fs::read_to_string(task.path().join("comm")).ok())
+            .filter(|name| name.trim_end() == STAGED_FOLD_WORKER_NAME_V1)
+            .count()
+    })
 }
 
 /// P1 and P2 (case 26): handoff work must be planned by `g0 + 29 s`, and a

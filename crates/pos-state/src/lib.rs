@@ -37,7 +37,7 @@ pub use candidate::{
     StagedAccountingV1, StagedLimitErrorV1, MAX_STAGED_CONSUMERS_V1,
     MAX_STAGED_ENTITIES_PER_CONSUMER_V1, MAX_STAGED_OUTPUT_BYTES_V1,
 };
-pub use staged::{InstallErrorV1, RevokedSubjectsV1, StagedProjectionV1};
+pub use staged::{InstallErrorV1, RevokedSubjectsV1};
 
 // ---------------------------------------------------------------------------
 // EntityStateProjection
@@ -97,6 +97,27 @@ impl Slot {
     fn fold(&mut self, event: &Event) {
         self.registry.apply(self.reducer.as_ref(), event);
     }
+}
+
+/// The complete result of one staged fold.
+///
+/// It holds no reducer instance and exposes no State; its maps reach a
+/// visible registry only through [`ProjectionRegistry::prepare_install`] and
+/// ADR-112's checked handoff. It cannot be cloned. Only a
+/// [`DetachedProjectionCandidateV1`] in this crate assembles one.
+pub struct StagedProjectionV1 {
+    consumers: Vec<RecordedConsumerV1>,
+    source: ProjectionSourceV1,
+    slots: Vec<StagedSlotV1>,
+    revocations: Vec<EntityId>,
+}
+
+/// One staged consumer's private State map and the identity it must match.
+struct StagedSlotV1 {
+    plugin_id: PluginId,
+    name: &'static str,
+    observation_policy: Option<ProjectionObservationPolicyV1>,
+    registry: StateRegistry,
 }
 
 /// Fold one Event into ordered reducer slots: the single live fold step
@@ -321,6 +342,23 @@ impl ProjectionRegistry {
         name: &str,
         reducer: Box<dyn Reducer>,
     ) -> Result<(), ProjectionSlotErrorV1> {
+        self.register_installed_reducer_with_policy(plugin_id, name, reducer, None)
+    }
+
+    /// Register an installed reducer with the observation policy, if any,
+    /// installed beside it at the same composition seam. A staged result
+    /// installs into this slot only when its copied policy equals
+    /// `observation_policy`.
+    ///
+    /// # Errors
+    /// Rejects an invalid name or duplicate Plugin identity before mutation.
+    pub fn register_installed_reducer_with_policy(
+        &mut self,
+        plugin_id: PluginId,
+        name: &str,
+        reducer: Box<dyn Reducer>,
+        observation_policy: Option<ProjectionObservationPolicyV1>,
+    ) -> Result<(), ProjectionSlotErrorV1> {
         if name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES {
             return Err(ProjectionSlotErrorV1::InvalidName);
         }
@@ -337,7 +375,7 @@ impl ProjectionRegistry {
                 plugin_id: Some(plugin_id),
                 reducer,
                 registry: StateRegistry::new(),
-                observation_policy: None,
+                observation_policy,
             },
         ));
         Ok(())
@@ -770,14 +808,14 @@ impl ProjectionRegistry {
     }
 
     fn check_install(&self, staged: &StagedProjectionV1) -> Result<(), InstallErrorV1> {
-        if !self.erasure_gate_bound || staged.source().generation() != self.current_generation() {
+        if !self.erasure_gate_bound || staged.source.generation() != self.current_generation() {
             return Err(InstallErrorV1::SourceMismatch);
         }
-        let slots_match = self.slots.len() == staged.slots().len()
+        let slots_match = self.slots.len() == staged.slots.len()
             && self
                 .slots
                 .iter()
-                .zip(staged.slots())
+                .zip(&staged.slots)
                 .all(|((name, live), staged)| {
                     live.plugin_id == Some(staged.plugin_id)
                         && name == staged.name
@@ -791,12 +829,12 @@ impl ProjectionRegistry {
     }
 
     fn prepare_checked(&mut self, staged: StagedProjectionV1) -> PreparedInstallV1<'_> {
-        let (source, maps) = staged.into_install_parts();
+        let StagedProjectionV1 { source, slots, .. } = staged;
         let pairs = self
             .slots
             .iter_mut()
-            .zip(maps)
-            .map(|((_, live), map)| (&mut live.registry, map))
+            .zip(slots)
+            .map(|((_, live), staged)| (&mut live.registry, staged.registry))
             .collect();
         PreparedInstallV1::new(pairs, &mut self.source, source)
     }

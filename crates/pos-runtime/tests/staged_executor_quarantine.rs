@@ -1,6 +1,7 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 //! Quarantine of the process-global staged fold executor (ADR-113 §5;
-//! acceptance cases 3, 17, 18 and 24 for the executor).
+//! acceptance cases 3, 17, 18 and 24 for the executor), and the worker's
+//! last-resort containment of a host panic.
 //!
 //! Quarantine closes protected release for the whole process, so this
 //! binary holds exactly one test.
@@ -21,7 +22,7 @@ use pos_core::{
 use pos_runtime::{
     require_staged_release, ExecutorHealthV1, GuardedFoldWindowV1, HostProjectionProviderV1,
     InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1, StagedFoldErrorV1,
-    StagedFoldExecutorV1, StagedFoldPlanV1,
+    StagedFoldExecutorV1, StagedFoldPlanV1, STAGED_FOLD_WORKER_NAME_V1,
 };
 use pos_state::{ProtectedProjectionProviderV1, RecordedConsumerV1};
 use std::{
@@ -152,13 +153,20 @@ fn guarded(port: &mut TrustedClockFixtureV1) -> ReleaseGuardV1<'_> {
     ))
 }
 
-fn thread_count() -> usize {
-    std::fs::read_dir("/proc/self/task").map_or(0, Iterator::count)
+/// Threads of this process named as the staged-fold worker.
+fn worker_threads() -> usize {
+    std::fs::read_dir("/proc/self/task").map_or(0, |tasks| {
+        tasks
+            .filter_map(Result::ok)
+            .filter_map(|task| std::fs::read_to_string(task.path().join("comm")).ok())
+            .filter(|name| name.trim_end() == STAGED_FOLD_WORKER_NAME_V1)
+            .count()
+    })
 }
 
 fn plan(consumer: RecordedConsumerV1, events: &[Event]) -> StagedFoldPlanV1 {
     let source = ProjectionSourceV1::bound(TimelineId::new(), None);
-    StagedFoldPlanV1::new(vec![consumer], events, source)
+    StagedFoldPlanV1::new(vec![consumer], events.to_vec(), source)
 }
 
 #[test]
@@ -169,7 +177,7 @@ fn an_abandoned_fold_quarantines_the_process_until_it_ends() {
     let entity = EntityId::new();
     let events = [counted(entity, 1), counted(entity, 2)];
     let executor = test_ok(StagedFoldExecutorV1::acquire());
-    let threads = thread_count();
+    assert_eq!(worker_threads(), 1);
 
     // Case 3: the guard thread decides failure at `g0 + 27 s` without the
     // callback returning, and quarantines the executor.
@@ -202,7 +210,7 @@ fn an_abandoned_fold_quarantines_the_process_until_it_ends() {
     );
     assert_eq!(refused.err(), Some(StagedFoldErrorV1::ExecutorQuarantined));
     drop(executor);
-    assert_eq!(thread_count(), threads);
+    assert_eq!(worker_threads(), 1);
 
     // Case 18: the abandoned job ends at its next check, its late result is
     // discarded, and only then does quarantine clear.
@@ -220,9 +228,31 @@ fn an_abandoned_fold_quarantines_the_process_until_it_ends() {
     let staged = test_ok(executor.fold(
         &window,
         &mut SystemGuardMonotonicSourceV1,
-        counting,
+        Arc::clone(&counting),
         plan(consumer, &events),
     ));
     assert_eq!(staged.consumers(), &[consumer]);
-    assert_eq!(thread_count(), threads);
+    assert_eq!(worker_threads(), 1);
+
+    // A panic in the worker's host code outside every callback ends the
+    // job without killing the worker, and quarantines the executor for the
+    // rest of the process instead of leaving it busy.
+    let faulted = executor.fold(
+        &window,
+        &mut SystemGuardMonotonicSourceV1,
+        counting,
+        plan(consumer, &events).with_host_fault(),
+    );
+    assert!(faulted.is_err());
+    let mut polls = 0;
+    while ExecutorHealthV1::current() != ExecutorHealthV1::Quarantined && polls < 1_000 {
+        std::thread::sleep(Duration::from_millis(5));
+        polls += 1;
+    }
+    assert_eq!(ExecutorHealthV1::current(), ExecutorHealthV1::Quarantined);
+    assert_eq!(
+        require_staged_release(),
+        Err(StagedFoldErrorV1::ExecutorQuarantined)
+    );
+    assert_eq!(worker_threads(), 1);
 }

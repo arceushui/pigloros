@@ -1,15 +1,16 @@
 //! Fork-comparison: install both arms of two timelines that share a common
 //! ancestor and report the entities whose State differs.
 
+use pos_core::staged_install::PreparedInstallPairV1;
 use pos_core::store::{EventReadBounds, SeqRange};
-use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1};
+use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1, StagedProtectedOutputV1};
 use pos_core::{
     CoreError, EntityId, ErasureProtectedOperationV1, Event, Seq, TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{ErasureReadSenderV1, WorldReplayUseV1};
-use pos_state::{ProjectionRegistry, RevokedSubjectsV1, StagedProjectionV1};
+use pos_state::{ProjectionRegistry, RevokedSubjectsV1};
 
-use crate::{ProtectedFoldV1, ProtectedReleaseV1};
+use crate::{ProtectedFoldV1, ProtectedReleaseV1, ReleaseHealthV1};
 
 /// The State-only result of comparing two diverged timelines.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -69,18 +70,23 @@ pub fn compare(
         folds,
         consumer_ids: &consumer_ids,
     };
-    let ProtectedReleaseV1 { guard, expiries } = release;
+    let ProtectedReleaseV1 {
+        guard,
+        expiries,
+        health,
+    } = release;
     let mut guard = Some(guard);
     let mut revoked: [Option<RevokedSubjectsV1>; 2] = [None, None];
     let mut comparison_outcome = Err(CoreError::ArtifactUnavailable);
     let mut second_timeline_fence_result = Err(CoreError::ArtifactUnavailable);
     let mut first_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
         let mut second_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-            if let Some(guard) = guard.take() {
+            if let Some(held) = guard.take() {
                 let target = CompareTargetV1 {
                     registries: [&mut *registry_a, &mut *registry_b],
-                    guard,
+                    guard: held,
                     expiries: &expiries,
+                    health,
                     revoked: &mut revoked,
                 };
                 comparison_outcome = compare_in_fences(sender, &request, target);
@@ -103,8 +109,9 @@ pub fn compare(
         .map_err(crate::host_error_to_core)
         .and(second_timeline_fence_result)
         .and(comparison_outcome);
-    // Teardown before the failure-path forget of each arm.
-    drop(guard);
+    // P2 and teardown of a guard the effect never took, before the
+    // failure-path forget of each arm.
+    crate::teardown(guard, health);
     let [revoked_a, revoked_b] = revoked;
     let fenced = crate::forget_on_failure(fenced, registry_a, revoked_a.as_ref());
     crate::forget_on_failure(fenced, registry_b, revoked_b.as_ref())
@@ -124,22 +131,61 @@ struct CompareTargetV1<'t, 'g> {
     registries: [&'t mut ProjectionRegistry; 2],
     guard: ReleaseGuardV1<'g>,
     expiries: &'t ApplicableExpiriesV1,
+    health: &'t ReleaseHealthV1,
     revoked: &'t mut [Option<RevokedSubjectsV1>; 2],
 }
 
-/// Bind, verify, read, fold, re-verify and hand both arms over inside their
-/// fences, then compute the diverged entities.
+/// Stage both arms inside their fences, then hand them over under one token
+/// and release the diverged entities; on any failure before the handoff,
+/// run P2 and tear the guard down.
 fn compare_in_fences(
     sender: &mut ErasureReadSenderV1<'_>,
     request: &CompareRequestV1<'_>,
     target: CompareTargetV1<'_, '_>,
 ) -> Result<ForkDiff, CoreError> {
     let CompareTargetV1 {
-        registries: [registry_a, registry_b],
+        registries,
         guard,
         expiries,
+        health,
         revoked,
     } = target;
+    let (prepared, diverged_entities) =
+        match prepare_comparison(sender, request, &guard, revoked, registries) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                crate::teardown(Some(guard), health);
+                return Err(error);
+            }
+        };
+    // One token commits both arms. ADR-112's overrun signal is recorded and
+    // the displaced maps are dropped after the handoff returns, and only
+    // then is the diff released.
+    pos_runtime::handoff(guard, expiries, prepared)
+        .map(|used| health.record_overrun(used.overrun_signal()))
+        .map_err(crate::unavailable)?;
+    Ok(ForkDiff {
+        fork_seq: request.fork_seq,
+        diverged_entities,
+    })
+}
+
+/// Both arms' prepared install and their diverged entities.
+type PreparedComparisonV1<'t> = (
+    StagedProtectedOutputV1<PreparedInstallPairV1<'t, 't>>,
+    Vec<EntityId>,
+);
+
+/// Bind, verify, read, fold and re-verify both arms inside their fences,
+/// check the handoff reserve, compute the diverged entities, and prepare
+/// both installs as one pair.
+fn prepare_comparison<'t>(
+    sender: &mut ErasureReadSenderV1<'_>,
+    request: &CompareRequestV1<'_>,
+    guard: &ReleaseGuardV1<'_>,
+    revoked: &mut [Option<RevokedSubjectsV1>; 2],
+    registries: [&'t mut ProjectionRegistry; 2],
+) -> Result<PreparedComparisonV1<'t>, CoreError> {
     let [a, b] = request.timelines;
     let [closure_a, closure_b] = request.closures;
     let requested_a = comparison_use(sender, a, &request.consumer_ids[0])?;
@@ -154,34 +200,28 @@ fn compare_in_fences(
     let [fold_a, fold_b] = request.folds;
     let staged_a = crate::fold_staged(
         fold_a,
-        &guard,
-        &events_a,
+        guard,
+        events_a,
         crate::verified_source(a, closure_a),
     )?;
     let staged_b = crate::fold_staged(
         fold_b,
-        &guard,
-        &events_b,
+        guard,
+        events_b,
         crate::verified_source(b, closure_b),
     )?;
     let final_bounds = require_comparison_artifacts(sender, request.closures, requested_uses)?;
     if final_bounds != read_bounds {
         return Err(CoreError::ArtifactUnavailable);
     }
-    crate::handoff_reserve(&guard)?;
-    let diverged_entities = StagedProjectionV1::diverged_entities(&staged_a, &staged_b);
-    let prepared =
-        ProjectionRegistry::prepare_install_pair(registry_a, staged_a, registry_b, staged_b)
-            .map_err(crate::unavailable)?;
-    // One token commits both arms; the displaced maps are dropped after the
-    // handoff returns, and only then is the diff released.
-    pos_runtime::handoff(guard, expiries, prepared)
-        .map(drop)
+    crate::handoff_reserve(guard)?;
+    let diverged_entities = staged_a
+        .diverged_entities(&staged_b)
         .map_err(crate::unavailable)?;
-    Ok(ForkDiff {
-        fork_seq: request.fork_seq,
-        diverged_entities,
-    })
+    let [registry_a, registry_b] = registries;
+    ProjectionRegistry::prepare_install_pair(registry_a, staged_a, registry_b, staged_b)
+        .map(|prepared| (prepared, diverged_entities))
+        .map_err(crate::unavailable)
 }
 
 fn require_comparison_artifacts(
@@ -699,6 +739,39 @@ mod tests {
             ),
             Err(CoreError::ArtifactUnavailable)
         ));
+        assert_eq!(count_for(&registry_a, fork_a, entity), 0);
+        assert_eq!(count_for(&registry_b, fork_b, entity), 0);
+    }
+
+    /// Arms folded for different consumer sets cannot be compared slot by
+    /// slot: the diff fails closed and neither arm is installed, even though
+    /// each arm alone would install.
+    #[test]
+    fn public_compare_refuses_arms_with_different_consumer_sets() {
+        let fixture = count_fixture();
+        let rival = fixture.rival();
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let entity = EntityId::new();
+        let (fork_a, fork_b, fork_seq) = forked(&mut host, &[entity], 1, [1, 2]);
+        let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
+        let mut registry_a = fixture.registry(Arc::clone(&gate));
+        let mut registry_b = rival.registry(gate);
+        let mut reads = host.read_sender().test_ok();
+        let (fold_a, fold_b) = (fixture.fold(), rival.fold());
+        let compared = with_release(|release| {
+            super::compare(
+                &mut reads,
+                [fork_a, fork_b],
+                fork_seq,
+                [&mut registry_a, &mut registry_b],
+                [&closure_a, &closure_b],
+                release,
+                [&fold_a, &fold_b],
+            )
+        });
+        assert!(matches!(compared, Err(CoreError::ArtifactUnavailable)));
         assert_eq!(count_for(&registry_a, fork_a, entity), 0);
         assert_eq!(count_for(&registry_b, fork_b, entity), 0);
     }

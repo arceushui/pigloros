@@ -22,12 +22,15 @@
 //! in only through [`pos_runtime::handoff`]. They return State only, never
 //! Events. On a failure after the range was read and verified, the visible
 //! registry forgets only the revoked subjects of that range, after release
-//! (ADR-093 Revision 4).
+//! (ADR-093 Revision 4). Each release reports its payload-free health
+//! signals into the caller's [`ReleaseHealthV1`].
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc};
 
-use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1, SystemGuardMonotonicSourceV1};
+use pos_core::trusted_clock::{
+    ApplicableExpiriesV1, ReleaseGuardV1, SystemGuardMonotonicSourceV1, TrustedClockOverrunKindV1,
+};
 use pos_core::{staged_install::ProjectionSourceV1, ErasureReferenceV1, Event};
 use pos_runtime::{
     GuardedFoldWindowV1, HostProjectionProviderV1, StagedFoldExecutorV1, StagedFoldPlanV1,
@@ -51,12 +54,58 @@ pub use replay::{replay, replay_at};
 pub use snapshot::{snapshot, verify_snapshot_consistency, Snapshot, SnapshotError};
 
 /// The ADR-112 capability of one protected release: the held release guard
-/// and the expiries checked under it. The release consumes it.
+/// and the expiries checked under it, plus the caller's health record. The
+/// release consumes it.
 pub struct ProtectedReleaseV1<'g> {
     /// The held authority guard.
     pub guard: ReleaseGuardV1<'g>,
     /// The applicable expiries checked under `guard`.
     pub expiries: ApplicableExpiriesV1,
+    /// Where the release reports its payload-free health signals.
+    pub health: &'g ReleaseHealthV1,
+}
+
+/// Payload-free health signals of protected releases, which the release host
+/// forwards to its health sink. Signals only accumulate; none carries State,
+/// Events or a cause.
+#[derive(Debug, Default)]
+pub struct ReleaseHealthV1 {
+    overrun: Cell<Option<TrustedClockOverrunKindV1>>,
+    guard_release_late: Cell<Option<&'static str>>,
+}
+
+impl ReleaseHealthV1 {
+    /// An empty record.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            overrun: Cell::new(None),
+            guard_release_late: Cell::new(None),
+        }
+    }
+
+    /// ADR-112's `trusted_clock_fence_overrun{kind}` signal, when a
+    /// handoff's post-handoff check detected an overrun.
+    #[must_use]
+    pub const fn overrun_signal(&self) -> Option<TrustedClockOverrunKindV1> {
+        self.overrun.get()
+    }
+
+    /// ADR-113 P2's [`pos_runtime::GUARD_RELEASE_LATE_SIGNAL`], when a
+    /// failure-path teardown was predicted to end after `g0 + 30 s`.
+    #[must_use]
+    pub const fn guard_release_late(&self) -> Option<&'static str> {
+        self.guard_release_late.get()
+    }
+
+    fn record_overrun(&self, signal: Option<TrustedClockOverrunKindV1>) {
+        self.overrun.set(self.overrun.get().or(signal));
+    }
+
+    fn record_guard_release_late(&self, signal: Option<&'static str>) {
+        self.guard_release_late
+            .set(self.guard_release_late.get().or(signal));
+    }
 }
 
 /// The staged fold of one protected arm: the executor, the host-installed
@@ -89,10 +138,11 @@ const fn verified_source(
 }
 
 /// Fold a verified range on the staged executor inside `guard`'s window.
+/// The plan takes the Events without copying their payloads.
 fn fold_staged(
     fold: &ProtectedFoldV1<'_>,
     guard: &ReleaseGuardV1<'_>,
-    events: &[Event],
+    events: Vec<Event>,
     source: ProjectionSourceV1,
 ) -> Result<StagedProjectionV1, pos_core::CoreError> {
     let window = GuardedFoldWindowV1::new(guard);
@@ -108,6 +158,20 @@ fn fold_staged(
 fn handoff_reserve(guard: &ReleaseGuardV1<'_>) -> Result<(), pos_core::CoreError> {
     pos_runtime::check_handoff_reserve(&mut SystemGuardMonotonicSourceV1, guard.guard_started_at())
         .map_err(unavailable)
+}
+
+/// P2, then teardown: a guard that did not reach the handoff is rolled back
+/// and released, after recording the payload-free late signal when the
+/// teardown is predicted to end after `g0 + 30 s`. Teardown runs either way.
+/// A guard the handoff consumed has nothing left to tear down.
+fn teardown(guard: Option<ReleaseGuardV1<'_>>, health: &ReleaseHealthV1) {
+    if let Some(guard) = guard {
+        health.record_guard_release_late(pos_runtime::teardown_signal(
+            &mut SystemGuardMonotonicSourceV1,
+            guard.guard_started_at(),
+        ));
+        drop(guard);
+    }
 }
 
 /// Apply the ADR-093 Revision 4 failure-path forget after release: only the
@@ -268,10 +332,10 @@ pub mod test_support {
         StagedFoldExecutorV1, VerifiedWorldReplayV1, WorldReplayUseV1,
         WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
     };
-    use pos_state::{ProjectionRegistry, RecordedConsumerV1};
+    use pos_state::{ProjectionObservationPolicyV1, ProjectionRegistry, RecordedConsumerV1};
     use pos_store::StoreConfig;
 
-    use crate::{ProtectedFoldV1, ProtectedReleaseV1};
+    use crate::{ProtectedFoldV1, ProtectedReleaseV1, ReleaseHealthV1};
 
     const DAY_MICROS: u64 = 86_400_000_000;
 
@@ -333,23 +397,47 @@ pub mod test_support {
     /// One admitted staged consumer and the executor, held under the lock
     /// that serializes folds in this test process.
     pub(crate) struct ProtectedFixture {
-        _serial: MutexGuard<'static, ()>,
+        _serial: Option<MutexGuard<'static, ()>>,
         executor: StagedFoldExecutorV1,
         provider: Arc<HostProjectionProviderV1>,
         consumers: Vec<RecordedConsumerV1>,
         name: &'static str,
         reducer: fn() -> Box<dyn Reducer>,
+        policy: Option<ProjectionObservationPolicyV1>,
     }
 
     impl ProtectedFixture {
         pub(crate) fn new(name: &'static str, reducer: fn() -> Box<dyn Reducer>) -> Self {
-            let serial = EXECUTOR_SERIAL
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            Self::admitted(Some(serial()), name, reducer, None)
+        }
+
+        /// A fixture whose admitted entry and installed slot both carry
+        /// `policy`.
+        pub(crate) fn observable(
+            name: &'static str,
+            reducer: fn() -> Box<dyn Reducer>,
+            policy: ProjectionObservationPolicyV1,
+        ) -> Self {
+            Self::admitted(Some(serial()), name, reducer, Some(policy))
+        }
+
+        /// Another admission of the same reducer under its own provider and
+        /// Plugin identity, serialized by this fixture's lock.
+        pub(crate) fn rival(&self) -> Self {
+            Self::admitted(None, self.name, self.reducer, self.policy.clone())
+        }
+
+        fn admitted(
+            serial: Option<MutexGuard<'static, ()>>,
+            name: &'static str,
+            reducer: fn() -> Box<dyn Reducer>,
+            policy: Option<ProjectionObservationPolicyV1>,
+        ) -> Self {
             let mut provider = HostProjectionProviderV1::default();
-            let configuration = FixtureConfiguration { name, reducer };
-            let consumer =
-                test_ok(provider.admit_fixture::<FixturePlugin>(Arc::new(configuration)));
+            let configuration = Arc::new(FixtureConfiguration { name, reducer });
+            let consumer = test_ok(
+                provider.admit_fixture_with_policy::<FixturePlugin>(configuration, policy.clone()),
+            );
             Self {
                 _serial: serial,
                 executor: test_ok(StagedFoldExecutorV1::acquire()),
@@ -357,16 +445,29 @@ pub mod test_support {
                 consumers: vec![consumer],
                 name,
                 reducer,
+                policy,
             }
         }
 
-        /// A visible registry whose one installed slot is the recorded consumer.
+        /// A visible registry whose one installed slot is the recorded
+        /// consumer, with the fixture's observation policy.
         pub(crate) fn registry(&self, gate: Arc<dyn ErasureGate>) -> ProjectionRegistry {
+            self.registry_with_policy(gate, self.policy.clone())
+        }
+
+        /// A visible registry whose one installed slot is the recorded
+        /// consumer, with `policy` in place of the fixture's.
+        pub(crate) fn registry_with_policy(
+            &self,
+            gate: Arc<dyn ErasureGate>,
+            policy: Option<ProjectionObservationPolicyV1>,
+        ) -> ProjectionRegistry {
             let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
-            test_ok(registry.register_installed_reducer(
+            test_ok(registry.register_installed_reducer_with_policy(
                 self.consumers[0].plugin_id(),
                 self.name,
                 (self.reducer)(),
+                policy,
             ));
             registry
         }
@@ -411,8 +512,33 @@ pub mod test_support {
         test_ok(AuthenticatedPrincipalResultV1::try_from_draft(draft))
     }
 
+    fn serial() -> MutexGuard<'static, ()> {
+        EXECUTOR_SERIAL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// An observation policy permitting the `n` field.
+    pub(crate) fn count_policy() -> ProjectionObservationPolicyV1 {
+        test_ok(ProjectionObservationPolicyV1::try_new(
+            vec!["n".to_owned()],
+            "count.v1".to_owned(),
+            Hash::from_bytes([7; 32]),
+            Hash::from_bytes([8; 32]),
+            Hash::from_bytes([9; 32]),
+        ))
+    }
+
     /// Run `body` with one fresh ADR-112 release on its own authority.
     pub(crate) fn with_release<T>(body: impl FnOnce(ProtectedReleaseV1<'_>) -> T) -> T {
+        with_release_health(&ReleaseHealthV1::new(), body)
+    }
+
+    /// Run `body` with one fresh ADR-112 release reporting into `health`.
+    pub(crate) fn with_release_health<T>(
+        health: &ReleaseHealthV1,
+        body: impl FnOnce(ProtectedReleaseV1<'_>) -> T,
+    ) -> T {
         let mut port = TrustedClockFixtureV1::new();
         let mut store = port.clone();
         let mut wait = WaitBudgetV1::new();
@@ -439,7 +565,11 @@ pub mod test_support {
             access: Some(&access),
         };
         let expiries = test_ok(guard.applicable_expiries(&premises));
-        body(ProtectedReleaseV1 { guard, expiries })
+        body(ProtectedReleaseV1 {
+            guard,
+            expiries,
+            health,
+        })
     }
 
     struct ExactWorldReplayVerifier;

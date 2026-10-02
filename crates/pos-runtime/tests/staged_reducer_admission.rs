@@ -23,7 +23,7 @@ use pos_runtime::{
 };
 use pos_state::{
     EntityStateProjection, InitialStateV1, ProjectionCandidateErrorV1,
-    ProtectedProjectionProviderV1, RecordedConsumerV1,
+    ProjectionObservationPolicyV1, ProtectedProjectionProviderV1, RecordedConsumerV1,
 };
 use std::{
     fmt::Debug,
@@ -249,6 +249,17 @@ fn reviewed_admission_rejects_unreviewed_factories_before_any_build() {
     );
     assert_eq!(
         provider.admit::<EntityStatePlugin>(Arc::new(())),
+        Err(StagedReducerAdmissionErrorV1::NotReviewed)
+    );
+    let policy = test_ok(ProjectionObservationPolicyV1::try_new(
+        vec!["count".to_owned()],
+        "count.v1".to_owned(),
+        Hash::from_bytes([7; 32]),
+        Hash::from_bytes([8; 32]),
+        Hash::from_bytes([9; 32]),
+    ));
+    assert_eq!(
+        provider.admit_observable::<CountingPlugin>(Arc::clone(&configuration), policy),
         Err(StagedReducerAdmissionErrorV1::NotReviewed)
     );
     assert_eq!(configuration.builds(), 0);

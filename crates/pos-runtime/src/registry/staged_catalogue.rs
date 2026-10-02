@@ -14,7 +14,8 @@ use std::{any::type_name, collections::HashSet, sync::Arc, time::Duration};
 use pos_core::{staged_install::ProjectionSourceV1, Event, Hash, Plugin, Reducer};
 use pos_state::{
     CandidateBoundsV1, CandidateReducerV1, DetachedProjectionCandidateV1, InitialStateV1,
-    ProjectionCandidateErrorV1, ProtectedProjectionProviderV1, RecordedConsumerV1,
+    ProjectionCandidateErrorV1, ProjectionObservationPolicyV1, ProtectedProjectionProviderV1,
+    RecordedConsumerV1,
 };
 
 use super::InstalledPluginFactoryV1;
@@ -247,19 +248,21 @@ struct BuiltReducerV1 {
 /// Builds one fresh product from the retained frozen configuration.
 type StagedReducerBuilderV1 = Box<dyn Fn() -> BuiltReducerV1 + Send + Sync>;
 
-/// One admitted entry: its recorded identity and Plugin, record and fresh
-/// builder.
+/// One admitted entry: its recorded identity and Plugin, record, the
+/// observation policy installed beside it and its fresh builder.
 struct AdmittedStagedReducerV1 {
     consumer: RecordedConsumerV1,
     name: &'static str,
     version: &'static str,
     admission: StagedReducerAdmissionV1,
+    observation_policy: Option<ProjectionObservationPolicyV1>,
     build: StagedReducerBuilderV1,
 }
 
 impl AdmittedStagedReducerV1 {
     /// Build a fresh reducer and re-check that the built Plugin is the
-    /// recorded one. The built Plugin and approver are dropped unused.
+    /// recorded one, copying the entry's observation policy into the
+    /// candidate. The built Plugin and approver are dropped unused.
     fn candidate_reducer(&self) -> Result<CandidateReducerV1, ProjectionCandidateErrorV1> {
         let built = (self.build)();
         let recorded = built.name == self.name && built.version == self.version;
@@ -271,7 +274,7 @@ impl AdmittedStagedReducerV1 {
                 name: self.name,
                 reducer,
                 bounds: self.admission.candidate_bounds(),
-                observation_policy: None,
+                observation_policy: self.observation_policy.clone(),
             })
             .ok_or(ProjectionCandidateErrorV1::PluginMismatch)
     }
@@ -308,7 +311,29 @@ impl HostProjectionProviderV1 {
         F: InstalledPluginFactoryV1 + 'static,
         F::Configuration: Send + Sync + 'static,
     {
-        self.admit_with::<F>(frozen_configuration, StagedEvidenceV1::Reviewed)
+        self.admit_with::<F>(frozen_configuration, StagedEvidenceV1::Reviewed, None)
+    }
+
+    /// Admit the reviewed staged Reducer entry of factory `F` together with
+    /// the observation policy the host installs beside its visible slot.
+    /// Every candidate copies `policy` at open.
+    ///
+    /// # Errors
+    /// Returns the same closed errors as [`Self::admit`].
+    pub fn admit_observable<F>(
+        &mut self,
+        frozen_configuration: Arc<F::Configuration>,
+        policy: ProjectionObservationPolicyV1,
+    ) -> Result<RecordedConsumerV1, StagedReducerAdmissionErrorV1>
+    where
+        F: InstalledPluginFactoryV1 + 'static,
+        F::Configuration: Send + Sync + 'static,
+    {
+        self.admit_with::<F>(
+            frozen_configuration,
+            StagedEvidenceV1::Reviewed,
+            Some(policy),
+        )
     }
 
     /// Admit any factory as a nonproduction fixture entry.
@@ -326,7 +351,31 @@ impl HostProjectionProviderV1 {
         F: InstalledPluginFactoryV1 + 'static,
         F::Configuration: Send + Sync + 'static,
     {
-        self.admit_with::<F>(frozen_configuration, StagedEvidenceV1::Fixture)
+        self.admit_with::<F>(frozen_configuration, StagedEvidenceV1::Fixture, None)
+    }
+
+    /// Admit any factory as a nonproduction fixture entry with the
+    /// observation policy, if any, that candidates copy at open, as
+    /// [`Self::admit_observable`] does.
+    ///
+    /// # Errors
+    /// Returns the same closed errors as [`Self::admit_fixture`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn admit_fixture_with_policy<F>(
+        &mut self,
+        frozen_configuration: Arc<F::Configuration>,
+        observation_policy: Option<ProjectionObservationPolicyV1>,
+    ) -> Result<RecordedConsumerV1, StagedReducerAdmissionErrorV1>
+    where
+        F: InstalledPluginFactoryV1 + 'static,
+        F::Configuration: Send + Sync + 'static,
+    {
+        self.admit_with::<F>(
+            frozen_configuration,
+            StagedEvidenceV1::Fixture,
+            observation_policy,
+        )
     }
 
     /// The admission record of one recorded consumer, when it is admitted
@@ -340,6 +389,7 @@ impl HostProjectionProviderV1 {
         &mut self,
         frozen_configuration: Arc<F::Configuration>,
         evidence: StagedEvidenceV1,
+        observation_policy: Option<ProjectionObservationPolicyV1>,
     ) -> Result<RecordedConsumerV1, StagedReducerAdmissionErrorV1>
     where
         F: InstalledPluginFactoryV1 + 'static,
@@ -367,6 +417,7 @@ impl HostProjectionProviderV1 {
             name: product.plugin.name(),
             version: product.plugin.version(),
             admission,
+            observation_policy,
             build: Box::new(move || {
                 let product = F::build(&frozen_configuration);
                 BuiltReducerV1 {

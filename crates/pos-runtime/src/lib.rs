@@ -103,7 +103,7 @@ pub use staged_executor::{
     GuardedFoldWindowV1, StagedFoldErrorV1, StagedFoldExecutorV1, StagedFoldPlanV1,
     GUARD_RELEASE_LATE_SIGNAL, MAX_STAGED_INPUT_BYTES_V1, MEASURED_PREPARE_BOUND_V1,
     MEASURED_TEARDOWN_BOUND_V1, STAGED_ACCOUNTING_PASS_BOUND_V1, STAGED_FOLD_DEADLINE_V1,
-    STAGED_HANDOFF_DEADLINE_V1,
+    STAGED_FOLD_WORKER_NAME_V1, STAGED_HANDOFF_DEADLINE_V1,
 };
 pub use trusted_clock::handoff;
 pub use world_profile::HostWorldProfileV1;

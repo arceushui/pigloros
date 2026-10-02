@@ -14,7 +14,9 @@
 //! When the timed wait expires (E6) the executor is quarantined: the cancel
 //! flag is set, the reply is abandoned and every later `acquire`, `fold` and
 //! protected release in the process fails closed until the abandoned job
-//! ends. The worker is never respawned.
+//! ends. The worker is never respawned. A panic in the worker's host code
+//! outside every callback quarantines the executor for the rest of the
+//! process; the worker survives it and is never left busy.
 
 use std::{
     any::Any,
@@ -61,6 +63,9 @@ pub const MEASURED_PREPARE_BOUND_V1: Duration = Duration::from_millis(500);
 pub const MEASURED_TEARDOWN_BOUND_V1: Duration = Duration::from_millis(250);
 /// Payload-free health signal for a teardown predicted to end after `g0 + 30 s`.
 pub const GUARD_RELEASE_LATE_SIGNAL: &str = "guard_release_late";
+/// OS name of the one staged-fold worker thread. It fits Linux's 15-byte
+/// thread name, so `/proc/self/task/*/comm` shows it whole.
+pub const STAGED_FOLD_WORKER_NAME_V1: &str = "pos-staged-fold";
 
 /// The only line the panic hook writes for a panic inside a staged callback.
 const STAGED_CALLBACK_PANIC_LINE: &[u8] = b"pigloros: staged reducer callback panicked\n";
@@ -70,7 +75,8 @@ const BUSY: u8 = 1;
 const QUARANTINED: u8 = 2;
 
 static HEALTH: AtomicU8 = AtomicU8::new(READY);
-static WORKER: OnceLock<mpsc::Sender<StagedJobV1>> = OnceLock::new();
+/// The worker's job queue, or `None` when the worker thread could not start.
+static WORKER: OnceLock<Option<mpsc::Sender<StagedJobV1>>> = OnceLock::new();
 
 thread_local! {
     static IN_STAGED_CALLBACK: Cell<bool> = const { Cell::new(false) };
@@ -105,6 +111,8 @@ impl ExecutorHealthV1 {
 pub enum StagedFoldErrorV1 {
     /// The process was built with `panic = "abort"`.
     UnsupportedPanicStrategy,
+    /// The one staged-fold worker thread could not be started.
+    WorkerUnavailable,
     /// A recorded consumer has no admitted entry, or its built Plugin is not
     /// the recorded one.
     NotAdmitted,
@@ -244,25 +252,31 @@ impl<'w> GuardedFoldWindowV1<'w> {
 /// inside the guard, and the source they were read from.
 pub struct StagedFoldPlanV1 {
     consumers: Vec<RecordedConsumerV1>,
-    events: Arc<[Event]>,
+    events: Vec<Event>,
     source: ProjectionSourceV1,
     clock: Box<dyn GuardMonotonicSourceV1>,
+    #[cfg(any(test, feature = "test-support"))]
+    host_fault: bool,
 }
 
 impl StagedFoldPlanV1 {
-    /// Plan a fold of `events` for exactly `consumers`. The host drops
+    /// Plan a fold of `events` for exactly `consumers`. The plan takes the
+    /// verified Events without copying their payloads, and the host drops
     /// consent-closed markers here, once, as the live fold does.
     #[must_use]
     pub fn new(
         consumers: Vec<RecordedConsumerV1>,
-        events: &[Event],
+        mut events: Vec<Event>,
         source: ProjectionSourceV1,
     ) -> Self {
+        events.retain(crate::registry::is_host_projection_event);
         Self {
             consumers,
-            events: crate::registry::host_projection_events(events).into(),
+            events,
             source,
             clock: Box::new(SystemGuardMonotonicSourceV1),
+            #[cfg(any(test, feature = "test-support"))]
+            host_fault: false,
         }
     }
 
@@ -270,6 +284,16 @@ impl StagedFoldPlanV1 {
     #[must_use]
     pub fn with_worker_clock(mut self, clock: Box<dyn GuardMonotonicSourceV1>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Make the worker's host code panic outside every callback, to exercise
+    /// the worker's last-resort containment. Nonproduction only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_host_fault(mut self) -> Self {
+        self.host_fault = true;
         self
     }
 }
@@ -285,13 +309,27 @@ impl StagedFoldExecutorV1 {
     /// panic hook on first use (E1). The worker is never respawned.
     ///
     /// # Errors
-    /// Returns [`StagedFoldErrorV1::UnsupportedPanicStrategy`] under
-    /// `panic = "abort"` or [`StagedFoldErrorV1::ExecutorQuarantined`].
+    /// Returns [`StagedFoldErrorV1::ExecutorQuarantined`], or
+    /// [`StagedFoldErrorV1::WorkerUnavailable`] when the worker thread could
+    /// not be started. A `panic = "abort"` build always returns
+    /// [`StagedFoldErrorV1::UnsupportedPanicStrategy`].
+    #[cfg(panic = "unwind")]
     pub fn acquire() -> Result<Self, StagedFoldErrorV1> {
-        PANIC_STRATEGY?;
-        let worker = WORKER.get_or_init(start_worker);
+        let worker = WORKER.get_or_init(start_worker).as_ref();
         require_staged_release()?;
-        Ok(Self { worker })
+        worker
+            .map(|worker| Self { worker })
+            .ok_or(StagedFoldErrorV1::WorkerUnavailable)
+    }
+
+    /// E1: callbacks can be contained only when panics unwind, so a
+    /// `panic = "abort"` build never starts the worker.
+    ///
+    /// # Errors
+    /// Always returns [`StagedFoldErrorV1::UnsupportedPanicStrategy`].
+    #[cfg(not(panic = "unwind"))]
+    pub const fn acquire() -> Result<Self, StagedFoldErrorV1> {
+        Err(StagedFoldErrorV1::UnsupportedPanicStrategy)
     }
 
     /// Fold `plan` on the worker and wait for it until `g0 + 27 s`.
@@ -321,22 +359,26 @@ impl StagedFoldExecutorV1 {
             cancel: Arc::clone(&window.cancel),
             reply,
         };
-        let _ = self.worker.send(job);
+        // The worker outlives every job, so the queue stays open. Were it
+        // closed, the job and its reply sender would drop here, and the
+        // wait below would end at once as a failure.
+        self.worker.send(job).ok();
         outcome.recv_timeout(remaining).unwrap_or_else(|_| {
             window.cancel.store(true, Ordering::SeqCst);
-            let _ = HEALTH.compare_exchange(BUSY, QUARANTINED, Ordering::SeqCst, Ordering::SeqCst);
+            // Quarantine only a job still running; `BUSY` leaves only when
+            // its job ends. Race: if the worker finished between the
+            // timeout and this exchange, it already stored `READY` and its
+            // late reply drops with `outcome`, so the exchange fails and the
+            // executor stays ready with no abandoned job. Had another
+            // thread claimed the worker in that gap, its fold is
+            // quarantined until it ends, which fails closed.
+            HEALTH
+                .compare_exchange(BUSY, QUARANTINED, Ordering::SeqCst, Ordering::SeqCst)
+                .ok();
             Err(StagedFoldErrorV1::DeadlineExceeded)
         })
     }
 }
-
-/// E1: callbacks can be contained only when panics unwind.
-#[cfg(panic = "unwind")]
-const PANIC_STRATEGY: Result<(), StagedFoldErrorV1> = Ok(());
-/// E1: callbacks can be contained only when panics unwind.
-#[cfg(not(panic = "unwind"))]
-const PANIC_STRATEGY: Result<(), StagedFoldErrorV1> =
-    Err(StagedFoldErrorV1::UnsupportedPanicStrategy);
 
 /// E2: check the plan on the guard thread and return the wait until
 /// `g0 + 27 s`.
@@ -377,11 +419,27 @@ fn claim_worker() -> Result<(), StagedFoldErrorV1> {
         })
 }
 
-fn start_worker() -> mpsc::Sender<StagedJobV1> {
+/// Start the one named worker thread. It is detached and never respawned;
+/// `None` when the thread could not be started.
+fn start_worker() -> Option<mpsc::Sender<StagedJobV1>> {
     install_panic_hook();
     let (jobs, queue) = mpsc::channel::<StagedJobV1>();
-    let _detached = std::thread::spawn(move || queue.iter().for_each(run_job));
-    jobs
+    std::thread::Builder::new()
+        .name(STAGED_FOLD_WORKER_NAME_V1.to_owned())
+        .spawn(move || queue.iter().for_each(run_contained_job))
+        .ok()
+        .map(|_detached| jobs)
+}
+
+/// Run one job under a last `catch_unwind`. A panic in host code outside
+/// every contained callback ends the job: its payload is dropped without
+/// being formatted, and the executor is quarantined for the rest of the
+/// process instead of being left busy. The worker survives.
+fn run_contained_job(job: StagedJobV1) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(move || run_job(job))) {
+        drop_payload(payload);
+        HEALTH.store(QUARANTINED, Ordering::SeqCst);
+    }
 }
 
 /// Chain one process-global hook that writes only a fixed line for a panic
@@ -391,7 +449,9 @@ fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if IN_STAGED_CALLBACK.get() {
-            let _ = std::io::stderr().write_all(STAGED_CALLBACK_PANIC_LINE);
+            // A hook has nowhere to report a failed write; the line is
+            // diagnostic only.
+            std::io::stderr().write_all(STAGED_CALLBACK_PANIC_LINE).ok();
         } else {
             previous(info);
         }
@@ -409,17 +469,23 @@ fn run_callback<T>(callback: impl FnOnce() -> T) -> Option<T> {
     value
 }
 
-fn drop_payload(payload: Box<dyn Any + Send>) {
-    if let Err(nested) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
-        // A payload whose `Drop` panicked again is leaked, never formatted.
-        std::mem::forget(nested);
+/// Drop a panic payload without formatting it. A payload whose `Drop`
+/// panics again yields a new payload, dropped the same way, so nothing is
+/// leaked. A payload chain that never ends keeps the worker inside this
+/// callback, as a callback that never returns would, and the guard thread
+/// abandons it at its deadline.
+fn drop_payload(mut payload: Box<dyn Any + Send>) {
+    while let Err(next) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+        payload = next;
     }
 }
 
 /// Drop a value that may own Reducer or factory state under the same
-/// panic containment as a callback.
+/// panic containment as a callback. A panic in its `Drop` is contained and
+/// otherwise ignored here; callers that must report it use
+/// [`run_callback`] directly.
 fn drop_guarded<T>(value: T) {
-    let _ = run_callback(move || drop(value));
+    run_callback(move || drop(value));
 }
 
 type StagedReplyV1 = Result<StagedProjectionV1, StagedFoldErrorV1>;
@@ -448,7 +514,10 @@ fn run_job(job: StagedJobV1) {
         HEALTH.store(READY, Ordering::SeqCst);
     } else {
         HEALTH.store(READY, Ordering::SeqCst);
-        let _ = reply.send(outcome);
+        // A guard thread that timed out between the cancel check and this
+        // send has dropped its receiver; the reply then drops here, and it
+        // holds no reducer instance.
+        reply.send(outcome).ok();
     }
 }
 
@@ -508,14 +577,21 @@ fn fold_on_worker(
     g0: MonotonicMarkV1,
     cancel: &AtomicBool,
 ) -> StagedReplyV1 {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        if plan.host_fault {
+            std::panic::resume_unwind(Box::new(()));
+        }
+    }
     let StagedFoldPlanV1 {
         consumers,
         events,
         source,
         clock,
+        ..
     } = plan;
     let mut gate = WorkerGateV1 { clock, g0, cancel };
-    let opened = open_on_worker(&mut gate, provider.as_ref(), &consumers, source);
+    let opened = open_on_worker(&mut gate, &*provider, &consumers, source);
     drop_guarded(provider);
     let (mut candidate, started) = opened?;
     let outcome = gate

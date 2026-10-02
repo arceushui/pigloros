@@ -9,14 +9,18 @@
 //! visible registry uses, so a candidate fold equals the live fold, and it
 //! accounts its staged size incrementally for the staged executor.
 
-use std::{collections::HashMap, convert::Infallible, time::Duration};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    convert::Infallible,
+    time::Duration,
+};
 
 use pos_core::{
     staged_install::ProjectionSourceV1, EntityId, Event, Hash, PluginId, Reducer, State,
     StateRegistry,
 };
 
-use crate::{staged::StagedSlotV1, ProjectionObservationPolicyV1, StagedProjectionV1};
+use crate::{ProjectionObservationPolicyV1, StagedProjectionV1, StagedSlotV1};
 
 /// Largest staged output of one fold, in staged-size bytes (ADR-093).
 pub const MAX_STAGED_OUTPUT_BYTES_V1: u64 = 64 * 1024 * 1024;
@@ -195,20 +199,22 @@ impl StagedAccountingV1 {
 
     fn record(&mut self, key: (usize, EntityId), state: &State, growth: u64) {
         self.current = false;
-        if let Some(account) = self.entities.get_mut(&key) {
-            account.declared = account.declared.saturating_add(growth);
-            self.upper = self.upper.saturating_add(growth);
-        } else {
-            let measured = staged_state_bytes(state);
-            self.entities.insert(
-                key,
-                EntityAccountV1 {
+        let added = match self.entities.entry(key) {
+            Entry::Occupied(mut account) => {
+                let account = account.get_mut();
+                account.declared = account.declared.saturating_add(growth);
+                growth
+            }
+            Entry::Vacant(account) => {
+                let measured = staged_state_bytes(state);
+                account.insert(EntityAccountV1 {
                     measured,
                     declared: 0,
-                },
-            );
-            self.upper = self.upper.saturating_add(measured);
-        }
+                });
+                measured
+            }
+        };
+        self.upper = self.upper.saturating_add(added);
     }
 
     fn forget(&mut self, slots: usize, subject: EntityId) {
@@ -510,12 +516,12 @@ impl DetachedProjectionCandidateV1 {
                 registry: std::mem::take(&mut slot.inner.registry),
             })
             .collect();
-        Some(StagedProjectionV1::new(
+        Some(StagedProjectionV1 {
             consumers,
-            self.source,
+            source: self.source,
             slots,
-            std::mem::take(&mut self.revocations),
-        ))
+            revocations: std::mem::take(&mut self.revocations),
+        })
     }
 
     /// Candidate-owned State of one entity for one recorded consumer.
