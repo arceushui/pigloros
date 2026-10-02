@@ -1359,7 +1359,8 @@ impl PluginRegistry {
     /// Returns `OwnerRejected` when no owner verifier is installed, the
     /// complete capability is stale, or the request catalog differs from the
     /// admitted catalog. Returns `InvalidBatch` when a policy copy names an
-    /// unknown Plugin or its EOP1/OPC1 bytes differ from the admitted sources.
+    /// unknown Plugin or its EOP1/OPC1 bytes differ from, or fail to decode
+    /// as, the admitted sources.
     /// Forwards malformed requests, owner-verification failures, and atomic
     /// persistence conflicts from the core owner-admission boundary.
     pub fn commit_admitted_manifest_owner_admission_v1<
