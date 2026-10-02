@@ -1,5 +1,5 @@
 //! Protected Snapshot capture and verification stay `Unavailable` until #502
-//! (ADR-113 §9, acceptance case 16), on MemoryStore and SQLite.
+//! (ADR-113 §9, acceptance case 16), on `MemoryStore` and `SQLite`.
 
 use pos_core::{
     ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash, Reducer, State, WorldReplayClosureV1,
