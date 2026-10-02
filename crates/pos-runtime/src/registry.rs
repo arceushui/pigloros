@@ -45,8 +45,10 @@ use std::{
 };
 
 mod catalogue;
+mod scheduled_admission;
 
 pub use catalogue::{HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPluginProductV1};
+pub use scheduled_admission::ScheduledPassAdmissionV1;
 
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
@@ -477,6 +479,7 @@ mod coverage_paths {
             operation: OperationContext::Public,
             staged_drafts: Vec::new(),
             authorized: None,
+            scheduled: None,
         });
         registry.abort_step();
 
@@ -488,6 +491,7 @@ mod coverage_paths {
             operation: OperationContext::Public,
             staged_drafts: Vec::new(),
             authorized: None,
+            scheduled: None,
         });
         assert!(registry.commit_step_at(Seq::ZERO, 0).is_ok());
     }
@@ -1065,6 +1069,8 @@ struct PendingStep {
     operation: OperationContext,
     staged_drafts: Vec<EventDraft>,
     authorized: Option<AuthorizedPendingStep>,
+    /// Shared base cut and snapshot digest of an anchored scheduled pass.
+    scheduled: Option<(Seq, pos_core::Hash)>,
 }
 
 struct AuthorizedPendingStep {
@@ -1127,6 +1133,10 @@ pub struct PluginRegistry {
     pub schemas: SchemaRegistry,
     projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
+    /// Scheduled pass whose admission outcome is unknown; only an exact
+    /// retry of its retained basis or an explicit abort may resolve it. Boxed
+    /// so the rarely used retained basis does not enlarge every registry.
+    in_doubt_admission: Option<Box<(PendingStep, pos_core::PipelineAdmissionBasisV1)>>,
     run_mode: RunMode,
     composition_mode: PluginExecutionModeV1,
     resource_limit: Option<u64>,
@@ -1619,6 +1629,7 @@ impl PluginRegistry {
             // runtime and projection work can proceed.
             projections: ProjectionRegistry::new(),
             pending_step: None,
+            in_doubt_admission: None,
             run_mode,
             composition_mode,
             resource_limit: None,
@@ -1930,11 +1941,17 @@ impl PluginRegistry {
         if let Some(name) = &self.poisoned_driver {
             return Err(RuntimeError::DriverCommitPanicked { name: name.clone() });
         }
-        if self.pending_step.is_some() {
+        if self.has_unfinished_step() {
             Err(RuntimeError::PendingDriverStep)
         } else {
             Ok(())
         }
+    }
+
+    /// A staged pass or a retained in-doubt scheduled admission both block a
+    /// new pass until it is committed, recovered, or aborted.
+    const fn has_unfinished_step(&self) -> bool {
+        self.pending_step.is_some() || self.in_doubt_admission.is_some()
     }
 
     fn abort_drivers(&mut self, driver_ids: &[PluginId]) -> Option<RuntimeError> {
@@ -2157,6 +2174,7 @@ impl PluginRegistry {
             ObservationSnapshot::from_anchored_subscriptions(anchor, subscriptions.iter(), |key| {
                 states.get(key).cloned()
             });
+        let scheduled = snapshot.anchored_digest();
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
         for id in driver_ids {
@@ -2207,6 +2225,7 @@ impl PluginRegistry {
             operation,
             staged_drafts: all_drafts.clone(),
             authorized: None,
+            scheduled,
         });
         Ok(all_drafts)
     }
@@ -2358,6 +2377,7 @@ impl PluginRegistry {
                 observation: observation.clone(),
                 drafts: drafts.clone(),
             }),
+            scheduled: None,
         });
         Ok(drafts)
     }
@@ -2685,8 +2705,12 @@ impl PluginRegistry {
     }
 
     /// Abort the Driver and cadence state staged by an anchored step.
+    ///
+    /// An in-doubt scheduled admission is abandoned as well; the host then
+    /// rebuilds Driver state only from committed history.
     pub fn abort_step(&mut self) {
-        if let Some(pending) = self.pending_step.take() {
+        let in_doubt = self.in_doubt_admission.take().map(|in_doubt| in_doubt.0);
+        for pending in self.pending_step.take().into_iter().chain(in_doubt) {
             let _ = self.abort_drivers(&pending.driver_ids);
         }
     }

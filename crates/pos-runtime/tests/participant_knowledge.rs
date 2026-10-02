@@ -1,20 +1,23 @@
 use pos_core::{
-    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-    ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
-    AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1,
-    AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
-    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
-    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, EntityId,
-    ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    Event, EventDraft, Hash, Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1,
-    MemoryPolicyRevisionV1, ObservationSnapshotV1, PersistedAuthorityV1, Plugin, PluginId,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, ArtifactClaimInputV1, ArtifactDataClassV1,
+    ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, AssuranceLevelV1,
+    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, AuthorityErrorV1,
+    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, Capability,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
+    ConsentGrantRefV1, ConsentGrantStatusV1, EntityId, ErasureArtifactClassV1,
+    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, Hash,
+    Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
+    ObservationSnapshotV1, PersistedAuthorityV1, PipelineAttemptIdV1, PipelineEvidenceRefV1,
+    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
     PrincipalRefV1, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
     Seq, SeqRange, State, TimelineId, WallTime,
 };
 use pos_runtime::{
-    AuthorizedDriverTargetV1, Driver, ObservationView, PluginRegistry, RuntimeError, StepOutput,
+    AuthorizedDriverTargetV1, Driver, ObservationView, PluginRegistry, RuntimeError,
+    ScheduledPassAdmissionV1, StepOutput,
 };
 use pos_state::{
     AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
@@ -1303,5 +1306,56 @@ fn authorized_commit_rejects_a_legacy_pending_step() {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .aborts,
         1
+    );
+}
+
+#[test]
+fn scheduled_admission_refuses_participant_authorized_work() {
+    let fixture = fixture();
+    let (mut registry, state) = registry(&fixture, false);
+    assert_eq!(stage_current(&mut registry, &fixture).test_ok().len(), 1);
+    let mut port = pos_store::memory::MemoryStore::new();
+    let admission = ScheduledPassAdmissionV1 {
+        attempt_id: PipelineAttemptIdV1::try_new([1; 16]).test_ok(),
+        idempotency: AppendIdentity::new(
+            AppendDedupKey::from_keyed_hash([2; 32]),
+            AppendDedupScope::from_keyed_hash([3; 32]),
+        ),
+        provider_validation: PipelineEvidenceRefV1::try_new(hash_from_repeated_byte(4)).test_ok(),
+        security_revisions: PipelineSecurityRevisionsV1::try_from_draft(
+            PipelineSecurityRevisionsDraftV1 {
+                authority: hash_from_repeated_byte(5),
+                consent: hash_from_repeated_byte(6),
+                capability: hash_from_repeated_byte(7),
+                delegation: hash_from_repeated_byte(8),
+                policy: hash_from_repeated_byte(9),
+                execution_profile: hash_from_repeated_byte(10),
+                erasure: hash_from_repeated_byte(11),
+            },
+        )
+        .test_ok(),
+        commit_head: Seq::from_u64(12),
+        commit_now_secs: 1,
+    };
+
+    let refused = registry.admit_scheduled_pass(&mut port, &admission);
+    match refused {
+        Err(RuntimeError::AuthorityFenceRequired) => {}
+        Ok(_) => std::panic::resume_unwind(Box::new("expected authority fence error")),
+        Err(other) => std::panic::resume_unwind(Box::new(format!(
+            "expected authority fence error, got: {other}"
+        ))),
+    }
+    assert_eq!(
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aborts,
+        1,
+        "every staged Driver is aborted"
+    );
+    assert!(
+        error_text(registry.admit_scheduled_pass(&mut port, &admission))
+            .contains("Driver step is already pending")
     );
 }
