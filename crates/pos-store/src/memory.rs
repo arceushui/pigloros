@@ -11043,9 +11043,11 @@ fn memory_collect_manifest_owner_generation_evidence(
         .timelines
         .iter()
         .map(|timeline_id| {
-            store
-                .manifest_owner_admission_snapshots
-                .get(&(owner_id, state.configuration_generation, *timeline_id))
+            store.manifest_owner_admission_snapshots.get(&(
+                owner_id,
+                state.configuration_generation,
+                *timeline_id,
+            ))
         })
         .collect::<Option<Vec<_>>>()
         .unwrap_or_default();
@@ -11650,7 +11652,10 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         // The owner-state read validates every retained cut and its one
         // linked operation.
         self.read_local_cut_owner_state_v1(owner_id)?;
-        Ok(self.local_cut_owner_commits.get(&(owner_id, cut_id)).cloned())
+        Ok(self
+            .local_cut_owner_commits
+            .get(&(owner_id, cut_id))
+            .cloned())
     }
 }
 

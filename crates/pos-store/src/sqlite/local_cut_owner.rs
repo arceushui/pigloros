@@ -22,7 +22,8 @@ use super::{
     SqliteManifestOwnerAdmissionGenerationV1, SqliteStore,
 };
 
-pub(super) const LOCAL_CUT_OWNER_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS local_cut_owner_state (
+pub(super) const LOCAL_CUT_OWNER_SCHEMA_SQL: &str =
+    "CREATE TABLE IF NOT EXISTS local_cut_owner_state (
          owner_id BLOB PRIMARY KEY CHECK (length(owner_id) = 32),
          last_visible_cut_id BLOB NOT NULL CHECK (length(last_visible_cut_id) = 8),
          last_visible_tick BLOB NOT NULL CHECK (length(last_visible_tick) = 8),
