@@ -758,9 +758,8 @@ fn a_second_fold_is_refused_while_one_runs() {
 #[test]
 fn the_panic_hook_and_worker_are_installed_once() {
     let _serial = serial();
-    let first = test_ok(StagedFoldExecutorV1::acquire());
+    let _first = test_ok(StagedFoldExecutorV1::acquire());
     assert_eq!(worker_threads(), 1);
-    drop(first);
     let second = test_ok(StagedFoldExecutorV1::acquire());
     assert_eq!(worker_threads(), 1);
     assert!(format!("{second:?}").starts_with("StagedFoldExecutorV1"));
