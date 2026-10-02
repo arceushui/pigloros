@@ -1008,18 +1008,6 @@ impl<'a> Reader<'a> {
             .map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)?;
         OwnerIdV1::new(value).map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)
     }
-    fn text(&mut self, maximum: usize) -> Result<&'a str, ForkAttributionCodecErrorV1> {
-        let length = usize::try_from(self.head(3)?)
-            .map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)?;
-        if length > maximum {
-            return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
-        }
-        let value = self.take(length)?;
-        if value.is_empty() {
-            return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
-        }
-        std::str::from_utf8(value).map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)
-    }
     fn hash(&mut self) -> Result<Hash, ForkAttributionCodecErrorV1> {
         Ok(Hash::from_bytes(self.fixed()?))
     }
@@ -1033,8 +1021,12 @@ impl<'a> Reader<'a> {
             _ => Err(ForkAttributionCodecErrorV1::InvalidEncoding),
         }
     }
+    /// Compare a text-string marker byte-for-byte; any other length or
+    /// content is an invalid encoding.
     fn magic(&mut self, expected: &str) -> Result<(), ForkAttributionCodecErrorV1> {
-        if self.text(4)? == expected {
+        // A length that does not fit `usize` is necessarily unavailable to `take`.
+        let length = usize::try_from(self.head(3)?).unwrap_or(usize::MAX);
+        if self.take(length)? == expected.as_bytes() {
             Ok(())
         } else {
             Err(ForkAttributionCodecErrorV1::InvalidEncoding)

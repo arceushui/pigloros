@@ -304,6 +304,12 @@ fn publication_decoders_reject_version_trailing_byte_and_oversize_input(
             decode(&version),
             Err(ForkAttributionCodecErrorV1::UnsupportedVersion)
         );
+        let mut marker = canonical.clone();
+        marker[PUBLICATION_VERSION_AT - 4] = b'X';
+        assert_eq!(
+            decode(&marker),
+            Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+        );
         let mut trailing = canonical;
         trailing.push(0);
         assert_eq!(
