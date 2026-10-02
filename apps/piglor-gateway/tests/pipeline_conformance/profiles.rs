@@ -370,7 +370,7 @@ impl Driver for PlannedDriver {
             || "none".to_owned(),
             |snapshot| format!("{:?}", snapshot.digest()),
         );
-        let raw_input = !observations.events().is_empty() || observations.len() > 0;
+        let raw_input = !observations.events().is_empty() || !observations.is_empty();
         self.observed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
