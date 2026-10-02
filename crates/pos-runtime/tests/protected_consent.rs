@@ -10,8 +10,8 @@ use pos_core::{
     PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, Reducer, State,
 };
 use pos_runtime::{
-    schema::EventTypeSchema, ActionSubmissionError, Driver, InstalledOutputPolicySourceV1,
-    LocalScheduledAdmissionHostV1, ObservationView, OutputPolicyBindingV1,
+    schema::EventTypeSchema, ActionSubmissionError, Driver, LocalScheduledAdmissionHostV1,
+    ObservationView, OutputPolicyBindingV1, OutputPolicySourceV1,
     PluginRegistry as RuntimePluginRegistry, RuntimeError, StepOutput, TimelineHistorySegment,
 };
 use pos_store::{memory::MemoryStore, EventStore};
@@ -116,9 +116,9 @@ fn register_output_driver(
         id: plugin_id,
         event_type: Kind::new(event_type),
     };
-    let binding = test_ok(OutputPolicyBindingV1::from_installed_source(
+    let binding = test_ok(OutputPolicyBindingV1::from_source(
         &binding_plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &[],
         "deterministic-local-v1",
     ));

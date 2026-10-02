@@ -68,9 +68,9 @@ fn output_binding(
         version: plugin_version,
         event_types: event_types.iter().map(|kind| Kind::new(*kind)).collect(),
     };
-    Ok(OutputPolicyBindingV1::from_installed_source(
+    Ok(OutputPolicyBindingV1::from_source(
         &plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Generated,
+        pos_runtime::OutputPolicySourceV1::Generated,
         &[],
         "deterministic-local-v1",
     )?)

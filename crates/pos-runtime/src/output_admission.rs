@@ -69,16 +69,16 @@ pub enum OutputAdmissionErrorV1 {
     CallbackMismatch { kind: &'static str },
 }
 
-/// Installed implementation source selected by a trusted composition root.
+/// Local or installed implementation source selected by a composition root.
 ///
-/// These variants are the only artifact roots accepted by production output
-/// admission. The runtime observes the concrete Plugin type at this boundary,
-/// resolves its complete native source bundle from the repository, and rejects
-/// same-name or caller-authored fixture types before policy construction.
+/// `Generated` is the explicit local open-source path. Its metadata-derived
+/// implementation identity supports same-process output admission only; it
+/// is not an installed-source, deployment, or release qualification claim.
+/// The other variants resolve reviewed implementation bundles compiled into
+/// this runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InstalledOutputPolicySourceV1 {
-    /// The bounded generated source available only to explicit test-support fixtures.
-    #[cfg(any(test, feature = "test-support"))]
+pub enum OutputPolicySourceV1 {
+    /// Local metadata-derived source, with no installed-profile qualification.
     Generated,
     /// The Gateway composition root.
     Gateway,
@@ -163,7 +163,7 @@ struct InstalledPluginV1 {
 
 /// Complete native data for one installed source, so adding a source is one
 /// descriptor plus its enum variant.
-struct InstalledSourceDescriptorV1 {
+struct OutputPolicySourceDescriptorV1 {
     plugins: &'static [InstalledPluginV1],
     /// Concrete `ActionApprover` type accepted from this source, if any.
     approver_type: Option<&'static str>,
@@ -172,15 +172,14 @@ struct InstalledSourceDescriptorV1 {
     source_files: &'static [(&'static str, &'static [u8])],
 }
 
-#[cfg(any(test, feature = "test-support"))]
-static GENERATED_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static GENERATED_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[],
     approver_type: None,
     workload_profile: WorkloadProfileV1::Interactive,
     source_files: &[],
 };
 
-static GATEWAY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static GATEWAY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "gateway-world-actions",
         type_name: "piglor_gateway::GatewayActionPlugin",
@@ -229,7 +228,7 @@ static GATEWAY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1
     ],
 };
 
-static WORLD_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static WORLD_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "world",
         type_name: "pos_plugin_world::WorldPlugin",
@@ -248,7 +247,7 @@ static WORLD_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
     )],
 };
 
-static RULE_AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static RULE_AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "rule-agent",
         type_name: "pos_plugin_rule_agent::RuleAgentPlugin",
@@ -263,7 +262,7 @@ static RULE_AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescripto
     )],
 };
 
-static AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "agent",
         type_name: "pos_plugin_agent::AgentPlugin",
@@ -296,22 +295,23 @@ static AGENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
     ],
 };
 
-static SYNTHETIC_OBSERVATION_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
-    plugins: &[InstalledPluginV1 {
-        name: "synthetic-obs",
-        type_name: "pos_plugin_synthetic_obs::SyntheticObsPlugin",
-        event_types: &["obs.synthetic"],
-        driver_type: Some("pos_plugin_synthetic_obs::SyntheticDriver"),
-    }],
-    approver_type: None,
-    workload_profile: WorkloadProfileV1::Research,
-    source_files: &[(
-        "src/lib.rs",
-        include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
-    )],
-};
+static SYNTHETIC_OBSERVATION_SOURCE: OutputPolicySourceDescriptorV1 =
+    OutputPolicySourceDescriptorV1 {
+        plugins: &[InstalledPluginV1 {
+            name: "synthetic-obs",
+            type_name: "pos_plugin_synthetic_obs::SyntheticObsPlugin",
+            event_types: &["obs.synthetic"],
+            driver_type: Some("pos_plugin_synthetic_obs::SyntheticDriver"),
+        }],
+        approver_type: None,
+        workload_profile: WorkloadProfileV1::Research,
+        source_files: &[(
+            "src/lib.rs",
+            include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
+        )],
+    };
 
-static SOCIETY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static SOCIETY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[
         InstalledPluginV1 {
             name: "society",
@@ -334,7 +334,7 @@ static SOCIETY_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1
     )],
 };
 
-static EXPERIMENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescriptorV1 {
+static EXPERIMENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[
         InstalledPluginV1 {
             name: "successful-sibling",
@@ -383,11 +383,10 @@ static EXPERIMENT_SOURCE: InstalledSourceDescriptorV1 = InstalledSourceDescripto
     ],
 };
 
-impl InstalledOutputPolicySourceV1 {
+impl OutputPolicySourceV1 {
     /// Return the complete native data compiled into this source.
-    fn descriptor(self) -> &'static InstalledSourceDescriptorV1 {
+    fn descriptor(self) -> &'static OutputPolicySourceDescriptorV1 {
         match self {
-            #[cfg(any(test, feature = "test-support"))]
             Self::Generated => &GENERATED_SOURCE,
             Self::Gateway => &GATEWAY_SOURCE,
             Self::World => &WORLD_SOURCE,
@@ -407,7 +406,6 @@ impl InstalledOutputPolicySourceV1 {
     }
 
     pub(crate) fn accepts_plugin<P: Plugin + ?Sized>(self, plugin: &P) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
         }
@@ -417,7 +415,6 @@ impl InstalledOutputPolicySourceV1 {
     }
 
     fn accepts_driver<D: Driver + 'static>(self, plugin_name: &str) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
         }
@@ -426,7 +423,6 @@ impl InstalledOutputPolicySourceV1 {
     }
 
     pub(crate) fn accepts_approver<A: ActionApprover + 'static>(self) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return true;
         }
@@ -434,17 +430,13 @@ impl InstalledOutputPolicySourceV1 {
     }
 
     fn implementation_artifact<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<u8> {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             return generated_implementation_artifact_v1(plugin);
         }
-        #[cfg(not(any(test, feature = "test-support")))]
-        let _ = plugin;
         source_artifact_bundle(self.descriptor().source_files)
     }
 
     fn event_types<P: Plugin + ?Sized>(self, plugin: &P) -> Vec<String> {
-        #[cfg(any(test, feature = "test-support"))]
         if matches!(self, Self::Generated) {
             let mut event_types = plugin
                 .capability()
@@ -591,11 +583,11 @@ impl InstalledOutputPolicySourceV1 {
     }
 }
 
-/// Deterministic implementation bytes for the test-support generated source.
+/// Deterministic local implementation metadata for an open-source Plugin.
 ///
-/// This remains a bounded fixture source; ordinary registration has no
-/// generated fallback and must select an installed composition root above.
-#[cfg(any(test, feature = "test-support"))]
+/// This deliberately does not claim to measure or authenticate the compiled
+/// binary. Deployment and release decisions continue to use installed source
+/// descriptors and their separately qualified execution profile.
 pub(crate) fn generated_implementation_artifact_v1<P: Plugin + ?Sized>(plugin: &P) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"pigloros.generated-implementation.v1\0");
@@ -628,7 +620,6 @@ fn source_artifact_bundle(parts: &[(&str, &[u8])]) -> Vec<u8> {
     bytes
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn append_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     output.extend_from_slice(&bytes_len.to_le_bytes());
@@ -640,7 +631,7 @@ pub struct OutputPolicyBindingV1 {
     policy: OutputPolicyV1,
     budget: ExecutableBudgetPolicyV1,
     artifacts: OutputPolicyArtifactInputV1,
-    source: InstalledOutputPolicySourceV1,
+    source: OutputPolicySourceV1,
     plugin_name: &'static str,
     owner_token: PluginOwnerTokenV1,
     /// Validated installed callbacks. They stay inert until installed
@@ -651,14 +642,17 @@ pub struct OutputPolicyBindingV1 {
 }
 
 impl OutputPolicyBindingV1 {
-    /// Resolve the exact installed source leaves and bind them to one policy.
+    /// Resolve the selected source leaves and bind them to one local policy.
+    ///
+    /// `Generated` builds metadata-only artifacts for ordinary local Plugin
+    /// use. Installed variants require their separate host-qualified source.
     ///
     /// # Errors
-    /// Returns a closed artifact or profile error before registration can
-    /// mutate the registry.
-    pub fn from_installed_source<P: Plugin>(
+    /// Returns a closed source, artifact, or profile error before registration
+    /// can mutate the registry.
+    pub fn from_source<P: Plugin>(
         plugin: &P,
-        source: InstalledOutputPolicySourceV1,
+        source: OutputPolicySourceV1,
         configuration_details: &[u8],
         profile_id: &str,
     ) -> Result<Self, OutputAdmissionErrorV1> {
@@ -693,10 +687,9 @@ impl OutputPolicyBindingV1 {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn from_installed_source_with_policy<P: Plugin + ?Sized>(
+    pub(crate) fn from_source_with_policy<P: Plugin + ?Sized>(
         plugin: &P,
-        source: InstalledOutputPolicySourceV1,
+        source: OutputPolicySourceV1,
         policy: OutputPolicyV1,
         budget: ExecutableBudgetPolicyV1,
         configuration_details: &[u8],
@@ -756,7 +749,7 @@ impl OutputPolicyBindingV1 {
         event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<Self, OutputAdmissionErrorV1> {
         if self.approver.is_some()
-            || self.source == InstalledOutputPolicySourceV1::World
+            || self.source == OutputPolicySourceV1::World
             || !self.source.accepts_approver::<A>()
         {
             return Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" });
@@ -773,8 +766,7 @@ impl OutputPolicyBindingV1 {
     }
 
     pub(crate) fn verifies_erased_owner_instance(&self, plugin: &dyn Plugin) -> bool {
-        #[cfg(any(test, feature = "test-support"))]
-        if self.source == InstalledOutputPolicySourceV1::Generated {
+        if self.source == OutputPolicySourceV1::Generated {
             return self.owner_token == PluginInstanceIdentity::installed_owner_token(plugin);
         }
         self.source.descriptor().plugins.iter().any(|installed| {
@@ -789,7 +781,7 @@ impl OutputPolicyBindingV1 {
         OutputPolicyV1,
         ExecutableBudgetPolicyV1,
         OutputPolicyArtifactInputV1,
-        InstalledOutputPolicySourceV1,
+        OutputPolicySourceV1,
         PluginOwnerTokenV1,
     ) {
         (
@@ -825,7 +817,8 @@ impl OutputPolicyBindingV1 {
         self.artifacts.configuration_artifact()
     }
 
-    /// Exact installed EPF1 bytes retained by this binding.
+    /// Exact execution-profile bytes retained by this binding. The local
+    /// `Generated` source has no EPF1 profile; installed sources retain exact EPF1.
     #[must_use]
     pub fn execution_profile_artifact(&self) -> &[u8] {
         self.artifacts.execution_profile_artifact()
@@ -859,11 +852,10 @@ impl OutputPolicyBindingV1 {
 
 /// The immutable artifact closure required to activate one output policy.
 ///
-/// EOP1/EBP1 identify the declarations and executable bounds.  The remaining
-/// bytes are the exact implementation, configuration, EPF1, and RTP1 inputs
-/// that those records reference.  Keeping the bytes with the admission owner
-/// makes the Replay identity retrievable instead of reducing it to opaque
-/// digests.
+/// EOP1/EBP1 identify the declarations and executable bounds. The remaining
+/// bytes are the exact implementation, configuration, optional EPF1, and RTP1
+/// inputs that those records reference. The local `Generated` path has no
+/// installed execution profile, so its EPF1 member is empty.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutputPolicyClosureV1 {
     output_policy: OutputPolicyV1,
@@ -930,7 +922,7 @@ impl OutputPolicyClosureV1 {
                 kind: "configuration",
             });
         }
-        validate_execution_profile_artifact_v1(execution_profile_artifact)?;
+        validate_optional_execution_profile_artifact_v1(execution_profile_artifact)?;
         let retention_policy =
             WorldRetentionPolicyV1::from_canonical_cbor(retention_policy_artifact)
                 .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })?;
@@ -1010,7 +1002,8 @@ impl OutputPolicyClosureV1 {
         &self.configuration_artifact
     }
 
-    /// Exact EPF1 bytes retained for Replay closure retrieval.
+    /// Exact execution-profile bytes retained for Replay closure retrieval.
+    /// Metadata-only local admission has an empty profile member.
     #[must_use]
     pub fn execution_profile_artifact(&self) -> &[u8] {
         &self.execution_profile_artifact
@@ -1141,9 +1134,9 @@ impl OutputPolicyClosureV1 {
 
     /// Encode the retained closure as one deterministic, length-framed record.
     ///
-    /// This is a retrieval envelope for a Replay manifest; each member keeps
-    /// its own native EOP1/EBP1/EPF1/RTP1 encoding and is independently
-    /// revalidated before use.
+    /// This is a retrieval envelope for a Replay manifest; each nonempty
+    /// member keeps its native encoding and is independently revalidated
+    /// before use. The local metadata-only profile member is empty.
     #[must_use]
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let members = [
@@ -1167,6 +1160,36 @@ impl OutputPolicyClosureV1 {
         }
         output
     }
+
+    /// Decode and validate one exact OPC1 envelope and every native member.
+    ///
+    /// The expected EOP1 bytes must equal member zero. Each remaining member
+    /// is checked by its native decoder, including canonical encoding and
+    /// recorded identity, before this method returns the retained closure.
+    ///
+    /// # Errors
+    /// Returns an artifact error when the envelope, member schemas, identities,
+    /// or canonical encoding are invalid.
+    pub fn from_manifest_canonical_bytes_v1(
+        bytes: &[u8],
+        expected_eop1: &[u8],
+    ) -> Result<Self, OutputAdmissionErrorV1> {
+        if bytes.len() > MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 {
+            return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" });
+        }
+        let envelope =
+            pos_core::OutputPolicyClosureEnvelopeV1::from_canonical_bytes_v1(bytes, expected_eop1)
+                .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
+        let closure = Self::from_artifacts_inner(
+            envelope.eop1_bytes(),
+            envelope.executable_budget_bytes(),
+            envelope.implementation_artifact(),
+            envelope.configuration_artifact(),
+            envelope.execution_profile_artifact(),
+            envelope.retention_policy_artifact(),
+        )?;
+        Ok(closure)
+    }
 }
 
 /// Validate a complete host artifact set without minting an admission closure.
@@ -1176,7 +1199,9 @@ impl OutputPolicyClosureV1 {
 ///
 /// # Errors
 /// Returns the closed artifact or identity error reported by the native
-/// policy, budget, profile, and retention decoders.
+/// policy, budget, profile, and retention decoders. An empty execution-profile
+/// member is valid for metadata-only local admission and makes no installed
+/// profile claim.
 pub fn validate_output_policy_artifacts_v1(
     output_policy_bytes: &[u8],
     executable_budget_bytes: &[u8],
@@ -1232,7 +1257,12 @@ const fn validate_leaf_lengths(
     Ok(())
 }
 
-fn validate_execution_profile_artifact_v1(bytes: &[u8]) -> Result<(), OutputAdmissionErrorV1> {
+fn validate_optional_execution_profile_artifact_v1(
+    bytes: &[u8],
+) -> Result<(), OutputAdmissionErrorV1> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     {
         pos_conformance::ExecutionProfileV1::from_canonical_cbor(bytes)
@@ -1241,37 +1271,18 @@ fn validate_execution_profile_artifact_v1(bytes: &[u8]) -> Result<(), OutputAdmi
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = bytes;
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn draft_execution_profile_artifact_v1(
-    profile_id: &str,
-) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
-    #[cfg(target_os = "linux")]
-    {
-        pos_conformance::draft_execution_profile_bytes_v1(profile_id)
-            .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = profile_id;
         Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
     }
 }
 
 fn execution_profile_artifact_v1(
     profile_id: &str,
-    source: InstalledOutputPolicySourceV1,
+    source: OutputPolicySourceV1,
 ) -> Result<Vec<u8>, OutputAdmissionErrorV1> {
-    #[cfg(any(test, feature = "test-support"))]
-    if source == InstalledOutputPolicySourceV1::Generated {
-        return draft_execution_profile_artifact_v1(profile_id);
+    if source == OutputPolicySourceV1::Generated {
+        let _ = profile_id;
+        return Ok(Vec::new());
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    let _ = source;
     #[cfg(target_os = "linux")]
     {
         pos_conformance::host_verified_execution_profile_bytes_v1(profile_id)
@@ -1568,40 +1579,38 @@ mod tests {
     }
 
     #[test]
-    fn draft_epf1_requires_generated_source() -> Result<(), Box<dyn std::error::Error>> {
+    fn generated_source_has_no_installed_execution_profile() {
         let profile_id = "deterministic-local-v1";
-        let generated =
-            execution_profile_artifact_v1(profile_id, InstalledOutputPolicySourceV1::Generated)?;
-        assert_eq!(
-            generated,
-            pos_conformance::draft_execution_profile_bytes_v1(profile_id)?
+        assert!(
+            execution_profile_artifact_v1(profile_id, OutputPolicySourceV1::Generated)
+                .or_resume()
+                .is_empty()
         );
         for source in [
-            InstalledOutputPolicySourceV1::Gateway,
-            InstalledOutputPolicySourceV1::World,
-            InstalledOutputPolicySourceV1::RuleAgent,
-            InstalledOutputPolicySourceV1::Agent,
-            InstalledOutputPolicySourceV1::SyntheticObservation,
-            InstalledOutputPolicySourceV1::Society,
-            InstalledOutputPolicySourceV1::Experiment,
+            OutputPolicySourceV1::Gateway,
+            OutputPolicySourceV1::World,
+            OutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::Agent,
+            OutputPolicySourceV1::SyntheticObservation,
+            OutputPolicySourceV1::Society,
+            OutputPolicySourceV1::Experiment,
         ] {
             assert_eq!(
                 execution_profile_artifact_v1(profile_id, source),
                 Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
             );
         }
-        Ok(())
     }
 
     #[test]
-    fn installed_sources_reject_unrelated_driver_types() {
+    fn policy_sources_reject_unrelated_driver_types() {
         for source in [
-            InstalledOutputPolicySourceV1::Gateway,
-            InstalledOutputPolicySourceV1::Agent,
-            InstalledOutputPolicySourceV1::Society,
-            InstalledOutputPolicySourceV1::World,
-            InstalledOutputPolicySourceV1::RuleAgent,
-            InstalledOutputPolicySourceV1::SyntheticObservation,
+            OutputPolicySourceV1::Gateway,
+            OutputPolicySourceV1::Agent,
+            OutputPolicySourceV1::Society,
+            OutputPolicySourceV1::World,
+            OutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::SyntheticObservation,
         ] {
             assert!(!source.accepts_driver::<SourceProbeDriver>("unrelated"));
         }
@@ -1612,20 +1621,21 @@ mod tests {
             "society",
             "unrelated",
         ] {
-            assert!(!InstalledOutputPolicySourceV1::Experiment
-                .accepts_driver::<SourceProbeDriver>(plugin_name));
+            assert!(
+                !OutputPolicySourceV1::Experiment.accepts_driver::<SourceProbeDriver>(plugin_name)
+            );
         }
     }
 
     #[test]
-    fn installed_sources_reject_unrelated_approver_types() {
-        assert!(InstalledOutputPolicySourceV1::Generated.accepts_approver::<BindingTestApprover>());
+    fn policy_sources_reject_unrelated_approver_types() {
+        assert!(OutputPolicySourceV1::Generated.accepts_approver::<BindingTestApprover>());
         for source in [
-            InstalledOutputPolicySourceV1::RuleAgent,
-            InstalledOutputPolicySourceV1::Agent,
-            InstalledOutputPolicySourceV1::SyntheticObservation,
-            InstalledOutputPolicySourceV1::Society,
-            InstalledOutputPolicySourceV1::Experiment,
+            OutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::Agent,
+            OutputPolicySourceV1::SyntheticObservation,
+            OutputPolicySourceV1::Society,
+            OutputPolicySourceV1::Experiment,
         ] {
             assert!(!source.accepts_approver::<BindingTestApprover>());
         }
@@ -1639,9 +1649,9 @@ mod tests {
             events: vec![Kind::new("plugin.output")],
         };
         let generated = || {
-            OutputPolicyBindingV1::from_installed_source(
+            OutputPolicyBindingV1::from_source(
                 &plugin,
-                InstalledOutputPolicySourceV1::Generated,
+                OutputPolicySourceV1::Generated,
                 &[],
                 "deterministic-local-v1",
             )
@@ -1661,7 +1671,7 @@ mod tests {
         assert!(!owned.verifies_erased_owner_instance(&cloned_plugin));
         // An installed source checks the owner against its descriptor types,
         // which a fixture Plugin never matches.
-        owned.source = InstalledOutputPolicySourceV1::Gateway;
+        owned.source = OutputPolicySourceV1::Gateway;
         assert!(!owned.verifies_erased_owner_instance(&plugin));
     }
 
@@ -1790,12 +1800,12 @@ mod tests {
             name: "gateway-world-actions",
             events: Vec::new(),
         };
-        let artifact = InstalledOutputPolicySourceV1::Gateway.implementation_artifact(&plugin);
+        let artifact = OutputPolicySourceV1::Gateway.implementation_artifact(&plugin);
         let delegated: &[u8] = include_bytes!("../../../plugins/world/src/lib.rs");
         assert!(artifact
             .windows(delegated.len())
             .any(|window| window == delegated));
-        assert!(!InstalledOutputPolicySourceV1::Gateway.accepts_approver::<BindingTestApprover>());
+        assert!(!OutputPolicySourceV1::Gateway.accepts_approver::<BindingTestApprover>());
     }
 
     #[test]
@@ -1805,9 +1815,9 @@ mod tests {
             name: "fixture",
             events: Vec::new(),
         };
-        let mut binding = OutputPolicyBindingV1::from_installed_source(
+        let mut binding = OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -1846,7 +1856,7 @@ mod tests {
         plugin_id: PluginId,
         workload_profile: WorkloadProfileV1,
     ) -> OutputPolicyClosureV1 {
-        let profile = draft_execution_profile_artifact_v1("deterministic-local-v1").or_resume();
+        let profile = [];
         let profile_hash = crate::reviewed_policy::execution_profile_artifact_hash_v1(&profile);
         let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -1959,43 +1969,41 @@ mod tests {
         artifact
     }
 
-    const fn installed_sources() -> [InstalledOutputPolicySourceV1; 8] {
+    const fn policy_sources() -> [OutputPolicySourceV1; 8] {
         [
-            InstalledOutputPolicySourceV1::Generated,
-            InstalledOutputPolicySourceV1::Gateway,
-            InstalledOutputPolicySourceV1::World,
-            InstalledOutputPolicySourceV1::RuleAgent,
-            InstalledOutputPolicySourceV1::Agent,
-            InstalledOutputPolicySourceV1::SyntheticObservation,
-            InstalledOutputPolicySourceV1::Society,
-            InstalledOutputPolicySourceV1::Experiment,
+            OutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Gateway,
+            OutputPolicySourceV1::World,
+            OutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::Agent,
+            OutputPolicySourceV1::SyntheticObservation,
+            OutputPolicySourceV1::Society,
+            OutputPolicySourceV1::Experiment,
         ]
     }
 
     #[test]
-    fn installed_source_descriptors_bind_native_types_and_event_types() {
+    fn policy_source_descriptors_bind_native_types_and_event_types() {
         let plugin = FixturePlugin {
             id: PluginId::new(),
             name: "fixture",
             events: vec![Kind::new("fixture.output")],
         };
-        for source in installed_sources() {
+        for source in policy_sources() {
             let expected_native_types: &[&str] = match source {
-                InstalledOutputPolicySourceV1::Generated => &[],
-                InstalledOutputPolicySourceV1::Gateway => &["piglor_gateway::GatewayActionPlugin"],
-                InstalledOutputPolicySourceV1::World => &["pos_plugin_world::WorldPlugin"],
-                InstalledOutputPolicySourceV1::RuleAgent => {
-                    &["pos_plugin_rule_agent::RuleAgentPlugin"]
-                }
-                InstalledOutputPolicySourceV1::Agent => &["pos_plugin_agent::AgentPlugin"],
-                InstalledOutputPolicySourceV1::SyntheticObservation => {
+                OutputPolicySourceV1::Generated => &[],
+                OutputPolicySourceV1::Gateway => &["piglor_gateway::GatewayActionPlugin"],
+                OutputPolicySourceV1::World => &["pos_plugin_world::WorldPlugin"],
+                OutputPolicySourceV1::RuleAgent => &["pos_plugin_rule_agent::RuleAgentPlugin"],
+                OutputPolicySourceV1::Agent => &["pos_plugin_agent::AgentPlugin"],
+                OutputPolicySourceV1::SyntheticObservation => {
                     &["pos_plugin_synthetic_obs::SyntheticObsPlugin"]
                 }
-                InstalledOutputPolicySourceV1::Society => &[
+                OutputPolicySourceV1::Society => &[
                     "pos_plugin_society::SocietyPlugin",
                     "pos_plugin_society::SocietySignalProjectionPlugin",
                 ],
-                InstalledOutputPolicySourceV1::Experiment => &[
+                OutputPolicySourceV1::Experiment => &[
                     "pos_experiment::moat_proof::SiblingProbePlugin",
                     "pos_experiment::moat_proof::FailureProbePlugin",
                     "pos_experiment::moat_proof::ProofAgentPlugin",
@@ -2011,18 +2019,16 @@ mod tests {
             assert_eq!(native_types, expected_native_types);
             assert!(!source.implementation_artifact(&plugin).is_empty());
             let expected_event_types: &[&str] = match source {
-                InstalledOutputPolicySourceV1::Generated => &["fixture.output"],
-                InstalledOutputPolicySourceV1::Gateway => &["world.action.v1"],
-                InstalledOutputPolicySourceV1::World => {
+                OutputPolicySourceV1::Generated => &["fixture.output"],
+                OutputPolicySourceV1::Gateway => &["world.action.v1"],
+                OutputPolicySourceV1::World => {
                     &["world.action.v1", "world.observation.v1", "world.config.v1"]
                 }
-                InstalledOutputPolicySourceV1::RuleAgent => &["agent.decision"],
-                InstalledOutputPolicySourceV1::Agent => {
-                    &["agent.action", "runtime.recorded_output"]
-                }
-                InstalledOutputPolicySourceV1::SyntheticObservation => &["obs.synthetic"],
-                InstalledOutputPolicySourceV1::Society => &["society.signal"],
-                InstalledOutputPolicySourceV1::Experiment => &["proof.failure.sibling"],
+                OutputPolicySourceV1::RuleAgent => &["agent.decision"],
+                OutputPolicySourceV1::Agent => &["agent.action", "runtime.recorded_output"],
+                OutputPolicySourceV1::SyntheticObservation => &["obs.synthetic"],
+                OutputPolicySourceV1::Society => &["society.signal"],
+                OutputPolicySourceV1::Experiment => &["proof.failure.sibling"],
             };
             let mut expected_event_types = expected_event_types
                 .iter()
@@ -2044,35 +2050,34 @@ mod tests {
     }
 
     #[test]
-    fn installed_sources_exercise_names_artifacts_and_policy_builders() {
+    fn policy_sources_exercise_names_artifacts_and_policy_builders() {
         let plugin = FixturePlugin {
             id: PluginId::new(),
             name: "fixture",
             events: vec![Kind::new("fixture.output")],
         };
-        for source in installed_sources() {
+        for source in policy_sources() {
             let expected_profile = match source {
-                InstalledOutputPolicySourceV1::Generated
-                | InstalledOutputPolicySourceV1::Gateway
-                | InstalledOutputPolicySourceV1::Agent => WorkloadProfileV1::Interactive,
-                InstalledOutputPolicySourceV1::RuleAgent
-                | InstalledOutputPolicySourceV1::SyntheticObservation => {
+                OutputPolicySourceV1::Generated
+                | OutputPolicySourceV1::Gateway
+                | OutputPolicySourceV1::Agent => WorkloadProfileV1::Interactive,
+                OutputPolicySourceV1::RuleAgent | OutputPolicySourceV1::SyntheticObservation => {
                     WorkloadProfileV1::Research
                 }
-                InstalledOutputPolicySourceV1::World
-                | InstalledOutputPolicySourceV1::Society
-                | InstalledOutputPolicySourceV1::Experiment => WorkloadProfileV1::Fork,
+                OutputPolicySourceV1::World
+                | OutputPolicySourceV1::Society
+                | OutputPolicySourceV1::Experiment => WorkloadProfileV1::Fork,
             };
             assert_eq!(source.workload_profile(), expected_profile);
             let accepts_plugin = source.accepts_plugin(&plugin);
             assert_eq!(
                 accepts_plugin,
-                matches!(source, InstalledOutputPolicySourceV1::Generated)
+                matches!(source, OutputPolicySourceV1::Generated)
             );
             let budget = source
                 .build_budget(plugin.id, Hash::from_bytes([9; 32]))
                 .or_resume();
-            if matches!(source, InstalledOutputPolicySourceV1::Generated) {
+            if matches!(source, OutputPolicySourceV1::Generated) {
                 assert!(accepts_plugin);
                 source
                     .build_policy(
@@ -2111,10 +2116,10 @@ mod tests {
                 _ => Vec::new(),
             };
             assert_eq!(
-                InstalledOutputPolicySourceV1::Experiment.event_types(&named),
+                OutputPolicySourceV1::Experiment.event_types(&named),
                 expected_event_types
             );
-            assert!(!InstalledOutputPolicySourceV1::Experiment.accepts_plugin(&named));
+            assert!(!OutputPolicySourceV1::Experiment.accepts_plugin(&named));
         }
     }
 
@@ -2125,13 +2130,13 @@ mod tests {
             name: "empty",
             events: vec![Kind::new("")],
         };
-        let budget = InstalledOutputPolicySourceV1::Generated
+        let budget = OutputPolicySourceV1::Generated
             .build_budget(empty.id, Hash::from_bytes([9; 32]))
             .or_resume();
-        assert!(InstalledOutputPolicySourceV1::Generated
+        assert!(OutputPolicySourceV1::Generated
             .build_policy(
                 &empty,
-                InstalledOutputPolicySourceV1::Generated.implementation_artifact_hash(&empty),
+                OutputPolicySourceV1::Generated.implementation_artifact_hash(&empty),
                 Hash::from_bytes([8; 32]),
                 &budget,
             )
@@ -2140,21 +2145,20 @@ mod tests {
         let long_version_plugin = LongVersionPlugin {
             version: long_version,
         };
-        let budget = InstalledOutputPolicySourceV1::Generated
+        let budget = OutputPolicySourceV1::Generated
             .build_budget(long_version_plugin.id(), Hash::from_bytes([9; 32]))
             .or_resume();
-        assert!(InstalledOutputPolicySourceV1::Generated
+        assert!(OutputPolicySourceV1::Generated
             .build_policy(
                 &long_version_plugin,
-                InstalledOutputPolicySourceV1::Generated
-                    .implementation_artifact_hash(&long_version_plugin),
+                OutputPolicySourceV1::Generated.implementation_artifact_hash(&long_version_plugin),
                 Hash::from_bytes([8; 32]),
                 &budget,
             )
             .is_err());
-        assert!(OutputPolicyBindingV1::from_installed_source(
+        assert!(OutputPolicyBindingV1::from_source(
             &long_version_plugin,
-            InstalledOutputPolicySourceV1::Generated,
+            OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -2212,9 +2216,9 @@ mod tests {
         let details =
             vec![0_u8; crate::reviewed_policy::MAX_PLUGIN_CONFIGURATION_DETAILS_BYTES_V1 + 1];
         assert!(matches!(
-            OutputPolicyBindingV1::from_installed_source(
+            OutputPolicyBindingV1::from_source(
                 &plugin,
-                InstalledOutputPolicySourceV1::Generated,
+                OutputPolicySourceV1::Generated,
                 &details,
                 "deterministic-local-v1",
             ),
@@ -2223,20 +2227,22 @@ mod tests {
             })
         ));
         assert!(matches!(
-            OutputPolicyBindingV1::from_installed_source(
+            OutputPolicyBindingV1::from_source(
                 &plugin,
-                InstalledOutputPolicySourceV1::Generated,
+                OutputPolicySourceV1::Generated,
                 &[],
                 "missing-profile",
             ),
-            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+            Ok(binding)
+                if binding.source == OutputPolicySourceV1::Generated
+                    && binding.execution_profile_artifact().is_empty()
         ));
         let budget = budget(plugin.id, 16, 2, 32, 100, [10, 10, 10]);
         let policy = policy(plugin.id, &budget);
         assert!(matches!(
-            OutputPolicyBindingV1::from_installed_source_with_policy(
+            OutputPolicyBindingV1::from_source_with_policy(
                 &plugin,
-                InstalledOutputPolicySourceV1::Generated,
+                OutputPolicySourceV1::Generated,
                 policy.clone(),
                 budget.clone(),
                 &details,
@@ -2247,15 +2253,17 @@ mod tests {
             })
         ));
         assert!(matches!(
-            OutputPolicyBindingV1::from_installed_source_with_policy(
+            OutputPolicyBindingV1::from_source_with_policy(
                 &plugin,
-                InstalledOutputPolicySourceV1::Generated,
+                OutputPolicySourceV1::Generated,
                 policy,
                 budget,
                 &[],
                 "missing-profile",
             ),
-            Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
+            Ok(binding)
+                if binding.source == OutputPolicySourceV1::Generated
+                    && binding.execution_profile_artifact().is_empty()
         ));
     }
 
@@ -2269,9 +2277,9 @@ mod tests {
         let budget = budget(plugin.id, 16, 2, 32, 100, [10, 10, 10]);
         let policy = policy(plugin.id, &budget);
         assert!(matches!(
-            OutputPolicyBindingV1::from_installed_source_with_policy(
+            OutputPolicyBindingV1::from_source_with_policy(
                 &plugin,
-                InstalledOutputPolicySourceV1::World,
+                OutputPolicySourceV1::World,
                 policy,
                 budget,
                 &[],
@@ -2316,7 +2324,7 @@ mod tests {
                 closure.configuration_artifact(),
                 fixture_configuration_artifact()
             );
-            assert!(!closure.execution_profile_artifact().is_empty());
+            assert!(closure.execution_profile_artifact().is_empty());
             assert!(!closure.retention_policy_artifact().is_empty());
             assert!(!closure.to_canonical_bytes().is_empty());
         }

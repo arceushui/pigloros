@@ -12,6 +12,7 @@ use std::{
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
+    close_adapter_recording_v1, completed_adapter_call_v1,
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft, EventOriginV1, Kind},
@@ -29,6 +30,7 @@ use pos_core::{
     },
     hasher::Hasher,
     ids::{EventId, TimelineId},
+    inspect_artifact_registration_graph_v1, local_cut_owner_intent_digest_v1,
     owntracks_enrollment::{
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
@@ -42,12 +44,19 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
-    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
-    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
-    ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
+    validate_artifact_registration_catalog_graph_v1, validate_closed_adapter_recording_v1,
+    validate_local_cut_owner_result_v1, validate_local_cut_owner_successor_v1,
+    validate_manifest_owner_admission_snapshot_v1, AdapterCallReservationOutcomeV1,
+    AdapterCallReservationV1, AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1,
+    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1,
+    ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
+    ArtifactRegistrationGraphNodeV1, ArtifactRegistrationPersistenceErrorV1,
+    ArtifactRegistrationPersistencePortV1, AuthorityCommitOutcomeV1, AuthorityMutationPermitV1,
+    AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
+    AuthorityPersistenceStateV1, CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit,
+    ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
+    ErasureForkPersistencePortV1, ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate,
+    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistedStateV1,
     ErasurePersistenceInventorySnapshotV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
     ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
@@ -61,11 +70,17 @@ use pos_core::{
     ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1,
     ForkPublicationArtifactV1, ForkPublicationBindingV1, ForkPublicationOperationV1,
     ForkPublicationReceiptV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, PersistedAuthorityV1,
-    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
-    PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PublicKey, Signature,
-    StoredErasureManifestV1, ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, LocalCutOwnerCommitKindV1,
+    LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
+    LocalCutOwnerRequestV1, LocalCutOwnerStateV1, ManifestOwnerAdmissionCommitKindV1,
+    ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1,
+    ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
+    ManifestOwnerAdmissionSnapshotV1, OwnerIdV1, PersistedAuthorityV1,
+    PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, PreparedLocalCutOwnerCommitV1,
+    PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
+    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
+    ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 use crate::fork_admission_authority::{
@@ -270,6 +285,28 @@ pub struct MemoryStore {
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
     erasure_evidence: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    /// Exact immutable artifact bytes and ARD1 rows visible in each local owner catalog.
+    artifact_registrations: BTreeMap<Hash, ArtifactRegistrationCatalogRowV1>,
+    /// Unique immutable identity index for `(owner, class, artifact digest)`.
+    artifact_registration_identities: BTreeMap<(OwnerIdV1, ErasureArtifactClassV1, Hash), Hash>,
+    /// Immutable `(owner, MRM1 operation ID) -> root registration` index.
+    artifact_registration_operations: BTreeMap<(OwnerIdV1, Hash), Hash>,
+    /// Current local manifest-owner generation and complete owned Timeline set.
+    manifest_owner_admission_states: BTreeMap<[u8; 32], MemoryManifestOwnerAdmissionStateV1>,
+    /// Immutable historical MCA1/MSB1/MSR1 rows and exact scoped native copies.
+    manifest_owner_admission_snapshots:
+        BTreeMap<([u8; 32], u64, TimelineId), ManifestOwnerAdmissionSnapshotV1>,
+    /// Idempotent operation outcomes, including the original receipt digests.
+    manifest_owner_admission_operations:
+        BTreeMap<([u8; 32], Hash), MemoryManifestOwnerAdmissionOperationV1>,
+    /// Current local-cut owner state, synchronized with the current admission state.
+    local_cut_owner_states: BTreeMap<[u8; 32], LocalCutOwnerStateV1>,
+    /// Immutable local-cut batches keyed by owner operation identity.
+    local_cut_owner_operations: BTreeMap<([u8; 32], Hash), MemoryLocalCutOwnerOperationV1>,
+    /// Immutable visible local-cut results keyed by their owner and cut identity.
+    local_cut_owner_commits: BTreeMap<([u8; 32], u64), LocalCutOwnerCommitV1>,
+    /// Crash-recoverable local adapter recorder sessions by owner/run ID.
+    adapter_recording_sessions: BTreeMap<(Hash, Hash), MemoryAdapterRecordingSessionV1>,
     /// Canonical ERS1 history needed to validate predecessor links after restart.
     erasure_states: BTreeMap<ErasureReferenceV1, Vec<u8>>,
     erasure_attempt_pages: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
@@ -284,6 +321,48 @@ pub struct MemoryStore {
     erasure_fork_recovery_proofs: BTreeMap<ErasureReferenceV1, ErasureForkRecoveryProofV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MemoryAdapterRecordingStatusV1 {
+    Open,
+    Closed,
+    Aborted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryAdapterRecordingCallV1 {
+    reservation: AdapterCallReservationV1,
+    output_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryAdapterRecordingSessionV1 {
+    session: AdapterRecordingSessionV1,
+    status: MemoryAdapterRecordingStatusV1,
+    calls: BTreeMap<u64, MemoryAdapterRecordingCallV1>,
+    transcript_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryManifestOwnerAdmissionStateV1 {
+    configuration_generation: u64,
+    previous_visible_lcq1_hash: Option<Hash>,
+    inventory_generation: Hash,
+    timelines: BTreeSet<TimelineId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryManifestOwnerAdmissionOperationV1 {
+    intent_digest: Hash,
+    result: ManifestOwnerAdmissionCommitV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryLocalCutOwnerOperationV1 {
+    intent_digest: Hash,
+    request: LocalCutOwnerRequestV1,
+    result: LocalCutOwnerCommitV1,
 }
 
 #[derive(Clone, Copy)]
@@ -628,6 +707,16 @@ impl MemoryStore {
             fork_publication_artifacts: HashMap::new(),
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
+            artifact_registrations: BTreeMap::new(),
+            artifact_registration_identities: BTreeMap::new(),
+            artifact_registration_operations: BTreeMap::new(),
+            manifest_owner_admission_states: BTreeMap::new(),
+            manifest_owner_admission_snapshots: BTreeMap::new(),
+            manifest_owner_admission_operations: BTreeMap::new(),
+            local_cut_owner_states: BTreeMap::new(),
+            local_cut_owner_operations: BTreeMap::new(),
+            local_cut_owner_commits: BTreeMap::new(),
+            adapter_recording_sessions: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
             erasure_attempt_pages: BTreeMap::new(),
             erasure_scope_nodes: BTreeMap::new(),
@@ -4769,6 +4858,104 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
 }
 
 impl EventStore for MemoryStore {
+    fn commit_artifact_registration_batch(
+        &mut self,
+        batch: pos_core::PreparedArtifactRegistrationBatchV1,
+    ) -> Result<
+        pos_core::ArtifactRegistrationCommitOutcomeV1,
+        pos_core::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        ArtifactRegistrationPersistencePortV1::commit_artifact_registration_batch(self, batch)
+    }
+
+    fn read_artifact_registration(
+        &self,
+        owner_id: &pos_core::OwnerIdV1,
+        registration_address: Hash,
+    ) -> Result<
+        Option<pos_core::ArtifactRegistrationCatalogRowV1>,
+        pos_core::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        ArtifactRegistrationPersistencePortV1::read_artifact_registration(
+            self,
+            owner_id,
+            registration_address,
+        )
+    }
+
+    fn adapter_recording_open_session(
+        &mut self,
+        session: AdapterRecordingSessionV1,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::open_adapter_recording_session(self, session)
+    }
+
+    fn adapter_recording_reserve_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: AdapterCallReservationV1,
+    ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::reserve_adapter_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            reservation,
+        )
+    }
+
+    fn adapter_recording_complete_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::complete_adapter_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            global_call_index,
+            output_bytes,
+        )
+    }
+
+    fn adapter_recording_close_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::close_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
+    fn adapter_recording_read_closed_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::read_closed_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
+    fn adapter_recording_abort_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::abort_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         self.bind_erasure_gate_impl(gate)
     }
@@ -10638,10 +10825,1162 @@ mod tests {
     }
 }
 
+impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
+    fn commit_artifact_registration_batch(
+        &mut self,
+        batch: PreparedArtifactRegistrationBatchV1,
+    ) -> Result<ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1> {
+        let root_registration_address = batch.root_registration_address();
+        let has_root_record = batch.records().iter().any(|record| {
+            let same_owner = record.owner_id() == batch.owner_id();
+            let same_address = record.registration_address() == root_registration_address;
+            same_owner && same_address
+        });
+        if batch.records().is_empty() || !has_root_record {
+            return Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure);
+        }
+
+        let operation_key = (*batch.owner_id(), batch.root_operation_id());
+        let mut rows = Vec::with_capacity(batch.records().len());
+        let mut has_new_rows = false;
+        for record in batch.records() {
+            let row = ArtifactRegistrationCatalogRowV1::from_persisted(
+                *record.owner_id(),
+                record.artifact_class(),
+                record.artifact_digest(),
+                record.registration_address(),
+                record.artifact_bytes().to_vec(),
+                record.registration().canonical_cbor(),
+            )?;
+            let address_key = row.registration_address();
+            let identity_key = (*row.owner_id(), row.artifact_class(), row.artifact_digest());
+            match (
+                self.artifact_registrations.get(&address_key),
+                self.artifact_registration_identities.get(&identity_key),
+            ) {
+                (None, None) => has_new_rows = true,
+                (Some(existing), Some(address))
+                    if existing == &row && *address == row.registration_address() => {}
+                (None | Some(_), Some(_)) | (Some(_), None) => {
+                    return Err(ArtifactRegistrationPersistenceErrorV1::Conflict);
+                }
+            }
+            rows.push((address_key, identity_key, row));
+        }
+
+        let graph_nodes: Vec<_> = rows
+            .iter()
+            .map(|(address, _, row)| ArtifactRegistrationGraphNodeV1 {
+                address: *address,
+                owner_id: *row.owner_id(),
+                artifact_class: row.artifact_class(),
+                artifact_digest: row.artifact_digest(),
+                registration: row.registration().clone(),
+            })
+            .collect();
+        inspect_artifact_registration_graph_v1(batch.root_registration_address(), &graph_nodes)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+
+        let root_row = rows
+            .iter()
+            .find(|(address, _, _)| *address == batch.root_registration_address())
+            .map(|(_, _, row)| row)
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        let root = ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if root.as_input().run_operation_id != batch.root_operation_id()
+            || root_row.owner_id() != batch.owner_id()
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        let transcript_bytes =
+            find_memory_root_transcript_bytes(rows.iter().map(|(_, _, row)| row), &root)?;
+        self.validate_root_adapter_recording(&root, transcript_bytes)?;
+
+        self.check_artifact_registration_operation(
+            operation_key,
+            batch.root_registration_address(),
+        )?;
+
+        for (address_key, identity_key, row) in rows {
+            self.artifact_registrations
+                .entry(address_key)
+                .or_insert(row);
+            self.artifact_registration_identities
+                .entry(identity_key)
+                .or_insert(address_key);
+        }
+        self.artifact_registration_operations
+            .entry(operation_key)
+            .or_insert(root_registration_address);
+        Ok(if has_new_rows {
+            ArtifactRegistrationCommitOutcomeV1::Applied
+        } else {
+            ArtifactRegistrationCommitOutcomeV1::ExactRetry
+        })
+    }
+
+    fn read_artifact_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        registration_address: Hash,
+    ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>
+    {
+        let Some(row) = self.artifact_registrations.get(&registration_address) else {
+            let indexed_without_row = self.artifact_registration_identities.iter().any(
+                |((stored_owner, _, _), address)| {
+                    stored_owner == owner_id && *address == registration_address
+                },
+            ) || self.artifact_registration_operations.iter().any(
+                |((stored_owner, _), address)| {
+                    stored_owner == owner_id && *address == registration_address
+                },
+            );
+            return if indexed_without_row {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            } else {
+                Ok(None)
+            };
+        };
+        if row.owner_id() != owner_id {
+            return Ok(None);
+        }
+        self.validate_artifact_registration_closure(registration_address)?;
+        Ok(Some(row.clone()))
+    }
+}
+
+struct MemoryManifestOwnerGenerationEvidenceV1 {
+    operation_id: Hash,
+    inventory_generation: Hash,
+    previous_visible_lcq1_hash: Option<Hash>,
+    receipt_hashes: Vec<Hash>,
+}
+
+fn memory_manifest_owner_state_has_orphaned_rows(store: &MemoryStore, owner_id: [u8; 32]) -> bool {
+    store
+        .manifest_owner_admission_snapshots
+        .keys()
+        .any(|(stored_owner, _, _)| *stored_owner == owner_id)
+        || store
+            .manifest_owner_admission_operations
+            .keys()
+            .any(|(stored_owner, _)| *stored_owner == owner_id)
+        || store.local_cut_owner_states.contains_key(&owner_id)
+        || store
+            .local_cut_owner_operations
+            .keys()
+            .any(|(stored_owner, _)| *stored_owner == owner_id)
+        || store
+            .local_cut_owner_commits
+            .keys()
+            .any(|(stored_owner, _)| *stored_owner == owner_id)
+}
+
+fn memory_validate_manifest_owner_state_header(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    state: &MemoryManifestOwnerAdmissionStateV1,
+) -> Result<bool, ManifestOwnerAdmissionErrorV1> {
+    if state.configuration_generation == 0
+        || state.timelines.is_empty()
+        || state.inventory_generation == Hash::zero()
+        || state.previous_visible_lcq1_hash == Some(Hash::zero())
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    let Some(local_cut_state) = store.local_cut_owner_states.get(&owner_id) else {
+        let has_orphaned_local_cut_rows = store
+            .local_cut_owner_operations
+            .keys()
+            .any(|(stored_owner, _)| *stored_owner == owner_id)
+            || store
+                .local_cut_owner_commits
+                .keys()
+                .any(|(stored_owner, _)| *stored_owner == owner_id);
+        return if has_orphaned_local_cut_rows {
+            Err(ManifestOwnerAdmissionErrorV1::CorruptState)
+        } else {
+            Ok(false)
+        };
+    };
+    local_cut_state
+        .validate()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    if local_cut_state.owner_id != owner_id
+        || local_cut_state.configuration_generation != state.configuration_generation
+        || local_cut_state.previous_visible_lcq1_hash != state.previous_visible_lcq1_hash
+        || local_cut_state.inventory_generation != state.inventory_generation
+        || local_cut_state
+            .timelines
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != state.timelines
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    Ok(true)
+}
+
+fn memory_collect_manifest_owner_generation_evidence(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    state: &MemoryManifestOwnerAdmissionStateV1,
+) -> Result<MemoryManifestOwnerGenerationEvidenceV1, ManifestOwnerAdmissionErrorV1> {
+    let current_generation_rows = store
+        .manifest_owner_admission_snapshots
+        .keys()
+        .filter(|(stored_owner, generation, _)| {
+            *stored_owner == owner_id && *generation == state.configuration_generation
+        })
+        .count();
+    if current_generation_rows != state.timelines.len() {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    // A missing snapshot empties the list; the header already rejected an
+    // empty roster, so an absent first snapshot always means a missing row.
+    let snapshots = state
+        .timelines
+        .iter()
+        .map(|timeline_id| {
+            store.manifest_owner_admission_snapshots.get(&(
+                owner_id,
+                state.configuration_generation,
+                *timeline_id,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    let first = snapshots
+        .first()
+        .copied()
+        .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let catalog_hash = first.catalog.digest();
+    let first_receipt = first.timeline.receipt.as_input();
+    let previous_visible_lcq1_hash = first_receipt.previous_visible_lcq1_hash;
+    let mut scopes = HashSet::with_capacity(snapshots.len());
+    let mut receipt_hashes = Vec::with_capacity(snapshots.len());
+    for (snapshot, timeline_id) in snapshots.iter().zip(&state.timelines) {
+        let receipt = snapshot.timeline.receipt.as_input();
+        if snapshot.timeline.timeline_id != *timeline_id
+            || snapshot.operation_id != first.operation_id
+            || snapshot.catalog.digest() != catalog_hash
+            || snapshot.resulting_inventory_generation != first.resulting_inventory_generation
+            || receipt.previous_visible_lcq1_hash != previous_visible_lcq1_hash
+            || !scopes.insert(snapshot.timeline.scope)
+            || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        receipt_hashes.push(snapshot.timeline.receipt.digest());
+    }
+    Ok(MemoryManifestOwnerGenerationEvidenceV1 {
+        operation_id: first.operation_id,
+        inventory_generation: first.resulting_inventory_generation,
+        previous_visible_lcq1_hash,
+        receipt_hashes,
+    })
+}
+
+fn memory_validate_manifest_owner_generation_operation(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    state: &MemoryManifestOwnerAdmissionStateV1,
+    evidence: &MemoryManifestOwnerGenerationEvidenceV1,
+    has_local_cut_state: bool,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    if !has_local_cut_state
+        && (evidence.inventory_generation != state.inventory_generation
+            || evidence.previous_visible_lcq1_hash != state.previous_visible_lcq1_hash)
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    let operation = store
+        .manifest_owner_admission_operations
+        .get(&(owner_id, evidence.operation_id))
+        .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    if operation.result.kind != ManifestOwnerAdmissionCommitKindV1::Applied
+        || operation.result.configuration_generation != state.configuration_generation
+        || operation.result.inventory_generation != evidence.inventory_generation
+        || operation.result.receipt_hashes != evidence.receipt_hashes
+        || store
+            .manifest_owner_admission_operations
+            .iter()
+            .filter(|((stored_owner, _), operation)| {
+                *stored_owner == owner_id
+                    && operation.result.configuration_generation == state.configuration_generation
+            })
+            .count()
+            != 1
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    Ok(())
+}
+
+/// Derive the local-cut owner successor for a committed successor admission.
+///
+/// The caller has just read the owner state, which validated the local-cut
+/// state against the admitted header, and matched that header against the
+/// input's expected generation, receipt, and inventory.
+fn memory_successor_local_cut_owner_state(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    input: &pos_core::ManifestOwnerAdmissionInputV1,
+    next_state: &MemoryManifestOwnerAdmissionStateV1,
+) -> Result<Option<LocalCutOwnerStateV1>, ManifestOwnerAdmissionErrorV1> {
+    let Some(local_cut_state) = store.local_cut_owner_states.get(&owner_id) else {
+        return Ok(None);
+    };
+    let next_timelines = next_state.timelines.iter().copied().collect::<Vec<_>>();
+    let membership_epoch = if local_cut_state.timelines == next_timelines {
+        local_cut_state.membership_epoch
+    } else {
+        local_cut_state
+            .membership_epoch
+            .checked_add(1)
+            .ok_or(ManifestOwnerAdmissionErrorV1::Conflict)?
+    };
+    let successor = LocalCutOwnerStateV1 {
+        owner_id,
+        last_visible_cut_id: local_cut_state.last_visible_cut_id,
+        last_visible_tick: local_cut_state.last_visible_tick,
+        membership_epoch,
+        configuration_generation: input.catalog.as_input().configuration_generation,
+        previous_visible_lcq1_hash: input.previous_visible_lcq1_hash,
+        inventory_generation: input.resulting_inventory_generation,
+        timelines: next_timelines,
+    };
+    successor
+        .validate()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    Ok(Some(successor))
+}
+
+impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
+    fn read_manifest_owner_state_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<ManifestOwnerAdmissionOwnerStateV1>, ManifestOwnerAdmissionErrorV1> {
+        let Some(state) = self.manifest_owner_admission_states.get(&owner_id) else {
+            return if memory_manifest_owner_state_has_orphaned_rows(self, owner_id) {
+                Err(ManifestOwnerAdmissionErrorV1::CorruptState)
+            } else {
+                Ok(None)
+            };
+        };
+        let has_local_cut_state =
+            memory_validate_manifest_owner_state_header(self, owner_id, state)?;
+        let evidence = memory_collect_manifest_owner_generation_evidence(self, owner_id, state)?;
+        memory_validate_manifest_owner_generation_operation(
+            self,
+            owner_id,
+            state,
+            &evidence,
+            has_local_cut_state,
+        )?;
+        Ok(Some(ManifestOwnerAdmissionOwnerStateV1 {
+            owner_id,
+            configuration_generation: state.configuration_generation,
+            previous_visible_lcq1_hash: state.previous_visible_lcq1_hash,
+            inventory_generation: state.inventory_generation,
+            timelines: state.timelines.iter().copied().collect(),
+        }))
+    }
+
+    fn resolve_manifest_owner_admission_retry_v1(
+        &self,
+        owner_id: [u8; 32],
+        operation_id: Hash,
+        intent_digest: Hash,
+    ) -> Result<Option<ManifestOwnerAdmissionCommitV1>, ManifestOwnerAdmissionErrorV1> {
+        self.read_manifest_owner_state_v1(owner_id)?;
+        let Some(operation) = self
+            .manifest_owner_admission_operations
+            .get(&(owner_id, operation_id))
+        else {
+            return Ok(None);
+        };
+        if operation.intent_digest != intent_digest {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+        let result = &operation.result;
+        if result.kind != ManifestOwnerAdmissionCommitKindV1::Applied
+            || result.configuration_generation == 0
+            || result.inventory_generation == Hash::zero()
+            || result.receipt_hashes.is_empty()
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut receipt_hashes = Vec::with_capacity(result.receipt_hashes.len());
+        let mut row_count = 0;
+        for ((stored_owner, generation, timeline_id), snapshot) in
+            &self.manifest_owner_admission_snapshots
+        {
+            if *stored_owner == owner_id && *generation == result.configuration_generation {
+                row_count += 1;
+                if snapshot.operation_id != operation_id
+                    || snapshot.timeline.timeline_id != *timeline_id
+                    || snapshot.resulting_inventory_generation != result.inventory_generation
+                    || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+                {
+                    return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+                }
+                receipt_hashes.push(snapshot.timeline.receipt.digest());
+            }
+        }
+        if row_count != result.receipt_hashes.len() || receipt_hashes != result.receipt_hashes {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut retry = result.clone();
+        retry.kind = ManifestOwnerAdmissionCommitKindV1::ExactRetry;
+        Ok(Some(retry))
+    }
+
+    fn commit_manifest_owner_admission_v1(
+        &mut self,
+        batch: PreparedManifestOwnerAdmissionV1,
+    ) -> Result<ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1> {
+        let input = batch.input();
+        let owner_id = input.catalog.as_input().owner_id;
+        let current_state = self.read_manifest_owner_state_v1(owner_id)?;
+        if let Some(result) = self.resolve_manifest_owner_admission_retry_v1(
+            owner_id,
+            input.operation_id,
+            batch.intent_digest(),
+        )? {
+            return Ok(result);
+        }
+
+        match (input.expected_configuration_generation, current_state) {
+            (None, None) => {}
+            (Some(expected_generation), Some(state))
+                if state.configuration_generation == expected_generation
+                    && state.previous_visible_lcq1_hash == input.previous_visible_lcq1_hash
+                    && Some(state.inventory_generation) == input.expected_inventory_generation
+                    && !state.timelines.is_empty()
+                    && expected_generation.checked_add(1)
+                        == Some(input.catalog.as_input().configuration_generation) => {}
+            _ => return Err(ManifestOwnerAdmissionErrorV1::Conflict),
+        }
+
+        let configuration_generation = input.catalog.as_input().configuration_generation;
+        if input.timelines.iter().any(|timeline| {
+            self.manifest_owner_admission_snapshots.contains_key(&(
+                owner_id,
+                configuration_generation,
+                timeline.timeline_id,
+            ))
+        }) {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+
+        let result = ManifestOwnerAdmissionCommitV1 {
+            kind: ManifestOwnerAdmissionCommitKindV1::Applied,
+            configuration_generation,
+            inventory_generation: input.resulting_inventory_generation,
+            receipt_hashes: input
+                .timelines
+                .iter()
+                .map(|timeline| timeline.receipt.digest())
+                .collect(),
+        };
+        let snapshots: Vec<_> = input
+            .timelines
+            .iter()
+            .map(|timeline| {
+                (
+                    (owner_id, configuration_generation, timeline.timeline_id),
+                    ManifestOwnerAdmissionSnapshotV1 {
+                        catalog: input.catalog.clone(),
+                        timeline: timeline.clone(),
+                        operation_id: input.operation_id,
+                        expected_inventory_generation: input.expected_inventory_generation,
+                        resulting_inventory_generation: input.resulting_inventory_generation,
+                    },
+                )
+            })
+            .collect();
+        let next_state = MemoryManifestOwnerAdmissionStateV1 {
+            configuration_generation,
+            previous_visible_lcq1_hash: input.previous_visible_lcq1_hash,
+            inventory_generation: input.resulting_inventory_generation,
+            timelines: input
+                .timelines
+                .iter()
+                .map(|timeline| timeline.timeline_id)
+                .collect(),
+        };
+        let next_local_cut_owner_state =
+            memory_successor_local_cut_owner_state(self, owner_id, input, &next_state)?;
+        let operation = MemoryManifestOwnerAdmissionOperationV1 {
+            intent_digest: batch.intent_digest(),
+            result: result.clone(),
+        };
+
+        for (key, snapshot) in snapshots {
+            self.manifest_owner_admission_snapshots
+                .insert(key, snapshot);
+        }
+        self.manifest_owner_admission_states
+            .insert(owner_id, next_state);
+        if let Some(next_local_cut_owner_state) = next_local_cut_owner_state {
+            self.local_cut_owner_states
+                .insert(owner_id, next_local_cut_owner_state);
+        }
+        self.manifest_owner_admission_operations
+            .insert((owner_id, input.operation_id), operation);
+        Ok(result)
+    }
+
+    fn read_manifest_owner_admission_v1(
+        &self,
+        owner_id: [u8; 32],
+        configuration_generation: u64,
+        timeline_id: TimelineId,
+    ) -> Result<Option<ManifestOwnerAdmissionSnapshotV1>, ManifestOwnerAdmissionErrorV1> {
+        let Some(snapshot) = self.manifest_owner_admission_snapshots.get(&(
+            owner_id,
+            configuration_generation,
+            timeline_id,
+        )) else {
+            return Ok(None);
+        };
+        if snapshot.catalog.as_input().owner_id != owner_id
+            || snapshot.catalog.as_input().configuration_generation != configuration_generation
+            || snapshot.timeline.timeline_id != timeline_id
+            || snapshot.timeline.receipt.digest() == Hash::zero()
+            || snapshot.resulting_inventory_generation == Hash::zero()
+            || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let operation = self
+            .manifest_owner_admission_operations
+            .get(&(owner_id, snapshot.operation_id))
+            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        if operation.result.configuration_generation != configuration_generation
+            || operation.result.inventory_generation != snapshot.resulting_inventory_generation
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut generation_receipts = Vec::new();
+        let mut generation_operations = 0_usize;
+        for ((stored_owner, stored_operation_id), stored_operation) in
+            &self.manifest_owner_admission_operations
+        {
+            if *stored_owner == owner_id
+                && stored_operation.result.configuration_generation == configuration_generation
+            {
+                generation_operations += 1;
+                if *stored_operation_id != snapshot.operation_id {
+                    return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+                }
+            }
+        }
+        for ((stored_owner, stored_generation, stored_timeline), stored_snapshot) in
+            &self.manifest_owner_admission_snapshots
+        {
+            if *stored_owner != owner_id || *stored_generation != configuration_generation {
+                continue;
+            }
+            if stored_snapshot.operation_id != snapshot.operation_id
+                || stored_snapshot.resulting_inventory_generation
+                    != snapshot.resulting_inventory_generation
+                || stored_snapshot
+                    .timeline
+                    .receipt
+                    .as_input()
+                    .previous_visible_lcq1_hash
+                    != snapshot
+                        .timeline
+                        .receipt
+                        .as_input()
+                        .previous_visible_lcq1_hash
+                || validate_manifest_owner_admission_snapshot_v1(stored_snapshot).is_err()
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+            generation_receipts.push(stored_snapshot.timeline.receipt.digest());
+            if *stored_timeline == timeline_id
+                && stored_snapshot.timeline.receipt.digest() != snapshot.timeline.receipt.digest()
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+        }
+        if generation_operations != 1
+            || generation_receipts.is_empty()
+            || generation_receipts != operation.result.receipt_hashes
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        Ok(Some(snapshot.clone()))
+    }
+}
+
+fn validate_memory_local_cut_operation(
+    owner_id: [u8; 32],
+    operation_id: Hash,
+    operation: &MemoryLocalCutOwnerOperationV1,
+    commits: &BTreeMap<([u8; 32], u64), LocalCutOwnerCommitV1>,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    if local_cut_owner_intent_digest_v1(&operation.request)? != operation.intent_digest {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    let cut_id = operation.request.seal.as_input().cut_id;
+    validate_local_cut_owner_result_v1(owner_id, cut_id, &operation.result)?;
+    let commit = operation.result.commit.as_input();
+    if operation.request.operation_id != operation_id
+        || operation.result.seal != operation.request.seal
+        || commit.partition_ledger_seq != operation.request.partition_ledger_seq
+        || commit.manifest_hash != operation.request.manifest_hash
+        || commit.result_heads_table != operation.request.result_heads_table
+        || commit.participant_successor_table != operation.request.participant_successor_table
+        || commit.cpu_completion_table != operation.request.cpu_completion_table
+        || commit.action_disposition_table != operation.request.action_disposition_table
+        || commit.candidate_bases_table != operation.request.candidate_bases_table
+        || commit.invocation_bridges_table != operation.request.invocation_bridges_table
+        || commit.result_inventory_generation != operation.request.result_inventory_generation
+        || commit.release_fence_proof_digest != operation.request.release_fence_proof_digest
+        || commits.get(&(owner_id, cut_id)) != Some(&operation.result)
+    {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    Ok(())
+}
+
+impl LocalCutOwnerPersistencePortV1 for MemoryStore {
+    fn read_local_cut_owner_state_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
+        let Some(state) = self.local_cut_owner_states.get(&owner_id) else {
+            let has_rows = self
+                .local_cut_owner_operations
+                .keys()
+                .any(|(stored_owner, _)| *stored_owner == owner_id)
+                || self
+                    .local_cut_owner_commits
+                    .keys()
+                    .any(|(stored_owner, _)| *stored_owner == owner_id);
+            return if has_rows {
+                Err(LocalCutOwnerErrorV1::CorruptState)
+            } else {
+                Ok(None)
+            };
+        };
+        state.validate()?;
+        // The memory admission read only fails with CorruptState. It also checks
+        // this local-cut state against the admitted header, and rejects a
+        // local-cut state without an admitted header as orphaned.
+        self.read_manifest_owner_state_v1(owner_id)?;
+
+        let mut found_current = false;
+        for ((stored_owner, cut_id), result) in &self.local_cut_owner_commits {
+            if *stored_owner != owner_id {
+                continue;
+            }
+            validate_local_cut_owner_result_v1(owner_id, *cut_id, result)?;
+            if *cut_id > state.last_visible_cut_id {
+                return Err(LocalCutOwnerErrorV1::CorruptState);
+            }
+            if *cut_id == state.last_visible_cut_id {
+                if state.previous_visible_lcq1_hash != Some(result.receipt.digest()) {
+                    return Err(LocalCutOwnerErrorV1::CorruptState);
+                }
+                found_current = true;
+            }
+            let linked_operations = self
+                .local_cut_owner_operations
+                .iter()
+                .filter(|((stored_owner, _), operation)| {
+                    *stored_owner == owner_id
+                        && operation.request.seal.as_input().cut_id == *cut_id
+                        && operation.result == *result
+                })
+                .count();
+            if linked_operations != 1 {
+                return Err(LocalCutOwnerErrorV1::CorruptState);
+            }
+        }
+        if !found_current {
+            return Err(LocalCutOwnerErrorV1::CorruptState);
+        }
+        for ((stored_owner, operation_id), operation) in &self.local_cut_owner_operations {
+            if *stored_owner == owner_id {
+                validate_memory_local_cut_operation(
+                    owner_id,
+                    *operation_id,
+                    operation,
+                    &self.local_cut_owner_commits,
+                )?;
+            }
+        }
+        Ok(Some(state.clone()))
+    }
+
+    fn resolve_local_cut_owner_retry_v1(
+        &self,
+        owner_id: [u8; 32],
+        operation_id: Hash,
+        intent_digest: Hash,
+    ) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+        self.read_local_cut_owner_state_v1(owner_id)?;
+        let Some(operation) = self
+            .local_cut_owner_operations
+            .get(&(owner_id, operation_id))
+        else {
+            return Ok(None);
+        };
+        // The owner-state read above already validated every retained operation.
+        if operation.intent_digest != intent_digest {
+            return Err(LocalCutOwnerErrorV1::Conflict);
+        }
+        let mut retry = operation.result.clone();
+        retry.kind = LocalCutOwnerCommitKindV1::ExactRetry;
+        Ok(Some(retry))
+    }
+
+    fn commit_local_cut_owner_v1(
+        &mut self,
+        batch: PreparedLocalCutOwnerCommitV1,
+    ) -> Result<LocalCutOwnerCommitV1, LocalCutOwnerErrorV1> {
+        let owner_id = batch.successor_state().owner_id;
+        let operation_id = batch.request().operation_id;
+        let intent_digest = batch.intent_digest();
+        let result = batch.applied_result();
+        let current_state = self.read_local_cut_owner_state_v1(owner_id)?;
+        if let Some(retry) =
+            self.resolve_local_cut_owner_retry_v1(owner_id, operation_id, intent_digest)?
+        {
+            return Ok(retry);
+        }
+        let admission = self
+            .read_manifest_owner_state_v1(owner_id)?
+            .ok_or(LocalCutOwnerErrorV1::Conflict)?;
+        validate_local_cut_owner_successor_v1(&batch, &admission, current_state.as_ref())?;
+        let request = batch.request();
+        let successor = batch.successor_state();
+        // The owner-state read bounds every retained cut by the last visible cut,
+        // and the successor cut is strictly newer, so this key is unused.
+        let cut_id = request.seal.as_input().cut_id;
+        let operation = MemoryLocalCutOwnerOperationV1 {
+            intent_digest,
+            request: request.clone(),
+            result: result.clone(),
+        };
+        let next_admission_state = MemoryManifestOwnerAdmissionStateV1 {
+            configuration_generation: admission.configuration_generation,
+            previous_visible_lcq1_hash: Some(result.receipt.digest()),
+            inventory_generation: request.result_inventory_generation,
+            timelines: admission.timelines.iter().copied().collect(),
+        };
+
+        self.local_cut_owner_commits
+            .insert((owner_id, cut_id), result.clone());
+        self.local_cut_owner_operations
+            .insert((owner_id, operation_id), operation);
+        self.local_cut_owner_states
+            .insert(owner_id, successor.clone());
+        self.manifest_owner_admission_states
+            .insert(owner_id, next_admission_state);
+        Ok(result)
+    }
+
+    fn read_local_cut_owner_commit_v1(
+        &self,
+        owner_id: [u8; 32],
+        cut_id: u64,
+    ) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+        // The owner-state read validates every retained cut and its one
+        // linked operation.
+        self.read_local_cut_owner_state_v1(owner_id)?;
+        Ok(self
+            .local_cut_owner_commits
+            .get(&(owner_id, cut_id))
+            .cloned())
+    }
+}
+
+impl AdapterRecordingStoreV1 for MemoryStore {
+    fn open_adapter_recording_session(
+        &mut self,
+        session: AdapterRecordingSessionV1,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        let key = (session.owner_reference(), session.run_operation_id());
+        match self.adapter_recording_sessions.get(&key) {
+            Some(existing) if existing.session != session => {
+                Err(AdapterRecordingStoreErrorV1::Conflict)
+            }
+            Some(existing) if existing.status == MemoryAdapterRecordingStatusV1::Open => Ok(()),
+            Some(_) => Err(AdapterRecordingStoreErrorV1::InvalidState),
+            None => {
+                self.adapter_recording_sessions.insert(
+                    key,
+                    MemoryAdapterRecordingSessionV1 {
+                        session,
+                        status: MemoryAdapterRecordingStatusV1::Open,
+                        calls: BTreeMap::new(),
+                        transcript_bytes: None,
+                    },
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn reserve_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: AdapterCallReservationV1,
+    ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+        let key = (owner_reference, run_operation_id);
+        let journal = self
+            .adapter_recording_sessions
+            .get_mut(&key)
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        if journal.status != MemoryAdapterRecordingStatusV1::Open
+            || journal.session.owner_reference() != owner_reference
+        {
+            return Err(AdapterRecordingStoreErrorV1::InvalidState);
+        }
+        let global_index = reservation.invocation().as_input().global_call_index;
+        if let Some(existing) = journal.calls.get(&global_index) {
+            if !same_memory_adapter_reservation(&existing.reservation, &reservation) {
+                return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+            }
+            return Ok(existing.output_bytes.as_ref().map_or_else(
+                || AdapterCallReservationOutcomeV1::Reserved {
+                    reserved_at_micros: existing.reservation.reserved_at_micros(),
+                },
+                |output_bytes| AdapterCallReservationOutcomeV1::Completed {
+                    output_bytes: output_bytes.clone(),
+                    reserved_at_micros: existing.reservation.reserved_at_micros(),
+                },
+            ));
+        }
+        let expected_index = u64::try_from(journal.calls.len())
+            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+        if global_index != expected_index
+            || journal.calls.len() >= pos_core::MAX_ADAPTER_TRANSCRIPT_CALLS_V1
+        {
+            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+        }
+        let expected_plugin_index = journal
+            .calls
+            .values()
+            .filter(|call| call.reservation.plugin_id() == reservation.plugin_id())
+            .count();
+        if usize::try_from(reservation.per_plugin_call_index()).ok() != Some(expected_plugin_index)
+        {
+            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+        }
+        journal.calls.insert(
+            global_index,
+            MemoryAdapterRecordingCallV1 {
+                reservation: reservation.clone(),
+                output_bytes: None,
+            },
+        );
+        Ok(AdapterCallReservationOutcomeV1::Reserved {
+            reserved_at_micros: reservation.reserved_at_micros(),
+        })
+    }
+
+    fn complete_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        if output_bytes.len() > pos_core::MAX_ADAPTER_CALL_BYTES_V1 {
+            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+        }
+        let journal = self
+            .adapter_recording_sessions
+            .get_mut(&(owner_reference, run_operation_id))
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        if journal.status != MemoryAdapterRecordingStatusV1::Open {
+            return Err(AdapterRecordingStoreErrorV1::InvalidState);
+        }
+        let call = journal
+            .calls
+            .get_mut(&global_call_index)
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidCall)?;
+        match &call.output_bytes {
+            Some(existing) if existing == &output_bytes => Ok(()),
+            Some(_) => Err(AdapterRecordingStoreErrorV1::Conflict),
+            None => {
+                call.output_bytes = Some(output_bytes);
+                Ok(())
+            }
+        }
+    }
+
+    fn close_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+        let journal = self
+            .adapter_recording_sessions
+            .get_mut(&(owner_reference, run_operation_id))
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        if journal.status == MemoryAdapterRecordingStatusV1::Closed {
+            let retained = journal
+                .transcript_bytes
+                .clone()
+                .ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+            let derived = memory_adapter_recording_transcript(journal)?;
+            if retained != derived {
+                return Err(AdapterRecordingStoreErrorV1::CorruptState);
+            }
+            return Ok(retained);
+        }
+        if journal.status != MemoryAdapterRecordingStatusV1::Open {
+            return Err(AdapterRecordingStoreErrorV1::InvalidState);
+        }
+        let transcript_bytes = memory_adapter_recording_transcript(journal)?;
+        journal.status = MemoryAdapterRecordingStatusV1::Closed;
+        journal.transcript_bytes = Some(transcript_bytes.clone());
+        Ok(transcript_bytes)
+    }
+
+    fn read_closed_adapter_recording_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, AdapterRecordingStoreErrorV1> {
+        let Some(journal) = self
+            .adapter_recording_sessions
+            .get(&(owner_reference, run_operation_id))
+        else {
+            return Ok(None);
+        };
+        if journal.session.owner_reference() != owner_reference {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        if journal.status != MemoryAdapterRecordingStatusV1::Closed {
+            return Ok(None);
+        }
+        let bytes = journal
+            .transcript_bytes
+            .as_ref()
+            .ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+        if memory_adapter_recording_transcript(journal)?.as_slice() != bytes.as_slice() {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        validate_closed_adapter_recording_v1(&journal.session, bytes)?;
+        Ok(Some(bytes.clone()))
+    }
+
+    fn abort_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        let journal = self
+            .adapter_recording_sessions
+            .get_mut(&(owner_reference, run_operation_id))
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        if journal.status != MemoryAdapterRecordingStatusV1::Open {
+            return Err(AdapterRecordingStoreErrorV1::InvalidState);
+        }
+        journal.status = MemoryAdapterRecordingStatusV1::Aborted;
+        Ok(())
+    }
+}
+
+fn memory_adapter_recording_transcript(
+    journal: &MemoryAdapterRecordingSessionV1,
+) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+    let calls = journal
+        .calls
+        .values()
+        .map(|call| {
+            call.output_bytes
+                .as_ref()
+                .map(|output| completed_adapter_call_v1(call.reservation.clone(), output.clone()))
+                .ok_or(AdapterRecordingStoreErrorV1::InvalidState)
+        })
+        .collect::<Result<Vec<AdapterTranscriptCallV1>, _>>()?;
+    close_adapter_recording_v1(&journal.session, calls)
+}
+
+fn same_memory_adapter_reservation(
+    existing: &AdapterCallReservationV1,
+    retry: &AdapterCallReservationV1,
+) -> bool {
+    existing.plugin_id() == retry.plugin_id()
+        && existing.per_plugin_call_index() == retry.per_plugin_call_index()
+        && existing.invocation() == retry.invocation()
+        && existing.idempotency_key() == retry.idempotency_key()
+}
+
+impl MemoryStore {
+    fn validate_root_adapter_recording(
+        &self,
+        root: &ReproManifestRootV1,
+        transcript_bytes: &[u8],
+    ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+        let root_input = root.as_input();
+        let session = self
+            .adapter_recording_sessions
+            .get(&(root_input.owner_reference, root_input.run_operation_id))
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if session.status != MemoryAdapterRecordingStatusV1::Closed
+            || session.session.world_handle() != root_input.world_handle
+            || session.session.admission().as_input().scope_digest
+                != root_input.plugin_roster_digest
+            || session.transcript_bytes.as_deref() != Some(transcript_bytes)
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        let derived = memory_adapter_recording_transcript(session)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if derived != transcript_bytes {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        let transcript = validate_closed_adapter_recording_v1(&session.session, transcript_bytes)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if transcript.digest() != root_input.adapter_transcript_digest {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        Ok(())
+    }
+
+    fn check_artifact_registration_operation(
+        &self,
+        operation_key: (OwnerIdV1, Hash),
+        root_address: Hash,
+    ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+        let operation_root = self.artifact_registration_operations.get(&operation_key);
+        let mut root_operations = self
+            .artifact_registration_operations
+            .iter()
+            .filter(|((owner_id, _), address)| {
+                owner_id == &operation_key.0 && **address == root_address
+            })
+            .map(|((_, operation_id), _)| *operation_id);
+        let root_operation = root_operations.next();
+        if root_operations.next().is_some() {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        let root_row = self.artifact_registrations.get(&root_address);
+
+        match (operation_root, root_operation, root_row) {
+            (None, None, None) => Ok(()),
+            (Some(existing_root), Some(existing_operation), Some(row))
+                if *existing_root == root_address
+                    && existing_operation == operation_key.1
+                    && row.owner_id() == &operation_key.0 =>
+            {
+                Ok(())
+            }
+            (Some(existing_root), _, _) if *existing_root != root_address => {
+                Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
+            }
+            _ => Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
+        }
+    }
+
+    fn validate_artifact_registration_closure(
+        &self,
+        root: Hash,
+    ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+        let mut pending = vec![root];
+        let mut seen = BTreeSet::new();
+        let mut catalog_rows = Vec::new();
+        while let Some(address) = pending.pop() {
+            if !seen.insert(address) {
+                continue;
+            }
+            let row = self
+                .artifact_registrations
+                .get(&address)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            let identity_key = (*row.owner_id(), row.artifact_class(), row.artifact_digest());
+            if self.artifact_registration_identities.get(&identity_key) != Some(&address)
+                || row.registration_address() != address
+            {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+            catalog_rows.push(row.clone());
+            pending.extend(
+                row.registration()
+                    .fields()
+                    .child_artifacts
+                    .iter()
+                    .map(|edge| edge.registration_address),
+            );
+        }
+        validate_artifact_registration_catalog_graph_v1(root, &catalog_rows)?;
+        let root_row = self
+            .artifact_registrations
+            .get(&root)
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
+            && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
+        {
+            let root_record =
+                ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
+                    .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if self.artifact_registration_operations.get(&(
+                *root_row.owner_id(),
+                root_record.as_input().run_operation_id,
+            )) != Some(&root)
+            {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+            let transcript_bytes =
+                find_memory_root_transcript_bytes(catalog_rows.iter(), &root_record)?;
+            self.validate_root_adapter_recording(&root_record, transcript_bytes)?;
+        }
+        Ok(())
+    }
+}
+
+fn find_memory_root_transcript_bytes<'a>(
+    rows: impl Iterator<Item = &'a ArtifactRegistrationCatalogRowV1>,
+    root: &ReproManifestRootV1,
+) -> Result<&'a [u8], ArtifactRegistrationPersistenceErrorV1> {
+    let mut transcript_bytes = None;
+    for row in rows {
+        if row.artifact_class() != ErasureArtifactClassV1::ReproManifest {
+            continue;
+        }
+        let Ok(transcript) = AdapterTranscriptV1::from_canonical_cbor(row.artifact_bytes()) else {
+            continue;
+        };
+        if transcript.digest() == root.as_input().adapter_transcript_digest
+            && transcript_bytes.replace(row.artifact_bytes()).is_some()
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+    }
+    transcript_bytes.ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+}
+
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::tests::new_store;
     use super::*;
+    use pos_core::{
+        adapter_configuration_digest_v1, extract_adapter_admission_registration_v1,
+        extract_adapter_transcript_registration_v1, extract_repro_manifest_root_registration_v1,
+        prepare_artifact_registration_batch_v1, public_adapter_schema_digest_v1,
+        AdapterAdmissionEntryV1, AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterDataClassV1,
+        AdapterEffectModeV1, AdapterInvocationInputV1, AdapterInvocationV1,
+        AdapterTranscriptInputV1, ArtifactChildEdgeV1, ArtifactDataClassV1, ArtifactOptionalityV1,
+        ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
+        ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
+        ArtifactRegistrationV1, ArtifactTransitionRuleV1, ReproManifestRootInputV1,
+        ReproManifestRootRegistrationInputV1, WorldRecordingReceiptInputV1,
+        WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
+    };
     use pos_core::{
         ConsentAuthority, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
         KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey, ERASURE_MAX_INVENTORY_TIMELINES,
@@ -11541,5 +12880,1892 @@ mod coverage_entrypoints {
             store.recovery_error_refs(request),
             Err(ErasureErrorV1::ScopeInvalid)
         );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_adapter_recording_fixture(
+        owner_byte: u8,
+        run_byte: u8,
+    ) -> Result<(AdapterRecordingSessionV1, AdapterCallReservationV1), Box<dyn std::error::Error>>
+    {
+        let owner_reference = Hash::from_bytes([owner_byte; 32]);
+        let plugin_id = pos_core::PluginId::new();
+        let configuration = b"memory-coverage-adapter".to_vec();
+        let schema_digest = public_adapter_schema_digest_v1();
+        let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+            owner_reference,
+            configuration_generation: 1,
+            scope_digest: Hash::from_bytes([owner_byte.wrapping_add(1); 32]),
+            entries: vec![AdapterAdmissionEntryV1 {
+                plugin_id,
+                adapter_id: "coverage.adapter".to_owned(),
+                provider_id: "coverage.provider".to_owned(),
+                operation_id: "coverage-operation".to_owned(),
+                protocol_version: 1,
+                request_schema_digest: schema_digest,
+                response_schema_digest: schema_digest,
+                configuration_digest: adapter_configuration_digest_v1(&configuration),
+                exact_configuration_bytes: configuration,
+                input_data_class: AdapterDataClassV1::PublicRecord,
+                output_data_class: AdapterDataClassV1::PublicRecord,
+                effect_mode: AdapterEffectModeV1::ReadOnly,
+            }],
+        })?;
+        let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+            owner_reference,
+            timeline_id: TimelineId::new(),
+            cut_id: 1,
+            commit_receipt_digest: Hash::from_bytes([owner_byte.wrapping_add(2); 32]),
+            recording_receipt_digest: Hash::from_bytes([owner_byte.wrapping_add(3); 32]),
+            logical_head: 0,
+            stitched_head_hash: Hash::from_bytes([owner_byte.wrapping_add(4); 32]),
+        })?;
+        let run_operation_id = Hash::from_bytes([run_byte; 32]);
+        let session = AdapterRecordingSessionV1::new(
+            owner_reference,
+            world_handle,
+            run_operation_id,
+            admission,
+        )?;
+        let invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
+            adapter_id: "coverage.adapter".to_owned(),
+            provider_id: "coverage.provider".to_owned(),
+            operation_id: "coverage-operation".to_owned(),
+            protocol_version: 1,
+            request_schema_digest: schema_digest,
+            response_schema_digest: schema_digest,
+            configuration_digest: adapter_configuration_digest_v1(b"memory-coverage-adapter"),
+            global_call_index: 0,
+            exact_request_payload: b"coverage request".to_vec(),
+        })?;
+        let reservation = AdapterCallReservationV1::new(
+            plugin_id,
+            0,
+            invocation,
+            Hash::from_bytes([owner_byte.wrapping_add(5); 32]),
+            1,
+        )?;
+        Ok((session, reservation))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn closed_memory_adapter_recording(
+        run_byte: u8,
+    ) -> Result<(MemoryStore, AdapterRecordingSessionV1), Box<dyn std::error::Error>> {
+        let (session, reservation) = memory_adapter_recording_fixture(180, run_byte)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let mut store = MemoryStore::new();
+        store.open_adapter_recording_session(session.clone())?;
+        store.reserve_adapter_call(owner_reference, run_operation_id, reservation)?;
+        store.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            b"coverage response".to_vec(),
+        )?;
+        store.close_adapter_recording_session(owner_reference, run_operation_id)?;
+        Ok((store, session))
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_adapter_recording_rejects_retained_corruption(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, session) = closed_memory_adapter_recording(181)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal.transcript_bytes = None;
+        }
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+
+        let (mut store, session) = closed_memory_adapter_recording(182)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal.transcript_bytes = Some(b"changed retained transcript".to_vec());
+        }
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+
+        let (mut store, session) = closed_memory_adapter_recording(183)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal.calls.clear();
+        }
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+
+        let (mut store, session) = closed_memory_adapter_recording(184)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal
+                .calls
+                .get_mut(&0)
+                .ok_or("missing memory recorder call")?
+                .output_bytes = None;
+        }
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+
+        let (mut store, session) = closed_memory_adapter_recording(185)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let (wrong_session, _) = memory_adapter_recording_fixture(186, 185)?;
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal.session = wrong_session;
+        }
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    type CatalogFixture = (
+        PreparedArtifactRegistrationBatchV1,
+        AdapterRecordingSessionV1,
+    );
+    type CommittedCatalog = (
+        MemoryStore,
+        PreparedArtifactRegistrationBatchV1,
+        (Hash, Hash),
+    );
+
+    // This fixture isolates the memory catalog port. Its synthetic WCR1
+    // registration is not Wave 8 owner-verification evidence.
+    struct MemoryCatalogOwnerVerifier;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl ArtifactRegistrationOwnerVerifierV1 for MemoryCatalogOwnerVerifier {
+        fn derive_native_registration(
+            &self,
+            owner_id: &OwnerIdV1,
+            artifact_class: ErasureArtifactClassV1,
+            artifact_bytes: &[u8],
+        ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+            structural_registration(owner_id, artifact_class, artifact_bytes, Vec::new())
+                .map_err(|_| ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+        }
+
+        fn verify_committed_artifact(
+            &self,
+            _owner_id: &OwnerIdV1,
+            _artifact_bytes: &[u8],
+            _registration: &ArtifactRegistrationV1,
+        ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+            Ok(())
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn structural_registration(
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+        child_artifacts: Vec<ArtifactChildEdgeV1>,
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationErrorV1> {
+        ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+            artifact_class,
+            artifact_digest: ArtifactRegistrationV1::artifact_digest(
+                artifact_class,
+                artifact_bytes,
+            ),
+            owner_reference: ArtifactRegistrationV1::owner_reference(owner_id),
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            optionality: ArtifactOptionalityV1::Required,
+            transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+            required_key_roles: Vec::new(),
+            key_dependencies: Vec::new(),
+            child_artifacts,
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn catalog_row(
+        owner_id: OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+        child_artifacts: Vec<ArtifactChildEdgeV1>,
+    ) -> Result<ArtifactRegistrationCatalogRowV1, Box<dyn std::error::Error>> {
+        let registration =
+            structural_registration(&owner_id, artifact_class, artifact_bytes, child_artifacts)?;
+        let row = ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner_id,
+            artifact_class,
+            registration.fields().artifact_digest,
+            registration.address(),
+            artifact_bytes.to_vec(),
+            registration.canonical_cbor(),
+        )?;
+        Ok(row)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn child_edge(row: &ArtifactRegistrationCatalogRowV1) -> ArtifactChildEdgeV1 {
+        ArtifactChildEdgeV1 {
+            artifact_class: row.artifact_class(),
+            artifact_digest: row.artifact_digest(),
+            registration_address: row.registration_address(),
+            required: true,
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn insert_catalog_row(store: &mut MemoryStore, row: ArtifactRegistrationCatalogRowV1) {
+        let address = row.registration_address();
+        let identity = (*row.owner_id(), row.artifact_class(), row.artifact_digest());
+        store
+            .artifact_registration_identities
+            .insert(identity, address);
+        store.artifact_registrations.insert(address, row);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn commit_catalog(
+        store: &mut MemoryStore,
+        batch: PreparedArtifactRegistrationBatchV1,
+    ) -> Result<ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1> {
+        ArtifactRegistrationPersistencePortV1::commit_artifact_registration_batch(store, batch)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_catalog_error(
+        store: &MemoryStore,
+        owner: &OwnerIdV1,
+        address: Hash,
+    ) -> Option<ArtifactRegistrationPersistenceErrorV1> {
+        ArtifactRegistrationPersistencePortV1::read_artifact_registration(store, owner, address)
+            .err()
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_batch() -> Result<CatalogFixture, Box<dyn std::error::Error>> {
+        let owner_id = OwnerIdV1::from_static("memory-coverage-catalog");
+        let owner_reference = ArtifactRegistrationV1::owner_reference(&owner_id);
+        let operation_id = Hash::from_bytes([0x61; 32]);
+        let commit_receipt_digest = Hash::from_bytes([0x62; 32]);
+        let recording = WorldRecordingReceiptV1::new(WorldRecordingReceiptInputV1 {
+            binding_hash: Hash::from_bytes([0x63; 32]),
+            operation_id,
+            actual_commit_receipt_digest: commit_receipt_digest,
+            installed_inventory_generation: Hash::from_bytes([0x64; 32]),
+        })?;
+        let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+            owner_reference,
+            timeline_id: TimelineId::new(),
+            cut_id: 2,
+            commit_receipt_digest,
+            recording_receipt_digest: recording.digest(),
+            logical_head: 0,
+            stitched_head_hash: Hash::from_bytes([0x65; 32]),
+        })?;
+        let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+            owner_reference,
+            configuration_generation: 1,
+            scope_digest: Hash::from_bytes([0x66; 32]),
+            entries: Vec::new(),
+        })?;
+        let transcript = AdapterTranscriptV1::new(AdapterTranscriptInputV1 {
+            owner_reference,
+            world_handle,
+            run_operation_id: operation_id,
+            adapter_admission_digest: admission.digest(),
+            calls: Vec::new(),
+        })?;
+        let root = ReproManifestRootV1::new(ReproManifestRootInputV1 {
+            owner_reference,
+            world_handle,
+            run_operation_id: operation_id,
+            plugin_roster_digest: admission.as_input().scope_digest,
+            adapter_transcript_digest: transcript.digest(),
+            created_at_micros: 2,
+            label: None,
+        })?;
+        let session = AdapterRecordingSessionV1::new(
+            owner_reference,
+            world_handle,
+            operation_id,
+            admission.clone(),
+        )?;
+        let admission_bytes = admission.to_canonical_cbor();
+        let transcript_bytes = transcript.to_canonical_cbor();
+        let recording_bytes = recording.to_canonical_cbor();
+        let root_bytes = root.to_canonical_cbor();
+        let admission_registration = extract_adapter_admission_registration_v1(&admission_bytes)?;
+        let transcript_registration = extract_adapter_transcript_registration_v1(
+            &transcript_bytes,
+            &admission_bytes,
+            &admission_registration,
+        )?;
+        let recording_registration = structural_registration(
+            &owner_id,
+            ErasureArtifactClassV1::TimelineReplay,
+            &recording_bytes,
+            Vec::new(),
+        )?;
+        let root_registration =
+            extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
+                root_bytes: &root_bytes,
+                recording_receipt_bytes: &recording_bytes,
+                recording_registration: &recording_registration,
+                transcript_bytes: &transcript_bytes,
+                admission_bytes: &admission_bytes,
+                admission_registration: &admission_registration,
+                transcript_registration: &transcript_registration,
+                owner_id: &owner_id,
+                label_data_class: None,
+            })?;
+        let root_address = root_registration.address();
+        let inputs = [
+            (admission_bytes, admission_registration),
+            (transcript_bytes, transcript_registration),
+            (recording_bytes, recording_registration),
+            (root_bytes, root_registration),
+        ]
+        .into_iter()
+        .map(
+            |(artifact_bytes, registration)| ArtifactRegistrationInputV1 {
+                owner_id,
+                artifact_bytes,
+                registration_cbor: registration.canonical_cbor().to_vec(),
+            },
+        )
+        .collect();
+        let batch = prepare_artifact_registration_batch_v1(
+            owner_id,
+            root_address,
+            inputs,
+            &MemoryCatalogOwnerVerifier,
+        )?;
+        Ok((batch, session))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn committed_memory_catalog() -> Result<CommittedCatalog, Box<dyn std::error::Error>> {
+        let (batch, session) = memory_catalog_batch()?;
+        let key = (session.owner_reference(), session.run_operation_id());
+        let mut store = MemoryStore::new();
+        store.open_adapter_recording_session(session)?;
+        store.close_adapter_recording_session(key.0, key.1)?;
+        assert_eq!(
+            commit_catalog(&mut store, batch.clone())?,
+            ArtifactRegistrationCommitOutcomeV1::Applied
+        );
+        Ok((store, batch, key))
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_commit_rejects_corrupt_retained_indexes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        store.artifact_registration_identities.clear();
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
+        );
+
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let owner = *batch.owner_id();
+        let root = batch.root_registration_address();
+        store.artifact_registration_operations.clear();
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let second_operation = (*batch.owner_id(), Hash::from_bytes([0x6f; 32]));
+        store
+            .artifact_registration_operations
+            .insert(second_operation, batch.root_registration_address());
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_read_rejects_corrupt_retained_rows_and_indexes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let owner = *batch.owner_id();
+        let root = batch.root_registration_address();
+        store.artifact_registrations.remove(&root);
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let root = batch.root_registration_address();
+        store
+            .artifact_registrations
+            .retain(|address, _| *address == root);
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let root = batch.root_registration_address();
+        store
+            .artifact_registration_identities
+            .retain(|_, address| *address == root);
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, key) = committed_memory_catalog()?;
+        let root = batch.root_registration_address();
+        store
+            .adapter_recording_sessions
+            .get_mut(&key)
+            .ok_or("missing memory catalog recorder")?
+            .status = MemoryAdapterRecordingStatusV1::Open;
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_commit_rejects_a_recorder_that_no_longer_derives_the_root(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_, reservation) = memory_adapter_recording_fixture(190, 191)?;
+        let pending = MemoryAdapterRecordingCallV1 {
+            reservation,
+            output_bytes: None,
+        };
+        let (mut store, batch, key) = committed_memory_catalog()?;
+        store
+            .adapter_recording_sessions
+            .get_mut(&key)
+            .ok_or("missing memory catalog recorder")?
+            .calls
+            .insert(0, pending);
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, key) = committed_memory_catalog()?;
+        let journal = store
+            .adapter_recording_sessions
+            .get_mut(&key)
+            .ok_or("missing memory catalog recorder")?;
+        journal.session = AdapterRecordingSessionV1::new(
+            journal.session.owner_reference(),
+            journal.session.world_handle(),
+            Hash::from_bytes([0x6e; 32]),
+            journal.session.admission().clone(),
+        )?;
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_read_revalidates_shared_children_and_native_rows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let owner = OwnerIdV1::from_static("memory-coverage-graph");
+        let class = ErasureArtifactClassV1::TimelineReplay;
+        let leaf = catalog_row(owner, class, b"shared leaf", Vec::new())?;
+        let middle = catalog_row(owner, class, b"middle", vec![child_edge(&leaf)])?;
+        let mut root_children = vec![child_edge(&middle), child_edge(&leaf)];
+        root_children.sort_by_key(|edge| edge.artifact_digest);
+        let root = catalog_row(owner, class, b"diamond root", root_children)?;
+        let mut store = MemoryStore::new();
+        for row in [leaf, middle, root.clone()] {
+            insert_catalog_row(&mut store, row);
+        }
+        let read = ArtifactRegistrationPersistencePortV1::read_artifact_registration(
+            &store,
+            &owner,
+            root.registration_address(),
+        )?;
+        assert_eq!(read, Some(root));
+
+        let native = catalog_row(
+            owner,
+            ErasureArtifactClassV1::ReproManifest,
+            b"not a native manifest",
+            Vec::new(),
+        )?;
+        let native_address = native.registration_address();
+        insert_catalog_row(&mut store, native);
+        assert_eq!(
+            read_catalog_error(&store, &owner, native_address),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_root_lookup_rejects_a_duplicated_transcript_row(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, batch, _) = committed_memory_catalog()?;
+        let rows: Vec<_> = store.artifact_registrations.values().collect();
+        let root_row = rows
+            .iter()
+            .find(|row| row.registration_address() == batch.root_registration_address())
+            .ok_or("missing memory catalog root")?;
+        let root = ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())?;
+        assert_eq!(
+            find_memory_root_transcript_bytes(rows.iter().chain(rows.iter()).copied(), &root),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_adapter_reservation_requires_the_next_plugin_ordinal(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (session, reservation) = memory_adapter_recording_fixture(192, 193)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let mut store = MemoryStore::new();
+        store.open_adapter_recording_session(session)?;
+        store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone())?;
+        let invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
+            global_call_index: 1,
+            ..reservation.invocation().as_input().clone()
+        })?;
+        let repeated_ordinal = AdapterCallReservationV1::new(
+            reservation.plugin_id(),
+            0,
+            invocation.clone(),
+            Hash::from_bytes([0x6d; 32]),
+            2,
+        )?;
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, repeated_ordinal),
+            Err(AdapterRecordingStoreErrorV1::InvalidCall)
+        );
+        let next_ordinal = AdapterCallReservationV1::new(
+            reservation.plugin_id(),
+            1,
+            invocation,
+            Hash::from_bytes([0x6c; 32]),
+            2,
+        )?;
+        let expected = AdapterCallReservationOutcomeV1::Reserved {
+            reserved_at_micros: 2,
+        };
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, next_ordinal),
+            Ok(expected)
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod manifest_owner_admission_coverage {
+    use super::*;
+    use crate::manifest_owner_fixtures::{
+        catalog, hash, plugin, policy_copies, AcceptingOwner, PolicySource,
+    };
+    use pos_core::{
+        prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerTimelineAdmissionRequestV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
+        WorldConsumerV1, WorldProducerV1,
+    };
+
+    type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
+    type TestResult = FixtureResult<()>;
+    type Corruption = fn(&mut MemoryStore) -> TestResult;
+
+    const OWNER: [u8; 32] = [0x4d; 32];
+    const CORRUPT_STATE: Result<(), ManifestOwnerAdmissionErrorV1> =
+        Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+
+    const fn owned_timeline(byte: u8) -> TimelineId {
+        TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+    }
+
+    fn timeline_request(
+        index: usize,
+        timeline_id: TimelineId,
+        sources: &[PolicySource],
+    ) -> FixtureResult<ManifestOwnerTimelineAdmissionRequestV1> {
+        let offset = u8::try_from(index).unwrap_or(u8::MAX);
+        let scope = hash(70 + offset);
+        let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+            scope,
+            consumers: vec![WorldConsumerV1::new(
+                "local-observer".to_owned(),
+                hash(130),
+                hash(131),
+                hash(132),
+            )?],
+            producers: vec![WorldProducerV1::new(plugin(1), sources[0].0.digest())?],
+            optional_view_roots: Vec::new(),
+        })?;
+        Ok(ManifestOwnerTimelineAdmissionRequestV1 {
+            timeline_id,
+            scope,
+            wcs1,
+            policy_copies: policy_copies(OWNER, scope, sources, hash(80 + offset))?,
+        })
+    }
+
+    /// Prepare the successor of `current` (or genesis) owning `timeline_ids`.
+    fn prepared(
+        current: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+        timeline_ids: &[TimelineId],
+    ) -> FixtureResult<PreparedManifestOwnerAdmissionV1> {
+        let generation = current.map_or(1, |state| state.configuration_generation + 1);
+        let seed = u8::try_from(generation).unwrap_or(u8::MAX);
+        let (catalog, sources) = catalog(OWNER, generation)?;
+        let timelines = timeline_ids
+            .iter()
+            .enumerate()
+            .map(|(index, timeline_id)| timeline_request(index, *timeline_id, &sources))
+            .collect::<FixtureResult<Vec<_>>>()?;
+        let request = ManifestOwnerAdmissionRequestV1 {
+            operation_id: hash(40 + seed),
+            catalog,
+            expected_configuration_generation: current.map(|state| state.configuration_generation),
+            previous_visible_lcq1_hash: current.and_then(|state| state.previous_visible_lcq1_hash),
+            expected_inventory_generation: current.map(|state| state.inventory_generation),
+            resulting_inventory_generation: hash(50 + seed),
+            timelines,
+        };
+        let batch = prepare_manifest_owner_admission_v1(request, &AcceptingOwner, current)?;
+        Ok(batch)
+    }
+
+    const fn genesis_timelines() -> [TimelineId; 2] {
+        [owned_timeline(1), owned_timeline(2)]
+    }
+
+    /// Store holding generation 1 (operation `hash(41)`, Timelines 1 and 2).
+    fn genesis_store() -> FixtureResult<MemoryStore> {
+        let mut store = MemoryStore::new();
+        store.commit_manifest_owner_admission_v1(prepared(None, &genesis_timelines())?)?;
+        Ok(store)
+    }
+
+    /// Store holding generation 1 and its replacement generation 2
+    /// (operation `hash(42)`, Timelines 3 and 4).
+    fn replaced_store() -> FixtureResult<MemoryStore> {
+        let mut store = genesis_store()?;
+        let current = store
+            .read_manifest_owner_state_v1(OWNER)?
+            .ok_or("missing genesis owner state")?;
+        let replacement = prepared(Some(&current), &[owned_timeline(3), owned_timeline(4)])?;
+        store.commit_manifest_owner_admission_v1(replacement)?;
+        Ok(store)
+    }
+
+    fn genesis_with(corrupt: Corruption) -> FixtureResult<MemoryStore> {
+        let mut store = genesis_store()?;
+        corrupt(&mut store)?;
+        Ok(store)
+    }
+
+    fn state_mut(
+        store: &mut MemoryStore,
+    ) -> FixtureResult<&mut MemoryManifestOwnerAdmissionStateV1> {
+        store
+            .manifest_owner_admission_states
+            .get_mut(&OWNER)
+            .ok_or_else(|| "missing owner state".into())
+    }
+
+    fn operation_mut(
+        store: &mut MemoryStore,
+        operation_id: Hash,
+    ) -> FixtureResult<&mut MemoryManifestOwnerAdmissionOperationV1> {
+        store
+            .manifest_owner_admission_operations
+            .get_mut(&(OWNER, operation_id))
+            .ok_or_else(|| "missing owner operation".into())
+    }
+
+    fn snapshot_mut(
+        store: &mut MemoryStore,
+        generation: u64,
+        timeline_id: TimelineId,
+    ) -> FixtureResult<&mut ManifestOwnerAdmissionSnapshotV1> {
+        store
+            .manifest_owner_admission_snapshots
+            .get_mut(&(OWNER, generation, timeline_id))
+            .ok_or_else(|| "missing owner snapshot".into())
+    }
+
+    fn drop_state(store: &mut MemoryStore) -> TestResult {
+        store
+            .manifest_owner_admission_states
+            .remove(&OWNER)
+            .ok_or("missing owner state")?;
+        Ok(())
+    }
+
+    fn drop_operation(store: &mut MemoryStore, operation_id: Hash) -> TestResult {
+        store
+            .manifest_owner_admission_operations
+            .remove(&(OWNER, operation_id))
+            .ok_or("missing owner operation")?;
+        Ok(())
+    }
+
+    fn insert_operation(
+        store: &mut MemoryStore,
+        operation_id: Hash,
+        operation: MemoryManifestOwnerAdmissionOperationV1,
+    ) {
+        store
+            .manifest_owner_admission_operations
+            .insert((OWNER, operation_id), operation);
+    }
+
+    fn drop_snapshot(
+        store: &mut MemoryStore,
+        generation: u64,
+        timeline_id: TimelineId,
+    ) -> TestResult {
+        store
+            .manifest_owner_admission_snapshots
+            .remove(&(OWNER, generation, timeline_id))
+            .ok_or("missing owner snapshot")?;
+        Ok(())
+    }
+
+    fn insert_snapshot(
+        store: &mut MemoryStore,
+        generation: u64,
+        timeline_id: TimelineId,
+        snapshot: ManifestOwnerAdmissionSnapshotV1,
+    ) {
+        store
+            .manifest_owner_admission_snapshots
+            .insert((OWNER, generation, timeline_id), snapshot);
+    }
+
+    fn clear_snapshots(store: &mut MemoryStore) {
+        store.manifest_owner_admission_snapshots.clear();
+    }
+
+    fn intent(store: &MemoryStore, operation_id: Hash) -> FixtureResult<Hash> {
+        store
+            .manifest_owner_admission_operations
+            .get(&(OWNER, operation_id))
+            .map(|operation| operation.intent_digest)
+            .ok_or_else(|| "missing owner operation".into())
+    }
+
+    #[test]
+    fn owner_rows_without_a_state_row_are_corrupt() -> TestResult {
+        let mut store = genesis_store()?;
+        assert_eq!(store.read_manifest_owner_state_v1([0x4e; 32]), Ok(None));
+
+        drop_state(&mut store)?;
+        assert_eq!(
+            store.read_manifest_owner_state_v1(OWNER).map(drop),
+            CORRUPT_STATE
+        );
+
+        clear_snapshots(&mut store);
+        assert_eq!(
+            store.read_manifest_owner_state_v1(OWNER).map(drop),
+            CORRUPT_STATE
+        );
+        let genesis_intent = intent(&store, hash(41))?;
+        assert_eq!(
+            store
+                .resolve_manifest_owner_admission_retry_v1(OWNER, hash(41), genesis_intent)
+                .map(drop),
+            CORRUPT_STATE
+        );
+        let retry = prepared(None, &genesis_timelines())?;
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(retry).map(drop),
+            CORRUPT_STATE
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn current_owner_state_rejects_each_inconsistent_retained_row() -> TestResult {
+        let corruptions: [Corruption; 6] = [
+            |store| {
+                state_mut(store)?.timelines.clear();
+                Ok(())
+            },
+            |store| {
+                state_mut(store)?.timelines.insert(owned_timeline(9));
+                Ok(())
+            },
+            |store| {
+                let state = state_mut(store)?;
+                state.timelines.remove(&owned_timeline(2));
+                state.timelines.insert(owned_timeline(9));
+                Ok(())
+            },
+            |store| {
+                state_mut(store)?.inventory_generation = hash(99);
+                Ok(())
+            },
+            |store| drop_operation(store, hash(41)),
+            |store| {
+                operation_mut(store, hash(41))?.result.kind =
+                    ManifestOwnerAdmissionCommitKindV1::ExactRetry;
+                Ok(())
+            },
+        ];
+        for corrupt in corruptions {
+            let store = genesis_with(corrupt)?;
+            assert_eq!(
+                store.read_manifest_owner_state_v1(OWNER).map(drop),
+                CORRUPT_STATE
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retry_resolves_and_rejects_historical_generation_rows() -> TestResult {
+        let store = replaced_store()?;
+        for operation_id in [hash(41), hash(42)] {
+            let retry = store
+                .resolve_manifest_owner_admission_retry_v1(
+                    OWNER,
+                    operation_id,
+                    intent(&store, operation_id)?,
+                )?
+                .ok_or("missing exact retry")?;
+            assert_eq!(retry.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+        }
+
+        let corruptions: [Corruption; 3] = [
+            |store| {
+                operation_mut(store, hash(41))?
+                    .result
+                    .receipt_hashes
+                    .clear();
+                Ok(())
+            },
+            |store| {
+                snapshot_mut(store, 1, owned_timeline(1))?.resulting_inventory_generation =
+                    hash(99);
+                Ok(())
+            },
+            |store| drop_snapshot(store, 1, owned_timeline(2)),
+        ];
+        for corrupt in corruptions {
+            let mut damaged_store = replaced_store()?;
+            corrupt(&mut damaged_store)?;
+            let genesis_intent = intent(&damaged_store, hash(41))?;
+            assert_eq!(
+                damaged_store
+                    .resolve_manifest_owner_admission_retry_v1(OWNER, hash(41), genesis_intent)
+                    .map(drop),
+                CORRUPT_STATE
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn commit_rejects_an_occupied_successor_generation_row() -> TestResult {
+        let mut store = genesis_store()?;
+        let current = store
+            .read_manifest_owner_state_v1(OWNER)?
+            .ok_or("missing genesis owner state")?;
+        let stray = snapshot_mut(&mut store, 1, owned_timeline(1))?.clone();
+        insert_snapshot(&mut store, 2, owned_timeline(3), stray);
+        let replacement = prepared(Some(&current), &[owned_timeline(3), owned_timeline(4)])?;
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(replacement),
+            Err(ManifestOwnerAdmissionErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn historical_read_rejects_each_inconsistent_generation_row() -> TestResult {
+        let store = genesis_store()?;
+        assert_eq!(
+            store.read_manifest_owner_admission_v1(OWNER, 3, owned_timeline(1)),
+            Ok(None)
+        );
+
+        let corruptions: [Corruption; 6] = [
+            |store| {
+                snapshot_mut(store, 1, owned_timeline(1))?.resulting_inventory_generation =
+                    Hash::zero();
+                Ok(())
+            },
+            |store| drop_operation(store, hash(41)),
+            |store| {
+                operation_mut(store, hash(41))?.result.inventory_generation = hash(99);
+                Ok(())
+            },
+            |store| {
+                let duplicate = operation_mut(store, hash(41))?.clone();
+                insert_operation(store, hash(77), duplicate);
+                Ok(())
+            },
+            |store| {
+                snapshot_mut(store, 1, owned_timeline(2))?.resulting_inventory_generation =
+                    hash(99);
+                Ok(())
+            },
+            |store| {
+                operation_mut(store, hash(41))?
+                    .result
+                    .receipt_hashes
+                    .reverse();
+                Ok(())
+            },
+        ];
+        for corrupt in corruptions {
+            let store = genesis_with(corrupt)?;
+            assert_eq!(
+                store
+                    .read_manifest_owner_admission_v1(OWNER, 1, owned_timeline(1))
+                    .map(drop),
+                CORRUPT_STATE
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod local_cut_owner_coverage {
+    use super::*;
+    use pos_core::{
+        output_policy::{OutputPolicyInputV1, OutputPolicyV1},
+        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
+        ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, LocalCutCommitV1,
+        LocalCutCompositionBindingRowV1, LocalCutManifestBindingRowV1,
+        LocalCutManifestBindingTableV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
+        LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutSealInputV2, LocalCutSealV2,
+        LocalCutTableRefV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
+        ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
+        ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
+        ManifestSlotAdmissionReceiptV1, PluginId, WorldArtifactKindV1, WorldArtifactLeafInputV1,
+        WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+        WorldProducerV1,
+    };
+
+    type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
+    type TestResult = FixtureResult<()>;
+    type PolicySource = (OutputPolicyV1, Vec<u8>);
+
+    const CUT_OWNER: [u8; 32] = [0x41; 32];
+    const IDLE_OWNER: [u8; 32] = [0x42; 32];
+    const PEER_OWNER: [u8; 32] = [0x43; 32];
+    const STRANGER: [u8; 32] = [0x44; 32];
+    const CUT_TIMELINE: TimelineId = timeline(1);
+    const NEXT_TIMELINE: TimelineId = timeline(2);
+    const IDLE_TIMELINE: TimelineId = timeline(3);
+    const PEER_TIMELINE: TimelineId = timeline(4);
+    const CUT_ROSTER: [([u8; 32], TimelineId); 1] = [(CUT_OWNER, CUT_TIMELINE)];
+    const ADMISSION_OPERATION: Hash = hash(0x51);
+    const EVIDENCE: Hash = hash(90);
+    const SIGNATURE: [u8; 64] = [0x5a; 64];
+    const FIRST_CUT: CutPlan = CutPlan {
+        cut_id: 1,
+        tick: 1,
+        membership_epoch: 0,
+        operation_id: hash(0x61),
+        result_inventory: hash(0x71),
+    };
+    const SECOND_CUT: CutPlan = CutPlan {
+        cut_id: 2,
+        tick: 2,
+        membership_epoch: 0,
+        operation_id: hash(0x62),
+        result_inventory: hash(0x72),
+    };
+    const RIVAL_CUT: CutPlan = CutPlan {
+        cut_id: 1,
+        tick: 1,
+        membership_epoch: 0,
+        operation_id: hash(0x63),
+        result_inventory: hash(0x73),
+    };
+    const EPOCH_CUT: CutPlan = CutPlan {
+        cut_id: 1,
+        tick: 1,
+        membership_epoch: 3,
+        operation_id: hash(0x64),
+        result_inventory: hash(0x74),
+    };
+
+    struct CutPlan {
+        cut_id: u64,
+        tick: u64,
+        membership_epoch: u32,
+        operation_id: Hash,
+        result_inventory: Hash,
+    }
+
+    struct AdmittedView {
+        state: ManifestOwnerAdmissionOwnerStateV1,
+        snapshots: Vec<ManifestOwnerAdmissionSnapshotV1>,
+    }
+
+    struct AcceptingOwner;
+
+    impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
+        fn verify_complete_composition(
+            &self,
+            _catalog: &ManifestAdmissionCatalogV1,
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+
+        fn verify_complete_owned_scope_set(
+            &self,
+            _owner_id: [u8; 32],
+            _timelines: &[ManifestOwnerTimelineAdmissionRequestV1],
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+
+        fn verify_coordinator_receipt(
+            &self,
+            _receipt: &ManifestSlotAdmissionReceiptV1,
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+
+        fn verify_owner_prestate_and_allocation(
+            &self,
+            _request: &ManifestOwnerAdmissionRequestV1,
+            _current_state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+
+        fn sign_coordinator_receipt(
+            &self,
+            draft: ManifestSlotAdmissionReceiptDraftV1,
+        ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+            draft
+                .with_evidence_and_signature(EVIDENCE, SIGNATURE)
+                .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
+        }
+
+        fn verify_native_policy_copies(
+            &self,
+            _timeline_id: TimelineId,
+            _scope: Hash,
+            _copies: &ManifestOwnerPolicyCopiesV1,
+        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+            Ok(())
+        }
+    }
+
+    impl LocalCutOwnerVerifierV1 for AcceptingOwner {
+        fn verify_authenticated_cut(
+            &self,
+            _request: &LocalCutOwnerRequestV1,
+            _current_state: Option<&LocalCutOwnerStateV1>,
+            _admission_state: &ManifestOwnerAdmissionOwnerStateV1,
+            _admissions: &[ManifestOwnerAdmissionSnapshotV1],
+        ) -> Result<(), LocalCutOwnerErrorV1> {
+            Ok(())
+        }
+
+        fn sign_local_cut_receipt(
+            &self,
+            commit: &LocalCutCommitV1,
+        ) -> Result<LocalCutReceiptV1, LocalCutOwnerErrorV1> {
+            LocalCutReceiptV1::new(LocalCutReceiptInputV1 {
+                commit_record_hash: commit.digest(),
+                coordinator_key_evidence_hash: EVIDENCE,
+                signature: SIGNATURE,
+            })
+            .map_err(|_| LocalCutOwnerErrorV1::OwnerRejected)
+        }
+
+        fn verify_local_cut_receipt(
+            &self,
+            _receipt: &LocalCutReceiptV1,
+            _commit: &LocalCutCommitV1,
+            _admissions: &[ManifestOwnerAdmissionSnapshotV1],
+        ) -> Result<(), LocalCutOwnerErrorV1> {
+            Ok(())
+        }
+    }
+
+    const fn hash(byte: u8) -> Hash {
+        Hash::from_bytes([byte; 32])
+    }
+
+    const fn plugin(byte: u8) -> PluginId {
+        PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+    }
+
+    const fn timeline(byte: u8) -> TimelineId {
+        TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+    }
+
+    fn policy_source(plugin_id: PluginId, seed: u8) -> FixtureResult<PolicySource> {
+        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+            plugin_id,
+            plugin_version: "1.0.0".to_owned(),
+            implementation_hash: hash(seed + 30),
+            base_configuration_digest: hash(seed + 40),
+            executable_profile_hash: hash(seed + 50),
+            retention_policy_hash: hash(seed + 60),
+            policy_revision: 1,
+            output_declarations: Vec::new(),
+        })?;
+        let members = [
+            policy.to_canonical_cbor(),
+            b"EBP1-fixture".to_vec(),
+            b"implementation-fixture".to_vec(),
+            b"CFG1-fixture".to_vec(),
+            Vec::new(),
+            b"RTP1-fixture".to_vec(),
+        ];
+        let mut closure = b"OPC1".to_vec();
+        for member in members {
+            let length = u64::try_from(member.len())?;
+            closure.extend_from_slice(&length.to_be_bytes());
+            closure.extend_from_slice(&member);
+        }
+        Ok((policy, closure))
+    }
+
+    fn opc1_digest(bytes: &[u8]) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
+        hasher.update(bytes);
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    }
+
+    fn catalog_fixture(
+        owner_id: [u8; 32],
+        generation: u64,
+    ) -> FixtureResult<(ManifestAdmissionCatalogV1, Vec<PolicySource>)> {
+        let first = policy_source(plugin(1), 1)?;
+        let second = policy_source(plugin(2), 2)?;
+        let sources = vec![first, second];
+        let mut rows = Vec::with_capacity(sources.len());
+        for (index, (policy, closure)) in sources.iter().enumerate() {
+            rows.push(ManifestAdmissionCatalogRowV1 {
+                stable_slot: format!("slot-{index}"),
+                plugin_id: policy.fields().plugin_id,
+                plugin_name: "same-name".to_owned(),
+                plugin_version: policy.fields().plugin_version.clone(),
+                implementation_hash: policy.fields().implementation_hash,
+                eop1_native_digest: policy.digest(),
+                closure_hash: opc1_digest(closure),
+            });
+        }
+        let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
+            owner_id,
+            configuration_generation: generation,
+            rows,
+        })?;
+        Ok((catalog, sources))
+    }
+
+    fn leaf(
+        owner_id: [u8; 32],
+        scope: Hash,
+        kind: WorldArtifactKindV1,
+        native_digest: Hash,
+        native_bytes: &[u8],
+    ) -> FixtureResult<WorldArtifactLeafV1> {
+        let leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
+            scope,
+            kind,
+            native_digest,
+            native_byte_length: u64::try_from(native_bytes.len())?,
+            owner: owner_id,
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            optionality: ArtifactOptionalityV1::Required,
+            transition: ArtifactTransitionRuleV1::PreserveExact,
+            source_lease_hash: hash(80),
+            key_dependencies: Vec::new(),
+            child_node_hashes: Vec::new(),
+        })?;
+        Ok(leaf)
+    }
+
+    fn policy_copy(
+        owner_id: [u8; 32],
+        scope: Hash,
+        policy: &OutputPolicyV1,
+        closure: &[u8],
+    ) -> FixtureResult<ManifestOwnerPolicyCopiesV1> {
+        let eop1_bytes = policy.to_canonical_cbor();
+        let eop1_kind = WorldArtifactKindV1::OutputPolicy;
+        let eop1_leaf = leaf(owner_id, scope, eop1_kind, policy.digest(), &eop1_bytes)?;
+        let opc1_kind = WorldArtifactKindV1::OutputPolicyClosure;
+        let opc1_leaf = leaf(owner_id, scope, opc1_kind, opc1_digest(closure), closure)?;
+        Ok(ManifestOwnerPolicyCopiesV1 {
+            plugin_id: policy.fields().plugin_id,
+            eop1_bytes,
+            eop1_leaf,
+            opc1_bytes: closure.to_vec(),
+            opc1_leaf,
+        })
+    }
+
+    fn timeline_request(
+        owner_id: [u8; 32],
+        timeline_id: TimelineId,
+        scope: Hash,
+        sources: &[PolicySource],
+    ) -> FixtureResult<ManifestOwnerTimelineAdmissionRequestV1> {
+        let observer = "local-observer".to_owned();
+        let consumer = WorldConsumerV1::new(observer, hash(130), hash(131), hash(132))?;
+        let producer = WorldProducerV1::new(plugin(1), sources[0].0.digest())?;
+        let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+            scope,
+            consumers: vec![consumer],
+            producers: vec![producer],
+            optional_view_roots: Vec::new(),
+        })?;
+        let mut policy_copies = Vec::with_capacity(sources.len());
+        for (policy, closure) in sources {
+            policy_copies.push(policy_copy(owner_id, scope, policy, closure)?);
+        }
+        Ok(ManifestOwnerTimelineAdmissionRequestV1 {
+            timeline_id,
+            scope,
+            wcs1,
+            policy_copies,
+        })
+    }
+
+    fn admission_request(
+        owner_id: [u8; 32],
+        generation: u64,
+        timeline_ids: &[TimelineId],
+        operation_id: Hash,
+        current: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+    ) -> FixtureResult<ManifestOwnerAdmissionRequestV1> {
+        let (catalog, sources) = catalog_fixture(owner_id, generation)?;
+        let mut timelines = Vec::with_capacity(timeline_ids.len());
+        for (index, timeline_id) in timeline_ids.iter().enumerate() {
+            let scope = hash(70 + u8::try_from(index)?);
+            timelines.push(timeline_request(owner_id, *timeline_id, scope, &sources)?);
+        }
+        let expected_generation = current.map(|state| state.configuration_generation);
+        let previous_receipt = current.and_then(|state| state.previous_visible_lcq1_hash);
+        let expected_inventory = current.map(|state| state.inventory_generation);
+        Ok(ManifestOwnerAdmissionRequestV1 {
+            operation_id,
+            catalog,
+            expected_configuration_generation: expected_generation,
+            previous_visible_lcq1_hash: previous_receipt,
+            expected_inventory_generation: expected_inventory,
+            resulting_inventory_generation: operation_id,
+            timelines,
+        })
+    }
+
+    fn prepare_admission(
+        store: &MemoryStore,
+        owner_id: [u8; 32],
+        generation: u64,
+        timeline_ids: &[TimelineId],
+        operation_id: Hash,
+    ) -> FixtureResult<PreparedManifestOwnerAdmissionV1> {
+        let current = store.read_manifest_owner_state_v1(owner_id)?;
+        let request = admission_request(
+            owner_id,
+            generation,
+            timeline_ids,
+            operation_id,
+            current.as_ref(),
+        )?;
+        let prepared =
+            prepare_manifest_owner_admission_v1(request, &AcceptingOwner, current.as_ref())?;
+        Ok(prepared)
+    }
+
+    fn admitted_store(roster: &[([u8; 32], TimelineId)]) -> FixtureResult<MemoryStore> {
+        let mut store = MemoryStore::new();
+        for &(owner_id, timeline_id) in roster {
+            let timelines = [timeline_id];
+            let batch = prepare_admission(&store, owner_id, 1, &timelines, ADMISSION_OPERATION)?;
+            store.commit_manifest_owner_admission_v1(batch)?;
+        }
+        Ok(store)
+    }
+
+    fn admitted_view(store: &MemoryStore, owner_id: [u8; 32]) -> FixtureResult<AdmittedView> {
+        let state = store.read_manifest_owner_state_v1(owner_id)?;
+        let state = state.ok_or("missing admitted owner state")?;
+        let generation = state.configuration_generation;
+        let mut snapshots = Vec::with_capacity(state.timelines.len());
+        for timeline_id in &state.timelines {
+            let snapshot =
+                store.read_manifest_owner_admission_v1(owner_id, generation, *timeline_id)?;
+            snapshots.push(snapshot.ok_or("missing admitted owner snapshot")?);
+        }
+        Ok(AdmittedView { state, snapshots })
+    }
+
+    fn table(row_count: usize, byte: u8) -> FixtureResult<LocalCutTableRefV1> {
+        let rows = u64::try_from(row_count)?;
+        let table = LocalCutTableRefV1::new(rows, (rows != 0).then_some(hash(byte)))?;
+        Ok(table)
+    }
+
+    fn composition_row(
+        row: &ManifestAdmissionCatalogRowV1,
+        timeline_id: TimelineId,
+    ) -> LocalCutCompositionBindingRowV1 {
+        LocalCutCompositionBindingRowV1 {
+            plugin_id: row.plugin_id,
+            timeline_id,
+            plugin_version: row.plugin_version.clone(),
+            implementation_hash: row.implementation_hash,
+            eop1_native_digest: row.eop1_native_digest,
+            driver_interval_ns: Some(0),
+            last_due_ns: None,
+            event_cursor: 0,
+            participant_native_state_hash: hash(91),
+        }
+    }
+
+    fn cut_request(
+        owner_id: [u8; 32],
+        admission: &ManifestOwnerAdmissionOwnerStateV1,
+        snapshots: &[ManifestOwnerAdmissionSnapshotV1],
+        plan: &CutPlan,
+    ) -> FixtureResult<LocalCutOwnerRequestV1> {
+        let mut binding_rows = Vec::with_capacity(snapshots.len());
+        let mut composition_rows = Vec::new();
+        let mut recording_context_rows = Vec::with_capacity(snapshots.len());
+        for snapshot in snapshots {
+            let timeline = &snapshot.timeline;
+            binding_rows.push(LocalCutManifestBindingRowV1 {
+                timeline_id: timeline.timeline_id,
+                scope: timeline.scope,
+                wcs_hash: timeline.wcs1.digest(),
+                msr_hash: timeline.receipt.digest(),
+                msb_hash: timeline.binding.digest(),
+            });
+            for row in &snapshot.catalog.as_input().rows {
+                composition_rows.push(composition_row(row, timeline.timeline_id));
+            }
+            recording_context_rows.push(LocalCutRecordingContextRowV1 {
+                timeline_id: timeline.timeline_id,
+                wcs_hash: timeline.wcs1.digest(),
+                retention_lease_hash: hash(104),
+                predecessor_wcb_hash: None,
+            });
+        }
+        composition_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
+        let binding_table =
+            LocalCutManifestBindingTableV1::new(owner_id, plan.cut_id, binding_rows)?;
+        let seal = LocalCutSealV2::new(LocalCutSealInputV2 {
+            owner_id,
+            cut_id: plan.cut_id,
+            tick: plan.tick,
+            membership_epoch: plan.membership_epoch,
+            configuration_generation: admission.configuration_generation,
+            schedule_ns: 0,
+            previous_visible_receipt_hash: admission.previous_visible_lcq1_hash,
+            expected_inventory_generation: admission.inventory_generation,
+            membership_table: table(snapshots.len(), 94)?,
+            composition_table: table(composition_rows.len(), 92)?,
+            inbox_table: table(0, 95)?,
+            invocation_table: table(0, 96)?,
+            expected_heads_table: table(1, 105)?,
+            ebp_native_hash: hash(98),
+            execution_profile_native_hash: hash(99),
+            recording_context_table: table(recording_context_rows.len(), 93)?,
+            owner_operational_policy_hash: hash(100),
+            explicit_attempt_hash: None,
+            ingress_preallocation_native_hash: hash(101),
+            manifest_binding_table: binding_table.table_ref(),
+        })?;
+        Ok(LocalCutOwnerRequestV1 {
+            operation_id: plan.operation_id,
+            seal,
+            manifest_hash: hash(103),
+            manifest_binding_table: binding_table,
+            composition_rows,
+            recording_context_rows,
+            partition_ledger_seq: plan.cut_id,
+            result_heads_table: table(1, 105)?,
+            participant_successor_table: table(1, 106)?,
+            cpu_completion_table: table(0, 107)?,
+            action_disposition_table: table(1, 108)?,
+            candidate_bases_table: table(0, 109)?,
+            invocation_bridges_table: table(0, 110)?,
+            result_inventory_generation: plan.result_inventory,
+            release_fence_proof_digest: hash(112),
+        })
+    }
+
+    fn prepare_cut_from(
+        store: &MemoryStore,
+        owner_id: [u8; 32],
+        plan: &CutPlan,
+        current: Option<&LocalCutOwnerStateV1>,
+    ) -> FixtureResult<PreparedLocalCutOwnerCommitV1> {
+        let view = admitted_view(store, owner_id)?;
+        let request = cut_request(owner_id, &view.state, &view.snapshots, plan)?;
+        let batch = prepare_local_cut_owner_commit_v1(
+            request,
+            current,
+            &view.state,
+            &view.snapshots,
+            &AcceptingOwner,
+        )?;
+        Ok(batch)
+    }
+
+    fn prepare_cut(
+        store: &MemoryStore,
+        owner_id: [u8; 32],
+        plan: &CutPlan,
+    ) -> FixtureResult<PreparedLocalCutOwnerCommitV1> {
+        let current = store.read_local_cut_owner_state_v1(owner_id)?;
+        prepare_cut_from(store, owner_id, plan, current.as_ref())
+    }
+
+    fn commit_cut(
+        store: &mut MemoryStore,
+        owner_id: [u8; 32],
+        plan: &CutPlan,
+    ) -> FixtureResult<LocalCutOwnerCommitV1> {
+        let batch = prepare_cut(store, owner_id, plan)?;
+        let committed = store.commit_local_cut_owner_v1(batch)?;
+        Ok(committed)
+    }
+
+    fn cut_store() -> FixtureResult<(MemoryStore, LocalCutOwnerCommitV1)> {
+        let mut store = admitted_store(&CUT_ROSTER)?;
+        let first = commit_cut(&mut store, CUT_OWNER, &FIRST_CUT)?;
+        Ok((store, first))
+    }
+
+    fn local_state(
+        store: &mut MemoryStore,
+        owner_id: [u8; 32],
+    ) -> FixtureResult<&mut LocalCutOwnerStateV1> {
+        let state = store.local_cut_owner_states.get_mut(&owner_id);
+        state.ok_or_else(|| "missing local-cut owner state".into())
+    }
+
+    fn admission_state(
+        store: &mut MemoryStore,
+        owner_id: [u8; 32],
+    ) -> FixtureResult<&mut MemoryManifestOwnerAdmissionStateV1> {
+        let state = store.manifest_owner_admission_states.get_mut(&owner_id);
+        state.ok_or_else(|| "missing admitted owner state".into())
+    }
+
+    fn admission_operation(
+        store: &mut MemoryStore,
+        owner_id: [u8; 32],
+    ) -> FixtureResult<&mut MemoryManifestOwnerAdmissionOperationV1> {
+        let key = (owner_id, ADMISSION_OPERATION);
+        let operation = store.manifest_owner_admission_operations.get_mut(&key);
+        operation.ok_or_else(|| "missing admitted owner operation".into())
+    }
+
+    fn local_operation(
+        store: &mut MemoryStore,
+        operation_id: Hash,
+    ) -> FixtureResult<&mut MemoryLocalCutOwnerOperationV1> {
+        let key = (CUT_OWNER, operation_id);
+        let operation = store.local_cut_owner_operations.get_mut(&key);
+        operation.ok_or_else(|| "missing local-cut operation".into())
+    }
+
+    fn assert_manifest_corrupt(store: &MemoryStore, owner_id: [u8; 32]) {
+        assert_eq!(
+            store.read_manifest_owner_state_v1(owner_id),
+            Err(ManifestOwnerAdmissionErrorV1::CorruptState)
+        );
+    }
+
+    fn assert_local_error(store: &MemoryStore, error: LocalCutOwnerErrorV1) {
+        assert_eq!(store.read_local_cut_owner_state_v1(CUT_OWNER), Err(error));
+    }
+
+    #[test]
+    fn owner_reads_skip_rows_owned_by_other_owners() -> TestResult {
+        let roster = [(CUT_OWNER, CUT_TIMELINE), (IDLE_OWNER, IDLE_TIMELINE)];
+        let mut store = admitted_store(&roster)?;
+        commit_cut(&mut store, CUT_OWNER, &FIRST_CUT)?;
+        assert_eq!(store.read_manifest_owner_state_v1(STRANGER), Ok(None));
+        let idle = store.read_manifest_owner_state_v1(IDLE_OWNER)?;
+        let idle = idle.ok_or("missing idle owner state")?;
+        assert_eq!(idle.timelines, [IDLE_TIMELINE]);
+        assert_eq!(idle.previous_visible_lcq1_hash, None);
+        assert_eq!(store.read_local_cut_owner_state_v1(IDLE_OWNER), Ok(None));
+        Ok(())
+    }
+
+    #[test]
+    fn owner_reads_reject_orphaned_local_cut_rows() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        store.local_cut_owner_states.remove(&CUT_OWNER);
+        assert_manifest_corrupt(&store, CUT_OWNER);
+        assert_local_error(&store, LocalCutOwnerErrorV1::CorruptState);
+        assert_eq!(
+            store.read_local_cut_owner_commit_v1(CUT_OWNER, 1),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
+        assert_eq!(
+            store.resolve_local_cut_owner_retry_v1(CUT_OWNER, FIRST_CUT.operation_id, hash(1)),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_state_rejects_a_zero_generation_header() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        let state = admission_state(&mut store, CUT_OWNER)?;
+        state.configuration_generation = 0;
+        assert_manifest_corrupt(&store, CUT_OWNER);
+        Ok(())
+    }
+
+    #[test]
+    fn owner_reads_reject_an_invalid_local_cut_state() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        let state = local_state(&mut store, CUT_OWNER)?;
+        state.configuration_generation = 0;
+        assert_manifest_corrupt(&store, CUT_OWNER);
+        assert_local_error(&store, LocalCutOwnerErrorV1::CorruptState);
+        Ok(())
+    }
+
+    #[test]
+    fn owner_reads_reject_a_desynchronized_local_cut_state() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        let state = local_state(&mut store, CUT_OWNER)?;
+        state.configuration_generation = 7;
+        assert_manifest_corrupt(&store, CUT_OWNER);
+        assert_local_error(&store, LocalCutOwnerErrorV1::CorruptState);
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_state_rejects_missing_or_misfiled_snapshots() -> TestResult {
+        let key = (CUT_OWNER, 1, CUT_TIMELINE);
+        let (mut missing, _) = cut_store()?;
+        missing.manifest_owner_admission_snapshots.remove(&key);
+        assert_manifest_corrupt(&missing, CUT_OWNER);
+
+        let (mut misfiled, _) = cut_store()?;
+        let rows = &mut misfiled.manifest_owner_admission_snapshots;
+        let snapshot = rows.remove(&key).ok_or("missing admitted snapshot")?;
+        rows.insert((CUT_OWNER, 1, NEXT_TIMELINE), snapshot);
+        assert_manifest_corrupt(&misfiled, CUT_OWNER);
+
+        let (mut retimed, _) = cut_store()?;
+        let rows = &mut retimed.manifest_owner_admission_snapshots;
+        let snapshot = rows.get_mut(&key).ok_or("missing admitted snapshot")?;
+        snapshot.timeline.timeline_id = NEXT_TIMELINE;
+        assert_manifest_corrupt(&retimed, CUT_OWNER);
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_state_rejects_an_inconsistent_generation_operation() -> TestResult {
+        let roster = [(IDLE_OWNER, IDLE_TIMELINE)];
+        let mut drifted = admitted_store(&roster)?;
+        let state = admission_state(&mut drifted, IDLE_OWNER)?;
+        state.inventory_generation = hash(0x99);
+        assert_manifest_corrupt(&drifted, IDLE_OWNER);
+
+        let mut missing = admitted_store(&roster)?;
+        let key = (IDLE_OWNER, ADMISSION_OPERATION);
+        missing.manifest_owner_admission_operations.remove(&key);
+        assert_manifest_corrupt(&missing, IDLE_OWNER);
+
+        let mut retried = admitted_store(&roster)?;
+        let operation = admission_operation(&mut retried, IDLE_OWNER)?;
+        operation.result.kind = ManifestOwnerAdmissionCommitKindV1::ExactRetry;
+        assert_manifest_corrupt(&retried, IDLE_OWNER);
+        Ok(())
+    }
+
+    #[test]
+    fn successor_admission_keeps_the_epoch_for_the_same_roster() -> TestResult {
+        let (mut store, first) = cut_store()?;
+        let timelines = [CUT_TIMELINE];
+        let batch = prepare_admission(&store, CUT_OWNER, 2, &timelines, hash(0x52))?;
+        store.commit_manifest_owner_admission_v1(batch)?;
+        let state = store.read_local_cut_owner_state_v1(CUT_OWNER)?;
+        let state = state.ok_or("missing local-cut owner state")?;
+        assert_eq!(state.membership_epoch, 0);
+        assert_eq!(state.configuration_generation, 2);
+        assert_eq!(state.inventory_generation, hash(0x52));
+        assert_eq!(
+            state.previous_visible_lcq1_hash,
+            Some(first.receipt.digest())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn successor_admission_rejects_an_exhausted_membership_epoch() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        let state = local_state(&mut store, CUT_OWNER)?;
+        state.membership_epoch = u32::MAX;
+        let timelines = [NEXT_TIMELINE];
+        let batch = prepare_admission(&store, CUT_OWNER, 2, &timelines, hash(0x53))?;
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(batch),
+            Err(ManifestOwnerAdmissionErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_state_rejects_inconsistent_commit_rows() -> TestResult {
+        let (mut retried, _) = cut_store()?;
+        let rows = &mut retried.local_cut_owner_commits;
+        let commit = rows.get_mut(&(CUT_OWNER, 1)).ok_or("missing commit")?;
+        commit.kind = LocalCutOwnerCommitKindV1::ExactRetry;
+        assert_local_error(&retried, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut unlinked, _) = cut_store()?;
+        let key = (CUT_OWNER, FIRST_CUT.operation_id);
+        unlinked.local_cut_owner_operations.remove(&key);
+        assert_local_error(&unlinked, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut rewired, _) = cut_store()?;
+        let state = local_state(&mut rewired, CUT_OWNER)?;
+        state.previous_visible_lcq1_hash = Some(hash(0x98));
+        let admission = admission_state(&mut rewired, CUT_OWNER)?;
+        admission.previous_visible_lcq1_hash = Some(hash(0x98));
+        assert_local_error(&rewired, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut ahead, _) = cut_store()?;
+        let state = local_state(&mut ahead, CUT_OWNER)?;
+        state.last_visible_cut_id = 2;
+        assert_local_error(&ahead, LocalCutOwnerErrorV1::CorruptState);
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_state_rejects_commits_after_the_visible_cut() -> TestResult {
+        let (mut store, first) = cut_store()?;
+        commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
+        let rewound = Some(first.receipt.digest());
+        let state = local_state(&mut store, CUT_OWNER)?;
+        state.last_visible_cut_id = 1;
+        state.previous_visible_lcq1_hash = rewound;
+        let admission = admission_state(&mut store, CUT_OWNER)?;
+        admission.previous_visible_lcq1_hash = rewound;
+        assert_local_error(&store, LocalCutOwnerErrorV1::CorruptState);
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_reads_skip_rows_owned_by_other_owners() -> TestResult {
+        let roster = [(CUT_OWNER, CUT_TIMELINE), (PEER_OWNER, PEER_TIMELINE)];
+        let mut store = admitted_store(&roster)?;
+        let first = commit_cut(&mut store, CUT_OWNER, &FIRST_CUT)?;
+        commit_cut(&mut store, PEER_OWNER, &FIRST_CUT)?;
+        let state = store.read_local_cut_owner_state_v1(CUT_OWNER)?;
+        let state = state.ok_or("missing local-cut owner state")?;
+        assert_eq!(
+            state.previous_visible_lcq1_hash,
+            Some(first.receipt.digest())
+        );
+        let unknown_cut = store.read_local_cut_owner_commit_v1(CUT_OWNER, 9);
+        assert_eq!(unknown_cut, Ok(None));
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_state_rejects_inconsistent_operation_rows() -> TestResult {
+        let (mut unshaped, _) = cut_store()?;
+        let operation = local_operation(&mut unshaped, FIRST_CUT.operation_id)?;
+        operation.request.operation_id = Hash::zero();
+        assert_local_error(&unshaped, LocalCutOwnerErrorV1::BoundExceeded);
+
+        let (mut forged, _) = cut_store()?;
+        let operation = local_operation(&mut forged, FIRST_CUT.operation_id)?;
+        operation.intent_digest = hash(0x97);
+        assert_local_error(&forged, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut replayed, _) = cut_store()?;
+        let operation = local_operation(&mut replayed, FIRST_CUT.operation_id)?;
+        let mut retried = operation.clone();
+        retried.result.kind = LocalCutOwnerCommitKindV1::ExactRetry;
+        let rows = &mut replayed.local_cut_owner_operations;
+        rows.insert((CUT_OWNER, hash(0x96)), retried);
+        assert_local_error(&replayed, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut rekeyed, _) = cut_store()?;
+        let rows = &mut rekeyed.local_cut_owner_operations;
+        let operation = rows.remove(&(CUT_OWNER, FIRST_CUT.operation_id));
+        let operation = operation.ok_or("missing local-cut operation")?;
+        rows.insert((CUT_OWNER, hash(0x95)), operation);
+        assert_local_error(&rekeyed, LocalCutOwnerErrorV1::CorruptState);
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_commit_recovers_an_exact_retry() -> TestResult {
+        let mut store = admitted_store(&CUT_ROSTER)?;
+        let batch = prepare_cut(&store, CUT_OWNER, &FIRST_CUT)?;
+        let applied = store.commit_local_cut_owner_v1(batch.clone())?;
+        let retried = store.commit_local_cut_owner_v1(batch)?;
+        assert_eq!(applied.kind, LocalCutOwnerCommitKindV1::Applied);
+        assert_eq!(retried.kind, LocalCutOwnerCommitKindV1::ExactRetry);
+        assert_eq!(retried.receipt, applied.receipt);
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_commit_rejects_corrupt_or_missing_retained_state() -> TestResult {
+        let (mut unlinked, _) = cut_store()?;
+        let batch = prepare_cut(&unlinked, CUT_OWNER, &SECOND_CUT)?;
+        let key = (CUT_OWNER, FIRST_CUT.operation_id);
+        unlinked.local_cut_owner_operations.remove(&key);
+        assert_eq!(
+            unlinked.commit_local_cut_owner_v1(batch),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
+
+        let mut corrupt = admitted_store(&CUT_ROSTER)?;
+        let batch = prepare_cut(&corrupt, CUT_OWNER, &FIRST_CUT)?;
+        let key = (CUT_OWNER, ADMISSION_OPERATION);
+        corrupt.manifest_owner_admission_operations.remove(&key);
+        assert_eq!(
+            corrupt.commit_local_cut_owner_v1(batch),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
+
+        let source = admitted_store(&CUT_ROSTER)?;
+        let batch = prepare_cut(&source, CUT_OWNER, &FIRST_CUT)?;
+        let mut empty = MemoryStore::new();
+        assert_eq!(
+            empty.commit_local_cut_owner_v1(batch),
+            Err(LocalCutOwnerErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_commit_rejects_stale_or_misordered_successors() -> TestResult {
+        let mut store = admitted_store(&CUT_ROSTER)?;
+        let first = prepare_cut(&store, CUT_OWNER, &FIRST_CUT)?;
+        let rival = prepare_cut(&store, CUT_OWNER, &RIVAL_CUT)?;
+        store.commit_local_cut_owner_v1(first)?;
+        assert_eq!(
+            store.commit_local_cut_owner_v1(rival),
+            Err(LocalCutOwnerErrorV1::Conflict)
+        );
+
+        let (mut overflowed, _) = cut_store()?;
+        let batch = prepare_cut(&overflowed, CUT_OWNER, &SECOND_CUT)?;
+        let state = local_state(&mut overflowed, CUT_OWNER)?;
+        state.last_visible_tick = u64::MAX;
+        assert_eq!(
+            overflowed.commit_local_cut_owner_v1(batch),
+            Err(LocalCutOwnerErrorV1::Conflict)
+        );
+
+        let (mut skipped, _) = cut_store()?;
+        let batch = prepare_cut(&skipped, CUT_OWNER, &SECOND_CUT)?;
+        let state = local_state(&mut skipped, CUT_OWNER)?;
+        state.last_visible_tick = 5;
+        assert_eq!(
+            skipped.commit_local_cut_owner_v1(batch),
+            Err(LocalCutOwnerErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_commit_rejects_a_first_cut_outside_epoch_zero() -> TestResult {
+        let mut store = admitted_store(&CUT_ROSTER)?;
+        let view = admitted_view(&store, CUT_OWNER)?;
+        let assumed = LocalCutOwnerStateV1 {
+            owner_id: CUT_OWNER,
+            last_visible_cut_id: 0,
+            last_visible_tick: 0,
+            membership_epoch: EPOCH_CUT.membership_epoch,
+            configuration_generation: view.state.configuration_generation,
+            previous_visible_lcq1_hash: None,
+            inventory_generation: view.state.inventory_generation,
+            timelines: view.state.timelines,
+        };
+        let batch = prepare_cut_from(&store, CUT_OWNER, &EPOCH_CUT, Some(&assumed))?;
+        assert_eq!(
+            store.commit_local_cut_owner_v1(batch),
+            Err(LocalCutOwnerErrorV1::Conflict)
+        );
+        Ok(())
     }
 }

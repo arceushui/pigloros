@@ -11,7 +11,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, TransactionBehavior,
 };
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -28,6 +28,7 @@ pub use recipient_owner::RecipientKeyOwnerV1;
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
+    close_adapter_recording_v1, completed_adapter_call_v1,
     event::{CanonicalBytes, Event, EventDraft, EventOriginV1, Kind, SchemaVersion},
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
@@ -55,29 +56,43 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
+    validate_artifact_registration_catalog_graph_v1, validate_closed_adapter_recording_v1,
+    validate_manifest_owner_admission_snapshot_v1, AdapterAdmissionV1,
+    AdapterCallReservationOutcomeV1, AdapterCallReservationV1, AdapterInvocationV1,
+    AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1,
+    AdapterTranscriptV1, ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
+    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError, ErasureCasOutcomeV1,
-    ErasureContainmentGateV1, ErasureErrorV1, ErasureForkPersistencePortV1,
-    ErasureForkRecoveryMutationV1, ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate,
-    ErasureIndexInsertV1, ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
-    ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
-    ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
-    ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
-    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, EventOriginRecordV1,
-    ForkAdmissionHostCommandV1, ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1,
-    ForkAdmissionOpenChallengeV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
-    ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
-    ForkAdmissionRecoveryProofV1, ForkAppendOperationV1, ForkAppendSourceIdentityV1,
-    ForkAttributionOriginV1, ForkAuthorityOriginV1, ForkClassifiedEventV1,
-    ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
-    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1,
-    ForkInterventionAdmissionV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1,
-    KeyRoleV1, OwnerIdV1, PersistedAuthorityV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PublicKey, Signature, StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE,
+    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError,
+    ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
+    ErasureForkPersistencePortV1, ErasureForkRecoveryMutationV1, ErasureForkRecoveryProofV1,
+    ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
+    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1,
+    ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1,
+    ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
+    ErasureVerifiedInventoryV1, EventOriginRecordV1, ForkAdmissionHostCommandV1,
+    ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
+    ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1, ForkAdmissionReceiptV1,
+    ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAdmissionRecoveryProofV1,
+    ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkAttributionOriginV1,
+    ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
+    ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
+    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryErrorV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1,
+    ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
+    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionInputV1,
+    ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
+    ManifestOwnerAdmissionSnapshotV1, ManifestOwnerPolicyCopiesV1,
+    ManifestOwnerTimelineAdmissionV1, ManifestSlotAdmissionReceiptV1, ManifestSlotBindingV1,
+    OwnerIdV1, PersistedAuthorityV1, PluginId, PreparedArtifactRegistrationBatchV1,
+    PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
+    PreparedErasureRecoveryErrorV1, PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1,
+    PrincipalOwnerBindingV1, PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
+    WorldArtifactLeafV1, WorldConsumerSetV1, WorldReplayHandleV1, ERASURE_MAX_RECOVERY_ERRORS,
+    GEOGRAPHIC_EVENT_TYPE, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 
 use crate::fork_admission_authority::{
@@ -111,7 +126,13 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+mod local_cut_owner;
 mod pipeline_admission;
+
+use local_cut_owner::{
+    sqlite_manifest_or_local_cut_owner_has_rows, sqlite_sync_local_cut_owner_after_admission,
+    sqlite_validate_local_cut_owner_admission, LOCAL_CUT_OWNER_SCHEMA_SQL,
+};
 
 #[cfg(test)]
 thread_local! {
@@ -1038,6 +1059,100 @@ fn normalize_schema_sql(sql: &str) -> String {
         .collect()
 }
 
+const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artifact_registrations (
+         owner_id TEXT NOT NULL,
+         registration_address BLOB NOT NULL CHECK (length(registration_address) = 32),
+         artifact_class INTEGER NOT NULL CHECK (artifact_class BETWEEN 0 AND 6),
+         artifact_digest BLOB NOT NULL CHECK (length(artifact_digest) = 32),
+         artifact_bytes BLOB NOT NULL,
+         registration_cbor BLOB NOT NULL CHECK (length(registration_cbor) <= 1048576),
+         PRIMARY KEY (registration_address),
+         UNIQUE (owner_id, artifact_class, artifact_digest)
+     );
+     CREATE TABLE IF NOT EXISTS artifact_registration_operations (
+         owner_id TEXT NOT NULL,
+         operation_id BLOB NOT NULL CHECK (length(operation_id) = 32),
+         root_registration_address BLOB NOT NULL CHECK (length(root_registration_address) = 32),
+         PRIMARY KEY (owner_id, operation_id),
+         UNIQUE (owner_id, root_registration_address)
+     );
+     CREATE TABLE IF NOT EXISTS adapter_recording_sessions (
+         owner_reference BLOB NOT NULL CHECK (length(owner_reference) = 32),
+         run_operation_id BLOB NOT NULL CHECK (length(run_operation_id) = 32),
+         world_handle_cbor BLOB NOT NULL CHECK (length(world_handle_cbor) <= 256),
+         admission_cbor BLOB NOT NULL CHECK (length(admission_cbor) <= 16777216),
+         state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 2),
+         transcript_cbor BLOB CHECK (transcript_cbor IS NULL OR length(transcript_cbor) <= 268435456),
+         PRIMARY KEY (owner_reference, run_operation_id),
+         CHECK ((state = 1 AND transcript_cbor IS NOT NULL) OR
+                (state != 1 AND transcript_cbor IS NULL))
+     );
+     CREATE TABLE IF NOT EXISTS adapter_recording_calls (
+         owner_reference BLOB NOT NULL CHECK (length(owner_reference) = 32),
+         run_operation_id BLOB NOT NULL CHECK (length(run_operation_id) = 32),
+         global_call_index INTEGER NOT NULL CHECK (global_call_index >= 0),
+         plugin_id BLOB NOT NULL CHECK (length(plugin_id) = 16),
+         per_plugin_call_index INTEGER NOT NULL CHECK (per_plugin_call_index >= 0),
+         invocation_cbor BLOB NOT NULL CHECK (length(invocation_cbor) <= 16777216),
+         idempotency_key BLOB NOT NULL CHECK (length(idempotency_key) = 32),
+         reserved_at_micros INTEGER NOT NULL CHECK (reserved_at_micros >= 0),
+         output_bytes BLOB CHECK (output_bytes IS NULL OR length(output_bytes) <= 16777216),
+         PRIMARY KEY (owner_reference, run_operation_id, global_call_index),
+         UNIQUE (owner_reference, run_operation_id, plugin_id, per_plugin_call_index),
+         FOREIGN KEY (owner_reference, run_operation_id)
+             REFERENCES adapter_recording_sessions(owner_reference, run_operation_id)
+     );";
+
+const MANIFEST_OWNER_ADMISSION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS manifest_owner_admission_state (
+         owner_id BLOB PRIMARY KEY CHECK (length(owner_id) = 32),
+         configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
+         previous_visible_lcq1_hash BLOB CHECK (previous_visible_lcq1_hash IS NULL OR length(previous_visible_lcq1_hash) = 32),
+         inventory_generation BLOB NOT NULL CHECK (length(inventory_generation) = 32)
+     );
+     CREATE TABLE IF NOT EXISTS manifest_owner_admission_operations (
+         owner_id BLOB NOT NULL CHECK (length(owner_id) = 32),
+         operation_id BLOB NOT NULL CHECK (length(operation_id) = 32),
+         request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+         configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
+         inventory_generation BLOB NOT NULL CHECK (length(inventory_generation) = 32),
+         receipt_count INTEGER NOT NULL CHECK (receipt_count BETWEEN 1 AND 1048576),
+         receipt_set_digest BLOB NOT NULL CHECK (length(receipt_set_digest) = 32),
+         PRIMARY KEY (owner_id, operation_id),
+         UNIQUE (owner_id, configuration_generation)
+     );
+     CREATE TABLE IF NOT EXISTS manifest_owner_admissions (
+         owner_id BLOB NOT NULL CHECK (length(owner_id) = 32),
+         configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
+         timeline_id BLOB NOT NULL CHECK (length(timeline_id) = 16),
+         scope BLOB NOT NULL CHECK (length(scope) = 32),
+         wcs1_hash BLOB NOT NULL CHECK (length(wcs1_hash) = 32),
+         catalog_cbor BLOB NOT NULL CHECK (length(catalog_cbor) <= 131072),
+         wcs1_cbor BLOB NOT NULL CHECK (length(wcs1_cbor) <= 65536),
+         binding_cbor BLOB NOT NULL CHECK (length(binding_cbor) <= 65536),
+         receipt_cbor BLOB NOT NULL CHECK (length(receipt_cbor) <= 16384),
+         operation_id BLOB NOT NULL CHECK (length(operation_id) = 32),
+         expected_inventory_generation BLOB CHECK (expected_inventory_generation IS NULL OR length(expected_inventory_generation) = 32),
+         resulting_inventory_generation BLOB NOT NULL CHECK (length(resulting_inventory_generation) = 32),
+         PRIMARY KEY (owner_id, configuration_generation, timeline_id),
+         UNIQUE (owner_id, configuration_generation, scope)
+     );
+     CREATE TABLE IF NOT EXISTS manifest_owner_policy_copies (
+         owner_id BLOB NOT NULL CHECK (length(owner_id) = 32),
+         configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
+         timeline_id BLOB NOT NULL CHECK (length(timeline_id) = 16),
+         plugin_id BLOB NOT NULL CHECK (length(plugin_id) = 16),
+         eop1_bytes BLOB NOT NULL,
+         eop1_leaf_cbor BLOB NOT NULL CHECK (length(eop1_leaf_cbor) <= 16384),
+         opc1_bytes BLOB NOT NULL CHECK (length(opc1_bytes) <= 16777216),
+         opc1_leaf_cbor BLOB NOT NULL CHECK (length(opc1_leaf_cbor) <= 16384),
+         PRIMARY KEY (owner_id, configuration_generation, timeline_id, plugin_id),
+         FOREIGN KEY (owner_id, configuration_generation, timeline_id)
+             REFERENCES manifest_owner_admissions(owner_id, configuration_generation, timeline_id),
+         CHECK (length(eop1_bytes) <= 16777216)
+     );";
+
+const SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1: u32 = 1_048_576;
+
 /// Validated `(EOR1, optional FIA1, FOP1)` rows for one child suffix.
 type ForkEventSuffixV1 = Vec<(
     EventOriginRecordV1,
@@ -1666,6 +1781,8 @@ impl SqliteStore {
                     self.validate_erasure_schema()
                 }
             })
+            .and_then(|()| self.prepare_artifact_registration_schema(read_only))
+            .and_then(|()| self.prepare_manifest_owner_admission_schema(read_only))
             .and_then(|()| {
                 if read_only {
                     self.validate_authority_schema_and_state()
@@ -1677,6 +1794,27 @@ impl SqliteStore {
                         .and_then(|()| self.prepare_pipeline_admission_schema())
                 }
             })
+    }
+
+    fn prepare_artifact_registration_schema(&self, read_only: bool) -> Result<(), CoreError> {
+        if read_only {
+            Ok(())
+        } else {
+            self.conn
+                .execute_batch(ARTIFACT_REGISTRATION_SCHEMA_SQL)
+                .map_err(Self::into_storage_error)
+        }
+    }
+
+    fn prepare_manifest_owner_admission_schema(&self, read_only: bool) -> Result<(), CoreError> {
+        if read_only {
+            Ok(())
+        } else {
+            self.conn
+                .execute_batch(MANIFEST_OWNER_ADMISSION_SCHEMA_SQL)
+                .and_then(|()| self.conn.execute_batch(LOCAL_CUT_OWNER_SCHEMA_SQL))
+                .map_err(Self::into_storage_error)
+        }
     }
 
     fn should_initialize_schema(&self, initialize: bool) -> Result<bool, CoreError> {
@@ -4934,6 +5072,102 @@ impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
 }
 
 impl EventStore for SqliteStore {
+    fn commit_artifact_registration_batch(
+        &mut self,
+        batch: pos_core::PreparedArtifactRegistrationBatchV1,
+    ) -> Result<
+        pos_core::ArtifactRegistrationCommitOutcomeV1,
+        pos_core::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        ArtifactRegistrationPersistencePortV1::commit_artifact_registration_batch(self, batch)
+    }
+
+    fn read_artifact_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        registration_address: Hash,
+    ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>
+    {
+        ArtifactRegistrationPersistencePortV1::read_artifact_registration(
+            self,
+            owner_id,
+            registration_address,
+        )
+    }
+
+    fn adapter_recording_open_session(
+        &mut self,
+        session: AdapterRecordingSessionV1,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::open_adapter_recording_session(self, session)
+    }
+
+    fn adapter_recording_reserve_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: AdapterCallReservationV1,
+    ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::reserve_adapter_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            reservation,
+        )
+    }
+
+    fn adapter_recording_complete_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::complete_adapter_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            global_call_index,
+            output_bytes,
+        )
+    }
+
+    fn adapter_recording_close_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::close_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
+    fn adapter_recording_read_closed_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::read_closed_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
+    fn adapter_recording_abort_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        AdapterRecordingStoreV1::abort_adapter_recording_session(
+            self,
+            owner_reference,
+            run_operation_id,
+        )
+    }
+
     fn bind_erasure_gate(&mut self, gate: Arc<ErasureContainmentGateV1>) -> Result<(), CoreError> {
         self.bind_erasure_gate_impl(gate)
     }
@@ -6246,6 +6480,2224 @@ impl crate::ErasureRejoinPersistencePortV1 for SqliteStore {
                 result.and_then(|proof| crate::validate_rejoin_proof_reference(reference, proof))
             })
             .transpose()
+    }
+}
+
+impl ArtifactRegistrationPersistencePortV1 for SqliteStore {
+    fn commit_artifact_registration_batch(
+        &mut self,
+        batch: PreparedArtifactRegistrationBatchV1,
+    ) -> Result<ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1> {
+        let root_registration_address = batch.root_registration_address();
+        let has_root_record = batch.records().iter().any(|record| {
+            let same_owner = record.owner_id() == batch.owner_id();
+            let same_address = record.registration_address() == root_registration_address;
+            same_owner && same_address
+        });
+        if batch.records().is_empty() || !has_root_record {
+            return Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure);
+        }
+        sqlite_artifact_registration_schema_exists(&self.conn)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+            .and_then(|table_exists| {
+                if table_exists {
+                    Ok(())
+                } else {
+                    Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+                }
+            })?;
+
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+        let owner_id = *batch.owner_id();
+        let result = (|| {
+            sqlite_check_artifact_registration_operation(
+                &self.conn,
+                &owner_id,
+                batch.root_operation_id(),
+                batch.root_registration_address(),
+            )?;
+            let mut inserted = false;
+            for record in batch.records() {
+                inserted |= commit_sqlite_artifact_registration_record(&self.conn, record)?;
+            }
+            sqlite_commit_artifact_registration_operation(
+                &self.conn,
+                &owner_id,
+                batch.root_operation_id(),
+                batch.root_registration_address(),
+            )?;
+            sqlite_validate_artifact_registration_closure(
+                &self.conn,
+                batch.root_registration_address(),
+            )?;
+            Ok(if inserted {
+                ArtifactRegistrationCommitOutcomeV1::Applied
+            } else {
+                ArtifactRegistrationCommitOutcomeV1::ExactRetry
+            })
+        })();
+        finish_artifact_registration_scope(&self.conn, scope, result)
+    }
+
+    fn read_artifact_registration(
+        &self,
+        owner_id: &OwnerIdV1,
+        registration_address: Hash,
+    ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1>
+    {
+        sqlite_read_artifact_registration(&self.conn, owner_id, registration_address)
+    }
+}
+
+impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
+    /// Reads the owner state inside its own deferred `BEGIN` transaction.
+    ///
+    /// Unlike `commit_manifest_owner_admission_v1`, which nests through a
+    /// savepoint, this read cannot run while the connection already holds an
+    /// open transaction: the connection rejects the nested `BEGIN` and the
+    /// call returns `StorageFailure`.
+    fn read_manifest_owner_state_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<ManifestOwnerAdmissionOwnerStateV1>, ManifestOwnerAdmissionErrorV1> {
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+        let result = sqlite_read_manifest_owner_current_state(&transaction, owner_id);
+        match result {
+            Ok(state) => {
+                transaction
+                    .commit()
+                    .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+                Ok(state)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolves an exact retry inside its own deferred `BEGIN` transaction.
+    ///
+    /// Unlike `commit_manifest_owner_admission_v1`, which nests through a
+    /// savepoint, this read cannot run while the connection already holds an
+    /// open transaction: the connection rejects the nested `BEGIN` and the
+    /// call returns `StorageFailure`.
+    fn resolve_manifest_owner_admission_retry_v1(
+        &self,
+        owner_id: [u8; 32],
+        operation_id: Hash,
+        intent_digest: Hash,
+    ) -> Result<Option<ManifestOwnerAdmissionCommitV1>, ManifestOwnerAdmissionErrorV1> {
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+        sqlite_read_manifest_owner_current_state(&transaction, owner_id)?;
+        let result = sqlite_resolve_manifest_owner_retry(
+            &transaction,
+            owner_id,
+            operation_id,
+            intent_digest,
+        );
+        match result {
+            Ok(retry) => {
+                transaction
+                    .commit()
+                    .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+                Ok(retry)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn commit_manifest_owner_admission_v1(
+        &mut self,
+        batch: PreparedManifestOwnerAdmissionV1,
+    ) -> Result<ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1> {
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+        let result = (|| {
+            let input = batch.input();
+            let owner_id = input.catalog.as_input().owner_id;
+            let current_state = sqlite_read_manifest_owner_current_state(&self.conn, owner_id)?;
+            if let Some(retry) = sqlite_resolve_manifest_owner_retry(
+                &self.conn,
+                owner_id,
+                input.operation_id,
+                batch.intent_digest(),
+            )? {
+                return Ok(retry);
+            }
+            let configuration_generation = input.catalog.as_input().configuration_generation;
+            sqlite_validate_manifest_owner_transition(input, current_state.as_ref())?;
+            sqlite_insert_manifest_owner_rows(&self.conn, input)?;
+            sqlite_write_manifest_owner_state(&self.conn, input)?;
+            sqlite_sync_local_cut_owner_after_admission(&self.conn, input, current_state.as_ref())?;
+            let receipt_hashes = input
+                .timelines
+                .iter()
+                .map(|timeline| timeline.receipt.digest())
+                .collect::<Vec<_>>();
+            sqlite_insert_manifest_owner_operation(
+                &self.conn,
+                input,
+                batch.intent_digest(),
+                &receipt_hashes,
+            )?;
+            Ok(ManifestOwnerAdmissionCommitV1 {
+                kind: ManifestOwnerAdmissionCommitKindV1::Applied,
+                configuration_generation,
+                inventory_generation: input.resulting_inventory_generation,
+                receipt_hashes,
+            })
+        })();
+        finish_owner_scope(
+            &self.conn,
+            scope,
+            result,
+            ManifestOwnerAdmissionErrorV1::StorageFailure,
+        )
+    }
+
+    fn read_manifest_owner_admission_v1(
+        &self,
+        owner_id: [u8; 32],
+        configuration_generation: u64,
+        timeline_id: TimelineId,
+    ) -> Result<Option<ManifestOwnerAdmissionSnapshotV1>, ManifestOwnerAdmissionErrorV1> {
+        let Some(snapshot) = sqlite_read_manifest_owner_admission(
+            &self.conn,
+            owner_id,
+            configuration_generation,
+            timeline_id,
+        )?
+        else {
+            return Ok(None);
+        };
+        let generation =
+            sqlite_read_manifest_owner_generation(&self.conn, owner_id, configuration_generation)?;
+        let inventory_matches =
+            generation.inventory_generation == snapshot.resulting_inventory_generation;
+        let previous_receipt_matches = generation.previous_visible_lcq1_hash
+            == snapshot
+                .timeline
+                .receipt
+                .as_input()
+                .previous_visible_lcq1_hash;
+        if generation.operation_id != snapshot.operation_id
+            || !inventory_matches
+            || !previous_receipt_matches
+            || !generation.timelines.contains(&timeline_id)
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        sqlite_validate_manifest_owner_generation_operation(
+            &self.conn,
+            owner_id,
+            configuration_generation,
+            generation.inventory_generation,
+            generation.operation_id,
+            &generation.receipt_hashes,
+        )?;
+        Ok(Some(snapshot))
+    }
+}
+
+/// Finish an owner-boundary scope, reporting any lost outcome as `storage_failure`.
+fn finish_owner_scope<T, E: Copy>(
+    connection: &Connection,
+    scope: SqliteImmediateScopeV1,
+    result: Result<T, E>,
+    storage_failure: E,
+) -> Result<T, E> {
+    match scope {
+        SqliteImmediateScopeV1::Transaction => finish_transaction(
+            connection,
+            result,
+            |_, _| storage_failure,
+            |_, _| storage_failure,
+        ),
+        SqliteImmediateScopeV1::Savepoint => match result {
+            Ok(value) => connection
+                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+                .map(|()| value)
+                .map_err(|_| storage_failure),
+            Err(error) => {
+                let rollback = connection.execute_batch(
+                    "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
+                     RELEASE SAVEPOINT pigloros_protected_effect",
+                );
+                match rollback {
+                    Ok(()) => Err(error),
+                    Err(_) => Err(storage_failure),
+                }
+            }
+        },
+    }
+}
+
+struct SqliteManifestOwnerAdmissionGenerationV1 {
+    operation_id: Hash,
+    timelines: Vec<TimelineId>,
+    receipt_hashes: Vec<Hash>,
+    inventory_generation: Hash,
+    previous_visible_lcq1_hash: Option<Hash>,
+}
+
+fn sqlite_read_manifest_owner_current_state(
+    connection: &Connection,
+    owner_id: [u8; 32],
+) -> Result<Option<ManifestOwnerAdmissionOwnerStateV1>, ManifestOwnerAdmissionErrorV1> {
+    let Some((generation, previous_visible_lcq1_hash, inventory_generation)) =
+        sqlite_manifest_owner_state(connection, owner_id)?
+    else {
+        return if sqlite_manifest_or_local_cut_owner_has_rows(connection, owner_id)? {
+            Err(ManifestOwnerAdmissionErrorV1::CorruptState)
+        } else {
+            Ok(None)
+        };
+    };
+    if inventory_generation == Hash::zero() || previous_visible_lcq1_hash == Some(Hash::zero()) {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    let generation_rows = sqlite_read_manifest_owner_generation(connection, owner_id, generation)?;
+    sqlite_validate_manifest_owner_generation_operation(
+        connection,
+        owner_id,
+        generation,
+        generation_rows.inventory_generation,
+        generation_rows.operation_id,
+        &generation_rows.receipt_hashes,
+    )?;
+    sqlite_validate_local_cut_owner_admission(
+        connection,
+        owner_id,
+        generation,
+        previous_visible_lcq1_hash,
+        inventory_generation,
+        &generation_rows,
+    )
+    .map(|()| {
+        Some(ManifestOwnerAdmissionOwnerStateV1 {
+            owner_id,
+            configuration_generation: generation,
+            previous_visible_lcq1_hash,
+            inventory_generation,
+            timelines: generation_rows.timelines,
+        })
+    })
+}
+
+fn sqlite_read_manifest_owner_generation(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+) -> Result<SqliteManifestOwnerAdmissionGenerationV1, ManifestOwnerAdmissionErrorV1> {
+    let mut statement = connection
+        .prepare(
+            "SELECT timeline_id FROM manifest_owner_admissions
+             WHERE owner_id = ?1 AND configuration_generation = ?2
+             ORDER BY timeline_id",
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let timeline_bytes = statement
+        .query_map(
+            params![
+                owner_id.as_slice(),
+                configuration_generation.to_be_bytes().as_slice(),
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    drop(statement);
+    if timeline_bytes.len() > pos_core::MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1 {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+
+    let mut timelines = Vec::with_capacity(timeline_bytes.len());
+    let mut generation_identity = None;
+    let mut catalog_digest = None;
+    let mut scopes = HashSet::with_capacity(timeline_bytes.len());
+    let mut receipt_hashes = Vec::with_capacity(timeline_bytes.len());
+    for bytes in timeline_bytes {
+        let raw: [u8; 16] = bytes
+            .try_into()
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        let timeline_id = TimelineId::from_ulid(ulid::Ulid::from_bytes(raw));
+        let snapshot = sqlite_read_manifest_owner_admission(
+            connection,
+            owner_id,
+            configuration_generation,
+            timeline_id,
+        )?
+        .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        let identity = (
+            snapshot.operation_id,
+            snapshot.resulting_inventory_generation,
+            snapshot
+                .timeline
+                .receipt
+                .as_input()
+                .previous_visible_lcq1_hash,
+        );
+        if generation_identity.is_some_and(|stored| stored != identity)
+            || catalog_digest.is_some_and(|stored| stored != snapshot.catalog.digest())
+            || !scopes.insert(snapshot.timeline.scope)
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        generation_identity = Some(identity);
+        catalog_digest = Some(snapshot.catalog.digest());
+        receipt_hashes.push(snapshot.timeline.receipt.digest());
+        timelines.push(timeline_id);
+    }
+    // A generation without admission rows has no identity and is corrupt.
+    let (operation_id, inventory_generation, previous_visible_lcq1_hash) =
+        generation_identity.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    Ok(SqliteManifestOwnerAdmissionGenerationV1 {
+        operation_id,
+        timelines,
+        receipt_hashes,
+        inventory_generation,
+        previous_visible_lcq1_hash,
+    })
+}
+
+fn sqlite_validate_manifest_owner_generation_operation(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+    inventory_generation: Hash,
+    operation_id: Hash,
+    receipt_hashes: &[Hash],
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let operation = sqlite_manifest_owner_operation(connection, owner_id, operation_id)?
+        .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let generation_operation_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM manifest_owner_admission_operations
+             WHERE owner_id = ?1 AND configuration_generation = ?2",
+            params![
+                owner_id.as_slice(),
+                configuration_generation.to_be_bytes().as_slice(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let operation_receipts = sqlite_manifest_owner_operation_receipts(
+        connection,
+        owner_id,
+        operation_id,
+        configuration_generation,
+    )?;
+    if operation.configuration_generation != configuration_generation
+        || operation.inventory_generation != inventory_generation
+        || operation.receipt_count != sqlite_manifest_owner_receipt_count(receipt_hashes.len())?
+        || operation.receipt_set_digest != sqlite_manifest_owner_receipt_set_digest(receipt_hashes)
+        || generation_operation_count != 1
+        || operation_receipts != receipt_hashes
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    Ok(())
+}
+
+struct SqliteManifestOwnerOperationV1 {
+    request_digest: Hash,
+    configuration_generation: u64,
+    inventory_generation: Hash,
+    receipt_count: i64,
+    receipt_set_digest: Hash,
+}
+
+fn sqlite_manifest_owner_operation(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    operation_id: Hash,
+) -> Result<Option<SqliteManifestOwnerOperationV1>, ManifestOwnerAdmissionErrorV1> {
+    let row = connection
+        .query_row(
+            "SELECT request_digest, configuration_generation, inventory_generation,
+                    receipt_count, receipt_set_digest
+             FROM manifest_owner_admission_operations
+             WHERE owner_id = ?1 AND operation_id = ?2",
+            params![owner_id.as_slice(), operation_id.as_bytes().as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    row.map(
+        |(digest, generation, inventory, receipt_count, receipt_set_digest)| {
+            if receipt_count < 1
+                || receipt_count > i64::from(SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1)
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+            Ok(SqliteManifestOwnerOperationV1 {
+                request_digest: manifest_owner_hash(digest)?,
+                configuration_generation: manifest_owner_generation(generation)?,
+                inventory_generation: manifest_owner_hash(inventory)?,
+                receipt_count,
+                receipt_set_digest: manifest_owner_hash(receipt_set_digest)?,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn sqlite_validate_manifest_owner_transition(
+    input: &ManifestOwnerAdmissionInputV1,
+    current: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let owner_id = input.catalog.as_input().owner_id;
+    match (input.expected_configuration_generation, current) {
+        (None, None) => Ok(()),
+        (Some(expected_generation), Some(state))
+            if state.owner_id == owner_id
+                && state.configuration_generation == expected_generation
+                && state.previous_visible_lcq1_hash == input.previous_visible_lcq1_hash
+                && Some(state.inventory_generation) == input.expected_inventory_generation
+                && !state.timelines.is_empty()
+                && expected_generation.checked_add(1)
+                    == Some(input.catalog.as_input().configuration_generation) =>
+        {
+            Ok(())
+        }
+        _ => Err(ManifestOwnerAdmissionErrorV1::Conflict),
+    }
+}
+
+fn sqlite_insert_manifest_owner_rows(
+    connection: &Connection,
+    input: &ManifestOwnerAdmissionInputV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let owner_id = input.catalog.as_input().owner_id;
+    let generation_bytes = input
+        .catalog
+        .as_input()
+        .configuration_generation
+        .to_be_bytes();
+    let catalog_bytes = input.catalog.to_canonical_cbor();
+    for timeline in &input.timelines {
+        let timeline_bytes = timeline.timeline_id.inner().to_bytes();
+        let wcs1_bytes = timeline.wcs1.encode();
+        connection
+            .execute(
+                "INSERT INTO manifest_owner_admissions
+                 (owner_id, configuration_generation, timeline_id, scope, wcs1_hash,
+                  catalog_cbor, wcs1_cbor, binding_cbor, receipt_cbor, operation_id,
+                  expected_inventory_generation, resulting_inventory_generation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    owner_id.as_slice(),
+                    generation_bytes.as_slice(),
+                    timeline_bytes.as_slice(),
+                    timeline.scope.as_bytes().as_slice(),
+                    timeline.wcs1.digest().as_bytes().as_slice(),
+                    catalog_bytes.as_slice(),
+                    wcs1_bytes.as_slice(),
+                    timeline.binding.to_canonical_cbor(),
+                    timeline.receipt.to_canonical_cbor(),
+                    input.operation_id.as_bytes().as_slice(),
+                    input
+                        .expected_inventory_generation
+                        .map(|hash| hash.as_bytes().to_vec()),
+                    input.resulting_inventory_generation.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+        for copy in &timeline.policy_copies {
+            let plugin_bytes = copy.plugin_id.inner().to_bytes();
+            let eop1_leaf_bytes = copy.eop1_leaf.to_canonical_cbor();
+            let opc1_leaf_bytes = copy.opc1_leaf.to_canonical_cbor();
+            connection
+                .execute(
+                    "INSERT INTO manifest_owner_policy_copies
+                     (owner_id, configuration_generation, timeline_id, plugin_id,
+                      eop1_bytes, eop1_leaf_cbor, opc1_bytes, opc1_leaf_cbor)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        owner_id.as_slice(),
+                        generation_bytes.as_slice(),
+                        timeline_bytes.as_slice(),
+                        plugin_bytes.as_slice(),
+                        copy.eop1_bytes.as_slice(),
+                        eop1_leaf_bytes.as_slice(),
+                        copy.opc1_bytes.as_slice(),
+                        opc1_leaf_bytes.as_slice(),
+                    ],
+                )
+                .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_write_manifest_owner_state(
+    connection: &Connection,
+    input: &ManifestOwnerAdmissionInputV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let owner_id = input.catalog.as_input().owner_id;
+    let generation_bytes = input
+        .catalog
+        .as_input()
+        .configuration_generation
+        .to_be_bytes();
+    let next_visible = input
+        .previous_visible_lcq1_hash
+        .map(|hash| hash.as_bytes().to_vec());
+    let changed = if let Some(expected_generation) = input.expected_configuration_generation {
+        let expected_generation_bytes = expected_generation.to_be_bytes();
+        let expected_inventory = input
+            .expected_inventory_generation
+            .map(|hash| hash.as_bytes().to_vec());
+        connection
+            .execute(
+                "UPDATE manifest_owner_admission_state
+                 SET configuration_generation = ?1,
+                     previous_visible_lcq1_hash = ?2,
+                     inventory_generation = ?3
+                 WHERE owner_id = ?4 AND configuration_generation = ?5
+                   AND previous_visible_lcq1_hash IS ?2 AND inventory_generation = ?6",
+                params![
+                    generation_bytes.as_slice(),
+                    next_visible,
+                    input.resulting_inventory_generation.as_bytes().as_slice(),
+                    owner_id.as_slice(),
+                    expected_generation_bytes.as_slice(),
+                    expected_inventory,
+                ],
+            )
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?
+    } else {
+        connection
+            .execute(
+                "INSERT INTO manifest_owner_admission_state
+                 (owner_id, configuration_generation, previous_visible_lcq1_hash, inventory_generation)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    owner_id.as_slice(),
+                    generation_bytes.as_slice(),
+                    next_visible,
+                    input.resulting_inventory_generation.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::Conflict)?
+    };
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(ManifestOwnerAdmissionErrorV1::Conflict)
+    }
+}
+
+fn sqlite_insert_manifest_owner_operation(
+    connection: &Connection,
+    input: &ManifestOwnerAdmissionInputV1,
+    intent_digest: Hash,
+    receipt_hashes: &[Hash],
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let receipt_count = sqlite_manifest_owner_receipt_count(receipt_hashes.len())?;
+    let receipt_set_digest = sqlite_manifest_owner_receipt_set_digest(receipt_hashes);
+    connection
+        .execute(
+            "INSERT INTO manifest_owner_admission_operations
+             (owner_id, operation_id, request_digest, configuration_generation, inventory_generation,
+              receipt_count, receipt_set_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                input.catalog.as_input().owner_id.as_slice(),
+                input.operation_id.as_bytes().as_slice(),
+                intent_digest.as_bytes().as_slice(),
+                input
+                    .catalog
+                    .as_input()
+                    .configuration_generation
+                    .to_be_bytes()
+                    .as_slice(),
+                input.resulting_inventory_generation.as_bytes().as_slice(),
+                receipt_count,
+                receipt_set_digest.as_bytes().as_slice(),
+            ],
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    Ok(())
+}
+
+fn sqlite_resolve_manifest_owner_retry(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    operation_id: Hash,
+    intent_digest: Hash,
+) -> Result<Option<ManifestOwnerAdmissionCommitV1>, ManifestOwnerAdmissionErrorV1> {
+    let Some(operation) = sqlite_manifest_owner_operation(connection, owner_id, operation_id)?
+    else {
+        return Ok(None);
+    };
+    if operation.request_digest != intent_digest {
+        return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+    }
+    let receipt_hashes = sqlite_manifest_owner_operation_receipts(
+        connection,
+        owner_id,
+        operation_id,
+        operation.configuration_generation,
+    )?;
+    let row_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM manifest_owner_admissions
+             WHERE owner_id = ?1 AND configuration_generation = ?2",
+            params![
+                owner_id.as_slice(),
+                operation.configuration_generation.to_be_bytes().as_slice(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let receipt_count = sqlite_manifest_owner_receipt_count(receipt_hashes.len())
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    if receipt_hashes.is_empty()
+        || receipt_count != operation.receipt_count
+        || sqlite_manifest_owner_receipt_set_digest(&receipt_hashes) != operation.receipt_set_digest
+        || row_count != receipt_count
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    Ok(Some(ManifestOwnerAdmissionCommitV1 {
+        kind: ManifestOwnerAdmissionCommitKindV1::ExactRetry,
+        configuration_generation: operation.configuration_generation,
+        inventory_generation: operation.inventory_generation,
+        receipt_hashes,
+    }))
+}
+
+fn sqlite_manifest_owner_receipt_count(
+    receipt_count: usize,
+) -> Result<i64, ManifestOwnerAdmissionErrorV1> {
+    let receipt_count =
+        u32::try_from(receipt_count).map_err(|_| ManifestOwnerAdmissionErrorV1::BoundExceeded)?;
+    if receipt_count == 0 || receipt_count > SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1 {
+        return Err(ManifestOwnerAdmissionErrorV1::BoundExceeded);
+    }
+    Ok(i64::from(receipt_count))
+}
+
+fn sqlite_manifest_owner_receipt_set_digest(receipt_hashes: &[Hash]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros.manifest-owner-admission-receipts.v1\0");
+    hasher.update(&(receipt_hashes.len() as u64).to_be_bytes());
+    for receipt_hash in receipt_hashes {
+        hasher.update(receipt_hash.as_bytes());
+    }
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn sqlite_manifest_owner_operation_receipts(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    operation_id: Hash,
+    generation: u64,
+) -> Result<Vec<Hash>, ManifestOwnerAdmissionErrorV1> {
+    let mut statement = connection
+        .prepare(
+            "SELECT timeline_id FROM manifest_owner_admissions
+             WHERE owner_id = ?1 AND configuration_generation = ?2 AND operation_id = ?3
+             ORDER BY timeline_id",
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let timeline_bytes = statement
+        .query_map(
+            params![
+                owner_id.as_slice(),
+                generation.to_be_bytes().as_slice(),
+                operation_id.as_bytes().as_slice(),
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let mut receipt_hashes = Vec::with_capacity(timeline_bytes.len());
+    for bytes in timeline_bytes {
+        let raw: [u8; 16] = bytes
+            .try_into()
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        let timeline_id = TimelineId::from_ulid(ulid::Ulid::from_bytes(raw));
+        let snapshot =
+            sqlite_read_manifest_owner_admission(connection, owner_id, generation, timeline_id)?
+                .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        if snapshot.operation_id != operation_id {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        receipt_hashes.push(snapshot.timeline.receipt.digest());
+    }
+    Ok(receipt_hashes)
+}
+
+fn sqlite_manifest_owner_state(
+    connection: &Connection,
+    owner_id: [u8; 32],
+) -> Result<Option<(u64, Option<Hash>, Hash)>, ManifestOwnerAdmissionErrorV1> {
+    let row = connection
+        .query_row(
+            "SELECT configuration_generation, previous_visible_lcq1_hash, inventory_generation
+             FROM manifest_owner_admission_state WHERE owner_id = ?1",
+            params![owner_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    row.map(|(generation, visible, inventory)| {
+        Ok((
+            manifest_owner_generation(generation)?,
+            visible.map(manifest_owner_hash).transpose()?,
+            manifest_owner_hash(inventory)?,
+        ))
+    })
+    .transpose()
+}
+
+fn sqlite_manifest_owner_has_rows(
+    connection: &Connection,
+    owner_id: [u8; 32],
+) -> Result<bool, ManifestOwnerAdmissionErrorV1> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM manifest_owner_admission_operations WHERE owner_id = ?1
+                 UNION ALL
+                 SELECT 1 FROM manifest_owner_admissions WHERE owner_id = ?1
+                 UNION ALL
+                 SELECT 1 FROM manifest_owner_policy_copies WHERE owner_id = ?1
+             )",
+            params![owner_id.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)
+}
+
+struct SqliteManifestOwnerAdmissionRowV1 {
+    scope: Vec<u8>,
+    wcs_hash: Vec<u8>,
+    catalog: Vec<u8>,
+    wcs: Vec<u8>,
+    binding: Vec<u8>,
+    receipt: Vec<u8>,
+    operation: Vec<u8>,
+    expected_inventory: Option<Vec<u8>>,
+    result_inventory: Vec<u8>,
+}
+
+fn sqlite_read_manifest_owner_admission(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+    timeline_id: TimelineId,
+) -> Result<Option<ManifestOwnerAdmissionSnapshotV1>, ManifestOwnerAdmissionErrorV1> {
+    let Some(row) = sqlite_manifest_owner_admission_row(
+        connection,
+        owner_id,
+        configuration_generation,
+        timeline_id,
+    )?
+    else {
+        return Ok(None);
+    };
+    sqlite_decode_manifest_owner_admission(
+        connection,
+        owner_id,
+        configuration_generation,
+        timeline_id,
+        row,
+    )
+    .map(Some)
+}
+
+fn sqlite_manifest_owner_admission_row(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+    timeline_id: TimelineId,
+) -> Result<Option<SqliteManifestOwnerAdmissionRowV1>, ManifestOwnerAdmissionErrorV1> {
+    let generation_bytes = configuration_generation.to_be_bytes();
+    let timeline_bytes = timeline_id.inner().to_bytes();
+    let row = connection
+        .query_row(
+            "SELECT scope, wcs1_hash, catalog_cbor, wcs1_cbor, binding_cbor, receipt_cbor,
+                    operation_id, expected_inventory_generation, resulting_inventory_generation
+             FROM manifest_owner_admissions
+             WHERE owner_id = ?1 AND configuration_generation = ?2 AND timeline_id = ?3",
+            params![
+                owner_id.as_slice(),
+                generation_bytes.as_slice(),
+                timeline_bytes.as_slice(),
+            ],
+            |row| {
+                Ok(SqliteManifestOwnerAdmissionRowV1 {
+                    scope: row.get(0)?,
+                    wcs_hash: row.get(1)?,
+                    catalog: row.get(2)?,
+                    wcs: row.get(3)?,
+                    binding: row.get(4)?,
+                    receipt: row.get(5)?,
+                    operation: row.get(6)?,
+                    expected_inventory: row.get(7)?,
+                    result_inventory: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    Ok(row)
+}
+
+fn sqlite_decode_manifest_owner_admission(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+    timeline_id: TimelineId,
+    row: SqliteManifestOwnerAdmissionRowV1,
+) -> Result<ManifestOwnerAdmissionSnapshotV1, ManifestOwnerAdmissionErrorV1> {
+    let scope = manifest_owner_hash(row.scope)?;
+    let stored_wcs_hash = manifest_owner_hash(row.wcs_hash)?;
+    let catalog = ManifestAdmissionCatalogV1::from_canonical_cbor(&row.catalog)
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let wcs1 = WorldConsumerSetV1::decode(&CanonicalBytes::from_vec(row.wcs))
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    if wcs1.digest() != stored_wcs_hash || wcs1.scope() != scope {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    let binding = ManifestSlotBindingV1::from_canonical_cbor(&row.binding)
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let receipt = ManifestSlotAdmissionReceiptV1::from_canonical_cbor(&row.receipt)
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let operation_id = manifest_owner_hash(row.operation)?;
+    let expected_inventory_generation = row
+        .expected_inventory
+        .map(manifest_owner_hash)
+        .transpose()?;
+    let resulting_inventory_generation = manifest_owner_hash(row.result_inventory)?;
+    let policy_copies = sqlite_read_manifest_owner_policy_copies(
+        connection,
+        owner_id,
+        configuration_generation,
+        timeline_id,
+    )?;
+    let snapshot = ManifestOwnerAdmissionSnapshotV1 {
+        catalog,
+        timeline: ManifestOwnerTimelineAdmissionV1 {
+            timeline_id,
+            scope,
+            wcs1,
+            binding,
+            receipt,
+            policy_copies,
+        },
+        operation_id,
+        expected_inventory_generation,
+        resulting_inventory_generation,
+    };
+    sqlite_validate_manifest_owner_snapshot(
+        connection,
+        owner_id,
+        configuration_generation,
+        &snapshot,
+    )?;
+    Ok(snapshot)
+}
+
+fn sqlite_read_manifest_owner_policy_copies(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+    timeline_id: TimelineId,
+) -> Result<Vec<ManifestOwnerPolicyCopiesV1>, ManifestOwnerAdmissionErrorV1> {
+    let generation_bytes = configuration_generation.to_be_bytes();
+    let timeline_bytes = timeline_id.inner().to_bytes();
+    let mut statement = connection
+        .prepare(
+            "SELECT plugin_id, eop1_bytes, eop1_leaf_cbor, opc1_bytes, opc1_leaf_cbor
+             FROM manifest_owner_policy_copies
+             WHERE owner_id = ?1 AND configuration_generation = ?2 AND timeline_id = ?3
+             ORDER BY plugin_id",
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let policy_rows = statement
+        .query_map(
+            params![
+                owner_id.as_slice(),
+                generation_bytes.as_slice(),
+                timeline_bytes.as_slice(),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            },
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let mut policy_copies = Vec::with_capacity(policy_rows.len());
+    for (plugin, eop_bytes, eop_leaf, opc_bytes, opc_leaf) in policy_rows {
+        let plugin: [u8; 16] = plugin
+            .try_into()
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        policy_copies.push(ManifestOwnerPolicyCopiesV1 {
+            plugin_id: PluginId::from_ulid(ulid::Ulid::from_bytes(plugin)),
+            eop1_bytes: eop_bytes,
+            eop1_leaf: WorldArtifactLeafV1::from_canonical_cbor(&eop_leaf)
+                .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?,
+            opc1_bytes: opc_bytes,
+            opc1_leaf: WorldArtifactLeafV1::from_canonical_cbor(&opc_leaf)
+                .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?,
+        });
+    }
+    Ok(policy_copies)
+}
+
+fn sqlite_validate_manifest_owner_snapshot(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+    snapshot: &ManifestOwnerAdmissionSnapshotV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    if snapshot.catalog.as_input().owner_id != owner_id
+        || snapshot.catalog.as_input().configuration_generation != configuration_generation
+        || snapshot.timeline.receipt.as_input().admission_operation_id != snapshot.operation_id
+        || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    let operation = sqlite_manifest_owner_operation(connection, owner_id, snapshot.operation_id)?
+        .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    if operation.configuration_generation != configuration_generation
+        || operation.inventory_generation != snapshot.resulting_inventory_generation
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    Ok(())
+}
+
+fn manifest_owner_hash(bytes: Vec<u8>) -> Result<Hash, ManifestOwnerAdmissionErrorV1> {
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    Ok(Hash::from_bytes(bytes))
+}
+
+fn manifest_owner_generation(bytes: Vec<u8>) -> Result<u64, ManifestOwnerAdmissionErrorV1> {
+    let bytes: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let generation = u64::from_be_bytes(bytes);
+    if generation == 0 {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    Ok(generation)
+}
+
+impl AdapterRecordingStoreV1 for SqliteStore {
+    fn open_adapter_recording_session(
+        &mut self,
+        session: AdapterRecordingSessionV1,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let handle_bytes = session.world_handle().to_canonical_cbor();
+        let admission_bytes = session.admission().to_canonical_cbor();
+        let result = (|| {
+            let existing = self
+                .conn
+                .query_row(
+                    "SELECT world_handle_cbor, admission_cbor, state
+                     FROM adapter_recording_sessions
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice()
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            if let Some((stored_handle, stored_admission, state)) = existing {
+                if stored_handle != handle_bytes || stored_admission != admission_bytes {
+                    return Err(AdapterRecordingStoreErrorV1::Conflict);
+                }
+                return if state == 0 {
+                    Ok(())
+                } else {
+                    Err(AdapterRecordingStoreErrorV1::InvalidState)
+                };
+            }
+            self.conn
+                .execute(
+                    "INSERT INTO adapter_recording_sessions
+                     (owner_reference, run_operation_id, world_handle_cbor, admission_cbor, state)
+                     VALUES (?1, ?2, ?3, ?4, 0)",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                        handle_bytes,
+                        admission_bytes,
+                    ],
+                )
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            Ok(())
+        })();
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+
+    fn reserve_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: AdapterCallReservationV1,
+    ) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let result = sqlite_reserve_adapter_call_in_scope(
+            &self.conn,
+            owner_reference,
+            run_operation_id,
+            &reservation,
+        );
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+
+    fn complete_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        if output_bytes.len() > pos_core::MAX_ADAPTER_CALL_BYTES_V1 {
+            return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+        }
+        let global_index_sql = i64::try_from(global_call_index)
+            .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let result = (|| {
+            if sqlite_adapter_recording_state(&self.conn, owner_reference, run_operation_id)?
+                != Some(0)
+            {
+                return Err(AdapterRecordingStoreErrorV1::InvalidState);
+            }
+            let existing = self
+                .conn
+                .query_row(
+                    "SELECT output_bytes FROM adapter_recording_calls
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2
+                       AND global_call_index = ?3",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                        global_index_sql
+                    ],
+                    |row| row.get::<_, Option<Vec<u8>>>(0),
+                )
+                .optional()
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?
+                .ok_or(AdapterRecordingStoreErrorV1::InvalidCall)?;
+            match existing {
+                Some(existing) if existing == output_bytes => Ok(()),
+                Some(_) => Err(AdapterRecordingStoreErrorV1::Conflict),
+                None => {
+                    let changed = self
+                        .conn
+                        .execute(
+                            "UPDATE adapter_recording_calls SET output_bytes = ?1
+                             WHERE owner_reference = ?2 AND run_operation_id = ?3
+                               AND global_call_index = ?4 AND output_bytes IS NULL",
+                            params![
+                                output_bytes,
+                                owner_reference.as_bytes().as_slice(),
+                                run_operation_id.as_bytes().as_slice(),
+                                global_index_sql,
+                            ],
+                        )
+                        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+                    if changed == 1 {
+                        Ok(())
+                    } else {
+                        Err(AdapterRecordingStoreErrorV1::Conflict)
+                    }
+                }
+            }
+        })();
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+
+    fn close_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let result = (|| {
+            let loaded = sqlite_load_adapter_recording_session(
+                &self.conn,
+                owner_reference,
+                run_operation_id,
+            )?
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+            let SqliteLoadedAdapterRecordingSessionV1 {
+                session,
+                state,
+                transcript_bytes: transcript,
+            } = loaded;
+            if state == 1 {
+                let transcript_bytes =
+                    transcript.ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+                let derived = sqlite_adapter_recording_transcript(
+                    &self.conn,
+                    owner_reference,
+                    run_operation_id,
+                    &session,
+                )?;
+                if derived != transcript_bytes {
+                    return Err(AdapterRecordingStoreErrorV1::CorruptState);
+                }
+                return Ok(transcript_bytes);
+            }
+            if state != 0 || transcript.is_some() {
+                return Err(AdapterRecordingStoreErrorV1::InvalidState);
+            }
+            let transcript_bytes = sqlite_adapter_recording_transcript(
+                &self.conn,
+                owner_reference,
+                run_operation_id,
+                &session,
+            )?;
+            let changed = self
+                .conn
+                .execute(
+                    "UPDATE adapter_recording_sessions
+                     SET state = 1, transcript_cbor = ?1
+                     WHERE owner_reference = ?2 AND run_operation_id = ?3 AND state = 0",
+                    params![
+                        transcript_bytes,
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice(),
+                    ],
+                )
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            if changed != 1 {
+                return Err(AdapterRecordingStoreErrorV1::Conflict);
+            }
+            Ok(transcript_bytes)
+        })();
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+
+    fn read_closed_adapter_recording_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let Some(loaded) =
+            sqlite_load_adapter_recording_session(&self.conn, owner_reference, run_operation_id)?
+        else {
+            return Ok(None);
+        };
+        let SqliteLoadedAdapterRecordingSessionV1 {
+            session,
+            state,
+            transcript_bytes: transcript,
+        } = loaded;
+        if state != 1 {
+            return Ok(None);
+        }
+        let transcript_bytes = transcript.ok_or(AdapterRecordingStoreErrorV1::CorruptState)?;
+        let derived = sqlite_adapter_recording_transcript(
+            &self.conn,
+            owner_reference,
+            run_operation_id,
+            &session,
+        )?;
+        if derived != transcript_bytes {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        validate_closed_adapter_recording_v1(&session, &transcript_bytes)?;
+        Ok(Some(transcript_bytes))
+    }
+
+    fn abort_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), AdapterRecordingStoreErrorV1> {
+        sqlite_require_adapter_recording_schema(&self.conn)?;
+        let scope = begin_immediate_scope(&self.conn)
+            .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+        let result = (|| {
+            let changed = self
+                .conn
+                .execute(
+                    "UPDATE adapter_recording_sessions SET state = 2
+                     WHERE owner_reference = ?1 AND run_operation_id = ?2 AND state = 0",
+                    params![
+                        owner_reference.as_bytes().as_slice(),
+                        run_operation_id.as_bytes().as_slice()
+                    ],
+                )
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+            if changed == 1 {
+                Ok(())
+            } else {
+                Err(AdapterRecordingStoreErrorV1::InvalidState)
+            }
+        })();
+        finish_adapter_recording_scope(&self.conn, scope, result)
+    }
+}
+
+fn sqlite_require_adapter_recording_schema(
+    connection: &Connection,
+) -> Result<(), AdapterRecordingStoreErrorV1> {
+    let exists = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'adapter_recording_sessions')
+             AND EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'adapter_recording_calls')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AdapterRecordingStoreErrorV1::StorageFailure)
+    }
+}
+
+struct SqliteAdapterRecordingCallRowV1 {
+    plugin_id: Vec<u8>,
+    per_plugin_call_index: i64,
+    invocation_cbor: Vec<u8>,
+    idempotency_key: Vec<u8>,
+    reserved_at_micros: i64,
+    output_bytes: Option<Vec<u8>>,
+}
+
+fn sqlite_reserve_adapter_call_in_scope(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+    reservation: &AdapterCallReservationV1,
+) -> Result<AdapterCallReservationOutcomeV1, AdapterRecordingStoreErrorV1> {
+    let global_index = reservation.invocation().as_input().global_call_index;
+    let global_index_sql =
+        i64::try_from(global_index).map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    let per_plugin_index_sql = i64::try_from(reservation.per_plugin_call_index())
+        .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    let reserved_at_sql = i64::try_from(reservation.reserved_at_micros())
+        .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    let maximum_call_count = u64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)
+        .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    let maximum_call_count_sql = i64::try_from(MAX_ADAPTER_TRANSCRIPT_CALLS_V1)
+        .map_err(|_| AdapterRecordingStoreErrorV1::InvalidCall)?;
+    if global_index >= maximum_call_count {
+        return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+    }
+
+    let plugin_id = reservation.plugin_id().inner().to_bytes();
+    let invocation_bytes = reservation.invocation().to_canonical_cbor();
+    let idempotency_key = reservation.idempotency_key();
+    let session_state =
+        sqlite_adapter_recording_state(connection, owner_reference, run_operation_id)?
+            .ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+    if session_state != 0 {
+        return Err(AdapterRecordingStoreErrorV1::InvalidState);
+    }
+    let existing = sqlite_load_adapter_recording_call(
+        connection,
+        owner_reference,
+        run_operation_id,
+        global_index_sql,
+    )?;
+    if let Some(outcome) = sqlite_existing_adapter_call_outcome(
+        existing,
+        &plugin_id,
+        per_plugin_index_sql,
+        &invocation_bytes,
+        idempotency_key,
+    )? {
+        return Ok(outcome);
+    }
+    sqlite_require_next_adapter_call(
+        connection,
+        owner_reference,
+        run_operation_id,
+        global_index_sql,
+        per_plugin_index_sql,
+        maximum_call_count_sql,
+        &plugin_id,
+    )?;
+    connection
+        .execute(
+            "INSERT INTO adapter_recording_calls
+             (owner_reference, run_operation_id, global_call_index, plugin_id,
+              per_plugin_call_index, invocation_cbor, idempotency_key, reserved_at_micros)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+                global_index_sql,
+                plugin_id.as_slice(),
+                per_plugin_index_sql,
+                invocation_bytes,
+                idempotency_key.as_bytes().as_slice(),
+                reserved_at_sql,
+            ],
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    Ok(AdapterCallReservationOutcomeV1::Reserved {
+        reserved_at_micros: reservation.reserved_at_micros(),
+    })
+}
+
+fn sqlite_load_adapter_recording_call(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+    global_index_sql: i64,
+) -> Result<Option<SqliteAdapterRecordingCallRowV1>, AdapterRecordingStoreErrorV1> {
+    connection
+        .query_row(
+            "SELECT plugin_id, per_plugin_call_index, invocation_cbor,
+                    idempotency_key, reserved_at_micros, output_bytes
+             FROM adapter_recording_calls
+             WHERE owner_reference = ?1 AND run_operation_id = ?2
+               AND global_call_index = ?3",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+                global_index_sql,
+            ],
+            |row| {
+                Ok(SqliteAdapterRecordingCallRowV1 {
+                    plugin_id: row.get(0)?,
+                    per_plugin_call_index: row.get(1)?,
+                    invocation_cbor: row.get(2)?,
+                    idempotency_key: row.get(3)?,
+                    reserved_at_micros: row.get(4)?,
+                    output_bytes: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)
+}
+
+fn sqlite_existing_adapter_call_outcome(
+    existing: Option<SqliteAdapterRecordingCallRowV1>,
+    plugin_id: &[u8],
+    per_plugin_index_sql: i64,
+    invocation_bytes: &[u8],
+    idempotency_key: Hash,
+) -> Result<Option<AdapterCallReservationOutcomeV1>, AdapterRecordingStoreErrorV1> {
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    if existing.plugin_id.as_slice() != plugin_id
+        || existing.per_plugin_call_index != per_plugin_index_sql
+        || existing.invocation_cbor.as_slice() != invocation_bytes
+        || existing.idempotency_key.as_slice() != idempotency_key.as_bytes().as_slice()
+    {
+        return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+    }
+    let reserved_at_micros = u64::try_from(existing.reserved_at_micros)
+        .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+    Ok(Some(existing.output_bytes.map_or(
+        AdapterCallReservationOutcomeV1::Reserved { reserved_at_micros },
+        |output_bytes| AdapterCallReservationOutcomeV1::Completed {
+            output_bytes,
+            reserved_at_micros,
+        },
+    )))
+}
+
+fn sqlite_require_next_adapter_call(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+    global_index_sql: i64,
+    per_plugin_index_sql: i64,
+    maximum_call_count_sql: i64,
+    plugin_id: &[u8],
+) -> Result<(), AdapterRecordingStoreErrorV1> {
+    let global_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM adapter_recording_calls
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    if global_count != global_index_sql || global_count >= maximum_call_count_sql {
+        return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+    }
+    let plugin_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM adapter_recording_calls
+             WHERE owner_reference = ?1 AND run_operation_id = ?2 AND plugin_id = ?3",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+                plugin_id,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    if plugin_count != per_plugin_index_sql {
+        return Err(AdapterRecordingStoreErrorV1::InvalidCall);
+    }
+    Ok(())
+}
+
+fn sqlite_adapter_recording_state(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+) -> Result<Option<i64>, AdapterRecordingStoreErrorV1> {
+    connection
+        .query_row(
+            "SELECT state FROM adapter_recording_sessions
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)
+}
+
+/// Classifies a recorder row read failure: a durable column holding the wrong
+/// SQL type is corrupt state, while any other failure is storage failure.
+const fn adapter_recording_row_error(error: &rusqlite::Error) -> AdapterRecordingStoreErrorV1 {
+    match error {
+        rusqlite::Error::InvalidColumnType(..)
+        | rusqlite::Error::FromSqlConversionFailure(..)
+        | rusqlite::Error::IntegralValueOutOfRange(..) => {
+            AdapterRecordingStoreErrorV1::CorruptState
+        }
+        _ => AdapterRecordingStoreErrorV1::StorageFailure,
+    }
+}
+
+struct SqliteLoadedAdapterRecordingSessionV1 {
+    session: AdapterRecordingSessionV1,
+    state: i64,
+    transcript_bytes: Option<Vec<u8>>,
+}
+
+fn sqlite_load_adapter_recording_session(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+) -> Result<Option<SqliteLoadedAdapterRecordingSessionV1>, AdapterRecordingStoreErrorV1> {
+    let stored = connection
+        .query_row(
+            "SELECT world_handle_cbor, admission_cbor, state, transcript_cbor
+             FROM adapter_recording_sessions
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| adapter_recording_row_error(&error))?;
+    let Some((handle_bytes, admission_bytes, state, transcript_bytes)) = stored else {
+        return Ok(None);
+    };
+    if !(0..=2).contains(&state) || (state == 1) != transcript_bytes.is_some() {
+        return Err(AdapterRecordingStoreErrorV1::CorruptState);
+    }
+    let handle = WorldReplayHandleV1::from_canonical_cbor(&handle_bytes)
+        .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+    let admission = AdapterAdmissionV1::from_canonical_cbor(&admission_bytes)
+        .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+    let session =
+        AdapterRecordingSessionV1::new(owner_reference, handle, run_operation_id, admission)
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+    if handle.to_canonical_cbor() != handle_bytes
+        || session.admission().to_canonical_cbor() != admission_bytes
+    {
+        return Err(AdapterRecordingStoreErrorV1::CorruptState);
+    }
+    if let Some(bytes) = transcript_bytes.as_deref() {
+        validate_closed_adapter_recording_v1(&session, bytes)?;
+    }
+    Ok(Some(SqliteLoadedAdapterRecordingSessionV1 {
+        session,
+        state,
+        transcript_bytes,
+    }))
+}
+
+fn sqlite_adapter_recording_transcript(
+    connection: &Connection,
+    owner_reference: Hash,
+    run_operation_id: Hash,
+    session: &AdapterRecordingSessionV1,
+) -> Result<Vec<u8>, AdapterRecordingStoreErrorV1> {
+    let mut statement = connection
+        .prepare(
+            "SELECT global_call_index, plugin_id, per_plugin_call_index,
+                    invocation_cbor, idempotency_key, reserved_at_micros, output_bytes
+             FROM adapter_recording_calls
+             WHERE owner_reference = ?1 AND run_operation_id = ?2
+             ORDER BY global_call_index",
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    let rows = statement
+        .query_map(
+            params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(6)?,
+                ))
+            },
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure)?;
+    let mut calls = Vec::new();
+    for (expected_global_index, row) in rows.enumerate() {
+        let (
+            global_index,
+            plugin_id_bytes,
+            per_plugin_index,
+            invocation_bytes,
+            idempotency_bytes,
+            reserved_at,
+            output_bytes,
+        ) = row.map_err(|error| adapter_recording_row_error(&error))?;
+        let expected_global_index = i64::try_from(expected_global_index)
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        if global_index != expected_global_index {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        let plugin_id_bytes: [u8; 16] = plugin_id_bytes
+            .try_into()
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let idempotency_bytes: [u8; 32] = idempotency_bytes
+            .try_into()
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let per_plugin_index = u64::try_from(per_plugin_index)
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let global_index =
+            u64::try_from(global_index).map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let reserved_at =
+            u64::try_from(reserved_at).map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let invocation = AdapterInvocationV1::from_canonical_cbor(&invocation_bytes)
+            .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        if invocation.as_input().global_call_index != global_index {
+            return Err(AdapterRecordingStoreErrorV1::CorruptState);
+        }
+        let reservation = AdapterCallReservationV1::new(
+            PluginId::from_ulid(ulid::Ulid::from_bytes(plugin_id_bytes)),
+            per_plugin_index,
+            invocation,
+            Hash::from_bytes(idempotency_bytes),
+            reserved_at,
+        )
+        .map_err(|_| AdapterRecordingStoreErrorV1::CorruptState)?;
+        let output_bytes = output_bytes.ok_or(AdapterRecordingStoreErrorV1::InvalidState)?;
+        calls.push(completed_adapter_call_v1(reservation, output_bytes));
+    }
+    close_adapter_recording_v1(session, calls)
+}
+
+fn finish_adapter_recording_scope<T>(
+    connection: &Connection,
+    scope: SqliteImmediateScopeV1,
+    result: Result<T, AdapterRecordingStoreErrorV1>,
+) -> Result<T, AdapterRecordingStoreErrorV1> {
+    match scope {
+        SqliteImmediateScopeV1::Transaction => finish_transaction(
+            connection,
+            result,
+            |_, _| AdapterRecordingStoreErrorV1::StorageFailure,
+            |_, _| AdapterRecordingStoreErrorV1::StorageFailure,
+        ),
+        SqliteImmediateScopeV1::Savepoint => match result {
+            Ok(value) => connection
+                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+                .map(|()| value)
+                .map_err(|_| AdapterRecordingStoreErrorV1::StorageFailure),
+            Err(error) => {
+                let rollback = connection.execute_batch(
+                    "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
+                     RELEASE SAVEPOINT pigloros_protected_effect",
+                );
+                if rollback.is_ok() {
+                    Err(error)
+                } else {
+                    Err(AdapterRecordingStoreErrorV1::StorageFailure)
+                }
+            }
+        },
+    }
+}
+
+fn commit_sqlite_artifact_registration_record(
+    connection: &Connection,
+    record: &PreparedArtifactRegistrationRecordV1,
+) -> Result<bool, ArtifactRegistrationPersistenceErrorV1> {
+    let expected = ArtifactRegistrationCatalogRowV1::from_persisted(
+        *record.owner_id(),
+        record.artifact_class(),
+        record.artifact_digest(),
+        record.registration_address(),
+        record.artifact_bytes().to_vec(),
+        record.registration().canonical_cbor(),
+    )?;
+    let by_address =
+        sqlite_load_artifact_registration_by_address(connection, record.registration_address())?;
+    let identity_address = connection
+        .query_row(
+            "SELECT registration_address FROM artifact_registrations
+             WHERE owner_id = ?1 AND artifact_class = ?2 AND artifact_digest = ?3",
+            params![
+                record.owner_id().as_str(),
+                artifact_class_code(record.artifact_class()),
+                record.artifact_digest().as_bytes().as_slice(),
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    match (by_address, identity_address) {
+        (Some(existing), Some(address))
+            if existing == expected
+                && address.as_slice() == record.registration_address().as_bytes().as_slice() =>
+        {
+            Ok(false)
+        }
+        (None, None) => {
+            connection
+                .execute(
+                    "INSERT INTO artifact_registrations
+                     (owner_id, registration_address, artifact_class,
+                      artifact_digest, artifact_bytes, registration_cbor)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        record.owner_id().as_str(),
+                        record.registration_address().as_bytes().as_slice(),
+                        artifact_class_code(record.artifact_class()),
+                        record.artifact_digest().as_bytes().as_slice(),
+                        record.artifact_bytes(),
+                        record.registration().canonical_cbor(),
+                    ],
+                )
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+            let stored = sqlite_load_artifact_registration_by_address(
+                connection,
+                record.registration_address(),
+            )?
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if stored != expected {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+            Ok(true)
+        }
+        (Some(_), None | Some(_)) | (None, Some(_)) => {
+            Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
+        }
+    }
+}
+
+fn sqlite_artifact_registration_table_exists(
+    connection: &Connection,
+) -> Result<bool, rusqlite::Error> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'artifact_registrations')",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn sqlite_artifact_registration_schema_exists(
+    connection: &Connection,
+) -> Result<bool, rusqlite::Error> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'artifact_registrations')
+         AND EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'artifact_registration_operations')",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn sqlite_read_artifact_registration(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    registration_address: Hash,
+) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+    let table_exists = sqlite_artifact_registration_table_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if !table_exists {
+        return Ok(None);
+    }
+    let complete_schema = sqlite_artifact_registration_schema_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if !complete_schema {
+        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+    }
+    let Some(row) = sqlite_load_artifact_registration_by_address(connection, registration_address)?
+    else {
+        if sqlite_artifact_registration_operation_references_root(
+            connection,
+            owner_id,
+            registration_address,
+        )? {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        return Ok(None);
+    };
+    if row.owner_id() != owner_id {
+        return Ok(None);
+    }
+    sqlite_validate_artifact_registration_closure(connection, registration_address)?;
+    Ok(Some(row))
+}
+
+fn sqlite_artifact_registration_operation_references_root(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    root_address: Hash,
+) -> Result<bool, ArtifactRegistrationPersistenceErrorV1> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM artifact_registration_operations
+             WHERE owner_id = ?1 AND root_registration_address = ?2)",
+            params![owner_id.as_str(), root_address.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+}
+
+fn sqlite_load_artifact_registration_by_address(
+    connection: &Connection,
+    registration_address: Hash,
+) -> Result<Option<ArtifactRegistrationCatalogRowV1>, ArtifactRegistrationPersistenceErrorV1> {
+    let table_exists = sqlite_artifact_registration_table_exists(connection)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    if !table_exists {
+        return Ok(None);
+    }
+    let row = connection
+        .query_row(
+            "SELECT owner_id, artifact_class, artifact_digest, artifact_bytes, registration_cbor
+             FROM artifact_registrations
+             WHERE registration_address = ?1",
+            params![registration_address.as_bytes().as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?;
+    row.map(
+        |(owner_text, class_code, digest_bytes, artifact_bytes, registration_cbor)| {
+            let owner_id = OwnerIdV1::new(owner_text)
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            let artifact_class = artifact_class_from_code(class_code)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            let artifact_digest = sqlite_artifact_hash(&digest_bytes)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            ArtifactRegistrationCatalogRowV1::from_persisted(
+                owner_id,
+                artifact_class,
+                artifact_digest,
+                registration_address,
+                artifact_bytes,
+                &registration_cbor,
+            )
+        },
+    )
+    .transpose()
+}
+
+fn sqlite_validate_artifact_registration_closure(
+    connection: &Connection,
+    root: Hash,
+) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    let mut pending = vec![root];
+    let mut seen = BTreeSet::new();
+    let mut catalog_rows = Vec::new();
+    while let Some(address) = pending.pop() {
+        if !seen.insert(address) {
+            continue;
+        }
+        let row = sqlite_load_artifact_registration_by_address(connection, address)?
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        let identity_address = connection
+            .query_row(
+                "SELECT registration_address FROM artifact_registrations
+                 WHERE owner_id = ?1 AND artifact_class = ?2 AND artifact_digest = ?3",
+                params![
+                    row.owner_id().as_str(),
+                    artifact_class_code(row.artifact_class()),
+                    row.artifact_digest().as_bytes().as_slice(),
+                ],
+                |stored| stored.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?
+            .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        if identity_address.as_slice() != address.as_bytes().as_slice() {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        pending.extend(
+            row.registration()
+                .fields()
+                .child_artifacts
+                .iter()
+                .map(|edge| edge.registration_address),
+        );
+        catalog_rows.push(row);
+    }
+    validate_artifact_registration_catalog_graph_v1(root, &catalog_rows)?;
+    let root_row = sqlite_load_artifact_registration_by_address(connection, root)?
+        .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+    if root_row.artifact_class() == ErasureArtifactClassV1::ReproManifest
+        && root_row.artifact_bytes().get(2..6) == Some(b"MRM1")
+    {
+        let root_record = ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())
+            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+        let stored_root = sqlite_artifact_registration_operation_root(
+            connection,
+            root_row.owner_id(),
+            root_record.as_input().run_operation_id,
+        )?;
+        if stored_root != Some(root) {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+        let transcript_bytes = find_sqlite_root_transcript_bytes(&catalog_rows, &root_record)?;
+        sqlite_validate_root_adapter_recording(connection, &root_record, transcript_bytes)?;
+    }
+    Ok(())
+}
+
+fn find_sqlite_root_transcript_bytes<'a>(
+    rows: &'a [ArtifactRegistrationCatalogRowV1],
+    root: &ReproManifestRootV1,
+) -> Result<&'a [u8], ArtifactRegistrationPersistenceErrorV1> {
+    let mut transcript_bytes = None;
+    for row in rows {
+        if row.artifact_class() != ErasureArtifactClassV1::ReproManifest {
+            continue;
+        }
+        let Ok(transcript) = AdapterTranscriptV1::from_canonical_cbor(row.artifact_bytes()) else {
+            continue;
+        };
+        if transcript.digest() == root.as_input().adapter_transcript_digest
+            && transcript_bytes.replace(row.artifact_bytes()).is_some()
+        {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+        }
+    }
+    transcript_bytes.ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+}
+
+fn sqlite_validate_root_adapter_recording(
+    connection: &Connection,
+    root: &ReproManifestRootV1,
+    transcript_bytes: &[u8],
+) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    let root_input = root.as_input();
+    let loaded = sqlite_load_adapter_recording_session(
+        connection,
+        root_input.owner_reference,
+        root_input.run_operation_id,
+    )
+    .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?
+    .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+    let SqliteLoadedAdapterRecordingSessionV1 {
+        session,
+        state,
+        transcript_bytes: stored_transcript,
+    } = loaded;
+    if state != 1
+        || session.world_handle() != root_input.world_handle
+        || session.admission().as_input().scope_digest != root_input.plugin_roster_digest
+        || stored_transcript.as_deref() != Some(transcript_bytes)
+    {
+        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+    }
+    let derived = sqlite_adapter_recording_transcript(
+        connection,
+        root_input.owner_reference,
+        root_input.run_operation_id,
+        &session,
+    )
+    .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+    if derived != transcript_bytes {
+        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+    }
+    let transcript = validate_closed_adapter_recording_v1(&session, transcript_bytes)
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+    if transcript.digest() != root_input.adapter_transcript_digest {
+        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+    }
+    Ok(())
+}
+
+fn sqlite_artifact_registration_operation_root(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    operation_id: Hash,
+) -> Result<Option<Hash>, ArtifactRegistrationPersistenceErrorV1> {
+    connection
+        .query_row(
+            "SELECT root_registration_address FROM artifact_registration_operations
+             WHERE owner_id = ?1 AND operation_id = ?2",
+            params![owner_id.as_str(), operation_id.as_bytes().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?
+        .map(|bytes| {
+            sqlite_artifact_hash(&bytes)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        })
+        .transpose()
+}
+
+fn sqlite_check_artifact_registration_operation(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    operation_id: Hash,
+    root_address: Hash,
+) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    let operation_root =
+        sqlite_artifact_registration_operation_root(connection, owner_id, operation_id)?;
+    let root_operation = connection
+        .query_row(
+            "SELECT operation_id FROM artifact_registration_operations
+             WHERE owner_id = ?1 AND root_registration_address = ?2",
+            params![owner_id.as_str(), root_address.as_bytes().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure)?
+        .map(|bytes| {
+            sqlite_artifact_hash(&bytes)
+                .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        })
+        .transpose()?;
+    let root_row = sqlite_load_artifact_registration_by_address(connection, root_address)?;
+    match (operation_root, root_operation, root_row) {
+        (None, None, None) => Ok(()),
+        (Some(existing_root), Some(existing_operation), Some(row))
+            if existing_root == root_address
+                && existing_operation == operation_id
+                && row.owner_id() == owner_id
+                && row.artifact_class() == ErasureArtifactClassV1::ReproManifest =>
+        {
+            let root = ReproManifestRootV1::from_canonical_cbor(row.artifact_bytes())
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if root.as_input().run_operation_id == operation_id {
+                Ok(())
+            } else {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            }
+        }
+        (Some(existing_root), _, _) if existing_root != root_address => {
+            let existing_row =
+                sqlite_load_artifact_registration_by_address(connection, existing_root)?
+                    .ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if existing_row.owner_id() != owner_id
+                || existing_row.artifact_class() != ErasureArtifactClassV1::ReproManifest
+            {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+            let existing_manifest =
+                ReproManifestRootV1::from_canonical_cbor(existing_row.artifact_bytes())
+                    .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
+            if existing_manifest.as_input().run_operation_id != operation_id {
+                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
+            }
+            let existing_operation = sqlite_artifact_registration_operation_root(
+                connection,
+                owner_id,
+                existing_manifest.as_input().run_operation_id,
+            )?;
+            if existing_operation == Some(existing_root) {
+                Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
+            } else {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            }
+        }
+        (None, None, Some(_)) | (Some(_), None, _) | (None, Some(_), _) => {
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        }
+        _ => Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
+    }
+}
+
+fn sqlite_commit_artifact_registration_operation(
+    connection: &Connection,
+    owner_id: &OwnerIdV1,
+    operation_id: Hash,
+    root_address: Hash,
+) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
+    match sqlite_artifact_registration_operation_root(connection, owner_id, operation_id)? {
+        Some(existing_root) if existing_root == root_address => Ok(()),
+        Some(_) => Err(ArtifactRegistrationPersistenceErrorV1::Conflict),
+        None => {
+            connection
+                .execute(
+                    "INSERT INTO artifact_registration_operations
+                     (owner_id, operation_id, root_registration_address)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        owner_id.as_str(),
+                        operation_id.as_bytes().as_slice(),
+                        root_address.as_bytes().as_slice(),
+                    ],
+                )
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::Conflict)?;
+            if sqlite_artifact_registration_operation_root(connection, owner_id, operation_id)?
+                == Some(root_address)
+            {
+                Ok(())
+            } else {
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            }
+        }
+    }
+}
+
+const fn artifact_class_code(class: ErasureArtifactClassV1) -> i64 {
+    match class {
+        ErasureArtifactClassV1::TimelineReplay => 0,
+        ErasureArtifactClassV1::ReproManifest => 1,
+        ErasureArtifactClassV1::CausalTrace => 2,
+        ErasureArtifactClassV1::CalibrationReport => 3,
+        ErasureArtifactClassV1::Export => 4,
+        ErasureArtifactClassV1::ForkOrSnapshot => 5,
+        ErasureArtifactClassV1::ConformanceReport => 6,
+    }
+}
+
+const fn artifact_class_from_code(code: i64) -> Option<ErasureArtifactClassV1> {
+    match code {
+        0 => Some(ErasureArtifactClassV1::TimelineReplay),
+        1 => Some(ErasureArtifactClassV1::ReproManifest),
+        2 => Some(ErasureArtifactClassV1::CausalTrace),
+        3 => Some(ErasureArtifactClassV1::CalibrationReport),
+        4 => Some(ErasureArtifactClassV1::Export),
+        5 => Some(ErasureArtifactClassV1::ForkOrSnapshot),
+        6 => Some(ErasureArtifactClassV1::ConformanceReport),
+        _ => None,
+    }
+}
+
+fn sqlite_artifact_hash(bytes: &[u8]) -> Option<Hash> {
+    let array: [u8; 32] = bytes.try_into().ok()?;
+    Some(Hash::from_bytes(array))
+}
+
+fn finish_artifact_registration_scope<T>(
+    connection: &Connection,
+    scope: SqliteImmediateScopeV1,
+    result: Result<T, ArtifactRegistrationPersistenceErrorV1>,
+) -> Result<T, ArtifactRegistrationPersistenceErrorV1> {
+    match scope {
+        SqliteImmediateScopeV1::Transaction => finish_transaction(
+            connection,
+            result,
+            |_, _| ArtifactRegistrationPersistenceErrorV1::StorageFailure,
+            |_, _| ArtifactRegistrationPersistenceErrorV1::StorageFailure,
+        ),
+        SqliteImmediateScopeV1::Savepoint => match result {
+            Ok(value) => connection
+                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+                .map(|()| value)
+                .map_err(|_| ArtifactRegistrationPersistenceErrorV1::StorageFailure),
+            Err(error) => {
+                let rollback = connection.execute_batch(
+                    "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
+                     RELEASE SAVEPOINT pigloros_protected_effect",
+                );
+                match rollback {
+                    Ok(()) => Err(error),
+                    Err(_) => Err(ArtifactRegistrationPersistenceErrorV1::StorageFailure),
+                }
+            }
+        },
     }
 }
 
@@ -11172,6 +13624,27 @@ mod tests {
         verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
         ForkHostSigningKeyV1,
     };
+
+    #[test]
+    fn sqlite_manifest_owner_receipt_count_is_checked_and_bounded() {
+        assert_eq!(
+            sqlite_manifest_owner_receipt_count(0),
+            Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
+        );
+        assert_eq!(sqlite_manifest_owner_receipt_count(1), Ok(1));
+        assert_eq!(
+            sqlite_manifest_owner_receipt_count(1_048_576),
+            Ok(i64::from(SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1))
+        );
+        assert_eq!(
+            sqlite_manifest_owner_receipt_count(1_048_577),
+            Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
+        );
+        assert_eq!(
+            sqlite_manifest_owner_receipt_count(usize::MAX),
+            Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
+        );
+    }
 
     #[test]
     fn fork_admission_error_mapping_and_incomplete_graph_fail_closed(
@@ -21909,6 +24382,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
     use pos_core::ConsentAuthority;
@@ -23567,5 +26041,2370 @@ pub(super) mod key_registry_coverage {
         let serialization = store.save_key_registry(&KeyRegistryStateV1::new());
         FAIL_REGISTRY_SERIALIZATION.with(|flag| flag.set(false));
         assert!(matches!(serialization, Err(CoreError::Serialization(_))));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn adapter_recording_fixture(
+        run_byte: u8,
+    ) -> Result<
+        (
+            AdapterRecordingSessionV1,
+            AdapterCallReservationV1,
+            PluginId,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let owner_reference = Hash::from_bytes([41; 32]);
+        let plugin_id = PluginId::new();
+        let configuration = b"sqlite-recorder-config".to_vec();
+        let schema_digest = pos_core::public_adapter_schema_digest_v1();
+        let entry = pos_core::AdapterAdmissionEntryV1 {
+            plugin_id,
+            adapter_id: "weather.client".to_owned(),
+            provider_id: "fixture.provider".to_owned(),
+            operation_id: "read-current".to_owned(),
+            protocol_version: 1,
+            request_schema_digest: schema_digest,
+            response_schema_digest: schema_digest,
+            configuration_digest: pos_core::adapter_configuration_digest_v1(&configuration),
+            exact_configuration_bytes: configuration,
+            input_data_class: pos_core::AdapterDataClassV1::PublicRecord,
+            output_data_class: pos_core::AdapterDataClassV1::PublicRecord,
+            effect_mode: pos_core::AdapterEffectModeV1::ReadOnly,
+        };
+        let admission = AdapterAdmissionV1::new(pos_core::AdapterAdmissionInputV1 {
+            owner_reference,
+            configuration_generation: 7,
+            scope_digest: Hash::from_bytes([42; 32]),
+            entries: vec![entry.clone()],
+        })?;
+        let world_handle = WorldReplayHandleV1::new(pos_core::WorldReplayHandleInputV1 {
+            owner_reference,
+            timeline_id: TimelineId::new(),
+            cut_id: 5,
+            commit_receipt_digest: Hash::from_bytes([43; 32]),
+            recording_receipt_digest: Hash::from_bytes([44; 32]),
+            logical_head: 9,
+            stitched_head_hash: Hash::from_bytes([45; 32]),
+        })?;
+        let run_operation_id = Hash::from_bytes([run_byte; 32]);
+        let session = AdapterRecordingSessionV1::new(
+            owner_reference,
+            world_handle,
+            run_operation_id,
+            admission,
+        )?;
+        let invocation = AdapterInvocationV1::new(pos_core::AdapterInvocationInputV1 {
+            adapter_id: entry.adapter_id,
+            provider_id: entry.provider_id,
+            operation_id: entry.operation_id,
+            protocol_version: entry.protocol_version,
+            request_schema_digest: entry.request_schema_digest,
+            response_schema_digest: entry.response_schema_digest,
+            configuration_digest: entry.configuration_digest,
+            global_call_index: 0,
+            exact_request_payload: b"exact recorder request".to_vec(),
+        })?;
+        let reservation = AdapterCallReservationV1::new(
+            plugin_id,
+            0,
+            invocation,
+            Hash::from_bytes([46; 32]),
+            100,
+        )?;
+        Ok((session, reservation, plugin_id))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn resume_sqlite_adapter_recording(
+        store: &mut SqliteStore,
+        session: &AdapterRecordingSessionV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        store.open_adapter_recording_session(session.clone())?;
+        store.open_adapter_recording_session(session.clone())?;
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Ok(None)
+        );
+
+        let mut changed_handle = *session.world_handle().as_input();
+        changed_handle.logical_head += 1;
+        let changed_session = AdapterRecordingSessionV1::new(
+            owner_reference,
+            WorldReplayHandleV1::new(changed_handle)?,
+            run_operation_id,
+            session.admission().clone(),
+        )?;
+        assert_eq!(
+            store.open_adapter_recording_session(changed_session),
+            Err(AdapterRecordingStoreErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn verify_sqlite_adapter_call_retries(
+        store: &mut SqliteStore,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: &AdapterCallReservationV1,
+        plugin_id: PluginId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut gap_input = reservation.invocation().as_input().clone();
+        gap_input.global_call_index = 1;
+        let gap_invocation = AdapterInvocationV1::new(gap_input)?;
+        let gap_reservation = AdapterCallReservationV1::new(
+            plugin_id,
+            0,
+            gap_invocation,
+            Hash::from_bytes([48; 32]),
+            100,
+        )?;
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, gap_reservation),
+            Err(AdapterRecordingStoreErrorV1::InvalidCall)
+        );
+
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone()),
+            Ok(AdapterCallReservationOutcomeV1::Reserved {
+                reserved_at_micros: 100
+            })
+        );
+        let retry = AdapterCallReservationV1::new(
+            plugin_id,
+            reservation.per_plugin_call_index(),
+            reservation.invocation().clone(),
+            reservation.idempotency_key(),
+            999,
+        )?;
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, retry),
+            Ok(AdapterCallReservationOutcomeV1::Reserved {
+                reserved_at_micros: 100
+            })
+        );
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        store.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            b"exact response".to_vec(),
+        )?;
+        store.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            b"exact response".to_vec(),
+        )?;
+        assert_eq!(
+            store.complete_adapter_call(
+                owner_reference,
+                run_operation_id,
+                0,
+                b"different response".to_vec()
+            ),
+            Err(AdapterRecordingStoreErrorV1::Conflict)
+        );
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone()),
+            Ok(AdapterCallReservationOutcomeV1::Completed {
+                output_bytes: b"exact response".to_vec(),
+                reserved_at_micros: 100
+            })
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn exercise_sqlite_adapter_recording(
+        store: &mut SqliteStore,
+        session: &AdapterRecordingSessionV1,
+        reservation: &AdapterCallReservationV1,
+        plugin_id: PluginId,
+    ) -> Result<(Hash, Hash, Vec<u8>), Box<dyn std::error::Error>> {
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        resume_sqlite_adapter_recording(store, session)?;
+        verify_sqlite_adapter_call_retries(
+            store,
+            owner_reference,
+            run_operation_id,
+            reservation,
+            plugin_id,
+        )?;
+        let closed = store.close_adapter_recording_session(owner_reference, run_operation_id)?;
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Ok(closed.clone())
+        );
+        Ok((owner_reference, run_operation_id, closed))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn sqlite_adapter_recording_resumes_and_closes_durable_exact_calls(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("adapter-recording.sqlite");
+        let path = path.to_string_lossy().into_owned();
+        let (session, reservation, plugin_id) = adapter_recording_fixture(47)?;
+        let mut store = SqliteStore::open(&path)?;
+        let (owner_reference, run_operation_id, closed) =
+            exercise_sqlite_adapter_recording(&mut store, &session, &reservation, plugin_id)?;
+        drop(store);
+
+        let mut reopened = SqliteStore::open(&path)?;
+        assert_eq!(
+            reopened.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Ok(Some(closed))
+        );
+        assert_eq!(
+            reopened.open_adapter_recording_session(session),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn sqlite_adapter_recording_abort_prevents_close() -> Result<(), Box<dyn std::error::Error>> {
+        let (session, reservation, _) = adapter_recording_fixture(49)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let mut store = open_store()?;
+        store.open_adapter_recording_session(session.clone())?;
+        store.reserve_adapter_call(owner_reference, run_operation_id, reservation)?;
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        store.abort_adapter_recording_session(owner_reference, run_operation_id)?;
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store.open_adapter_recording_session(session),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        Ok(())
+    }
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn artifact_registration_helper_boundaries_are_closed() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let classes = [
+            (ErasureArtifactClassV1::TimelineReplay, 0),
+            (ErasureArtifactClassV1::ReproManifest, 1),
+            (ErasureArtifactClassV1::CausalTrace, 2),
+            (ErasureArtifactClassV1::CalibrationReport, 3),
+            (ErasureArtifactClassV1::Export, 4),
+            (ErasureArtifactClassV1::ForkOrSnapshot, 5),
+            (ErasureArtifactClassV1::ConformanceReport, 6),
+        ];
+        for (class, code) in classes {
+            assert_eq!(artifact_class_code(class), code);
+            assert_eq!(artifact_class_from_code(code), Some(class));
+        }
+        assert_eq!(artifact_class_from_code(7), None);
+        assert_eq!(sqlite_artifact_hash(&[0; 31]), None);
+
+        let store = open_store()?;
+        store.conn.execute_batch("BEGIN")?;
+        let scope = begin_immediate_scope(&store.conn)?;
+        assert!(matches!(scope, SqliteImmediateScopeV1::Savepoint));
+        assert_eq!(
+            finish_adapter_recording_scope(&store.conn, scope, Ok(3_u8)),
+            Ok(3)
+        );
+        store.conn.execute_batch("ROLLBACK")?;
+
+        store.conn.execute_batch("BEGIN")?;
+        let scope = begin_immediate_scope(&store.conn)?;
+        assert_eq!(
+            finish_adapter_recording_scope(
+                &store.conn,
+                scope,
+                Err::<(), _>(AdapterRecordingStoreErrorV1::InvalidState),
+            ),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+        store.conn.execute_batch("ROLLBACK")?;
+
+        store.conn.execute_batch("BEGIN")?;
+        let scope = begin_immediate_scope(&store.conn)?;
+        assert_eq!(
+            finish_artifact_registration_scope(&store.conn, scope, Ok(4_u8)),
+            Ok(4)
+        );
+        store.conn.execute_batch("ROLLBACK")?;
+
+        store.conn.execute_batch("BEGIN")?;
+        let scope = begin_immediate_scope(&store.conn)?;
+        assert_eq!(
+            finish_artifact_registration_scope(
+                &store.conn,
+                scope,
+                Err::<(), _>(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog),
+            ),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        store.conn.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn closed_adapter_recording(
+        run_byte: u8,
+    ) -> Result<
+        (
+            SqliteStore,
+            AdapterRecordingSessionV1,
+            AdapterCallReservationV1,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let (session, reservation, _) = adapter_recording_fixture(run_byte)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let mut store = open_store()?;
+        store.open_adapter_recording_session(session.clone())?;
+        store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone())?;
+        store.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            b"exact response".to_vec(),
+        )?;
+        store.close_adapter_recording_session(owner_reference, run_operation_id)?;
+        Ok((store, session, reservation))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_closed_recording_rejects_call_mutation(
+        run_byte: u8,
+        mutation: &str,
+        ignore_check_constraints: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, session, _) = closed_adapter_recording(run_byte)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        if ignore_check_constraints {
+            store
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+        }
+        let mutation_result = store.conn.execute(
+            mutation,
+            rusqlite::params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+            ],
+        );
+        if ignore_check_constraints {
+            store
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = OFF;")?;
+        }
+        mutation_result?;
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_closed_recording_rejects_session_mutation(
+        run_byte: u8,
+        mutation: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, session, _) = closed_adapter_recording(run_byte)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        store.conn.execute(
+            mutation,
+            rusqlite::params![
+                owner_reference.as_bytes().as_slice(),
+                run_operation_id.as_bytes().as_slice(),
+            ],
+        )?;
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn sqlite_adapter_recording_durable_rows_reject_corruption(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_closed_recording_rejects_call_mutation(
+            151,
+            "UPDATE adapter_recording_calls SET global_call_index = 1
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            false,
+        )?;
+        assert_closed_recording_rejects_call_mutation(
+            152,
+            "UPDATE adapter_recording_calls SET output_bytes = X'01'
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            false,
+        )?;
+        assert_closed_recording_rejects_session_mutation(
+            153,
+            "UPDATE adapter_recording_sessions SET world_handle_cbor = X'00'
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+        )?;
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn sqlite_adapter_recording_durable_column_bounds_are_rejected(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (run_byte, mutation) in [
+            (
+                154,
+                "UPDATE adapter_recording_calls SET plugin_id = X'00'
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                155,
+                "UPDATE adapter_recording_calls SET idempotency_key = zeroblob(31)
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                156,
+                "UPDATE adapter_recording_calls SET per_plugin_call_index = -1
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                157,
+                "UPDATE adapter_recording_calls SET reserved_at_micros = -1
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+        ] {
+            assert_closed_recording_rejects_call_mutation(run_byte, mutation, true)?;
+        }
+        assert_closed_recording_rejects_call_mutation(
+            158,
+            "UPDATE adapter_recording_calls SET invocation_cbor = X'00'
+             WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            false,
+        )?;
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn sqlite_adapter_recording_reservation_bounds_are_rejected(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (session, reservation, _) = adapter_recording_fixture(159)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let mut store = open_store()?;
+        store.open_adapter_recording_session(session)?;
+        let mut high_index_input = reservation.invocation().as_input().clone();
+        high_index_input.global_call_index =
+            u64::try_from(pos_core::MAX_ADAPTER_TRANSCRIPT_CALLS_V1)?;
+        let high_index_invocation = AdapterInvocationV1::new(high_index_input)?;
+        let high_index_reservation = AdapterCallReservationV1::new(
+            reservation.plugin_id(),
+            reservation.per_plugin_call_index(),
+            high_index_invocation,
+            Hash::from_bytes([160; 32]),
+            reservation.reserved_at_micros(),
+        )?;
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, high_index_reservation),
+            Err(AdapterRecordingStoreErrorV1::InvalidCall)
+        );
+        let wrong_plugin_index = AdapterCallReservationV1::new(
+            reservation.plugin_id(),
+            1,
+            reservation.invocation().clone(),
+            Hash::from_bytes([161; 32]),
+            reservation.reserved_at_micros(),
+        )?;
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, wrong_plugin_index),
+            Err(AdapterRecordingStoreErrorV1::InvalidCall)
+        );
+        assert_eq!(
+            store.complete_adapter_call(owner_reference, run_operation_id, u64::MAX, Vec::new()),
+            Err(AdapterRecordingStoreErrorV1::InvalidCall)
+        );
+        store.abort_adapter_recording_session(owner_reference, run_operation_id)?;
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn adapter_recording_row_error_keeps_non_type_failures_as_storage_failures() {
+        assert_eq!(
+            adapter_recording_row_error(&rusqlite::Error::QueryReturnedNoRows),
+            AdapterRecordingStoreErrorV1::StorageFailure
+        );
+        assert_eq!(
+            adapter_recording_row_error(&rusqlite::Error::IntegralValueOutOfRange(0, -1)),
+            AdapterRecordingStoreErrorV1::CorruptState
+        );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn sqlite_adapter_recording_rejects_durable_sql_type_corruption(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (run_byte, mutation, ignore_check_constraints) in [
+            (
+                162,
+                "UPDATE adapter_recording_calls SET global_call_index = 'invalid' \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                163,
+                "UPDATE adapter_recording_calls SET plugin_id = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                164,
+                "UPDATE adapter_recording_calls SET per_plugin_call_index = 'invalid' \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                165,
+                "UPDATE adapter_recording_calls SET invocation_cbor = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                false,
+            ),
+            (
+                166,
+                "UPDATE adapter_recording_calls SET idempotency_key = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                167,
+                "UPDATE adapter_recording_calls SET reserved_at_micros = 'invalid' \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                168,
+                "UPDATE adapter_recording_calls SET output_bytes = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                false,
+            ),
+        ] {
+            assert_closed_recording_rejects_call_mutation(
+                run_byte,
+                mutation,
+                ignore_check_constraints,
+            )?;
+        }
+        for (run_byte, mutation) in [
+            (
+                169,
+                "UPDATE adapter_recording_sessions SET world_handle_cbor = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                170,
+                "UPDATE adapter_recording_sessions SET admission_cbor = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                171,
+                "UPDATE adapter_recording_sessions SET transcript_cbor = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+        ] {
+            assert_closed_recording_rejects_session_mutation(run_byte, mutation)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    mod recorder_and_catalog_failure_paths {
+        use super::*;
+        use pos_core::{
+            adapter_configuration_digest_v1, extract_adapter_admission_registration_v1,
+            extract_adapter_transcript_registration_v1,
+            extract_repro_manifest_root_registration_v1, prepare_artifact_registration_batch_v1,
+            public_adapter_schema_digest_v1, AdapterAdmissionEntryV1, AdapterAdmissionInputV1,
+            AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationInputV1,
+            AdapterRecordingStoreErrorV1 as RecorderError, AdapterTranscriptInputV1,
+            ArtifactChildEdgeV1, ArtifactDataClassV1, ArtifactOptionalityV1,
+            ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
+            ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
+            ArtifactRegistrationPersistenceErrorV1 as CatalogError, ArtifactRegistrationV1,
+            ArtifactTransitionRuleV1, ReproManifestRootInputV1,
+            ReproManifestRootRegistrationInputV1, WorldRecordingReceiptInputV1,
+            WorldRecordingReceiptV1, WorldReplayHandleInputV1,
+        };
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+        type TestResult = Fallible<()>;
+
+        const SCHEMA: &str = "sqlite_master";
+        const CATALOG: &str = "artifact_registrations";
+        const OPERATIONS: &str = "artifact_registration_operations";
+        const CALLS: &str = "adapter_recording_calls";
+        const SESSION_UPDATE_FAULT: &str = "CREATE TRIGGER fault \
+             BEFORE UPDATE ON adapter_recording_sessions \
+             BEGIN SELECT RAISE(ABORT, 'session update fault'); END";
+
+        struct CatalogFixture {
+            owner_id: OwnerIdV1,
+            root_address: Hash,
+            batch: PreparedArtifactRegistrationBatchV1,
+            session: AdapterRecordingSessionV1,
+        }
+
+        // Structural stand-in for the local owner; it only isolates the store port.
+        struct StructuralOwnerVerifier;
+
+        impl ArtifactRegistrationOwnerVerifierV1 for StructuralOwnerVerifier {
+            fn derive_native_registration(
+                &self,
+                owner_id: &OwnerIdV1,
+                artifact_class: ErasureArtifactClassV1,
+                artifact_bytes: &[u8],
+            ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1>
+            {
+                if artifact_class != ErasureArtifactClassV1::TimelineReplay
+                    || WorldRecordingReceiptV1::from_canonical_cbor(artifact_bytes).is_err()
+                {
+                    return Err(ArtifactRegistrationOwnerVerificationErrorV1::Rejected);
+                }
+                timeline_registration(owner_id, artifact_bytes, Vec::new())
+                    .map_err(|_| ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+            }
+
+            fn classify_repro_manifest_label(
+                &self,
+                _owner_id: &OwnerIdV1,
+                _label: &str,
+            ) -> Result<ArtifactDataClassV1, ArtifactRegistrationOwnerVerificationErrorV1>
+            {
+                Ok(ArtifactDataClassV1::PublicRecord)
+            }
+
+            fn verify_committed_artifact(
+                &self,
+                _owner_id: &OwnerIdV1,
+                _artifact_bytes: &[u8],
+                _registration: &ArtifactRegistrationV1,
+            ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+                Ok(())
+            }
+        }
+
+        fn timeline_registration(
+            owner_id: &OwnerIdV1,
+            artifact_bytes: &[u8],
+            mut child_artifacts: Vec<ArtifactChildEdgeV1>,
+        ) -> Fallible<ArtifactRegistrationV1> {
+            let artifact_class = ErasureArtifactClassV1::TimelineReplay;
+            child_artifacts.sort_by_key(|edge| (edge.artifact_digest, edge.registration_address));
+            Ok(ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+                artifact_class,
+                artifact_digest: ArtifactRegistrationV1::artifact_digest(
+                    artifact_class,
+                    artifact_bytes,
+                ),
+                owner_reference: ArtifactRegistrationV1::owner_reference(owner_id),
+                data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+                optionality: ArtifactOptionalityV1::Required,
+                transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+                required_key_roles: Vec::new(),
+                key_dependencies: Vec::new(),
+                child_artifacts,
+            })?)
+        }
+
+        fn child_edge(child: &ArtifactRegistrationV1) -> ArtifactChildEdgeV1 {
+            ArtifactChildEdgeV1 {
+                artifact_class: child.fields().artifact_class,
+                artifact_digest: child.fields().artifact_digest,
+                registration_address: child.address(),
+                required: true,
+            }
+        }
+
+        fn catalog_admission_entry() -> AdapterAdmissionEntryV1 {
+            let configuration = b"sqlite-catalog-coverage-config".to_vec();
+            let schema_digest = public_adapter_schema_digest_v1();
+            AdapterAdmissionEntryV1 {
+                plugin_id: PluginId::from_ulid(ulid::Ulid::from_bytes([0x58; 16])),
+                adapter_id: "weather.client".to_owned(),
+                provider_id: "fixture.provider".to_owned(),
+                operation_id: "read-current".to_owned(),
+                protocol_version: 1,
+                request_schema_digest: schema_digest,
+                response_schema_digest: schema_digest,
+                configuration_digest: adapter_configuration_digest_v1(&configuration),
+                exact_configuration_bytes: configuration,
+                input_data_class: AdapterDataClassV1::PublicRecord,
+                output_data_class: AdapterDataClassV1::PublicRecord,
+                effect_mode: AdapterEffectModeV1::ReadOnly,
+            }
+        }
+
+        fn catalog_invocation_cbor() -> Fallible<Vec<u8>> {
+            let entry = catalog_admission_entry();
+            let invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
+                adapter_id: entry.adapter_id,
+                provider_id: entry.provider_id,
+                operation_id: entry.operation_id,
+                protocol_version: entry.protocol_version,
+                request_schema_digest: entry.request_schema_digest,
+                response_schema_digest: entry.response_schema_digest,
+                configuration_digest: entry.configuration_digest,
+                global_call_index: 0,
+                exact_request_payload: b"catalog request".to_vec(),
+            })?;
+            Ok(invocation.to_canonical_cbor())
+        }
+
+        fn catalog_batch(
+            owner_id: OwnerIdV1,
+            admission: &AdapterAdmissionV1,
+            transcript: &AdapterTranscriptV1,
+            recording: &WorldRecordingReceiptV1,
+            root: &ReproManifestRootV1,
+        ) -> Fallible<(Hash, PreparedArtifactRegistrationBatchV1)> {
+            let admission_bytes = admission.to_canonical_cbor();
+            let transcript_bytes = transcript.to_canonical_cbor();
+            let recording_bytes = recording.to_canonical_cbor();
+            let root_bytes = root.to_canonical_cbor();
+            let admission_registration =
+                extract_adapter_admission_registration_v1(&admission_bytes)?;
+            let transcript_registration = extract_adapter_transcript_registration_v1(
+                &transcript_bytes,
+                &admission_bytes,
+                &admission_registration,
+            )?;
+            let recording_registration = StructuralOwnerVerifier.derive_native_registration(
+                &owner_id,
+                ErasureArtifactClassV1::TimelineReplay,
+                &recording_bytes,
+            )?;
+            let root_registration = extract_repro_manifest_root_registration_v1(
+                ReproManifestRootRegistrationInputV1 {
+                    root_bytes: &root_bytes,
+                    recording_receipt_bytes: &recording_bytes,
+                    recording_registration: &recording_registration,
+                    transcript_bytes: &transcript_bytes,
+                    admission_bytes: &admission_bytes,
+                    admission_registration: &admission_registration,
+                    transcript_registration: &transcript_registration,
+                    owner_id: &owner_id,
+                    label_data_class: None,
+                },
+            )?;
+            let root_address = root_registration.address();
+            let mut inputs = Vec::new();
+            for (artifact_bytes, registration) in [
+                (admission_bytes, admission_registration),
+                (transcript_bytes, transcript_registration),
+                (recording_bytes, recording_registration),
+                (root_bytes, root_registration),
+            ] {
+                inputs.push(ArtifactRegistrationInputV1 {
+                    owner_id,
+                    artifact_bytes,
+                    registration_cbor: registration.canonical_cbor().to_vec(),
+                });
+            }
+            let batch = prepare_artifact_registration_batch_v1(
+                owner_id,
+                root_address,
+                inputs,
+                &StructuralOwnerVerifier,
+            )?;
+            Ok((root_address, batch))
+        }
+
+        fn catalog_fixture(operation_byte: u8, label: Option<&str>) -> Fallible<CatalogFixture> {
+            let owner_id = OwnerIdV1::from_static("sqlite-catalog-coverage-owner");
+            let owner_reference = ArtifactRegistrationV1::owner_reference(&owner_id);
+            let operation_id = Hash::from_bytes([operation_byte; 32]);
+            let recording = WorldRecordingReceiptV1::new(WorldRecordingReceiptInputV1 {
+                binding_hash: Hash::from_bytes([0x53; 32]),
+                operation_id,
+                actual_commit_receipt_digest: Hash::from_bytes([0x52; 32]),
+                installed_inventory_generation: Hash::from_bytes([0x54; 32]),
+            })?;
+            let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+                owner_reference,
+                timeline_id: TimelineId::from_ulid(ulid::Ulid::from_bytes([0x57; 16])),
+                cut_id: 2,
+                commit_receipt_digest: Hash::from_bytes([0x52; 32]),
+                recording_receipt_digest: recording.digest(),
+                logical_head: 0,
+                stitched_head_hash: Hash::from_bytes([0x55; 32]),
+            })?;
+            let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+                owner_reference,
+                configuration_generation: 1,
+                scope_digest: Hash::from_bytes([0x56; 32]),
+                entries: vec![catalog_admission_entry()],
+            })?;
+            let transcript = AdapterTranscriptV1::new(AdapterTranscriptInputV1 {
+                owner_reference,
+                world_handle,
+                run_operation_id: operation_id,
+                adapter_admission_digest: admission.digest(),
+                calls: Vec::new(),
+            })?;
+            let root = ReproManifestRootV1::new(ReproManifestRootInputV1 {
+                owner_reference,
+                world_handle,
+                run_operation_id: operation_id,
+                plugin_roster_digest: admission.as_input().scope_digest,
+                adapter_transcript_digest: transcript.digest(),
+                created_at_micros: 2,
+                label: label.map(str::to_owned),
+            })?;
+            let (root_address, batch) =
+                catalog_batch(owner_id, &admission, &transcript, &recording, &root)?;
+            let session = AdapterRecordingSessionV1::new(
+                owner_reference,
+                world_handle,
+                operation_id,
+                admission,
+            )?;
+            Ok(CatalogFixture {
+                owner_id,
+                root_address,
+                batch,
+                session,
+            })
+        }
+
+        fn close_catalog_recording(
+            store: &mut SqliteStore,
+            fixture: &CatalogFixture,
+        ) -> Result<(), RecorderError> {
+            let owner = fixture.session.owner_reference();
+            let run = fixture.session.run_operation_id();
+            store.open_adapter_recording_session(fixture.session.clone())?;
+            store.close_adapter_recording_session(owner, run)?;
+            Ok(())
+        }
+
+        fn closed_catalog(operation_byte: u8) -> Fallible<(SqliteStore, CatalogFixture)> {
+            let fixture = catalog_fixture(operation_byte, None)?;
+            let mut store = open_store()?;
+            close_catalog_recording(&mut store, &fixture)?;
+            Ok((store, fixture))
+        }
+
+        fn committed_catalog(operation_byte: u8) -> Fallible<(SqliteStore, CatalogFixture)> {
+            let (mut store, fixture) = closed_catalog(operation_byte)?;
+            let outcome = commit_catalog(&mut store, fixture.batch.clone());
+            assert_eq!(outcome, Ok(ArtifactRegistrationCommitOutcomeV1::Applied));
+            Ok((store, fixture))
+        }
+
+        fn commit_catalog(
+            store: &mut SqliteStore,
+            batch: PreparedArtifactRegistrationBatchV1,
+        ) -> Result<ArtifactRegistrationCommitOutcomeV1, CatalogError> {
+            ArtifactRegistrationPersistencePortV1::commit_artifact_registration_batch(store, batch)
+        }
+
+        fn read_catalog(
+            store: &SqliteStore,
+            owner_id: &OwnerIdV1,
+            address: Hash,
+        ) -> Result<Option<ArtifactRegistrationCatalogRowV1>, CatalogError> {
+            ArtifactRegistrationPersistencePortV1::read_artifact_registration(
+                store, owner_id, address,
+            )
+        }
+
+        fn record_address(fixture: &CatalogFixture, magic: &[u8]) -> Hash {
+            fixture
+                .batch
+                .records()
+                .iter()
+                .find(|record| record.artifact_bytes().get(2..6) == Some(magic))
+                .map_or_else(
+                    Hash::zero,
+                    PreparedArtifactRegistrationRecordV1::registration_address,
+                )
+        }
+
+        fn blob(bytes: &[u8]) -> String {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut literal = String::from("X'");
+            for byte in bytes {
+                literal.push(char::from(HEX[usize::from(byte >> 4)]));
+                literal.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            }
+            literal.push('\'');
+            literal
+        }
+
+        fn render(template: &str, fixture: &CatalogFixture) -> String {
+            let root = blob(fixture.root_address.as_bytes());
+            let recording = blob(record_address(fixture, b"WCR1").as_bytes());
+            let admission = blob(record_address(fixture, b"MAA1").as_bytes());
+            let operation = blob(fixture.batch.root_operation_id().as_bytes());
+            template
+                .replace(":root", &root)
+                .replace(":recording", &recording)
+                .replace(":admission", &admission)
+                .replace(":operation", &operation)
+        }
+
+        fn run_sql(store: &SqliteStore, sql: &str) -> rusqlite::Result<()> {
+            store.conn.execute_batch(sql)
+        }
+
+        fn run_unchecked(store: &SqliteStore, sql: &str) -> rusqlite::Result<()> {
+            run_sql(store, "PRAGMA ignore_check_constraints = ON")?;
+            let result = run_sql(store, sql);
+            run_sql(store, "PRAGMA ignore_check_constraints = OFF")?;
+            result
+        }
+
+        fn deny_reads(
+            store: &SqliteStore,
+            table: &'static str,
+            column: &'static str,
+            allowed: usize,
+        ) -> rusqlite::Result<()> {
+            let mut seen = 0_usize;
+            store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if let AuthAction::Read {
+                    table_name,
+                    column_name,
+                } = context.action
+                {
+                    let schema_alias = table == SCHEMA && table_name == "sqlite_schema";
+                    if (table_name == table || schema_alias) && column_name == column {
+                        seen += 1;
+                        if seen > allowed {
+                            return Authorization::Deny;
+                        }
+                    }
+                }
+                Authorization::Allow
+            }))
+        }
+
+        fn deny_savepoint_rollback(store: &SqliteStore) -> rusqlite::Result<()> {
+            store.conn.authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Savepoint {
+                        operation: TransactionOperation::Rollback,
+                        ..
+                    }
+                ) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }))
+        }
+
+        fn allow_all(store: &SqliteStore) -> rusqlite::Result<()> {
+            store
+                .conn
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        }
+
+        fn open_recording(
+            run_byte: u8,
+        ) -> Fallible<(SqliteStore, Hash, Hash, AdapterCallReservationV1)> {
+            let (session, reservation, _) = adapter_recording_fixture(run_byte)?;
+            let (owner, run) = (session.owner_reference(), session.run_operation_id());
+            let mut store = open_store()?;
+            store.open_adapter_recording_session(session)?;
+            Ok((store, owner, run, reservation))
+        }
+
+        fn insert_catalog_row(
+            store: &SqliteStore,
+            owner_id: &OwnerIdV1,
+            artifact_bytes: &[u8],
+            registration: &ArtifactRegistrationV1,
+        ) -> rusqlite::Result<usize> {
+            store.conn.execute(
+                "INSERT INTO artifact_registrations
+                 (owner_id, registration_address, artifact_class,
+                  artifact_digest, artifact_bytes, registration_cbor)
+                 VALUES (?1, ?2, 0, ?3, ?4, ?5)",
+                rusqlite::params![
+                    owner_id.as_str(),
+                    registration.address().as_bytes().as_slice(),
+                    registration.fields().artifact_digest.as_bytes().as_slice(),
+                    artifact_bytes,
+                    registration.canonical_cbor(),
+                ],
+            )
+        }
+
+        #[test]
+        fn recorder_operations_fail_closed_without_a_scope_or_schema() -> TestResult {
+            let (mut store, owner, run, reservation) = open_recording(181)?;
+            let failure = Err(RecorderError::StorageFailure);
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+            let reserved = store.reserve_adapter_call(owner, run, reservation.clone());
+            let completed = store.complete_adapter_call(owner, run, 0, Vec::new());
+            let closed = store.close_adapter_recording_session(owner, run);
+            let aborted = store.abort_adapter_recording_session(owner, run);
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+            assert_eq!(reserved, Err(RecorderError::StorageFailure));
+            assert_eq!(completed, failure);
+            assert_eq!(closed, Err(RecorderError::StorageFailure));
+            assert_eq!(aborted, failure);
+
+            deny_reads(&store, SCHEMA, "name", 0)?;
+            let denied = store.abort_adapter_recording_session(owner, run);
+            allow_all(&store)?;
+            assert_eq!(denied, failure);
+
+            run_sql(&store, "DROP TABLE adapter_recording_calls")?;
+            assert_eq!(
+                store.reserve_adapter_call(owner, run, reservation),
+                Err(RecorderError::StorageFailure)
+            );
+            assert_eq!(
+                store.complete_adapter_call(owner, run, 0, Vec::new()),
+                failure
+            );
+            assert_eq!(
+                store.close_adapter_recording_session(owner, run),
+                Err(RecorderError::StorageFailure)
+            );
+            assert_eq!(
+                store.read_closed_adapter_recording_session(owner, run),
+                Err(RecorderError::StorageFailure)
+            );
+            assert_eq!(store.abort_adapter_recording_session(owner, run), failure);
+            Ok(())
+        }
+
+        #[test]
+        fn opening_a_recorder_session_maps_row_and_insert_faults() -> TestResult {
+            for mutation in [
+                "UPDATE adapter_recording_sessions SET world_handle_cbor = 7",
+                "UPDATE adapter_recording_sessions SET admission_cbor = 7",
+                "UPDATE adapter_recording_sessions SET state = 'open'",
+            ] {
+                let (session, _, _) = adapter_recording_fixture(182)?;
+                let mut store = open_store()?;
+                store.open_adapter_recording_session(session.clone())?;
+                run_unchecked(&store, mutation)?;
+                assert_eq!(
+                    store.open_adapter_recording_session(session),
+                    Err(RecorderError::StorageFailure)
+                );
+            }
+            let (session, _, _) = adapter_recording_fixture(183)?;
+            let mut store = open_store()?;
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+            let begin = store.open_adapter_recording_session(session.clone());
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+            assert_eq!(begin, Err(RecorderError::StorageFailure));
+            run_sql(
+                &store,
+                "CREATE TRIGGER fault BEFORE INSERT ON adapter_recording_sessions \
+                 BEGIN SELECT RAISE(ABORT, 'session insert fault'); END",
+            )?;
+            assert_eq!(
+                store.open_adapter_recording_session(session),
+                Err(RecorderError::StorageFailure)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn reserving_a_recorded_call_maps_index_bounds_and_session_faults() -> TestResult {
+            let (mut store, owner, run, reservation) = open_recording(184)?;
+            let plugin_id = reservation.plugin_id();
+            let key = reservation.idempotency_key();
+            let invocation = reservation.invocation().clone();
+            let mut input = invocation.as_input().clone();
+            input.global_call_index = u64::MAX;
+            let high_index = AdapterInvocationV1::new(input)?;
+            for candidate in [
+                AdapterCallReservationV1::new(plugin_id, 0, high_index, key, 0)?,
+                AdapterCallReservationV1::new(plugin_id, u64::MAX, invocation.clone(), key, 0)?,
+                AdapterCallReservationV1::new(plugin_id, 0, invocation, key, u64::MAX)?,
+            ] {
+                assert_eq!(
+                    store.reserve_adapter_call(owner, run, candidate),
+                    Err(RecorderError::InvalidCall)
+                );
+            }
+            let unreadable_state = "UPDATE adapter_recording_sessions SET state = 'open'";
+            run_unchecked(&store, unreadable_state)?;
+            assert_eq!(
+                store.reserve_adapter_call(owner, run, reservation),
+                Err(RecorderError::StorageFailure)
+            );
+            assert_eq!(
+                store.complete_adapter_call(owner, run, 0, Vec::new()),
+                Err(RecorderError::StorageFailure)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn reserving_a_retried_call_maps_durable_row_faults() -> TestResult {
+            for (mutation, expected) in [
+                (
+                    "UPDATE adapter_recording_calls SET plugin_id = 7",
+                    RecorderError::StorageFailure,
+                ),
+                (
+                    "UPDATE adapter_recording_calls SET per_plugin_call_index = 'first'",
+                    RecorderError::StorageFailure,
+                ),
+                (
+                    "UPDATE adapter_recording_calls SET invocation_cbor = 7",
+                    RecorderError::StorageFailure,
+                ),
+                (
+                    "UPDATE adapter_recording_calls SET idempotency_key = 7",
+                    RecorderError::StorageFailure,
+                ),
+                (
+                    "UPDATE adapter_recording_calls SET reserved_at_micros = 'now'",
+                    RecorderError::StorageFailure,
+                ),
+                (
+                    "UPDATE adapter_recording_calls SET output_bytes = 7",
+                    RecorderError::StorageFailure,
+                ),
+                (
+                    "UPDATE adapter_recording_calls SET reserved_at_micros = -1",
+                    RecorderError::CorruptState,
+                ),
+            ] {
+                let (mut store, owner, run, reservation) = open_recording(185)?;
+                store.reserve_adapter_call(owner, run, reservation.clone())?;
+                run_unchecked(&store, mutation)?;
+                assert_eq!(
+                    store.reserve_adapter_call(owner, run, reservation),
+                    Err(expected)
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn reserving_a_new_call_maps_count_and_insert_faults() -> TestResult {
+            for allowed in [1, 2] {
+                let (mut store, owner, run, reservation) = open_recording(186)?;
+                deny_reads(&store, CALLS, "run_operation_id", allowed)?;
+                let denied = store.reserve_adapter_call(owner, run, reservation);
+                allow_all(&store)?;
+                assert_eq!(denied, Err(RecorderError::StorageFailure));
+            }
+            let (mut store, owner, run, reservation) = open_recording(186)?;
+            run_sql(
+                &store,
+                "CREATE TRIGGER fault BEFORE INSERT ON adapter_recording_calls \
+                 BEGIN SELECT RAISE(ABORT, 'call insert fault'); END",
+            )?;
+            assert_eq!(
+                store.reserve_adapter_call(owner, run, reservation),
+                Err(RecorderError::StorageFailure)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn completing_a_recorded_call_maps_row_and_update_faults() -> TestResult {
+            for (setup, expected) in [
+                (
+                    "UPDATE adapter_recording_calls SET output_bytes = 7",
+                    RecorderError::StorageFailure,
+                ),
+                (
+                    "CREATE TRIGGER fault BEFORE UPDATE ON adapter_recording_calls \
+                     BEGIN SELECT RAISE(ABORT, 'call update fault'); END",
+                    RecorderError::StorageFailure,
+                ),
+                (
+                    "CREATE TRIGGER fault BEFORE UPDATE ON adapter_recording_calls \
+                     BEGIN SELECT RAISE(IGNORE); END",
+                    RecorderError::Conflict,
+                ),
+            ] {
+                let (mut store, owner, run, reservation) = open_recording(187)?;
+                store.reserve_adapter_call(owner, run, reservation)?;
+                run_sql(&store, setup)?;
+                assert_eq!(
+                    store.complete_adapter_call(owner, run, 0, b"response".to_vec()),
+                    Err(expected)
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn closing_or_aborting_an_open_session_maps_row_and_update_faults() -> TestResult {
+            for (setup, expected) in [
+                (
+                    "UPDATE adapter_recording_sessions SET world_handle_cbor = X'00'",
+                    RecorderError::CorruptState,
+                ),
+                (SESSION_UPDATE_FAULT, RecorderError::StorageFailure),
+                (
+                    "CREATE TRIGGER fault BEFORE UPDATE ON adapter_recording_sessions \
+                     BEGIN SELECT RAISE(IGNORE); END",
+                    RecorderError::Conflict,
+                ),
+            ] {
+                let (mut store, owner, run, _) = open_recording(188)?;
+                run_sql(&store, setup)?;
+                assert_eq!(
+                    store.close_adapter_recording_session(owner, run),
+                    Err(expected)
+                );
+            }
+            let (mut store, owner, run, _) = open_recording(189)?;
+            deny_reads(&store, CALLS, "global_call_index", 0)?;
+            let denied = store.close_adapter_recording_session(owner, run);
+            allow_all(&store)?;
+            assert_eq!(denied, Err(RecorderError::StorageFailure));
+            run_sql(&store, SESSION_UPDATE_FAULT)?;
+            assert_eq!(
+                store.abort_adapter_recording_session(owner, run),
+                Err(RecorderError::StorageFailure)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn closed_recorder_reads_reject_corrupt_durable_rows() -> TestResult {
+            let (session, reservation, _) = adapter_recording_fixture(190)?;
+            let mut foreign_input = *session.world_handle().as_input();
+            foreign_input.owner_reference = Hash::from_bytes([99; 32]);
+            let foreign_handle = WorldReplayHandleV1::new(foreign_input)?;
+            let foreign = blob(&foreign_handle.to_canonical_cbor());
+            let mut shifted_input = reservation.invocation().as_input().clone();
+            shifted_input.global_call_index = 1;
+            let shifted_invocation = AdapterInvocationV1::new(shifted_input)?;
+            let shifted = blob(&shifted_invocation.to_canonical_cbor());
+            for mutation in [
+                "UPDATE adapter_recording_sessions SET state = 'closed'".to_owned(),
+                "UPDATE adapter_recording_sessions SET admission_cbor = X'00'".to_owned(),
+                format!("UPDATE adapter_recording_sessions SET world_handle_cbor = {foreign}"),
+                "UPDATE adapter_recording_calls SET global_call_index = 1".to_owned(),
+                format!("UPDATE adapter_recording_calls SET invocation_cbor = {shifted}"),
+                "UPDATE adapter_recording_calls SET idempotency_key = zeroblob(32)".to_owned(),
+            ] {
+                let (store, closed, _) = closed_adapter_recording(191)?;
+                let (owner, run) = (closed.owner_reference(), closed.run_operation_id());
+                run_unchecked(&store, &mutation)?;
+                assert_eq!(
+                    store.read_closed_adapter_recording_session(owner, run),
+                    Err(RecorderError::CorruptState)
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn savepoint_rollback_faults_become_storage_failures() -> TestResult {
+            let store = open_store()?;
+            run_sql(&store, "BEGIN")?;
+            let scope = begin_immediate_scope(&store.conn)?;
+            deny_savepoint_rollback(&store)?;
+            let recorder_error = Err::<(), _>(RecorderError::InvalidState);
+            let recorder = finish_adapter_recording_scope(&store.conn, scope, recorder_error);
+            allow_all(&store)?;
+            run_sql(&store, "ROLLBACK")?;
+            assert_eq!(recorder, Err(RecorderError::StorageFailure));
+
+            run_sql(&store, "BEGIN")?;
+            let scope = begin_immediate_scope(&store.conn)?;
+            deny_savepoint_rollback(&store)?;
+            let catalog_error = Err::<(), _>(CatalogError::CorruptCatalog);
+            let catalog = finish_artifact_registration_scope(&store.conn, scope, catalog_error);
+            allow_all(&store)?;
+            run_sql(&store, "ROLLBACK")?;
+            assert_eq!(catalog, Err(CatalogError::StorageFailure));
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_commit_maps_scope_and_operation_read_faults() -> TestResult {
+            let (mut store, fixture) = closed_catalog(0x61)?;
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+            let begin = commit_catalog(&mut store, fixture.batch);
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+            assert_eq!(begin, Err(CatalogError::StorageFailure));
+            for allowed in 0..4 {
+                let (mut store, fixture) = closed_catalog(0x61)?;
+                deny_reads(&store, OPERATIONS, "owner_id", allowed)?;
+                let denied = commit_catalog(&mut store, fixture.batch);
+                allow_all(&store)?;
+                assert_eq!(denied, Err(CatalogError::StorageFailure));
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_commit_maps_injected_write_faults() -> TestResult {
+            for (template, expected) in [
+                (
+                    "CREATE TRIGGER fault AFTER INSERT ON artifact_registrations BEGIN \
+                     UPDATE artifact_registrations SET artifact_bytes = 7 \
+                     WHERE registration_address = NEW.registration_address; END",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "CREATE TRIGGER fault AFTER INSERT ON artifact_registrations BEGIN \
+                     DELETE FROM artifact_registrations \
+                     WHERE registration_address = NEW.registration_address; END",
+                    CatalogError::CorruptCatalog,
+                ),
+                (
+                    "CREATE TRIGGER fault BEFORE INSERT ON artifact_registration_operations \
+                     BEGIN SELECT RAISE(ABORT, 'operation insert fault'); END",
+                    CatalogError::Conflict,
+                ),
+                (
+                    "CREATE TRIGGER fault AFTER INSERT ON artifact_registration_operations \
+                     BEGIN UPDATE artifact_registration_operations \
+                     SET root_registration_address = zeroblob(32) \
+                     WHERE operation_id = NEW.operation_id; END",
+                    CatalogError::CorruptCatalog,
+                ),
+                (
+                    "CREATE TRIGGER fault AFTER INSERT ON artifact_registrations BEGIN \
+                     INSERT OR IGNORE INTO artifact_registration_operations \
+                     VALUES (NEW.owner_id, :operation, zeroblob(32)); END",
+                    CatalogError::Conflict,
+                ),
+            ] {
+                let (mut store, fixture) = closed_catalog(0x62)?;
+                run_sql(&store, &render(template, &fixture))?;
+                assert_eq!(commit_catalog(&mut store, fixture.batch), Err(expected));
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_commit_rejects_corrupt_operation_rows() -> TestResult {
+            for (template, expected) in [
+                (
+                    "UPDATE artifact_registrations SET artifact_bytes = 7 \
+                     WHERE registration_address = :root",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "UPDATE artifact_registration_operations SET operation_id = X'00'",
+                    CatalogError::CorruptCatalog,
+                ),
+                (
+                    "DELETE FROM artifact_registrations WHERE registration_address = :root",
+                    CatalogError::CorruptCatalog,
+                ),
+                (
+                    "UPDATE artifact_registration_operations \
+                     SET root_registration_address = zeroblob(32)",
+                    CatalogError::CorruptCatalog,
+                ),
+                (
+                    "UPDATE artifact_registration_operations \
+                     SET root_registration_address = :recording; \
+                     UPDATE artifact_registrations SET artifact_bytes = 7 \
+                     WHERE registration_address = :recording",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "UPDATE artifact_registration_operations \
+                     SET root_registration_address = :recording",
+                    CatalogError::CorruptCatalog,
+                ),
+                (
+                    "UPDATE artifact_registration_operations \
+                     SET root_registration_address = :admission",
+                    CatalogError::CorruptCatalog,
+                ),
+            ] {
+                let (mut store, fixture) = committed_catalog(0x63)?;
+                run_unchecked(&store, &render(template, &fixture))?;
+                assert_eq!(commit_catalog(&mut store, fixture.batch), Err(expected));
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_commit_rejects_corrupt_registration_rows() -> TestResult {
+            for (template, expected) in [
+                (
+                    "DELETE FROM artifact_registration_operations; \
+                     DELETE FROM artifact_registrations WHERE registration_address = :root; \
+                     UPDATE artifact_registrations SET artifact_bytes = 7 \
+                     WHERE registration_address = :admission",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "DELETE FROM artifact_registration_operations; \
+                     UPDATE artifact_registrations SET registration_address = 7 \
+                     WHERE registration_address = :root",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "DELETE FROM artifact_registration_operations; \
+                     UPDATE artifact_registrations SET registration_address = zeroblob(32) \
+                     WHERE registration_address = :root",
+                    CatalogError::Conflict,
+                ),
+            ] {
+                let (mut store, fixture) = committed_catalog(0x64)?;
+                run_unchecked(&store, &render(template, &fixture))?;
+                assert_eq!(commit_catalog(&mut store, fixture.batch), Err(expected));
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_commit_maps_alternate_and_foreign_operation_roots() -> TestResult {
+            let (mut store, first) = committed_catalog(0x65)?;
+            let alternate = catalog_fixture(0x65, Some("alternate root"))?;
+            deny_reads(&store, OPERATIONS, "owner_id", 2)?;
+            let denied = commit_catalog(&mut store, alternate.batch.clone());
+            allow_all(&store)?;
+            assert_eq!(denied, Err(CatalogError::StorageFailure));
+            assert_eq!(
+                commit_catalog(&mut store, alternate.batch),
+                Err(CatalogError::Conflict)
+            );
+
+            let second = catalog_fixture(0x66, None)?;
+            close_catalog_recording(&mut store, &second)?;
+            assert_eq!(
+                commit_catalog(&mut store, second.batch.clone()),
+                Ok(ArtifactRegistrationCommitOutcomeV1::Applied)
+            );
+            let operation = blob(second.batch.root_operation_id().as_bytes());
+            let root = blob(second.root_address.as_bytes());
+            let sql = format!(
+                "DELETE FROM artifact_registration_operations WHERE operation_id = {operation};
+                 UPDATE artifact_registration_operations SET root_registration_address = {root}"
+            );
+            run_sql(&store, &sql)?;
+            assert_eq!(
+                commit_catalog(&mut store, first.batch),
+                Err(CatalogError::CorruptCatalog)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_reads_map_schema_and_operation_read_faults() -> TestResult {
+            let (store, fixture) = committed_catalog(0x67)?;
+            let (owner_id, root) = (fixture.owner_id, fixture.root_address);
+            for (table, column, allowed) in [
+                (SCHEMA, "name", 0),
+                (SCHEMA, "name", 1),
+                (OPERATIONS, "owner_id", 0),
+            ] {
+                deny_reads(&store, table, column, allowed)?;
+                let denied = read_catalog(&store, &owner_id, root);
+                allow_all(&store)?;
+                assert_eq!(denied, Err(CatalogError::StorageFailure));
+            }
+            deny_reads(&store, OPERATIONS, "owner_id", 0)?;
+            let missing = read_catalog(&store, &owner_id, Hash::from_bytes([0x68; 32]));
+            allow_all(&store)?;
+            assert_eq!(missing, Err(CatalogError::StorageFailure));
+            run_sql(&store, "DROP TABLE artifact_registration_operations")?;
+            assert_eq!(
+                read_catalog(&store, &owner_id, root),
+                Err(CatalogError::CorruptCatalog)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_reads_reject_corrupt_root_columns() -> TestResult {
+            for (template, expected) in [
+                (
+                    "UPDATE artifact_registrations SET owner_id = X'00' \
+                     WHERE registration_address = :root",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "UPDATE artifact_registrations SET artifact_class = 'manifest' \
+                     WHERE registration_address = :root",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "UPDATE artifact_registrations SET artifact_digest = 7 \
+                     WHERE registration_address = :root",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "UPDATE artifact_registrations SET artifact_bytes = 7 \
+                     WHERE registration_address = :root",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "UPDATE artifact_registrations SET registration_cbor = 7 \
+                     WHERE registration_address = :root",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "UPDATE artifact_registrations SET owner_id = '' \
+                     WHERE registration_address = :root",
+                    CatalogError::CorruptCatalog,
+                ),
+                (
+                    "UPDATE artifact_registrations SET artifact_digest = X'00' \
+                     WHERE registration_address = :root",
+                    CatalogError::CorruptCatalog,
+                ),
+            ] {
+                let (store, fixture) = committed_catalog(0x69)?;
+                run_unchecked(&store, &render(template, &fixture))?;
+                assert_eq!(
+                    read_catalog(&store, &fixture.owner_id, fixture.root_address),
+                    Err(expected)
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_reads_reject_corrupt_children_and_recordings() -> TestResult {
+            let call = "INSERT INTO adapter_recording_calls VALUES \
+                 (:owner, :operation, 0, :plugin, 0, :invocation, :key, 5, X'01')";
+            let plugin = blob(&catalog_admission_entry().plugin_id.inner().to_bytes());
+            let call = call.replace(":plugin", &plugin);
+            let call = call.replace(":key", &blob(&[7; 32]));
+            let invalid_call = call.replace(":invocation", "X'00'");
+            let derived_call = call.replace(":invocation", &blob(&catalog_invocation_cbor()?));
+            for (template, expected) in [
+                (
+                    "DELETE FROM artifact_registrations WHERE registration_address = :recording",
+                    CatalogError::CorruptCatalog,
+                ),
+                (
+                    "UPDATE artifact_registrations SET artifact_bytes = 7 \
+                     WHERE registration_address = :recording",
+                    CatalogError::StorageFailure,
+                ),
+                (
+                    "UPDATE adapter_recording_sessions SET state = 2, transcript_cbor = NULL",
+                    CatalogError::CorruptCatalog,
+                ),
+                (invalid_call.as_str(), CatalogError::CorruptCatalog),
+                (derived_call.as_str(), CatalogError::CorruptCatalog),
+            ] {
+                let (store, fixture) = committed_catalog(0x6a)?;
+                let owner = blob(fixture.session.owner_reference().as_bytes());
+                let sql = render(template, &fixture).replace(":owner", &owner);
+                run_sql(&store, &sql)?;
+                assert_eq!(
+                    read_catalog(&store, &fixture.owner_id, fixture.root_address),
+                    Err(expected)
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_reads_reject_a_tampered_root_registration() -> TestResult {
+            let (store, fixture) = committed_catalog(0x6b)?;
+            let root_record = fixture
+                .batch
+                .records()
+                .iter()
+                .find(|record| record.registration_address() == fixture.root_address)
+                .ok_or("committed root record is missing")?;
+            let mut fields = root_record.registration().fields().clone();
+            fields.data_class = ArtifactDataClassV1::PublicRecord;
+            let tampered = ArtifactRegistrationV1::new(fields)?;
+            store.conn.execute(
+                "UPDATE artifact_registrations
+                 SET registration_address = ?1, registration_cbor = ?2
+                 WHERE registration_address = ?3",
+                rusqlite::params![
+                    tampered.address().as_bytes().as_slice(),
+                    tampered.canonical_cbor(),
+                    fixture.root_address.as_bytes().as_slice(),
+                ],
+            )?;
+            assert_eq!(
+                read_catalog(&store, &fixture.owner_id, tampered.address()),
+                Err(CatalogError::CorruptCatalog)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_closure_helpers_map_direct_read_faults() -> TestResult {
+            let (store, fixture) = committed_catalog(0x6c)?;
+            let recording = record_address(&fixture, b"WCR1");
+            let admission = record_address(&fixture, b"MAA1");
+            let child = read_catalog(&store, &fixture.owner_id, admission)?;
+            assert!(child.is_some());
+            assert_eq!(
+                sqlite_validate_artifact_registration_closure(&store.conn, recording),
+                Ok(())
+            );
+            for (address, allowed) in [(fixture.root_address, 1), (recording, 2)] {
+                deny_reads(&store, CATALOG, "registration_address", allowed)?;
+                let denied = sqlite_validate_artifact_registration_closure(&store.conn, address);
+                allow_all(&store)?;
+                assert_eq!(denied, Err(CatalogError::StorageFailure));
+            }
+            deny_reads(&store, SCHEMA, "name", 0)?;
+            let denied = sqlite_load_artifact_registration_by_address(&store.conn, recording);
+            allow_all(&store)?;
+            assert_eq!(denied, Err(CatalogError::StorageFailure));
+            run_sql(&store, "DROP TABLE artifact_registrations")?;
+            assert_eq!(
+                sqlite_load_artifact_registration_by_address(&store.conn, recording),
+                Ok(None)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_closure_visits_a_shared_child_once() -> TestResult {
+            let store = open_store()?;
+            let owner_id = OwnerIdV1::from_static("sqlite-catalog-coverage-owner");
+            let leaf = timeline_registration(&owner_id, b"shared leaf", Vec::new())?;
+            let middle = timeline_registration(&owner_id, b"middle", vec![child_edge(&leaf)])?;
+            let root = timeline_registration(
+                &owner_id,
+                b"diamond root",
+                vec![child_edge(&leaf), child_edge(&middle)],
+            )?;
+            for (artifact_bytes, registration) in [
+                (b"shared leaf".as_slice(), &leaf),
+                (b"middle".as_slice(), &middle),
+                (b"diamond root".as_slice(), &root),
+            ] {
+                insert_catalog_row(&store, &owner_id, artifact_bytes, registration)?;
+            }
+            assert_eq!(
+                sqlite_validate_artifact_registration_closure(&store.conn, root.address()),
+                Ok(())
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn catalog_closure_rejects_an_identity_bound_to_another_address() -> TestResult {
+            let store = open_store()?;
+            // Without the identity constraint a second row can claim the same
+            // owner/class/digest identity under another address.
+            run_sql(
+                &store,
+                "DROP TABLE artifact_registrations;
+                 CREATE TABLE artifact_registrations (
+                     owner_id TEXT NOT NULL,
+                     registration_address BLOB NOT NULL PRIMARY KEY,
+                     artifact_class INTEGER NOT NULL,
+                     artifact_digest BLOB NOT NULL,
+                     artifact_bytes BLOB NOT NULL,
+                     registration_cbor BLOB NOT NULL
+                 )",
+            )?;
+            let owner_id = OwnerIdV1::from_static("sqlite-catalog-coverage-owner");
+            let leaf = timeline_registration(&owner_id, b"leaf", Vec::new())?;
+            let mut decoy_fields = leaf.fields().clone();
+            decoy_fields.data_class = ArtifactDataClassV1::PublicRecord;
+            let decoy = ArtifactRegistrationV1::new(decoy_fields)?;
+            insert_catalog_row(&store, &owner_id, b"leaf", &decoy)?;
+            insert_catalog_row(&store, &owner_id, b"leaf", &leaf)?;
+            assert_eq!(
+                sqlite_validate_artifact_registration_closure(&store.conn, leaf.address()),
+                Err(CatalogError::CorruptCatalog)
+            );
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod manifest_owner_admission_coverage {
+    use super::*;
+    use crate::manifest_owner_fixtures::{catalog, hash, plugin, policy_copies, AcceptingOwner};
+    use pos_core::{
+        prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionErrorV1 as AdmissionError,
+        ManifestOwnerAdmissionRequestV1, ManifestOwnerTimelineAdmissionRequestV1,
+        WorldConsumerSetInputV1, WorldConsumerV1, WorldProducerV1,
+    };
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+    type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+    type TestResult = Fallible<()>;
+    type Retry = Result<Option<ManifestOwnerAdmissionCommitV1>, AdmissionError>;
+
+    const OWNER: [u8; 32] = [41; 32];
+    const STORAGE: AdmissionError = AdmissionError::StorageFailure;
+    const CORRUPT: AdmissionError = AdmissionError::CorruptState;
+    const CONFLICT: AdmissionError = AdmissionError::Conflict;
+    const BOUND: AdmissionError = AdmissionError::BoundExceeded;
+
+    const STATE: &str = "manifest_owner_admission_state";
+    const OPERATIONS: &str = "manifest_owner_admission_operations";
+    const ADMISSIONS: &str = "manifest_owner_admissions";
+    const COPIES: &str = "manifest_owner_policy_copies";
+    const ALL: &str = "1";
+    const FIRST_SCOPE: &str = "timeline_id = X'01010101010101010101010101010101'";
+    const SECOND_SCOPE: &str = "timeline_id = X'02020202020202020202020202020202'";
+    const FIRST_COPY: &str = "timeline_id = X'01010101010101010101010101010101' \
+                              AND plugin_id = X'01010101010101010101010101010101'";
+    // Bypasses CHECK and foreign-key guards to plant rows only a tampered file could hold.
+    const UNCHECKED: &str = "PRAGMA ignore_check_constraints = ON; PRAGMA foreign_keys = OFF";
+    const CHECKED: &str = "PRAGMA ignore_check_constraints = OFF";
+    const ABORT: &str = "ABORT, 'injected owner admission fault'";
+    const IGNORE: &str = "IGNORE";
+
+    const DROP_COPIES: &str = "DROP TABLE manifest_owner_policy_copies";
+    const DROP_ADMISSIONS: &str = "DROP TABLE manifest_owner_policy_copies; \
+                                   DROP TABLE manifest_owner_admissions";
+    const UNREADABLE_ORPHANS: &str = "DELETE FROM manifest_owner_admission_state; \
+                                      DROP TABLE manifest_owner_policy_copies";
+    const DELETE_STATE: &str = "DELETE FROM manifest_owner_admission_state";
+    const EMPTY_ADMISSIONS: &str = "DELETE FROM manifest_owner_policy_copies; \
+                                    DELETE FROM manifest_owner_admissions";
+    const MISSING_COPY: &str = "DELETE FROM manifest_owner_policy_copies \
+                                WHERE plugin_id = X'01010101010101010101010101010101'";
+    const DELETE_OPERATIONS: &str = "DELETE FROM manifest_owner_admission_operations";
+    const UNREADABLE_OPERATION: &str =
+        "UPDATE manifest_owner_admission_operations SET request_digest = 7";
+    const SHORT_RECEIPT_COUNT: &str =
+        "UPDATE manifest_owner_admission_operations SET receipt_count = 1";
+
+    const GENESIS: Transition = Transition {
+        generation: 1,
+        expected_generation: None,
+        expected_inventory: None,
+        resulting_inventory: hash(40),
+        operation_id: hash(41),
+    };
+    const REPLACEMENT: Transition = Transition {
+        generation: 2,
+        expected_generation: Some(1),
+        expected_inventory: Some(hash(40)),
+        resulting_inventory: hash(50),
+        operation_id: hash(51),
+    };
+
+    // Non-BLOB owner-state columns: decoding fails, so the port reports StorageFailure.
+    const STATE_TYPES: [&str; 3] = [
+        "configuration_generation = 7",
+        "previous_visible_lcq1_hash = 7",
+        "inventory_generation = 7",
+    ];
+    // Non-BLOB admission-row columns: decoding fails, so the port reports StorageFailure.
+    const ADMISSION_TYPES: [&str; 10] = [
+        "timeline_id = 7",
+        "scope = 7",
+        "wcs1_hash = 7",
+        "catalog_cbor = 7",
+        "wcs1_cbor = 7",
+        "binding_cbor = 7",
+        "receipt_cbor = 7",
+        "operation_id = 7",
+        "expected_inventory_generation = 7",
+        "resulting_inventory_generation = 7",
+    ];
+    // Non-BLOB policy-copy columns: decoding fails, so the port reports StorageFailure.
+    const COPY_TYPES: [&str; 5] = [
+        "plugin_id = 7",
+        "eop1_bytes = 7",
+        "eop1_leaf_cbor = 7",
+        "opc1_bytes = 7",
+        "opc1_leaf_cbor = 7",
+    ];
+    // Mistyped operation-row columns: decoding fails, so the port reports StorageFailure.
+    const OPERATION_TYPES: [&str; 5] = [
+        "request_digest = 7",
+        "configuration_generation = 7",
+        "inventory_generation = 7",
+        "receipt_count = 'x'",
+        "receipt_set_digest = 7",
+    ];
+
+    // Wrong-length or zero owner-state values: rows decode but the port reports CorruptState.
+    const STATE_SHAPES: [&str; 6] = [
+        "configuration_generation = X'00'",
+        "configuration_generation = zeroblob(8)",
+        "previous_visible_lcq1_hash = X'00'",
+        "previous_visible_lcq1_hash = CAST(hex(zeroblob(16)) AS BLOB)",
+        "inventory_generation = X'00'",
+        "inventory_generation = zeroblob(32)",
+    ];
+    // Wrong-length ids or digests and undecodable CBOR in admission rows: CorruptState.
+    const ADMISSION_SHAPES: [&str; 11] = [
+        "timeline_id = X'00'",
+        "scope = X'00'",
+        "wcs1_hash = X'00'",
+        "wcs1_hash = zeroblob(32)",
+        "catalog_cbor = X'FF'",
+        "wcs1_cbor = X'FF'",
+        "binding_cbor = X'FF'",
+        "receipt_cbor = X'FF'",
+        "operation_id = X'00'",
+        "expected_inventory_generation = X'00'",
+        "resulting_inventory_generation = X'00'",
+    ];
+    // Wrong-length Plugin id and undecodable leaf CBOR in policy copies: CorruptState.
+    const COPY_SHAPES: [&str; 3] = [
+        "plugin_id = X'00'",
+        "eop1_leaf_cbor = X'FF'",
+        "opc1_leaf_cbor = X'FF'",
+    ];
+    // Wrong-length or zero digests and generations in operation rows: CorruptState.
+    const OPERATION_SHAPES: [&str; 5] = [
+        "request_digest = X'00'",
+        "configuration_generation = X'00'",
+        "inventory_generation = X'00'",
+        "inventory_generation = zeroblob(32)",
+        "receipt_set_digest = X'00'",
+    ];
+
+    // Dropped tables (StorageFailure) and missing rows of a committed generation (CorruptState).
+    const STRUCTURE_FAULTS: [(&str, AdmissionError); 7] = [
+        (UNREADABLE_ORPHANS, STORAGE),
+        (DROP_ADMISSIONS, STORAGE),
+        (DROP_COPIES, STORAGE),
+        (DELETE_STATE, CORRUPT),
+        (EMPTY_ADMISSIONS, CORRUPT),
+        (MISSING_COPY, CORRUPT),
+        (DELETE_OPERATIONS, CORRUPT),
+    ];
+    // Operation and admission damage that exact-retry resolution must not replay.
+    const RETRY_FAULTS: [(&str, AdmissionError); 4] = [
+        (UNREADABLE_OPERATION, STORAGE),
+        (DROP_ADMISSIONS, STORAGE),
+        (EMPTY_ADMISSIONS, CORRUPT),
+        (SHORT_RECEIPT_COUNT, CORRUPT),
+    ];
+    // Admission-row damage met while listing one operation's receipt hashes.
+    const RECEIPT_FAULTS: [(&str, AdmissionError); 3] = [
+        ("timeline_id = 7", STORAGE),
+        ("timeline_id = X'00'", CORRUPT),
+        ("scope = 7", STORAGE),
+    ];
+    // Tables whose INSERT an injected trigger aborts mid-commit, with the mapped error.
+    const INSERT_FAULTS: [(&str, AdmissionError); 3] = [
+        (ADMISSIONS, STORAGE),
+        (STATE, CONFLICT),
+        (OPERATIONS, STORAGE),
+    ];
+
+    #[derive(Clone, Copy)]
+    struct Transition {
+        generation: u64,
+        expected_generation: Option<u64>,
+        expected_inventory: Option<Hash>,
+        resulting_inventory: Hash,
+        operation_id: Hash,
+    }
+
+    const fn timeline(byte: u8) -> TimelineId {
+        TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+    }
+
+    fn request(
+        transition: Transition,
+        timeline_ids: &[TimelineId],
+    ) -> Fallible<ManifestOwnerAdmissionRequestV1> {
+        let (catalog, sources) = catalog(OWNER, transition.generation)?;
+        let producer = sources.first().ok_or("missing fixture policy")?.0.digest();
+        let mut timelines = Vec::with_capacity(timeline_ids.len());
+        for (index, timeline_id) in timeline_ids.iter().enumerate() {
+            let offset = u8::try_from(index)?;
+            let scope = hash(70 + offset);
+            let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+                scope,
+                consumers: vec![WorldConsumerV1::new(
+                    "local-observer".to_owned(),
+                    hash(130),
+                    hash(131),
+                    hash(132),
+                )?],
+                producers: vec![WorldProducerV1::new(plugin(1), producer)?],
+                optional_view_roots: Vec::new(),
+            })?;
+            timelines.push(ManifestOwnerTimelineAdmissionRequestV1 {
+                timeline_id: *timeline_id,
+                scope,
+                wcs1,
+                policy_copies: policy_copies(OWNER, scope, &sources, hash(80 + offset))?,
+            });
+        }
+        Ok(ManifestOwnerAdmissionRequestV1 {
+            operation_id: transition.operation_id,
+            catalog,
+            expected_configuration_generation: transition.expected_generation,
+            previous_visible_lcq1_hash: None,
+            expected_inventory_generation: transition.expected_inventory,
+            resulting_inventory_generation: transition.resulting_inventory,
+            timelines,
+        })
+    }
+
+    fn genesis_request() -> Fallible<ManifestOwnerAdmissionRequestV1> {
+        request(GENESIS, &[timeline(1), timeline(2)])
+    }
+
+    fn changed_genesis_request() -> Fallible<ManifestOwnerAdmissionRequestV1> {
+        let mut changed = genesis_request()?;
+        changed.resulting_inventory_generation = hash(42);
+        Ok(changed)
+    }
+
+    fn prepare(
+        admission: ManifestOwnerAdmissionRequestV1,
+        state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+    ) -> Fallible<PreparedManifestOwnerAdmissionV1> {
+        prepare_manifest_owner_admission_v1(admission, &AcceptingOwner, state).map_err(Into::into)
+    }
+
+    fn admitted_store() -> Fallible<SqliteStore> {
+        let mut store = SqliteStore::open_in_memory()?;
+        store.commit_manifest_owner_admission_v1(prepare(genesis_request()?, None)?)?;
+        Ok(store)
+    }
+
+    fn run_sql(store: &SqliteStore, sql: &str) -> rusqlite::Result<()> {
+        store.conn.execute_batch(sql)
+    }
+
+    // Foreign keys stay off afterwards so later reads see the corrupt rows.
+    fn run_unchecked(store: &SqliteStore, sql: &str) -> rusqlite::Result<()> {
+        run_sql(store, UNCHECKED)?;
+        let result = run_sql(store, sql);
+        run_sql(store, CHECKED)?;
+        result
+    }
+
+    fn corrupt(table: &str, assignment: &str, filter: &str) -> String {
+        format!("UPDATE {table} SET {assignment} WHERE {filter}")
+    }
+
+    fn trigger(event: &str, table: &str, action: &str) -> String {
+        format!("CREATE TRIGGER fault BEFORE {event} ON {table} BEGIN SELECT RAISE({action}); END")
+    }
+
+    fn deny_action(
+        store: &SqliteStore,
+        denied: fn(&AuthAction<'_>) -> bool,
+    ) -> rusqlite::Result<()> {
+        store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+            if denied(&context.action) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))
+    }
+
+    fn deny_reads(
+        store: &SqliteStore,
+        table: &'static str,
+        column: &'static str,
+        allowed: usize,
+    ) -> rusqlite::Result<()> {
+        let mut seen = 0_usize;
+        store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+            if let AuthAction::Read {
+                table_name,
+                column_name,
+            } = context.action
+            {
+                let matches_column = table_name == table && column_name == column;
+                if matches_column {
+                    seen += 1;
+                    if seen > allowed {
+                        return Authorization::Deny;
+                    }
+                }
+            }
+            Authorization::Allow
+        }))
+    }
+
+    fn allow_all(store: &SqliteStore) -> rusqlite::Result<()> {
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+    }
+
+    const fn begins_transaction(action: &AuthAction<'_>) -> bool {
+        matches!(
+            action,
+            AuthAction::Transaction {
+                operation: TransactionOperation::Begin
+            }
+        )
+    }
+
+    // SQLite authorizes COMMIT as a transaction step that rusqlite cannot name.
+    const fn commits_transaction(action: &AuthAction<'_>) -> bool {
+        matches!(
+            action,
+            AuthAction::Transaction {
+                operation: TransactionOperation::Unknown
+            }
+        )
+    }
+
+    const fn releases_savepoint(action: &AuthAction<'_>) -> bool {
+        matches!(
+            action,
+            AuthAction::Savepoint {
+                operation: TransactionOperation::Release,
+                ..
+            }
+        )
+    }
+
+    const fn rolls_back_savepoint(action: &AuthAction<'_>) -> bool {
+        matches!(
+            action,
+            AuthAction::Savepoint {
+                operation: TransactionOperation::Rollback,
+                ..
+            }
+        )
+    }
+
+    fn retry(store: &SqliteStore, digest: Hash) -> Retry {
+        store.resolve_manifest_owner_admission_retry_v1(OWNER, GENESIS.operation_id, digest)
+    }
+
+    fn resolve(store: &SqliteStore, digest: Hash) -> Retry {
+        sqlite_resolve_manifest_owner_retry(&store.conn, OWNER, GENESIS.operation_id, digest)
+    }
+
+    fn operation_receipts(store: &SqliteStore) -> Result<Vec<Hash>, AdmissionError> {
+        sqlite_manifest_owner_operation_receipts(&store.conn, OWNER, GENESIS.operation_id, 1)
+    }
+
+    fn validate_generation(
+        store: &SqliteStore,
+        operation_id: Hash,
+        receipts: &[Hash],
+    ) -> Result<(), AdmissionError> {
+        sqlite_validate_manifest_owner_generation_operation(
+            &store.conn,
+            OWNER,
+            1,
+            GENESIS.resulting_inventory,
+            operation_id,
+            receipts,
+        )
+    }
+
+    fn assert_port_fails(store: &mut SqliteStore, expected: AdmissionError) -> TestResult {
+        let prepared = prepare(genesis_request()?, None)?;
+        assert_eq!(store.read_manifest_owner_state_v1(OWNER), Err(expected));
+        assert_eq!(retry(store, prepared.intent_digest()), Err(expected));
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(prepared),
+            Err(expected)
+        );
+        Ok(())
+    }
+
+    fn assert_read_faults(
+        table: &str,
+        filter: &str,
+        assignments: &[&str],
+        expected: AdmissionError,
+    ) -> TestResult {
+        for assignment in assignments {
+            let mut store = admitted_store()?;
+            run_unchecked(&store, &corrupt(table, assignment, filter))?;
+            assert_port_fails(&mut store, expected)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn checked_schema_rejects_representative_fault_writes() -> TestResult {
+        let store = admitted_store()?;
+        let writes = [
+            corrupt(STATE, STATE_TYPES[0], ALL),
+            corrupt(STATE, STATE_SHAPES[0], ALL),
+            corrupt(ADMISSIONS, ADMISSION_TYPES[0], FIRST_SCOPE),
+            corrupt(ADMISSIONS, ADMISSION_SHAPES[0], FIRST_SCOPE),
+            corrupt(COPIES, COPY_SHAPES[0], FIRST_COPY),
+            corrupt(OPERATIONS, OPERATION_TYPES[0], ALL),
+            corrupt(OPERATIONS, OPERATION_SHAPES[0], ALL),
+        ];
+        for write in writes {
+            let error = run_sql(&store, &write)
+                .err()
+                .ok_or("checked schema accepted a fault write")?;
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+        assert!(store.read_manifest_owner_state_v1(OWNER)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn owner_reads_map_unreadable_columns_to_storage_failures() -> TestResult {
+        assert_read_faults(STATE, ALL, &STATE_TYPES, STORAGE)?;
+        assert_read_faults(ADMISSIONS, FIRST_SCOPE, &ADMISSION_TYPES, STORAGE)?;
+        assert_read_faults(COPIES, FIRST_COPY, &COPY_TYPES, STORAGE)?;
+        assert_read_faults(OPERATIONS, ALL, &OPERATION_TYPES, STORAGE)
+    }
+
+    #[test]
+    fn owner_reads_map_malformed_columns_to_corrupt_state() -> TestResult {
+        assert_read_faults(STATE, ALL, &STATE_SHAPES, CORRUPT)?;
+        assert_read_faults(ADMISSIONS, FIRST_SCOPE, &ADMISSION_SHAPES, CORRUPT)?;
+        assert_read_faults(COPIES, FIRST_COPY, &COPY_SHAPES, CORRUPT)?;
+        assert_read_faults(OPERATIONS, ALL, &OPERATION_SHAPES, CORRUPT)
+    }
+
+    #[test]
+    fn owner_reads_map_missing_schema_and_rows() -> TestResult {
+        for (fault, expected) in STRUCTURE_FAULTS {
+            let mut store = admitted_store()?;
+            run_unchecked(&store, fault)?;
+            assert_port_fails(&mut store, expected)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn historical_reads_map_missing_unreadable_and_corrupt_rows() -> TestResult {
+        let store = admitted_store()?;
+        assert_eq!(
+            store.read_manifest_owner_admission_v1(OWNER, 1, timeline(9)),
+            Ok(None)
+        );
+        run_unchecked(&store, &corrupt(ADMISSIONS, "scope = 7", FIRST_SCOPE))?;
+        assert_eq!(
+            store.read_manifest_owner_admission_v1(OWNER, 1, timeline(1)),
+            Err(STORAGE)
+        );
+        // The requested row decodes, but its generation sibling is corrupt.
+        let store = admitted_store()?;
+        let sibling = corrupt(ADMISSIONS, "scope = X'00'", SECOND_SCOPE);
+        run_unchecked(&store, &sibling)?;
+        assert_eq!(
+            store.read_manifest_owner_admission_v1(OWNER, 1, timeline(1)),
+            Err(CORRUPT)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn owner_port_transactions_map_begin_and_commit_failures() -> TestResult {
+        let mut store = admitted_store()?;
+        let prepared = prepare(genesis_request()?, None)?;
+        let digest = prepared.intent_digest();
+        for denied in [begins_transaction, commits_transaction] {
+            deny_action(&store, denied)?;
+            let state = store.read_manifest_owner_state_v1(OWNER);
+            let resolved = retry(&store, digest);
+            allow_all(&store)?;
+            assert_eq!(state, Err(STORAGE));
+            assert_eq!(resolved, Err(STORAGE));
+            assert!(store.conn.is_autocommit());
+        }
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let begin = store.commit_manifest_owner_admission_v1(prepared);
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert_eq!(begin, Err(STORAGE));
+        Ok(())
+    }
+
+    #[test]
+    fn commits_recover_exact_retries_and_reject_changed_intents() -> TestResult {
+        let mut store = SqliteStore::open_in_memory()?;
+        let prepared = prepare(genesis_request()?, None)?;
+        let applied = store.commit_manifest_owner_admission_v1(prepared.clone())?;
+        let exact = store.commit_manifest_owner_admission_v1(prepared)?;
+        assert_eq!(exact.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+        assert_eq!(exact.receipt_hashes, applied.receipt_hashes);
+        let changed = prepare(changed_genesis_request()?, None)?;
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(changed),
+            Err(CONFLICT)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn commits_map_insert_and_state_write_faults() -> TestResult {
+        for (table, expected) in INSERT_FAULTS {
+            let mut store = SqliteStore::open_in_memory()?;
+            run_sql(&store, &trigger("INSERT", table, ABORT))?;
+            let prepared = prepare(genesis_request()?, None)?;
+            assert_eq!(
+                store.commit_manifest_owner_admission_v1(prepared),
+                Err(expected)
+            );
+            assert_eq!(store.read_manifest_owner_state_v1(OWNER), Ok(None));
+        }
+        for (action, expected) in [(ABORT, STORAGE), (IGNORE, CONFLICT)] {
+            let mut store = admitted_store()?;
+            let current = store.read_manifest_owner_state_v1(OWNER)?;
+            let replacement = request(REPLACEMENT, &[timeline(3), timeline(4)])?;
+            let prepared = prepare(replacement, current.as_ref())?;
+            run_sql(&store, &trigger("UPDATE", STATE, action))?;
+            assert_eq!(
+                store.commit_manifest_owner_admission_v1(prepared),
+                Err(expected)
+            );
+            assert_eq!(store.read_manifest_owner_state_v1(OWNER)?, current);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn commits_inside_an_outer_transaction_finish_their_savepoint() -> TestResult {
+        let mut store = SqliteStore::open_in_memory()?;
+        let prepared = prepare(genesis_request()?, None)?;
+        run_sql(&store, "BEGIN")?;
+        deny_action(&store, releases_savepoint)?;
+        let unreleased = store.commit_manifest_owner_admission_v1(prepared.clone());
+        allow_all(&store)?;
+        run_sql(&store, "ROLLBACK")?;
+        assert_eq!(unreleased, Err(STORAGE));
+
+        run_sql(&store, "BEGIN")?;
+        let applied = store.commit_manifest_owner_admission_v1(prepared)?;
+        run_sql(&store, "COMMIT")?;
+        assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
+
+        let changed = prepare(changed_genesis_request()?, None)?;
+        run_sql(&store, "BEGIN")?;
+        let rejected = store.commit_manifest_owner_admission_v1(changed.clone());
+        deny_action(&store, rolls_back_savepoint)?;
+        let stranded = store.commit_manifest_owner_admission_v1(changed);
+        allow_all(&store)?;
+        run_sql(&store, "ROLLBACK")?;
+        assert_eq!(rejected, Err(CONFLICT));
+        assert_eq!(stranded, Err(STORAGE));
+        assert!(store.read_manifest_owner_state_v1(OWNER)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn generation_operation_validation_maps_direct_faults() -> TestResult {
+        let store = admitted_store()?;
+        let receipts = operation_receipts(&store)?;
+        let operation = GENESIS.operation_id;
+        assert_eq!(validate_generation(&store, operation, &receipts), Ok(()));
+        assert_eq!(
+            validate_generation(&store, hash(99), &receipts),
+            Err(CORRUPT)
+        );
+        assert_eq!(validate_generation(&store, operation, &[]), Err(BOUND));
+        // Sweep the denial past the operation lookup into the generation count.
+        let mut failures = 0_usize;
+        for allowed in 0..8 {
+            deny_reads(&store, OPERATIONS, "configuration_generation", allowed)?;
+            let result = validate_generation(&store, operation, &receipts);
+            allow_all(&store)?;
+            if let Err(error) = result {
+                assert_eq!(error, STORAGE);
+                failures += 1;
+            }
+        }
+        assert!(failures > 1);
+
+        let store = admitted_store()?;
+        run_unchecked(&store, UNREADABLE_OPERATION)?;
+        assert_eq!(
+            validate_generation(&store, operation, &receipts),
+            Err(STORAGE)
+        );
+        let store = admitted_store()?;
+        run_unchecked(&store, DROP_ADMISSIONS)?;
+        assert_eq!(
+            validate_generation(&store, operation, &receipts),
+            Err(STORAGE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retry_resolution_maps_direct_faults() -> TestResult {
+        let digest = prepare(genesis_request()?, None)?.intent_digest();
+        let store = admitted_store()?;
+        // Sweep the denial past the receipt reads into the row count.
+        let mut failures = 0_usize;
+        for allowed in 0..8 {
+            deny_reads(&store, ADMISSIONS, "configuration_generation", allowed)?;
+            let result = resolve(&store, digest);
+            allow_all(&store)?;
+            if let Err(error) = result {
+                assert_eq!(error, STORAGE);
+                failures += 1;
+            }
+        }
+        assert!(failures > 1);
+        assert!(matches!(resolve(&store, digest), Ok(Some(_))));
+        for (fault, expected) in RETRY_FAULTS {
+            let store = admitted_store()?;
+            run_unchecked(&store, fault)?;
+            assert_eq!(resolve(&store, digest), Err(expected));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn receipt_listing_maps_direct_faults() -> TestResult {
+        for (assignment, expected) in RECEIPT_FAULTS {
+            let store = admitted_store()?;
+            run_unchecked(&store, &corrupt(ADMISSIONS, assignment, FIRST_SCOPE))?;
+            assert_eq!(operation_receipts(&store), Err(expected));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn owner_writers_cover_visible_hashes_and_empty_receipt_sets() -> TestResult {
+        let store = SqliteStore::open_in_memory()?;
+        let mut input = prepare(genesis_request()?, None)?.input().clone();
+        input.previous_visible_lcq1_hash = Some(hash(77));
+        assert_eq!(
+            sqlite_write_manifest_owner_state(&store.conn, &input),
+            Ok(())
+        );
+        assert_eq!(
+            sqlite_insert_manifest_owner_operation(&store.conn, &input, hash(78), &[]),
+            Err(BOUND)
+        );
+        Ok(())
     }
 }

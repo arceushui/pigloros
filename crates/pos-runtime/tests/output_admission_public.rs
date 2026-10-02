@@ -7,8 +7,8 @@ use pos_core::{
 };
 use pos_runtime::{
     installed_plugin_role_v1, validate_output_policy_artifacts_v1, DomainImplementationKindV1,
-    Driver, InstalledOutputPolicySourceV1, LocalScheduledAdmissionHostV1, ObservationView,
-    OutputAdmissionErrorV1, PluginAvailabilityV1, PluginIsolationV1, PluginPinV1,
+    Driver, LocalScheduledAdmissionHostV1, ObservationView, OutputAdmissionErrorV1,
+    OutputPolicySourceV1, PluginAvailabilityV1, PluginIsolationV1, PluginPinV1,
     PluginRegistrationV1, PluginRegistry, RuntimeError, StepOutput, TickScheduler,
 };
 use std::error::Error;
@@ -28,9 +28,9 @@ struct FixtureBinding {
 
 fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Error>> {
     let configuration_details = b"fixture-configuration";
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    let binding = pos_runtime::OutputPolicyBindingV1::from_source(
         plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Generated,
+        pos_runtime::OutputPolicySourceV1::Generated,
         configuration_details,
         "deterministic-local-v1",
     )?;
@@ -357,8 +357,95 @@ fn assert_artifact_identity_rejections(source: &FixtureBinding) -> TestResult {
     Ok(())
 }
 
+fn assert_canonical_closure_member_lengths(
+    expected_bytes: &[u8],
+    members: [&[u8]; 6],
+) -> TestResult {
+    let mut offset = 4_usize;
+    for member in members {
+        let length_end = offset + 8;
+        let member_length = member.len();
+        assert_eq!(
+            u64::from_be_bytes(expected_bytes[offset..length_end].try_into()?),
+            u64::try_from(member_length)?
+        );
+        if member_length > 0 {
+            let mut malformed = expected_bytes.to_vec();
+            malformed[length_end] ^= 1;
+            assert!(
+                pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+                    &malformed, members[0],
+                )
+                .is_err()
+            );
+        }
+        offset = length_end + member_length;
+    }
+    Ok(())
+}
+
+fn assert_canonical_closure_rejects_invalid_wire(
+    expected_bytes: &[u8],
+    output_policy_bytes: &[u8],
+) {
+    let mut trailing = expected_bytes.to_vec();
+    trailing.push(0);
+    let mut impossible_length = Vec::from(&b"OPC1"[..]);
+    impossible_length.extend_from_slice(&u64::MAX.to_be_bytes());
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            b"bad",
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            b"OPC1",
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &expected_bytes[..expected_bytes.len() - 1],
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &trailing,
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &impossible_length,
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            expected_bytes,
+            b"wrong EOP1",
+        )
+        .is_err()
+    );
+    let oversized = vec![0; pos_runtime::MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 + 1];
+    assert!(
+        pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+            &oversized,
+            output_policy_bytes,
+        )
+        .is_err()
+    );
+}
+
 #[test]
-fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult {
+fn verified_output_policy_closure_artifacts_are_validated() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -367,17 +454,49 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     assert!(!source.executable_budget_bytes.is_empty());
     assert!(!source.implementation_artifact.is_empty());
     assert!(source.configuration_artifact.starts_with(b"CFG1"));
-    assert!(!source.profile_artifact.is_empty());
+    assert!(source.profile_artifact.is_empty());
     assert!(!source.retention_artifact.is_empty());
     assert_artifact_shape_rejections(&source);
     assert_artifact_size_rejections(&source);
     assert_artifact_identity_rejections(&source)?;
-    let expected_bytes = canonical_fixture_closure_bytes(&source);
-    assert!(expected_bytes.starts_with(b"OPC1"));
-    let fresh_plugin = FixturePlugin {
+    Ok(())
+}
+
+#[test]
+fn verified_output_policy_closure_round_trips_and_rejects_malformed_wire() -> TestResult {
+    let plugin = FixturePlugin {
         id: PluginId::new(),
     };
+    let source = verified_binding(&plugin)?;
+    let expected_bytes = canonical_fixture_closure_bytes(&source);
+    assert!(expected_bytes.starts_with(b"OPC1"));
+    let decoded = pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        &expected_bytes,
+        &source.output_policy_bytes,
+    )?;
+    assert_eq!(decoded.to_canonical_bytes(), expected_bytes);
+    assert_canonical_closure_member_lengths(
+        &expected_bytes,
+        [
+            source.output_policy_bytes.as_slice(),
+            source.executable_budget_bytes.as_slice(),
+            source.implementation_artifact.as_slice(),
+            source.configuration_artifact.as_slice(),
+            source.profile_artifact.as_slice(),
+            source.retention_artifact.as_slice(),
+        ],
+    )?;
+    assert_canonical_closure_rejects_invalid_wire(&expected_bytes, &source.output_policy_bytes);
+    Ok(())
+}
 
+#[test]
+fn verified_output_policy_closure_is_retained_with_stable_identity() -> TestResult {
+    let plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
+    let source = verified_binding(&plugin)?;
+    let expected_bytes = canonical_fixture_closure_bytes(&source);
     let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
@@ -393,6 +512,9 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         .ok_or_else(|| std::io::Error::other("verified closure was not retained"))?;
     assert_eq!(retained, expected_bytes);
 
+    let fresh_plugin = FixturePlugin {
+        id: PluginId::new(),
+    };
     let fresh_source = verified_binding(&fresh_plugin)?;
     let mut fresh_registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
@@ -412,7 +534,6 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
         registry.replay_policy_closure_identities().next(),
         fresh_registry.replay_policy_closure_identities().next()
     );
-
     Ok(())
 }
 
@@ -441,7 +562,7 @@ fn verified_binding_rejects_a_foreign_plugin_instance() -> TestResult {
 }
 
 #[test]
-fn unknown_or_changed_execution_profile_fails_before_registry_mutation() -> TestResult {
+fn local_execution_profile_absence_does_not_create_installed_authority() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -449,30 +570,16 @@ fn unknown_or_changed_execution_profile_fails_before_registry_mutation() -> Test
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
 
-    // An unknown profile resolves no EPF1 bytes, so no binding can exist.
-    assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            b"fixture-configuration",
-            "unknown-profile-v1",
-        ),
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    ));
-
-    // A binding resolved under another draft profile carries changed EPF1
-    // bytes and still cannot enter installed registration.
+    // Generated local admission has no EPF1 profile member.
     let local = verified_binding(&plugin)?;
-    let changed = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    let changed = pos_runtime::OutputPolicyBindingV1::from_source(
         &plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         b"fixture-configuration",
         "deterministic-air-gapped-v1",
     )?;
-    assert_ne!(
-        changed.execution_profile_artifact(),
-        local.profile_artifact.as_slice()
-    );
+    assert!(changed.execution_profile_artifact().is_empty());
+    assert!(local.profile_artifact.is_empty());
     let pin = PluginPinV1::try_new(
         DomainImplementationKindV1::Plugin,
         PluginIsolationV1::OperatorTrustedNative,
@@ -763,9 +870,9 @@ fn public_binding_rejects_foreign_capability_name() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::RuleAgent,
             &[],
             "deterministic-local-v1",
         ),
@@ -779,9 +886,9 @@ fn public_binding_rejects_name_only_installed_source_claims() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::RuleAgent,
             &[],
             "deterministic-local-v1",
         ),
@@ -966,9 +1073,9 @@ fn explicit_registration_rejects_unowned_installed_source() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::RuleAgent,
             b"fixture-configuration",
             "deterministic-local-v1",
         ),
@@ -982,9 +1089,9 @@ fn explicit_registration_rejects_name_only_source_even_with_configuration() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::Agent,
+            OutputPolicySourceV1::Agent,
             b"fixture-configuration",
             "deterministic-local-v1",
         ),
@@ -1271,19 +1378,18 @@ fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult 
 }
 
 #[test]
-fn verified_binding_rejects_an_undeclared_execution_profile() {
+fn generated_binding_keeps_an_undeclared_profile_metadata_only() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
-    assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            b"fixture-configuration",
-            "undeclared-profile-v1",
-        ),
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    ));
+    let binding = pos_runtime::OutputPolicyBindingV1::from_source(
+        &plugin,
+        OutputPolicySourceV1::Generated,
+        b"fixture-configuration",
+        "undeclared-profile-v1",
+    )?;
+    assert!(binding.execution_profile_artifact().is_empty());
+    Ok(())
 }
 
 struct UpgradingPlugin {
@@ -1323,9 +1429,9 @@ fn verified_registration_rejects_a_policy_recorded_for_another_plugin_identity()
         id: PluginId::new(),
         upgraded: AtomicBool::new(false),
     };
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    let binding = pos_runtime::OutputPolicyBindingV1::from_source(
         &plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         b"fixture-configuration",
         "deterministic-local-v1",
     )?;

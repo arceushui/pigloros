@@ -3,7 +3,10 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use pos_core::{manifest_owner_link::ManifestAdmissionCatalogV1, Hash, PluginId};
+use pos_core::{
+    manifest_owner_link::{ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1},
+    AdapterAdmissionV1, Hash, PluginId,
+};
 
 /// Closed failures of the host's complete pre-registration manifest batch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -18,9 +21,7 @@ pub enum ManifestRegistrationErrorV1 {
     PluginMismatch,
     #[error("manifest registration slot is missing, duplicated or mismatched")]
     SlotMismatch,
-    #[error(
-        "manifest registration requires an available installed pin and retained output closure"
-    )]
+    #[error("manifest registration requires an available pin and retained output closure")]
     UnverifiedRegistration,
     #[error("manifest registration batch is incomplete or changed")]
     IncompleteBatch,
@@ -35,6 +36,7 @@ pub struct AdmittedCompositionV1 {
     pub(crate) registry_identity: Arc<()>,
     pub(crate) registration_revision: u64,
     pub(crate) catalog: ManifestAdmissionCatalogV1,
+    pub(crate) adapter_admission: AdapterAdmissionV1,
 }
 
 impl AdmittedCompositionV1 {
@@ -42,6 +44,104 @@ impl AdmittedCompositionV1 {
     #[must_use]
     pub const fn catalog(&self) -> &ManifestAdmissionCatalogV1 {
         &self.catalog
+    }
+
+    /// The exact adapter contract snapshot derived from this Plugin roster.
+    #[must_use]
+    pub const fn adapter_admission(&self) -> &AdapterAdmissionV1 {
+        &self.adapter_admission
+    }
+}
+
+/// Exact EOP1 and OPC1 native bytes read from one current admitted Plugin.
+///
+/// This value is an extraction result, not owner persistence or an admission
+/// receipt. Its constructor stays private to the complete Plugin registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedManifestPolicySourceV1 {
+    stable_slot: String,
+    plugin_id: PluginId,
+    plugin_name: String,
+    plugin_version: String,
+    implementation_hash: Hash,
+    eop1_native_digest: Hash,
+    closure_hash: Hash,
+    eop1_bytes: Vec<u8>,
+    opc1_bytes: Vec<u8>,
+}
+
+impl AdmittedManifestPolicySourceV1 {
+    /// Build a native source after the Plugin registry validates the admitted roster.
+    pub(crate) fn from_registry(
+        row: &ManifestAdmissionCatalogRowV1,
+        eop1_bytes: Vec<u8>,
+        opc1_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            stable_slot: row.stable_slot.clone(),
+            plugin_id: row.plugin_id,
+            plugin_name: row.plugin_name.clone(),
+            plugin_version: row.plugin_version.clone(),
+            implementation_hash: row.implementation_hash,
+            eop1_native_digest: row.eop1_native_digest,
+            closure_hash: row.closure_hash,
+            eop1_bytes,
+            opc1_bytes,
+        }
+    }
+
+    /// Stable slot bound by the complete registry capability.
+    #[must_use]
+    pub fn stable_slot(&self) -> &str {
+        &self.stable_slot
+    }
+
+    /// Actual allocated `PluginId`, including reducer-only Plugins.
+    #[must_use]
+    pub const fn plugin_id(&self) -> PluginId {
+        self.plugin_id
+    }
+
+    /// Exact Plugin display name retained by the registry.
+    #[must_use]
+    pub fn plugin_name(&self) -> &str {
+        &self.plugin_name
+    }
+
+    /// Exact Plugin version retained by the registry.
+    #[must_use]
+    pub fn plugin_version(&self) -> &str {
+        &self.plugin_version
+    }
+
+    /// Host-admitted implementation pin.
+    #[must_use]
+    pub const fn implementation_hash(&self) -> Hash {
+        self.implementation_hash
+    }
+
+    /// ADR-077 EOP1 native identity.
+    #[must_use]
+    pub const fn eop1_native_digest(&self) -> Hash {
+        self.eop1_native_digest
+    }
+
+    /// ADR-088 OPC1 exact closure identity.
+    #[must_use]
+    pub const fn closure_hash(&self) -> Hash {
+        self.closure_hash
+    }
+
+    /// Exact canonical EOP1 bytes retained by output admission.
+    #[must_use]
+    pub fn eop1_bytes(&self) -> &[u8] {
+        &self.eop1_bytes
+    }
+
+    /// Exact canonical OPC1 bytes retained by output admission.
+    #[must_use]
+    pub fn opc1_bytes(&self) -> &[u8] {
+        &self.opc1_bytes
     }
 }
 
