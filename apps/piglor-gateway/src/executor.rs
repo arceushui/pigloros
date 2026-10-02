@@ -26,7 +26,6 @@ use pos_core::{
 #[cfg(test)]
 use pos_core::{
     geo_admission::GeoLocationAdmissionStore,
-    ids::EventId,
     store::{AppendIdentity, AppendIntent, AppendOrDuplicateOutcome},
     OwnTracksIngressStore,
 };
@@ -393,12 +392,6 @@ enum Command {
         expected_generation: Option<ErasureReferenceV1>,
         reply: oneshot::Sender<Result<ProtectedReadPage, StoreExecutorError>>,
     },
-    #[cfg(test)]
-    ReadOne {
-        timeline: TimelineId,
-        event: EventId,
-        reply: oneshot::Sender<Result<Option<Event>, StoreExecutorError>>,
-    },
     Append {
         timeline: TimelineId,
         drafts: Vec<EventDraft>,
@@ -475,7 +468,7 @@ impl Command {
             | Self::ProtectedLogicalHead { .. }
             | Self::ErasureStatus { .. } => true,
             #[cfg(test)]
-            Self::ReadOne { .. } | Self::GetTimeline { .. } | Self::PanicRead { .. } => true,
+            Self::GetTimeline { .. } | Self::PanicRead { .. } => true,
             _ => false,
         }
     }
@@ -2446,10 +2439,6 @@ fn expire_command_impl(command: Command) {
         Command::Read { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        #[cfg(test)]
-        Command::ReadOne { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
         Command::Append { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -2620,12 +2609,6 @@ fn execute_command_impl(state: &mut ExecutorState, command: Command) -> CommandE
             expected_generation,
             reply,
         } => execute_read_page_command(state, timeline, range, bounds, expected_generation, reply),
-        #[cfg(test)]
-        Command::ReadOne {
-            timeline,
-            event,
-            reply,
-        } => execute_read_one_command(state, timeline, event, reply),
         Command::Append {
             timeline,
             drafts,
@@ -2881,25 +2864,6 @@ mod read_page_coverage_tests {
             Ok(Err(StoreExecutorError::DeadlineExceeded))
         ));
     }
-}
-
-#[cfg(test)]
-fn execute_read_one_command(
-    state: &mut ExecutorState,
-    timeline: TimelineId,
-    event: EventId,
-    reply: oneshot::Sender<Result<Option<Event>, StoreExecutorError>>,
-) {
-    send_store_result(
-        reply,
-        state.store.execute(
-            |host| {
-                host.read_sender()
-                    .and_then(|mut sender| sender.event_by_id(timeline, event))
-            },
-            |store| store.read_event_by_id(timeline, event),
-        ),
-    );
 }
 
 fn execute_append_command(
@@ -3445,7 +3409,7 @@ mod tests {
         },
         timeline::Timeline,
         CanonicalBytes, ConsentAuthority, ConsentGate, ConsentGrantedV1, ConsentRevokedV1,
-        CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, ProposedAction, TimelineId,
+        CoreError, EntityId, Kind, OwnTracksIngressRateKeyV1, ProposedAction, TimelineId,
     };
     use pos_runtime::{ErasureExecutionHostV1, PluginRegistry};
     use pos_store::memory::MemoryStore;
@@ -3553,6 +3517,56 @@ mod tests {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         execute_admit_action_command(&mut state, &context, reply);
         assert!(receiver.blocking_recv().test_ok()?.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_identified_append_and_timeline_reads_use_the_host_senders(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut host = ErasureExecutionHostV1::open_verified_empty(
+            pos_store::StoreConfig::Memory,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        let timeline = host
+            .command_sender()?
+            .create_timeline("hosted-identified-append")?
+            .id();
+        let mut state = ExecutorState {
+            store: ExecutorStore::Host(Box::new(host), None),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        super::execute_get_timeline_command(&mut state, timeline, reply);
+        let found = result.blocking_recv().test_ok()?.test_ok()?;
+        assert_eq!(found.as_ref().map(Timeline::id), Some(timeline));
+
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("hosted.identified"),
+            CanonicalBytes::from_static(b"identified"),
+        );
+        let identity = AppendIdentity::new(
+            AppendDedupKey::from_keyed_hash([41; 32]),
+            AppendDedupScope::from_keyed_hash([42; 32]),
+        );
+        let (reply, result) = tokio::sync::oneshot::channel();
+        super::execute_append_identified_command(
+            &mut state,
+            timeline,
+            identity,
+            AppendIntent::new(&draft),
+            8,
+            reply,
+        );
+        let outcome = result.blocking_recv().test_ok()?.test_ok()?;
+        assert!(matches!(
+            outcome,
+            Some(pos_core::store::AppendOrDuplicateOutcome::Appended(_))
+        ));
         Ok(())
     }
 
@@ -4304,16 +4318,6 @@ mod tests {
         assert_expired(
             Command::Create {
                 name: "expired".to_owned(),
-                reply,
-            },
-            receiver,
-        );
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(
-            Command::ReadOne {
-                timeline: TimelineId::new(),
-                event: EventId::new(),
                 reply,
             },
             receiver,

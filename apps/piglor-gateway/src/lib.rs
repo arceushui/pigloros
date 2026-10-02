@@ -5493,8 +5493,9 @@ mod tests {
             submit_subject_action(&gateway, &timeline_id, (subject, body), 0, "device-1:42").await;
         assert!(!first.duplicate());
 
-        // More admitted-action receipts than one cleanup batch removes.
-        for index in 1..=CONSENT_DEDUP_CLEANUP_BATCH.get() {
+        // More admitted-action receipts than the revocation and the first
+        // scheduled cleanup batch remove, so the worker must requeue the scope.
+        for index in 1..=CONSENT_DEDUP_CLEANUP_BATCH.get().saturating_mul(2) {
             let result = submit_subject_action(
                 &gateway,
                 &timeline_id,

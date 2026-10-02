@@ -812,6 +812,30 @@ fn every_not_admitted_outcome_maps_to_a_stable_gateway_error() {
     ));
 }
 
+#[test]
+fn every_authorization_failure_maps_to_a_stable_gateway_error() {
+    use crate::GatewayAuthorizationError as Failure;
+    let mapped = |failure| {
+        crate::action_command_error(executor::ActionCommandError::Authorization(failure), 7)
+    };
+    assert!(matches!(
+        mapped(Failure::AuthenticationUnavailable),
+        GatewayError::AuthorizationUnavailable
+    ));
+    assert!(matches!(
+        mapped(Failure::AuthorityUnavailable),
+        GatewayError::AuthorizationUnavailable
+    ));
+    assert!(matches!(
+        mapped(Failure::RequestUnavailable),
+        GatewayError::InvalidAuthorizationRequest
+    ));
+    assert!(matches!(
+        mapped(Failure::AuthorizationDenied),
+        GatewayError::AuthorizationDenied
+    ));
+}
+
 #[tokio::test]
 async fn an_unknown_timeline_is_not_found_rather_than_unavailable() -> TestResult {
     for backend in backends()? {
