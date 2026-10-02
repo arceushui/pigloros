@@ -704,7 +704,10 @@ fn request_shape_rejects_zero_cas_values_null_state_drift_and_oversized_copies()
     let (registry, _plugins, _owner, admitted) = setup(verifier(timeline_id, operation_id))?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
     let base = request(&admitted, &sources, timeline_id, operation_id)?;
-    assert_ne!(manifest_owner_admission_intent_digest_v1(&base)?, Hash::zero());
+    assert_ne!(
+        manifest_owner_admission_intent_digest_v1(&base)?,
+        Hash::zero()
+    );
 
     let mut zero_inventory = base.clone();
     zero_inventory.expected_inventory_generation = Some(Hash::zero());

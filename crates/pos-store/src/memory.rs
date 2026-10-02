@@ -13588,7 +13588,10 @@ mod manifest_owner_admission_coverage {
 
         let corruptions: [Corruption; 3] = [
             |store| {
-                operation_mut(store, hash(41))?.result.receipt_hashes.clear();
+                operation_mut(store, hash(41))?
+                    .result
+                    .receipt_hashes
+                    .clear();
                 Ok(())
             },
             |store| {
@@ -13674,7 +13677,10 @@ mod manifest_owner_admission_coverage {
                 Ok(())
             },
             |store| {
-                operation_mut(store, hash(41))?.result.receipt_hashes.reverse();
+                operation_mut(store, hash(41))?
+                    .result
+                    .receipt_hashes
+                    .reverse();
                 Ok(())
             },
         ];
