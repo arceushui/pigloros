@@ -621,3 +621,52 @@ fn the_derivation_mapping_enters_evals_pinned_configuration_identity() {
     assert_eq!(identity(64), identity(64));
     assert_ne!(identity(3), identity(64));
 }
+
+#[test]
+fn an_unknown_source_version_fails_the_pass_closed_and_commits_nothing() {
+    for (name, mut store) in stores() {
+        let timeline = store.create_timeline("unknown-version").test_ok().id();
+        let entity = EntityId::new();
+        let authority = ConsentAuthority::new();
+        let mut payload = Vec::new();
+        ciborium::into_writer(
+            &PredictionSourceV1 {
+                version: 2,
+                predicted_prob: 0.5,
+                outcome: PredictionOutcomeV1::Observed(true),
+            },
+            &mut payload,
+        )
+        .test_ok();
+        store
+            .append(
+                timeline,
+                &[EventDraft::new(
+                    entity,
+                    Kind::new(EVENT_TYPE_PREDICTION_SOURCE),
+                    CanonicalBytes::from_vec(payload),
+                )],
+            )
+            .test_ok();
+        let token = persona_token(&authority, timeline, entity);
+        let diagnostics = EvalDiagnosticsV1::default();
+        let mut registry = gated_registry(&authority);
+        register_eval(&mut registry, 64, &diagnostics);
+
+        let error = stage(&mut registry, store.as_ref(), timeline, &token)
+            .err()
+            .map(|error| error.to_string());
+        assert_eq!(
+            error,
+            Some(
+                RuntimeError::InvalidPayload {
+                    event_type: EVENT_TYPE_PREDICTION_SOURCE.to_owned(),
+                    reason: "unsupported prediction source version 2".to_owned(),
+                }
+                .to_string()
+            ),
+            "{name}"
+        );
+        assert_eq!(events(store.as_ref(), timeline).len(), 1, "{name}");
+    }
+}

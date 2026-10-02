@@ -295,6 +295,17 @@ fn test_support_driver_registrations_share_the_ownership_check() {
     assert_eq!(error, Some(owner_error("shared.type")));
     assert_eq!(snapshot(&registry), before);
 
+    // The same registration identity is a duplicate Plugin, not a new claimant.
+    assert!(matches!(
+        registry.register_test_driver_with_verified_output_policy(
+            driver_owner.id,
+            generated_binding(&driver_owner),
+            Box::new(IdleDriver),
+        ),
+        Err(RuntimeError::DuplicatePlugin { .. })
+    ));
+    assert_eq!(snapshot(&registry), before);
+
     // Distinct types coexist.
     let distinct = OwnerPlugin::new("distinct-owner", &["distinct.type"]);
     registry

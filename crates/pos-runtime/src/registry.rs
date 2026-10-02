@@ -3888,6 +3888,14 @@ mod tests {
         event_types: &[&str],
         driver: Box<dyn Driver>,
     ) {
+        try_register_output_driver(registry, event_types, driver).test_ok();
+    }
+
+    fn try_register_output_driver(
+        registry: &mut PluginRegistry,
+        event_types: &[&str],
+        driver: Box<dyn Driver>,
+    ) -> Result<(), RuntimeError> {
         let plugin_id = PluginId::new();
         let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -3951,9 +3959,35 @@ mod tests {
             output_declarations: declarations,
         })
         .test_ok();
-        registry
-            .register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
-            .test_ok();
+        registry.register_test_driver_with_output_policy(plugin_id, "test", policy, budget, driver)
+    }
+
+    /// ADR-024 Revision 1: the policy-derived test-support path runs the
+    /// shared ownership check and leaves the registry unchanged on rejection.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn policy_derived_test_driver_rejects_an_owned_event_type() {
+        let mut registry = gated_registry();
+        register_output_driver(
+            &mut registry,
+            &["shared.output"],
+            Box::new(NamedNoopDriver("first-owner")),
+        );
+        let revision = registry.registration_revision;
+        let error = try_register_output_driver(
+            &mut registry,
+            &["other.output", "shared.output"],
+            Box::new(NamedNoopDriver("second-owner")),
+        )
+        .test_err();
+        assert!(matches!(
+            error,
+            RuntimeError::Composition(PluginCompositionErrorV1::DuplicateEventTypeOwner {
+                ref event_type
+            }) if event_type == "shared.output"
+        ));
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.registration_revision, revision);
     }
 
     struct NamedNoopDriver(&'static str);
