@@ -142,7 +142,7 @@ EXPECTED_SETUP_STEPS = [
     {"uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"},
     {"run": "rm -f rust-toolchain.toml"},
     {
-        "uses": "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772",
+        "uses": "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de",
         "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
     },
     {
