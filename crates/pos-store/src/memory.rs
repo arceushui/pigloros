@@ -11474,8 +11474,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         // The memory admission read only fails with CorruptState. It also checks
         // this local-cut state against the admitted header, and rejects a
         // local-cut state without an admitted header as orphaned.
-        self.read_manifest_owner_state_v1(owner_id)
-            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+        self.read_manifest_owner_state_v1(owner_id)?;
 
         let mut found_current = false;
         for ((stored_owner, cut_id), result) in &self.local_cut_owner_commits {
@@ -11558,8 +11557,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
             return Ok(retry);
         }
         let admission = self
-            .read_manifest_owner_state_v1(owner_id)
-            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?
+            .read_manifest_owner_state_v1(owner_id)?
             .ok_or(LocalCutOwnerErrorV1::Conflict)?;
         validate_local_cut_owner_successor_v1(&batch, &admission, current_state.as_ref())?;
         let request = batch.request();
