@@ -70,11 +70,13 @@ pub fn verify_fork_attribution_authority_envelope_signature_v1(
     })
 }
 
+/// Decode one `FAI1` public key as a non-weak Ed25519 verifying key.
+///
+/// A small-order key admits signatures over arbitrary messages, so it can
+/// never identify an attribution-import issuer.
 fn issuer_key(
     issuer: &ForkAttributionIssuerV1,
 ) -> Result<VerifyingKey, ForkAttributionAuthoritySignatureErrorV1> {
-    // A small-order key admits signatures over arbitrary messages, so it can
-    // never identify an attribution-import issuer.
     VerifyingKey::from_bytes(issuer.public_key().as_bytes())
         .ok()
         .filter(|key| !key.is_weak())

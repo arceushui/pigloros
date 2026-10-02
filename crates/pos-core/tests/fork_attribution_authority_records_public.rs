@@ -3,22 +3,26 @@
 
 use ciborium::Value;
 use pos_core::{
-    CanonicalBytes, EntityId, EventId, ForkAttributionCodecErrorV1 as CodecError,
+    CanonicalBytes, EntityId, ForkAttributionCodecErrorV1 as CodecError,
     ForkAttributionIssuerPolicyEntryV1, ForkAttributionIssuerPolicyInputV1,
     ForkAttributionIssuerPolicyV1, ForkAttributionIssuerStateV1, ForkAttributionIssuerV1,
     ForkEventEvidenceV1, ForkTimelineImportInputV1, ForkTimelineImportV1, Hash,
     ImportedKeyRecordV1, ImportedKeyTombstoneV1, KeyIdentityV1, KeyRecordV1, KeyRoleV1,
-    KeyTombstoneV1, Kind, PublicKey, Seq, Signature, TimelineEventEnvelopeInputV1,
-    TimelineEventEnvelopeV1, TimelineId, TimelineMode, WallTime,
-    MAX_FORK_ATTRIBUTION_ISSUER_BYTES_V1, MAX_FORK_ATTRIBUTION_ISSUER_POLICY_BYTES_V1,
-    MAX_FORK_ATTRIBUTION_ISSUER_POLICY_ENTRIES_V1, MAX_FORK_EVENT_EVIDENCE_BYTES_V1,
-    MAX_FORK_TIMELINE_IMPORT_BYTES_V1, MAX_FORK_TIMELINE_IMPORT_NAME_BYTES_V1,
-    MAX_IMPORTED_KEY_RECORD_BYTES_V1, MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
-    MAX_TIMELINE_EVENT_ENVELOPE_BYTES_V1, MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1,
+    KeyTombstoneV1, PublicKey, Seq, Signature, TimelineMode, MAX_FORK_ATTRIBUTION_ISSUER_BYTES_V1,
+    MAX_FORK_ATTRIBUTION_ISSUER_POLICY_BYTES_V1, MAX_FORK_ATTRIBUTION_ISSUER_POLICY_ENTRIES_V1,
+    MAX_FORK_EVENT_EVIDENCE_BYTES_V1, MAX_FORK_TIMELINE_IMPORT_BYTES_V1,
+    MAX_FORK_TIMELINE_IMPORT_NAME_BYTES_V1, MAX_IMPORTED_KEY_RECORD_BYTES_V1,
+    MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1, MAX_TIMELINE_EVENT_ENVELOPE_BYTES_V1,
+    MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1,
 };
 use ulid::Ulid;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+pub mod common;
+
+use common::{
+    attribution_identity, encode, envelope_at, evidence, evidence_from, hash, issuer, items,
+    timeline_id, unhex, widened, Fallible, TestResult,
+};
 
 /// Independently computed canonical vectors (see the PR description).
 const FAI1_HEX: &str = "85644641493101686973737565722d61015820\
@@ -36,37 +40,6 @@ const FTI1_HEX: &str = "8a6446544931015002020202020202020202020202020202\
 const FAI1_EPOCH_AT: usize = 1 + 5 + 1 + 9;
 /// Offset of the first `"issuer-a"` text byte.
 const FAI1_ISSUER_TEXT_AT: usize = 1 + 5 + 1 + 1;
-
-const fn hash(value: u8) -> Hash {
-    Hash::from_bytes([value; 32])
-}
-
-const fn timeline_id(value: u8) -> TimelineId {
-    TimelineId::from_ulid(Ulid::from_bytes([value; 16]))
-}
-
-fn unhex(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let digits = text.split_whitespace().collect::<String>();
-    (0..digits.len())
-        .step_by(2)
-        .map(|at| -> Result<u8, Box<dyn std::error::Error>> {
-            let pair = digits.get(at..at + 2).ok_or("odd hex length")?;
-            Ok(u8::from_str_radix(pair, 16)?)
-        })
-        .collect()
-}
-
-fn items(bytes: &[u8]) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    ciborium::from_reader::<Value, _>(bytes)?
-        .into_array()
-        .map_err(|_| "not a CBOR array".into())
-}
-
-fn encode(items: Vec<Value>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut out = Vec::new();
-    ciborium::into_writer(&Value::Array(items), &mut out)?;
-    Ok(out)
-}
 
 fn text(value: &str) -> Value {
     Value::Text(value.to_owned())
@@ -87,25 +60,16 @@ fn truncations_fail<T>(bytes: &[u8], decode: impl Fn(&[u8]) -> Result<T, CodecEr
     }
 }
 
-/// Re-encode the one-byte unsigned integer at `at` in a wider, noncanonical form.
-fn widened(bytes: &[u8], at: usize) -> Vec<u8> {
-    [&bytes[..at], &[0x18_u8][..], &bytes[at..]].concat()
-}
-
 /// Replace one top-level field and return the decoder result's error.
 fn mutated<T>(
     canonical: &[u8],
     at: usize,
     value: Value,
     decode: impl Fn(&[u8]) -> Result<T, CodecError>,
-) -> Result<Option<CodecError>, Box<dyn std::error::Error>> {
+) -> Fallible<Option<CodecError>> {
     let mut fields = items(canonical)?;
     *fields.get_mut(at).ok_or("field index")? = value;
     Ok(decode(&encode(fields)?).err())
-}
-
-fn issuer() -> Result<ForkAttributionIssuerV1, CodecError> {
-    ForkAttributionIssuerV1::new("issuer-a", 1, PublicKey::from_bytes([0x22; 32]))
 }
 
 #[test]
@@ -243,11 +207,11 @@ fn fip1_states_are_closed() {
         ForkAttributionIssuerStateV1::Revoked,
     ] {
         assert_eq!(
-            ForkAttributionIssuerStateV1::from_code(u64::from(state.code())),
+            ForkAttributionIssuerStateV1::from_code(state.code()),
             Ok(state)
         );
     }
-    for code in [0, 4, u64::MAX] {
+    for code in [0, 4, u8::MAX] {
         assert_eq!(
             ForkAttributionIssuerStateV1::from_code(code),
             Err(CodecError::InvalidEncoding)
@@ -372,6 +336,11 @@ fn fip1_decoder_rejects_versions_counts_states_and_carrier_bounds() -> TestResul
         ),
         (
             5,
+            Value::Array(vec![entry_with(fai1.clone(), int(300))]),
+            CodecError::InvalidEncoding,
+        ),
+        (
+            5,
             Value::Array(vec![Value::Array(vec![fai1, int(1), int(1)])]),
             CodecError::InvalidEncoding,
         ),
@@ -408,10 +377,6 @@ fn fip1_decoder_rejects_versions_counts_states_and_carrier_bounds() -> TestResul
         Err(CodecError::FieldOutOfBounds)
     );
     Ok(())
-}
-
-fn attribution_identity(epoch: u64) -> KeyIdentityV1 {
-    KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, epoch)
 }
 
 fn live_key() -> Result<ImportedKeyRecordV1, CodecError> {
@@ -513,25 +478,6 @@ fn ikr1_and_ikt1_round_trip_and_project_source_registry_values() -> TestResult {
 }
 
 #[test]
-fn imported_key_lifecycle_requires_exactly_the_matching_tombstone() -> TestResult {
-    let live = live_key()?;
-    let destroyed = destroyed_key()?;
-    assert_eq!(live.validate_tombstone(None), Ok(()));
-    assert_eq!(destroyed.validate_tombstone(Some(&tombstone(1)?)), Ok(()));
-    for (key, ended) in [
-        (live, Some(tombstone(1)?)),
-        (destroyed, None),
-        (destroyed, Some(tombstone(2)?)),
-    ] {
-        assert_eq!(
-            key.validate_tombstone(ended.as_ref()),
-            Err(CodecError::FieldMismatch)
-        );
-    }
-    Ok(())
-}
-
-#[test]
 fn imported_key_constructors_and_decoders_reject_foreign_roles_and_zero_values() -> TestResult {
     let key = PublicKey::from_bytes([0x55; 32]);
     let timeline_role = KeyIdentityV1::new("creator-a", KeyRoleV1::TimelineIntegritySigning, 1);
@@ -599,46 +545,6 @@ fn imported_key_constructors_and_decoders_reject_foreign_roles_and_zero_values()
         Err(CodecError::FieldOutOfBounds)
     );
     Ok(())
-}
-
-fn envelope_at(
-    origin: TimelineId,
-    seq: u64,
-    schema_version: u32,
-    payload: &CanonicalBytes,
-) -> Result<TimelineEventEnvelopeV1, Box<dyn std::error::Error>> {
-    Ok(TimelineEventEnvelopeV1::new(
-        TimelineEventEnvelopeInputV1 {
-            identity: KeyIdentityV1::new("timeline-owner", KeyRoleV1::TimelineIntegritySigning, 1),
-            origin_timeline_id: origin,
-            event_id: EventId::from_ulid(Ulid::from_parts(seq, 7)),
-            origin_logical_seq: Seq::from_u64(seq),
-            entity_id: EntityId::from_ulid(Ulid::from_parts(1, 2)),
-            event_type: Kind::new("fork.test"),
-            schema_version,
-            wall_time: WallTime::from_micros(1_000 + seq),
-            causation_id: None,
-            correlation_id: None,
-        },
-        payload,
-    )?)
-}
-
-fn evidence_from(
-    origin: TimelineId,
-    seq: u64,
-    payload: &[u8],
-) -> Result<ForkEventEvidenceV1, Box<dyn std::error::Error>> {
-    let payload = CanonicalBytes::from_vec(payload.to_vec());
-    Ok(ForkEventEvidenceV1::new(
-        envelope_at(origin, seq, 1, &payload)?,
-        payload,
-        Signature::from_bytes([0x77; 64]),
-    )?)
-}
-
-fn evidence(seq: u64, payload: &[u8]) -> Result<ForkEventEvidenceV1, Box<dyn std::error::Error>> {
-    evidence_from(timeline_id(2), seq, payload)
 }
 
 #[test]

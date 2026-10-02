@@ -48,8 +48,15 @@ const ENVELOPE_DOMAIN: &[u8] = b"pigloros/fork-attribution-authority-envelope/v1
 /// Fields 0–21 form the signed preimage; field 22 is the signature.
 const UNSIGNED_FIELDS: u64 = 22;
 const SIGNED_FIELDS: u64 = 23;
-/// A 64-byte signature adds its 2-byte `bstr` head; both array heads are one byte.
+/// Both array heads (22 and 23 elements) are exactly one byte.
+///
+/// Each count is below 24, so the unsigned and signed encodings share every
+/// byte after the head.
+const ARRAY_HEAD_BYTES: usize = 1;
+/// A 64-byte signature adds its 2-byte `bstr` head.
 const SIGNATURE_ITEM_BYTES: usize = 2 + 64;
+/// The `bstr .size 32` head that precedes the closure root in field 5.
+const DIGEST_HEAD_BYTES: usize = 2;
 
 /// Closed `closure_leaf` type codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,34 +116,8 @@ impl ForkAttributionClosureLeafTypeV1 {
         }
     }
 
-    /// Decode a closed type code.
-    ///
-    /// # Errors
-    /// Returns `InvalidEncoding` for every unknown code.
-    pub const fn from_code(code: u8) -> Result<Self, Error> {
-        match code {
-            1 => Ok(Self::PrincipalOwnerBinding),
-            2 => Ok(Self::ForkAdmission),
-            3 => Ok(Self::EventOrigin),
-            4 => Ok(Self::InterventionAdmission),
-            5 => Ok(Self::PublicationOperation),
-            6 => Ok(Self::PublicationBinding),
-            7 => Ok(Self::PublicationArtifact),
-            8 => Ok(Self::ImportedKeyRecord),
-            9 => Ok(Self::ImportedKeyTombstone),
-            10 => Ok(Self::EventEvidence),
-            11 => Ok(Self::TimelineImport),
-            12 => Ok(Self::ClassifierSource),
-            13 => Ok(Self::ClassifierTable),
-            14 => Ok(Self::ClassifierRegistration),
-            15 => Ok(Self::AppendOperation),
-            _ => Err(Error::InvalidEncoding),
-        }
-    }
-
     /// Return the exact record bound that a present leaf must satisfy.
-    #[must_use]
-    pub const fn maximum_bytes(self) -> usize {
+    const fn maximum_bytes(self) -> usize {
         match self {
             Self::PrincipalOwnerBinding => MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1,
             Self::ForkAdmission => MAX_FORK_ADMISSION_RECORD_BYTES_V1,
@@ -158,8 +139,7 @@ impl ForkAttributionClosureLeafTypeV1 {
     }
 
     /// Whether the record may be absent, hashing as the typed empty leaf.
-    #[must_use]
-    pub const fn may_be_absent(self) -> bool {
+    const fn may_be_absent(self) -> bool {
         matches!(
             self,
             Self::ImportedKeyTombstone
@@ -167,6 +147,21 @@ impl ForkAttributionClosureLeafTypeV1 {
                 | Self::ClassifierTable
                 | Self::ClassifierRegistration
         )
+    }
+
+    /// Require a present record within its bound, or the absent form only
+    /// where the type permits it.
+    const fn check(self, record: &[u8]) -> Result<(), Error> {
+        if record.len() > self.maximum_bytes() || (record.is_empty() && !self.may_be_absent()) {
+            Err(Error::FieldOutOfBounds)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Read one carried record of this type, bounded before allocation.
+    fn read(self, wire: &mut Reader<'_>) -> Result<Vec<u8>, Error> {
+        wire.record(self.maximum_bytes()).map(<[u8]>::to_vec)
     }
 }
 
@@ -183,10 +178,7 @@ pub fn fork_attribution_closure_leaf_v1(
     leaf: ForkAttributionClosureLeafTypeV1,
     record: &[u8],
 ) -> Result<Hash, Error> {
-    if record.len() > leaf.maximum_bytes() || (record.is_empty() && !leaf.may_be_absent()) {
-        return Err(Error::FieldOutOfBounds);
-    }
-    Ok(leaf_digest(leaf, record))
+    leaf.check(record).map(|()| leaf_digest(leaf, record))
 }
 
 /// Derive the primitive `FAO1` code-2 authority-origin digest.
@@ -202,12 +194,28 @@ pub fn fork_attribution_authority_origin_digest_v1(
     parent_timeline_id: TimelineId,
     child_timeline_id: TimelineId,
 ) -> Hash {
+    origin_digest(
+        import_operation_id,
+        &issuer.to_canonical_cbor(),
+        issuer_policy_digest,
+        parent_timeline_id,
+        child_timeline_id,
+    )
+}
+
+fn origin_digest(
+    import_operation_id: Hash,
+    issuer: &[u8],
+    issuer_policy_digest: Hash,
+    parent_timeline_id: TimelineId,
+    child_timeline_id: TimelineId,
+) -> Hash {
     let mut out = Vec::with_capacity(320);
     array(&mut out, 7);
     text(&mut out, "FAO1");
     uint(&mut out, 1);
     hash(&mut out, import_operation_id);
-    bytes(&mut out, &issuer.to_canonical_cbor());
+    bytes(&mut out, issuer);
     hash(&mut out, issuer_policy_digest);
     timeline(&mut out, parent_timeline_id);
     timeline(&mut out, child_timeline_id);
@@ -289,27 +297,33 @@ impl ForkAttributionAuthorityUnsignedEnvelopeV1 {
     /// closure root and the primitive code-2 origin digest.
     ///
     /// The origin digest uses the `FTI1` parent and child IDs; the import
-    /// seam must still prove they equal `FAR1` fields 5 and 6.
+    /// seam must still prove they equal `FAR1` fields 5 and 6. Every record
+    /// is encoded exactly once, and each closure leaf is hashed as it is
+    /// written.
     ///
     /// # Errors
-    /// Returns `FieldOutOfBounds` for a zero required digest, any
-    /// record, count, aggregate-payload, or complete-envelope bound, and
-    /// `FieldMismatch` for an Event count that `EOR1` or `FOP1`
-    /// does not match, a classifier triple absent for a nonempty segment or
-    /// beside any Event record, or an inconsistent key tombstone.
+    /// Returns `FieldOutOfBounds` for a zero required digest, any record,
+    /// count, aggregate-payload, or complete-envelope bound, and
+    /// `FieldMismatch` for an Event count that `EOR1` or `FOP1` does not
+    /// match, Events that are not exactly the `FTI1` child segment, a
+    /// classifier triple absent for a nonempty segment or beside any Event
+    /// record, or an inconsistent key tombstone.
     pub fn new(input: ForkAttributionAuthorityEnvelopeInputV1) -> Result<Self, Error> {
-        validate_bounds(&input)?;
+        validate_counts(&input)?;
         validate_structure(&input)?;
+        let issuer = input.issuer.to_canonical_cbor();
         let fork = input.timeline_import.input();
-        let authority_origin_digest = fork_attribution_authority_origin_digest_v1(
+        let authority_origin_digest = origin_digest(
             input.import_operation_id,
-            &input.issuer,
+            &issuer,
             input.issuer_policy_digest,
             fork.parent_timeline_id,
             fork.child_timeline_id,
         );
-        let closure_root = closure_root(&input);
-        let canonical_bytes = encode_unsigned(&input, closure_root, authority_origin_digest);
+        let mut writer = ClosureWriter::new();
+        let root_at = writer.header(&input, &issuer, authority_origin_digest);
+        writer.closure(&input);
+        let (canonical_bytes, closure_root) = writer.finish(root_at)?;
         if canonical_bytes.len() + SIGNATURE_ITEM_BYTES
             > MAX_FORK_ATTRIBUTION_AUTHORITY_ENVELOPE_BYTES_V1
         {
@@ -323,6 +337,7 @@ impl ForkAttributionAuthorityUnsignedEnvelopeV1 {
         })
     }
 
+    /// Return the validated input fields.
     #[must_use]
     pub const fn input(&self) -> &ForkAttributionAuthorityEnvelopeInputV1 {
         &self.input
@@ -344,6 +359,11 @@ impl ForkAttributionAuthorityUnsignedEnvelopeV1 {
     #[must_use]
     pub const fn canonical_bytes(&self) -> &[u8] {
         self.canonical_bytes.as_slice()
+    }
+
+    /// Fields 0–21 without the one-byte array head.
+    fn body(&self) -> &[u8] {
+        &self.canonical_bytes[ARRAY_HEAD_BYTES..]
     }
 
     /// Return the exact Ed25519 issuer signature message:
@@ -384,11 +404,13 @@ impl ForkAttributionAuthorityEnvelopeV1 {
         }
     }
 
+    /// Fields 0–21: the exact signed preimage.
     #[must_use]
     pub const fn unsigned(&self) -> &ForkAttributionAuthorityUnsignedEnvelopeV1 {
         &self.unsigned
     }
 
+    /// Field 22: the issuer signature, not verified here.
     #[must_use]
     pub const fn signature(&self) -> Signature {
         self.signature
@@ -397,18 +419,34 @@ impl ForkAttributionAuthorityEnvelopeV1 {
     /// Encode the exact canonical 23-element `FAE1`.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let unsigned = self.unsigned.canonical_bytes();
-        let mut out = Vec::with_capacity(unsigned.len() + SIGNATURE_ITEM_BYTES);
-        array(&mut out, SIGNED_FIELDS);
-        out.extend_from_slice(unsigned.get(1..).unwrap_or_default());
-        bytes(&mut out, self.signature.as_bytes());
+        let mut out =
+            Vec::with_capacity(self.unsigned.canonical_bytes.len() + SIGNATURE_ITEM_BYTES);
+        self.for_each_part(|part| out.extend_from_slice(part));
         out
     }
 
-    /// Return the full signed-envelope content address.
+    /// Return the full signed-envelope content address, hashing the encoding
+    /// in place without materializing it.
     #[must_use]
     pub fn full_envelope_digest(&self) -> Hash {
-        domain_digest(ENVELOPE_DOMAIN, &self.to_canonical_cbor())
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(ENVELOPE_DOMAIN);
+        self.for_each_part(|part| {
+            hasher.update(part);
+        });
+        Hash::from_bytes(*hasher.finalize().as_bytes())
+    }
+
+    /// Feed the canonical signed encoding, in order, to `sink`: the signed
+    /// array head, the unsigned body, and the signature item.
+    fn for_each_part(&self, mut sink: impl FnMut(&[u8])) {
+        let mut head = Vec::with_capacity(ARRAY_HEAD_BYTES);
+        array(&mut head, SIGNED_FIELDS);
+        let mut signature = Vec::with_capacity(SIGNATURE_ITEM_BYTES);
+        bytes(&mut signature, self.signature.as_bytes());
+        sink(&head);
+        sink(self.unsigned.body());
+        sink(&signature);
     }
 
     /// Decode exact canonical `FAE1` bytes.
@@ -454,26 +492,21 @@ impl ForkAttributionAuthorityEnvelopeV1 {
 }
 
 fn read_records(wire: &mut Reader<'_>) -> Result<ForkAttributionAuthorityRecordsV1, Error> {
+    use ForkAttributionClosureLeafTypeV1 as Leaf;
     Ok(ForkAttributionAuthorityRecordsV1 {
-        principal_owner_binding: wire
-            .record(MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1)?
-            .to_vec(),
-        fork_admission: wire.record(MAX_FORK_ADMISSION_RECORD_BYTES_V1)?.to_vec(),
+        principal_owner_binding: Leaf::PrincipalOwnerBinding.read(wire)?,
+        fork_admission: Leaf::ForkAdmission.read(wire)?,
         event_origins: wire.records(
             MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1,
-            MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
+            Leaf::EventOrigin.maximum_bytes(),
         )?,
         intervention_admissions: wire.records(
             MAX_FORK_ATTRIBUTION_AUTHORITY_INTERVENTIONS_V1,
-            MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
+            Leaf::InterventionAdmission.maximum_bytes(),
         )?,
-        publication_operation: wire
-            .record(MAX_FORK_PUBLICATION_OPERATION_BYTES_V1)?
-            .to_vec(),
-        publication_binding: wire.record(MAX_FORK_PUBLICATION_BINDING_BYTES_V1)?.to_vec(),
-        publication_artifact: wire
-            .record(MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1)?
-            .to_vec(),
+        publication_operation: Leaf::PublicationOperation.read(wire)?,
+        publication_binding: Leaf::PublicationBinding.read(wire)?,
+        publication_artifact: Leaf::PublicationArtifact.read(wire)?,
     })
 }
 
@@ -485,26 +518,27 @@ fn read_evidence(
     issuer_policy_digest: Hash,
     records: ForkAttributionAuthorityRecordsV1,
 ) -> Result<ForkAttributionAuthorityEnvelopeInputV1, Error> {
+    use ForkAttributionClosureLeafTypeV1 as Leaf;
     Ok(ForkAttributionAuthorityEnvelopeInputV1 {
         import_operation_id,
         issuer,
         issuer_policy_digest,
         records,
         key_record: ImportedKeyRecordV1::from_canonical_cbor(
-            wire.record(MAX_IMPORTED_KEY_RECORD_BYTES_V1)?,
+            wire.record(Leaf::ImportedKeyRecord.maximum_bytes())?,
         )?,
         key_tombstone: wire
-            .optional_record(MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1)?
+            .optional_record(Leaf::ImportedKeyTombstone.maximum_bytes())?
             .map(ImportedKeyTombstoneV1::from_canonical_cbor)
             .transpose()?,
         event_evidence: read_event_evidence(wire)?,
         timeline_import: ForkTimelineImportV1::from_canonical_cbor(
-            wire.record(MAX_FORK_TIMELINE_IMPORT_BYTES_V1)?,
+            wire.record(Leaf::TimelineImport.maximum_bytes())?,
         )?,
         classifier: read_classifier(wire)?,
         append_operations: wire.records(
             MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1,
-            MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1,
+            Leaf::AppendOperation.maximum_bytes(),
         )?,
     })
 }
@@ -520,9 +554,10 @@ fn read_event_evidence(wire: &mut Reader<'_>) -> Result<Vec<ForkEventEvidenceV1>
 fn read_classifier(
     wire: &mut Reader<'_>,
 ) -> Result<Option<ForkAttributionClassifierRecordsV1>, Error> {
-    let source = wire.optional_record(MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1)?;
-    let table = wire.optional_record(MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1)?;
-    let registration = wire.optional_record(MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1)?;
+    use ForkAttributionClosureLeafTypeV1 as Leaf;
+    let source = wire.optional_record(Leaf::ClassifierSource.maximum_bytes())?;
+    let table = wire.optional_record(Leaf::ClassifierTable.maximum_bytes())?;
+    let registration = wire.optional_record(Leaf::ClassifierRegistration.maximum_bytes())?;
     match (source, table, registration) {
         (Some(source), Some(table), Some(registration)) => {
             Ok(Some(ForkAttributionClassifierRecordsV1 {
@@ -536,37 +571,23 @@ fn read_classifier(
     }
 }
 
-/// Enforce every per-record, count, and aggregate-payload bound.
-fn validate_bounds(input: &ForkAttributionAuthorityEnvelopeInputV1) -> Result<(), Error> {
-    if input.import_operation_id == Hash::zero() || input.issuer_policy_digest == Hash::zero() {
-        return Err(Error::FieldOutOfBounds);
-    }
-    validate_record_bounds(&input.records)?;
-    if let Some(classifier) = &input.classifier {
-        authority_wire::bounded_record(
-            &classifier.source,
-            MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
-        )?;
-        authority_wire::bounded_record(
-            &classifier.table,
-            MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
-        )?;
-        authority_wire::bounded_record(
-            &classifier.registration,
-            MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1,
-        )?;
-    }
-    authority_wire::bounded_records(
-        &input.append_operations,
-        MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1,
-        MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1,
-    )?;
+/// Enforce the nonzero digests and every count and aggregate-payload bound.
+///
+/// Per-record byte bounds are enforced once, by the closure leaf check, as
+/// each record is encoded.
+fn validate_counts(input: &ForkAttributionAuthorityEnvelopeInputV1) -> Result<(), Error> {
     let payload_bytes = input
         .event_evidence
         .iter()
         .map(|evidence| evidence.payload().len())
         .sum::<usize>();
-    if input.event_evidence.len() > MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1
+    if input.import_operation_id == Hash::zero()
+        || input.issuer_policy_digest == Hash::zero()
+        || input.records.event_origins.len() > MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1
+        || input.records.intervention_admissions.len()
+            > MAX_FORK_ATTRIBUTION_AUTHORITY_INTERVENTIONS_V1
+        || input.event_evidence.len() > MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1
+        || input.append_operations.len() > MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1
         || payload_bytes > MAX_FORK_ATTRIBUTION_AUTHORITY_PAYLOAD_BYTES_V1
     {
         return Err(Error::FieldOutOfBounds);
@@ -574,37 +595,8 @@ fn validate_bounds(input: &ForkAttributionAuthorityEnvelopeInputV1) -> Result<()
     Ok(())
 }
 
-fn validate_record_bounds(records: &ForkAttributionAuthorityRecordsV1) -> Result<(), Error> {
-    authority_wire::bounded_record(
-        &records.principal_owner_binding,
-        MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1,
-    )?;
-    authority_wire::bounded_record(&records.fork_admission, MAX_FORK_ADMISSION_RECORD_BYTES_V1)?;
-    authority_wire::bounded_records(
-        &records.event_origins,
-        MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1,
-        MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
-    )?;
-    authority_wire::bounded_records(
-        &records.intervention_admissions,
-        MAX_FORK_ATTRIBUTION_AUTHORITY_INTERVENTIONS_V1,
-        MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
-    )?;
-    authority_wire::bounded_record(
-        &records.publication_operation,
-        MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
-    )?;
-    authority_wire::bounded_record(
-        &records.publication_binding,
-        MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
-    )?;
-    authority_wire::bounded_record(
-        &records.publication_artifact,
-        MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
-    )
-}
-
-/// Enforce the structural count, all-or-none, and key-lifecycle rules.
+/// Enforce the structural count, all-or-none, child-segment, and
+/// key-lifecycle rules.
 fn validate_structure(input: &ForkAttributionAuthorityEnvelopeInputV1) -> Result<(), Error> {
     let events = input.event_evidence.len();
     let unclassified_records = input.classifier.is_none()
@@ -616,182 +608,165 @@ fn validate_structure(input: &ForkAttributionAuthorityEnvelopeInputV1) -> Result
         return Err(Error::FieldMismatch);
     }
     input
-        .key_record
-        .validate_tombstone(input.key_tombstone.as_ref())
+        .timeline_import
+        .validate_segment(&input.event_evidence)
+        .and_then(|()| {
+            input
+                .key_record
+                .validate_tombstone(input.key_tombstone.as_ref())
+        })
 }
 
-fn leaf_digest(leaf: ForkAttributionClosureLeafTypeV1, record: &[u8]) -> Hash {
+fn leaf_digest(kind: ForkAttributionClosureLeafTypeV1, record: &[u8]) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(LEAF_DOMAIN);
-    hasher.update(&[leaf.code()]);
+    hasher.update(&[kind.code()]);
     hasher.update(&(record.len() as u64).to_be_bytes());
     hasher.update(record);
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-/// Append one leaf to the root preimage.
-fn leaf(root: &mut blake3::Hasher, leaf: ForkAttributionClosureLeafTypeV1, record: &[u8]) {
-    root.update(leaf_digest(leaf, record).as_bytes());
+/// Single-pass `FAE1` encoder that hashes each closure leaf as it writes the
+/// record, so every record is encoded once and no leaf is copied.
+struct ClosureWriter {
+    out: Vec<u8>,
+    root: blake3::Hasher,
+    /// The first violated record bound, if any.
+    bounded: Result<(), Error>,
 }
 
-/// Append `u32be(count)` and one leaf per record, in carried order.
-fn leaves<'a>(
-    root: &mut blake3::Hasher,
-    kind: ForkAttributionClosureLeafTypeV1,
-    records: impl ExactSizeIterator<Item = &'a [u8]>,
-) {
-    // Validated counts are at most 10,000, so they always fit `u32`.
-    root.update(
-        &u32::try_from(records.len())
-            .unwrap_or(u32::MAX)
-            .to_be_bytes(),
-    );
-    for record in records {
-        leaf(root, kind, record);
+impl ClosureWriter {
+    fn new() -> Self {
+        let mut root = blake3::Hasher::new();
+        root.update(ROOT_DOMAIN);
+        Self {
+            out: Vec::new(),
+            root,
+            bounded: Ok(()),
+        }
     }
-}
 
-fn closure_root(input: &ForkAttributionAuthorityEnvelopeInputV1) -> Hash {
-    use ForkAttributionClosureLeafTypeV1 as Leaf;
-    let records = &input.records;
-    let classifier = input.classifier.as_ref();
-    let mut root = blake3::Hasher::new();
-    root.update(ROOT_DOMAIN);
-    leaf(
-        &mut root,
-        Leaf::PrincipalOwnerBinding,
-        &records.principal_owner_binding,
-    );
-    leaf(&mut root, Leaf::ForkAdmission, &records.fork_admission);
-    leaves(
-        &mut root,
-        Leaf::EventOrigin,
-        records.event_origins.iter().map(Vec::as_slice),
-    );
-    leaves(
-        &mut root,
-        Leaf::InterventionAdmission,
-        records.intervention_admissions.iter().map(Vec::as_slice),
-    );
-    leaf(
-        &mut root,
-        Leaf::PublicationOperation,
-        &records.publication_operation,
-    );
-    leaf(
-        &mut root,
-        Leaf::PublicationBinding,
-        &records.publication_binding,
-    );
-    leaf(
-        &mut root,
-        Leaf::PublicationArtifact,
-        &records.publication_artifact,
-    );
-    leaf(
-        &mut root,
-        Leaf::ImportedKeyRecord,
-        &input.key_record.to_canonical_cbor(),
-    );
-    leaf(
-        &mut root,
-        Leaf::ImportedKeyTombstone,
-        &input
-            .key_tombstone
-            .as_ref()
-            .map(ImportedKeyTombstoneV1::to_canonical_cbor)
-            .unwrap_or_default(),
-    );
-    let evidence = input
-        .event_evidence
-        .iter()
-        .map(ForkEventEvidenceV1::to_canonical_cbor)
-        .collect::<Vec<_>>();
-    leaves(
-        &mut root,
-        Leaf::EventEvidence,
-        evidence.iter().map(Vec::as_slice),
-    );
-    leaf(
-        &mut root,
-        Leaf::TimelineImport,
-        &input.timeline_import.to_canonical_cbor(),
-    );
-    leaf(
-        &mut root,
-        Leaf::ClassifierSource,
-        classifier
-            .map(|records| records.source.as_slice())
-            .unwrap_or_default(),
-    );
-    leaf(
-        &mut root,
-        Leaf::ClassifierTable,
-        classifier
-            .map(|records| records.table.as_slice())
-            .unwrap_or_default(),
-    );
-    leaf(
-        &mut root,
-        Leaf::ClassifierRegistration,
-        classifier
-            .map(|records| records.registration.as_slice())
-            .unwrap_or_default(),
-    );
-    leaves(
-        &mut root,
-        Leaf::AppendOperation,
-        input.append_operations.iter().map(Vec::as_slice),
-    );
-    Hash::from_bytes(*root.finalize().as_bytes())
-}
-
-fn encode_unsigned(
-    input: &ForkAttributionAuthorityEnvelopeInputV1,
-    closure_root: Hash,
-    authority_origin_digest: Hash,
-) -> Vec<u8> {
-    let records = &input.records;
-    let classifier = input.classifier.as_ref();
-    let mut out = Vec::new();
-    array(&mut out, UNSIGNED_FIELDS);
-    text(&mut out, "FAE1");
-    uint(&mut out, 1);
-    hash(&mut out, input.import_operation_id);
-    bytes(&mut out, &input.issuer.to_canonical_cbor());
-    hash(&mut out, input.issuer_policy_digest);
-    hash(&mut out, closure_root);
-    hash(&mut out, authority_origin_digest);
-    bytes(&mut out, &records.principal_owner_binding);
-    bytes(&mut out, &records.fork_admission);
-    authority_wire::records(&mut out, &records.event_origins);
-    authority_wire::records(&mut out, &records.intervention_admissions);
-    bytes(&mut out, &records.publication_operation);
-    bytes(&mut out, &records.publication_binding);
-    bytes(&mut out, &records.publication_artifact);
-    bytes(&mut out, &input.key_record.to_canonical_cbor());
-    authority_wire::optional_record(
-        &mut out,
-        input
-            .key_tombstone
-            .as_ref()
-            .map(ImportedKeyTombstoneV1::to_canonical_cbor)
-            .as_deref(),
-    );
-    array(&mut out, input.event_evidence.len() as u64);
-    for evidence in &input.event_evidence {
-        evidence.encode(&mut out);
+    /// Write fields 0–6 with a zero closure-root placeholder and return the
+    /// placeholder's offset.
+    fn header(
+        &mut self,
+        input: &ForkAttributionAuthorityEnvelopeInputV1,
+        issuer: &[u8],
+        authority_origin_digest: Hash,
+    ) -> usize {
+        let out = &mut self.out;
+        array(out, UNSIGNED_FIELDS);
+        text(out, "FAE1");
+        uint(out, 1);
+        hash(out, input.import_operation_id);
+        bytes(out, issuer);
+        hash(out, input.issuer_policy_digest);
+        let root_at = out.len() + DIGEST_HEAD_BYTES;
+        hash(out, Hash::zero());
+        hash(out, authority_origin_digest);
+        root_at
     }
-    bytes(&mut out, &input.timeline_import.to_canonical_cbor());
-    authority_wire::optional_record(
-        &mut out,
-        classifier.map(|records| records.source.as_slice()),
-    );
-    authority_wire::optional_record(&mut out, classifier.map(|records| records.table.as_slice()));
-    authority_wire::optional_record(
-        &mut out,
-        classifier.map(|records| records.registration.as_slice()),
-    );
-    authority_wire::records(&mut out, &input.append_operations);
-    out
+
+    /// Write fields 7–21, whose order is exactly the closure-root order.
+    fn closure(&mut self, input: &ForkAttributionAuthorityEnvelopeInputV1) {
+        use ForkAttributionClosureLeafTypeV1 as Leaf;
+        let records = &input.records;
+        let classifier = input.classifier.as_ref();
+        self.record(
+            Leaf::PrincipalOwnerBinding,
+            &records.principal_owner_binding,
+        );
+        self.record(Leaf::ForkAdmission, &records.fork_admission);
+        self.records(Leaf::EventOrigin, &records.event_origins);
+        self.records(
+            Leaf::InterventionAdmission,
+            &records.intervention_admissions,
+        );
+        self.record(Leaf::PublicationOperation, &records.publication_operation);
+        self.record(Leaf::PublicationBinding, &records.publication_binding);
+        self.record(Leaf::PublicationArtifact, &records.publication_artifact);
+        self.record(
+            Leaf::ImportedKeyRecord,
+            &input.key_record.to_canonical_cbor(),
+        );
+        self.optional(
+            Leaf::ImportedKeyTombstone,
+            input
+                .key_tombstone
+                .as_ref()
+                .map(ImportedKeyTombstoneV1::to_canonical_cbor)
+                .as_deref(),
+        );
+        self.evidence(&input.event_evidence);
+        self.record(
+            Leaf::TimelineImport,
+            &input.timeline_import.to_canonical_cbor(),
+        );
+        self.optional(
+            Leaf::ClassifierSource,
+            classifier.map(|records| records.source.as_slice()),
+        );
+        self.optional(
+            Leaf::ClassifierTable,
+            classifier.map(|records| records.table.as_slice()),
+        );
+        self.optional(
+            Leaf::ClassifierRegistration,
+            classifier.map(|records| records.registration.as_slice()),
+        );
+        self.records(Leaf::AppendOperation, &input.append_operations);
+    }
+
+    /// Check one leaf's bound and append its digest to the root preimage.
+    fn push_leaf(&mut self, kind: ForkAttributionClosureLeafTypeV1, record: &[u8]) {
+        self.bounded = self.bounded.and(kind.check(record));
+        self.root.update(leaf_digest(kind, record).as_bytes());
+    }
+
+    /// Write one list head and append `u32be(count)` to the root preimage.
+    fn push_count(&mut self, count: usize) {
+        array(&mut self.out, count as u64);
+        // Validated counts are at most 10,000, so they always fit `u32`.
+        self.root
+            .update(&u32::try_from(count).unwrap_or(u32::MAX).to_be_bytes());
+    }
+
+    fn record(&mut self, kind: ForkAttributionClosureLeafTypeV1, record: &[u8]) {
+        bytes(&mut self.out, record);
+        self.push_leaf(kind, record);
+    }
+
+    fn optional(&mut self, kind: ForkAttributionClosureLeafTypeV1, record: Option<&[u8]>) {
+        authority_wire::encode_optional_record(&mut self.out, record);
+        self.push_leaf(kind, record.unwrap_or_default());
+    }
+
+    fn records(&mut self, kind: ForkAttributionClosureLeafTypeV1, records: &[Vec<u8>]) {
+        self.push_count(records.len());
+        for record in records {
+            self.record(kind, record);
+        }
+    }
+
+    /// Write field 16 inline. Each `FEE1` is bounded by construction, so its
+    /// leaf is hashed straight from the bytes just written.
+    fn evidence(&mut self, events: &[ForkEventEvidenceV1]) {
+        self.push_count(events.len());
+        for event in events {
+            let start = self.out.len();
+            event.encode(&mut self.out);
+            let leaf = leaf_digest(
+                ForkAttributionClosureLeafTypeV1::EventEvidence,
+                &self.out[start..],
+            );
+            self.root.update(leaf.as_bytes());
+        }
+    }
+
+    /// Patch the closure root into field 5 and return the unsigned bytes.
+    fn finish(mut self, root_at: usize) -> Result<(Vec<u8>, Hash), Error> {
+        let closure_root = Hash::from_bytes(*self.root.finalize().as_bytes());
+        self.out[root_at..root_at + 32].copy_from_slice(closure_root.as_bytes());
+        self.bounded.map(|()| (self.out, closure_root))
+    }
 }

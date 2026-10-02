@@ -3,7 +3,7 @@
 //! These extend the parent ADR-099 reader and encoders, so every ADR-105
 //! record keeps exactly the same preferred-serialization profile.
 
-use super::{array, bytes, hash, ForkAttributionCodecErrorV1 as Error, Reader};
+use super::{bytes, hash, text, ForkAttributionCodecErrorV1 as Error, Reader};
 use crate::{Hash, KeyRoleV1};
 
 /// The single CBOR `null` byte.
@@ -80,14 +80,16 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Read one small closed code; a value that does not fit `u8` is malformed.
+    pub(super) fn code(&mut self) -> Result<u8, Error> {
+        self.uint()
+            .and_then(|code| u8::try_from(code).map_err(|_| Error::InvalidEncoding))
+    }
+
     /// Read one closed ADR-065 key-role code.
     pub(super) fn role(&mut self) -> Result<KeyRoleV1, Error> {
-        self.uint().and_then(|code| {
-            u8::try_from(code)
-                .ok()
-                .and_then(|code| KeyRoleV1::from_code(code).ok())
-                .ok_or(Error::InvalidEncoding)
-        })
+        self.code()
+            .and_then(|code| KeyRoleV1::from_code(code).map_err(|_| Error::InvalidEncoding))
     }
 }
 
@@ -100,31 +102,8 @@ const fn nonempty(value: &[u8]) -> Result<&[u8], Error> {
     }
 }
 
-/// Require `1..=maximum` bytes for one carried record.
-pub(super) const fn bounded_record(value: &[u8], maximum: usize) -> Result<(), Error> {
-    if value.is_empty() || value.len() > maximum {
-        Err(Error::FieldOutOfBounds)
-    } else {
-        Ok(())
-    }
-}
-
-/// Require at most `maximum_count` records of `1..=maximum_bytes` each.
-pub(super) fn bounded_records(
-    values: &[Vec<u8>],
-    maximum_count: usize,
-    maximum_bytes: usize,
-) -> Result<(), Error> {
-    if values.len() > maximum_count {
-        return Err(Error::FieldOutOfBounds);
-    }
-    values
-        .iter()
-        .try_for_each(|value| bounded_record(value, maximum_bytes))
-}
-
 /// Encode `null / bstr`.
-pub(super) fn optional_record(out: &mut Vec<u8>, value: Option<&[u8]>) {
+pub(super) fn encode_optional_record(out: &mut Vec<u8>, value: Option<&[u8]>) {
     if let Some(value) = value {
         bytes(out, value);
     } else {
@@ -132,8 +111,17 @@ pub(super) fn optional_record(out: &mut Vec<u8>, value: Option<&[u8]>) {
     }
 }
 
+/// Encode `null / bstr .size N`.
+pub(super) fn encode_optional_fixed<const N: usize>(out: &mut Vec<u8>, value: Option<[u8; N]>) {
+    if let Some(value) = value {
+        bytes(out, &value);
+    } else {
+        out.push(NULL);
+    }
+}
+
 /// Encode `null / bstr .size 32`.
-pub(super) fn optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
+pub(super) fn encode_optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
     if let Some(value) = value {
         hash(out, value);
     } else {
@@ -141,10 +129,11 @@ pub(super) fn optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
     }
 }
 
-/// Encode one definite array of byte strings.
-pub(super) fn records(out: &mut Vec<u8>, values: &[Vec<u8>]) {
-    array(out, values.len() as u64);
-    for value in values {
-        bytes(out, value);
+/// Encode `null / tstr`.
+pub(super) fn encode_optional_text(out: &mut Vec<u8>, value: Option<&str>) {
+    if let Some(value) = value {
+        text(out, value);
+    } else {
+        out.push(NULL);
     }
 }

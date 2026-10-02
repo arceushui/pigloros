@@ -20,16 +20,25 @@ pub const MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1: usize = 512;
 /// Construction fields for one `IFA1` import admission record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedForkAttributionAdmissionInputV1 {
+    /// `IFA1` field 2: the `FAE1` import operation ID.
     pub import_operation_id: Hash,
+    /// `IFA1` field 3: the primitive `FAO1` code-2 origin digest.
     pub authority_origin_digest: Hash,
+    /// `IFA1` field 4: the full signed-envelope digest.
     pub full_envelope_digest: Hash,
+    /// `IFA1` field 5: the exact `FAI1` issuer identity.
     pub issuer: ForkAttributionIssuerV1,
+    /// `IFA1` field 6: the admitting `FIP1` digest.
     pub issuer_policy_digest: Hash,
+    /// `IFA1` field 7: the admitting `FIP1` generation.
     pub issuer_policy_generation: u64,
+    /// `IFA1` field 8: the child Fork Timeline ID.
     pub child_timeline_id: TimelineId,
+    /// `IFA1` field 9: the final logical head.
     pub final_logical_head: u64,
+    /// `IFA1` field 10: the committed closure root.
     pub closure_root: Hash,
-    /// Revision 6: the ADR-099 digest of the carried `FAR1`.
+    /// `IFA1` field 11 (revision 6): the ADR-099 digest of the carried `FAR1`.
     pub fork_admission_digest: Hash,
 }
 
@@ -86,6 +95,7 @@ impl ImportedForkAttributionAdmissionV1 {
         })
     }
 
+    /// Return the validated `IFA1` fields.
     #[must_use]
     pub const fn input(&self) -> &ImportedForkAttributionAdmissionInputV1 {
         &self.0

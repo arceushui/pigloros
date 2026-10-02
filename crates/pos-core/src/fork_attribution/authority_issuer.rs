@@ -58,17 +58,19 @@ impl ForkAttributionIssuerV1 {
         })
     }
 
-    /// Return the exact, unnormalized issuer ID.
+    /// `FAI1` field 2: the exact, unnormalized issuer ID.
     #[must_use]
     pub const fn issuer_id(&self) -> &str {
         self.issuer_id.as_str()
     }
 
+    /// `FAI1` field 3: the nonzero issuer epoch.
     #[must_use]
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
 
+    /// `FAI1` field 4: the Ed25519 public key, carried exactly.
     #[must_use]
     pub const fn public_key(&self) -> PublicKey {
         self.public_key
@@ -137,7 +139,7 @@ impl ForkAttributionIssuerStateV1 {
     ///
     /// # Errors
     /// Rejects every code other than 1, 2, or 3.
-    pub const fn from_code(code: u64) -> Result<Self, Error> {
+    pub const fn from_code(code: u8) -> Result<Self, Error> {
         match code {
             1 => Ok(Self::Active),
             2 => Ok(Self::Retired),
@@ -150,16 +152,22 @@ impl ForkAttributionIssuerStateV1 {
 /// One `FIP1` entry: an exact issuer identity and its state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForkAttributionIssuerPolicyEntryV1 {
+    /// Entry field 0: the exact `FAI1` identity.
     pub issuer: ForkAttributionIssuerV1,
+    /// Entry field 1: the identity's state.
     pub state: ForkAttributionIssuerStateV1,
 }
 
 /// Construction fields for one `FIP1` issuer policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForkAttributionIssuerPolicyInputV1 {
+    /// `FIP1` field 2: the exact policy scope.
     pub scope: String,
+    /// `FIP1` field 3: the generation, 1 for genesis.
     pub generation: u64,
+    /// `FIP1` field 4: the predecessor's complete digest; `None` only at genesis.
     pub previous_policy_digest: Option<Hash>,
+    /// `FIP1` field 5: entries strictly ordered by `(issuer_id, epoch)`.
     pub entries: Vec<ForkAttributionIssuerPolicyEntryV1>,
 }
 
@@ -185,6 +193,7 @@ impl ForkAttributionIssuerPolicyV1 {
         Ok(Self(input))
     }
 
+    /// Return the validated `FIP1` fields.
     #[must_use]
     pub const fn input(&self) -> &ForkAttributionIssuerPolicyInputV1 {
         &self.0
@@ -219,7 +228,7 @@ impl ForkAttributionIssuerPolicyV1 {
         uint(&mut out, 1);
         text(&mut out, &value.scope);
         uint(&mut out, value.generation);
-        authority_wire::optional_hash(&mut out, value.previous_policy_digest);
+        authority_wire::encode_optional_hash(&mut out, value.previous_policy_digest);
         array(&mut out, value.entries.len() as u64);
         for entry in &value.entries {
             array(&mut out, 2);
@@ -263,7 +272,7 @@ fn read_policy_entry(wire: &mut Reader<'_>) -> Result<ForkAttributionIssuerPolic
     let issuer = ForkAttributionIssuerV1::from_canonical_cbor(
         wire.record(MAX_FORK_ATTRIBUTION_ISSUER_BYTES_V1)?,
     )?;
-    let state = ForkAttributionIssuerStateV1::from_code(wire.uint()?)?;
+    let state = ForkAttributionIssuerStateV1::from_code(wire.code()?)?;
     Ok(ForkAttributionIssuerPolicyEntryV1 { issuer, state })
 }
 

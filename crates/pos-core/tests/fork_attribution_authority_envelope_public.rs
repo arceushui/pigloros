@@ -6,28 +6,32 @@
 
 use ciborium::Value;
 use pos_core::{
-    fork_attribution_authority_origin_digest_v1, fork_attribution_closure_leaf_v1, CanonicalBytes,
-    EntityId, EventId, ForkAttributionAuthorityEnvelopeInputV1, ForkAttributionAuthorityEnvelopeV1,
+    fork_attribution_authority_origin_digest_v1, fork_attribution_closure_leaf_v1,
+    ForkAttributionAuthorityEnvelopeInputV1, ForkAttributionAuthorityEnvelopeV1,
     ForkAttributionAuthorityRecordsV1, ForkAttributionAuthorityUnsignedEnvelopeV1,
     ForkAttributionClassifierRecordsV1, ForkAttributionClosureLeafTypeV1 as Leaf,
     ForkAttributionCodecErrorV1 as CodecError, ForkAttributionIssuerV1, ForkEventEvidenceV1,
     ForkTimelineImportInputV1, ForkTimelineImportV1, Hash, ImportedForkAttributionAdmissionInputV1,
-    ImportedForkAttributionAdmissionV1, ImportedKeyRecordV1, ImportedKeyTombstoneV1, KeyIdentityV1,
-    KeyRoleV1, Kind, PublicKey, Seq, Signature, TimelineEventEnvelopeInputV1,
-    TimelineEventEnvelopeV1, TimelineId, WallTime, MAX_FORK_ADMISSION_RECORD_BYTES_V1,
+    ImportedForkAttributionAdmissionV1, ImportedKeyRecordV1, ImportedKeyTombstoneV1, PublicKey,
+    Signature, MAX_EVENT_ORIGIN_RECORD_BYTES_V1, MAX_FORK_ADMISSION_RECORD_BYTES_V1,
     MAX_FORK_ATTRIBUTION_AUTHORITY_ENVELOPE_BYTES_V1, MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1,
     MAX_FORK_ATTRIBUTION_AUTHORITY_INTERVENTIONS_V1,
     MAX_FORK_ATTRIBUTION_AUTHORITY_PAYLOAD_BYTES_V1, MAX_FORK_ATTRIBUTION_ISSUER_BYTES_V1,
-    MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1, MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
-    MAX_FORK_PUBLICATION_OPERATION_BYTES_V1, MAX_FORK_TIMELINE_IMPORT_BYTES_V1,
-    MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1, MAX_IMPORTED_KEY_RECORD_BYTES_V1,
-    MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1, MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1,
-    MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1,
+    MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1, MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1,
+    MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1, MAX_FORK_EVENT_EVIDENCE_BYTES_V1,
+    MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1, MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
+    MAX_FORK_PUBLICATION_BINDING_BYTES_V1, MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+    MAX_FORK_TIMELINE_IMPORT_BYTES_V1, MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1,
+    MAX_IMPORTED_KEY_RECORD_BYTES_V1, MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
+    MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1, MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1,
 };
-use ulid::Ulid;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
-type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+pub mod common;
+
+use common::{
+    attribution_identity, encode, evidence, hash, issuer, items, timeline_id, unhex, widened,
+    Fallible, TestResult,
+};
 
 /// Independently computed vectors for [`minimal_input`] signed with
 /// `[0x77; 64]` (see the PR description).
@@ -43,36 +47,6 @@ const LEAF_FOP1_ABC_HEX: &str = "6e751a25abc7f3f073a3a61847730690eb61d30bbc34906
 const SIGNATURE_DOMAIN: &[u8] = b"pigloros/fork-attribution-authority-envelope/signature/v1";
 /// The signature adds its 2-byte `bstr` head to the unsigned array.
 const SIGNATURE_ITEM_BYTES: usize = 2 + 64;
-
-const fn hash(value: u8) -> Hash {
-    Hash::from_bytes([value; 32])
-}
-
-const fn timeline_id(value: u8) -> TimelineId {
-    TimelineId::from_ulid(Ulid::from_bytes([value; 16]))
-}
-
-fn unhex(text: &str) -> Fallible<Vec<u8>> {
-    (0..text.len())
-        .step_by(2)
-        .map(|at| -> Fallible<u8> {
-            let pair = text.get(at..at + 2).ok_or("odd hex length")?;
-            Ok(u8::from_str_radix(pair, 16)?)
-        })
-        .collect()
-}
-
-fn items(bytes: &[u8]) -> Fallible<Vec<Value>> {
-    ciborium::from_reader::<Value, _>(bytes)?
-        .into_array()
-        .map_err(|_| "not a CBOR array".into())
-}
-
-fn encode(items: Vec<Value>) -> Fallible<Vec<u8>> {
-    let mut out = Vec::new();
-    ciborium::into_writer(&Value::Array(items), &mut out)?;
-    Ok(out)
-}
 
 fn decode(bytes: &[u8]) -> Result<ForkAttributionAuthorityEnvelopeV1, CodecError> {
     ForkAttributionAuthorityEnvelopeV1::from_canonical_cbor(bytes)
@@ -100,17 +74,9 @@ fn list(fields: &mut [Value], at: usize) -> Fallible<&mut Vec<Value>> {
     }
 }
 
-fn issuer() -> Result<ForkAttributionIssuerV1, CodecError> {
-    ForkAttributionIssuerV1::new("issuer-a", 1, PublicKey::from_bytes([0x22; 32]))
-}
-
-fn attribution_identity() -> KeyIdentityV1 {
-    KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, 1)
-}
-
 fn live_key() -> Result<ImportedKeyRecordV1, CodecError> {
     ImportedKeyRecordV1::new(
-        attribution_identity(),
+        attribution_identity(1),
         Some(hash(0x44)),
         PublicKey::from_bytes([0x55; 32]),
     )
@@ -149,7 +115,7 @@ fn classifier() -> ForkAttributionClassifierRecordsV1 {
 }
 
 /// An empty child segment whose source never registered a classifier.
-fn minimal_input() -> Result<ForkAttributionAuthorityEnvelopeInputV1, CodecError> {
+fn minimal_input() -> Fallible<ForkAttributionAuthorityEnvelopeInputV1> {
     Ok(ForkAttributionAuthorityEnvelopeInputV1 {
         import_operation_id: hash(0x11),
         issuer: issuer()?,
@@ -162,30 +128,6 @@ fn minimal_input() -> Result<ForkAttributionAuthorityEnvelopeInputV1, CodecError
         classifier: None,
         append_operations: Vec::new(),
     })
-}
-
-fn evidence(seq: u64, payload: Vec<u8>) -> Fallible<ForkEventEvidenceV1> {
-    let payload = CanonicalBytes::from_vec(payload);
-    let envelope = TimelineEventEnvelopeV1::new(
-        TimelineEventEnvelopeInputV1 {
-            identity: KeyIdentityV1::new("timeline-owner", KeyRoleV1::TimelineIntegritySigning, 1),
-            origin_timeline_id: timeline_id(2),
-            event_id: EventId::from_ulid(Ulid::from_parts(seq, 7)),
-            origin_logical_seq: Seq::from_u64(seq),
-            entity_id: EntityId::from_ulid(Ulid::from_parts(1, 2)),
-            event_type: Kind::new("fork.test"),
-            schema_version: 1,
-            wall_time: WallTime::from_micros(1_000 + seq),
-            causation_id: None,
-            correlation_id: None,
-        },
-        &payload,
-    )?;
-    Ok(ForkEventEvidenceV1::new(
-        envelope,
-        payload,
-        Signature::from_bytes([0x77; 64]),
-    )?)
 }
 
 /// Replace the segment with `events`, one `EOR1`/`FOP1` each, and a classifier.
@@ -210,19 +152,19 @@ fn with_events(
 /// Three Events, one intervention, a classifier, and a destroyed source key.
 fn populated_input() -> Fallible<ForkAttributionAuthorityEnvelopeInputV1> {
     let events = vec![
-        evidence(5, b"first".to_vec())?,
-        evidence(6, Vec::new())?,
-        evidence(7, b"third".to_vec())?,
+        evidence(5, b"first")?,
+        evidence(6, b"")?,
+        evidence(7, b"third")?,
     ];
     let mut input = with_events(events, minimal_input()?)?;
     input.records.intervention_admissions = vec![b"FIA1-bytes".to_vec()];
     input.key_record = ImportedKeyRecordV1::new(
-        attribution_identity(),
+        attribution_identity(1),
         None,
         PublicKey::from_bytes([0x55; 32]),
     )?;
     input.key_tombstone = Some(ImportedKeyTombstoneV1::new(
-        attribution_identity(),
+        attribution_identity(1),
         hash(0x44),
         hash(0x45),
         hash(0x46),
@@ -295,7 +237,7 @@ fn minimal_envelope_matches_independent_root_origin_and_digest_vectors() -> Test
 }
 
 #[test]
-fn closure_leaves_match_independent_vectors_and_codes_are_closed() -> TestResult {
+fn closure_leaves_match_independent_vectors_codes_and_bounds() -> TestResult {
     assert_eq!(
         fork_attribution_closure_leaf_v1(Leaf::PrincipalOwnerBinding, b"abc")?
             .as_bytes()
@@ -314,42 +256,107 @@ fn closure_leaves_match_independent_vectors_and_codes_are_closed() -> TestResult
             .to_vec(),
         unhex(LEAF_FOP1_ABC_HEX)?
     );
-    let mut known = Vec::new();
-    for code in 0..=u8::MAX {
-        match Leaf::from_code(code) {
-            Ok(leaf) => {
-                assert_eq!(leaf.code(), code);
-                known.push(leaf);
-            }
-            Err(error) => assert_eq!(error, CodecError::InvalidEncoding),
-        }
-    }
-    assert_eq!(known.len(), 15);
-    let absent = [
-        Leaf::ImportedKeyTombstone,
-        Leaf::ClassifierSource,
-        Leaf::ClassifierTable,
-        Leaf::ClassifierRegistration,
+    let table = [
+        (
+            Leaf::PrincipalOwnerBinding,
+            1,
+            MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::ForkAdmission,
+            2,
+            MAX_FORK_ADMISSION_RECORD_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::EventOrigin,
+            3,
+            MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::InterventionAdmission,
+            4,
+            MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::PublicationOperation,
+            5,
+            MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::PublicationBinding,
+            6,
+            MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::PublicationArtifact,
+            7,
+            MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::ImportedKeyRecord,
+            8,
+            MAX_IMPORTED_KEY_RECORD_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::ImportedKeyTombstone,
+            9,
+            MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
+            true,
+        ),
+        (
+            Leaf::EventEvidence,
+            10,
+            MAX_FORK_EVENT_EVIDENCE_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::TimelineImport,
+            11,
+            MAX_FORK_TIMELINE_IMPORT_BYTES_V1,
+            false,
+        ),
+        (
+            Leaf::ClassifierSource,
+            12,
+            MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
+            true,
+        ),
+        (
+            Leaf::ClassifierTable,
+            13,
+            MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
+            true,
+        ),
+        (
+            Leaf::ClassifierRegistration,
+            14,
+            MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1,
+            true,
+        ),
+        (
+            Leaf::AppendOperation,
+            15,
+            MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1,
+            false,
+        ),
     ];
-    let largest = known
-        .iter()
-        .copied()
-        .map(Leaf::maximum_bytes)
-        .max()
-        .unwrap_or(0);
-    let buffer = vec![0x5a; largest + 1];
-    for leaf in known {
-        assert_eq!(leaf.may_be_absent(), absent.contains(&leaf));
-        let maximum = leaf.maximum_bytes();
+    let buffer = vec![0x5a; MAX_FORK_EVENT_EVIDENCE_BYTES_V1 + 1];
+    for (leaf, code, maximum, absent) in table {
+        assert_eq!(leaf.code(), code);
         assert!(fork_attribution_closure_leaf_v1(leaf, &buffer[..maximum]).is_ok());
         assert_eq!(
             fork_attribution_closure_leaf_v1(leaf, &buffer[..=maximum]),
             Err(CodecError::FieldOutOfBounds)
         );
-        assert_eq!(
-            fork_attribution_closure_leaf_v1(leaf, b"").is_ok(),
-            leaf.may_be_absent()
-        );
+        assert_eq!(fork_attribution_closure_leaf_v1(leaf, b"").is_ok(), absent);
     }
     Ok(())
 }
@@ -379,8 +386,13 @@ fn populated_envelope_round_trips_and_commits_every_closure_member() -> TestResu
             5 => input.records.publication_binding.push(0),
             6 => input.records.publication_artifact.push(0),
             7 => input.append_operations[2].push(0),
-            8 => input.event_evidence[1] = evidence(6, b"x".to_vec())?,
-            _ => input.timeline_import = fork(4)?,
+            8 => input.event_evidence[1] = evidence(6, b"x")?,
+            _ => {
+                input.timeline_import = ForkTimelineImportV1::new(ForkTimelineImportInputV1 {
+                    name: None,
+                    ..base.timeline_import.input().clone()
+                })?;
+            }
         }
         variants.push(input);
     }
@@ -400,7 +412,7 @@ fn populated_envelope_round_trips_and_commits_every_closure_member() -> TestResu
     variants.extend(classifier_variants);
     variants.push(ForkAttributionAuthorityEnvelopeInputV1 {
         key_tombstone: Some(ImportedKeyTombstoneV1::new(
-            attribution_identity(),
+            attribution_identity(1),
             hash(0x47),
             hash(0x45),
             hash(0x46),
@@ -455,8 +467,10 @@ fn decoder_rejects_revision_5_arity_versions_and_alternate_encodings() -> TestRe
     assert_eq!(decode(&trailing).err(), Some(CodecError::InvalidEncoding));
     let version_at = 1 + 5;
     assert_eq!(signed[version_at], 0x01);
-    let widened = [&signed[..version_at], &[0x18_u8][..], &signed[version_at..]].concat();
-    assert_eq!(decode(&widened).err(), Some(CodecError::NonCanonical));
+    assert_eq!(
+        decode(&widened(&signed, version_at)).err(),
+        Some(CodecError::NonCanonical)
+    );
     assert_eq!(
         decode(&vec![
             0;
@@ -676,8 +690,11 @@ fn every_carried_record_bound_accepts_its_maximum_and_rejects_beyond_it() -> Tes
 
 #[test]
 fn event_and_intervention_counts_accept_their_maximum_and_reject_one_more() -> TestResult {
-    let tiny = evidence(5, Vec::new())?;
-    let events = vec![tiny.clone(); MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1];
+    let tiny = evidence(5, b"")?;
+    let events = (5..)
+        .take(MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1)
+        .map(|seq| evidence(seq, b""))
+        .collect::<Fallible<Vec<_>>>()?;
     let mut input = with_events(events, minimal_input()?)?;
     input.records.intervention_admissions =
         vec![b"FIA1".to_vec(); MAX_FORK_ATTRIBUTION_AUTHORITY_INTERVENTIONS_V1];
@@ -726,7 +743,7 @@ fn sixty_mebibytes(extra: usize) -> Fallible<Vec<ForkEventEvidenceV1>> {
     [full, full, full, last]
         .into_iter()
         .zip(5..)
-        .map(|(length, seq)| evidence(seq, vec![0xab; length]))
+        .map(|(length, seq)| evidence(seq, &vec![0xab; length]))
         .collect()
 }
 
@@ -765,8 +782,11 @@ fn sized_input(
     tiny: usize,
     source: usize,
 ) -> Fallible<ForkAttributionAuthorityEnvelopeInputV1> {
+    let first = 5 + u64::try_from(big.len())?;
     let mut events = big.to_vec();
-    events.extend(std::iter::repeat_n(evidence(5, Vec::new())?, tiny));
+    for seq in (first..).take(tiny) {
+        events.push(evidence(seq, b"")?);
+    }
     let count = events.len();
     let mut input = with_events(events, minimal_input()?)?;
     input.records.event_origins = vec![vec![0x31; 384]; count];
@@ -791,8 +811,10 @@ fn signed_length(input: ForkAttributionAuthorityEnvelopeInputV1) -> Fallible<usi
 #[test]
 fn complete_envelope_accepts_exactly_64_mebibytes_and_rejects_one_more_byte() -> TestResult {
     let maximum = MAX_FORK_ATTRIBUTION_AUTHORITY_ENVELOPE_BYTES_V1;
-    let per_event =
-        signed_length(sized_input(&[], 1, 1_024)?)? - signed_length(sized_input(&[], 0, 1_024)?)?;
+    // Measured where sequences and wall times already use their 3-byte
+    // form, so no later Event is larger than this estimate.
+    let per_event = signed_length(sized_input(&[], 301, 1_024)?)?
+        - signed_length(sized_input(&[], 300, 1_024)?)?;
     let big = sixty_mebibytes(0)?;
     let base = signed_length(sized_input(&big, 0, 1_024)?)?;
     let tiny = (maximum - base - 8_192) / per_event;
@@ -922,9 +944,8 @@ fn import_admission_record_enforces_bounds_and_canonical_bytes() -> TestResult {
     );
     let version_at = 1 + 5;
     assert_eq!(bytes[version_at], 0x01);
-    let widened = [&bytes[..version_at], &[0x18_u8][..], &bytes[version_at..]].concat();
     assert_eq!(
-        decode_admission(&widened).err(),
+        decode_admission(&widened(&bytes, version_at)).err(),
         Some(CodecError::NonCanonical)
     );
     let mut trailing = bytes;
@@ -941,5 +962,51 @@ fn import_admission_record_enforces_bounds_and_canonical_bytes() -> TestResult {
         .err(),
         Some(CodecError::FieldOutOfBounds)
     );
+    Ok(())
+}
+
+#[test]
+fn event_evidence_must_be_exactly_the_fti1_child_segment() -> TestResult {
+    let base = populated_input()?;
+    let mut gap = base.clone();
+    gap.event_evidence[2] = evidence(8, b"third")?;
+    let mut reordered = base.clone();
+    reordered.event_evidence.swap(0, 1);
+    let mut foreign = base.clone();
+    foreign.event_evidence[1] = common::evidence_from(timeline_id(3), 6, b"")?;
+    let mut longer_head = base.clone();
+    longer_head.timeline_import = fork(4)?;
+    let mut shorter_head = base.clone();
+    shorter_head.timeline_import = fork(2)?;
+    let mismatched_tombstone = ForkAttributionAuthorityEnvelopeInputV1 {
+        key_tombstone: Some(ImportedKeyTombstoneV1::new(
+            attribution_identity(2),
+            hash(0x44),
+            hash(0x45),
+            hash(0x46),
+        )?),
+        ..base
+    };
+    for input in [
+        gap,
+        reordered,
+        foreign,
+        longer_head,
+        shorter_head,
+        mismatched_tombstone,
+    ] {
+        assert_eq!(unsigned_error(input), Some(CodecError::FieldMismatch));
+    }
+
+    let signed = sign(populated_input()?)?.to_canonical_cbor();
+    let gap_item = items(&evidence(8, b"third")?.to_canonical_cbor())?;
+    let noncontiguous = decode_edited(&signed, |fields| {
+        *list(fields, 16)?.get_mut(2).ok_or("FEE1")? = Value::Array(gap_item);
+        Ok(())
+    })?;
+    assert_eq!(noncontiguous, Some(CodecError::FieldMismatch));
+    let wrong_head = fork(4)?.to_canonical_cbor();
+    let local_head = decode_edited(&signed, |fields| set(fields, 17, Value::Bytes(wrong_head)))?;
+    assert_eq!(local_head, Some(CodecError::FieldMismatch));
     Ok(())
 }

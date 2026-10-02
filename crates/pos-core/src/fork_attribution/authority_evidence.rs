@@ -86,16 +86,19 @@ impl ImportedKeyRecordV1 {
             .and_then(|key| Self::new(record.identity, record.private_material_digest, key))
     }
 
+    /// `IKR1` fields 2–4: the source owner, role, and epoch.
     #[must_use]
     pub const fn identity(&self) -> KeyIdentityV1 {
         self.identity
     }
 
+    /// `IKR1` field 5: the source material digest; `None` when destroyed.
     #[must_use]
     pub const fn private_material_digest(&self) -> Option<Hash> {
         self.private_material_digest
     }
 
+    /// `IKR1` field 6: the retained public verification key.
     #[must_use]
     pub const fn public_verification_key(&self) -> PublicKey {
         self.public_verification_key
@@ -106,7 +109,7 @@ impl ImportedKeyRecordV1 {
     ///
     /// # Errors
     /// Returns `FieldMismatch` for any other combination.
-    pub fn validate_tombstone(
+    pub(super) fn validate_tombstone(
         &self,
         tombstone: Option<&ImportedKeyTombstoneV1>,
     ) -> Result<(), Error> {
@@ -130,7 +133,7 @@ impl ImportedKeyRecordV1 {
         text(&mut out, "IKR1");
         uint(&mut out, 1);
         encode_identity(&mut out, self.identity);
-        authority_wire::optional_hash(&mut out, self.private_material_digest);
+        authority_wire::encode_optional_hash(&mut out, self.private_material_digest);
         bytes(&mut out, self.public_verification_key.as_bytes());
         out
     }
@@ -206,21 +209,25 @@ impl ImportedKeyTombstoneV1 {
         )
     }
 
+    /// `IKT1` fields 2–4: the destroyed owner, role, and epoch.
     #[must_use]
     pub const fn identity(&self) -> KeyIdentityV1 {
         self.identity
     }
 
+    /// `IKT1` field 5: the destroyed material digest.
     #[must_use]
     pub const fn destroyed_material_digest(&self) -> Hash {
         self.destroyed_material_digest
     }
 
+    /// `IKT1` field 6: the destruction digest.
     #[must_use]
     pub const fn destruction_digest(&self) -> Hash {
         self.destruction_digest
     }
 
+    /// `IKT1` field 7: the deletion receipt.
     #[must_use]
     pub const fn deletion_receipt(&self) -> Hash {
         self.deletion_receipt
@@ -318,16 +325,19 @@ impl ForkEventEvidenceV1 {
         Self::new(envelope, event.payload.clone(), signature)
     }
 
+    /// `FEE1` field 2: the exact ADR-065 Timeline envelope.
     #[must_use]
     pub const fn envelope(&self) -> &TimelineEventEnvelopeV1 {
         &self.envelope
     }
 
+    /// `FEE1` field 3: the exact Event payload.
     #[must_use]
     pub const fn payload(&self) -> &CanonicalBytes {
         &self.payload
     }
 
+    /// `FEE1` field 4: the carried `TimelineIntegritySigning` signature, unverified here.
     #[must_use]
     pub const fn signature(&self) -> Signature {
         self.signature
@@ -378,20 +388,30 @@ impl ForkEventEvidenceV1 {
         Self::new(envelope, payload, signature)
     }
 
-    /// Reconstruct the exported own-segment Event at one child-local sequence.
-    fn to_child_event(
+    /// Require this Event to sit at `local_seq` of the child segment.
+    ///
+    /// Its origin is the child and its origin logical sequence is exactly
+    /// `parent_cut + local_seq`, without overflow.
+    fn check_child_position(
         &self,
         fork: &ForkTimelineImportInputV1,
         local_seq: u64,
-    ) -> Result<Event, Error> {
+    ) -> Result<(), Error> {
         let input = self.envelope.input();
-        let origin_seq = input.origin_logical_seq.as_u64();
-        if input.origin_timeline_id != fork.child_timeline_id
-            || fork.parent_cut.checked_add(local_seq) != Some(origin_seq)
+        if input.origin_timeline_id == fork.child_timeline_id
+            && fork.parent_cut.checked_add(local_seq) == Some(input.origin_logical_seq.as_u64())
         {
-            return Err(Error::FieldMismatch);
+            Ok(())
+        } else {
+            Err(Error::FieldMismatch)
         }
-        Ok(Event {
+    }
+
+    /// Reconstruct the exported own-segment Event at one already checked
+    /// child-local sequence.
+    fn to_child_event(&self, local_seq: u64) -> Event {
+        let input = self.envelope.input();
+        Event {
             id: input.event_id,
             entity: input.entity_id,
             event_type: input.event_type.clone(),
@@ -408,22 +428,27 @@ impl ForkEventEvidenceV1 {
                 origin_logical_seq: input.origin_logical_seq,
             }),
             payload_hash: self.envelope.payload_hash(),
-        })
+        }
     }
 }
 
 /// Construction fields for one `FTI1` child-segment Timeline projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForkTimelineImportInputV1 {
+    /// `FTI1` field 2: the child Fork Timeline ID.
     pub child_timeline_id: TimelineId,
-    /// Transport metadata only; it grants no authority.
+    /// `FTI1` field 4: transport metadata only; it grants no authority.
     pub name: Option<String>,
-    /// Must equal the trusted parent owner at import; it cannot claim ownership.
+    /// `FTI1` field 5: must equal the trusted parent owner at import; it
+    /// cannot claim ownership.
     pub owner: Option<EntityId>,
+    /// `FTI1` field 6: the parent Timeline ID.
     pub parent_timeline_id: TimelineId,
+    /// `FTI1` field 7: the parent cut.
     pub parent_cut: u64,
-    /// Child-segment-local `Timeline.head`.
+    /// `FTI1` field 8: the child-segment-local `Timeline.head`.
     pub local_head: u64,
+    /// `FTI1` field 9: the parent chain hash at the cut.
     pub parent_chain_hash: Hash,
 }
 
@@ -451,6 +476,7 @@ impl ForkTimelineImportV1 {
         Ok(Self(input))
     }
 
+    /// Return the validated `FTI1` fields.
     #[must_use]
     pub const fn input(&self) -> &ForkTimelineImportInputV1 {
         &self.0
@@ -509,15 +535,13 @@ impl ForkTimelineImportV1 {
         &self,
         evidence: &[ForkEventEvidenceV1],
     ) -> Result<TimelineExport, Error> {
+        self.validate_segment(evidence)?;
         let value = &self.0;
-        if evidence.len() as u64 != value.local_head {
-            return Err(Error::FieldMismatch);
-        }
         let events = evidence
             .iter()
             .zip(1_u64..)
-            .map(|(item, local_seq)| item.to_child_event(value, local_seq))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(item, local_seq)| item.to_child_event(local_seq))
+            .collect();
         Ok(TimelineExport {
             timeline: Timeline {
                 meta: TimelineMeta {
@@ -534,6 +558,24 @@ impl ForkTimelineImportV1 {
         })
     }
 
+    /// Require `evidence` to be exactly this child segment.
+    ///
+    /// There is one Event per local sequence `1..=local_head`, in order, each
+    /// at origin logical sequence `parent_cut + local_seq` on the child.
+    ///
+    /// This rejects underflow, overflow, a zero or noncontiguous local
+    /// sequence, and any other local head.
+    pub(super) fn validate_segment(&self, evidence: &[ForkEventEvidenceV1]) -> Result<(), Error> {
+        let value = &self.0;
+        if evidence.len() as u64 != value.local_head {
+            return Err(Error::FieldMismatch);
+        }
+        evidence
+            .iter()
+            .zip(1_u64..)
+            .try_for_each(|(item, local_seq)| item.check_child_position(value, local_seq))
+    }
+
     /// Encode the exact ten-field deterministic-CBOR `FTI1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
@@ -544,16 +586,11 @@ impl ForkTimelineImportV1 {
         uint(&mut out, 1);
         timeline(&mut out, value.child_timeline_id);
         uint(&mut out, HISTORICAL_MODE);
-        if let Some(name) = &value.name {
-            text(&mut out, name);
-        } else {
-            out.push(authority_wire::NULL);
-        }
-        if let Some(owner) = value.owner {
-            bytes(&mut out, &owner.inner().to_bytes());
-        } else {
-            out.push(authority_wire::NULL);
-        }
+        authority_wire::encode_optional_text(&mut out, value.name.as_deref());
+        authority_wire::encode_optional_fixed(
+            &mut out,
+            value.owner.map(|owner| owner.inner().to_bytes()),
+        );
         timeline(&mut out, value.parent_timeline_id);
         uint(&mut out, value.parent_cut);
         uint(&mut out, value.local_head);

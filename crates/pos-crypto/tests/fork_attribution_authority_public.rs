@@ -213,7 +213,12 @@ fn field_mutations() -> Fallible<Vec<ForkAttributionAuthorityEnvelopeInputV1>> {
                 )?);
             }
             16 => changed.event_evidence[1] = evidence(6, b"other")?,
-            17 => changed.timeline_import = fork(3)?,
+            17 => {
+                changed.timeline_import = ForkTimelineImportV1::new(ForkTimelineImportInputV1 {
+                    name: Some("renamed".to_owned()),
+                    ..base.timeline_import.input().clone()
+                })?;
+            }
             21 => changed.append_operations[0].push(0),
             _ => {
                 let classifier = changed.classifier.as_mut().ok_or("classifier")?;
