@@ -4,10 +4,20 @@
 
 //! `pos-plugin-eval` — Wave 5 calibration harness.
 //!
-//! Owns event types `"eval.prediction"` and `"eval.outcome"`.
-//! Tracks predictions and outcomes in State, and provides
-//! [`compute_report`] to produce a [`CalibrationReport`] from a timeline.
+//! Owns event types `"eval.prediction"` and `"eval.outcome"` exclusively
+//! (ADR-024 Revision 1). Tracks predictions and outcomes in State, provides
+//! [`compute_report`] to produce a [`CalibrationReport`] from a timeline, and
+//! supplies [`EvalDerivationDriver`], the only appender of `eval.*`, which
+//! derives them from committed Persona prediction source Events.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
+
+mod derivation;
+
+pub use derivation::{
+    derive_eval_units, EvalDerivationConfigV1, EvalDerivationDriver, EvalDerivationV1,
+    EvalDiagnosticsV1, EvalIntegrityFindingKindV1, EvalIntegrityFindingV1,
+    DERIVED_PREDICTION_ID_PREFIX, MIN_DRAFTS_PER_PASS,
+};
 
 use pos_core::{
     event::{Event, Kind},
@@ -50,6 +60,16 @@ pub enum EvalError {
     /// ADR-060 forbids this artifact from authoritative evaluator input.
     #[error("calibration artifact is unavailable for authoritative use")]
     ArtifactUnavailable,
+    /// A prediction source carries a version Eval's pinned mapping does not
+    /// support. It fails closed so an outcome is never silently skipped.
+    #[error("unsupported prediction source version {version}")]
+    UnknownSourceVersion {
+        /// The source payload's version.
+        version: u32,
+    },
+    /// The derivation configuration cannot admit one whole unit per pass.
+    #[error("derivation budget must admit at least one whole prediction unit")]
+    InvalidConfiguration,
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +87,15 @@ pub struct PredictionPayload {
     pub prediction_id: String,
 }
 
+/// Provenance label of an `eval.outcome`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutcomeEvidenceV1 {
+    /// The ground truth came from the predicting Plugin's own source Event,
+    /// not from an independent observer. It is not independent outcome
+    /// evidence; independence is owned by ADR-062.
+    PredictorSupplied,
+}
+
 /// Payload for an `eval.outcome` event.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutcomePayload {
@@ -74,6 +103,10 @@ pub struct OutcomePayload {
     pub prediction_id: String,
     /// Observed binary outcome.
     pub outcome: bool,
+    /// Provenance label. Derived outcomes are labelled predictor-supplied;
+    /// legacy outcomes carry no label and keep their exact encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<OutcomeEvidenceV1>,
 }
 
 /// Build an `eval.prediction` [`pos_core::EventDraft`].
@@ -118,6 +151,7 @@ pub fn draft_outcome(
     let payload = OutcomePayload {
         prediction_id: prediction_id.to_owned(),
         outcome,
+        evidence: None,
     };
     let mut buf = Vec::new();
     assert!(ciborium::into_writer(&payload, &mut buf).is_ok());
@@ -172,6 +206,10 @@ pub struct CalibrationReport {
     pub n_predictions: u64,
     /// Number of predictions for which a matching outcome was found.
     pub n_resolved: u64,
+    /// Number of resolved pairs whose outcome is labelled predictor-supplied.
+    /// Those pairs are not independent outcome evidence (ADR-024 Revision 1
+    /// Decision 5; independence is owned by ADR-062).
+    pub n_predictor_supplied: u64,
     /// The 10 reliability bins used to compute ECE.
     pub reliability_bins: Vec<ReliabilityBin>,
 }
@@ -220,6 +258,14 @@ impl Plugin for EvalPlugin {
         "eval"
     }
 
+    /// Version 0.2.0 adds the derivation Driver, so its pinned identity
+    /// never matches an earlier Eval pin.
+    fn version(&self) -> &'static str {
+        "0.2.0"
+    }
+
+    /// Eval owns exactly `eval.prediction` and `eval.outcome` and supplies
+    /// [`EvalDerivationDriver`] and [`EvalReducer`].
     fn capability(&self) -> Capability {
         Capability {
             owned_event_types: vec![
@@ -227,7 +273,7 @@ impl Plugin for EvalPlugin {
                 Kind::new(EVENT_TYPE_OUTCOME),
             ],
             owned_entity_kinds: vec![ENTITY_KIND.to_owned()],
-            has_driver: false,
+            has_driver: true,
             has_reducer: true,
         }
     }
@@ -311,6 +357,7 @@ struct ResolvedPair {
     entity_id: String,
     predicted_prob: f64,
     outcome: f64,
+    predictor_supplied: bool,
 }
 
 /// Compute the Brier score for a constant predictor `p` over the given outcomes.
@@ -464,6 +511,7 @@ fn report_from_events(events: &[Event]) -> Result<CalibrationReport, EvalError> 
                 entity_id: pred.entity_id.clone(),
                 predicted_prob: pred.predicted_prob,
                 outcome: if outcome.outcome { 1.0 } else { 0.0 },
+                predictor_supplied: outcome.evidence == Some(OutcomeEvidenceV1::PredictorSupplied),
             });
         }
     }
@@ -484,6 +532,7 @@ fn report_from_events(events: &[Event]) -> Result<CalibrationReport, EvalError> 
             lift_vs_persistence: 0.0,
             n_predictions,
             n_resolved: 0,
+            n_predictor_supplied: 0,
             reliability_bins: empty_bins,
         });
     }
@@ -552,6 +601,13 @@ fn report_from_events(events: &[Event]) -> Result<CalibrationReport, EvalError> 
         lift_vs_persistence,
         n_predictions,
         n_resolved,
+        n_predictor_supplied: u64::try_from(
+            resolved
+                .iter()
+                .filter(|pair| pair.predictor_supplied)
+                .count(),
+        )
+        .unwrap_or(u64::MAX),
         reliability_bins,
     })
 }
@@ -632,6 +688,7 @@ mod tests {
         let o = OutcomePayload {
             prediction_id: prediction_id.to_owned(),
             outcome,
+            evidence: None,
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&o, &mut buf).test_ok();
@@ -723,8 +780,9 @@ mod tests {
             .iter()
             .any(|k| k.as_str() == EVENT_TYPE_OUTCOME));
         assert_eq!(cap.owned_entity_kinds, vec![ENTITY_KIND.to_owned()]);
-        assert!(!cap.has_driver);
+        assert!(cap.has_driver);
         assert!(cap.has_reducer);
+        assert_eq!(plugin.version(), "0.2.0");
     }
 
     // ── EvalReducer tests ─────────────────────────────────────────────────────

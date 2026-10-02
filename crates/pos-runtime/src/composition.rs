@@ -104,6 +104,10 @@ pub enum PluginCompositionErrorV1 {
     DuplicateImplementation { plugin_id: PluginId },
     #[error("domain role '{role}' has more than one owner")]
     DuplicateRole { role: String },
+    /// ADR-024 Revision 1: at most one owning Plugin registration per Event
+    /// type in one registry. The error names the type, not the incumbent.
+    #[error("Event type '{event_type}' has more than one owner")]
+    DuplicateEventTypeOwner { event_type: String },
     #[error("required Plugin implementation {plugin_id} is not registered")]
     MissingImplementation { plugin_id: PluginId },
     #[error("required Plugin implementation {plugin_id} was not registered through a pinned seam")]

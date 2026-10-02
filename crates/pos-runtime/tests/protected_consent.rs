@@ -72,11 +72,11 @@ fn admit(
 }
 
 fn register_protected_schema(registry: &mut RuntimePluginRegistry) {
-    registry.schemas.register(EventTypeSchema {
+    test_ok(registry.schemas.register(EventTypeSchema {
         event_type: Kind::new("protected.event"),
         description: "protected Driver output".to_owned(),
         json_schema: None,
-    });
+    }));
 }
 
 struct TestBindingPlugin {

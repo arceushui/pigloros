@@ -26,7 +26,7 @@ struct FixtureBinding {
     retention_artifact: Vec<u8>,
 }
 
-fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Error>> {
+fn verified_binding<P: Plugin>(plugin: &P) -> Result<FixtureBinding, Box<dyn Error>> {
     let configuration_details = b"fixture-configuration";
     let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
         plugin,
@@ -47,9 +47,9 @@ fn verified_binding(plugin: &FixturePlugin) -> Result<FixtureBinding, Box<dyn Er
     })
 }
 
-fn register_verified_fixture_driver<D: Driver + 'static>(
+fn register_verified_fixture_driver<P: Plugin, D: Driver + 'static>(
     registry: &mut PluginRegistry,
-    plugin: &FixturePlugin,
+    plugin: &P,
     driver: D,
 ) -> TestResult {
     registry.register_with_verified_output_policy(
@@ -542,6 +542,34 @@ impl Plugin for FixturePlugin {
     }
 }
 
+/// A second Plugin owning its own Event type: under exclusive ownership two
+/// registrations in one registry never share an owned type (ADR-024 R1).
+struct SecondFixturePlugin {
+    id: PluginId,
+}
+
+impl Plugin for SecondFixturePlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "second-fixture"
+    }
+
+    fn version(&self) -> &'static str {
+        "1.0.0"
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("second.output")],
+            has_driver: true,
+            ..Capability::default()
+        }
+    }
+}
+
 struct ForeignCapabilityPlugin {
     id: PluginId,
 }
@@ -652,7 +680,7 @@ impl Driver for RejectOnceDriver {
             self.reject_next = false;
             "plugin.undeclared"
         } else {
-            "plugin.output"
+            "second.output"
         };
         Ok(StepOutput::new(vec![draft(event_type, b"accepted")]))
     }
@@ -667,7 +695,7 @@ fn failed_scheduler_pass_does_not_advance_earlier_driver_cadence() -> TestResult
     let first = FixturePlugin {
         id: PluginId::new(),
     };
-    let second = FixturePlugin {
+    let second = SecondFixturePlugin {
         id: PluginId::new(),
     };
     let mut registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(

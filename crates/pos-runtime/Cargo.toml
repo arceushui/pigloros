@@ -37,6 +37,10 @@ rusqlite = { workspace = true }
 tempfile = { workspace = true }
 
 [[test]]
+name = "event_type_ownership"
+required-features = ["test-support"]
+
+[[test]]
 name = "human_admission"
 required-features = ["test-support"]
 
@@ -62,6 +66,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "scheduled_admission"
+required-features = ["test-support"]
+
+[[test]]
+name = "subscription_consent"
 required-features = ["test-support"]
 
 [[test]]

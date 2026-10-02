@@ -20,9 +20,8 @@ use pos_core::{
     PluginId, PrincipalRefV1, Reducer, Seq, SeqRange, State, TimelineId, DELEGATE_ACTION_V1,
 };
 use pos_runtime::{
-    schema::EventTypeSchema, Driver, LocalScheduledAdmissionHostV1, ObservationView,
-    PluginRegistry, ProjectionKey, RuntimeError, ScheduledAdmissionStoreV1,
-    ScheduledPassAdmissionV1, StepOutput,
+    Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
+    RuntimeError, ScheduledAdmissionStoreV1, ScheduledPassAdmissionV1, StepOutput,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use ulid::Ulid;
@@ -416,12 +415,8 @@ fn register(registry: &mut PluginRegistry, driver: ScriptedDriver) {
         event_type: driver.event_type,
         reducer: false,
     };
+    // Registration records the owned type's schema; it is never re-registered.
     ok(registry.register_generated(&plugin, None, Some(Box::new(driver))));
-    registry.schemas.register(EventTypeSchema {
-        event_type: Kind::new(plugin.event_type),
-        description: "scheduled AI Driver output".to_owned(),
-        json_schema: None,
-    });
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
