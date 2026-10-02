@@ -86,7 +86,7 @@ EXPECTED_STEP_ENV = {
 }
 EXPECTED_SCOPE_JOB = ["ci_change_scope", "standard-gate", "mutation-checks"]
 EXPECTED_SCOPE_IF = (
-    "${{ always() && needs.standard-gate.result == 'success' && "
+    "${{ !cancelled() && needs.standard-gate.result == 'success' && "
     "(needs.mutation-checks.result == 'success' || needs.mutation-checks.result == 'skipped') && "
     "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
 )

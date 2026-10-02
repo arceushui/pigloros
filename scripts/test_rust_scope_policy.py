@@ -137,7 +137,7 @@ class RustScopePolicyTests(unittest.TestCase):
         with workflow_path.open(encoding="utf-8") as stream:
             workflow = yaml.safe_load(stream)
         expected_if = (
-            "${{ always() && needs.preflight-gate.result == 'success' && "
+            "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
             "(needs.ci_change_scope.outputs.rust == 'true' || "
             "github.event_name != 'pull_request') }}"
         )
@@ -155,7 +155,7 @@ class RustScopePolicyTests(unittest.TestCase):
         self.assertIn("ci_change_scope", materialization["needs"])
         self.assertEqual(
             materialization["if"],
-            "${{ always() && needs.ci_change_scope.result == 'success' && "
+            "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
             "needs.conformance-fixtures.result == 'success' && "
             "needs.cargo-crap.result == 'success' && "
             "(needs.ci_change_scope.outputs.rust == 'true' || "
