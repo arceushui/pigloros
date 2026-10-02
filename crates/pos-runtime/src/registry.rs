@@ -5591,6 +5591,50 @@ mod tests {
     }
 
     #[test]
+    fn admitted_policy_sources_reject_stale_unverified_and_drifted_capabilities() {
+        let (mut registry, id, catalog) = manifest_validation_fixture();
+        let admitted = registry.admit_complete_manifest_registration().test_ok();
+        let sources = registry
+            .admitted_manifest_policy_sources(&admitted)
+            .test_ok();
+        let row = &catalog.as_input().rows[0];
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].stable_slot(), row.stable_slot);
+        assert_eq!(sources[0].plugin_version(), row.plugin_version);
+        assert_eq!(sources[0].implementation_hash(), row.implementation_hash);
+
+        registry.registration_revision += 1;
+        assert!(matches!(
+            registry.admitted_manifest_policy_sources(&admitted),
+            Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+        registry.registration_revision -= 1;
+
+        let saved_registration = registry.plugins.get_mut(&id).test_ok().registration.take();
+        assert!(matches!(
+            registry.admitted_manifest_policy_sources(&admitted),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        registry.plugins.get_mut(&id).test_ok().registration = saved_registration;
+
+        // The entry and batch agree on a version that the retained EOP1 does not carry.
+        let mut drifted = catalog.as_input().clone();
+        drifted.rows[0].plugin_version.push('x');
+        registry
+            .plugins
+            .get_mut(&id)
+            .test_ok()
+            .version
+            .clone_from(&drifted.rows[0].plugin_version);
+        registry.manifest_batch = Some(ManifestAdmissionCatalogV1::new(drifted).test_ok());
+        let drifted_admitted = registry.admit_complete_manifest_registration().test_ok();
+        assert!(matches!(
+            registry.admitted_manifest_policy_sources(&drifted_admitted),
+            Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+    }
+
+    #[test]
     fn local_admission_rejects_unverified_or_unavailable_local_entries() {
         let plugin = simple_plugin("local-fixture", &[]);
         let id = plugin.id;

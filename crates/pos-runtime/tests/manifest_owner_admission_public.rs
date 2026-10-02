@@ -7,14 +7,19 @@ use std::{
 };
 
 use pos_core::{
-    ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, Hash,
-    ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1,
-    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionErrorV1,
-    ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
+    manifest_owner_admission_intent_digest_v1, prepare_manifest_owner_admission_v1,
+    validate_manifest_owner_admission_snapshot_v1, ArtifactDataClassV1, ArtifactOptionalityV1,
+    ArtifactTransitionRuleV1, Hash, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1,
+    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
+    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
+    ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-    ManifestSlotAdmissionReceiptV1, OwnerIdV1, Plugin, PluginId, TimelineId, WorldArtifactKindV1,
-    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
-    WorldConsumerV1, WorldProducerV1,
+    ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1,
+    ManifestSlotBindingRowV1, ManifestSlotBindingV1, OwnerIdV1, Plugin, PluginId,
+    PreparedManifestOwnerAdmissionV1, TimelineId, WorldArtifactKindV1, WorldArtifactLeafInputV1,
+    WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+    WorldProducerV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 use pos_runtime::{
     recover_manifest_owner_admission_retry_v1, AdmittedCompositionV1, PluginRegistry,
@@ -119,20 +124,7 @@ fn request(
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     let producer = sources.first().ok_or("empty admitted Plugin set")?;
-    let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-        scope,
-        consumers: vec![WorldConsumerV1::new(
-            "local-observer".to_owned(),
-            hash(79),
-            hash(80),
-            hash(81),
-        )?],
-        producers: vec![WorldProducerV1::new(
-            producer.plugin_id(),
-            producer.eop1_native_digest(),
-        )?],
-        optional_view_roots: Vec::new(),
-    })?;
+    let wcs1 = consumer_set(scope, producer.plugin_id(), producer.eop1_native_digest())?;
     Ok(ManifestOwnerAdmissionRequestV1 {
         operation_id,
         catalog,
@@ -147,6 +139,24 @@ fn request(
             policy_copies,
         }],
     })
+}
+
+fn consumer_set(
+    scope: Hash,
+    producer_id: PluginId,
+    output_policy_hash: Hash,
+) -> Result<WorldConsumerSetV1, Box<dyn Error>> {
+    Ok(WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+        scope,
+        consumers: vec![WorldConsumerV1::new(
+            "local-observer".to_owned(),
+            hash(79),
+            hash(80),
+            hash(81),
+        )?],
+        producers: vec![WorldProducerV1::new(producer_id, output_policy_hash)?],
+        optional_view_roots: Vec::new(),
+    })?)
 }
 
 struct FixtureOwner {
@@ -468,5 +478,416 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
         Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
     );
     assert_eq!(signed_count.load(Ordering::Relaxed), 0);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnerFault {
+    Composition,
+    ScopeSet,
+    NativeCopies,
+    Signature,
+    ReceiptDraft,
+    Receipt,
+}
+
+/// Fixture owner that rejects, or signs a different draft, at one step.
+struct FaultyOwner {
+    inner: FixtureOwner,
+    fault: OwnerFault,
+}
+
+impl FaultyOwner {
+    fn reject_at(&self, fault: OwnerFault) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+        if self.fault == fault {
+            Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl ManifestOwnerAdmissionVerifierV1 for FaultyOwner {
+    fn verify_complete_composition(
+        &self,
+        catalog: &ManifestAdmissionCatalogV1,
+    ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+        self.reject_at(OwnerFault::Composition)?;
+        self.inner.verify_complete_composition(catalog)
+    }
+
+    fn verify_complete_owned_scope_set(
+        &self,
+        owner_id: [u8; 32],
+        timelines: &[ManifestOwnerTimelineAdmissionRequestV1],
+    ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+        self.reject_at(OwnerFault::ScopeSet)?;
+        self.inner
+            .verify_complete_owned_scope_set(owner_id, timelines)
+    }
+
+    fn verify_coordinator_receipt(
+        &self,
+        receipt: &ManifestSlotAdmissionReceiptV1,
+    ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+        self.reject_at(OwnerFault::Receipt)?;
+        self.inner.verify_coordinator_receipt(receipt)
+    }
+
+    fn verify_owner_prestate_and_allocation(
+        &self,
+        request: &ManifestOwnerAdmissionRequestV1,
+        current_state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+    ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+        self.inner
+            .verify_owner_prestate_and_allocation(request, current_state)
+    }
+
+    fn sign_coordinator_receipt(
+        &self,
+        draft: ManifestSlotAdmissionReceiptDraftV1,
+    ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+        self.reject_at(OwnerFault::Signature)?;
+        if self.fault == OwnerFault::ReceiptDraft {
+            let altered = ManifestSlotAdmissionReceiptDraftV1 {
+                mca1_hash: hash(91),
+                ..draft
+            };
+            return self.inner.sign_coordinator_receipt(altered);
+        }
+        self.inner.sign_coordinator_receipt(draft)
+    }
+
+    fn verify_native_policy_copies(
+        &self,
+        timeline_id: TimelineId,
+        scope: Hash,
+        copies: &ManifestOwnerPolicyCopiesV1,
+    ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+        self.reject_at(OwnerFault::NativeCopies)?;
+        self.inner
+            .verify_native_policy_copies(timeline_id, scope, copies)
+    }
+}
+
+/// Store whose owner-state read fails after a missing retry lookup.
+struct UnavailableOwnerState;
+
+impl ManifestOwnerAdmissionPersistencePortV1 for UnavailableOwnerState {
+    fn read_manifest_owner_state_v1(
+        &self,
+        _owner_id: [u8; 32],
+    ) -> Result<Option<ManifestOwnerAdmissionOwnerStateV1>, ManifestOwnerAdmissionErrorV1> {
+        Err(ManifestOwnerAdmissionErrorV1::StorageFailure)
+    }
+
+    fn resolve_manifest_owner_admission_retry_v1(
+        &self,
+        _owner_id: [u8; 32],
+        _operation_id: Hash,
+        _intent_digest: Hash,
+    ) -> Result<Option<ManifestOwnerAdmissionCommitV1>, ManifestOwnerAdmissionErrorV1> {
+        Ok(None)
+    }
+
+    fn commit_manifest_owner_admission_v1(
+        &mut self,
+        _batch: PreparedManifestOwnerAdmissionV1,
+    ) -> Result<ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1> {
+        Err(ManifestOwnerAdmissionErrorV1::StorageFailure)
+    }
+
+    fn read_manifest_owner_admission_v1(
+        &self,
+        _owner_id: [u8; 32],
+        _configuration_generation: u64,
+        _timeline_id: TimelineId,
+    ) -> Result<Option<ManifestOwnerAdmissionSnapshotV1>, ManifestOwnerAdmissionErrorV1> {
+        Ok(None)
+    }
+}
+
+fn unknown_plugin_id(sources: &[pos_runtime::AdmittedManifestPolicySourceV1]) -> PluginId {
+    let mut unknown = PluginId::new();
+    while sources.iter().any(|source| source.plugin_id() == unknown) {
+        unknown = PluginId::new();
+    }
+    unknown
+}
+
+fn prepared_snapshot(
+    timeline_id: TimelineId,
+    operation_id: Hash,
+) -> Result<ManifestOwnerAdmissionSnapshotV1, Box<dyn Error>> {
+    let (registry, _plugins, _owner, admitted) = setup(verifier(timeline_id, operation_id))?;
+    let sources = registry.admitted_manifest_policy_sources(&admitted)?;
+    let prepared = prepare_manifest_owner_admission_v1(
+        request(&admitted, &sources, timeline_id, operation_id)?,
+        &verifier(timeline_id, operation_id),
+        None,
+    )?;
+    let input = prepared.input();
+    Ok(ManifestOwnerAdmissionSnapshotV1 {
+        catalog: input.catalog.clone(),
+        timeline: input
+            .timelines
+            .first()
+            .ok_or("prepared admission has no Timeline")?
+            .clone(),
+        operation_id: input.operation_id,
+        expected_inventory_generation: input.expected_inventory_generation,
+        resulting_inventory_generation: input.resulting_inventory_generation,
+    })
+}
+
+/// Replace the MSB1 rows and re-issue the MSR1 so only the row content differs.
+fn rebound(
+    snapshot: &ManifestOwnerAdmissionSnapshotV1,
+    rows: Vec<ManifestSlotBindingRowV1>,
+) -> Result<ManifestOwnerAdmissionSnapshotV1, Box<dyn Error>> {
+    let binding = ManifestSlotBindingV1::new(ManifestSlotBindingInputV1 {
+        scope: snapshot.timeline.scope,
+        wcs1_hash: snapshot.timeline.wcs1.digest(),
+        rows,
+    })?;
+    let receipt = ManifestSlotAdmissionReceiptV1::new(ManifestSlotAdmissionReceiptInputV1 {
+        msb1_hash: binding.digest(),
+        ..snapshot.timeline.receipt.as_input().clone()
+    })?;
+    let mut changed = snapshot.clone();
+    changed.timeline.binding = binding;
+    changed.timeline.receipt = receipt;
+    Ok(changed)
+}
+
+#[test]
+fn owner_verifier_rejections_stop_preparation_at_each_step() -> TestResult {
+    let timeline_id = TimelineId::new();
+    let operation_id = hash(83);
+    let (registry, _plugins, _owner, admitted) = setup(verifier(timeline_id, operation_id))?;
+    let sources = registry.admitted_manifest_policy_sources(&admitted)?;
+    for fault in [
+        OwnerFault::Composition,
+        OwnerFault::ScopeSet,
+        OwnerFault::NativeCopies,
+        OwnerFault::Signature,
+        OwnerFault::ReceiptDraft,
+        OwnerFault::Receipt,
+    ] {
+        let owner = FaultyOwner {
+            inner: verifier(timeline_id, operation_id),
+            fault,
+        };
+        assert_eq!(
+            prepare_manifest_owner_admission_v1(
+                request(&admitted, &sources, timeline_id, operation_id)?,
+                &owner,
+                None,
+            ),
+            Err(ManifestOwnerAdmissionErrorV1::OwnerRejected),
+            "{fault:?}"
+        );
+    }
+    let prepared = prepare_manifest_owner_admission_v1(
+        request(&admitted, &sources, timeline_id, operation_id)?,
+        &verifier(timeline_id, operation_id),
+        None,
+    )?;
+    assert_eq!(prepared.input().timelines.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn request_shape_rejects_zero_cas_values_null_state_drift_and_oversized_copies() -> TestResult {
+    let timeline_id = TimelineId::new();
+    let operation_id = hash(84);
+    let (registry, _plugins, _owner, admitted) = setup(verifier(timeline_id, operation_id))?;
+    let sources = registry.admitted_manifest_policy_sources(&admitted)?;
+    let base = request(&admitted, &sources, timeline_id, operation_id)?;
+    assert_ne!(manifest_owner_admission_intent_digest_v1(&base)?, Hash::zero());
+
+    let mut zero_inventory = base.clone();
+    zero_inventory.expected_inventory_generation = Some(Hash::zero());
+    let mut genesis_with_inventory = base.clone();
+    genesis_with_inventory.expected_inventory_generation = Some(hash(85));
+    let mut successor_from_zero = base.clone();
+    successor_from_zero.expected_configuration_generation = Some(0);
+    let mut zero_scope = base.clone();
+    zero_scope.timelines[0].scope = Hash::zero();
+    for invalid in [
+        zero_inventory,
+        genesis_with_inventory,
+        successor_from_zero,
+        zero_scope,
+    ] {
+        assert_eq!(
+            manifest_owner_admission_intent_digest_v1(&invalid),
+            Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+        );
+    }
+
+    let mut oversized = base;
+    oversized.timelines[0].policy_copies[0].eop1_bytes =
+        vec![0; MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1 + 1];
+    assert_eq!(
+        manifest_owner_admission_intent_digest_v1(&oversized),
+        Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn preparation_rejects_unknown_copies_unparseable_eop1_and_foreign_producers() -> TestResult {
+    let timeline_id = TimelineId::new();
+    let operation_id = hash(86);
+    let (registry, _plugins, _owner, admitted) = setup(verifier(timeline_id, operation_id))?;
+    let sources = registry.admitted_manifest_policy_sources(&admitted)?;
+    let owner = verifier(timeline_id, operation_id);
+    let unknown = unknown_plugin_id(&sources);
+    let producer = sources.first().ok_or("empty admitted Plugin set")?;
+
+    let mut unknown_copy = request(&admitted, &sources, timeline_id, operation_id)?;
+    unknown_copy.timelines[0].policy_copies[0].plugin_id = unknown;
+    unknown_copy.timelines[0]
+        .policy_copies
+        .sort_unstable_by_key(|copy| copy.plugin_id);
+
+    let mut unparseable = request(&admitted, &sources, timeline_id, operation_id)?;
+    unparseable.timelines[0].policy_copies[0].eop1_bytes = b"not-an-eop1".to_vec();
+
+    let mut foreign_producer = request(&admitted, &sources, timeline_id, operation_id)?;
+    let scope = foreign_producer.timelines[0].scope;
+    foreign_producer.timelines[0].wcs1 =
+        consumer_set(scope, unknown, producer.eop1_native_digest())?;
+
+    let mut drifted_producer = request(&admitted, &sources, timeline_id, operation_id)?;
+    drifted_producer.timelines[0].wcs1 = consumer_set(scope, producer.plugin_id(), hash(87))?;
+
+    for invalid in [
+        unknown_copy,
+        unparseable,
+        foreign_producer,
+        drifted_producer,
+    ] {
+        assert_eq!(
+            prepare_manifest_owner_admission_v1(invalid, &owner, None),
+            Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn snapshot_validation_rejects_bound_cas_scope_owner_and_receipt_drift() -> TestResult {
+    let snapshot = prepared_snapshot(TimelineId::new(), hash(88))?;
+    validate_manifest_owner_admission_snapshot_v1(&snapshot)?;
+    let catalog = snapshot.catalog.as_input().clone();
+
+    let mut zero_operation = snapshot.clone();
+    zero_operation.operation_id = Hash::zero();
+    let mut oversized_copy = snapshot.clone();
+    oversized_copy.timeline.policy_copies[0].opc1_bytes =
+        vec![0; MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1 + 1];
+    for bounded in [zero_operation, oversized_copy] {
+        assert_eq!(
+            validate_manifest_owner_admission_snapshot_v1(&bounded),
+            Err(ManifestOwnerAdmissionErrorV1::BoundExceeded)
+        );
+    }
+
+    let mut zero_inventory = snapshot.clone();
+    zero_inventory.expected_inventory_generation = Some(Hash::zero());
+    let mut genesis_with_inventory = snapshot.clone();
+    genesis_with_inventory.expected_inventory_generation = Some(hash(89));
+    let mut successor_without_inventory = snapshot.clone();
+    successor_without_inventory.catalog =
+        ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
+            configuration_generation: 2,
+            ..catalog.clone()
+        })?;
+    let mut zero_scope = snapshot.clone();
+    zero_scope.timeline.scope = Hash::zero();
+    let mut foreign_scope = snapshot.clone();
+    foreign_scope.timeline.scope = hash(94);
+    let mut zero_owner = snapshot.clone();
+    zero_owner.catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
+        owner_id: [0; 32],
+        ..catalog
+    })?;
+    let mut other_operation = snapshot;
+    other_operation.operation_id = hash(95);
+    for invalid in [
+        zero_inventory,
+        genesis_with_inventory,
+        successor_without_inventory,
+        zero_scope,
+        foreign_scope,
+        zero_owner,
+        other_operation,
+    ] {
+        assert_eq!(
+            validate_manifest_owner_admission_snapshot_v1(&invalid),
+            Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn snapshot_validation_rejects_reissued_bindings_with_foreign_rows() -> TestResult {
+    let snapshot = prepared_snapshot(TimelineId::new(), hash(92))?;
+    let rows = snapshot.timeline.binding.as_input().rows.clone();
+    validate_manifest_owner_admission_snapshot_v1(&rebound(&snapshot, rows.clone())?)?;
+
+    let foreign_ids: Vec<_> = rows
+        .iter()
+        .map(|row| ManifestSlotBindingRowV1 {
+            plugin_id: PluginId::new(),
+            ..row.clone()
+        })
+        .collect();
+    let foreign_closures: Vec<_> = rows
+        .iter()
+        .map(|row| ManifestSlotBindingRowV1 {
+            closure_hash: hash(96),
+            ..row.clone()
+        })
+        .collect();
+    for invalid_rows in [foreign_ids, foreign_closures] {
+        assert_eq!(
+            validate_manifest_owner_admission_snapshot_v1(&rebound(&snapshot, invalid_rows)?),
+            Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn commit_rejects_a_foreign_capability_and_forwards_owner_state_failures() -> TestResult {
+    let timeline_id = TimelineId::new();
+    let operation_id = hash(97);
+    let (registry, _plugins, _owner, admitted) = setup(verifier(timeline_id, operation_id))?;
+    let sources = registry.admitted_manifest_policy_sources(&admitted)?;
+
+    let foreign_owner = verifier(timeline_id, operation_id);
+    let foreign_registry =
+        PluginRegistry::new_with_manifest_owner_admission_verifier(foreign_owner);
+    assert_eq!(
+        foreign_registry.commit_admitted_manifest_owner_admission_v1(
+            &admitted,
+            request(&admitted, &sources, timeline_id, operation_id)?,
+            &mut MemoryStore::new(),
+        ),
+        Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
+    );
+
+    assert_eq!(
+        registry.commit_admitted_manifest_owner_admission_v1(
+            &admitted,
+            request(&admitted, &sources, timeline_id, operation_id)?,
+            &mut UnavailableOwnerState,
+        ),
+        Err(ManifestOwnerAdmissionErrorV1::StorageFailure)
+    );
     Ok(())
 }
