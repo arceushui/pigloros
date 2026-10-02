@@ -1109,6 +1109,7 @@ fn multi_timeline_zero_output_cuts_retain_history_across_scope_replacement() -> 
     replace_scope_and_commit_third_cut(&registry, &mut store, &context)
 }
 
+#[derive(Clone, Copy)]
 struct SqliteSuccessorInput<'a> {
     registry: &'a PluginRegistry,
     admitted: &'a AdmittedCompositionV1,
@@ -1334,7 +1335,7 @@ struct LocalCutPreparationContext<'a> {
 fn assert_structural_local_cut_rejections(
     local_cut: &pos_core::LocalCutOwnerRequestV1,
     context: &LocalCutPreparationContext<'_>,
-) -> TestResult {
+) {
     let mut missing_composition = local_cut.clone();
     missing_composition.composition_rows.pop();
     assert_eq!(
@@ -1386,7 +1387,6 @@ fn assert_structural_local_cut_rejections(
         ),
         Err(pos_core::LocalCutOwnerErrorV1::OwnerRejected)
     );
-    Ok(())
 }
 
 fn assert_owner_and_inventory_rejections(
@@ -1496,7 +1496,7 @@ fn complete_admitted_owner_selection_is_required_before_lcq1_signing() -> TestRe
         signatures_before_cut + 1
     );
 
-    assert_structural_local_cut_rejections(&local_cut, &context)?;
+    assert_structural_local_cut_rejections(&local_cut, &context);
     assert_owner_and_inventory_rejections(&local_cut, &context)?;
     assert_eq!(
         signed_count.load(Ordering::Relaxed),
