@@ -37,7 +37,7 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "5231dcbe90def4e71008f2b06a0b1ea35d12c502b91fa39ad57f86349895f16b";
+const MANIFEST_SHA256: &str = "e0a957f517c60980b43d893a37c0b0ac90151a191cedb8dfc85380e5063c31e6";
 
 /// Every runner of profile version 1, by case identifier.
 const RUNNERS: [(&str, Runner); 45] = [

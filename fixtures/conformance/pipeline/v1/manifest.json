@@ -29,7 +29,7 @@
     {
       "id": "R3-PARTICIPANT-COMMIT-RECOVERY",
       "reason": "Recovery and duplicate-receipt of a committed participant-authorized pass need a published participant authority fence in a store; the test host offers participant passes to a recording port only",
-      "owner": "#481"
+      "owner": "#507"
     },
     {
       "id": "REG-DUPLICATE-CLOSED-ERROR",
@@ -539,7 +539,7 @@
         "consent.staged": "2",
         "consent.refused": "true",
         "consent.aborted": "1,1",
-        "consent.committed": "0",
+        "consent.committed": "1",
         "erasure.staged": "2",
         "erasure.refused": "true",
         "erasure.aborted": "1,1"
