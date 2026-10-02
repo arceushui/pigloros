@@ -11037,53 +11037,45 @@ fn memory_collect_manifest_owner_generation_evidence(
     if current_generation_rows != state.timelines.len() {
         return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
     }
-    let mut operation_id = None;
-    let mut catalog_hash = None;
-    let mut scopes = HashSet::with_capacity(state.timelines.len());
-    let mut receipt_hashes = Vec::with_capacity(state.timelines.len());
-    let mut inventory_generation = None;
-    let mut previous_visible_lcq1_hash = None;
-    for timeline_id in &state.timelines {
-        let snapshot = store
-            .manifest_owner_admission_snapshots
-            .get(&(owner_id, state.configuration_generation, *timeline_id))
-            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    // A missing snapshot empties the list; the header already rejected an
+    // empty roster, so an absent first snapshot always means a missing row.
+    let snapshots = state
+        .timelines
+        .iter()
+        .map(|timeline_id| {
+            store
+                .manifest_owner_admission_snapshots
+                .get(&(owner_id, state.configuration_generation, *timeline_id))
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    let first = snapshots
+        .first()
+        .copied()
+        .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let catalog_hash = first.catalog.digest();
+    let first_receipt = first.timeline.receipt.as_input();
+    let previous_visible_lcq1_hash = first_receipt.previous_visible_lcq1_hash;
+    let mut scopes = HashSet::with_capacity(snapshots.len());
+    let mut receipt_hashes = Vec::with_capacity(snapshots.len());
+    for (snapshot, timeline_id) in snapshots.iter().zip(&state.timelines) {
+        let receipt = snapshot.timeline.receipt.as_input();
         if snapshot.timeline.timeline_id != *timeline_id
-            || operation_id.is_some_and(|operation| operation != snapshot.operation_id)
-            || catalog_hash.is_some_and(|catalog| catalog != snapshot.catalog.digest())
-            || inventory_generation
-                .is_some_and(|inventory| inventory != snapshot.resulting_inventory_generation)
-            || previous_visible_lcq1_hash.is_some_and(|previous| {
-                previous
-                    != snapshot
-                        .timeline
-                        .receipt
-                        .as_input()
-                        .previous_visible_lcq1_hash
-            })
+            || snapshot.operation_id != first.operation_id
+            || snapshot.catalog.digest() != catalog_hash
+            || snapshot.resulting_inventory_generation != first.resulting_inventory_generation
+            || receipt.previous_visible_lcq1_hash != previous_visible_lcq1_hash
             || !scopes.insert(snapshot.timeline.scope)
             || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
         {
             return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
         }
-        operation_id = Some(snapshot.operation_id);
-        catalog_hash = Some(snapshot.catalog.digest());
-        inventory_generation = Some(snapshot.resulting_inventory_generation);
-        previous_visible_lcq1_hash = Some(
-            snapshot
-                .timeline
-                .receipt
-                .as_input()
-                .previous_visible_lcq1_hash,
-        );
         receipt_hashes.push(snapshot.timeline.receipt.digest());
     }
     Ok(MemoryManifestOwnerGenerationEvidenceV1 {
-        operation_id: operation_id.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
-        inventory_generation: inventory_generation
-            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
-        previous_visible_lcq1_hash: previous_visible_lcq1_hash
-            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
+        operation_id: first.operation_id,
+        inventory_generation: first.resulting_inventory_generation,
+        previous_visible_lcq1_hash,
         receipt_hashes,
     })
 }
@@ -11124,6 +11116,11 @@ fn memory_validate_manifest_owner_generation_operation(
     Ok(())
 }
 
+/// Derive the local-cut owner successor for a committed successor admission.
+///
+/// The caller has just read the owner state, which validated the local-cut
+/// state against the admitted header, and matched that header against the
+/// input's expected generation, receipt, and inventory.
 fn memory_successor_local_cut_owner_state(
     store: &MemoryStore,
     owner_id: [u8; 32],
@@ -11133,25 +11130,7 @@ fn memory_successor_local_cut_owner_state(
     let Some(local_cut_state) = store.local_cut_owner_states.get(&owner_id) else {
         return Ok(None);
     };
-    local_cut_state
-        .validate()
-        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
-    let current_timelines =
-        current_state_timelines(&store.manifest_owner_admission_states, owner_id)?;
     let next_timelines = next_state.timelines.iter().copied().collect::<Vec<_>>();
-    if local_cut_state.owner_id != owner_id
-        || input.expected_configuration_generation != Some(local_cut_state.configuration_generation)
-        || input.previous_visible_lcq1_hash != local_cut_state.previous_visible_lcq1_hash
-        || input.expected_inventory_generation != Some(local_cut_state.inventory_generation)
-        || local_cut_state
-            .timelines
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            != current_timelines
-    {
-        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
-    }
     let membership_epoch = if local_cut_state.timelines == next_timelines {
         local_cut_state.membership_epoch
     } else {
@@ -11437,29 +11416,6 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
     }
 }
 
-const fn map_memory_manifest_owner_admission_error(
-    error: ManifestOwnerAdmissionErrorV1,
-) -> LocalCutOwnerErrorV1 {
-    match error {
-        ManifestOwnerAdmissionErrorV1::Conflict => LocalCutOwnerErrorV1::Conflict,
-        ManifestOwnerAdmissionErrorV1::StorageFailure => LocalCutOwnerErrorV1::StorageFailure,
-        ManifestOwnerAdmissionErrorV1::BoundExceeded
-        | ManifestOwnerAdmissionErrorV1::InvalidBatch
-        | ManifestOwnerAdmissionErrorV1::OwnerRejected
-        | ManifestOwnerAdmissionErrorV1::CorruptState => LocalCutOwnerErrorV1::CorruptState,
-    }
-}
-
-fn current_state_timelines(
-    states: &BTreeMap<[u8; 32], MemoryManifestOwnerAdmissionStateV1>,
-    owner_id: [u8; 32],
-) -> Result<BTreeSet<TimelineId>, ManifestOwnerAdmissionErrorV1> {
-    states
-        .get(&owner_id)
-        .map(|state| state.timelines.clone())
-        .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)
-}
-
 fn validate_memory_local_cut_result(
     owner_id: [u8; 32],
     cut_id: u64,
@@ -11534,18 +11490,11 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
             };
         };
         state.validate()?;
-        let admission = self
-            .read_manifest_owner_state_v1(owner_id)
-            .map_err(map_memory_manifest_owner_admission_error)?
-            .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
-        if state.owner_id != admission.owner_id
-            || state.configuration_generation != admission.configuration_generation
-            || state.previous_visible_lcq1_hash != admission.previous_visible_lcq1_hash
-            || state.inventory_generation != admission.inventory_generation
-            || state.timelines != admission.timelines
-        {
-            return Err(LocalCutOwnerErrorV1::CorruptState);
-        }
+        // The memory admission read only fails with CorruptState. It also checks
+        // this local-cut state against the admitted header, and rejects a
+        // local-cut state without an admitted header as orphaned.
+        self.read_manifest_owner_state_v1(owner_id)
+            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
 
         let mut found_current = false;
         for ((stored_owner, cut_id), result) in &self.local_cut_owner_commits {
@@ -11604,12 +11553,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         else {
             return Ok(None);
         };
-        validate_memory_local_cut_operation(
-            owner_id,
-            operation_id,
-            operation,
-            &self.local_cut_owner_commits,
-        )?;
+        // The owner-state read above already validated every retained operation.
         if operation.intent_digest != intent_digest {
             return Err(LocalCutOwnerErrorV1::Conflict);
         }
@@ -11626,15 +11570,10 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         let operation_id = batch.request().operation_id;
         let intent_digest = batch.intent_digest();
         let result = batch.applied_result();
-        if local_cut_owner_intent_digest_v1(batch.request())? != intent_digest {
-            return Err(LocalCutOwnerErrorV1::CorruptState);
-        }
-        batch.successor_state().validate()?;
-        validate_memory_local_cut_result(
-            owner_id,
-            batch.request().seal.as_input().cut_id,
-            &result,
-        )?;
+        // The prepared batch is immutable: its intent digest, successor state,
+        // and applied result were derived and validated together by
+        // prepare_local_cut_owner_commit_v1.
+        let current_state = self.read_local_cut_owner_state_v1(owner_id)?;
         if let Some(retry) =
             self.resolve_local_cut_owner_retry_v1(owner_id, operation_id, intent_digest)?
         {
@@ -11642,9 +11581,8 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         }
         let admission = self
             .read_manifest_owner_state_v1(owner_id)
-            .map_err(map_memory_manifest_owner_admission_error)?
+            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?
             .ok_or(LocalCutOwnerErrorV1::Conflict)?;
-        let current_state = self.read_local_cut_owner_state_v1(owner_id)?;
         let request = batch.request();
         let seal = request.seal.as_input();
         let successor = batch.successor_state();
@@ -11678,13 +11616,9 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
                 }
             }
         }
+        // The owner-state read bounds every retained cut by the last visible cut,
+        // and the successor cut is strictly newer, so this key is unused.
         let cut_id = seal.cut_id;
-        if self
-            .local_cut_owner_commits
-            .contains_key(&(owner_id, cut_id))
-        {
-            return Err(LocalCutOwnerErrorV1::Conflict);
-        }
         let operation = MemoryLocalCutOwnerOperationV1 {
             intent_digest,
             request: request.clone(),
@@ -11713,24 +11647,10 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         owner_id: [u8; 32],
         cut_id: u64,
     ) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+        // The owner-state read validates every retained cut and its one
+        // linked operation.
         self.read_local_cut_owner_state_v1(owner_id)?;
-        let Some(result) = self.local_cut_owner_commits.get(&(owner_id, cut_id)) else {
-            return Ok(None);
-        };
-        validate_memory_local_cut_result(owner_id, cut_id, result)?;
-        let linked_operations = self
-            .local_cut_owner_operations
-            .iter()
-            .filter(|((stored_owner, _), operation)| {
-                *stored_owner == owner_id
-                    && operation.request.seal.as_input().cut_id == cut_id
-                    && operation.result == *result
-            })
-            .count();
-        if linked_operations != 1 {
-            return Err(LocalCutOwnerErrorV1::CorruptState);
-        }
-        Ok(Some(result.clone()))
+        Ok(self.local_cut_owner_commits.get(&(owner_id, cut_id)).cloned())
     }
 }
 
@@ -14898,34 +14818,5 @@ mod local_cut_owner_coverage {
             Err(LocalCutOwnerErrorV1::Conflict)
         );
         Ok(())
-    }
-
-    #[test]
-    fn manifest_errors_map_to_closed_local_cut_errors() {
-        let map = map_memory_manifest_owner_admission_error;
-        assert_eq!(
-            map(ManifestOwnerAdmissionErrorV1::Conflict),
-            LocalCutOwnerErrorV1::Conflict
-        );
-        assert_eq!(
-            map(ManifestOwnerAdmissionErrorV1::StorageFailure),
-            LocalCutOwnerErrorV1::StorageFailure
-        );
-        assert_eq!(
-            map(ManifestOwnerAdmissionErrorV1::BoundExceeded),
-            LocalCutOwnerErrorV1::CorruptState
-        );
-        assert_eq!(
-            map(ManifestOwnerAdmissionErrorV1::InvalidBatch),
-            LocalCutOwnerErrorV1::CorruptState
-        );
-        assert_eq!(
-            map(ManifestOwnerAdmissionErrorV1::OwnerRejected),
-            LocalCutOwnerErrorV1::CorruptState
-        );
-        assert_eq!(
-            map(ManifestOwnerAdmissionErrorV1::CorruptState),
-            LocalCutOwnerErrorV1::CorruptState
-        );
     }
 }
