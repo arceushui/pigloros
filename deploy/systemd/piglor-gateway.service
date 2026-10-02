@@ -13,6 +13,7 @@ RuntimeDirectory=pigloros
 RuntimeDirectoryMode=0750
 LoadCredentialEncrypted=pigloros.fork-admission-auth:/etc/credstore.encrypted/pigloros.fork-admission-auth.cred
 LoadCredentialEncrypted=pigloros.fork-admission-host-signer:/etc/credstore.encrypted/pigloros.fork-admission-host-signer.cred
+LoadCredentialEncrypted=pigloros.fork-classifier-profile:/etc/credstore.encrypted/pigloros.fork-classifier-profile.cred
 ExecStart=/usr/bin/piglor-gateway serve 127.0.0.1:8080 /var/lib/pigloros/gateway.db --require-local-fork-authority
 NoNewPrivileges=yes
 PrivateMounts=yes

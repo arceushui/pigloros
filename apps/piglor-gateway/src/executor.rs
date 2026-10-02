@@ -19,9 +19,9 @@ use pos_core::{
     ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
     CoreError, ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureReferenceV1,
     ForkAdmissionHostCommandV1, ForkAdmissionOperationResultV1, ForkAdmissionRecoveryProofV1,
-    ForkAuthenticationPolicyV1, Hash, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1,
-    PersistedAuthorityV1, PreparedOwnTracksIngressV1, ProposedAction, Seq,
-    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    ForkAuthenticationPolicyV1, ForkClassifierSourceV1, Hash, OwnTracksIngressInputV1,
+    OwnTracksIngressRateKeyV1, PersistedAuthorityV1, PreparedOwnTracksIngressV1, ProposedAction,
+    Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 #[cfg(test)]
 use pos_core::{
@@ -36,6 +36,7 @@ use pos_runtime::{
 use pos_store::{
     ForkAdmissionAuthoritySessionV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
     ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryTupleV1,
+    ForkEventAuthorityErrorV1, ForkEventPermitIssuerV1,
 };
 use std::{
     collections::HashMap,
@@ -1669,9 +1670,9 @@ impl StoreExecutor {
     /// `build` runs exactly once: the built command is shared by every
     /// admission attempt, and each retry only re-wraps it, so the values it
     /// captures are moved, never copied per attempt.
-    fn submit_fork_admission<T>(
+    fn submit_fork_admission<T, C: ForkAdmissionWorkV1>(
         &self,
-        build: impl FnOnce(ForkAdmissionReplyV1<T>) -> ForkAdmissionCommandV1,
+        build: impl FnOnce(ForkAdmissionReplyV1<T>) -> C,
     ) -> ForkAdmissionSubmissionV1<T> {
         let deadline = Instant::now() + self.command_deadline();
         let lifecycle = Arc::new(CommandLifecycle::new());
@@ -1701,10 +1702,10 @@ impl StoreExecutor {
 /// One admission attempt of a built Fork-admission command. Every attempt of
 /// one submission shares the command; the attempt that runs or expires takes
 /// it.
-struct ForkAdmissionAttemptV1(Arc<Mutex<Option<ForkAdmissionCommandV1>>>);
+struct ForkAdmissionAttemptV1<C>(Arc<Mutex<Option<C>>>);
 
-impl ForkAdmissionAttemptV1 {
-    fn take(&self) -> Option<ForkAdmissionCommandV1> {
+impl<C> ForkAdmissionAttemptV1<C> {
+    fn take(&self) -> Option<C> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1712,19 +1713,67 @@ impl ForkAdmissionAttemptV1 {
     }
 }
 
-impl WorkerCommandV1 for ForkAdmissionAttemptV1 {
+impl<C: ForkAdmissionWorkV1> WorkerCommandV1 for ForkAdmissionAttemptV1<C> {
     fn run_on_worker(self: Box<Self>, state: &mut ExecutorState) {
         let Some(command) = self.take() else {
             return;
         };
-        command.run_on(state.store.fork_admission_target());
+        command.run_work(state.store.fork_admission_target());
     }
 
     fn expire_unrun(self: Box<Self>) {
         let Some(command) = self.take() else {
             return;
         };
-        command.refuse(ForkAdmissionSubmissionErrorV1::Busy);
+        command.refuse_work(ForkAdmissionSubmissionErrorV1::Busy);
+    }
+}
+
+/// One private Fork-admission command kind the executor worker runs against
+/// its host and slot, or refuses unrun.
+trait ForkAdmissionWorkV1: Send + 'static {
+    /// Run on the worker; a missing slot refuses the command as unavailable.
+    fn run_work(self, target: Option<(&mut ErasureExecutionHostV1, &ForkAdmissionSlotV1)>);
+
+    /// Reply that the command did not run.
+    fn refuse_work(self, error: ForkAdmissionSubmissionErrorV1);
+}
+
+impl ForkAdmissionWorkV1 for ForkAdmissionCommandV1 {
+    fn run_work(self, target: Option<(&mut ErasureExecutionHostV1, &ForkAdmissionSlotV1)>) {
+        self.run_on(target);
+    }
+
+    fn refuse_work(self, error: ForkAdmissionSubmissionErrorV1) {
+        self.refuse(error);
+    }
+}
+
+/// The ADR-109 revision 12 classifier registration command: the committed
+/// Fork's child and FAR1 digest. The issuer, session, and profile come from
+/// the executor's slot.
+struct ForkClassifierRegistrationCommandV1 {
+    child: TimelineId,
+    admission_digest: Hash,
+    reply: ForkAdmissionReplyV1<ForkClassifierRegistrationV1>,
+}
+
+impl ForkAdmissionWorkV1 for ForkClassifierRegistrationCommandV1 {
+    fn run_work(self, target: Option<(&mut ErasureExecutionHostV1, &ForkAdmissionSlotV1)>) {
+        let Some((host, slot)) = target else {
+            return send_fork_admission_refusal(
+                &self.reply,
+                ForkAdmissionSubmissionErrorV1::Unavailable,
+            );
+        };
+        send_fork_admission_result(
+            &self.reply,
+            Ok(slot.register_classifier(host, self.child, self.admission_digest)),
+        );
+    }
+
+    fn refuse_work(self, error: ForkAdmissionSubmissionErrorV1) {
+        send_fork_admission_refusal(&self.reply, error);
     }
 }
 
@@ -1761,26 +1810,87 @@ fn await_fork_admission_reply<T>(
     }
 }
 
-/// The private ADR-109 revision 9 Fork-admission slot of one executor: the
-/// ADR-106 authority session opened on the host adapter and an immutable copy
-/// of the FACR1 FAP1 policy.
+/// The private ADR-109 Fork-admission slot of one executor: the ADR-106
+/// authority session opened on the host adapter, an immutable copy of the
+/// FACR1 FAP1 policy (revision 9), and the session's take-once ADR-099 permit
+/// issuer with the immutable FCP1 profile rows (revision 12).
 ///
 /// It is installed with the host at startup and never exposed to HTTP. The
-/// listener thread keeps only the session identity digest.
+/// listener thread keeps only the session identity digest, so the slot is the
+/// sole holder of the issuer and the profile: the protected composition is
+/// the only registrar of profile-selected classifiers.
 pub(crate) struct ForkAdmissionSlotV1 {
     session: ForkAdmissionAuthoritySessionV1,
     policy: ForkAuthenticationPolicyV1,
+    issuer: ForkEventPermitIssuerV1,
+    profile: Vec<ForkClassifierSourceV1>,
 }
 
 impl ForkAdmissionSlotV1 {
-    /// Pair one opened authority session with its pinned policy.
+    /// Install one opened authority session with its pinned policy, the
+    /// issuer taken from that session, and the activation FCP1 rows.
     #[must_use]
     pub(crate) const fn new(
         session: ForkAdmissionAuthoritySessionV1,
+        issuer: ForkEventPermitIssuerV1,
         policy: ForkAuthenticationPolicyV1,
+        profile: Vec<ForkClassifierSourceV1>,
     ) -> Self {
-        Self { session, policy }
+        Self {
+            session,
+            policy,
+            issuer,
+            profile,
+        }
     }
+
+    /// Register the FCP1 row selected by a committed Fork's durable FAR1
+    /// (ADR-099 revision 11 section 3; ADR-109 revision 12).
+    ///
+    /// A descriptor with no profile row fails; it never falls back to another
+    /// row. Every retry of the same FAR1 reuses one registration operation.
+    fn register_classifier(
+        &self,
+        host: &mut ErasureExecutionHostV1,
+        child: TimelineId,
+        admission_digest: Hash,
+    ) -> Result<(), ForkEventAuthorityErrorV1> {
+        host.register_fork_classifier(
+            (&self.issuer, &self.session),
+            classifier_registration_operation_id(child, admission_digest),
+            child,
+            |descriptor| select_profile_source(&self.profile, descriptor),
+        )
+        .map(|_| ())
+    }
+}
+
+/// Select the one FCP1 row for a durable FAR1 room revision descriptor hash
+/// (ADR-099 revision 11 section 3). An absent descriptor selects nothing; it
+/// never falls back to another row.
+///
+/// The executor slot and every test registration seam share this selection.
+pub(crate) fn select_profile_source(
+    profile: &[ForkClassifierSourceV1],
+    descriptor: Hash,
+) -> Option<ForkClassifierSourceV1> {
+    profile
+        .iter()
+        .find(|source| source.input().room_revision_descriptor_hash == descriptor)
+        .cloned()
+}
+
+/// Deterministic host-only FCR1 operation ID for one committed Fork, so every
+/// recovery of the same FAR1 retries the same registration operation.
+pub(crate) fn classifier_registration_operation_id(
+    child: TimelineId,
+    admission_digest: Hash,
+) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros/fork-classifier-registration-operation/v1");
+    hasher.update(&child.inner().to_bytes());
+    hasher.update(admission_digest.as_bytes());
+    Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 /// Why a Fork-admission command produced no store result.
@@ -1800,6 +1910,9 @@ pub(crate) enum ForkAdmissionSubmissionErrorV1 {
 pub(crate) type ForkAdmissionSubmissionV1<T> =
     Result<Result<T, ForkDeliveryJournalErrorV1>, ForkAdmissionSubmissionErrorV1>;
 
+/// The ADR-099 outcome of one classifier registration command.
+pub(crate) type ForkClassifierRegistrationV1 = Result<(), ForkEventAuthorityErrorV1>;
+
 /// The response-delivery mark recorded after a FARL1 write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ForkDeliveryMarkV1 {
@@ -1811,9 +1924,11 @@ pub(crate) enum ForkDeliveryMarkV1 {
 
 type ForkAdmissionReplyV1<T> = std::sync::mpsc::SyncSender<ForkAdmissionSubmissionV1<T>>;
 
-/// The five private Fork-admission commands (ADR-109 revision 9, Decision 1
-/// item 4). They carry no FAL1 bytes, UID, or Owner; the session and policy
-/// come from the executor's slot.
+/// The five private journal commands (ADR-109 revision 9, Decision 1 item 4).
+/// The sixth private command, the ADR-109 revision 12 classifier
+/// registration, is `ForkClassifierRegistrationCommandV1`; both run through
+/// `ForkAdmissionWorkV1`. They carry no FAL1 bytes, UID, or Owner; the
+/// session and policy come from the executor's slot.
 enum ForkAdmissionCommandV1 {
     Claim {
         tuple: ForkDeliveryTupleV1,
@@ -2003,6 +2118,25 @@ impl ForkAdmissionSubmitterV1 {
     ) -> ForkAdmissionSubmissionV1<()> {
         self.executor
             .submit_fork_admission(|reply| ForkAdmissionCommandV1::Mark { claim, mark, reply })
+    }
+
+    /// Register the profile-selected classifier of one committed Fork
+    /// (ADR-109 revision 12).
+    ///
+    /// # Errors
+    /// Returns why the command produced no store result; the inner result is
+    /// the ADR-099 registration outcome.
+    pub(crate) fn register_fork_classifier(
+        &self,
+        child: TimelineId,
+        admission_digest: Hash,
+    ) -> ForkAdmissionSubmissionV1<ForkClassifierRegistrationV1> {
+        self.executor
+            .submit_fork_admission(|reply| ForkClassifierRegistrationCommandV1 {
+                child,
+                admission_digest,
+                reply,
+            })
     }
 }
 
@@ -7159,6 +7293,9 @@ mod fork_admission_submission_tests {
                 submitter
                     .mark_fork_delivery(commands.claim, ForkDeliveryMarkV1::Uncertain)
                     .err(),
+                submitter
+                    .register_fork_classifier(TimelineId::new(), Hash::from_bytes([93; 32]))
+                    .err(),
             ]
         })
         .join()
@@ -7192,6 +7329,23 @@ mod fork_admission_submission_tests {
         Ok(())
     }
 
+    /// A classifier registration that expires while queued replies Busy.
+    #[test]
+    fn an_expired_classifier_registration_is_busy() -> TestResult {
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        let command = Arc::new(Mutex::new(Some(ForkClassifierRegistrationCommandV1 {
+            child: TimelineId::new(),
+            admission_digest: Hash::from_bytes([94; 32]),
+            reply,
+        })));
+        Box::new(ForkAdmissionAttemptV1(command)).expire_unrun();
+        assert_eq!(
+            result.try_recv()?,
+            Err(ForkAdmissionSubmissionErrorV1::Busy)
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn executors_without_a_fork_admission_slot_refuse_every_command() -> TestResult {
         let host = ErasureExecutionHostV1::open_verified_empty(
@@ -7209,7 +7363,7 @@ mod fork_admission_submission_tests {
             })?;
             assert_eq!(
                 refused,
-                vec![Some(ForkAdmissionSubmissionErrorV1::Unavailable); 6]
+                vec![Some(ForkAdmissionSubmissionErrorV1::Unavailable); 7]
             );
             executor
                 .shutdown()
@@ -7217,7 +7371,7 @@ mod fork_admission_submission_tests {
                 .map_err(|error| format!("executor shutdown failed: {error:?}"))?;
             assert_eq!(
                 submit_every_command(ForkAdmissionSubmitterV1 { executor })?,
-                vec![Some(ForkAdmissionSubmissionErrorV1::Unavailable); 6]
+                vec![Some(ForkAdmissionSubmissionErrorV1::Unavailable); 7]
             );
         }
         Ok(())

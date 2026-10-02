@@ -17,12 +17,19 @@ use std::{
 };
 
 use piglor_ledger::LedgerView;
-use pos_runtime::ErasureCoordinatorCompositionV1;
-use pos_store::{sqlite::SqliteStore, StoreConfig};
+use pos_core::ForkAdmissionHostRecordV1;
+use pos_runtime::{ErasureCoordinatorCompositionV1, ErasureExecutionHostV1};
+use pos_store::{
+    sqlite::SqliteStore, ForkAdmissionAuthoritySessionV1, ForkEventAuthorityErrorV1,
+    ForkEventPermitIssuerV1, StoreConfig,
+};
 
 use crate::{
     executor::ForkAdmissionSlotV1,
-    local_fork_authentication::LocalForkAuthenticationCredentialsV1,
+    local_fork_authentication::{
+        LocalForkAuthenticationCredentialsV1, LocalForkAuthenticationErrorV1,
+    },
+    local_fork_classifier_profile::ForkClassifierProfileV1,
     local_fork_coordinator::{
         open_fork_admission_session, reconcile_startup, LocalForkAdmissionCoordinatorV1,
     },
@@ -155,11 +162,14 @@ fn provision_with_credentials(
 /// erasure host of `paths.sqlite_path` (ADR-109 revision 9, Decision 1).
 ///
 /// Startup fails closed in this order, and no listener binds before its
-/// last step: the credentials are validated before the database opens; the
-/// host recovers a verified inventory with `composition`; the FAO1 open proof
-/// runs on the host's own adapter; the journal is reconciled there; the host
-/// and the Fork-admission slot move into one `StoreExecutor`; then TCP and,
-/// last, the Unix pathname socket bind. Shutdown stops TCP, then the
+/// last step: the three managed credentials (FACR1, FAHK1, and the FCP1
+/// classifier profile) are validated and decoded before the database opens;
+/// the host recovers a verified inventory with `composition`; the read-only
+/// FCP1 preflight and then the FAO1 open proof run on the host's own adapter;
+/// the journal is reconciled there; the host and the Fork-admission slot,
+/// which alone holds the session's permit issuer and the profile, move into
+/// one `StoreExecutor`; then TCP and, last, the Unix pathname socket bind
+/// (ADR-109 revision 12). Shutdown stops TCP, then the
 /// listener, then drains the executor. The binary passes the closed
 /// composition; no flag, environment variable, or credential selects another.
 ///
@@ -173,22 +183,22 @@ pub async fn serve_local_fork_admission(
     shutdown: impl Future<Output = ()> + Send + 'static,
     ledger: (LedgerView, LedgerWriteMode),
 ) -> Result<(), ServeError> {
-    let credentials = credentials(paths.credential_directory)?;
-    let started = open_with_credentials(
-        paths.sqlite_path,
-        credentials,
-        owntracks_owner_key,
-        composition,
-    )?;
+    let managed = managed_credentials(paths.credential_directory)?;
+    let started =
+        open_with_credentials(paths.sqlite_path, managed, owntracks_owner_key, composition)?;
     serve_started(addr, started, paths.socket_path, shutdown, ledger).await
 }
 
-/// Startup steps 2 to 5: open the one host with `composition`, open the
-/// ADR-106 session on its adapter, reconcile the journal there, and move the
-/// host with its Fork-admission slot into the Gateway's `StoreExecutor`.
+/// Startup steps 2 to 5: open the one host with `composition`, preflight the
+/// FCP1 profile and open the ADR-106 session on its adapter, reconcile the
+/// journal there, and move the host with its Fork-admission slot into the
+/// Gateway's `StoreExecutor`.
 fn open_with_credentials(
     sqlite_path: &str,
-    credentials: LocalForkAuthenticationCredentialsV1,
+    (credentials, profile): (
+        LocalForkAuthenticationCredentialsV1,
+        ForkClassifierProfileV1,
+    ),
     owntracks_owner_key: Option<&OwnTracksOwnerKey>,
     composition: &ErasureCoordinatorCompositionV1,
 ) -> io::Result<(Gateway, LocalForkAdmissionCoordinatorV1)> {
@@ -205,8 +215,7 @@ fn open_with_credentials(
         store,
         composition,
     )?;
-    let (session, record) =
-        open_fork_admission_session(&mut host, &credentials).map_err(io::Error::other)?;
+    let (session, issuer, record) = open_profiled_session(&mut host, &credentials, &profile)?;
     let tuples = host.reconcile_fork_delivery_journal(&session);
     reconcile_startup(
         &credentials,
@@ -216,7 +225,12 @@ fn open_with_credentials(
     )
     .map_err(io::Error::other)?;
     let session_identity = session.identity();
-    let slot = ForkAdmissionSlotV1::new(session, credentials.policy().clone());
+    let slot = ForkAdmissionSlotV1::new(
+        session,
+        issuer,
+        credentials.policy().clone(),
+        profile.into_sources(),
+    );
     let (gateway, submitter) =
         Gateway::new_with_fork_admission_erasure_host(host, owntracks_owner_key, slot)
             .map_err(io::Error::other)?;
@@ -227,6 +241,43 @@ fn open_with_credentials(
         Box::new(submitter),
     );
     Ok((gateway, coordinator))
+}
+
+/// ADR-109 revision 12 startup steps 2a and 3: run the read-only FCP1
+/// preflight on the host adapter, then the FAO1 open proof, and take the new
+/// session's one permit issuer for the executor slot.
+fn open_profiled_session(
+    host: &mut ErasureExecutionHostV1,
+    credentials: &LocalForkAuthenticationCredentialsV1,
+    profile: &ForkClassifierProfileV1,
+) -> io::Result<(
+    ForkAdmissionAuthoritySessionV1,
+    ForkEventPermitIssuerV1,
+    ForkAdmissionHostRecordV1,
+)> {
+    host.preflight_fork_classifier_profile(profile.sources())
+        .map_err(preflight_error)
+        .and_then(|()| open_fork_admission_session(host, credentials))
+        .and_then(|(mut session, record)| {
+            session
+                .take_event_permit_issuer()
+                .map(|issuer| (session, issuer, record))
+                .ok_or(LocalForkAuthenticationErrorV1::CredentialUnavailable)
+        })
+        .map_err(io::Error::other)
+}
+
+/// Map a read-only FCP1 preflight failure to the activation outcome.
+///
+/// Only an indeterminate storage read is retryable; every other outcome means
+/// the durable FCS1 rows disagree with the profile, so the profile is invalid.
+const fn preflight_error(error: ForkEventAuthorityErrorV1) -> LocalForkAuthenticationErrorV1 {
+    match error {
+        ForkEventAuthorityErrorV1::StorageIndeterminate => {
+            LocalForkAuthenticationErrorV1::CredentialUnavailable
+        }
+        _ => LocalForkAuthenticationErrorV1::CredentialInvalid,
+    }
 }
 
 /// Startup step 6 and the shutdown order of Decision 1 item 8.
@@ -302,6 +353,20 @@ fn credentials(directory: &Path) -> io::Result<LocalForkAuthenticationCredential
         .map_err(io::Error::other)
 }
 
+/// ADR-107 r6 startup step 1: exactly FACR1, FAHK1, and the FCP1 profile.
+fn managed_credentials(
+    directory: &Path,
+) -> io::Result<(
+    LocalForkAuthenticationCredentialsV1,
+    ForkClassifierProfileV1,
+)> {
+    LocalForkAuthenticationCredentialsV1::load_managed(
+        directory,
+        rustix::process::geteuid().as_raw(),
+    )
+    .map_err(io::Error::other)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -310,6 +375,10 @@ mod tests {
         executor::{ForkAdmissionSubmissionErrorV1, ForkAdmissionSubmissionV1, StoreExecutor},
         local_fork_authentication::{
             test_credential_bytes_for_service, test_credentials_for_current_peer_with_seeds,
+        },
+        local_fork_classifier_profile::{
+            test_profile_bytes, test_profile_source, CLASSIFIER_PROFILE_CREDENTIAL_NAME,
+            MAX_CLASSIFIER_PROFILE_BYTES,
         },
         local_fork_coordinator::LocalForkDeliveryJournalV1,
     };
@@ -391,6 +460,45 @@ mod tests {
 
     fn current_peer_credentials() -> io::Result<LocalForkAuthenticationCredentialsV1> {
         test_credentials_for_current_peer_with_seeds([7; 32], [8; 32]).map_err(io::Error::other)
+    }
+
+    /// Canonical FCP1 bytes with one empty-route row per descriptor byte.
+    fn profile_bytes(descriptors: &[u8]) -> io::Result<Vec<u8>> {
+        descriptors
+            .iter()
+            .map(|descriptor| test_profile_source(*descriptor, Vec::new()))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|rows| test_profile_bytes(&rows))
+            .map_err(io::Error::other)
+    }
+
+    fn profile_from(descriptors: &[u8]) -> io::Result<ForkClassifierProfileV1> {
+        ForkClassifierProfileV1::from_canonical_cbor(&profile_bytes(descriptors)?)
+            .map_err(io::Error::other)
+    }
+
+    /// The startup-step-1 inputs of the fixtures: the current-peer
+    /// credentials and an FCP1 row for the FAL1 Fork descriptor `[7; 32]`.
+    fn current_peer_managed() -> io::Result<(
+        LocalForkAuthenticationCredentialsV1,
+        ForkClassifierProfileV1,
+    )> {
+        Ok((current_peer_credentials()?, profile_from(&[7])?))
+    }
+
+    /// Add the ADR-107 r6 third managed credential, the FCP1 profile.
+    fn install_profile(directory: &Path, profile: &[u8]) -> io::Result<()> {
+        protected_credential_file(directory, CLASSIFIER_PROFILE_CREDENTIAL_NAME, profile)
+    }
+
+    /// The ADR-107 r6 managed-service directory: FACR1, FAHK1, and FCP1.
+    fn managed_credentials(
+        directory: &Path,
+        (adapter_seed, host_seed): ([u8; 32], [u8; 32]),
+        profile: &[u8],
+    ) -> io::Result<()> {
+        protected_credentials(directory, adapter_seed, host_seed)?;
+        install_profile(directory, profile)
     }
 
     fn bind_payload(operation: u8) -> Vec<u8> {
@@ -583,12 +691,8 @@ mod tests {
         world: &World,
         composition: &ErasureCoordinatorCompositionV1,
     ) -> TestResult<(Gateway, LocalForkAdmissionListenerV1)> {
-        let (gateway, coordinator) = open_with_credentials(
-            world.path()?,
-            current_peer_credentials()?,
-            None,
-            composition,
-        )?;
+        let (gateway, coordinator) =
+            open_with_credentials(world.path()?, current_peer_managed()?, None, composition)?;
         let listener = start_listener(coordinator, &world.socket)?;
         Ok((gateway, listener))
     }
@@ -1477,6 +1581,14 @@ mod tests {
         ) -> ForkAdmissionSubmissionV1<()> {
             self.inner.mark(claim, mark)
         }
+
+        fn register(
+            &mut self,
+            child: TimelineId,
+            admission_digest: pos_core::Hash,
+        ) -> ForkAdmissionSubmissionV1<crate::executor::ForkClassifierRegistrationV1> {
+            self.inner.register(child, admission_digest)
+        }
     }
 
     /// A7: an executor saturated before the claim, or between the claim and
@@ -1487,7 +1599,7 @@ mod tests {
         let (world, parents) = provisioned_world(&["a7 parent"])?;
         let (gateway, coordinator) = open_with_credentials(
             world.path()?,
-            current_peer_credentials()?,
+            current_peer_managed()?,
             None,
             &ErasureCoordinatorCompositionV1::closed(),
         )?;
@@ -1603,8 +1715,7 @@ mod tests {
         let authority_before = authority_rows(&world)?;
         let graph_before = graph_rows(&world)?;
         assert!(
-            open_with_credentials(world.path()?, current_peer_credentials()?, None, &closed)
-                .is_err()
+            open_with_credentials(world.path()?, current_peer_managed()?, None, &closed).is_err()
         );
         assert_eq!(authority_rows(&world)?, authority_before);
         assert_eq!(graph_rows(&world)?, graph_before);
@@ -1614,14 +1725,12 @@ mod tests {
             .path()
             .to_str()
             .ok_or("runtime path is not UTF-8")?;
-        assert!(
-            open_with_credentials(unopenable, current_peer_credentials()?, None, &closed).is_err()
-        );
+        assert!(open_with_credentials(unopenable, current_peer_managed()?, None, &closed).is_err());
 
         let unprovisioned = unprovisioned_world()?;
         assert!(open_with_credentials(
             unprovisioned.path()?,
-            current_peer_credentials()?,
+            current_peer_managed()?,
             None,
             &closed
         )
@@ -1644,8 +1753,7 @@ mod tests {
         )?;
         drop(connection);
         assert!(
-            open_with_credentials(corrupt.path()?, current_peer_credentials()?, None, &closed)
-                .is_err()
+            open_with_credentials(corrupt.path()?, current_peer_managed()?, None, &closed).is_err()
         );
         assert_eq!(delivery_state(&corrupt, 52)?, Some(0));
         for failed in [&world, &unprovisioned, &corrupt] {
@@ -1747,13 +1855,19 @@ mod tests {
         assert!(!world.socket.exists());
 
         let credentials = protected_credential_directory(world.runtime.path())?;
-        protected_credentials(&credentials, [7; 32], [8; 32])?;
+        let profile = profile_bytes(&[7])?;
+        managed_credentials(&credentials, ([7; 32], [8; 32]), &profile)?;
         assert!(serve_for_test(paths(&world, &credentials)?, async {})
             .await
             .is_err());
         assert!(!world.socket.exists());
 
+        // FCP1 is not a provisioning input: the provisioner accepts only the
+        // two key credentials (ADR-107 r6).
+        assert!(provision_local_fork_admission_authority(world.path()?, &credentials).is_err());
+        fs::remove_file(credentials.join(CLASSIFIER_PROFILE_CREDENTIAL_NAME))?;
         provision_local_fork_admission_authority(world.path()?, &credentials)?;
+        install_profile(&credentials, &profile)?;
         for (adapter, host) in [([9; 32], [8; 32]), ([7; 32], [9; 32])] {
             protected_credentials(&credentials, adapter, host)?;
             assert!(serve_for_test(paths(&world, &credentials)?, async {})
@@ -1773,6 +1887,7 @@ mod tests {
         let credentials = protected_credential_directory(world.runtime.path())?;
         protected_credentials(&credentials, [7; 32], [8; 32])?;
         provision_local_fork_admission_authority(world.path()?, &credentials)?;
+        install_profile(&credentials, &profile_bytes(&[7])?)?;
         let socket = world.socket.clone();
         serve_for_test(paths(&world, &credentials)?, async move {
             assert!(socket.exists());
@@ -1790,7 +1905,7 @@ mod tests {
         let occupied = std::net::TcpListener::bind("127.0.0.1:0")?;
         let started = open_with_credentials(
             world.path()?,
-            current_peer_credentials()?,
+            current_peer_managed()?,
             None,
             &ErasureCoordinatorCompositionV1::closed(),
         )?;
@@ -1812,7 +1927,7 @@ mod tests {
         fs::set_permissions(world.runtime.path(), fs::Permissions::from_mode(0o777))?;
         let started = open_with_credentials(
             world.path()?,
-            current_peer_credentials()?,
+            current_peer_managed()?,
             None,
             &ErasureCoordinatorCompositionV1::closed(),
         )?;
@@ -1841,7 +1956,7 @@ mod tests {
         let owner_key = OwnTracksOwnerKey::load(&owner_key_path)?;
         let (gateway, coordinator) = open_with_credentials(
             world.path()?,
-            current_peer_credentials()?,
+            current_peer_managed()?,
             Some(&owner_key),
             &ErasureCoordinatorCompositionV1::closed(),
         )?;
@@ -1950,5 +2065,177 @@ mod tests {
             socket_path: None,
         };
         assert!(listener.stop().await.is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-109 revision 12: FCP1 startup and classifier registration.
+    // -----------------------------------------------------------------
+
+    fn classifier_rows(world: &World) -> rusqlite::Result<[i64; 2]> {
+        Ok([
+            row_count(world, "SELECT COUNT(*) FROM fork_classifier_sources")?,
+            row_count(world, "SELECT COUNT(*) FROM fork_classifier_registrations")?,
+        ])
+    }
+
+    fn start_profiled(
+        world: &World,
+        descriptors: &[u8],
+    ) -> TestResult<(Gateway, LocalForkAdmissionListenerV1)> {
+        let (gateway, coordinator) = open_with_credentials(
+            world.path()?,
+            (current_peer_credentials()?, profile_from(descriptors)?),
+            None,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )?;
+        let listener = start_listener(coordinator, &world.socket)?;
+        Ok((gateway, listener))
+    }
+
+    /// The executor registers the FCS1 row that the committed FAR1 selects.
+    /// A Fork whose descriptor has no row is held at code 6 and stays
+    /// Uncertain, never rejected; a restart whose FCP1 adds the row recovers
+    /// and registers it; a later FCP1 without that durable row fails the
+    /// read-only preflight before any bind.
+    #[tokio::test]
+    async fn listener_registers_the_profile_selected_classifier_across_restarts() -> TestResult {
+        let (world, parents) = provisioned_world(&["classified parent"])?;
+        let payload = fork_payload(6, parents[0])?;
+
+        let (gateway, listener) = start_profiled(&world, &[9])?;
+        assert_eq!(
+            &request(&world.socket, &bind_payload(5), false)?[..10],
+            &BIND_OK
+        );
+        for _ in 0..2 {
+            assert_eq!(request(&world.socket, &payload, false)?, rejected(6));
+        }
+        assert_eq!(delivery_state(&world, 6)?, Some(2));
+        assert_eq!(graph_rows(&world)?[1], 1);
+        assert_eq!(classifier_rows(&world)?, [0, 0]);
+        stop(&world, gateway, listener).await?;
+
+        let (gateway, listener) = start_profiled(&world, &[7, 9])?;
+        let first = fork_result(&request(&world.socket, &payload, false)?)?;
+        wait_for_delivery_state(&world, 6, 3)?;
+        assert_eq!(classifier_rows(&world)?, [1, 1]);
+        assert_eq!(
+            fork_result(&request(&world.socket, &payload, false)?)?,
+            first
+        );
+        assert_eq!(classifier_rows(&world)?, [1, 1]);
+        stop(&world, gateway, listener).await?;
+
+        let authority_before = authority_rows(&world)?;
+        assert!(open_with_credentials(
+            world.path()?,
+            (current_peer_credentials()?, profile_from(&[9])?),
+            None,
+            &ErasureCoordinatorCompositionV1::closed(),
+        )
+        .is_err());
+        assert_eq!(authority_rows(&world)?, authority_before);
+        assert!(!world.socket.exists());
+
+        let (gateway, listener) = start_profiled(&world, &[7])?;
+        assert_eq!(
+            fork_result(&request(&world.socket, &payload, false)?)?,
+            first
+        );
+        assert_eq!(classifier_rows(&world)?, [1, 1]);
+        stop(&world, gateway, listener).await?;
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_failures_map_to_retryable_or_invalid_activation() {
+        for (error, expected) in [
+            (
+                ForkEventAuthorityErrorV1::StorageIndeterminate,
+                LocalForkAuthenticationErrorV1::CredentialUnavailable,
+            ),
+            (
+                ForkEventAuthorityErrorV1::CorruptAuthority,
+                LocalForkAuthenticationErrorV1::CredentialInvalid,
+            ),
+            (
+                ForkEventAuthorityErrorV1::Conflict,
+                LocalForkAuthenticationErrorV1::CredentialInvalid,
+            ),
+        ] {
+            assert_eq!(preflight_error(error), expected);
+        }
+    }
+
+    /// One named managed-credential fixture writer.
+    type CredentialCase<'a> = (&'a str, &'a dyn Fn(&Path) -> io::Result<()>);
+
+    /// Write the managed set, then leave one credential writable (mode 0600).
+    fn writable(directory: &Path, name: &str, profile: &[u8]) -> io::Result<()> {
+        managed_credentials(directory, ([7; 32], [8; 32]), profile)?;
+        fs::set_permissions(directory.join(name), fs::Permissions::from_mode(0o600))
+    }
+
+    /// ADR-107 r6 startup step 1: a missing, extra, renamed, unreadable,
+    /// oversized, or malformed managed credential fails before the database
+    /// is opened or created and before any listener binds.
+    #[tokio::test]
+    async fn serve_rejects_each_invalid_managed_credential_set_before_database_open() -> TestResult
+    {
+        let world = unprovisioned_world()?;
+        let profile = profile_bytes(&[7])?;
+        let cases: [CredentialCase<'_>; 9] = [
+            ("missing-profile", &|path| {
+                protected_credentials(path, [7; 32], [8; 32])
+            }),
+            ("extra", &|path| {
+                managed_credentials(path, ([7; 32], [8; 32]), &profile)?;
+                protected_credential_file(path, "pigloros.extra", b"x")
+            }),
+            ("renamed", &|path| {
+                protected_credentials(path, [7; 32], [8; 32])?;
+                protected_credential_file(path, "pigloros.fork-classifier-profiles", &profile)
+            }),
+            ("malformed", &|path| {
+                managed_credentials(path, ([7; 32], [8; 32]), b"FCP1")
+            }),
+            ("oversized", &|path| {
+                managed_credentials(
+                    path,
+                    ([7; 32], [8; 32]),
+                    &vec![0; MAX_CLASSIFIER_PROFILE_BYTES + 1],
+                )
+            }),
+            ("reused-seed", &|path| {
+                managed_credentials(path, ([7; 32], [7; 32]), &profile)
+            }),
+            ("writable-auth", &|path| {
+                writable(path, "pigloros.fork-admission-auth", &profile)
+            }),
+            ("writable-host", &|path| {
+                writable(path, "pigloros.fork-admission-host-signer", &profile)
+            }),
+            ("writable-profile", &|path| {
+                writable(path, CLASSIFIER_PROFILE_CREDENTIAL_NAME, &profile)
+            }),
+        ];
+        for (name, write) in cases {
+            let credentials = world.runtime.path().join(name);
+            fs::create_dir(&credentials)?;
+            fs::set_permissions(&credentials, fs::Permissions::from_mode(0o700))?;
+            write(credentials.as_path())?;
+            assert!(
+                serve_for_test(paths(&world, &credentials)?, async {})
+                    .await
+                    .is_err(),
+                "{name} must fail closed"
+            );
+            assert!(
+                !world.database.exists(),
+                "{name} must not open the database"
+            );
+            assert!(!world.socket.exists(), "{name} must not bind the listener");
+        }
+        Ok(())
     }
 }

@@ -20,6 +20,8 @@ pub mod ledger_config;
 #[cfg(target_os = "linux")]
 pub mod local_fork_authentication;
 #[cfg(target_os = "linux")]
+pub mod local_fork_classifier_profile;
+#[cfg(target_os = "linux")]
 pub mod local_fork_coordinator;
 #[cfg(target_os = "linux")]
 pub mod local_fork_listener;

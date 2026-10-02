@@ -53,8 +53,8 @@ pub use fork_delivery_journal::{
 };
 pub use fork_event_authority::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
-    ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1,
-    ForkEventProvenanceAuthorityPortV1,
+    ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1, ForkEventPermitIssuerPortV1,
+    ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1,
 };
 pub use timeline_range::{
     verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1, TimelineSignedRangeReportV1,
