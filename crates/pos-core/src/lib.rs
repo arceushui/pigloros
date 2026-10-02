@@ -42,6 +42,7 @@ pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
 pub mod pipeline;
 pub mod pipeline_admission;
+pub mod pipeline_evidence;
 pub mod plugin;
 pub mod retention;
 pub mod state;
@@ -278,6 +279,9 @@ pub use pipeline_admission::{
     pipeline_authority_revision_v1, pipeline_erasure_revision_v1,
     PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
     PipelineReceiptLookupV1, PIPELINE_ADMISSION_FENCE_BYTES_V1,
+};
+pub use pipeline_evidence::{
+    PipelineCommitEvidenceV1, PipelineCommittedRangeV1, PipelineProjectionCutV1,
 };
 pub use plugin::{
     ActionApprover, ActionRejected, Capability, Plugin, ProposedAction,

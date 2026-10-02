@@ -407,17 +407,43 @@ pub fn compute_report(
         .and_then(|()| compute_report_authorized(store, timeline_id))
 }
 
+/// Compute a [`CalibrationReport`] from an already authorized Event sequence.
+///
+/// This is [`compute_report`] for a host that reads the Events itself, for
+/// example the source prefix folded through one Projection cut. The same
+/// ADR-060 authoritative-use check runs before any Event is decoded.
+///
+/// # Errors
+/// Returns [`EvalError::ArtifactUnavailable`] when the report closure is not
+/// authoritative, or [`EvalError::Decode`] if a payload cannot be decoded.
+pub fn compute_report_from_events(
+    events: &[Event],
+    artifact_digest: pos_core::ErasureReferenceV1,
+    evaluation: &pos_core::ReplayClaimEvaluationV1,
+) -> Result<CalibrationReport, EvalError> {
+    evaluation
+        .require_authoritative_use(
+            pos_core::ErasureArtifactClassV1::CalibrationReport,
+            artifact_digest,
+        )
+        .map_err(|_| EvalError::ArtifactUnavailable)
+        .and_then(|()| report_from_events(events))
+}
+
 fn compute_report_authorized(
     store: &dyn EventStore,
     timeline_id: TimelineId,
 ) -> Result<CalibrationReport, EvalError> {
     let events = store.read(timeline_id, SeqRange::all())?;
+    report_from_events(&events)
+}
 
+fn report_from_events(events: &[Event]) -> Result<CalibrationReport, EvalError> {
     // Collect raw data.
     let mut raw_predictions: Vec<PredictionPayload> = Vec::new();
     let mut raw_outcomes: Vec<OutcomePayload> = Vec::new();
 
-    for event in &events {
+    for event in events {
         match event.event_type.as_str() {
             EVENT_TYPE_PREDICTION => {
                 let p = ciborium::from_reader::<PredictionPayload, _>(event.payload.as_slice())

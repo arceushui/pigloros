@@ -41,5 +41,9 @@ tempfile = "3"
 name = "agent_provider_replay"
 required-features = ["test-support"]
 
+[[test]]
+name = "pipeline_evaluation"
+required-features = ["test-support"]
+
 [lints]
 workspace = true
