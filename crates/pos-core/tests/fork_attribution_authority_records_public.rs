@@ -372,7 +372,7 @@ fn fip1_decoder_rejects_versions_counts_states_and_carrier_bounds() -> TestResul
         ),
         (
             5,
-            Value::Array(vec![Value::Array(vec![fai1.clone(), int(1), int(1)])]),
+            Value::Array(vec![Value::Array(vec![fai1, int(1), int(1)])]),
             CodecError::InvalidEncoding,
         ),
         (3, int(0), CodecError::FieldOutOfBounds),
@@ -588,7 +588,7 @@ fn imported_key_constructors_and_decoders_reject_foreign_roles_and_zero_values()
             Some(expected)
         );
     }
-    let mut trailing = ended.clone();
+    let mut trailing = ended;
     trailing.push(0);
     assert_eq!(
         decode_tombstone(&trailing),
