@@ -134,6 +134,20 @@ pub fn required_modality_for_event(event_type: &Kind) -> u8 {
     }
 }
 
+/// Returns whether an Event type needs a subject's consent before a caller
+/// may write or observe it: a type with a consent modality, a Timeline Fork
+/// request or a retention record (ADR-039).
+///
+/// This is the one shared predicate for consent-sensitive Event types. The
+/// Gateway-only `consent.*` types are reserved separately by
+/// [`is_consent_event_type`].
+#[must_use]
+pub fn is_consent_sensitive_event_type(event_type: &Kind) -> bool {
+    required_modality_for_event(event_type) != 0
+        || event_type.as_str().starts_with("timeline.fork.")
+        || event_type.as_str().starts_with("retention.")
+}
+
 // ---------------------------------------------------------------------------
 // CBOR helpers (private)
 // ---------------------------------------------------------------------------
@@ -1515,10 +1529,7 @@ impl ConsentGate for ConsentAuthority {
         if is_consent_event_type(event_type) {
             return Err(ConsentError::ConsentEventsForbidden);
         }
-        if required_modality_for_event(event_type) != 0
-            || event_type.as_str().starts_with("timeline.fork.")
-            || event_type.as_str().starts_with("retention.")
-        {
+        if is_consent_sensitive_event_type(event_type) {
             // Public operation contexts do not carry a caller capability. A
             // sensitive event therefore cannot borrow whichever active grant
             // happens to match its entity; callers must use a protected API
@@ -2229,6 +2240,32 @@ mod tests {
             required_modality_for_event(&Kind::new("location.coordinate.v1")),
             MODALITY_LOCATION
         );
+    }
+
+    #[test]
+    fn consent_sensitive_types_are_modality_fork_and_retention_types() {
+        for sensitive in [
+            "persona.prediction",
+            "geo.location.v1",
+            "timeline.fork.v1",
+            "retention.extend.v1",
+        ] {
+            assert!(
+                is_consent_sensitive_event_type(&Kind::new(sensitive)),
+                "{sensitive}"
+            );
+        }
+        for ordinary in [
+            "eval.prediction",
+            "timeline.forked",
+            "retention",
+            "agent.action",
+        ] {
+            assert!(
+                !is_consent_sensitive_event_type(&Kind::new(ordinary)),
+                "{ordinary}"
+            );
+        }
     }
 
     #[test]

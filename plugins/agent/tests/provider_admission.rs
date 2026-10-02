@@ -248,11 +248,11 @@ fn provider_proposal_commits_only_through_host_admission() {
             Box::new(provider),
         )),
     ));
-    registry.schemas.register(EventTypeSchema {
+    ok(registry.schemas.register(EventTypeSchema {
         event_type: Kind::new(EVENT_TYPE_ACTION),
         description: "host-constructed Agent action".to_owned(),
         json_schema: None,
-    });
+    }));
 
     // A validated provider proposal is still tentative: a stale basis
     // discards it and commits nothing.

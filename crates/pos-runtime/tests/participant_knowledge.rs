@@ -405,6 +405,7 @@ impl Reducer for EmptyReducer {
 
 struct TestPlugin {
     id: PluginId,
+    event_type: &'static str,
 }
 
 impl Plugin for TestPlugin {
@@ -418,7 +419,7 @@ impl Plugin for TestPlugin {
 
     fn capability(&self) -> Capability {
         Capability {
-            owned_event_types: vec![Kind::new("participant.planned")],
+            owned_event_types: vec![Kind::new(self.event_type)],
             owned_entity_kinds: Vec::new(),
             has_driver: true,
             has_reducer: false,
@@ -589,19 +590,32 @@ impl Driver for ParticipantDriver {
 fn registry_with_mode(
     fixture: &Fixture,
     ambient: bool,
+    registry: PluginRegistry,
+) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
+    registry_with_event_type(fixture, ambient, registry, "participant.planned")
+}
+
+/// Register one participant Driver that owns and emits `event_type`. Under
+/// exclusive Event-type ownership (ADR-024 Revision 1) each participant
+/// registration in one registry owns its own type.
+fn registry_with_event_type(
+    fixture: &Fixture,
+    ambient: bool,
     mut registry: PluginRegistry,
+    event_type: &'static str,
 ) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
     let state = Arc::new(Mutex::new(DriverState::default()));
     let driver = ParticipantDriver {
         state: Arc::clone(&state),
         entity: EntityId::new(),
-        event_type: Kind::new("participant.planned"),
+        event_type: Kind::new(event_type),
         ambient_subscription: ambient.then(|| pos_runtime::ProjectionKey::new(EntityId::new())),
     };
     registry
         .register_generated(
             &TestPlugin {
                 id: fixture.plugin_id,
+                event_type,
             },
             None,
             Some(Box::new(driver)),
@@ -1410,6 +1424,7 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
             .register_generated(
                 &TestPlugin {
                     id: fixture.plugin_id,
+                    event_type: "participant.planned",
                 },
                 None,
                 Some(Box::new(driver)),
@@ -1452,6 +1467,7 @@ fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
         .register_generated(
             &TestPlugin {
                 id: fixture.plugin_id,
+                event_type: "participant.planned",
             },
             None,
             Some(Box::new(driver)),
@@ -1575,7 +1591,12 @@ fn two_participants(
     second_ambient: bool,
 ) -> (PluginRegistry, [Arc<Mutex<DriverState>>; 2]) {
     let (registry, first_state) = registry_with_mode(first, false, gated_registry());
-    let (registry, second_state) = registry_with_mode(second, second_ambient, registry);
+    let (registry, second_state) = registry_with_event_type(
+        second,
+        second_ambient,
+        registry,
+        "participant.second.planned",
+    );
     (registry, [first_state, second_state])
 }
 
@@ -1895,6 +1916,7 @@ fn authorized_pass_rejects_another_plugins_event_type_and_commits_nothing() {
             .register_generated(
                 &TestPlugin {
                     id: second.plugin_id,
+                    event_type: "participant.intruder",
                 },
                 None,
                 Some(Box::new(ParticipantDriver {
