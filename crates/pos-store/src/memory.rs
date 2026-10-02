@@ -86,11 +86,11 @@ use crate::fork_event_authority::{
     fork_append_request, permitted_fork_admission, preflight_classifier_sources,
 };
 use crate::fork_manifest_publication::{
-    authorize_publication, publication_sources, recovered_publication_receipt,
-    require_absent_publication_graph, sign_publication, trusted_committed_manifest,
-    validate_publication_request, CommittedPublicationRowsV1, CommittedPublicationSourcesV1,
-    PublicationGraphV1, PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1,
-    PublicationSuffixV1,
+    authorize_publication, publication_parent_head, publication_sources,
+    recovered_publication_receipt, require_absent_publication_graph, sign_publication,
+    trusted_committed_manifest, validate_publication_request, AbsentPublicationPreflightV1,
+    CommittedPublicationRowsV1, CommittedPublicationSourcesV1, PublicationGraphV1,
+    PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1, PublicationSuffixV1,
 };
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
@@ -2507,15 +2507,26 @@ impl MemoryStore {
     fn fork_publication_suffix(
         &self,
         child_timeline_id: TimelineId,
-        admission: &PublicationSourceResultV1<ForkAdmissionRecordV1>,
+        parent_logical_head: PublicationSourceResultV1<u64>,
     ) -> PublicationSourceResultV1<PublicationSuffixV1> {
-        admission.clone().and_then(|admission| {
-            self.read_fork_event_suffix(
-                child_timeline_id,
-                admission.input().parent_logical_head.saturating_add(1),
-            )
-            .map_err(PublicationSourceErrorV1::from)
+        parent_logical_head.and_then(|parent_logical_head| {
+            self.read_fork_event_suffix(child_timeline_id, parent_logical_head.saturating_add(1))
+                .map_err(PublicationSourceErrorV1::from)
         })
+    }
+
+    /// Whether any stored `FPO1`, `FPB1`, or `FPA1` already carries
+    /// `record_id`.
+    fn fork_publication_record_is_present(&self, record_id: Hash) -> bool {
+        self.fork_publication_artifacts.contains_key(&record_id)
+            || self
+                .fork_publication_operations
+                .values()
+                .any(|row| row.input().signed_manifest_record_id == record_id)
+            || self
+                .fork_publication_bindings
+                .values()
+                .any(|row| row.input().signed_manifest_record_id == record_id)
     }
 
     /// Read the authoritative Fork provenance sources for one new issuance.
@@ -2525,7 +2536,7 @@ impl MemoryStore {
     ) -> Result<PublicationSourcesV1, ForkManifestPublicationErrorV1> {
         let child = request.child_timeline_id;
         let admission = self.fork_publication_admission(child);
-        let suffix = self.fork_publication_suffix(child, &admission);
+        let suffix = self.fork_publication_suffix(child, publication_parent_head(&admission));
         let head_and_chain = self
             .logical_head_unchecked(child)
             .and_then(|head| {
@@ -2537,7 +2548,8 @@ impl MemoryStore {
     }
 
     /// ADR-099 preflight for an absent `FPO1`, then held authorization,
-    /// provenance, one signer call, and the post-signing artifact check.
+    /// provenance, one signer call, and the post-signing check that no
+    /// `FPO1`, `FPB1`, or `FPA1` already carries the new record ID.
     fn sign_new_fork_publication<E, F>(
         &self,
         request: &ForkManifestPublicationRequestV1,
@@ -2548,15 +2560,21 @@ impl MemoryStore {
         F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>,
     {
         let operation_id = request.operation_id;
-        let artifacts = &self.fork_publication_artifacts;
         let operation_is_referenced = self
             .fork_publication_bindings
             .values()
             .map(|row| row.input().operation_id)
-            .chain(artifacts.values().map(|row| row.input().operation_id))
+            .chain(
+                self.fork_publication_artifacts
+                    .values()
+                    .map(|row| row.input().operation_id),
+            )
             .any(|referenced| referenced == operation_id);
-        let binding_is_occupied = self.fork_publication_bindings.contains_key(key);
-        require_absent_publication_graph(operation_is_referenced, binding_is_occupied)
+        let preflight = AbsentPublicationPreflightV1 {
+            operation_is_referenced,
+            binding_is_occupied: self.fork_publication_bindings.contains_key(key),
+        };
+        require_absent_publication_graph(preflight)
             .and_then(|()| authorize_publication(request, Ok(self.key_registry.clone())))
             .and_then(|authorization| {
                 self.fork_publication_sources(request)
@@ -2564,7 +2582,7 @@ impl MemoryStore {
             })
             .and_then(|graph| {
                 let record_id = graph.receipt.signed_manifest_record_id;
-                (!artifacts.contains_key(&record_id))
+                (!self.fork_publication_record_is_present(record_id))
                     .then_some(graph)
                     .ok_or(ForkManifestPublicationErrorV1::CorruptOrConflicting)
             })
@@ -2633,7 +2651,10 @@ impl ForkManifestPublicationPortV1 for MemoryStore {
                 let final_chain_head_hash = self
                     .compute_chain_hash_at_unchecked(child_timeline_id, head)
                     .map_err(PublicationSourceErrorV1::from);
-                let suffix = self.fork_publication_suffix(child_timeline_id, &admission);
+                let suffix = self.fork_publication_suffix(
+                    child_timeline_id,
+                    publication_parent_head(&admission),
+                );
                 let sources = CommittedPublicationSourcesV1 {
                     admission,
                     final_chain_head_hash,

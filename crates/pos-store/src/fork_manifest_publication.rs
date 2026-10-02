@@ -101,6 +101,27 @@ pub struct CommittedForkManifestV1 {
 /// `SigningRoleRequired`, `RegistryUnavailable` or `RegistryChanged`,
 /// `NotFound`, `Destroyed`, `DestructionPending`, `InactiveKey`, then
 /// `SigningKeyMismatch`; creator/head/provenance errors follow them.
+///
+/// The graph and authority failures are scoped by operation, where "new"
+/// and "recovery" are the two `commit_authorized` paths:
+///
+/// | Variant                | New issuance | Recovery | `read_committed` |
+/// |------------------------|--------------|----------|------------------|
+/// | `Conflict`             | yes          | yes      | no               |
+/// | `CorruptAuthority`     | yes          | no       | no               |
+/// | `CorruptOrConflicting` | yes          | yes      | no               |
+/// | `PublicationConflict`  | no           | no       | yes              |
+///
+/// - `Conflict`: new issuance finds the Fork/head binding held by another
+///   operation; recovery finds an `FPO1` with an unequal request tuple.
+/// - `CorruptAuthority`: new issuance cannot read valid Fork provenance or
+///   derive a valid graph from it.
+/// - `CorruptOrConflicting`: new issuance finds an orphan row naming the
+///   operation ID, or any `FPO1`/`FPB1`/`FPA1` at the new record ID; recovery
+///   finds a noncanonical `FPO1` or a graph that fails the trusted read.
+/// - `PublicationConflict`: a trusted read finds a missing join, extra row,
+///   or failed check; recovery reports the same failure as
+///   `CorruptOrConflicting`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ForkManifestPublicationErrorV1 {
     /// The caller did not provide a nonzero publication operation ID.
@@ -176,7 +197,22 @@ impl From<KeyRegistryErrorV1> for ForkManifestPublicationErrorV1 {
             KeyRegistryErrorV1::DestructionPending => Self::DestructionPending,
             KeyRegistryErrorV1::InactiveKey => Self::InactiveKey,
             KeyRegistryErrorV1::SigningKeyMismatch => Self::SigningKeyMismatch,
-            _ => Self::RegistryUnavailable,
+            KeyRegistryErrorV1::RegistryUnavailable
+            | KeyRegistryErrorV1::InvalidOwnerId
+            | KeyRegistryErrorV1::InvalidRoleCode
+            | KeyRegistryErrorV1::StaleEpoch { .. }
+            | KeyRegistryErrorV1::IdentityConflict
+            | KeyRegistryErrorV1::MaterialReuse
+            | KeyRegistryErrorV1::MissingPublicVerificationKey
+            | KeyRegistryErrorV1::UnexpectedPublicVerificationKey
+            | KeyRegistryErrorV1::EncryptionRoleRequired
+            | KeyRegistryErrorV1::EncryptionKeyMismatch
+            | KeyRegistryErrorV1::HistoricalDecryptionRoleRequired
+            | KeyRegistryErrorV1::InvalidState
+            | KeyRegistryErrorV1::MaterialDigestMismatch
+            | KeyRegistryErrorV1::DestructionAuthorizationMismatch
+            | KeyRegistryErrorV1::DestructionNotPending
+            | KeyRegistryErrorV1::DeletionReceiptMismatch => Self::RegistryUnavailable,
         }
     }
 }
@@ -337,17 +373,25 @@ pub(crate) fn validate_publication_request(
         .ok_or(ForkManifestPublicationErrorV1::InvalidRequest)
 }
 
+/// What an adapter observed before issuing a new publication graph.
+#[derive(Clone, Copy)]
+pub(crate) struct AbsentPublicationPreflightV1 {
+    /// A stored `FPB1` or `FPA1` already references the operation ID.
+    pub(crate) operation_is_referenced: bool,
+    /// The requested Fork/head binding key is already occupied.
+    pub(crate) binding_is_occupied: bool,
+}
+
 /// ADR-099 recovery preflight for an absent `FPO1`: a binding or artifact
 /// that already references the operation ID is an orphan, and an occupied
 /// Fork/head binding belongs to another operation.
 pub(crate) const fn require_absent_publication_graph(
-    operation_is_referenced: bool,
-    binding_is_occupied: bool,
+    preflight: AbsentPublicationPreflightV1,
 ) -> PublicationResultV1<()> {
-    if operation_is_referenced {
+    if preflight.operation_is_referenced {
         return Err(ForkManifestPublicationErrorV1::CorruptOrConflicting);
     }
-    if binding_is_occupied {
+    if preflight.binding_is_occupied {
         return Err(ForkManifestPublicationErrorV1::Conflict);
     }
     Ok(())
@@ -360,6 +404,16 @@ const fn recovery_error(error: ForkManifestPublicationErrorV1) -> ForkManifestPu
         ForkManifestPublicationErrorV1::StorageIndeterminate => error,
         _ => ForkManifestPublicationErrorV1::CorruptOrConflicting,
     }
+}
+
+/// The parent cut of an admitted Fork, or the failure of its admission read.
+pub(crate) fn publication_parent_head(
+    admission: &PublicationSourceResultV1<ForkAdmissionRecordV1>,
+) -> PublicationSourceResultV1<u64> {
+    admission
+        .as_ref()
+        .map(|admission| admission.input().parent_logical_head)
+        .map_err(|error| *error)
 }
 
 /// ADR-099 recovery: an existing `FPO1` must carry the exact durable request
@@ -475,6 +529,9 @@ fn intervention_sequences(suffix: PublicationSuffixV1, final_logical_head: u64) 
     suffix
         .into_iter()
         .filter_map(|(origin, intervention, _)| intervention.map(|_| origin.input().logical_seq))
+        // New issuance reads the suffix at the current head, so this bound
+        // only drops rows on the trusted-read path, where the Fork may have
+        // grown past the published head.
         .filter(|sequence| *sequence <= final_logical_head)
         .collect()
 }
@@ -735,6 +792,8 @@ mod tests {
         }
     }
 
+    /// Keeps only the mapper arms the public-seam publication tests do not
+    /// exercise, such as adapter storage failures and an unreadable registry.
     #[test]
     fn source_errors_keep_storage_indeterminate() {
         assert_eq!(
@@ -754,27 +813,13 @@ mod tests {
             SourceError::Storage
         );
         assert_eq!(
-            SourceError::from(ForkEventAuthorityErrorV1::CorruptAuthority),
-            SourceError::Invalid
+            SourceError::Storage.into_corrupt_authority(),
+            PublicationError::StorageIndeterminate
         );
-        for (source, corrupt, registry, conflict) in [
-            (
-                SourceError::Storage,
-                PublicationError::StorageIndeterminate,
-                PublicationError::StorageIndeterminate,
-                PublicationError::StorageIndeterminate,
-            ),
-            (
-                SourceError::Invalid,
-                PublicationError::CorruptAuthority,
-                PublicationError::RegistryUnavailable,
-                PublicationError::PublicationConflict,
-            ),
-        ] {
-            assert_eq!(source.into_corrupt_authority(), corrupt);
-            assert_eq!(source.into_registry_unavailable(), registry);
-            assert_eq!(source.into_publication_conflict(), conflict);
-        }
+        assert_eq!(
+            SourceError::Invalid.into_registry_unavailable(),
+            PublicationError::RegistryUnavailable
+        );
     }
 
     #[test]
@@ -782,10 +827,6 @@ mod tests {
         assert_eq!(
             recovery_error(PublicationError::StorageIndeterminate),
             PublicationError::StorageIndeterminate
-        );
-        assert_eq!(
-            recovery_error(PublicationError::PublicationConflict),
-            PublicationError::CorruptOrConflicting
         );
     }
 }

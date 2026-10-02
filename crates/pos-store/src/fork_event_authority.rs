@@ -1635,15 +1635,26 @@ mod tests {
         assert_fork_publication_registry_vectors(&mut SqliteStore::open_in_memory()?)
     }
 
-    /// A classified intervention is listed in the published `FRM1`, and a
-    /// later key destruction keeps the graph readable through its tombstone.
+    /// A classified intervention is listed in the published `FRM1`, a second
+    /// head publishes beside an earlier graph, and a later key destruction
+    /// keeps the graph readable through its tombstone.
     fn assert_fork_publication_read_accepts_retained_destroyed_key<S: PublicationTestStoreV1>(
         store: &mut S,
     ) -> Result<(), Box<dyn Error>> {
         let lifecycle = create_lifecycle(store)?;
-        append_intervention(store, &lifecycle)?;
         let mut fixture = publication_fixture(store, &lifecycle, 96, 1)?;
+        let initial = ForkManifestPublicationRequestV1 {
+            operation_id: Hash::from_bytes([86; 32]),
+            expected_final_logical_head: 0,
+            ..fixture.request.clone()
+        };
+        let initial = commit_fork_publication(store, &fixture, initial)?;
+        append_intervention(store, &lifecycle)?;
         let receipt = commit_fork_publication(store, &fixture, fixture.request.clone())?;
+        assert_ne!(
+            receipt.signed_manifest_record_id,
+            initial.signed_manifest_record_id
+        );
         let committed = store.read_committed(lifecycle.fork.child_id, 1)?;
         let signed =
             pos_core::SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
@@ -1792,17 +1803,24 @@ mod tests {
 
     /// ADR-099 recovery: an orphan `FPB1` or `FPA1` that references an absent
     /// operation, a partial graph, and a noncanonical `FPO1` all fail closed
-    /// without signing; an orphan `FPA1` at the freshly signed record ID
-    /// fails after the single signer call and before any insert.
+    /// without signing; an orphan `FPA1`, `FPO1`, or relocated `FPB1` at the
+    /// freshly signed record ID fails after the single signer call and
+    /// before any insert.
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_fork_manifest_commit_rejects_orphan_or_partial_graph() -> Result<(), Box<dyn Error>> {
         let orphan_artifact =
             "DELETE FROM fork_publication_operations; DELETE FROM fork_publication_bindings;";
+        let orphan_operation =
+            "DELETE FROM fork_publication_bindings; DELETE FROM fork_publication_artifacts;";
+        let orphan_binding = "UPDATE fork_publication_bindings SET final_logical_head = 7; \
+             DELETE FROM fork_publication_operations; DELETE FROM fork_publication_artifacts;";
         for (index, (tamper, operation, calls)) in [
             ("DELETE FROM fork_publication_operations", 91, 0),
             (orphan_artifact, 91, 0),
             (orphan_artifact, 98, 1),
+            (orphan_operation, 98, 1),
+            (orphan_binding, 98, 1),
             ("DELETE FROM fork_publication_artifacts", 91, 0),
             (
                 "UPDATE fork_publication_operations SET fpo1_cbor = x'00'",
