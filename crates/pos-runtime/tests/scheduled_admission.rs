@@ -1301,7 +1301,7 @@ struct ProbingDriver {
     event_type: &'static str,
     entity: EntityId,
     subscriptions: Vec<ProjectionKey>,
-    probes: [ProjectionKey; 2],
+    verified_prefix: bool,
     log: Log,
 }
 
@@ -1317,17 +1317,21 @@ impl Driver for ProbingDriver {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn requires_verified_event_prefix(&self) -> bool {
+        self.verified_prefix
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn step(
         &mut self,
         _: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
-        let seen: Vec<String> = self
-            .probes
+        let seen: Vec<String> = PROBED
             .iter()
-            .map(|key| {
+            .map(|subject| {
                 observations
-                    .state_for(key)
+                    .state_for(&ProjectionKey::new(entity(*subject)))
                     .and_then(|state| state.get("count"))
                     .map_or_else(|| "none".to_owned(), ToString::to_string)
             })
@@ -1341,34 +1345,41 @@ impl Driver for ProbingDriver {
     }
 }
 
-/// Register a probing Driver that subscribes to `subscriptions` and probes
-/// both `probes`, emitting its own Event type on `entity`.
+/// The subjects every probing Driver reads, subscribed or not: A, then B.
+const PROBED: [u128; 2] = [50, 51];
+
+/// A probing Driver named `name` that owns `event_type`, subscribes to
+/// `subscriptions`, and emits one draft on `draft_entity`.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn register_probe(
-    registry: &mut PluginRegistry,
+fn probe(
     name: &'static str,
-    subscriptions: Vec<ProjectionKey>,
-    probes: [EntityId; 2],
-    entity: EntityId,
+    event_type: &'static str,
+    subscriptions: &[EntityId],
+    draft_entity: EntityId,
     log: &Log,
-) {
-    let event_type = match name {
-        "blind" => "agent.scheduled.blind",
-        _ => "agent.scheduled.subscriber",
-    };
+) -> ProbingDriver {
+    ProbingDriver {
+        name,
+        event_type,
+        entity: draft_entity,
+        subscriptions: subscriptions
+            .iter()
+            .copied()
+            .map(ProjectionKey::new)
+            .collect(),
+        verified_prefix: false,
+        log: Arc::clone(log),
+    }
+}
+
+/// Register a probing Driver under a Plugin that owns its Event type.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn register_probe(registry: &mut PluginRegistry, driver: ProbingDriver) {
     let plugin = TestPlugin {
         id: PluginId::new(),
-        name,
-        event_type,
+        name: driver.name,
+        event_type: driver.event_type,
         reducer: false,
-    };
-    let driver = ProbingDriver {
-        name,
-        event_type,
-        entity,
-        subscriptions,
-        probes: probes.map(ProjectionKey::new),
-        log: Arc::clone(log),
     };
     ok(registry.register_generated(&plugin, None, Some(Box::new(driver))));
 }
@@ -1489,72 +1500,123 @@ fn expected_digest(
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
+/// The canonical State JSON of a subject folded from exactly one Projection
+/// Event: `CountingReducer` starts from an empty State and sets `count` to 1.
+const ONE_FOLDED_EVENT: &str = r#"{"count":1}"#;
+
 /// #513, ADR-021 Revision 3 Decision 1: in a protected multi-Driver pass the
 /// shared snapshot holds the union of every due Driver's subscriptions, but
-/// each Driver reads only its own. The Driver with no subscription reads
-/// nothing, the subscriber reads only subject A, and the bound digest still
-/// covers the whole union.
+/// each Driver reads only its own. The Drivers with no subscription, on
+/// either the plain or the verified-prefix path, read nothing; the subscriber
+/// reads only subject A; and the bound digest still covers the whole union.
+///
+/// A protected pass authorizes exactly one consent subject, so a second
+/// subscriber on a disjoint subject B cannot share the pass: the pass fails
+/// closed before any Driver steps.
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn protected_pass_scopes_each_drivers_view_to_its_own_subscriptions() {
     for (name, mut store) in stores() {
         let host = Host::prepare(store.as_mut(), 10);
-        let (subject, other) = (entity(50), entity(51));
+        let (subject, other) = (entity(PROBED[0]), entity(PROBED[1]));
         let authority = ConsentAuthority::new();
         let token = authority.record_grant_on_timeline(host.timeline, &consent_grant(subject));
         let log = Log::default();
         let mut registry = host.registry().with_consent_authority(authority);
         register_projection(&mut registry);
-        let probes = [subject, other];
-        register_probe(&mut registry, "blind", Vec::new(), probes, subject, &log);
-        let subscribed = vec![ProjectionKey::new(subject)];
         register_probe(
             &mut registry,
-            "subscriber",
-            subscribed,
-            probes,
-            subject,
-            &log,
+            probe("blind", "agent.scheduled.blind", &[], subject, &log),
         );
-        let observed = fold_subjects(store.as_mut(), &mut registry, host.timeline, &probes);
+        register_probe(
+            &mut registry,
+            ProbingDriver {
+                verified_prefix: true,
+                ..probe("prefix", "agent.scheduled.prefix", &[], subject, &log)
+            },
+        );
+        register_probe(
+            &mut registry,
+            probe(
+                "subscriber",
+                "agent.scheduled.subscriber",
+                &[subject],
+                subject,
+                &log,
+            ),
+        );
+        let observed = fold_subjects(
+            store.as_mut(),
+            &mut registry,
+            host.timeline,
+            &[subject, other],
+        );
+        let prefix = committed_events(store.as_ref(), host.timeline);
 
-        let staged =
-            ok(registry.step_all_anchored_protected(host.timeline, observed, token, 1, &[]));
-        assert_eq!(staged.len(), 2, "{name}");
+        let staged = ok(registry.step_all_anchored_protected(
+            host.timeline,
+            observed,
+            token.clone(),
+            1,
+            &prefix,
+        ));
+        assert_eq!(staged.len(), 3, "{name}");
         assert_eq!(
             entries(&log),
-            ["blind:none,none", "subscriber:1,none"],
+            ["blind:none,none", "prefix:none,none", "subscriber:1,none"],
             "{name}"
         );
         let digest = admit_recording_digest(&host, &mut registry, store.as_mut(), 1);
         assert_eq!(
             digest,
-            expected_digest(host.timeline, observed, &[(subject, r#"{"count":1}"#)]),
+            expected_digest(host.timeline, observed, &[(subject, ONE_FOLDED_EVENT)]),
             "{name}"
         );
         assert_eq!(
             committed_events(store.as_ref(), host.timeline).len(),
-            4,
+            5,
             "{name}"
         );
+
+        register_probe(
+            &mut registry,
+            probe("other", "agent.scheduled.other", &[other], subject, &log),
+        );
+        let head = ok(store.logical_head(host.timeline));
+        let refused = err(registry.step_all_anchored_protected(host.timeline, head, token, 1, &[]));
+        assert!(
+            matches!(
+                refused,
+                RuntimeError::Consent(pos_core::ConsentError::NoConsent)
+            ),
+            "{name}: {refused}"
+        );
+        assert_eq!(entries(&log).len(), 3, "{name}");
     }
 }
 
-/// #513: a public pass materializes no Projection. A Driver with no
-/// subscription reads nothing even though Projection state exists, and a
-/// public pass with any subscriber fails closed before any Driver steps.
+/// #513: a public pass refuses any Projection subscriber before a Driver
+/// steps, and a Driver with no subscription reads nothing even though
+/// Projection state exists.
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn public_pass_exposes_no_projection_to_any_driver() {
+fn public_pass_refuses_subscribers_and_hides_projections_from_the_rest() {
     for (name, mut store) in stores() {
         let host = Host::prepare(store.as_mut(), 10);
-        let (subject, other) = (entity(50), entity(51));
+        let (subject, other) = (entity(PROBED[0]), entity(PROBED[1]));
         let log = Log::default();
         let mut registry = host.registry();
         register_projection(&mut registry);
-        let probes = [subject, other];
-        register_probe(&mut registry, "blind", Vec::new(), probes, entity(10), &log);
-        let observed = fold_subjects(store.as_mut(), &mut registry, host.timeline, &probes);
+        register_probe(
+            &mut registry,
+            probe("blind", "agent.scheduled.blind", &[], entity(10), &log),
+        );
+        let observed = fold_subjects(
+            store.as_mut(),
+            &mut registry,
+            host.timeline,
+            &[subject, other],
+        );
 
         assert_eq!(
             ok(registry.step_all_anchored(host.timeline, observed)).len(),
@@ -1569,14 +1631,15 @@ fn public_pass_exposes_no_projection_to_any_driver() {
             "{name}"
         );
 
-        let subscribed = vec![ProjectionKey::new(subject)];
         register_probe(
             &mut registry,
-            "subscriber",
-            subscribed,
-            probes,
-            entity(10),
-            &log,
+            probe(
+                "subscriber",
+                "agent.scheduled.subscriber",
+                &[subject],
+                entity(10),
+                &log,
+            ),
         );
         let head = ok(store.logical_head(host.timeline));
         let refused = err(registry.step_all_anchored(host.timeline, head));

@@ -172,7 +172,7 @@ impl DriverRecoveryEvidence {
 }
 
 use crate::error::RuntimeError;
-use std::collections::{hash_map::Entry, HashSet};
+use std::collections::hash_map::Entry;
 
 /// The output of a single driver step.
 #[derive(Debug, Default)]
@@ -329,10 +329,9 @@ impl ObservationSnapshot {
         event_subscriptions: &[Kind],
         after_seq: Seq,
     ) -> ObservationView<'a> {
-        let mut scope = Vec::with_capacity(subscriptions.len());
-        let mut seen = HashSet::with_capacity(subscriptions.len());
+        let mut scope: Vec<ProjectionKey> = Vec::with_capacity(subscriptions.len());
         for key in subscriptions {
-            if seen.insert(key.clone()) {
+            if !scope.contains(key) {
                 scope.push(key.clone());
             }
         }
