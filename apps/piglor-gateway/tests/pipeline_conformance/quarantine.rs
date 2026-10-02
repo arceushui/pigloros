@@ -340,10 +340,12 @@ pub fn later_mapping_derives_once() -> Capture {
     capture
 }
 
-/// PCF-EVAL-R2-004: after a configuration drops a version's mapping, its
-/// eligible sources record `UnsupportedSourceVersion`, a derived source
-/// records it only under the `MissingOutcome` condition, a complete pair
-/// records nothing and is never decoded, and nothing is re-derived.
+/// PCF-EVAL-R2-004: a mapping rollback records findings and never re-derives.
+///
+/// After a configuration drops a version's mapping, its eligible sources
+/// record `UnsupportedSourceVersion`, a derived source records it only under
+/// the `MissingOutcome` condition, a complete pair records nothing and is
+/// never decoded, and nothing is re-derived.
 #[must_use]
 pub fn mapping_rollback_never_rederives() -> Capture {
     let mut capture = Capture::default();
@@ -460,8 +462,10 @@ pub fn invalid_prefix_discards_the_pass() -> Capture {
 }
 
 /// PCF-EVAL-R2-007: a source behind the host's ADR-060 erasure fence never
-/// reaches Eval: the fence refuses the pass with no finding and nothing
-/// decoded, so an erased source never yields `UndecodableSource`.
+/// reaches Eval.
+///
+/// The fence refuses the pass with no finding and nothing decoded, so an
+/// erased source never yields `UndecodableSource`.
 #[must_use]
 pub fn erased_sources_never_reach_eval() -> Capture {
     let mut capture = Capture::default();
