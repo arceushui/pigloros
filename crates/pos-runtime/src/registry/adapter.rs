@@ -711,12 +711,24 @@ fn sort_admission_entries(entries: &mut [AdapterAdmissionEntryV1]) {
     });
 }
 
+// These sizes mirror `AdapterTranscriptV1::new` and `to_canonical_cbor` in
+// `pos_core::adapter_transcript`, the MAT1 encoder; keep them in lockstep.
+
+/// MAT1 prefix: 7-item array head, 4-byte bstr head, `b"MAT1"`, version `1`.
+const MAT1_PREFIX_BYTES: usize = 1 + 1 + 4 + 1;
+/// One encoded hash: 2-byte bstr head (`0x58 0x20`) plus 32 digest bytes.
+const MAT1_HASH_BYTES: usize = 2 + 32;
+/// Head of one 7-item MAT1 call array.
+const MAT1_CALL_ARRAY_HEAD_BYTES: usize = 1;
+/// Big-endian `PluginId` bytes framed in each MAT1 call.
+const MAT1_PLUGIN_ID_BYTES: usize = 16;
+
 fn transcript_base_size(world_handle: WorldReplayHandleV1) -> usize {
-    7_usize
-        .saturating_add(34)
+    MAT1_PREFIX_BYTES
+        .saturating_add(MAT1_HASH_BYTES)
         .saturating_add(cbor_bytes_size(world_handle.to_canonical_cbor().len()))
-        .saturating_add(34)
-        .saturating_add(34)
+        .saturating_add(MAT1_HASH_BYTES)
+        .saturating_add(MAT1_HASH_BYTES)
 }
 
 fn transcript_call_size(
@@ -725,13 +737,13 @@ fn transcript_call_size(
     output_bytes: usize,
     recorded_wall_time_micros: u64,
 ) -> usize {
-    1_usize
-        .saturating_add(cbor_bytes_size(16))
+    MAT1_CALL_ARRAY_HEAD_BYTES
+        .saturating_add(cbor_bytes_size(MAT1_PLUGIN_ID_BYTES))
         .saturating_add(cbor_uint_size(per_plugin_call_index))
         .saturating_add(cbor_bytes_size(invocation_bytes))
-        .saturating_add(34)
+        .saturating_add(MAT1_HASH_BYTES)
         .saturating_add(cbor_bytes_size(output_bytes))
-        .saturating_add(34)
+        .saturating_add(MAT1_HASH_BYTES)
         .saturating_add(cbor_uint_size(recorded_wall_time_micros))
 }
 
@@ -743,6 +755,7 @@ fn cbor_head_size(length: usize) -> usize {
     cbor_uint_size(u64::try_from(length).unwrap_or(u64::MAX))
 }
 
+/// Preferred CBOR head size for `value`, as `encode_head` writes it in pos-core.
 const fn cbor_uint_size(value: u64) -> usize {
     match value {
         0..=23 => 1,
