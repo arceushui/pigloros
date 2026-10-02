@@ -45,10 +45,14 @@ use std::{
 
 mod authorized_pass;
 mod catalogue;
+mod human_admission;
 mod scheduled_admission;
 
 pub use authorized_pass::{AuthorizedDriverViewV1, AuthorizedViewAuthorityV1};
 pub use catalogue::{HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPluginProductV1};
+pub use human_admission::{
+    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
+};
 pub use scheduled_admission::ScheduledPassAdmissionV1;
 
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {

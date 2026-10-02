@@ -30,10 +30,11 @@
 use std::num::NonZeroUsize;
 
 use crate::{
-    pipeline::PIPELINE_SECURITY_REVISION_COUNT_V1, store::PurgeOutcome, CoreError,
-    ErasureReferenceV1, Hash, PersistedAuthorityV1, PipelineAdmissionBasisV1,
-    PipelineContractErrorV1, PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1,
-    PipelineSecurityRevisionsV1, TimelineId,
+    pipeline::PIPELINE_SECURITY_REVISION_COUNT_V1,
+    store::{AppendDedupKey, PurgeOutcome},
+    CoreError, ErasureReferenceV1, Hash, PersistedAuthorityV1, PipelineAdmissionBasisV1,
+    PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineOutcomeV1,
+    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, TimelineId,
 };
 
 const FENCE_VERSION_V1: u8 = 1;
@@ -203,6 +204,21 @@ pub fn pipeline_erasure_revision_v1(inventory_generation: Option<ErasureReferenc
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
+/// Retained admitted-batch state for one idempotency key, read without an
+/// admission basis.
+///
+/// The retained receipt is the only recovery result: a lookup never
+/// reruns approval or provider validation and never commits an Event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PipelineReceiptLookupV1 {
+    /// No unexpired receipt is retained for the idempotency key.
+    Absent,
+    /// The named attempt committed on the named Timeline; its original receipt.
+    Retained(PipelineCommitReceiptV1),
+    /// Another attempt or Timeline holds the idempotency key.
+    Conflict,
+}
+
 /// Host-only capability that publishes the admission fence for one Timeline.
 ///
 /// Publishing is deliberately separate from [`PipelineAdmissionPortV1`]: the
@@ -272,6 +288,26 @@ pub trait PipelineAdmissionPortV1 {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, CoreError>;
+
+    /// Look up the retained receipt for one idempotency key before a new
+    /// attempt runs approval.
+    ///
+    /// Returns [`PipelineReceiptLookupV1::Retained`] with the original
+    /// receipt only when `attempt_id` committed under `key` on `timeline`,
+    /// and [`PipelineReceiptLookupV1::Conflict`] when another attempt or
+    /// Timeline holds the key. An expired receipt is
+    /// [`PipelineReceiptLookupV1::Absent`], as it is for
+    /// [`Self::admit_pipeline_batch`]. The lookup runs under the Timeline's
+    /// erasure fence and never changes the Timeline, fence, or receipts.
+    ///
+    /// # Errors
+    /// Returns an erasure, visibility, clock, or storage error.
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<PipelineReceiptLookupV1, CoreError>;
 
     /// Remove at most `limit` admission receipts whose retention horizon has
     /// passed on the store-owned clock.

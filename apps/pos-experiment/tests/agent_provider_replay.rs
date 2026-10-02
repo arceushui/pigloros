@@ -689,6 +689,16 @@ impl PipelineAdmissionPortV1 for SharedMemoryAdapter {
     ) -> Result<PurgeOutcome, CoreError> {
         self.store().purge_expired_pipeline_receipts_bounded(limit)
     }
+
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: pos_core::TimelineId,
+        key: pos_core::AppendDedupKey,
+        attempt_id: pos_core::PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
+        self.store()
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
 }
 
 impl PipelineAdmissionFencePublisherV1 for SharedMemoryAdapter {

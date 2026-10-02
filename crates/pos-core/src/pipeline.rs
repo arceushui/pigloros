@@ -588,6 +588,49 @@ impl PipelineCommitReceiptV1 {
         {
             return Err(PipelineContractErrorV1::CommittedBatchMismatch);
         }
+        Self::try_from_ordered_events(
+            basis.attempt.attempt_id,
+            committed_timeline_id,
+            basis.batch.digest,
+            events,
+        )
+    }
+
+    /// Rebuild the original receipt of one retained committed attempt.
+    ///
+    /// A store adapter calls this for an exact retry it recognizes from its
+    /// retained receipt record alone, without the original admission basis,
+    /// so recovery never reruns domain approval or provider validation. The
+    /// record supplies the attempt identity and draft-batch digest bound when
+    /// the batch committed; `events` are the Events that commit assigned.
+    ///
+    /// # Errors
+    /// Returns a closed error for an empty, non-contiguous, or invalidly
+    /// identified Event range.
+    pub fn try_from_retained_events(
+        attempt_id: PipelineAttemptIdV1,
+        committed_timeline_id: TimelineId,
+        draft_batch_digest: Hash,
+        events: &[Event],
+    ) -> Result<Self, PipelineContractErrorV1> {
+        if events.is_empty() {
+            return Err(PipelineContractErrorV1::CommittedBatchMismatch);
+        }
+        Self::try_from_ordered_events(
+            attempt_id,
+            committed_timeline_id,
+            draft_batch_digest,
+            events,
+        )
+    }
+
+    /// Validate Timeline Order and identity, then bind the committed range.
+    fn try_from_ordered_events(
+        attempt_id: PipelineAttemptIdV1,
+        timeline_id: TimelineId,
+        draft_batch_digest: Hash,
+        events: &[Event],
+    ) -> Result<Self, PipelineContractErrorV1> {
         if events.first().is_some_and(|event| event.seq == Seq::ZERO)
             || events.windows(2).any(|pair| {
                 pair[0]
@@ -607,9 +650,9 @@ impl PipelineCommitReceiptV1 {
             return Err(PipelineContractErrorV1::InvalidCommittedIdentity);
         }
         Ok(Self {
-            attempt_id: basis.attempt.attempt_id,
-            timeline_id: committed_timeline_id,
-            draft_batch_digest: basis.batch.digest,
+            attempt_id,
+            timeline_id,
+            draft_batch_digest,
             committed_events: events
                 .iter()
                 .map(|event| CommittedPipelineEventV1 {

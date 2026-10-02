@@ -3131,6 +3131,20 @@ impl ErasureCommandSenderV1<'_> {
             .map_store_error()
     }
 
+    /// Read one Timeline's Logical Head inside a larger host command fence.
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors.
+    pub fn logical_head(&mut self, timeline: TimelineId) -> Result<Seq, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation).and_then(|()| {
+            self.host
+                .store
+                .host_store()
+                .logical_head(timeline)
+                .map_store_error()
+        })
+    }
+
     /// Read one Event by durable identifier inside a larger host command
     /// fence.
     ///
@@ -4859,6 +4873,20 @@ mod tests {
             pos_core::PipelineAdmissionPortV1::purge_expired_pipeline_receipts_bounded(
                 &mut self.inner,
                 limit,
+            )
+        }
+
+        fn lookup_pipeline_receipt(
+            &mut self,
+            timeline: TimelineId,
+            key: pos_core::AppendDedupKey,
+            attempt_id: pos_core::PipelineAttemptIdV1,
+        ) -> Result<pos_core::PipelineReceiptLookupV1, CoreError> {
+            pos_core::PipelineAdmissionPortV1::lookup_pipeline_receipt(
+                &mut self.inner,
+                timeline,
+                key,
+                attempt_id,
             )
         }
     }

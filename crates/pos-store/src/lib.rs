@@ -77,8 +77,8 @@ pub use pos_core::store::{
 use pos_core::{
     is_consent_event_type, is_geographic_event_type, pipeline_authority_revision_v1,
     pipeline_erasure_revision_v1, ErasureGate, ErasureReferenceV1, Hash, PipelineAdmissionBasisV1,
-    PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineIngressV1, PipelineOutcomeV1,
-    PipelinePreconditionV1, Seq,
+    PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineIngressV1,
+    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1, Seq,
 };
 pub use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
@@ -864,6 +864,23 @@ pub(crate) fn recovered_pipeline_receipt(
     events: &[Event],
 ) -> Result<PipelineOutcomeV1, CoreError> {
     committed_pipeline_receipt(basis, timeline, events).map(PipelineOutcomeV1::RecoveredDuplicate)
+}
+
+/// Rebuild the receipt of a retained attempt found by a basis-free lookup.
+pub(crate) fn retained_pipeline_receipt(
+    attempt_id: PipelineAttemptIdV1,
+    timeline: TimelineId,
+    draft_batch_digest: Hash,
+    events: &[Event],
+) -> Result<PipelineReceiptLookupV1, CoreError> {
+    PipelineCommitReceiptV1::try_from_retained_events(
+        attempt_id,
+        timeline,
+        draft_batch_digest,
+        events,
+    )
+    .map(PipelineReceiptLookupV1::Retained)
+    .map_err(pipeline_receipt_error)
 }
 
 fn pipeline_receipt_error(error: PipelineContractErrorV1) -> CoreError {

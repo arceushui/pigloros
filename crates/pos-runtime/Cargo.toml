@@ -37,6 +37,10 @@ rusqlite = { workspace = true }
 tempfile = { workspace = true }
 
 [[test]]
+name = "human_admission"
+required-features = ["test-support"]
+
+[[test]]
 name = "output_admission_public"
 required-features = ["test-support"]
 

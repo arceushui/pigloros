@@ -6,7 +6,9 @@
 //! publishes each Timeline's [`PipelineAdmissionFenceV1`] from the current
 //! persisted authority and erasure revisions, and admits every staged pass
 //! through [`PluginRegistry::admit_scheduled_pass`] with host-issued attempt,
-//! idempotency, and validation identities. The host is compiled only with the
+//! idempotency, and validation identities. The same root admits a local
+//! session's external human actions on the `HumanProposedAction` path through
+//! [`PluginRegistry::admit_human_action`]. The host is compiled only with the
 //! `local-admission-host` feature; see the parent module for why that is not
 //! a security boundary against in-process code.
 //!
@@ -24,13 +26,17 @@ use pos_core::{
     AuthorityPersistenceHostV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
     EventDraft, Hash, PipelineAdmissionFenceV1, PipelineAttemptIdV1, PipelineCommitReceiptV1,
-    PipelineContractErrorV1, PipelineEvidenceRefV1, PipelineSecurityRevisionsDraftV1,
-    PipelineSecurityRevisionsV1, PrincipalRefV1, Seq, TimelineId,
+    PipelineContractErrorV1, PipelineEvidenceRefV1, PipelineObservationAnchorV1,
+    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1, ProposedAction,
+    Seq, TimelineId,
 };
 use ulid::Ulid;
 
 use super::ScheduledAdmissionPortsV1;
-use crate::{PluginRegistry, RuntimeError, ScheduledPassAdmissionV1};
+use crate::{
+    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1, PluginRegistry,
+    RuntimeError, ScheduledPassAdmissionV1,
+};
 
 const TRUST_DOMAIN: &str = "local.experiment";
 const DOMAIN: &[u8] = b"PiglorOS.LocalScheduledAdmission.v1\0";
@@ -196,6 +202,57 @@ impl LocalScheduledAdmissionHostV1 {
             })
             .map_err(RuntimeError::PipelineContract)
             .and_then(|admission| registry.admit_scheduled_pass(store, &admission))
+    }
+
+    /// Admit one local human `ProposedAction` on the `HumanProposedAction`
+    /// path.
+    ///
+    /// A local experiment session is the trusted host that authorizes its own
+    /// external actions, so the authorization evidence is its persisted
+    /// session grant. `revisions` must come from [`Self::observe`] and
+    /// `observed_through` is the Logical Head the host read before approval:
+    /// a commit after it makes the attempt stale. The attempt and idempotency
+    /// identities are fresh, so the action is never retried implicitly.
+    ///
+    /// # Errors
+    /// Returns the same typed errors as [`PluginRegistry::admit_human_action`],
+    /// or [`HumanActionAdmissionErrorV1::HostContract`] when this host cannot
+    /// derive its own admission inputs.
+    pub fn admit_action(
+        &self,
+        registry: &PluginRegistry,
+        store: &mut dyn ScheduledAdmissionPortsV1,
+        proposal: &ProposedAction,
+        revisions: PipelineSecurityRevisionsV1,
+        observed_through: (TimelineId, Seq),
+    ) -> Result<HumanActionReceiptV1, HumanActionAdmissionErrorV1> {
+        let (timeline, head) = observed_through;
+        let attempt = EntityId::new().inner().to_bytes();
+        let mut cut = timeline.inner().to_bytes().to_vec();
+        cut.extend_from_slice(&head.as_u64().to_be_bytes());
+        PipelineAttemptIdV1::try_new(attempt)
+            .and_then(|attempt_id| {
+                PipelineObservationAnchorV1::try_new(timeline, head, keyed(b"observation", &cut))
+                    .map(|observation| (attempt_id, observation))
+            })
+            .and_then(|(attempt_id, observation)| {
+                PipelineEvidenceRefV1::try_new(self.authority_grant()).map(|authorization| {
+                    HumanActionAdmissionV1 {
+                        attempt_id,
+                        idempotency: AppendIdentity::new(
+                            AppendDedupKey::from_keyed_hash(
+                                *keyed(b"idempotency", &attempt).as_bytes(),
+                            ),
+                            AppendDedupScope::from_keyed_hash(*keyed(b"scope", &[]).as_bytes()),
+                        ),
+                        observation,
+                        authorization,
+                        security_revisions: revisions,
+                    }
+                })
+            })
+            .map_err(HumanActionAdmissionErrorV1::HostContract)
+            .and_then(|admission| registry.admit_human_action(store, proposal, &admission))
     }
 
     fn bind(&self, store: &mut dyn ScheduledAdmissionPortsV1) -> Result<(), RuntimeError> {

@@ -16,9 +16,10 @@ use pos_core::{
     PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
     PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
     PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1, Seq, SeqRange,
-    TentativePipelineResultV1, TimelineId, WallTime, APPEND_IDENTITY_RETENTION_MICROS,
-    DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE, PIPELINE_CONTRACT_VERSION_V1,
+    PipelineReceiptLookupV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    PrincipalRefV1, Seq, SeqRange, TentativePipelineResultV1, TimelineId, WallTime,
+    APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE,
+    PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -747,6 +748,118 @@ fn expired_receipts_release_their_key_and_are_purged_in_bounds() {
     }
 }
 
+fn lookup(
+    store: &mut dyn Harness,
+    timeline: TimelineId,
+    key: u8,
+    attempt: u8,
+) -> Result<PipelineReceiptLookupV1, CoreError> {
+    store.lookup_pipeline_receipt(
+        timeline,
+        AppendDedupKey::from_keyed_hash([key; 32]),
+        ok(PipelineAttemptIdV1::try_new([attempt; 16])),
+    )
+}
+
+#[test]
+fn basis_free_lookup_recovers_only_the_exact_retained_attempt() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        assert_eq!(
+            ok(lookup(store.as_mut(), fixture.timeline, 1, 1)),
+            PipelineReceiptLookupV1::Absent,
+            "{name}"
+        );
+        let receipt = committed(ok(admit(store.as_mut(), &attempt(&fixture, 1, 0))));
+
+        assert_eq!(
+            ok(lookup(store.as_mut(), fixture.timeline, 1, 1)),
+            PipelineReceiptLookupV1::Retained(receipt.clone()),
+            "{name}"
+        );
+        assert_eq!(
+            ok(lookup(store.as_mut(), fixture.timeline, 1, 9)),
+            PipelineReceiptLookupV1::Conflict,
+            "{name}: another attempt under the same key"
+        );
+        let other = ok(store.create_timeline("other-admission")).id();
+        assert_eq!(
+            ok(lookup(store.as_mut(), other, 1, 1)),
+            PipelineReceiptLookupV1::Conflict,
+            "{name}: the same key on another Timeline"
+        );
+        assert_eq!(
+            error_text(lookup(store.as_mut(), timeline_id(99), 1, 1)),
+            Some(CoreError::TimelineNotFound(timeline_id(99)).to_string()),
+            "{name}"
+        );
+
+        let child = ok(store.fork(fixture.timeline, Seq::from_u64(3), "lookup-child")).id();
+        ok(store.set_pipeline_admission_fence(child, fixture.fence));
+        let child_receipt = committed(ok(admit(
+            store.as_mut(),
+            &Attempt {
+                timeline: child,
+                ..attempt(&fixture, 2, 3)
+            },
+        )));
+        assert_eq!(receipt_positions(&child_receipt), [4, 5, 6], "{name}");
+        assert_eq!(
+            ok(lookup(store.as_mut(), child, 2, 2)),
+            PipelineReceiptLookupV1::Retained(child_receipt),
+            "{name}: the receipt keeps logical Fork positions"
+        );
+
+        clock.advance(APPEND_IDENTITY_RETENTION_MICROS);
+        assert_eq!(
+            ok(lookup(store.as_mut(), child, 2, 2)),
+            PipelineReceiptLookupV1::Absent,
+            "{name}: an expired receipt releases its key"
+        );
+
+        fixture.gate.freeze_timeline_for_test(fixture.timeline);
+        assert_eq!(
+            error_text(lookup(store.as_mut(), fixture.timeline, 1, 1)),
+            Some(CoreError::ErasureAccessFrozen.to_string()),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn subject_scoped_cleanup_releases_admitted_receipts_in_bounds() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let first = committed(ok(admit(store.as_mut(), &attempt(&fixture, 1, 0))));
+        committed(ok(admit(store.as_mut(), &attempt(&fixture, 2, 3))));
+        let scope = AppendDedupScope::from_keyed_hash([62; 32]);
+        let one = ok(NonZeroUsize::new(1).ok_or("limit"));
+
+        let partial = ok(store.remove_append_identities_bounded(scope, one));
+        assert_eq!(
+            (partial.removed, partial.more_may_remain),
+            (1, true),
+            "{name}"
+        );
+        assert_eq!(
+            ok(store.pending_append_identity_cleanup()),
+            Some(scope),
+            "{name}: the remaining receipt keeps the cleanup pending"
+        );
+        let rest = ok(store.remove_append_identities_bounded(scope, NonZeroUsize::MAX));
+        assert_eq!((rest.removed, rest.more_may_remain), (1, false), "{name}");
+        assert_eq!(ok(store.pending_append_identity_cleanup()), None, "{name}");
+        assert_eq!(
+            ok(lookup(store.as_mut(), fixture.timeline, 1, 1)),
+            PipelineReceiptLookupV1::Absent,
+            "{name}: a released key no longer recovers {first:?}"
+        );
+        assert_eq!(event_count(store.as_ref(), fixture.timeline), 6, "{name}");
+    }
+}
+
 #[test]
 fn deleting_a_timeline_removes_its_admission_state() {
     let clock = TestClock::at(1_000);
@@ -792,6 +905,10 @@ fn sqlite_reopen_recovers_the_receipt_and_persisted_fence() {
 
     let mut reopened = open_file(&path, &clock);
     assert_eq!(remaining_budget(&reopened, first.timeline), Some(7));
+    assert_eq!(
+        ok(lookup(&mut reopened, first.timeline, 1, 1)),
+        PipelineReceiptLookupV1::Retained(receipt.clone())
+    );
     assert_eq!(
         ok(admit(&mut reopened, &first)),
         PipelineOutcomeV1::RecoveredDuplicate(receipt)
@@ -848,6 +965,11 @@ fn sqlite_faults_roll_back_the_complete_batch_and_receipt() {
         error_text(admit(&mut open_file(&path, &clock), &first))
             .is_some_and(|text| text.contains("outside its storage range")),
         "an out-of-range persisted integer is a storage error, not a clamp"
+    );
+    assert!(
+        error_text(lookup(&mut open_file(&path, &clock), first.timeline, 1, 1))
+            .is_some_and(|text| text.contains("outside its storage range")),
+        "a basis-free lookup reads the same validated row"
     );
     execute(
         &path,
@@ -932,4 +1054,110 @@ fn sqlite_connections_racing_on_one_logical_head_commit_at_most_once() {
         remaining_budget(&reopened, fixture_attempt.timeline),
         Some(7)
     );
+}
+
+#[test]
+fn sqlite_hosts_republishing_one_fence_fail_closed_when_interleaved() {
+    let clock = TestClock::at(1_000);
+    let directory = ok(tempdir());
+    let path = directory.path().join("admission-shared-fence.db");
+    let gateway_attempt = {
+        let mut store = ok(SqliteStore::open_with_clock(
+            path.to_str().unwrap_or_default(),
+            Box::new(clock.clone()),
+        ));
+        attempt(&prepare(&mut store), 1, 0)
+    };
+    let timeline = gateway_attempt.timeline;
+    let session_revisions = ok(PipelineSecurityRevisionsV1::try_from_draft(
+        PipelineSecurityRevisionsDraftV1 {
+            execution_profile: hash(16),
+            ..gateway_attempt.revisions.as_draft()
+        },
+    ));
+    let session_attempt = Attempt {
+        key: 2,
+        revisions: session_revisions,
+        ..gateway_attempt.clone()
+    };
+
+    // A Gateway and an experiment session share one file and each republish
+    // the Timeline's fence from their own revisions; the session writes last.
+    let mut gateway = open_file(&path, &clock);
+    ok(gateway
+        .set_pipeline_admission_fence(timeline, fence_for(gateway_attempt.revisions, hash(1))));
+    let mut session = open_file(&path, &clock);
+    ok(session.set_pipeline_admission_fence(timeline, fence_for(session_revisions, hash(1))));
+
+    // The open Gateway connection observes the foreign write and rejects
+    // before comparing.
+    assert!(admit(&mut gateway, &gateway_attempt).is_err());
+    drop(gateway);
+    drop(session);
+    // A fresh Gateway connection compares its basis with the replaced fence.
+    assert_eq!(
+        ok(admit(&mut open_file(&path, &clock), &gateway_attempt)),
+        PipelineOutcomeV1::AdmissionConflict
+    );
+    assert_eq!(
+        ok(lookup(&mut open_file(&path, &clock), timeline, 1, 1)),
+        PipelineReceiptLookupV1::Absent
+    );
+    assert_eq!(event_count(&open_file(&path, &clock), timeline), 0);
+
+    // Only the host whose fence is current commits.
+    let receipt = committed(ok(admit(&mut open_file(&path, &clock), &session_attempt)));
+    assert_eq!(receipt_positions(&receipt), [1, 2, 3]);
+}
+
+#[test]
+fn sqlite_rejects_an_unreleased_receipt_table_or_index_shape_closed() {
+    let clock = TestClock::at(1_000);
+    let directory = ok(tempdir());
+    let path = directory.path().join("admission-schema.db");
+    let path_text = path.to_str().unwrap_or_default();
+    drop(ok(SqliteStore::open_with_clock(
+        path_text,
+        Box::new(clock.clone()),
+    )));
+    let open_read_only = || error_text(SqliteStore::open_read_only(path_text));
+    let open_writable = || {
+        error_text(SqliteStore::open_with_clock(
+            path_text,
+            Box::new(clock.clone()),
+        ))
+    };
+
+    execute(&path, "DROP INDEX idx_pipeline_admission_receipts_scope;");
+    assert!(open_read_only()
+        .is_some_and(|text| text.contains("idx_pipeline_admission_receipts_scope index")));
+    // A writable open recreates a missing index.
+    assert_eq!(open_writable(), None);
+    assert_eq!(open_read_only(), None);
+
+    execute(
+        &path,
+        "DROP INDEX idx_pipeline_admission_receipts_scope;
+         CREATE INDEX idx_pipeline_admission_receipts_scope
+         ON pipeline_admission_receipts(scope_key);",
+    );
+    assert!(open_writable()
+        .is_some_and(|text| text.contains("idx_pipeline_admission_receipts_scope index")));
+
+    // The receipt shape before #319 has no migration and is rejected closed.
+    execute(
+        &path,
+        "DROP TABLE pipeline_admission_receipts;
+         CREATE TABLE pipeline_admission_receipts (
+             dedup_key BLOB PRIMARY KEY NOT NULL CHECK (length(dedup_key) = 32),
+             timeline_id TEXT NOT NULL,
+             basis_digest BLOB NOT NULL CHECK (length(basis_digest) = 32),
+             first_local_seq INTEGER NOT NULL CHECK (first_local_seq >= 1),
+             event_count INTEGER NOT NULL CHECK (event_count >= 1),
+             expires_at INTEGER NOT NULL
+         );",
+    );
+    assert!(open_read_only().is_some_and(|text| text.contains("pipeline_admission_receipts table")));
+    assert!(open_writable().is_some());
+    assert!(open_read_only().is_some_and(|text| text.contains("pipeline_admission_receipts table")));
 }

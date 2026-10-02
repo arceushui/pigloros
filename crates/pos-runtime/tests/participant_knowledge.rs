@@ -897,6 +897,17 @@ impl PipelineAdmissionPortV1 for RecordingPort<'_> {
     ) -> Result<pos_core::PurgeOutcome, pos_core::CoreError> {
         self.inner.purge_expired_pipeline_receipts_bounded(limit)
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: pos_core::TimelineId,
+        key: pos_core::AppendDedupKey,
+        attempt_id: pos_core::PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
+        self.inner
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
 }
 
 /// Copy what a Driver recorded, releasing its lock at once.
