@@ -153,7 +153,7 @@ fn intent_rejects_partial_or_invalid_kind_one_and_kind_eight_rows() -> TestResul
 }
 
 #[test]
-fn owner_state_requires_one_complete_visible_or_genesis_shape() -> TestResult {
+fn owner_state_requires_one_complete_visible_or_genesis_shape() {
     let timeline_id = TimelineId::new();
     let genesis = LocalCutOwnerStateV1 {
         owner_id: [1; 32],
@@ -193,5 +193,4 @@ fn owner_state_requires_one_complete_visible_or_genesis_shape() -> TestResult {
         repeated_timeline.validate(),
         Err(LocalCutOwnerErrorV1::CorruptState)
     );
-    Ok(())
 }
