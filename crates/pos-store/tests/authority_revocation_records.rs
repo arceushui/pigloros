@@ -110,7 +110,7 @@ fn grant(
             budget: 100,
             environment_constraints: vec!["local-only".to_owned()],
         })),
-        valid_from_position: Seq::from_u64(1),
+        valid_from_position: Seq::from_u64(issuance),
         valid_until_position: Seq::from_u64(100),
         parent_grant_id: parent.map(CapabilityGrantV1::grant_id),
         delegation_depth: u8::from(parent.is_some()),

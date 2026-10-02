@@ -918,7 +918,7 @@ fn history_grant(
             budget: 1,
             environment_constraints: Vec::new(),
         })?,
-        valid_from_position: Seq::from_u64(1),
+        valid_from_position: Seq::from_u64(issuance),
         valid_until_position: Seq::from_u64(50),
         parent_grant_id: None,
         delegation_depth: 0,
