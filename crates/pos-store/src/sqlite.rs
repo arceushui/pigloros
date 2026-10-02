@@ -25620,10 +25620,10 @@ pub(super) mod key_registry_coverage {
         use super::*;
         use pos_core::{
             adapter_configuration_digest_v1, extract_adapter_admission_registration_v1,
-            extract_adapter_transcript_registration_v1, extract_repro_manifest_root_registration_v1,
-            prepare_artifact_registration_batch_v1, public_adapter_schema_digest_v1,
-            AdapterAdmissionEntryV1, AdapterAdmissionInputV1, AdapterDataClassV1,
-            AdapterEffectModeV1, AdapterInvocationInputV1,
+            extract_adapter_transcript_registration_v1,
+            extract_repro_manifest_root_registration_v1, prepare_artifact_registration_batch_v1,
+            public_adapter_schema_digest_v1, AdapterAdmissionEntryV1, AdapterAdmissionInputV1,
+            AdapterDataClassV1, AdapterEffectModeV1, AdapterInvocationInputV1,
             AdapterRecordingStoreErrorV1 as RecorderError, AdapterTranscriptInputV1,
             ArtifactChildEdgeV1, ArtifactDataClassV1, ArtifactOptionalityV1,
             ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
