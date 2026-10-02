@@ -38,17 +38,15 @@ impl SchemaRegistry {
 
     /// Register a new event type schema.
     ///
-    /// Registration never overwrites (ADR-024 Revision 1 Decision 4): an
-    /// existing entry is kept and the insert fails closed.
+    /// This is the only insert path, and it never overwrites (ADR-024
+    /// Revision 1 Decision 4): an existing entry is kept and the insert fails
+    /// closed. Hosts may call it directly for a host-owned type that no
+    /// Plugin registration owns.
     ///
     /// # Errors
     /// Returns [`crate::PluginCompositionErrorV1::DuplicateEventTypeOwner`]
     /// when the event type already has a schema.
     pub fn register(&mut self, schema: EventTypeSchema) -> Result<(), RuntimeError> {
-        self.insert_new(schema)
-    }
-
-    fn insert_new(&mut self, schema: EventTypeSchema) -> Result<(), RuntimeError> {
         match self.schemas.entry(schema.event_type.as_str().to_owned()) {
             Entry::Occupied(occupied) => Err(RuntimeError::Composition(
                 crate::PluginCompositionErrorV1::DuplicateEventTypeOwner {
@@ -64,21 +62,19 @@ impl SchemaRegistry {
 
     /// Build a registry holding exactly the host pre-registered schemas.
     pub(crate) fn with_host_schemas(schemas: impl IntoIterator<Item = EventTypeSchema>) -> Self {
-        Self {
-            schemas: schemas
-                .into_iter()
-                .map(|schema| (schema.event_type.as_str().to_owned(), schema))
-                .collect(),
+        let mut registry = Self::new();
+        for schema in schemas {
+            registry.register_claimed(schema);
         }
+        registry
     }
 
-    /// Record the schema of a type whose exclusive ownership the registry has
-    /// already checked. An existing entry, such as the host Recorder schema a
-    /// Plugin may claim, is kept and never replaced.
+    /// Record the schema of a type whose ownership the registry has already
+    /// settled, through [`Self::register`]. The only entry that can already
+    /// exist is a host schema a Plugin may claim (the Recorder type); it is
+    /// kept and never replaced, so the duplicate result carries no new fact.
     pub(crate) fn register_claimed(&mut self, schema: EventTypeSchema) {
-        self.schemas
-            .entry(schema.event_type.as_str().to_owned())
-            .or_insert(schema);
+        self.register(schema).unwrap_or_default();
     }
 
     /// Returns `true` if the event type is registered.

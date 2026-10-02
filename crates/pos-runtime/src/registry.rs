@@ -157,20 +157,27 @@ fn extend_unique_subscriptions(
     }
 }
 
-/// Host pre-registered Event types and whether one Plugin registration may
-/// claim each (ADR-024 Revision 1 Decision 3). Only the Recorder type is
-/// claimable; a claim records ownership and keeps the host schema.
-const HOST_EVENT_TYPES: [(&str, &str, bool); 2] = [
-    (
-        RECORDER_EVENT_TYPE,
-        "Internal: nondeterministic output recorded by the Recorder",
-        true,
-    ),
-    (
-        pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
-        "Gateway-owned durable consent revocation marker",
-        false,
-    ),
+/// One host pre-registered Event type (ADR-024 Revision 1 Decision 3).
+struct HostEventTypeV1 {
+    event_type: &'static str,
+    description: &'static str,
+    /// Whether one Plugin registration may claim the type. A claim records
+    /// ownership and keeps the host schema.
+    claimable: bool,
+}
+
+/// The host pre-registered Event types. Only the Recorder type is claimable.
+const HOST_EVENT_TYPES: [HostEventTypeV1; 2] = [
+    HostEventTypeV1 {
+        event_type: RECORDER_EVENT_TYPE,
+        description: "Internal: nondeterministic output recorded by the Recorder",
+        claimable: true,
+    },
+    HostEventTypeV1 {
+        event_type: pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
+        description: "Gateway-owned durable consent revocation marker",
+        claimable: false,
+    },
 ];
 
 /// Whether a Plugin registration may claim this type: every type that is not
@@ -178,8 +185,8 @@ const HOST_EVENT_TYPES: [(&str, &str, bool); 2] = [
 fn plugin_claimable_event_type(kind: &Kind) -> bool {
     HOST_EVENT_TYPES
         .iter()
-        .find(|(event_type, _, _)| *event_type == kind.as_str())
-        .is_none_or(|(_, _, claimable)| *claimable)
+        .find(|host| host.event_type == kind.as_str())
+        .is_none_or(|host| host.claimable)
 }
 
 fn driver_visible_event(event: &Event) -> bool {
@@ -188,16 +195,18 @@ fn driver_visible_event(event: &Event) -> bool {
         && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
 }
 
-/// Whether a committed Event of a consent-sensitive type may reach a Driver
-/// in this pass (ADR-039; ADR-021 Revision 3 Decision 1). Subscribed Events
-/// are consent-gated like every other non-participant observation: a
-/// sensitive Event is visible only inside a protected pass whose validated
-/// token names its entity and grants its modality. A public pass sees none.
+/// Whether a committed Event of a consent-sensitive type may reach a
+/// verified-prefix Driver in this pass (ADR-039; ADR-021 Revision 3
+/// Decision 1; ADR-024 Revision 1 Decision 5). A sensitive Event is visible
+/// only inside a protected pass whose validated token names its entity and
+/// grants its modality. A public pass sees none.
+///
+/// Only Drivers that read the full verified prefix are filtered. A
+/// cursor-based Driver keeps its previous view: filtering it here would let
+/// its Event cursor pass a hidden Event, which it would then never receive.
+/// Consent-gating cursor subscriptions without that loss is #494.
 fn consent_visible_event(operation: &OperationContext, event: &Event) -> bool {
-    let sensitive = pos_core::required_modality_for_event(&event.event_type) != 0
-        || event.event_type.as_str().starts_with("timeline.fork.")
-        || event.event_type.as_str().starts_with("retention.");
-    !sensitive
+    !pos_core::is_consent_sensitive_event_type(&event.event_type)
         || matches!(operation, OperationContext::Protected { token, .. }
             if token.subject_id() == event.entity
                 && token.authorize_event_type(&event.event_type).is_ok())
@@ -1555,13 +1564,12 @@ impl PluginRegistry {
         // Auto-register the host types, including the Recorder's internal
         // event type so that Recorder::to_draft() output passes
         // SchemaRegistry::validate().
-        let schemas = SchemaRegistry::with_host_schemas(HOST_EVENT_TYPES.map(
-            |(event_type, description, _)| EventTypeSchema {
-                event_type: pos_core::event::Kind::new(event_type),
-                description: description.to_owned(),
+        let schemas =
+            SchemaRegistry::with_host_schemas(HOST_EVENT_TYPES.map(|host| EventTypeSchema {
+                event_type: pos_core::event::Kind::new(host.event_type),
+                description: host.description.to_owned(),
                 json_schema: None,
-            },
-        ));
+            }));
         Self {
             plugins: IndexMap::new(),
             manifest_batch: None,
@@ -1744,9 +1752,7 @@ impl PluginRegistry {
         if events.iter().any(|event| {
             pos_core::is_consent_event_type(&event.event_type)
                 || pos_core::is_geographic_event_type(&event.event_type)
-                || pos_core::required_modality_for_event(&event.event_type) != 0
-                || event.event_type.as_str().starts_with("timeline.fork.")
-                || event.event_type.as_str().starts_with("retention.")
+                || pos_core::is_consent_sensitive_event_type(&event.event_type)
         }) {
             return Err(RuntimeError::ConsentOperationUnavailable);
         }
@@ -1846,10 +1852,9 @@ impl PluginRegistry {
             let subject = protected_token.map_or(draft.entity, ConsentCapabilityToken::subject_id);
             match protected_token {
                 Some(token) => {
-                    let sensitive = pos_core::required_modality_for_event(&draft.event_type) != 0
-                        || draft.event_type.as_str().starts_with("timeline.fork.")
-                        || draft.event_type.as_str().starts_with("retention.");
-                    if sensitive && draft.entity != token.subject_id() {
+                    if pos_core::is_consent_sensitive_event_type(&draft.event_type)
+                        && draft.entity != token.subject_id()
+                    {
                         return Err(RuntimeError::Consent(pos_core::ConsentError::NoConsent));
                     }
                     token
@@ -1964,25 +1969,30 @@ impl PluginRegistry {
                 committed_events,
             )?;
         }
-        let visible_events: Vec<Event> = committed_events
-            .iter()
-            .filter(|event| driver_visible_event(event) && consent_visible_event(operation, event))
-            .cloned()
-            .collect();
+        let event_subscriptions = driver.event_subscriptions();
+        // A Driver without Event subscriptions observes no committed Event,
+        // so the prefix is neither filtered nor copied for it.
+        let subscribed_events: Vec<Event> = if event_subscriptions.is_empty() {
+            Vec::new()
+        } else {
+            committed_events
+                .iter()
+                .filter(|event| {
+                    event_subscriptions.contains(&event.event_type)
+                        && driver_visible_event(event)
+                        && (!verified_prefix_required || consent_visible_event(operation, event))
+                })
+                .cloned()
+                .collect()
+        };
         let observations = snapshot.view_for_events_after(
             driver.subscriptions(),
-            &visible_events,
-            driver.event_subscriptions(),
+            &subscribed_events,
+            event_subscriptions,
             entry.event_cursor,
         );
         let observations = if verified_prefix_required {
-            observations.with_verified_prefix_events(
-                visible_events
-                    .iter()
-                    .filter(|event| driver.event_subscriptions().contains(&event.event_type))
-                    .cloned()
-                    .collect(),
-            )
+            observations.with_verified_prefix_events(subscribed_events.clone())
         } else {
             observations
         };
@@ -2925,6 +2935,12 @@ impl PluginRegistry {
     /// Resolve the registration context, then apply the reserved-type checks
     /// and the shared exclusive-ownership check before any other
     /// registration check or registry mutation (ADR-024 Revision 1 Decision 2).
+    ///
+    /// The order is fixed: a `PluginId` already in the registry fails first
+    /// with [`RuntimeError::DuplicatePlugin`], so registering the same Plugin
+    /// twice reports the duplicate registration, not a duplicate owner of
+    /// its own types. Only a distinct registration that claims an owned
+    /// type reaches [`PluginCompositionErrorV1::DuplicateEventTypeOwner`].
     fn owned_registration_context(
         &self,
         plugin: &dyn Plugin,
