@@ -63,7 +63,7 @@ use pos_core::{
     ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
     ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1, ForkAdmissionReceiptV1,
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAdmissionRecoveryProofV1,
-    validate_manifest_owner_admission_snapshot_v1, ForkAppendOperationV1,
+    ForkAppendOperationV1,
     ForkAppendSourceIdentityV1, ForkAttributionOriginV1, ForkAuthorityOriginV1,
     ForkClassifiedEventV1, ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1,
     ForkClassifierRegistrationV1, ForkClassifierSourceV1, ForkClassifierTableV1,
