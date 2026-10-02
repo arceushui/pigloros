@@ -13171,211 +13171,25 @@ mod coverage_entrypoints {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod manifest_owner_admission_coverage {
     use super::*;
+    use crate::manifest_owner_fixtures::{
+        catalog, hash, plugin, policy_copies, AcceptingOwner, PolicySource,
+    };
     use pos_core::{
-        output_policy::{OutputPolicyInputV1, OutputPolicyV1},
-        prepare_manifest_owner_admission_v1, ArtifactDataClassV1, ArtifactOptionalityV1,
-        ArtifactTransitionRuleV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
-        ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
-        ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
-        ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-        ManifestSlotAdmissionReceiptV1, PluginId, WorldArtifactKindV1, WorldArtifactLeafInputV1,
-        WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
-        WorldProducerV1,
+        prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerTimelineAdmissionRequestV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
+        WorldConsumerV1, WorldProducerV1,
     };
 
     type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
     type TestResult = FixtureResult<()>;
-    type PolicySource = (OutputPolicyV1, Vec<u8>);
     type Corruption = fn(&mut MemoryStore) -> TestResult;
 
     const OWNER: [u8; 32] = [0x4d; 32];
     const CORRUPT_STATE: Result<(), ManifestOwnerAdmissionErrorV1> =
         Err(ManifestOwnerAdmissionErrorV1::CorruptState);
 
-    const fn hash(byte: u8) -> Hash {
-        Hash::from_bytes([byte; 32])
-    }
-
-    const fn plugin(byte: u8) -> PluginId {
-        PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
-    }
-
     const fn owned_timeline(byte: u8) -> TimelineId {
         TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
-    }
-
-    struct CoverageOwner;
-
-    impl ManifestOwnerAdmissionVerifierV1 for CoverageOwner {
-        fn verify_complete_composition(
-            &self,
-            _catalog: &ManifestAdmissionCatalogV1,
-        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-            Ok(())
-        }
-
-        fn verify_complete_owned_scope_set(
-            &self,
-            _owner_id: [u8; 32],
-            _timelines: &[ManifestOwnerTimelineAdmissionRequestV1],
-        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-            Ok(())
-        }
-
-        fn verify_coordinator_receipt(
-            &self,
-            _receipt: &ManifestSlotAdmissionReceiptV1,
-        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-            Ok(())
-        }
-
-        fn verify_owner_prestate_and_allocation(
-            &self,
-            _request: &ManifestOwnerAdmissionRequestV1,
-            _current_state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
-        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-            Ok(())
-        }
-
-        fn sign_coordinator_receipt(
-            &self,
-            draft: ManifestSlotAdmissionReceiptDraftV1,
-        ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
-            draft
-                .with_evidence_and_signature(hash(90), [0x5a; 64])
-                .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
-        }
-
-        fn verify_native_policy_copies(
-            &self,
-            _timeline_id: TimelineId,
-            _scope: Hash,
-            _copies: &ManifestOwnerPolicyCopiesV1,
-        ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-            Ok(())
-        }
-    }
-
-    fn policy_and_closure(plugin_id: PluginId, fixture_seed: u8) -> FixtureResult<PolicySource> {
-        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-            plugin_id,
-            plugin_version: "1.0.0".to_owned(),
-            implementation_hash: hash(fixture_seed + 30),
-            base_configuration_digest: hash(fixture_seed + 40),
-            executable_profile_hash: hash(fixture_seed + 50),
-            retention_policy_hash: hash(fixture_seed + 60),
-            policy_revision: 1,
-            output_declarations: Vec::new(),
-        })?;
-        let members = [
-            policy.to_canonical_cbor(),
-            b"EBP1-fixture".to_vec(),
-            b"implementation-fixture".to_vec(),
-            b"CFG1-fixture".to_vec(),
-            Vec::new(),
-            b"RTP1-fixture".to_vec(),
-        ];
-        let mut closure = b"OPC1".to_vec();
-        for member in members {
-            closure.extend_from_slice(
-                &u64::try_from(member.len())
-                    .unwrap_or(u64::MAX)
-                    .to_be_bytes(),
-            );
-            closure.extend_from_slice(&member);
-        }
-        Ok((policy, closure))
-    }
-
-    fn opc1_digest(bytes: &[u8]) -> Hash {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
-        hasher.update(bytes);
-        Hash::from_bytes(*hasher.finalize().as_bytes())
-    }
-
-    fn catalog(generation: u64) -> FixtureResult<(ManifestAdmissionCatalogV1, Vec<PolicySource>)> {
-        let source = vec![
-            policy_and_closure(plugin(1), 1)?,
-            policy_and_closure(plugin(2), 2)?,
-        ];
-        let rows = source
-            .iter()
-            .enumerate()
-            .map(|(index, (policy, closure))| ManifestAdmissionCatalogRowV1 {
-                stable_slot: if index == 0 { "slot-a" } else { "slot-b" }.to_owned(),
-                plugin_id: policy.fields().plugin_id,
-                plugin_name: "same-name".to_owned(),
-                plugin_version: policy.fields().plugin_version.clone(),
-                implementation_hash: policy.fields().implementation_hash,
-                eop1_native_digest: policy.digest(),
-                closure_hash: opc1_digest(closure),
-            })
-            .collect();
-        Ok((
-            ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
-                owner_id: OWNER,
-                configuration_generation: generation,
-                rows,
-            })?,
-            source,
-        ))
-    }
-
-    fn leaf(
-        scope: Hash,
-        kind: WorldArtifactKindV1,
-        native_digest: Hash,
-        native_len: usize,
-        lease_hash: Hash,
-    ) -> FixtureResult<WorldArtifactLeafV1> {
-        Ok(WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-            scope,
-            kind,
-            native_digest,
-            native_byte_length: u64::try_from(native_len).unwrap_or(u64::MAX),
-            owner: OWNER,
-            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-            optionality: ArtifactOptionalityV1::Required,
-            transition: ArtifactTransitionRuleV1::PreserveExact,
-            source_lease_hash: lease_hash,
-            key_dependencies: Vec::new(),
-            child_node_hashes: Vec::new(),
-        })?)
-    }
-
-    fn policy_copies(
-        scope: Hash,
-        source: &[PolicySource],
-        lease_hash: Hash,
-    ) -> FixtureResult<Vec<ManifestOwnerPolicyCopiesV1>> {
-        source
-            .iter()
-            .map(|(policy, closure)| {
-                let eop1_bytes = policy.to_canonical_cbor();
-                let eop1_leaf = leaf(
-                    scope,
-                    WorldArtifactKindV1::OutputPolicy,
-                    policy.digest(),
-                    eop1_bytes.len(),
-                    lease_hash,
-                )?;
-                let opc1_leaf = leaf(
-                    scope,
-                    WorldArtifactKindV1::OutputPolicyClosure,
-                    opc1_digest(closure),
-                    closure.len(),
-                    lease_hash,
-                )?;
-                Ok(ManifestOwnerPolicyCopiesV1 {
-                    plugin_id: policy.fields().plugin_id,
-                    eop1_bytes,
-                    eop1_leaf,
-                    opc1_bytes: closure.clone(),
-                    opc1_leaf,
-                })
-            })
-            .collect()
     }
 
     fn timeline_request(
@@ -13400,7 +13214,7 @@ mod manifest_owner_admission_coverage {
             timeline_id,
             scope,
             wcs1,
-            policy_copies: policy_copies(scope, sources, hash(80 + offset))?,
+            policy_copies: policy_copies(OWNER, scope, sources, hash(80 + offset))?,
         })
     }
 
@@ -13411,7 +13225,7 @@ mod manifest_owner_admission_coverage {
     ) -> FixtureResult<PreparedManifestOwnerAdmissionV1> {
         let generation = current.map_or(1, |state| state.configuration_generation + 1);
         let seed = u8::try_from(generation).unwrap_or(u8::MAX);
-        let (catalog, sources) = catalog(generation)?;
+        let (catalog, sources) = catalog(OWNER, generation)?;
         let timelines = timeline_ids
             .iter()
             .enumerate()
@@ -13426,7 +13240,7 @@ mod manifest_owner_admission_coverage {
             resulting_inventory_generation: hash(50 + seed),
             timelines,
         };
-        let batch = prepare_manifest_owner_admission_v1(request, &CoverageOwner, current)?;
+        let batch = prepare_manifest_owner_admission_v1(request, &AcceptingOwner, current)?;
         Ok(batch)
     }
 
