@@ -6,7 +6,7 @@ human and AI ingress through atomic host admission, failure precedence,
 recovery, Replay and evaluation non-authority, the ADR-021 Revision 3
 observation profiles, exclusive Event-type ownership (ADR-024 Revision 1) and
 revocation persistence. Its runner is
-`apps/piglor-gateway/tests/pipeline_conformance.rs`, which the workspace test
+`apps/piglor-gateway/tests/pipeline_conformance/main.rs`, which the workspace test
 job executes.
 
 Each version directory is immutable. The runner pins the SHA-256 of every file
