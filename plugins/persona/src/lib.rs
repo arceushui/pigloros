@@ -13,13 +13,19 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
-    event::{CanonicalBytes, Event, EventDraft, Kind},
+    event::{CanonicalBytes, EventDraft, Kind},
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
 };
-use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
+use pos_runtime::{
+    Driver, InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1,
+    ObservationView, RuntimeError, StepOutput,
+};
 use serde::{Deserialize, Serialize};
+
+mod reducer;
+
+pub use reducer::PersonaReducer;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -167,46 +173,22 @@ impl Plugin for PersonaPlugin {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PersonaReducer
-// ---------------------------------------------------------------------------
+// Reviewed staged Reducer catalogue factory (ADR-113 §1): every protected
+// candidate builds a fresh `PersonaReducer` here and keeps only the reducer.
+impl InstalledPluginFactoryV1 for PersonaPlugin {
+    type Configuration = ();
+    type Plugin = Self;
+    type Approver = NoActionApproverV1;
 
-/// Tracks persona preference and decision events in [`State`].
-pub struct PersonaReducer;
-
-impl Reducer for PersonaReducer {
-    fn initial(&self) -> State {
-        let mut s = State::new();
-        s.set("preference_count", serde_json::json!(0_u64));
-        s.set("decision_count", serde_json::json!(0_u64));
-        s.set("last_regret_prob", serde_json::json!(0.0_f64));
-        s
+    fn configuration_details(_configuration: &()) -> Vec<u8> {
+        pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1.to_vec()
     }
 
-    fn apply(&self, state: &mut State, event: &Event) {
-        match event.event_type.as_str() {
-            EVENT_TYPE_PREFERENCE => {
-                let n = state
-                    .get("preference_count")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                state.set("preference_count", serde_json::json!(n + 1));
-            }
-            EVENT_TYPE_DECISION => {
-                let n = state
-                    .get("decision_count")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                state.set("decision_count", serde_json::json!(n + 1));
-
-                // Decode and store last regret_prob.
-                if let Ok(payload) =
-                    ciborium::from_reader::<DecisionPayload, _>(event.payload.as_slice())
-                {
-                    state.set("last_regret_prob", serde_json::json!(payload.regret_prob));
-                }
-            }
-            _ => {}
+    fn build(_configuration: &()) -> InstalledPluginProductV1<Self, NoActionApproverV1> {
+        InstalledPluginProductV1 {
+            plugin: Self::new(),
+            reducer: Some(Box::new(PersonaReducer)),
+            approver: NoActionApproverV1,
         }
     }
 }
@@ -385,8 +367,9 @@ mod tests {
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
-        event::SchemaVersion,
+        event::{Event, SchemaVersion},
         ids::EventId,
+        state::Reducer,
     };
 
     trait TestValueExt<T> {
@@ -955,5 +938,45 @@ mod tests {
         let source: PredictionSourceV1 = ciborium::from_reader(draft.payload.as_slice()).test_ok();
         assert_eq!(source.outcome, PredictionOutcomeV1::Absent);
         assert_eq!(source.version, PREDICTION_SOURCE_VERSION_V1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn staged_factory_builds_a_fresh_reducer_per_candidate() {
+        use pos_runtime::{
+            fold_detached_candidate_v1, HostProjectionProviderV1, ProtectedProjectionProviderV1,
+            StagedReducerAdmissionErrorV1,
+        };
+
+        let mut provider = HostProjectionProviderV1::default();
+        assert_eq!(
+            PersonaPlugin::configuration_details(&()),
+            pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1
+        );
+        assert_eq!(
+            provider.admit::<PersonaPlugin>(std::sync::Arc::new(())),
+            Err(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
+        );
+        let consumer = provider
+            .admit_fixture::<PersonaPlugin>(std::sync::Arc::new(()))
+            .test_ok();
+        let mut folded = provider.open_candidate(&[consumer]).test_ok();
+        let fresh = provider.open_candidate(&[consumer]).test_ok();
+        let entity = EntityId::new();
+        let event = make_event(
+            entity,
+            EVENT_TYPE_DECISION,
+            encode_decision("a", "b", "a", 0.25),
+            1,
+        );
+        fold_detached_candidate_v1(&mut folded, std::slice::from_ref(&event));
+
+        let mut expected = PersonaReducer.initial();
+        PersonaReducer.apply(&mut expected, &event);
+        assert_eq!(
+            folded.state_for(consumer.plugin_id(), &entity),
+            Some(&expected)
+        );
+        assert!(fresh.state_for(consumer.plugin_id(), &entity).is_none());
     }
 }

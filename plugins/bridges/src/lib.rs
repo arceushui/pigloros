@@ -26,16 +26,20 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
-    event::{CanonicalBytes, Event, EventDraft, Kind},
+    event::{CanonicalBytes, EventDraft, Kind},
     ids::{EntityId, PluginId},
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
 };
 use pos_plugin_geo::{
     CompactLocationMetadata, CompactLocationObservation, GeoError, SourceTimeBucket,
     V1SpatialCloaker, Wgs84Point,
 };
+use pos_runtime::{InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1};
 use serde::{Deserialize, Serialize};
+
+mod reducer;
+
+pub use reducer::BridgeReducer;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -227,6 +231,26 @@ impl Plugin for BridgePlugin {
     }
 }
 
+// Reviewed staged Reducer catalogue factory (ADR-113 §1): every protected
+// candidate builds a fresh `BridgeReducer` here and keeps only the reducer.
+impl InstalledPluginFactoryV1 for BridgePlugin {
+    type Configuration = ();
+    type Plugin = Self;
+    type Approver = NoActionApproverV1;
+
+    fn configuration_details(_configuration: &()) -> Vec<u8> {
+        pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1.to_vec()
+    }
+
+    fn build(_configuration: &()) -> InstalledPluginProductV1<Self, NoActionApproverV1> {
+        InstalledPluginProductV1 {
+            plugin: Self::new(),
+            reducer: Some(Box::new(BridgeReducer)),
+            approver: NoActionApproverV1,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BridgeIngestor
 // ---------------------------------------------------------------------------
@@ -276,51 +300,6 @@ impl BridgeIngestor {
 }
 
 // ---------------------------------------------------------------------------
-// BridgeReducer
-// ---------------------------------------------------------------------------
-
-/// Tracks observation count and last value per entity.
-pub struct BridgeReducer;
-
-impl Reducer for BridgeReducer {
-    fn initial(&self) -> State {
-        let mut s = State::new();
-        s.set("observations", serde_json::Value::Number(0.into()));
-        s.set("last_source", serde_json::Value::Null);
-        s.set("last_value", serde_json::Value::Null);
-        s.set("last_timestamp_micros", serde_json::Value::Number(0.into()));
-        s
-    }
-
-    fn apply(&self, state: &mut State, event: &Event) {
-        if event.event_type.as_str() != EVENT_TYPE {
-            return;
-        }
-
-        let observations = state
-            .get("observations")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        state.set(
-            "observations",
-            serde_json::Value::Number((observations + 1).into()),
-        );
-
-        // Decode the CBOR payload and update last_* fields.
-        if let Ok(observation) =
-            ciborium::from_reader::<BridgeObservation, _>(event.payload.as_slice())
-        {
-            state.set("last_source", serde_json::Value::String(observation.source));
-            state.set("last_value", observation.value);
-            state.set(
-                "last_timestamp_micros",
-                serde_json::Value::Number(observation.timestamp_micros.into()),
-            );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -349,8 +328,9 @@ mod tests {
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
-        event::SchemaVersion,
+        event::{Event, SchemaVersion},
         ids::EventId,
+        state::Reducer,
     };
 
     #[test]
@@ -882,5 +862,40 @@ mod tests {
         let bridge_err: BridgeError = core_err.into();
         let s = bridge_err.to_string();
         assert!(s.contains("store error"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn staged_factory_builds_a_fresh_reducer_per_candidate() {
+        use pos_runtime::{
+            fold_detached_candidate_v1, HostProjectionProviderV1, ProtectedProjectionProviderV1,
+            StagedReducerAdmissionErrorV1,
+        };
+
+        let mut provider = HostProjectionProviderV1::default();
+        assert_eq!(
+            BridgePlugin::configuration_details(&()),
+            pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1
+        );
+        assert_eq!(
+            provider.admit::<BridgePlugin>(std::sync::Arc::new(())),
+            Err(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
+        );
+        let consumer = provider
+            .admit_fixture::<BridgePlugin>(std::sync::Arc::new(()))
+            .test_ok();
+        let mut folded = provider.open_candidate(&[consumer]).test_ok();
+        let fresh = provider.open_candidate(&[consumer]).test_ok();
+        let entity = EntityId::new();
+        let event = make_bridge_event(entity, "owntracks", serde_json::json!(1), 7);
+        fold_detached_candidate_v1(&mut folded, std::slice::from_ref(&event));
+
+        let mut expected = BridgeReducer.initial();
+        BridgeReducer.apply(&mut expected, &event);
+        assert_eq!(
+            folded.state_for(consumer.plugin_id(), &entity),
+            Some(&expected)
+        );
+        assert!(fresh.state_for(consumer.plugin_id(), &entity).is_none());
     }
 }

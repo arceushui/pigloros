@@ -1,0 +1,64 @@
+# ADR-113 §7 staged-reducer purity guard for this Plugin crate.
+#
+# Clippy reads the nearest clippy.toml and does not merge it with the
+# workspace file, so the three root thresholds are copied verbatim.
+# The disallowed lists use concrete paths only. They are raised to `forbid`
+# inside `src/reducer.rs`; outside that module they keep the workspace level.
+cognitive-complexity-threshold = 30
+type-complexity-threshold = 250
+too-many-arguments-threshold = 8
+
+disallowed-methods = [
+  "std::fs::read",
+  "std::fs::read_to_string",
+  "std::fs::write",
+  "std::fs::File::open",
+  "std::fs::File::create",
+  "std::fs::OpenOptions::open",
+  "std::fs::remove_file",
+  "std::fs::create_dir_all",
+  "std::net::TcpStream::connect",
+  "std::net::TcpListener::bind",
+  "std::net::UdpSocket::bind",
+  "std::process::Command::new",
+  "std::process::exit",
+  "std::process::abort",
+  "std::env::var",
+  "std::env::var_os",
+  "std::env::vars",
+  "std::env::set_var",
+  "std::env::args",
+  "std::thread::spawn",
+  "std::thread::Builder::spawn",
+  "std::thread::scope",
+  "std::time::SystemTime::now",
+  "std::time::Instant::now",
+  "std::io::stdout",
+  "std::io::stderr",
+  "std::io::stdin",
+]
+
+disallowed-types = [
+  "std::sync::Mutex",
+  "std::sync::RwLock",
+  "std::sync::OnceLock",
+  "std::sync::LazyLock",
+  "std::sync::Condvar",
+  "std::sync::atomic::AtomicBool",
+  "std::sync::atomic::AtomicUsize",
+  "std::sync::atomic::AtomicU64",
+  "std::sync::atomic::AtomicI64",
+  "std::sync::atomic::AtomicU32",
+  "std::sync::atomic::AtomicPtr",
+  "std::cell::Cell",
+  "std::cell::RefCell",
+  "std::cell::OnceCell",
+  "std::cell::UnsafeCell",
+  "std::thread::LocalKey",
+  "std::fs::File",
+  "std::net::TcpStream",
+  "std::net::TcpListener",
+  "std::net::UdpSocket",
+]
+
+disallowed-macros = ["std::thread_local"]

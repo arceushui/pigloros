@@ -10,14 +10,20 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
-    event::{CanonicalBytes, Event, Kind},
+    event::{CanonicalBytes, Kind},
     ids::TimelineId,
     ids::{EntityId, PluginId},
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
 };
-use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
+use pos_runtime::{
+    Driver, InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1, ObservationView,
+    RuntimeError, StepOutput,
+};
 use serde::{Deserialize, Serialize};
+
+mod reducer;
+
+pub use reducer::RuleAgentReducer;
 
 /// The entity kind string for rule agents.
 pub const ENTITY_KIND: &str = "rule-agent";
@@ -103,6 +109,26 @@ impl Plugin for RuleAgentPlugin {
     }
 }
 
+// Reviewed staged Reducer catalogue factory (ADR-113 §1): every protected
+// candidate builds a fresh `RuleAgentReducer` here and keeps only the reducer.
+impl InstalledPluginFactoryV1 for RuleAgentPlugin {
+    type Configuration = ();
+    type Plugin = Self;
+    type Approver = NoActionApproverV1;
+
+    fn configuration_details(_configuration: &()) -> Vec<u8> {
+        pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1.to_vec()
+    }
+
+    fn build(_configuration: &()) -> InstalledPluginProductV1<Self, NoActionApproverV1> {
+        InstalledPluginProductV1 {
+            plugin: Self::new(),
+            reducer: Some(Box::new(RuleAgentReducer)),
+            approver: NoActionApproverV1,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------
@@ -164,34 +190,6 @@ impl Driver for RuleAgentDriver {
 }
 
 // ---------------------------------------------------------------------------
-// Reducer
-// ---------------------------------------------------------------------------
-
-/// Tracks per-agent decision count in State.
-pub struct RuleAgentReducer;
-
-impl Reducer for RuleAgentReducer {
-    fn initial(&self) -> State {
-        let mut s = State::new();
-        s.set("decisions", serde_json::Value::Number(0.into()));
-        s
-    }
-
-    fn apply(&self, state: &mut State, event: &Event) {
-        if event.event_type.as_str() == EVENT_TYPE_DECISION {
-            let decisions = state
-                .get("decisions")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            state.set(
-                "decisions",
-                serde_json::Value::Number((decisions + 1).into()),
-            );
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -224,8 +222,9 @@ mod tests {
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
-        event::{CanonicalBytes, SchemaVersion},
+        event::{CanonicalBytes, Event, SchemaVersion},
         ids::{EntityId, EventId},
+        state::Reducer,
     };
     use pos_store::{open_store, StoreConfig};
 
@@ -367,5 +366,40 @@ mod tests {
 
         assert_eq!(payload.action, "idle");
         assert_eq!(payload.tick, 0);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn staged_factory_builds_a_fresh_reducer_per_candidate() {
+        use pos_runtime::{
+            fold_detached_candidate_v1, HostProjectionProviderV1, ProtectedProjectionProviderV1,
+            StagedReducerAdmissionErrorV1,
+        };
+
+        let mut provider = HostProjectionProviderV1::default();
+        assert_eq!(
+            RuleAgentPlugin::configuration_details(&()),
+            pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1
+        );
+        assert_eq!(
+            provider.admit::<RuleAgentPlugin>(std::sync::Arc::new(())),
+            Err(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
+        );
+        let consumer = provider
+            .admit_fixture::<RuleAgentPlugin>(std::sync::Arc::new(()))
+            .test_ok();
+        let mut folded = provider.open_candidate(&[consumer]).test_ok();
+        let fresh = provider.open_candidate(&[consumer]).test_ok();
+        let entity = EntityId::new();
+        let event = make_decision_event(entity);
+        fold_detached_candidate_v1(&mut folded, std::slice::from_ref(&event));
+
+        let mut expected = RuleAgentReducer.initial();
+        RuleAgentReducer.apply(&mut expected, &event);
+        assert_eq!(
+            folded.state_for(consumer.plugin_id(), &entity),
+            Some(&expected)
+        );
+        assert!(fresh.state_for(consumer.plugin_id(), &entity).is_none());
     }
 }

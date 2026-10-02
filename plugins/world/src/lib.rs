@@ -1,6 +1,11 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
+#![expect(
+    clippy::disallowed_types,
+    reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
+              the Driver's static subscription list uses a `OnceLock`"
+)]
 
 //! `pos-plugin-world` — spatial + embodiment plugin with an installed Live backend.
 //!
@@ -13,18 +18,21 @@ use pos_core::{
     event::{CanonicalBytes, Event, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
     ActionApprover, ActionRejected, ProposedAction, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 #[cfg(test)]
 use pos_core::{WorldCoordinateV1, WorldTransformError};
 use pos_runtime::{
     CommittedForkHandoff, Driver, DriverRecoveryEvidence, HostWorldProfileV1,
-    MeasuredProcessImageV1, ObservationView, RecoveryEvent, RecoveryEventHeader, RuntimeError,
-    StepOutput, WorldInstallationErrorV1,
+    InstalledPluginFactoryV1, InstalledPluginProductV1, MeasuredProcessImageV1, ObservationView,
+    RecoveryEvent, RecoveryEventHeader, RuntimeError, StepOutput, WorldInstallationErrorV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+
+mod reducer;
+
+pub use reducer::WorldReducer;
 
 /// The entity kind string for world bodies.
 pub const ENTITY_KIND: &str = "world-body";
@@ -1075,6 +1083,26 @@ impl Plugin for WorldPlugin {
     }
 }
 
+// Reviewed staged Reducer catalogue factory (ADR-113 §1): every protected
+// candidate builds a fresh `WorldReducer` here and keeps only the reducer.
+impl InstalledPluginFactoryV1 for WorldPlugin {
+    type Configuration = ();
+    type Plugin = Self;
+    type Approver = Self;
+
+    fn configuration_details(_configuration: &()) -> Vec<u8> {
+        pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1.to_vec()
+    }
+
+    fn build(_configuration: &()) -> InstalledPluginProductV1<Self, Self> {
+        InstalledPluginProductV1 {
+            plugin: Self::new(),
+            reducer: Some(Box::new(WorldReducer)),
+            approver: Self::new(),
+        }
+    }
+}
+
 impl ActionApprover for WorldPlugin {
     fn approve(
         &self,
@@ -1968,68 +1996,6 @@ impl Driver for WorldDriver {
 }
 
 // ---------------------------------------------------------------------------
-// Reducer
-// ---------------------------------------------------------------------------
-
-/// Projects the latest accepted WOB1 body observation without a physics backend.
-pub struct WorldReducer;
-
-impl WorldReducer {
-    fn accepted_observation(event: &Event) -> Option<WorldObservationV1> {
-        if event.event_type.as_str() != EVENT_TYPE_OBSERVATION_V1 {
-            return None;
-        }
-        let observation = WorldObservationV1::decode(&event.payload).ok()?;
-        (observation.body_entity_id == event.entity).then_some(observation)
-    }
-}
-
-impl Reducer for WorldReducer {
-    fn initial(&self) -> State {
-        State::new()
-    }
-
-    fn projects_event(&self, event: &Event) -> bool {
-        Self::accepted_observation(event).is_some()
-    }
-
-    fn apply(&self, state: &mut State, event: &Event) {
-        let Some(observation) = Self::accepted_observation(event) else {
-            return;
-        };
-        let mut projected = State::new();
-        projected.set(
-            "body_entity_id",
-            serde_json::json!(observation.body_entity_id.to_string()),
-        );
-        projected.set("tick", serde_json::json!(observation.tick));
-        projected.set("step_index", serde_json::json!(observation.step_index));
-        projected.set("pos_x", serde_json::json!(observation.pos_x));
-        projected.set("pos_y", serde_json::json!(observation.pos_y));
-        projected.set("pos_z", serde_json::json!(observation.pos_z));
-        projected.set("orient_w", serde_json::json!(observation.orient_w));
-        projected.set("orient_x", serde_json::json!(observation.orient_x));
-        projected.set("orient_y", serde_json::json!(observation.orient_y));
-        projected.set("orient_z", serde_json::json!(observation.orient_z));
-        projected.set("vel_lin_x", serde_json::json!(observation.vel_lin_x));
-        projected.set("vel_lin_y", serde_json::json!(observation.vel_lin_y));
-        projected.set("vel_lin_z", serde_json::json!(observation.vel_lin_z));
-        projected.set("vel_ang_x", serde_json::json!(observation.vel_ang_x));
-        projected.set("vel_ang_y", serde_json::json!(observation.vel_ang_y));
-        projected.set("vel_ang_z", serde_json::json!(observation.vel_ang_z));
-        projected.set("sensor_kind", serde_json::json!(observation.sensor_kind));
-        projected.set("sensor_value", serde_json::json!(observation.sensor_value));
-        projected.set("observation_id", serde_json::json!(event.id.to_string()));
-        projected.set("observation_seq", serde_json::json!(event.seq.as_u64()));
-        projected.set(
-            "causation_id",
-            serde_json::json!(event.causation_id.as_ref().map(ToString::to_string)),
-        );
-        *state = projected;
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2078,6 +2044,7 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, SchemaVersion},
         ids::{EntityId, EventId},
+        state::{Reducer, State},
         CoreError, ErasureContainmentGateV1,
     };
     use pos_runtime::{PluginRegistry, SnapshotAnchor, TimelineHistorySegment};
@@ -6164,5 +6131,40 @@ mod tests {
             plugin.approve(&unknown_body),
             Err(ActionRejected::DomainValidationFailed(_))
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn staged_factory_builds_a_fresh_reducer_per_candidate() {
+        use pos_runtime::{
+            fold_detached_candidate_v1, HostProjectionProviderV1, ProtectedProjectionProviderV1,
+            StagedReducerAdmissionErrorV1,
+        };
+
+        let mut provider = HostProjectionProviderV1::default();
+        assert_eq!(
+            WorldPlugin::configuration_details(&()),
+            pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1
+        );
+        assert_eq!(
+            provider.admit::<WorldPlugin>(std::sync::Arc::new(())),
+            Err(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
+        );
+        let consumer = provider
+            .admit_fixture::<WorldPlugin>(std::sync::Arc::new(()))
+            .test_ok();
+        let mut folded = provider.open_candidate(&[consumer]).test_ok();
+        let fresh = provider.open_candidate(&[consumer]).test_ok();
+        let entity = EntityId::new();
+        let event = make_observation_event(entity);
+        fold_detached_candidate_v1(&mut folded, std::slice::from_ref(&event));
+
+        let mut expected = WorldReducer.initial();
+        WorldReducer.apply(&mut expected, &event);
+        assert_eq!(
+            folded.state_for(consumer.plugin_id(), &entity),
+            Some(&expected)
+        );
+        assert!(fresh.state_for(consumer.plugin_id(), &entity).is_none());
     }
 }

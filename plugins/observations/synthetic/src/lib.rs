@@ -10,13 +10,19 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
-    event::{CanonicalBytes, Event, Kind},
+    event::{CanonicalBytes, Kind},
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
 };
-use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
+use pos_runtime::{
+    Driver, InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1, ObservationView,
+    RuntimeError, StepOutput,
+};
 use serde::{Deserialize, Serialize};
+
+mod reducer;
+
+pub use reducer::SyntheticReducer;
 
 /// The entity kind string for synthetic observation sources.
 pub const ENTITY_KIND: &str = "synthetic-source";
@@ -74,6 +80,26 @@ impl Plugin for SyntheticObsPlugin {
             owned_entity_kinds: vec![ENTITY_KIND.to_owned()],
             has_driver: true,
             has_reducer: true,
+        }
+    }
+}
+
+// Reviewed staged Reducer catalogue factory (ADR-113 §1): every protected
+// candidate builds a fresh `SyntheticReducer` here and keeps only the reducer.
+impl InstalledPluginFactoryV1 for SyntheticObsPlugin {
+    type Configuration = ();
+    type Plugin = Self;
+    type Approver = NoActionApproverV1;
+
+    fn configuration_details(_configuration: &()) -> Vec<u8> {
+        pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1.to_vec()
+    }
+
+    fn build(_configuration: &()) -> InstalledPluginProductV1<Self, NoActionApproverV1> {
+        InstalledPluginProductV1 {
+            plugin: Self::new(),
+            reducer: Some(Box::new(SyntheticReducer)),
+            approver: NoActionApproverV1,
         }
     }
 }
@@ -147,45 +173,6 @@ impl Driver for SyntheticDriver {
 }
 
 // ---------------------------------------------------------------------------
-// Reducer
-// ---------------------------------------------------------------------------
-
-/// Tracks observation count and last observed value in State.
-pub struct SyntheticReducer;
-
-impl Reducer for SyntheticReducer {
-    fn initial(&self) -> State {
-        let mut s = State::new();
-        s.set("observations", serde_json::Value::Number(0.into()));
-        // 0.0 is always a finite f64, so from_f64 cannot fail here.
-        s.set("last_value", serde_json::json!(0.0));
-        s
-    }
-
-    fn apply(&self, state: &mut State, event: &Event) {
-        if event.event_type.as_str() != EVENT_TYPE {
-            return;
-        }
-
-        let observations = state
-            .get("observations")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        state.set(
-            "observations",
-            serde_json::Value::Number((observations + 1).into()),
-        );
-
-        // Decode the CBOR payload to extract last_value
-        if let Ok(payload) = ciborium::from_reader::<ObsPayload, _>(event.payload.as_slice()) {
-            if let Some(n) = serde_json::Number::from_f64(payload.value) {
-                state.set("last_value", serde_json::Value::Number(n));
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -217,8 +204,9 @@ mod tests {
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
-        event::{CanonicalBytes, SchemaVersion},
+        event::{CanonicalBytes, Event, SchemaVersion},
         ids::{EntityId, EventId},
+        state::Reducer,
     };
     use pos_store::{open_store, StoreConfig};
 
@@ -485,5 +473,40 @@ mod tests {
                 .and_then(serde_json::Value::as_u64),
             Some(1)
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn staged_factory_builds_a_fresh_reducer_per_candidate() {
+        use pos_runtime::{
+            fold_detached_candidate_v1, HostProjectionProviderV1, ProtectedProjectionProviderV1,
+            StagedReducerAdmissionErrorV1,
+        };
+
+        let mut provider = HostProjectionProviderV1::default();
+        assert_eq!(
+            SyntheticObsPlugin::configuration_details(&()),
+            pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1
+        );
+        assert_eq!(
+            provider.admit::<SyntheticObsPlugin>(std::sync::Arc::new(())),
+            Err(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
+        );
+        let consumer = provider
+            .admit_fixture::<SyntheticObsPlugin>(std::sync::Arc::new(()))
+            .test_ok();
+        let mut folded = provider.open_candidate(&[consumer]).test_ok();
+        let fresh = provider.open_candidate(&[consumer]).test_ok();
+        let entity = EntityId::new();
+        let event = make_obs_event(entity, 0.5, 1);
+        fold_detached_candidate_v1(&mut folded, std::slice::from_ref(&event));
+
+        let mut expected = SyntheticReducer.initial();
+        SyntheticReducer.apply(&mut expected, &event);
+        assert_eq!(
+            folded.state_for(consumer.plugin_id(), &entity),
+            Some(&expected)
+        );
+        assert!(fresh.state_for(consumer.plugin_id(), &entity).is_none());
     }
 }

@@ -262,6 +262,10 @@ static GATEWAY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescri
             "plugins/world/src/lib.rs",
             include_bytes!("../../../plugins/world/src/lib.rs"),
         ),
+        (
+            "plugins/world/src/reducer.rs",
+            include_bytes!("../../../plugins/world/src/reducer.rs"),
+        ),
     ],
 };
 
@@ -278,10 +282,16 @@ static WORLD_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescript
     }],
     approver_type: Some("pos_plugin_world::WorldPlugin"),
     workload_profile: WorkloadProfileV1::Fork,
-    source_files: &[(
-        "src/lib.rs",
-        include_bytes!("../../../plugins/world/src/lib.rs"),
-    )],
+    source_files: &[
+        (
+            "src/lib.rs",
+            include_bytes!("../../../plugins/world/src/lib.rs"),
+        ),
+        (
+            "src/reducer.rs",
+            include_bytes!("../../../plugins/world/src/reducer.rs"),
+        ),
+    ],
 };
 
 static RULE_AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
@@ -293,10 +303,16 @@ static RULE_AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDes
     }],
     approver_type: None,
     workload_profile: WorkloadProfileV1::Research,
-    source_files: &[(
-        "src/lib.rs",
-        include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
-    )],
+    source_files: &[
+        (
+            "src/lib.rs",
+            include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
+        ),
+        (
+            "src/reducer.rs",
+            include_bytes!("../../../plugins/entities/rule-agent/src/reducer.rs"),
+        ),
+    ],
 };
 
 static AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
@@ -326,6 +342,10 @@ static AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescript
             include_bytes!("../../../plugins/agent/src/provider_driver.rs"),
         ),
         (
+            "src/reducer.rs",
+            include_bytes!("../../../plugins/agent/src/reducer.rs"),
+        ),
+        (
             "src/replay.rs",
             include_bytes!("../../../plugins/agent/src/replay.rs"),
         ),
@@ -342,10 +362,16 @@ static SYNTHETIC_OBSERVATION_SOURCE: OutputPolicySourceDescriptorV1 =
         }],
         approver_type: None,
         workload_profile: WorkloadProfileV1::Research,
-        source_files: &[(
-            "src/lib.rs",
-            include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
-        )],
+        source_files: &[
+            (
+                "src/lib.rs",
+                include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
+            ),
+            (
+                "src/reducer.rs",
+                include_bytes!("../../../plugins/observations/synthetic/src/reducer.rs"),
+            ),
+        ],
     };
 
 static SOCIETY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
@@ -365,10 +391,16 @@ static SOCIETY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescri
     ],
     approver_type: None,
     workload_profile: WorkloadProfileV1::Fork,
-    source_files: &[(
-        "src/lib.rs",
-        include_bytes!("../../../plugins/society/src/lib.rs"),
-    )],
+    source_files: &[
+        (
+            "src/lib.rs",
+            include_bytes!("../../../plugins/society/src/lib.rs"),
+        ),
+        (
+            "src/reducer.rs",
+            include_bytes!("../../../plugins/society/src/reducer.rs"),
+        ),
+    ],
 };
 
 static EXPERIMENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
@@ -414,8 +446,16 @@ static EXPERIMENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDes
             include_bytes!("../../../plugins/world/src/lib.rs"),
         ),
         (
+            "plugins/world/src/reducer.rs",
+            include_bytes!("../../../plugins/world/src/reducer.rs"),
+        ),
+        (
             "plugins/society/src/lib.rs",
             include_bytes!("../../../plugins/society/src/lib.rs"),
+        ),
+        (
+            "plugins/society/src/reducer.rs",
+            include_bytes!("../../../plugins/society/src/reducer.rs"),
         ),
     ],
 };
