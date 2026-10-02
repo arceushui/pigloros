@@ -27709,7 +27709,7 @@ pub(super) mod key_registry_coverage {
     }
 }
 
-#[cfg(all(test, feature = "sqlite"))]
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod manifest_owner_admission_coverage {
     use super::*;
