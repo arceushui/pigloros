@@ -397,8 +397,8 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
     );
 
     let catalog = admitted.catalog().as_input().clone();
-    let mismatched_configuration_generation = catalog
-        .configuration_generation
+    let current_configuration_generation = catalog.configuration_generation;
+    let mismatched_configuration_generation = current_configuration_generation
         .checked_add(1)
         .ok_or("fixture configuration generation overflow")?;
     let mismatched_catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
@@ -408,12 +408,14 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
     })?;
     let mismatched_admitted = registry.revalidate_manifest_registration(mismatched_catalog)?;
     let mismatched_sources = registry.admitted_manifest_policy_sources(&mismatched_admitted)?;
-    let mismatched_request = request(
+    let mut mismatched_request = request(
         &mismatched_admitted,
         &mismatched_sources,
         timeline_id,
         operation_id,
     )?;
+    mismatched_request.expected_configuration_generation = Some(current_configuration_generation);
+    mismatched_request.expected_inventory_generation = Some(hash(82));
     assert_eq!(
         registry.commit_admitted_manifest_owner_admission_v1(
             &admitted,
