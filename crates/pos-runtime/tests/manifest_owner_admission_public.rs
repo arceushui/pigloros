@@ -396,22 +396,28 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
         Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
     );
 
-    let mut mismatched_catalog = request(&admitted, &sources, timeline_id, operation_id)?;
-    let catalog = mismatched_catalog.catalog.as_input().clone();
+    let catalog = admitted.catalog().as_input().clone();
     let mismatched_configuration_generation = catalog
         .configuration_generation
         .checked_add(1)
         .ok_or("fixture configuration generation overflow")?;
-    mismatched_catalog.catalog =
-        ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
-            owner_id: catalog.owner_id,
-            configuration_generation: mismatched_configuration_generation,
-            rows: catalog.rows,
-        })?;
+    let mismatched_catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
+        owner_id: catalog.owner_id,
+        configuration_generation: mismatched_configuration_generation,
+        rows: catalog.rows,
+    })?;
+    let mismatched_admitted = registry.revalidate_manifest_registration(mismatched_catalog)?;
+    let mismatched_sources = registry.admitted_manifest_policy_sources(&mismatched_admitted)?;
+    let mismatched_request = request(
+        &mismatched_admitted,
+        &mismatched_sources,
+        timeline_id,
+        operation_id,
+    )?;
     assert_eq!(
         registry.commit_admitted_manifest_owner_admission_v1(
             &admitted,
-            mismatched_catalog,
+            mismatched_request,
             &mut store,
         ),
         Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
