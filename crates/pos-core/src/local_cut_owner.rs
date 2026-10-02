@@ -573,8 +573,9 @@ pub fn validate_local_cut_owner_successor_v1(
 ) -> Result<(), LocalCutOwnerErrorV1> {
     let seal = batch.request.seal.as_input();
     let successor = &batch.successor_state;
+    let expected_previous_receipt_hash = admission.previous_visible_lcq1_hash;
     if seal.configuration_generation != admission.configuration_generation
-        || seal.previous_visible_receipt_hash != admission.previous_visible_lcq1_hash
+        || seal.previous_visible_receipt_hash != expected_previous_receipt_hash
         || seal.expected_inventory_generation != admission.inventory_generation
         || successor.timelines != admission.timelines
     {
