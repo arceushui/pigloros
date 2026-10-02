@@ -2665,14 +2665,15 @@ impl PluginRegistry {
             Self::generated_budget_input(plugin),
             configuration_details,
         )?;
-        Ok(OutputPolicyBindingV1::from_source_with_policy(
+        OutputPolicyBindingV1::from_source_with_policy(
             plugin,
             OutputPolicySourceV1::Generated,
             policy,
             budget,
             configuration_details,
             "deterministic-local-v1",
-        )?)
+        )
+        .map_err(RuntimeError::from)
     }
 
     fn generated_budget_input(plugin: &dyn Plugin) -> pos_core::ExecutableBudgetPolicyInputV1 {
