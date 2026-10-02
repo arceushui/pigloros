@@ -15,14 +15,14 @@
 //! a diverging value, or evidence whose observation profile differs from the
 //! declared tag is a failure. Community Plugin-host cases are #489.
 
-mod eval_seam;
-mod gateway;
-mod harness;
-mod ingress;
-mod ownership;
-mod profiles;
-mod revocation;
-mod support;
+pub mod eval_seam;
+pub mod gateway;
+pub mod harness;
+pub mod ingress;
+pub mod ownership;
+pub mod profiles;
+pub mod revocation;
+pub mod support;
 
 use harness::{
     load_manifest, run_suite, verify_pinned, Applicability, Capture, ConformanceError, Runner,

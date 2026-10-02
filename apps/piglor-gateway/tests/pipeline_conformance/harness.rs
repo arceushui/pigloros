@@ -17,11 +17,11 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 /// Magic of a pipeline conformance profile manifest.
-pub(super) const PROFILE_MAGIC: &str = "PPC1";
+pub const PROFILE_MAGIC: &str = "PPC1";
 /// The only supported profile manifest version.
-pub(super) const PROFILE_VERSION: u64 = 1;
+pub const PROFILE_VERSION: u64 = 1;
 /// Capture key every profile-tagged case records once per store.
-pub(super) const PROFILE_KEY: &str = "observation-profile";
+pub const PROFILE_KEY: &str = "observation-profile";
 
 const STORES: [&str; 3] = ["memory", "sqlite", "none"];
 const PROFILES: [&str; 2] = ["non-participant", "participant-bound"];
@@ -47,7 +47,7 @@ const EXCLUSION_FIELDS: [&str; 3] = ["id", "owner", "reason"];
 
 /// A closed conformance failure. None of them is ever a pass.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum ConformanceError {
+pub enum ConformanceError {
     DigestMismatch {
         expected: String,
         actual: String,
@@ -91,7 +91,7 @@ pub(super) enum ConformanceError {
 
 /// Whether a case runs under this profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum Applicability {
+pub enum Applicability {
     Applicable,
     /// Recorded rather than silently omitted (ADR-021 Revision 3).
     ProfileInapplicable {
@@ -100,32 +100,32 @@ pub(super) enum Applicability {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct Case {
-    pub(super) id: String,
-    pub(super) mandatory: bool,
-    pub(super) applicability: Applicability,
-    pub(super) stores: Vec<String>,
-    pub(super) observation_profile: Option<String>,
-    pub(super) expected: BTreeMap<String, String>,
+pub struct Case {
+    pub id: String,
+    pub mandatory: bool,
+    pub applicability: Applicability,
+    pub stores: Vec<String>,
+    pub observation_profile: Option<String>,
+    pub expected: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct Manifest {
-    pub(super) suite: String,
-    pub(super) cases: Vec<Case>,
-    pub(super) exclusions: Vec<String>,
+pub struct Manifest {
+    pub suite: String,
+    pub cases: Vec<Case>,
+    pub exclusions: Vec<String>,
 }
 
 /// Observations one runner captured, keyed `<store>/<key>`.
 #[derive(Debug, Default)]
-pub(super) struct Capture {
+pub struct Capture {
     values: BTreeMap<String, String>,
 }
 
 impl Capture {
     /// Record one observation. Recording a key twice with another value
     /// keeps both, so the comparison fails rather than picking one.
-    pub(super) fn record(&mut self, store: &str, key: &str, value: impl std::fmt::Display) {
+    pub fn record(&mut self, store: &str, key: &str, value: impl std::fmt::Display) {
         let value = value.to_string();
         self.values
             .entry(format!("{store}/{key}"))
@@ -139,27 +139,34 @@ impl Capture {
 }
 
 /// One case runner. A runner covers every store its case names.
-pub(super) type Runner = fn() -> Capture;
+pub type Runner = fn() -> Capture;
 
 /// Ordered outcome of one profile run.
 #[derive(Debug, Default)]
-pub(super) struct SuiteReport {
-    pub(super) passed: Vec<String>,
-    pub(super) not_applicable: Vec<String>,
-    pub(super) skipped_optional: Vec<String>,
-    pub(super) failures: Vec<ConformanceError>,
+pub struct SuiteReport {
+    pub passed: Vec<String>,
+    pub not_applicable: Vec<String>,
+    pub skipped_optional: Vec<String>,
+    pub failures: Vec<ConformanceError>,
 }
 
 /// Lower-case hexadecimal SHA-256 of `bytes`.
-pub(super) fn sha256_hex(bytes: &[u8]) -> String {
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     Sha256::digest(bytes)
         .iter()
-        .map(|byte| format!("{byte:02x}"))
+        .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
+        .map(char::from)
         .collect()
 }
 
 /// Require the exact immutable fixture bytes pinned by the suite.
-pub(super) fn verify_pinned(bytes: &[u8], pinned_sha256: &str) -> Result<(), ConformanceError> {
+///
+/// # Errors
+///
+/// Returns `DigestMismatch` when any fixture byte changed.
+pub fn verify_pinned(bytes: &[u8], pinned_sha256: &str) -> Result<(), ConformanceError> {
     let actual = sha256_hex(bytes);
     if actual == pinned_sha256 {
         Ok(())
@@ -176,7 +183,11 @@ fn invalid(message: impl Into<String>) -> ConformanceError {
 }
 
 /// Reject any field outside the closed set for one object.
-pub(super) fn closed_object<'a>(
+///
+/// # Errors
+///
+/// Returns `UnknownField` or `InvalidManifest` for an open or incomplete object.
+pub fn closed_object<'a>(
     value: &'a Value,
     at: &str,
     fields: &[&str],
@@ -230,7 +241,11 @@ fn string_list(
 
 /// Read the magic and version first, so an unknown version fails closed
 /// before any other field is interpreted.
-pub(super) fn require_version(
+///
+/// # Errors
+///
+/// Returns `UnsupportedVersion` for any other magic or version.
+pub fn require_version(
     root: &Map<String, Value>,
     magic: &str,
     version: u64,
@@ -345,7 +360,11 @@ fn parse_case(value: &Value, index: usize) -> Result<Case, ConformanceError> {
 }
 
 /// Parse a profile manifest, failing closed on every structural deviation.
-pub(super) fn load_manifest(bytes: &[u8]) -> Result<Manifest, ConformanceError> {
+///
+/// # Errors
+///
+/// Returns the first structural deviation of the manifest.
+pub fn load_manifest(bytes: &[u8]) -> Result<Manifest, ConformanceError> {
     let root: Value =
         serde_json::from_slice(bytes).map_err(|error| invalid(format!("not JSON: {error}")))?;
     let object = root
@@ -466,7 +485,7 @@ fn compare(case: &Case, capture: &Capture, failures: &mut Vec<ConformanceError>)
 
 /// Run every case of `manifest` with the matching runner.
 #[must_use]
-pub(super) fn run_suite(manifest: &Manifest, runners: &[(&str, Runner)]) -> SuiteReport {
+pub fn run_suite(manifest: &Manifest, runners: &[(&str, Runner)]) -> SuiteReport {
     let mut report = SuiteReport::default();
     let mut table = BTreeMap::new();
     for (id, runner) in runners {

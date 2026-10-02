@@ -141,7 +141,8 @@ fn decide(authorization: &GatewayAuthorization, actor: EntityId) -> String {
 
 /// PCF-FP-001: authentication precedes authorization, and both precede any
 /// domain approval or admission of a human request.
-pub(super) fn authorization_precedence() -> Capture {
+#[must_use]
+pub fn authorization_precedence() -> Capture {
     let mut capture = Capture::default();
     let actor = EntityId::new();
     let outsider = EntityId::new();
@@ -190,6 +191,18 @@ fn world_action(actor: EntityId, body: EntityId) -> ProposedAction {
     ProposedAction::new(Kind::new(ACTION), actor, payload, Kind::new(CAPABILITY))
 }
 
+/// The fail-closed outcome of composing an action-capable Gateway.
+fn composition(composed: Result<Gateway, GatewayError>) -> String {
+    match composed {
+        Ok(gateway) => {
+            drop(gateway);
+            "composed".to_owned()
+        }
+        Err(GatewayError::ActionRegistry(_)) => "fails-closed".to_owned(),
+        Err(error) => error.to_string(),
+    }
+}
+
 fn host(config: StoreConfig) -> ErasureExecutionHostV1 {
     ErasureExecutionHostV1::open_verified_empty(config, ErasureRecoveryLimitsV1::compiled_maximum())
         .test_ok()
@@ -198,7 +211,8 @@ fn host(config: StoreConfig) -> ErasureExecutionHostV1 {
 /// PCF-ING-003: the production Gateway composition fails closed without an
 /// installed action profile, and a Gateway without Principal authorization
 /// has no human route, even for a valid first-party action.
-pub(super) fn first_party_has_no_privileged_route() -> Capture {
+#[must_use]
+pub fn first_party_has_no_privileged_route() -> Capture {
     let mut capture = Capture::default();
     let directory = tempfile::tempdir().test_ok();
     let sqlite = |name: &str| StoreConfig::Sqlite {
@@ -224,19 +238,14 @@ pub(super) fn first_party_has_no_privileged_route() -> Capture {
             pinned.authenticated.clone(),
         ));
         runtime.block_on(async {
-            let composed = Gateway::new_with_erasure_host_and_authorization(
-                host(authorized_store),
-                [body],
-                authorization(&pinned, local, true),
-            );
             capture.record(
                 store,
                 "authorized-composition",
-                match composed {
-                    Ok(_) => "composed".to_owned(),
-                    Err(GatewayError::ActionRegistry(_)) => "fails-closed".to_owned(),
-                    Err(error) => error.to_string(),
-                },
+                composition(Gateway::new_with_erasure_host_and_authorization(
+                    host(authorized_store),
+                    [body],
+                    authorization(&pinned, local, true),
+                )),
             );
 
             let gateway = Gateway::new_with_erasure_host(host(unauthorized_store)).test_ok();
@@ -262,6 +271,7 @@ pub(super) fn first_party_has_no_privileged_route() -> Capture {
             let page = gateway.read_events_page(&timeline, 0, 16).await.test_ok();
             capture.record(store, "committed", page.events.len());
             gateway.shutdown().await.test_ok();
+            drop(gateway);
         });
     }
     capture
