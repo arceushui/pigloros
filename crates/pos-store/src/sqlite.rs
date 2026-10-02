@@ -6548,7 +6548,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
     ///
     /// Unlike `commit_manifest_owner_admission_v1`, which nests through a
     /// savepoint, this read cannot run while the connection already holds an
-    /// open transaction: SQLite rejects the nested `BEGIN` and the call returns
+    /// open transaction: the connection rejects the nested `BEGIN` and the call returns
     /// `StorageFailure`.
     fn read_manifest_owner_state_v1(
         &self,
@@ -6574,7 +6574,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
     ///
     /// Unlike `commit_manifest_owner_admission_v1`, which nests through a
     /// savepoint, this read cannot run while the connection already holds an
-    /// open transaction: SQLite rejects the nested `BEGIN` and the call returns
+    /// open transaction: the connection rejects the nested `BEGIN` and the call returns
     /// `StorageFailure`.
     fn resolve_manifest_owner_admission_retry_v1(
         &self,
