@@ -13303,6 +13303,59 @@ mod manifest_owner_admission_coverage {
             .ok_or_else(|| "missing owner snapshot".into())
     }
 
+    fn drop_state(store: &mut MemoryStore) -> TestResult {
+        store
+            .manifest_owner_admission_states
+            .remove(&OWNER)
+            .ok_or("missing owner state")?;
+        Ok(())
+    }
+
+    fn drop_operation(store: &mut MemoryStore, operation_id: Hash) -> TestResult {
+        store
+            .manifest_owner_admission_operations
+            .remove(&(OWNER, operation_id))
+            .ok_or("missing owner operation")?;
+        Ok(())
+    }
+
+    fn insert_operation(
+        store: &mut MemoryStore,
+        operation_id: Hash,
+        operation: MemoryManifestOwnerAdmissionOperationV1,
+    ) {
+        store
+            .manifest_owner_admission_operations
+            .insert((OWNER, operation_id), operation);
+    }
+
+    fn drop_snapshot(
+        store: &mut MemoryStore,
+        generation: u64,
+        timeline_id: TimelineId,
+    ) -> TestResult {
+        store
+            .manifest_owner_admission_snapshots
+            .remove(&(OWNER, generation, timeline_id))
+            .ok_or("missing owner snapshot")?;
+        Ok(())
+    }
+
+    fn insert_snapshot(
+        store: &mut MemoryStore,
+        generation: u64,
+        timeline_id: TimelineId,
+        snapshot: ManifestOwnerAdmissionSnapshotV1,
+    ) {
+        store
+            .manifest_owner_admission_snapshots
+            .insert((OWNER, generation, timeline_id), snapshot);
+    }
+
+    fn clear_snapshots(store: &mut MemoryStore) {
+        store.manifest_owner_admission_snapshots.clear();
+    }
+
     fn intent(store: &MemoryStore, operation_id: Hash) -> FixtureResult<Hash> {
         store
             .manifest_owner_admission_operations
@@ -13316,13 +13369,13 @@ mod manifest_owner_admission_coverage {
         let mut store = genesis_store()?;
         assert_eq!(store.read_manifest_owner_state_v1([0x4e; 32]), Ok(None));
 
-        store.manifest_owner_admission_states.remove(&OWNER);
+        drop_state(&mut store)?;
         assert_eq!(
             store.read_manifest_owner_state_v1(OWNER).map(drop),
             CORRUPT_STATE
         );
 
-        store.manifest_owner_admission_snapshots.clear();
+        clear_snapshots(&mut store);
         assert_eq!(
             store.read_manifest_owner_state_v1(OWNER).map(drop),
             CORRUPT_STATE
@@ -13363,13 +13416,7 @@ mod manifest_owner_admission_coverage {
                 state_mut(store)?.inventory_generation = hash(99);
                 Ok(())
             },
-            |store| {
-                store
-                    .manifest_owner_admission_operations
-                    .remove(&(OWNER, hash(41)))
-                    .ok_or("missing owner operation")?;
-                Ok(())
-            },
+            |store| drop_operation(store, hash(41)),
             |store| {
                 operation_mut(store, hash(41))?.result.kind =
                     ManifestOwnerAdmissionCommitKindV1::ExactRetry;
@@ -13413,13 +13460,7 @@ mod manifest_owner_admission_coverage {
                     hash(99);
                 Ok(())
             },
-            |store| {
-                store
-                    .manifest_owner_admission_snapshots
-                    .remove(&(OWNER, 1, owned_timeline(2)))
-                    .ok_or("missing owner snapshot")?;
-                Ok(())
-            },
+            |store| drop_snapshot(store, 1, owned_timeline(2)),
         ];
         for corrupt in corruptions {
             let mut damaged_store = replaced_store()?;
@@ -13442,9 +13483,7 @@ mod manifest_owner_admission_coverage {
             .read_manifest_owner_state_v1(OWNER)?
             .ok_or("missing genesis owner state")?;
         let stray = snapshot_mut(&mut store, 1, owned_timeline(1))?.clone();
-        store
-            .manifest_owner_admission_snapshots
-            .insert((OWNER, 2, owned_timeline(3)), stray);
+        insert_snapshot(&mut store, 2, owned_timeline(3), stray);
         let replacement = prepared(Some(&current), &[owned_timeline(3), owned_timeline(4)])?;
         assert_eq!(
             store.commit_manifest_owner_admission_v1(replacement),
@@ -13467,22 +13506,14 @@ mod manifest_owner_admission_coverage {
                     Hash::zero();
                 Ok(())
             },
-            |store| {
-                store
-                    .manifest_owner_admission_operations
-                    .remove(&(OWNER, hash(41)))
-                    .ok_or("missing owner operation")?;
-                Ok(())
-            },
+            |store| drop_operation(store, hash(41)),
             |store| {
                 operation_mut(store, hash(41))?.result.inventory_generation = hash(99);
                 Ok(())
             },
             |store| {
                 let duplicate = operation_mut(store, hash(41))?.clone();
-                store
-                    .manifest_owner_admission_operations
-                    .insert((OWNER, hash(77)), duplicate);
+                insert_operation(store, hash(77), duplicate);
                 Ok(())
             },
             |store| {
