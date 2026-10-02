@@ -809,6 +809,10 @@ mod tests {
             SourceError::Invalid
         );
         assert_eq!(
+            SourceError::from(ForkEventAuthorityErrorV1::CorruptAuthority),
+            SourceError::Invalid
+        );
+        assert_eq!(
             SourceError::from(ForkEventAuthorityErrorV1::StorageIndeterminate),
             SourceError::Storage
         );

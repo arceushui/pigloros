@@ -5982,6 +5982,55 @@ mod tests {
         Ok(())
     }
 
+    /// ADR-099: an orphan `FPO1` or `FPB1` carrying a record ID occupies it,
+    /// and an unrelated record ID stays free.
+    #[test]
+    fn fork_publication_record_is_present_checks_operations_and_bindings(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let child_timeline_id = TimelineId::new();
+        let record_id = Hash::from_bytes([21; 32]);
+        let operation =
+            ForkPublicationOperationV1::new(pos_core::ForkPublicationOperationInputV1 {
+                operation_id: Hash::from_bytes([22; 32]),
+                child_timeline_id,
+                final_logical_head: 0,
+                final_chain_head_hash: Hash::zero(),
+                admission_digest: Hash::from_bytes([23; 32]),
+                signing_identity: KeyIdentityV1::new(
+                    "publisher",
+                    KeyRoleV1::SubjectAttributionSigning,
+                    1,
+                ),
+                private_material_digest: Hash::from_bytes([24; 32]),
+                public_verification_key: PublicKey::from_bytes([25; 32]),
+                signed_manifest_record_id: record_id,
+                origin: ForkAttributionOriginV1::Local,
+            })?;
+        let binding = ForkPublicationBindingV1::new(pos_core::ForkPublicationBindingInputV1 {
+            child_timeline_id,
+            final_logical_head: 7,
+            operation_id: Hash::from_bytes([26; 32]),
+            signed_manifest_record_id: record_id,
+        })?;
+        let miss = Hash::from_bytes([27; 32]);
+
+        let mut by_operation = MemoryStore::new();
+        assert!(!by_operation.fork_publication_record_is_present(record_id));
+        by_operation
+            .fork_publication_operations
+            .insert(operation.input().operation_id, operation);
+        assert!(by_operation.fork_publication_record_is_present(record_id));
+        assert!(!by_operation.fork_publication_record_is_present(miss));
+
+        let mut by_binding = MemoryStore::new();
+        by_binding
+            .fork_publication_bindings
+            .insert((child_timeline_id, 7), binding);
+        assert!(by_binding.fork_publication_record_is_present(record_id));
+        assert!(!by_binding.fork_publication_record_is_present(miss));
+        Ok(())
+    }
+
     #[test]
     fn fork_admission_memory_rejects_an_orphaned_principal_owner_binding(
     ) -> Result<(), Box<dyn std::error::Error>> {
