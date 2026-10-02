@@ -1,7 +1,10 @@
 use pos_core::{
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1,
-    ForkAttributionOriginV1, ForkReproManifestInputV1, ForkReproManifestV1, Hash, KeyIdentityV1,
-    KeyRoleV1, SignedForkReproManifestV1, TimelineId,
+    ForkAttributionOriginV1, ForkPublicationArtifactInputV1, ForkPublicationArtifactV1,
+    ForkPublicationBindingInputV1, ForkPublicationBindingV1, ForkPublicationOperationInputV1,
+    ForkPublicationOperationV1, ForkPublicationReceiptV1, ForkReproManifestInputV1,
+    ForkReproManifestV1, Hash, KeyIdentityV1, KeyRoleV1, PublicKey, SignedForkReproManifestV1,
+    TimelineId,
 };
 
 /// Bytes from the `FRM1` intervention array head to the end of the fixture
@@ -9,6 +12,17 @@ use pos_core::{
 /// head `7` (1 byte), and the final chain hash as `bstr .size 32` (2-byte head
 /// plus 32 bytes).
 const FRM1_SUFFIX_FROM_INTERVENTIONS_BYTES: usize = 3 + 1 + 2 + 32;
+
+/// Offset of the version uint in every publication record: the one-byte array
+/// head plus the five-byte text marker (`0x64` and four ASCII bytes).
+const PUBLICATION_VERSION_AT: usize = 1 + 5;
+
+/// Offset of the first record ID byte in `FPA1`: the version byte follows
+/// [`PUBLICATION_VERSION_AT`], then the two-byte `bstr .size 32` head.
+const FPA1_RECORD_ID_AT: usize = PUBLICATION_VERSION_AT + 1 + 2;
+
+/// Type-erased public decoder for one publication record kind.
+type PublicationDecodeV1 = fn(&[u8]) -> Result<(), ForkAttributionCodecErrorV1>;
 
 const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
@@ -36,6 +50,318 @@ fn manifest(
     admission: &ForkAdmissionRecordV1,
 ) -> Result<ForkReproManifestV1, ForkAttributionCodecErrorV1> {
     ForkReproManifestV1::from_admission(admission, vec![5, 7], 7, hash(6))
+}
+
+fn publication_records(
+    admission: &ForkAdmissionRecordV1,
+) -> Result<
+    (
+        ForkPublicationOperationV1,
+        ForkPublicationBindingV1,
+        ForkPublicationArtifactV1,
+    ),
+    ForkAttributionCodecErrorV1,
+> {
+    let signed = SignedForkReproManifestV1::new_from_admission(
+        admission,
+        1,
+        manifest(admission)?,
+        pos_core::Signature::from_bytes([9; 64]),
+    )?;
+    let operation_id = hash(7);
+    let operation = ForkPublicationOperationV1::new(ForkPublicationOperationInputV1 {
+        operation_id,
+        child_timeline_id: admission.input().child_timeline_id,
+        final_logical_head: 7,
+        final_chain_head_hash: hash(6),
+        admission_digest: admission.digest(),
+        signing_identity: signed.identity(),
+        private_material_digest: hash(8),
+        public_verification_key: PublicKey::from_bytes([10; 32]),
+        signed_manifest_record_id: signed.record_id(),
+        origin: ForkAttributionOriginV1::Local,
+    })?;
+    let binding = ForkPublicationBindingV1::new(ForkPublicationBindingInputV1 {
+        child_timeline_id: admission.input().child_timeline_id,
+        final_logical_head: 7,
+        operation_id,
+        signed_manifest_record_id: signed.record_id(),
+    })?;
+    let artifact = ForkPublicationArtifactV1::new(ForkPublicationArtifactInputV1 {
+        signed_manifest_record_id: signed.record_id(),
+        operation_id,
+        signed_manifest_bytes: signed.to_canonical_cbor(),
+    })?;
+    Ok((operation, binding, artifact))
+}
+
+#[test]
+fn local_fpo1_fpb1_fpa1_and_derived_fpr1_round_trip_at_public_seam(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    assert_eq!(
+        &operation.to_canonical_cbor()[..6],
+        &[0x8e, 0x64, b'F', b'P', b'O', b'1']
+    );
+    assert_eq!(
+        &binding.to_canonical_cbor()[..6],
+        &[0x86, 0x64, b'F', b'P', b'B', b'1']
+    );
+    assert_eq!(
+        &artifact.to_canonical_cbor()[..6],
+        &[0x85, 0x64, b'F', b'P', b'A', b'1']
+    );
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&operation.to_canonical_cbor()),
+        Ok(operation.clone())
+    );
+    assert_eq!(
+        ForkPublicationBindingV1::from_canonical_cbor(&binding.to_canonical_cbor()),
+        Ok(binding)
+    );
+    assert_eq!(
+        ForkPublicationArtifactV1::from_canonical_cbor(&artifact.to_canonical_cbor()),
+        Ok(artifact)
+    );
+    let receipt = ForkPublicationReceiptV1::from_records(&operation, &binding)?;
+    assert_eq!(
+        &receipt.to_canonical_cbor()[..6],
+        &[0x86, 0x64, b'F', b'P', b'R', b'1']
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_codecs_reject_import_origin_and_mismatched_artifact(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, _binding, artifact) = publication_records(&admission)?;
+    let local = operation.to_canonical_cbor();
+    let origin_at = local.len() - 2;
+    assert_eq!(local[origin_at..], [0x81, 0x01]);
+    let mut bare_code_2 = local.clone();
+    bare_code_2[origin_at + 1] = 2;
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&bare_code_2),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    // ADR-099 authority-origin-v1 code 2: [2, bstr .size 32].
+    let mut imported = local[..origin_at].to_vec();
+    imported.extend_from_slice(&[0x82, 0x02, 0x58, 0x20]);
+    imported.extend_from_slice(&[0xab; 32]);
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&imported),
+        Err(ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable)
+    );
+    imported.push(0);
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&imported),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    let mut mismatched = artifact.input().clone();
+    mismatched.signed_manifest_record_id = hash(99);
+    assert_eq!(
+        ForkPublicationArtifactV1::new(mismatched),
+        Err(ForkAttributionCodecErrorV1::FieldMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_constructors_reject_zero_ids_and_foreign_signer_roles(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    let mut zero_operation = operation.input().clone();
+    zero_operation.private_material_digest = Hash::zero();
+    let mut wrong_role = operation.input().clone();
+    wrong_role.signing_identity.role = KeyRoleV1::TimelineIntegritySigning;
+    let mut zero_epoch = operation.input().clone();
+    zero_epoch.signing_identity.epoch = 0;
+    for input in [zero_operation, wrong_role, zero_epoch] {
+        assert_eq!(
+            ForkPublicationOperationV1::new(input),
+            Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+    let mut zero_binding = *binding.input();
+    zero_binding.signed_manifest_record_id = Hash::zero();
+    assert_eq!(
+        ForkPublicationBindingV1::new(zero_binding),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut zero_artifact = artifact.input().clone();
+    zero_artifact.operation_id = Hash::zero();
+    assert_eq!(
+        ForkPublicationArtifactV1::new(zero_artifact),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut foreign_head = *binding.input();
+    foreign_head.final_logical_head = 8;
+    assert_eq!(
+        ForkPublicationReceiptV1::from_records(
+            &operation,
+            &ForkPublicationBindingV1::new(foreign_head)?
+        ),
+        Err(ForkAttributionCodecErrorV1::FieldMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_operation_accepts_zero_genesis_chain_hash_of_empty_fork(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, _binding, _artifact) = publication_records(&admission)?;
+    let mut genesis = operation.input().clone();
+    genesis.final_chain_head_hash = Hash::zero();
+    let operation = ForkPublicationOperationV1::new(genesis)?;
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&operation.to_canonical_cbor()),
+        Ok(operation)
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_decoders_reject_role_codes_and_noncanonical_heads(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, _artifact) = publication_records(&admission)?;
+    let local = operation.to_canonical_cbor();
+    let role_at = local
+        .windows(b"creator-a".len())
+        .position(|bytes| bytes == b"creator-a")
+        .ok_or("encoded creator is absent")?
+        + b"creator-a".len();
+    assert_eq!(local[role_at..role_at + 2], [0x01, 0x01]);
+    for (role, expected) in [
+        (vec![0x02], ForkAttributionCodecErrorV1::FieldOutOfBounds),
+        (vec![0x17], ForkAttributionCodecErrorV1::InvalidEncoding),
+        (
+            vec![0x19, 0x01, 0x00],
+            ForkAttributionCodecErrorV1::InvalidEncoding,
+        ),
+    ] {
+        let mut bytes = local[..role_at].to_vec();
+        bytes.extend_from_slice(&role);
+        bytes.extend_from_slice(&local[role_at + 1..]);
+        assert_eq!(
+            ForkPublicationOperationV1::from_canonical_cbor(&bytes),
+            Err(expected)
+        );
+    }
+    // The final logical head 7 follows the marker, version, and fixed-width
+    // fields: FPO1 operation ID plus child Fork ID, FPB1 child Fork ID only.
+    let mut operation_head = local;
+    assert_eq!(operation_head[58], 7);
+    operation_head[58] = 0x18;
+    operation_head.insert(59, 7);
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&operation_head),
+        Err(ForkAttributionCodecErrorV1::NonCanonical)
+    );
+    let mut binding_head = binding.to_canonical_cbor();
+    assert_eq!(binding_head[24], 7);
+    binding_head[24] = 0x18;
+    binding_head.insert(25, 7);
+    assert_eq!(
+        ForkPublicationBindingV1::from_canonical_cbor(&binding_head),
+        Err(ForkAttributionCodecErrorV1::NonCanonical)
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_decoders_reject_version_trailing_byte_and_oversize_input(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    let codecs: [(Vec<u8>, usize, PublicationDecodeV1); 3] = [
+        (
+            operation.to_canonical_cbor(),
+            pos_core::MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+            |bytes| ForkPublicationOperationV1::from_canonical_cbor(bytes).map(drop),
+        ),
+        (
+            binding.to_canonical_cbor(),
+            pos_core::MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
+            |bytes| ForkPublicationBindingV1::from_canonical_cbor(bytes).map(drop),
+        ),
+        (
+            artifact.to_canonical_cbor(),
+            pos_core::MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
+            |bytes| ForkPublicationArtifactV1::from_canonical_cbor(bytes).map(drop),
+        ),
+    ];
+    for (canonical, maximum, decode) in codecs {
+        assert_eq!(decode(&canonical), Ok(()));
+        assert_eq!(canonical[PUBLICATION_VERSION_AT], 1);
+        let mut version = canonical.clone();
+        version[PUBLICATION_VERSION_AT] = 2;
+        assert_eq!(
+            decode(&version),
+            Err(ForkAttributionCodecErrorV1::UnsupportedVersion)
+        );
+        let mut marker = canonical.clone();
+        marker[PUBLICATION_VERSION_AT - 4] = b'X';
+        assert_eq!(
+            decode(&marker),
+            Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+        );
+        let mut trailing = canonical;
+        trailing.push(0);
+        assert_eq!(
+            decode(&trailing),
+            Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+        );
+        assert_eq!(
+            decode(&vec![0; maximum + 1]),
+            Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn fpa1_decoder_rejects_record_id_disagreeing_with_nested_fsm1(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (_operation, _binding, artifact) = publication_records(&admission)?;
+    let mut patched = artifact.to_canonical_cbor();
+    let record_id = FPA1_RECORD_ID_AT..FPA1_RECORD_ID_AT + 32;
+    assert_eq!(
+        patched[FPA1_RECORD_ID_AT - 2..FPA1_RECORD_ID_AT],
+        [0x58, 0x20]
+    );
+    assert_eq!(
+        patched[record_id.clone()],
+        *artifact.input().signed_manifest_record_id.as_bytes()
+    );
+    patched[record_id].fill(0xab);
+    assert_eq!(
+        ForkPublicationArtifactV1::from_canonical_cbor(&patched),
+        Err(ForkAttributionCodecErrorV1::FieldMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn worst_case_derived_fpr1_fits_its_exported_bound() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, _artifact) = publication_records(&admission)?;
+    let mut widest_operation = operation.input().clone();
+    widest_operation.final_logical_head = u64::MAX;
+    let mut widest_binding = *binding.input();
+    widest_binding.final_logical_head = u64::MAX;
+    let receipt = ForkPublicationReceiptV1::from_records(
+        &ForkPublicationOperationV1::new(widest_operation)?,
+        &ForkPublicationBindingV1::new(widest_binding)?,
+    )?;
+    assert_eq!(receipt.final_logical_head, u64::MAX);
+    assert!(receipt.to_canonical_cbor().len() <= pos_core::MAX_FORK_PUBLICATION_RECEIPT_BYTES_V1);
+    Ok(())
 }
 
 #[test]
@@ -723,5 +1049,185 @@ fn admission_decoder_rejects_zero_required_operation_hash() -> Result<(), Box<dy
         ForkAdmissionRecordV1::from_canonical_cbor(&bytes),
         Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
     );
+    Ok(())
+}
+
+#[test]
+fn every_truncated_publication_record_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    let codecs: [(Vec<u8>, PublicationDecodeV1); 3] = [
+        (operation.to_canonical_cbor(), |bytes| {
+            ForkPublicationOperationV1::from_canonical_cbor(bytes).map(drop)
+        }),
+        (binding.to_canonical_cbor(), |bytes| {
+            ForkPublicationBindingV1::from_canonical_cbor(bytes).map(drop)
+        }),
+        (artifact.to_canonical_cbor(), |bytes| {
+            ForkPublicationArtifactV1::from_canonical_cbor(bytes).map(drop)
+        }),
+    ];
+    for (canonical, decode) in codecs {
+        assert_eq!(decode(&canonical), Ok(()));
+        for length in 0..canonical.len() {
+            assert_eq!(
+                decode(&canonical[..length]),
+                Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fpo1_decoder_rejects_empty_oversized_and_invalid_utf8_owner(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, _binding, _artifact) = publication_records(&admission)?;
+    let canonical = operation.to_canonical_cbor();
+    let owner_at = canonical
+        .windows(b"creator-a".len())
+        .position(|window| window == b"creator-a")
+        .ok_or("encoded creator is absent")?;
+    let role_at = owner_at + b"creator-a".len();
+    assert_eq!(canonical[owner_at - 1], 0x69);
+    let mut empty_owner = canonical.clone();
+    empty_owner.splice(owner_at - 1..role_at, [0x60]);
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&empty_owner),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut oversized_owner = canonical.clone();
+    oversized_owner.splice(owner_at - 1..owner_at, [0x79, 0x00, 0x81]);
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&oversized_owner),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut invalid_utf8_owner = canonical;
+    invalid_utf8_owner[owner_at] = 0xff;
+    assert_eq!(
+        ForkPublicationOperationV1::from_canonical_cbor(&invalid_utf8_owner),
+        Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn fpb1_decoder_rejects_zero_operation_id() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (_operation, binding, _artifact) = publication_records(&admission)?;
+    // FPB1: version byte, the 16-byte child Fork ID behind its one-byte
+    // `bstr` head, the one-byte final logical head 7, then the operation ID's
+    // two-byte `bstr .size 32` head.
+    let operation_id_at = PUBLICATION_VERSION_AT + 1 + 1 + 16 + 1 + 2;
+    let operation_id = operation_id_at..operation_id_at + 32;
+    let mut zero_operation = binding.to_canonical_cbor();
+    assert_eq!(
+        zero_operation[operation_id_at - 2..operation_id_at],
+        [0x58, 0x20]
+    );
+    assert_eq!(
+        zero_operation[operation_id.clone()],
+        *binding.input().operation_id.as_bytes()
+    );
+    zero_operation[operation_id].fill(0);
+    assert_eq!(
+        ForkPublicationBindingV1::from_canonical_cbor(&zero_operation),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn fpa1_rejects_invalid_nested_fsm1_oversized_nested_length_and_wide_heads(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (_operation, _binding, artifact) = publication_records(&admission)?;
+    for signed_manifest_bytes in [vec![0xff], Vec::new()] {
+        let mut invalid = artifact.input().clone();
+        invalid.signed_manifest_bytes = signed_manifest_bytes;
+        assert_eq!(
+            ForkPublicationArtifactV1::new(invalid),
+            Err(ForkAttributionCodecErrorV1::InvalidEncoding)
+        );
+    }
+
+    // The nested FSM1 `bstr` head follows the record ID and operation ID, each
+    // a two-byte `bstr .size 32` head plus 32 bytes.
+    let canonical = artifact.to_canonical_cbor();
+    let nested = &artifact.input().signed_manifest_bytes;
+    let nested_at = canonical
+        .len()
+        .checked_sub(nested.len())
+        .ok_or("artifact is shorter than its nested FSM1")?;
+    let nested_head_at = FPA1_RECORD_ID_AT + 32 + 2 + 32;
+    assert_eq!(&canonical[nested_at..], nested.as_slice());
+    let mut oversized_nested = canonical.clone();
+    oversized_nested.splice(nested_head_at..nested_at, [0x59, 0x41, 0x01]);
+    assert_eq!(
+        ForkPublicationArtifactV1::from_canonical_cbor(&oversized_nested),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+
+    let record_id_head = FPA1_RECORD_ID_AT - 2..FPA1_RECORD_ID_AT;
+    let mut wide_head = canonical;
+    wide_head.splice(record_id_head, [0x59, 0x00, 0x20]);
+    assert_eq!(
+        ForkPublicationArtifactV1::from_canonical_cbor(&wide_head),
+        Err(ForkAttributionCodecErrorV1::NonCanonical)
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_constructors_reject_each_zero_id() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    let mut zero_operation_id = operation.input().clone();
+    zero_operation_id.operation_id = Hash::zero();
+    let mut zero_admission = operation.input().clone();
+    zero_admission.admission_digest = Hash::zero();
+    let mut zero_record_id = operation.input().clone();
+    zero_record_id.signed_manifest_record_id = Hash::zero();
+    for input in [zero_operation_id, zero_admission, zero_record_id] {
+        assert_eq!(
+            ForkPublicationOperationV1::new(input),
+            Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+        );
+    }
+    let mut zero_binding_operation = *binding.input();
+    zero_binding_operation.operation_id = Hash::zero();
+    assert_eq!(
+        ForkPublicationBindingV1::new(zero_binding_operation),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    let mut zero_artifact_record = artifact.input().clone();
+    zero_artifact_record.signed_manifest_record_id = Hash::zero();
+    assert_eq!(
+        ForkPublicationArtifactV1::new(zero_artifact_record),
+        Err(ForkAttributionCodecErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn receipt_rejects_each_mismatched_duplicated_field() -> Result<(), Box<dyn std::error::Error>> {
+    let admission = admission()?;
+    let (operation, binding, _artifact) = publication_records(&admission)?;
+    let mut foreign_operation = *binding.input();
+    foreign_operation.operation_id = hash(98);
+    let mut foreign_fork = *binding.input();
+    foreign_fork.child_timeline_id = TimelineId::new();
+    let mut foreign_record = *binding.input();
+    foreign_record.signed_manifest_record_id = hash(97);
+    for input in [foreign_operation, foreign_fork, foreign_record] {
+        assert_eq!(
+            ForkPublicationReceiptV1::from_records(
+                &operation,
+                &ForkPublicationBindingV1::new(input)?
+            ),
+            Err(ForkAttributionCodecErrorV1::FieldMismatch)
+        );
+    }
     Ok(())
 }
