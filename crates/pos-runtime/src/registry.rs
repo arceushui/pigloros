@@ -163,9 +163,19 @@ fn driver_visible_event(event: &Event) -> bool {
         && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
 }
 
+/// Vet one Driver's output with the single chain every Driver output path
+/// shares: the anchored non-participant pass, public cadence, live
+/// stepping, and the participant-authorized pass (ADR-021 Revision 3
+/// Decision 4, #484).
+///
+/// Host-owned Event types are rejected first. Every draft must then carry
+/// an Event type its own Plugin owns, so a Driver can never emit another
+/// Plugin's Event type on any path. Last, the Plugin's output-admission
+/// declaration enforces its per-type and batch budgets.
 fn validate_driver_output(entry: &PluginEntry, output: &StepOutput) -> Result<(), RuntimeError> {
-    reject_host_owned_drafts(output)?;
-    validate_plugin_output(entry, &output.drafts)
+    reject_host_owned_drafts(output)
+        .and_then(|()| reject_unowned_plugin_drafts(output, &entry.owned_event_types))
+        .and_then(|()| validate_plugin_output(entry, &output.drafts))
 }
 
 #[cfg(test)]
@@ -869,17 +879,17 @@ const fn unauthorized() -> RuntimeError {
     RuntimeError::Authority(pos_core::AuthorityErrorV1::UnauthorizedSource)
 }
 
+/// Enforce the Plugin's output-admission budgets on drafts that already
+/// passed the ownership check in [`validate_driver_output`].
+///
+/// Every registration path either binds an output-admission declaration
+/// whose declared Event types equal the Plugin's owned types, or registers
+/// an entry that owns no Event type and has no declaration. An entry without
+/// a declaration therefore reaches this check only with an empty batch.
 fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<(), RuntimeError> {
-    if drafts.is_empty() {
-        return Ok(());
-    }
-    let Some(admission) = entry.output_admission.as_ref() else {
-        return Err(crate::OutputAdmissionErrorV1::MissingDeclaration {
-            event_type: drafts[0].event_type.as_str().to_owned(),
-        }
-        .into());
-    };
-    admission.validate_batch(drafts).map_err(Into::into)
+    entry.output_admission.as_ref().map_or(Ok(()), |admission| {
+        admission.validate_batch(drafts).map_err(Into::into)
+    })
 }
 
 fn reset_admission_usage(entry: &PluginEntry) {
@@ -3219,10 +3229,10 @@ impl PluginRegistry {
 
     /// Register a driver without an output declaration.
     ///
-    /// Drivers registered here can process empty steps; any proposed Event is rejected
-    /// by the output-admission gate. The entry is unpinned, so this seam exists only for
-    /// tests and explicit `test-support` builds; production Plugins use a verified policy
-    /// binding.
+    /// Drivers registered here can process empty steps. The entry owns no Event
+    /// type, so the shared Driver output vetting rejects any proposed Event.
+    /// The entry is unpinned, so this seam exists only for tests and explicit
+    /// `test-support` builds; production Plugins use a verified policy binding.
     #[cfg(any(test, feature = "test-support"))]
     pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
         self.restored_binding = None;
@@ -4085,9 +4095,9 @@ mod tests {
         missing_admission_registry.register_driver(Box::new(UndeclaredOutputDriver));
         assert!(matches!(
             missing_admission_registry.step_all(TimelineId::new()),
-            Err(RuntimeError::OutputAdmission(
-                crate::OutputAdmissionErrorV1::MissingDeclaration { event_type }
-            )) if event_type == "missing.output"
+            Err(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
+            ))
         ));
 
         let mut registry = gated_registry();

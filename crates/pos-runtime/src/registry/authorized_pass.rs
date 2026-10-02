@@ -22,9 +22,8 @@ use pos_core::{
 use pos_state::AuthorizedObservationV1;
 
 use super::{
-    invoke_driver, reject_host_owned_drafts, reject_unowned_plugin_drafts, unauthorized,
-    validate_plugin_output, AuthorizedPendingStep, OperationContext, PendingStep, PluginEntry,
-    PluginRegistry,
+    invoke_driver, unauthorized, validate_driver_output, AuthorizedPendingStep, OperationContext,
+    PendingStep, PluginEntry, PluginRegistry,
 };
 use crate::{driver::ObservationView, error::RuntimeError};
 
@@ -248,12 +247,7 @@ fn invoke_authorized_entry(
         timeline,
         ObservationView::from_authorized_snapshot(snapshot, knowledge),
     );
-    invoked.and_then(|output| {
-        reject_host_owned_drafts(&output)
-            .and_then(|()| reject_unowned_plugin_drafts(&output, &entry.owned_event_types))
-            .and_then(|()| validate_plugin_output(entry, &output.drafts))
-            .map(|()| output.drafts)
-    })
+    invoked.and_then(|output| validate_driver_output(entry, &output).map(|()| output.drafts))
 }
 
 /// Require exactly one current authority for each view.

@@ -683,14 +683,18 @@ fn failed_scheduler_pass_does_not_advance_earlier_driver_cadence() -> TestResult
     let mut scheduler = TickScheduler::new(registry);
     assert!(matches!(
         scheduler.tick(timeline, 0),
-        Err(RuntimeError::OutputAdmission(_))
+        Err(RuntimeError::Authority(
+            pos_core::AuthorityErrorV1::UnauthorizedSource
+        ))
     ));
     assert_eq!(scheduler.tick(timeline, 0)?.len(), 2);
     Ok(())
 }
 
+/// The undeclared type is outside the Plugin's owned types, so public cadence
+/// and live stepping reject it through the shared Driver output vetting (#484).
 #[test]
-fn public_tick_and_step_report_output_admission_failures() -> TestResult {
+fn public_tick_and_step_reject_unowned_driver_output() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -701,11 +705,15 @@ fn public_tick_and_step_report_output_admission_failures() -> TestResult {
     let timeline = pos_core::TimelineId::new();
     assert!(matches!(
         registry.tick_cadenced(timeline, 0),
-        Err(RuntimeError::OutputAdmission(_))
+        Err(RuntimeError::Authority(
+            pos_core::AuthorityErrorV1::UnauthorizedSource
+        ))
     ));
     assert!(matches!(
         registry.step_all(timeline),
-        Err(RuntimeError::OutputAdmission(_))
+        Err(RuntimeError::Authority(
+            pos_core::AuthorityErrorV1::UnauthorizedSource
+        ))
     ));
     Ok(())
 }
@@ -1241,6 +1249,9 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
     Ok(())
 }
 
+/// A verified declaration names exactly the Plugin's owned Event types, so an
+/// undeclared type is also unowned. The Driver output vetting shared by every
+/// path rejects it as an unauthorized source before the budget check (#484).
 #[test]
 fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult {
     let plugin = FixturePlugin {
@@ -1252,9 +1263,9 @@ fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult 
 
     assert!(matches!(
         registry.step_all_anchored(timeline, pos_core::Seq::ZERO),
-        Err(RuntimeError::OutputAdmission(OutputAdmissionErrorV1::MissingDeclaration {
-            ref event_type,
-        })) if event_type == "plugin.undeclared"
+        Err(RuntimeError::Authority(
+            pos_core::AuthorityErrorV1::UnauthorizedSource
+        ))
     ));
     assert_rejected_output_is_not_persisted(&mut registry, &mut store, timeline)
 }

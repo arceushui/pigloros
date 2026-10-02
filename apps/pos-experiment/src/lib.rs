@@ -5214,8 +5214,8 @@ pub mod tests {
             .test_ok();
         assert!(matches!(
             session.step_tick(),
-            Err(ExperimentError::Runtime(RuntimeError::OutputAdmission(
-                pos_runtime::OutputAdmissionErrorV1::MissingDeclaration { .. }
+            Err(ExperimentError::Runtime(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
             )))
         ));
         assert!(matches!(
@@ -8271,9 +8271,9 @@ mod coverage_entrypoints {
         );
         assert!(matches!(
             result,
-            Err(ExperimentError::Runtime(RuntimeError::OutputAdmission(
-                pos_runtime::OutputAdmissionErrorV1::MissingDeclaration { event_type }
-            ))) if event_type == "coverage.unknown"
+            Err(ExperimentError::Runtime(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
+            )))
         ));
     }
 
@@ -8287,9 +8287,9 @@ mod coverage_entrypoints {
         register_undeclared_output_driver(&mut session.registry);
         assert!(matches!(
             session.step_tick(),
-            Err(ExperimentError::Runtime(RuntimeError::OutputAdmission(
-                pos_runtime::OutputAdmissionErrorV1::MissingDeclaration { event_type }
-            ))) if event_type == "coverage.unknown"
+            Err(ExperimentError::Runtime(RuntimeError::Authority(
+                pos_core::AuthorityErrorV1::UnauthorizedSource
+            )))
         ));
     }
 
