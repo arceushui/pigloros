@@ -37,7 +37,7 @@ const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 
-fn timeline_id(value: u8) -> TimelineId {
+const fn timeline_id(value: u8) -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([value; 16]))
 }
 

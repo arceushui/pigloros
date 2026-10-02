@@ -25,10 +25,11 @@ pub const MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1: usize = 512;
 pub const MAX_FORK_TIMELINE_IMPORT_BYTES_V1: usize = 1_024;
 /// Maximum exact UTF-8 bytes of the optional `FTI1` Timeline name.
 pub const MAX_FORK_TIMELINE_IMPORT_NAME_BYTES_V1: usize = 256;
-/// Largest canonical `FEE1`, derived from its field bounds: array head (1),
-/// marker (5), version (1), a 512-byte envelope with its 3-byte head, a
-/// 16 MiB payload with its 5-byte head, and a 64-byte signature with its
-/// 2-byte head.
+/// Largest canonical `FEE1`, derived from its field bounds.
+///
+/// The sum is the array head (1), marker (5), version (1), a 512-byte
+/// envelope with its 3-byte head, a 16 MiB payload with its 5-byte head, and
+/// a 64-byte signature with its 2-byte head.
 pub const MAX_FORK_EVENT_EVIDENCE_BYTES_V1: usize = 1
     + 5
     + 1

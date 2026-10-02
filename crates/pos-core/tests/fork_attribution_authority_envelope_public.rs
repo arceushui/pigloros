@@ -1,6 +1,8 @@
-//! Public-seam tests for ADR-105 revision 6 `FAE1`: canonical round trips,
-//! closure leaves and root, the primitive code-2 origin digest, every
-//! conjunctive bound, the structural rules, and the `IFA1` admission record.
+//! Public-seam tests for ADR-105 revision 6 `FAE1`.
+//!
+//! They cover canonical round trips, closure leaves and root, the primitive
+//! code-2 origin digest, every conjunctive bound, the structural rules, and
+//! the `IFA1` admission record.
 
 use ciborium::Value;
 use pos_core::{
@@ -46,7 +48,7 @@ const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 
-fn timeline_id(value: u8) -> TimelineId {
+const fn timeline_id(value: u8) -> TimelineId {
     TimelineId::from_ulid(Ulid::from_bytes([value; 16]))
 }
 
