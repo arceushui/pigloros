@@ -1231,6 +1231,7 @@ mod tests {
         + ForkAdmissionAuthorityBootstrapPortV1
         + ForkAdmissionAuthorityPortV1
         + ForkEventProvenanceAuthorityPortV1
+        + ForkEventPermitIssuerPortV1
         + ForkManifestPublicationPortV1
     {
     }
@@ -1240,6 +1241,7 @@ mod tests {
             + ForkAdmissionAuthorityBootstrapPortV1
             + ForkAdmissionAuthorityPortV1
             + ForkEventProvenanceAuthorityPortV1
+            + ForkEventPermitIssuerPortV1
             + ForkManifestPublicationPortV1
     {
     }
@@ -1347,21 +1349,23 @@ mod tests {
         (result, invoked.get())
     }
 
-    fn append_intervention<S: ForkEventProvenanceAuthorityPortV1>(
+    fn append_intervention<S>(
         store: &mut S,
         lifecycle: &LifecycleFixtureV1,
-    ) -> Result<(), Box<dyn Error>> {
-        let permit = append_permit(
-            lifecycle.store_id,
+    ) -> Result<(), Box<dyn Error>>
+    where
+        S: ForkEventProvenanceAuthorityPortV1 + ForkEventPermitIssuerPortV1,
+    {
+        let permit = store.issue_append_source_permit(
+            &lifecycle.issuer,
+            &lifecycle.session,
             lifecycle.fork.child_id,
-            lifecycle.fork.admission_digest,
-            lifecycle.registration.classifier_revision_digest,
-            lifecycle.source.input().registrar_identifier.as_str(),
+            &lifecycle.source,
             ForkAppendSourceIdentityV1::ExternalInput {
                 adapter_identifier: "gateway.adapter".to_owned(),
                 source: lifecycle.external.clone(),
             },
-        );
+        )?;
         store.append_classified(
             &lifecycle.session,
             &permit,
