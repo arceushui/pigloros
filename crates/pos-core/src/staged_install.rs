@@ -45,52 +45,62 @@
 use crate::trusted_clock::{sealed, HandoffTokenV1, ProtectedHandoffTargetV1};
 use crate::{ErasureReferenceV1, StateRegistry, TimelineId};
 
-/// The source a registry's Projection State was folded from: one Timeline at
-/// one erasure-inventory generation, or a mixed source that is never valid.
+/// The source a registry's Projection State was folded from.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ProjectionSourceV1 {
-    timeline: Option<TimelineId>,
-    generation: Option<ErasureReferenceV1>,
-    mixed: bool,
+pub enum ProjectionSourceV1 {
+    /// Not bound to any Timeline; the registry holds no folded State.
+    #[default]
+    Unbound,
+    /// Bound to one Timeline at one erasure-inventory generation, or at none
+    /// when no erasure gate is bound.
+    Bound {
+        /// The Timeline the State was folded from.
+        timeline: TimelineId,
+        /// The inventory generation bound with the Timeline.
+        generation: Option<ErasureReferenceV1>,
+    },
+    /// Mixed Timelines or generations; never valid, and it holds no State.
+    Mixed,
 }
 
 impl ProjectionSourceV1 {
     /// A source bound to one Timeline at one inventory generation.
     #[must_use]
     pub const fn bound(timeline: TimelineId, generation: Option<ErasureReferenceV1>) -> Self {
-        Self {
-            timeline: Some(timeline),
+        Self::Bound {
+            timeline,
             generation,
-            mixed: false,
         }
     }
 
     /// A source that mixed Timelines or generations; it holds no State.
     #[must_use]
     pub const fn mixed() -> Self {
-        Self {
-            timeline: None,
-            generation: None,
-            mixed: true,
-        }
+        Self::Mixed
     }
 
     /// The bound Timeline, if any.
     #[must_use]
     pub const fn timeline(&self) -> Option<TimelineId> {
-        self.timeline
+        match self {
+            Self::Bound { timeline, .. } => Some(*timeline),
+            Self::Unbound | Self::Mixed => None,
+        }
     }
 
     /// The inventory generation bound with the Timeline.
     #[must_use]
     pub const fn generation(&self) -> Option<ErasureReferenceV1> {
-        self.generation
+        match self {
+            Self::Bound { generation, .. } => *generation,
+            Self::Unbound | Self::Mixed => None,
+        }
     }
 
     /// Whether the source mixed Timelines or generations.
     #[must_use]
     pub const fn is_mixed(&self) -> bool {
-        self.mixed
+        matches!(self, Self::Mixed)
     }
 }
 
@@ -213,6 +223,11 @@ mod tests {
         let mixed = ProjectionSourceV1::mixed();
         assert!(mixed.is_mixed());
         assert_eq!(mixed.timeline(), None);
-        assert_eq!(ProjectionSourceV1::default().timeline(), None);
+        assert_eq!(mixed.generation(), None);
+        let unbound = ProjectionSourceV1::default();
+        assert_eq!(unbound, ProjectionSourceV1::Unbound);
+        assert_eq!(unbound.timeline(), None);
+        assert_eq!(unbound.generation(), None);
+        assert!(!unbound.is_mixed());
     }
 }

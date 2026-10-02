@@ -32,10 +32,10 @@ mod candidate;
 mod staged;
 
 pub use candidate::{
-    CandidateBoundsV1, CandidateReducerV1, CandidateTurnV1, DetachedProjectionCandidateV1,
-    InitialStateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1, RecordedConsumerV1,
-    StagedAccountingV1, StagedLimitErrorV1, MAX_STAGED_CONSUMERS_V1,
-    MAX_STAGED_ENTITIES_PER_CONSUMER_V1, MAX_STAGED_OUTPUT_BYTES_V1,
+    CandidateBoundsV1, CandidateBuildV1, CandidateReducerV1, CandidateTurnV1,
+    DetachedProjectionCandidateV1, InitialStateV1, ProjectionCandidateErrorV1,
+    ProtectedProjectionProviderV1, RecordedConsumerV1, StagedAccountingV1, StagedLimitErrorV1,
+    MAX_STAGED_CONSUMERS_V1, MAX_STAGED_ENTITIES_PER_CONSUMER_V1, MAX_STAGED_OUTPUT_BYTES_V1,
 };
 pub use staged::{InstallErrorV1, RevokedSubjectsV1};
 
@@ -816,10 +816,10 @@ impl ProjectionRegistry {
                 .slots
                 .iter()
                 .zip(&staged.slots)
-                .all(|((name, live), staged)| {
-                    live.plugin_id == Some(staged.plugin_id)
-                        && name == staged.name
-                        && live.observation_policy == staged.observation_policy
+                .all(|((name, live), staged_slot)| {
+                    live.plugin_id == Some(staged_slot.plugin_id)
+                        && name == staged_slot.name
+                        && live.observation_policy == staged_slot.observation_policy
                 });
         if slots_match {
             Ok(())
@@ -834,7 +834,7 @@ impl ProjectionRegistry {
             .slots
             .iter_mut()
             .zip(slots)
-            .map(|((_, live), staged)| (&mut live.registry, staged.registry))
+            .map(|((_, live), staged_slot)| (&mut live.registry, staged_slot.registry))
             .collect();
         PreparedInstallV1::new(pairs, &mut self.source, source)
     }

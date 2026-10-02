@@ -527,6 +527,8 @@ pub mod test_support {
         test_ok(AuthenticatedPrincipalResultV1::try_from_draft(draft))
     }
 
+    /// Spin-acquire [`EXECUTOR_SERIAL`], yielding between attempts, and return
+    /// a guard that releases it on drop.
     fn serial() -> SerialGuard {
         while EXECUTOR_SERIAL
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)

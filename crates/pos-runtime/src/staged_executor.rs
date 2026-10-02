@@ -4,12 +4,13 @@
 //! that holds ADR-112's release guard. The guard thread hands a
 //! [`StagedFoldPlanV1`] to the one staged-fold worker of the process and
 //! waits for it with a monotonic timed wait that ends at `g0 + 27 s`. The
-//! worker opens a fresh candidate through the host provider and folds it
-//! with the live fold step, checking the deadline and cancellation before
-//! every callback (E3), the admitted per-callback bound after it (E4) and the
-//! staged size after every `apply` (E5). Every callback runs under
-//! `catch_unwind`; its panic payload is dropped inside a nested
-//! `catch_unwind` and never formatted.
+//! worker opens a fresh candidate through the host provider, running each
+//! recorded consumer's `build` as its own callback, and folds it with the
+//! live fold step. It checks the deadline and cancellation before every
+//! callback, including each `build` (E3), the consumer's own admitted
+//! callback bound after it (E4) and the staged size after every `apply`
+//! (E5). Every callback runs under `catch_unwind`; its panic payload is
+//! dropped inside a nested `catch_unwind` and never formatted.
 //!
 //! When the timed wait expires (E6) the executor is quarantined: the cancel
 //! flag is set, the reply is abandoned and every later `acquire`, `fold` and
@@ -40,12 +41,10 @@ use pos_core::{
     Event,
 };
 use pos_state::{
-    CandidateTurnV1, DetachedProjectionCandidateV1, InitialStateV1, ProjectionCandidateErrorV1,
-    ProtectedProjectionProviderV1, RecordedConsumerV1, StagedLimitErrorV1, StagedProjectionV1,
-    MAX_STAGED_CONSUMERS_V1,
+    CandidateBuildV1, CandidateReducerV1, CandidateTurnV1, DetachedProjectionCandidateV1,
+    InitialStateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1, RecordedConsumerV1,
+    StagedLimitErrorV1, StagedProjectionV1, MAX_STAGED_CONSUMERS_V1,
 };
-
-use crate::registry::MAX_STAGED_CALLBACK_BOUND_V1;
 
 /// Fold deadline measured from `g0`; the guard thread decides failure here.
 pub const STAGED_FOLD_DEADLINE_V1: Duration = Duration::from_secs(27);
@@ -128,8 +127,9 @@ pub enum StagedFoldErrorV1 {
     EntityLimitExceeded,
     /// An entity grew by more than its declared growth bounds.
     GrowthBoundExceeded,
-    /// A callback panicked. Opening the candidate reports ordinals `0, 0`
-    /// and dropping its reducers reports event ordinal `u32::MAX`.
+    /// A callback panicked. A `build` reports its consumer ordinal and event
+    /// ordinal `0`; dropping the reducers reports consumer ordinal `0` and
+    /// event ordinal `u32::MAX`.
     ReducerPanicked {
         /// Recorded position of the consumer.
         consumer_ordinal: u16,
@@ -490,6 +490,12 @@ fn drop_guarded<T>(value: T) {
 
 type StagedReplyV1 = Result<StagedProjectionV1, StagedFoldErrorV1>;
 
+/// A panic while dropping candidate reducers.
+const TEARDOWN_PANICKED: StagedFoldErrorV1 = StagedFoldErrorV1::ReducerPanicked {
+    consumer_ordinal: 0,
+    event_ordinal: u32::MAX,
+};
+
 struct StagedJobV1 {
     plan: StagedFoldPlanV1,
     provider: Arc<dyn ProtectedProjectionProviderV1 + Send + Sync>,
@@ -566,11 +572,6 @@ impl WorkerGateV1<'_> {
     }
 }
 
-/// Bound of opening a candidate: one admitted callback bound per `build`.
-fn open_bound(consumers: usize) -> Duration {
-    MAX_STAGED_CALLBACK_BOUND_V1.saturating_mul(u32::try_from(consumers).unwrap_or(u32::MAX))
-}
-
 fn fold_on_worker(
     plan: StagedFoldPlanV1,
     provider: Arc<dyn ProtectedProjectionProviderV1 + Send + Sync>,
@@ -593,39 +594,68 @@ fn fold_on_worker(
     let mut gate = WorkerGateV1 { clock, g0, cancel };
     let opened = open_on_worker(&mut gate, &*provider, &consumers, source);
     drop_guarded(provider);
-    let (mut candidate, started) = opened?;
-    let outcome = gate
-        .after(started, open_bound(consumers.len()), 0, 0)
-        .and_then(|()| fold_candidate(&mut gate, &mut candidate, &events));
+    let mut candidate = opened?;
+    let outcome = fold_candidate(&mut gate, &mut candidate, &events);
     // The reducer instances are dropped here, as one more callback; a panic
     // in their `Drop` fails the fold with the teardown event ordinal.
     let dropped = run_callback(move || drop(candidate));
-    outcome.and_then(|staged| {
-        dropped
-            .map(|()| staged)
-            .ok_or(StagedFoldErrorV1::ReducerPanicked {
-                consumer_ordinal: 0,
-                event_ordinal: u32::MAX,
-            })
-    })
+    outcome.and_then(|staged| dropped.map(|()| staged).ok_or(TEARDOWN_PANICKED))
 }
 
-/// Open the candidate as one callback: the provider builds every recorded
-/// consumer's factory inside it.
+/// Open the candidate: resolve the recorded set in host code, run each
+/// consumer's `build` as its own callback, then assemble the candidate.
+/// Reducers built before a failure, and those a failed assembly drops, are
+/// dropped under callback containment.
 fn open_on_worker(
     gate: &mut WorkerGateV1<'_>,
     provider: &dyn ProtectedProjectionProviderV1,
     consumers: &[RecordedConsumerV1],
     source: ProjectionSourceV1,
-) -> Result<(DetachedProjectionCandidateV1, MonotonicMarkV1), StagedFoldErrorV1> {
-    let started = gate.before(open_bound(consumers.len()))?;
-    run_callback(|| provider.open_candidate(consumers, InitialStateV1::Empty, source))
+) -> Result<DetachedProjectionCandidateV1, StagedFoldErrorV1> {
+    let builds = provider
+        .candidate_builds(consumers)
+        .map_err(candidate_error)?;
+    let mut reducers = Vec::with_capacity(builds.len());
+    let built = builds
+        .into_iter()
+        .enumerate()
+        .try_for_each(|(ordinal, build)| {
+            build_on_worker(gate, build, ordinal).map(|reducer| reducers.push(reducer))
+        });
+    if let Err(error) = built {
+        drop_guarded(reducers);
+        return Err(error);
+    }
+    run_callback(move || {
+        DetachedProjectionCandidateV1::from_reducers(reducers, InitialStateV1::Empty, source)
+    })
+    .ok_or(TEARDOWN_PANICKED)?
+    .map_err(candidate_error)
+}
+
+/// One consumer's `build` as one callback, under E3, `catch_unwind` and E4
+/// against that consumer's own admitted callback bound.
+fn build_on_worker(
+    gate: &mut WorkerGateV1<'_>,
+    build: CandidateBuildV1<'_>,
+    ordinal: usize,
+) -> Result<CandidateReducerV1, StagedFoldErrorV1> {
+    let consumer_ordinal = u16::try_from(ordinal).unwrap_or(u16::MAX);
+    let bound = build.bounds().callback_bound;
+    let started = gate.before(bound)?;
+    let reducer = run_callback(move || build.build())
         .ok_or(StagedFoldErrorV1::ReducerPanicked {
-            consumer_ordinal: 0,
+            consumer_ordinal,
             event_ordinal: 0,
         })?
-        .map(|candidate| (candidate, started))
-        .map_err(candidate_error)
+        .map_err(candidate_error)?;
+    match gate.after(started, bound, consumer_ordinal, 0) {
+        Ok(()) => Ok(reducer),
+        Err(error) => {
+            drop_guarded(reducer);
+            Err(error)
+        }
+    }
 }
 
 const fn candidate_error(error: ProjectionCandidateErrorV1) -> StagedFoldErrorV1 {

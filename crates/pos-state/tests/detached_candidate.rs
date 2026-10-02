@@ -8,8 +8,8 @@ use pos_core::{
     State, TimelineId, WallTime, EVENT_TYPE_CONSENT_REVOKED_V1, GEOGRAPHIC_EVENT_TYPE,
 };
 use pos_state::{
-    CandidateBoundsV1, CandidateReducerV1, DetachedProjectionCandidateV1, InitialStateV1,
-    ProjectionCandidateErrorV1, ProjectionRegistry, ProtectedProjectionProviderV1,
+    CandidateBoundsV1, CandidateBuildV1, CandidateReducerV1, DetachedProjectionCandidateV1,
+    InitialStateV1, ProjectionCandidateErrorV1, ProjectionRegistry, ProtectedProjectionProviderV1,
     RecordedConsumerV1, StagedLimitErrorV1, MAX_STAGED_ENTITIES_PER_CONSUMER_V1,
     MAX_STAGED_OUTPUT_BYTES_V1,
 };
@@ -412,14 +412,12 @@ fn exact_passes_stay_within_their_bound_for_one_growing_entity() {
 struct EmptyProvider;
 
 impl ProtectedProjectionProviderV1 for EmptyProvider {
-    fn open_candidate(
+    fn candidate_builds(
         &self,
         recorded_consumers: &[RecordedConsumerV1],
-        initial_state: InitialStateV1,
-        source: ProjectionSourceV1,
-    ) -> Result<DetachedProjectionCandidateV1, ProjectionCandidateErrorV1> {
+    ) -> Result<Vec<CandidateBuildV1<'_>>, ProjectionCandidateErrorV1> {
         if recorded_consumers.is_empty() {
-            DetachedProjectionCandidateV1::from_reducers(Vec::new(), initial_state, source)
+            Ok(Vec::new())
         } else {
             Err(ProjectionCandidateErrorV1::NotAdmitted)
         }

@@ -568,6 +568,101 @@ fn panics_in_every_callback_are_contained() {
         test_err(fold(&provider, consumer, &events)),
         panicked(0, u32::MAX)
     );
+    // A candidate that fails to assemble drops its built reducers under the
+    // same containment.
+    let unbound = fold_in(
+        &provider,
+        &[consumer],
+        events,
+        ProjectionSourceV1::default(),
+        Clocks::default(),
+    );
+    assert_eq!(test_err(unbound), panicked(0, u32::MAX));
+    assert_ready();
+}
+
+/// E3 and E4 run before and after each `build` against that consumer's own
+/// admitted callback bound, and a failing `build` reports its consumer
+/// ordinal.
+#[test]
+fn each_build_is_checked_against_its_own_callback_bound() {
+    let _serial = serial();
+    let fixture = || Arc::new(FixtureConfiguration::new(|_| Box::new(CountingReducer)));
+    let mut provider = HostProjectionProviderV1::default();
+    let relaxed = test_ok(provider.admit_fixture::<FixturePlugin>(fixture()));
+    let tight =
+        test_ok(provider.admit_fixture_with_callback_bound::<FixturePlugin>(fixture(), ms(50)));
+    let provider = Arc::new(provider);
+    let events = counted_run(EntityId::new(), 2);
+    let fold_with = |worker: Vec<Duration>| {
+        let clocks = Clocks {
+            worker: Some(worker),
+            guard: None,
+        };
+        fold_in(
+            &provider,
+            &[relaxed, tight],
+            events.clone(),
+            source(),
+            clocks,
+        )
+    };
+
+    // One mark before and one after each build.
+    let opened = test_ok(fold_with(vec![ms(0), ms(250), ms(250), ms(300)]));
+    assert_eq!(opened.consumers(), &[relaxed, tight]);
+    // 51 ms fits the largest admissible bound and the whole open's 500 ms,
+    // but not the tight consumer's own 50 ms.
+    let over = fold_with(vec![ms(0), ms(0), ms(0), ms(51)]);
+    assert_eq!(
+        test_err(over),
+        StagedFoldErrorV1::CallbackBoundExceeded {
+            consumer_ordinal: 1,
+            event_ordinal: 0,
+        }
+    );
+    let slow_first = fold_with(vec![ms(0), ms(251)]);
+    assert_eq!(
+        test_err(slow_first),
+        StagedFoldErrorV1::CallbackBoundExceeded {
+            consumer_ordinal: 0,
+            event_ordinal: 0,
+        }
+    );
+    // E3 before the second build uses its own 50 ms bound: a start at
+    // 26.9 s, which the largest bound would refuse, passes E3, and E4
+    // catches the overrun.
+    let late = fold_with(vec![ms(0), ms(0), ms(26_900), ms(26_960)]);
+    assert_eq!(
+        test_err(late),
+        StagedFoldErrorV1::CallbackBoundExceeded {
+            consumer_ordinal: 1,
+            event_ordinal: 0,
+        }
+    );
+    let too_late = fold_with(vec![ms(0), ms(0), ms(26_951)]);
+    assert_eq!(test_err(too_late), StagedFoldErrorV1::DeadlineExceeded);
+
+    let mut panicking = FixtureConfiguration::new(|_| Box::new(CountingReducer));
+    panicking.panic_on_build = Some(1);
+    let mut provider = HostProjectionProviderV1::default();
+    let first = test_ok(provider.admit_fixture::<FixturePlugin>(fixture()));
+    let second = test_ok(provider.admit_fixture::<FixturePlugin>(Arc::new(panicking)));
+    let provider = Arc::new(provider);
+    let panicked = fold_in(
+        &provider,
+        &[first, second],
+        events,
+        source(),
+        Clocks::default(),
+    );
+    assert_eq!(
+        test_err(panicked),
+        StagedFoldErrorV1::ReducerPanicked {
+            consumer_ordinal: 1,
+            event_ordinal: 0,
+        }
+    );
     assert_ready();
 }
 
@@ -679,7 +774,7 @@ fn staged_limits_fail_the_fold_deterministically() {
 /// Case 20: one growing entity triggers an exact pass only when the
 /// declared upper bound crosses 64 MiB, plus the final pass.
 ///
-/// The worker takes one mark before and one after the open and every
+/// The worker takes one mark before and one after the one `build` and every
 /// callback, and one before every exact pass. With 20,000 Events that is
 /// 40,002 marks plus one per pass. Scripting the deadline at mark 40,004
 /// fails the fold, and at mark 40,005 it does not, so exactly two passes

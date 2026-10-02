@@ -95,21 +95,82 @@ pub enum InitialStateV1 {
 /// caller. Every candidate it opens owns fresh, independently built reducer
 /// internals for exactly the recorded consumers, in recorded order.
 pub trait ProtectedProjectionProviderV1 {
-    /// Open a fresh candidate for exactly `recorded_consumers`, starting from
-    /// `initial_state` and bound to `source`.
+    /// Resolve exactly `recorded_consumers` to one pending fresh build per
+    /// consumer, in recorded order, without running any factory.
+    ///
+    /// The staged executor runs each build as its own callback under that
+    /// consumer's admitted callback bound (ADR-113 §4 E3 and E4).
     ///
     /// # Errors
     /// Returns [`ProjectionCandidateErrorV1::NotAdmitted`] or
     /// [`ProjectionCandidateErrorV1::ConsumerSetMismatch`] before any reducer
-    /// is built, [`ProjectionCandidateErrorV1::PluginMismatch`] when an
-    /// admitted factory builds no reducer or another Plugin, or
+    /// is built.
+    fn candidate_builds(
+        &self,
+        recorded_consumers: &[RecordedConsumerV1],
+    ) -> Result<Vec<CandidateBuildV1<'_>>, ProjectionCandidateErrorV1>;
+
+    /// Open a fresh candidate for exactly `recorded_consumers`, starting from
+    /// `initial_state` and bound to `source`, running every build in turn.
+    ///
+    /// # Errors
+    /// Returns the errors of [`Self::candidate_builds`],
+    /// [`ProjectionCandidateErrorV1::PluginMismatch`] when an admitted
+    /// factory builds no reducer or another Plugin, or
     /// [`ProjectionCandidateErrorV1::SourceMismatch`] for an unbound source.
     fn open_candidate(
         &self,
         recorded_consumers: &[RecordedConsumerV1],
         initial_state: InitialStateV1,
         source: ProjectionSourceV1,
-    ) -> Result<DetachedProjectionCandidateV1, ProjectionCandidateErrorV1>;
+    ) -> Result<DetachedProjectionCandidateV1, ProjectionCandidateErrorV1> {
+        let reducers = self
+            .candidate_builds(recorded_consumers)?
+            .into_iter()
+            .map(CandidateBuildV1::build)
+            .collect::<Result<Vec<_>, _>>()?;
+        DetachedProjectionCandidateV1::from_reducers(reducers, initial_state, source)
+    }
+}
+
+/// Builds one fresh [`CandidateReducerV1`] from an admitted entry.
+type CandidateBuilderV1<'p> =
+    Box<dyn FnOnce() -> Result<CandidateReducerV1, ProjectionCandidateErrorV1> + 'p>;
+
+/// One recorded consumer's pending fresh build and the admitted bounds it
+/// runs under.
+pub struct CandidateBuildV1<'p> {
+    bounds: CandidateBoundsV1,
+    build: CandidateBuilderV1<'p>,
+}
+
+impl<'p> CandidateBuildV1<'p> {
+    /// Pair a fresh build with the consumer's admitted bounds.
+    #[must_use]
+    pub fn new(
+        bounds: CandidateBoundsV1,
+        build: impl FnOnce() -> Result<CandidateReducerV1, ProjectionCandidateErrorV1> + 'p,
+    ) -> Self {
+        Self {
+            bounds,
+            build: Box::new(build),
+        }
+    }
+
+    /// The consumer's admitted bounds, known before the build runs.
+    #[must_use]
+    pub const fn bounds(&self) -> CandidateBoundsV1 {
+        self.bounds
+    }
+
+    /// Run the build.
+    ///
+    /// # Errors
+    /// Returns [`ProjectionCandidateErrorV1::PluginMismatch`] when the
+    /// factory builds no reducer or a Plugin other than the recorded one.
+    pub fn build(self) -> Result<CandidateReducerV1, ProjectionCandidateErrorV1> {
+        (self.build)()
+    }
 }
 
 /// Admitted bounds of one candidate consumer (ADR-113 §4).
