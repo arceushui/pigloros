@@ -55,14 +55,9 @@ pub fn compare(
     release: ProtectedReleaseV1<'_>,
     folds: [&ProtectedFoldV1<'_>; 2],
 ) -> Result<ForkDiff, CoreError> {
-    if fork_seq.as_u64() == u64::MAX {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    pos_runtime::require_staged_release().map_err(crate::unavailable)?;
     let [a, b] = timelines;
     let [registry_a, registry_b] = registries;
-    let consumer_ids = crate::consumer_selection(registry_a)
-        .and_then(|ids_a| crate::consumer_selection(registry_b).map(|ids_b| [ids_a, ids_b]))?;
+    let consumer_ids = comparison_consumers(fork_seq, [&*registry_a, &*registry_b])?;
     let request = CompareRequestV1 {
         timelines,
         fork_seq,
@@ -117,6 +112,22 @@ pub fn compare(
     crate::forget_on_failure(fenced, registry_b, revoked_b.as_ref())
 }
 
+/// Refuse a Fork point with no successor and a quarantined staged executor,
+/// then select each arm's consumers.
+fn comparison_consumers(
+    fork_seq: Seq,
+    registries: [&ProjectionRegistry; 2],
+) -> Result<[Vec<String>; 2], CoreError> {
+    if fork_seq.as_u64() == u64::MAX {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    let [registry_a, registry_b] = registries;
+    pos_runtime::require_staged_release()
+        .map_err(crate::unavailable)
+        .and_then(|()| crate::consumer_selection(registry_a))
+        .and_then(|ids_a| crate::consumer_selection(registry_b).map(|ids_b| [ids_a, ids_b]))
+}
+
 /// One protected Compare request.
 struct CompareRequestV1<'r> {
     timelines: [TimelineId; 2],
@@ -150,24 +161,37 @@ fn compare_in_fences(
         health,
         revoked,
     } = target;
-    let (prepared, diverged_entities) =
-        match prepare_comparison(sender, request, &guard, revoked, registries) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                crate::teardown(Some(guard), health);
-                return Err(error);
-            }
-        };
-    // One token commits both arms. ADR-112's overrun signal is recorded and
-    // the displaced maps are dropped after the handoff returns, and only
-    // then is the diff released.
-    pos_runtime::handoff(guard, expiries, prepared)
-        .map(|used| health.record_overrun(used.overrun_signal()))
-        .map_err(crate::unavailable)?;
-    Ok(ForkDiff {
-        fork_seq: request.fork_seq,
-        diverged_entities,
-    })
+    let prepared = prepare_comparison(sender, request, &guard, revoked, registries);
+    keep_guard_or_teardown(guard, health, prepared).and_then(
+        |(guard, (prepared, diverged_entities))| {
+            // One token commits both arms. ADR-112's overrun signal is
+            // recorded and the displaced maps are dropped after the handoff
+            // returns, and only then is the diff released.
+            pos_runtime::handoff(guard, expiries, prepared)
+                .map(|used| health.record_overrun(used.overrun_signal()))
+                .map_err(crate::unavailable)
+                .map(|()| ForkDiff {
+                    fork_seq: request.fork_seq,
+                    diverged_entities,
+                })
+        },
+    )
+}
+
+/// Keep the held guard for the handoff when both arms were prepared;
+/// otherwise run P2 and tear the guard down before reporting the failure.
+fn keep_guard_or_teardown<'g, T>(
+    guard: ReleaseGuardV1<'g>,
+    health: &ReleaseHealthV1,
+    prepared: Result<T, CoreError>,
+) -> Result<(ReleaseGuardV1<'g>, T), CoreError> {
+    match prepared {
+        Ok(prepared) => Ok((guard, prepared)),
+        Err(error) => {
+            crate::teardown(Some(guard), health);
+            Err(error)
+        }
+    }
 }
 
 /// Both arms' prepared install and their diverged entities.

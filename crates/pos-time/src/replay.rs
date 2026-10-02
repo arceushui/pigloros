@@ -82,8 +82,9 @@ fn replay_range(
     registry: &mut ProjectionRegistry,
     release: ProtectedReleaseV1<'_>,
 ) -> Result<(), CoreError> {
-    pos_runtime::require_staged_release().map_err(crate::unavailable)?;
-    let consumer_ids = crate::consumer_selection(registry)?;
+    let consumer_ids = pos_runtime::require_staged_release()
+        .map_err(crate::unavailable)
+        .and_then(|()| crate::consumer_selection(registry))?;
     let ProtectedReleaseV1 {
         guard,
         expiries,
