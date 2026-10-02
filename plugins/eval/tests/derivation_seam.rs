@@ -1,7 +1,7 @@
 //! ADR-024 Revision 1 Decision 5 through the public runtime seams: Persona
 //! emits its own prediction source, and Eval's non-participant scheduled
 //! Driver appends `eval.*` in a later pass through the host's atomic
-//! `ScheduledAiDriver` admission. Every case runs on MemoryStore and SQLite.
+//! `ScheduledAiDriver` admission. Every case runs on `MemoryStore` and SQLite.
 
 use std::sync::Arc;
 
@@ -171,12 +171,13 @@ fn pass(
     token: &ConsentCapabilityToken,
 ) -> usize {
     let host = LocalScheduledAdmissionHostV1::shared().test_ok();
-    let revisions = host.observe(registry, store, timeline).test_ok();
-    let (head, drafts) = stage(registry, store, timeline, token).test_ok();
+    let revisions = host.observe(registry, &mut *store, timeline).test_ok();
+    let (head, drafts) = stage(registry, &*store, timeline, token).test_ok();
     if drafts.is_empty() {
         registry.commit_step_at(head, 0).test_ok();
     } else {
-        host.admit(registry, store, revisions, head, 0).test_ok();
+        host.admit(registry, &mut *store, revisions, head, 0)
+            .test_ok();
     }
     drafts.len()
 }

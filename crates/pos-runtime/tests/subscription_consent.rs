@@ -128,24 +128,10 @@ fn fixture(authority: ConsentAuthority, subject: EntityId, other: EntityId) -> F
     }
 }
 
-fn seen_after(
+fn finish(
     fixture: &mut Fixture,
-    token: Option<ConsentCapabilityToken>,
+    staged: Result<Vec<pos_core::event::EventDraft>, RuntimeError>,
 ) -> Vec<(String, EntityId)> {
-    let staged = match token {
-        Some(token) => fixture.registry.step_all_anchored_protected(
-            fixture.timeline,
-            Seq::ZERO,
-            token,
-            0,
-            &fixture.events,
-        ),
-        None => fixture.registry.step_all_anchored_with_events(
-            fixture.timeline,
-            Seq::ZERO,
-            &fixture.events,
-        ),
-    };
     assert!(staged.test_ok().is_empty());
     fixture.registry.abort_step();
     fixture
@@ -155,6 +141,26 @@ fn seen_after(
         .clone()
 }
 
+fn public_view(fixture: &mut Fixture) -> Vec<(String, EntityId)> {
+    let staged = fixture.registry.step_all_anchored_with_events(
+        fixture.timeline,
+        Seq::ZERO,
+        &fixture.events,
+    );
+    finish(fixture, staged)
+}
+
+fn protected_view(fixture: &mut Fixture, token: ConsentCapabilityToken) -> Vec<(String, EntityId)> {
+    let staged = fixture.registry.step_all_anchored_protected(
+        fixture.timeline,
+        Seq::ZERO,
+        token,
+        0,
+        &fixture.events,
+    );
+    finish(fixture, staged)
+}
+
 #[test]
 fn a_public_pass_sees_no_consent_sensitive_event() {
     let subject = EntityId::new();
@@ -162,7 +168,7 @@ fn a_public_pass_sees_no_consent_sensitive_event() {
     let mut fixture = fixture(ConsentAuthority::new(), subject, other);
 
     assert_eq!(
-        seen_after(&mut fixture, None),
+        public_view(&mut fixture),
         vec![(ORDINARY.to_owned(), other)]
     );
 }
@@ -179,14 +185,14 @@ fn a_protected_pass_sees_only_its_subject_within_the_granted_modalities() {
     // The other entity's source, the unpermitted Fork request and the
     // retention record stay hidden.
     assert_eq!(
-        seen_after(&mut fixture, Some(persona)),
+        protected_view(&mut fixture, persona),
         vec![(PERSONA.to_owned(), subject), (ORDINARY.to_owned(), other)]
     );
 
     // A token without the Persona modality sees no Persona source.
     let bare = authority.record_grant_on_timeline(fixture.timeline, &grant(subject, 0));
     assert_eq!(
-        seen_after(&mut fixture, Some(bare)),
+        protected_view(&mut fixture, bare),
         vec![(ORDINARY.to_owned(), other)]
     );
 }

@@ -96,7 +96,7 @@ impl Driver for IdleDriver {
 }
 
 /// Everything a rejected registration must leave untouched.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 struct RegistrySnapshot {
     composition: PluginComposition,
     descriptions: Vec<(String, String)>,

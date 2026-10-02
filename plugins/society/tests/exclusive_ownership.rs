@@ -44,13 +44,11 @@ impl Plugin for Declarer {
     }
 }
 
-fn owner_error(event_type: &str) -> Option<String> {
-    Some(
-        RuntimeError::Composition(PluginCompositionErrorV1::DuplicateEventTypeOwner {
-            event_type: event_type.to_owned(),
-        })
-        .to_string(),
-    )
+fn owner_error(event_type: &str) -> String {
+    RuntimeError::Composition(PluginCompositionErrorV1::DuplicateEventTypeOwner {
+        event_type: event_type.to_owned(),
+    })
+    .to_string()
 }
 
 fn proof_society() -> Declarer {
@@ -73,7 +71,7 @@ fn two_society_signal_declarers_fail_closed_in_either_order() {
         .register_generated(&proof_society(), None, None)
         .err()
         .map(|error| error.to_string());
-    assert_eq!(error, owner_error(EVENT_TYPE_SIGNAL));
+    assert_eq!(error, Some(owner_error(EVENT_TYPE_SIGNAL)));
     assert_eq!(society_first.len(), 1);
 
     let mut proof_first = PluginRegistry::new();
@@ -83,6 +81,6 @@ fn two_society_signal_declarers_fail_closed_in_either_order() {
     let error = register_society(&mut proof_first)
         .err()
         .map(|error| error.to_string());
-    assert_eq!(error, owner_error(EVENT_TYPE_SIGNAL));
+    assert_eq!(error, Some(owner_error(EVENT_TYPE_SIGNAL)));
     assert_eq!(proof_first.len(), 1);
 }

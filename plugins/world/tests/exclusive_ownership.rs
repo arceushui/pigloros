@@ -1,9 +1,11 @@
 //! ADR-024 Revision 1 Decision 2 (user answer 2): the latent
 //! `world.action.v1` overlap fails closed when a composition installs
-//! `WorldPlugin` together with another declarer, whichever registers first.
+//! `WorldPlugin` together with another declarer (the Gateway action Plugin or
+//! the human-action fixture). Order independence of the shared check is
+//! proven in `pos-runtime`'s `event_type_ownership` tests.
 
 use pos_core::{Capability, Kind, Plugin, PluginId};
-use pos_plugin_world::{WorldDriver, WorldPlugin, WorldReducer, EVENT_TYPE_ACTION_V1};
+use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION_V1};
 use pos_runtime::{PluginCompositionErrorV1, PluginRegistry, RuntimeError};
 
 trait TestValueExt<T> {
@@ -44,21 +46,11 @@ impl Plugin for Declarer {
     }
 }
 
-fn owner_error(event_type: &str) -> Option<String> {
-    Some(
-        RuntimeError::Composition(PluginCompositionErrorV1::DuplicateEventTypeOwner {
-            event_type: event_type.to_owned(),
-        })
-        .to_string(),
-    )
-}
-
-fn register_world(registry: &mut PluginRegistry) -> Result<(), RuntimeError> {
-    registry.register_generated(
-        &WorldPlugin::new(),
-        Some(Box::new(WorldReducer)),
-        Some(Box::new(WorldDriver::default())),
-    )
+fn owner_error(event_type: &str) -> String {
+    RuntimeError::Composition(PluginCompositionErrorV1::DuplicateEventTypeOwner {
+        event_type: event_type.to_owned(),
+    })
+    .to_string()
 }
 
 fn human_action() -> Declarer {
@@ -70,23 +62,17 @@ fn human_action() -> Declarer {
 }
 
 #[test]
-fn world_and_another_world_action_declarer_fail_closed_in_either_order() {
-    let mut world_first = PluginRegistry::new();
-    register_world(&mut world_first).test_ok();
-    let error = world_first
-        .register_generated(&human_action(), None, None)
-        .err()
-        .map(|error| error.to_string());
-    assert_eq!(error, owner_error(EVENT_TYPE_ACTION_V1));
-    assert_eq!(world_first.len(), 1);
-
-    let mut declarer_first = PluginRegistry::new();
-    declarer_first
+fn world_after_another_world_action_declarer_fails_closed() {
+    let mut registry = PluginRegistry::new();
+    registry
         .register_generated(&human_action(), None, None)
         .test_ok();
-    let error = register_world(&mut declarer_first)
+    // The shared ownership check runs before every capability check, so the
+    // second claimant is rejected for its Event type alone.
+    let error = registry
+        .register_generated(&WorldPlugin::new(), None, None)
         .err()
         .map(|error| error.to_string());
-    assert_eq!(error, owner_error(EVENT_TYPE_ACTION_V1));
-    assert_eq!(declarer_first.len(), 1);
+    assert_eq!(error, Some(owner_error(EVENT_TYPE_ACTION_V1)));
+    assert_eq!(registry.len(), 1);
 }

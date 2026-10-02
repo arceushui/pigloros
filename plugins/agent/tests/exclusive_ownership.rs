@@ -49,13 +49,11 @@ impl Plugin for Declarer {
     }
 }
 
-fn owner_error(event_type: &str) -> Option<String> {
-    Some(
-        RuntimeError::Composition(PluginCompositionErrorV1::DuplicateEventTypeOwner {
-            event_type: event_type.to_owned(),
-        })
-        .to_string(),
-    )
+fn owner_error(event_type: &str) -> String {
+    RuntimeError::Composition(PluginCompositionErrorV1::DuplicateEventTypeOwner {
+        event_type: event_type.to_owned(),
+    })
+    .to_string()
 }
 
 fn register_agent(registry: &mut PluginRegistry) -> Result<(), RuntimeError> {
@@ -77,7 +75,7 @@ fn a_second_agent_plugin_registration_is_rejected() {
     let error = register_agent(&mut registry)
         .err()
         .map(|error| error.to_string());
-    assert_eq!(error, owner_error(EVENT_TYPE_ACTION));
+    assert_eq!(error, Some(owner_error(EVENT_TYPE_ACTION)));
     assert_eq!(registry.len(), 1);
 }
 
@@ -94,6 +92,6 @@ fn a_second_recorder_claimant_is_rejected_beside_the_agent() {
         .register_generated(&recorder, None, None)
         .err()
         .map(|error| error.to_string());
-    assert_eq!(error, owner_error(RECORDER_EVENT_TYPE));
+    assert_eq!(error, Some(owner_error(RECORDER_EVENT_TYPE)));
     assert_eq!(registry.len(), 1);
 }
