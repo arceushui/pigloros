@@ -285,7 +285,7 @@ fn conversions_round_nanoseconds_up_and_reject_out_of_range_values() -> TestResu
     let convert = wall_time_from_epoch_duration;
     let unavailable = Err(Fence::SourceUnavailable);
     assert_eq!(convert(Duration::from_nanos(1))?.as_micros(), 1);
-    assert_eq!(convert(Duration::from_nanos(1_000))?.as_micros(), 1);
+    assert_eq!(convert(Duration::from_micros(1))?.as_micros(), 1);
     assert_eq!(convert(Duration::from_nanos(1_001))?.as_micros(), 2);
     let maximum = convert(Duration::from_micros(MAX_MICROS))?;
     assert_eq!(maximum.as_micros(), MAX_MICROS);
@@ -621,7 +621,7 @@ fn expiry_bound_is_exclusive_at_one_microsecond() -> TestResult {
         assert!(!fixture.writer_held());
     }
     let rounded = TrustedClockFixtureV1::new();
-    let below = Duration::from_micros(E - W) - Duration::from_nanos(1);
+    let below = Duration::from_nanos((E - W) * 1_000 - 1);
     let reservation = reserve_with(&rounded, ScriptedWallSampleV1::SinceEpoch(below))?;
     assert_eq!(reservation.sampled_at(), WallTime::from_micros(E - W));
     let refused = release(&rounded, reservation, E, E - W).err();
@@ -813,7 +813,7 @@ fn guards_may_finish_out_of_reservation_order() -> TestResult {
 fn applicable_expiries_take_the_checked_minimum() -> TestResult {
     let fixture = TrustedClockFixtureV1::new();
     let reservation = reserve_at(&fixture, T0)?;
-    let mut port = fixture.clone();
+    let mut port = fixture;
     let mut wait = WaitBudgetV1::new();
     let guard = open_release_guard(&mut port, reservation, &mut wait, &mut still())?;
     let leases = [lease(FAR), lease(FAR - SECOND)];
@@ -851,7 +851,7 @@ fn absolute_consent_expiry_releases_one_microsecond_before_its_bound() -> TestRe
     let x = u32::try_from(x_micros / SECOND)?;
     let fixture = TrustedClockFixtureV1::new();
     let reservation = reserve_at(&fixture, x_micros - 1 - W)?;
-    let mut port = fixture.clone();
+    let mut port = fixture;
     let mut wait = WaitBudgetV1::new();
     let guard = open_release_guard(&mut port, reservation, &mut wait, &mut still())?;
     let leases = [lease(FAR)];
@@ -1025,7 +1025,7 @@ fn acknowledgement_faults_fail_closed() {
     let refused = acknowledge(&missing, &operator, 2, 1, T0 + 1);
     assert_eq!(refused, Err(Fence::HighWaterMissing));
     let ready = initialized(T0);
-    let mut store = ready.clone();
+    let mut store = ready;
     let mut wall = ScriptedTrustedWallSourceV1::new([ScriptedWallSampleV1::Unavailable]);
     let authorization = authorization(2);
     let request = TrustedClockOverrunAcknowledgementV1 {
