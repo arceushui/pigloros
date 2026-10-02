@@ -37,7 +37,7 @@ const REJECTED: &str = "staged.rejected";
 
 fn test_ok<T, E: Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
-        std::panic::panic_any(format!("unexpected fixture error: {error:?}"))
+        std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
     })
 }
 
@@ -224,7 +224,7 @@ fn admitted_fixture(
 }
 
 fn test_some<T>(value: Option<T>) -> T {
-    value.unwrap_or_else(|| std::panic::panic_any("missing fixture value"))
+    value.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
 }
 
 fn count_of(state: Option<&State>) -> Option<u64> {
