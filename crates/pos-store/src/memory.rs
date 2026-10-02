@@ -14030,13 +14030,14 @@ mod manifest_owner_admission_coverage {
 mod local_cut_owner_coverage {
     use super::*;
     use pos_core::{
-        output_policy::{OutputPolicyInputV1, OutputPolicyV1}, prepare_local_cut_owner_commit_v1,
-        prepare_manifest_owner_admission_v1, ArtifactDataClassV1, ArtifactOptionalityV1,
-        ArtifactTransitionRuleV1, LocalCutCommitV1, LocalCutCompositionBindingRowV1,
-        LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1, LocalCutOwnerVerifierV1,
-        LocalCutReceiptInputV1, LocalCutReceiptV1, LocalCutRecordingContextRowV1,
-        LocalCutSealInputV2, LocalCutSealV2, LocalCutTableRefV1, ManifestAdmissionCatalogInputV1,
-        ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
+        output_policy::{OutputPolicyInputV1, OutputPolicyV1},
+        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
+        ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, LocalCutCommitV1,
+        LocalCutCompositionBindingRowV1, LocalCutManifestBindingRowV1,
+        LocalCutManifestBindingTableV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
+        LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutSealInputV2, LocalCutSealV2,
+        LocalCutTableRefV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
+        ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
         ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
         ManifestSlotAdmissionReceiptV1, PluginId, WorldArtifactKindV1, WorldArtifactLeafInputV1,
