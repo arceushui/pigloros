@@ -6770,14 +6770,16 @@ fn sqlite_read_manifest_owner_current_state(
         previous_visible_lcq1_hash,
         inventory_generation,
         &generation_rows,
-    )?;
-    Ok(Some(ManifestOwnerAdmissionOwnerStateV1 {
-        owner_id,
-        configuration_generation: generation,
-        previous_visible_lcq1_hash,
-        inventory_generation,
-        timelines: generation_rows.timelines,
-    }))
+    )
+    .map(|()| {
+        Some(ManifestOwnerAdmissionOwnerStateV1 {
+            owner_id,
+            configuration_generation: generation,
+            previous_visible_lcq1_hash,
+            inventory_generation,
+            timelines: generation_rows.timelines,
+        })
+    })
 }
 
 fn sqlite_read_manifest_owner_generation(
