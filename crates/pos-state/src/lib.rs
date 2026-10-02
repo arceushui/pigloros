@@ -8,6 +8,8 @@
 //! - [`ProjectionRegistry`]: a named registry of [`Reducer`] implementations.
 //! - [`EntityStateProjection`]: a built-in `Reducer` that folds event metadata per entity.
 //! - [`RelationshipIndex`]: an adjacency index for directed [`Relationship`] values.
+//! - [`ProtectedProjectionProviderV1`] and [`DetachedProjectionCandidateV1`]:
+//!   private protected projection candidates folded by the live fold step.
 //!
 //! No I/O, no async.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
@@ -22,6 +24,13 @@ use pos_core::{
     ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
     PluginId, Reducer, Relationship, Seq, State, StateRegistry, TimelineId,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
+};
+
+mod candidate;
+
+pub use candidate::{
+    DetachedProjectionCandidateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1,
+    RecordedConsumerV1,
 };
 
 // ---------------------------------------------------------------------------
@@ -75,6 +84,40 @@ struct Slot {
     reducer: Box<dyn Reducer>,
     registry: StateRegistry,
     observation_policy: Option<ProjectionObservationPolicyV1>,
+}
+
+impl Slot {
+    fn fold_parts(&mut self) -> (&dyn Reducer, &mut StateRegistry) {
+        (self.reducer.as_ref(), &mut self.registry)
+    }
+}
+
+/// Fold one Event into ordered reducer slots: the single live fold step
+/// shared by [`ProjectionRegistry`] and [`DetachedProjectionCandidateV1`].
+///
+/// A well-formed `consent.revoked.v1` Event reaches no reducer; its decoded
+/// revocation is returned so the caller forgets the subject. A malformed
+/// revocation, any other consent Event and any geographic Event are skipped.
+/// Every other Event is offered to every slot in order.
+fn fold_bound_event<'a>(
+    slots: impl Iterator<Item = (&'a dyn Reducer, &'a mut StateRegistry)>,
+    event: &Event,
+) -> Option<ConsentRevokedV1> {
+    if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
+        return ConsentRevokedV1::decode(&event.payload).ok();
+    }
+    // Consent is host control-plane state.  It is never reducer input and
+    // therefore cannot become a Plugin-visible projection or snapshot.
+    if pos_core::is_consent_event_type(&event.event_type) {
+        return None;
+    }
+    if pos_core::is_geographic_event_type(&event.event_type) {
+        return None;
+    }
+    for (reducer, registry) in slots {
+        registry.apply(reducer, event);
+    }
+    None
 }
 
 /// A named registry of [`Reducer`] implementations backed by per-name [`StateRegistry`]s.
@@ -303,22 +346,12 @@ impl ProjectionRegistry {
     }
 
     fn apply_bound_event(&mut self, event: &Event) {
-        if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
-            if let Ok(revocation) = ConsentRevokedV1::decode(&event.payload) {
-                self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
-            }
-            return;
-        }
-        // Consent is host control-plane state.  It is never reducer input and
-        // therefore cannot become a Plugin-visible projection or snapshot.
-        if pos_core::is_consent_event_type(&event.event_type) {
-            return;
-        }
-        if pos_core::is_geographic_event_type(&event.event_type) {
-            return;
-        }
-        for (_, slot) in &mut self.slots {
-            slot.registry.apply(slot.reducer.as_ref(), event);
+        let revocation = fold_bound_event(
+            self.slots.iter_mut().map(|(_, slot)| slot.fold_parts()),
+            event,
+        );
+        if let Some(revocation) = revocation {
+            self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
         }
     }
 
