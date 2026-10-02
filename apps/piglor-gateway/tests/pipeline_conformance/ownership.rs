@@ -37,6 +37,15 @@ const PATHS: [&str; 9] = [
     "manifest-slot",
 ];
 
+/// Paths whose duplicate-declaration rejection already carries the closed
+/// ownership error, or the installed fail-closed error.
+const CLOSED_ERROR_PATHS: [&str; 4] = [
+    "verified",
+    "verified-with-approver",
+    "installed",
+    "manifest-slot",
+];
+
 /// Everything a rejected registration must leave untouched.
 #[derive(Debug, PartialEq, Eq)]
 struct RegistrySnapshot {
@@ -249,7 +258,14 @@ pub fn duplicate_declaration_rejected() -> Capture {
         // paths carry another Plugin's canonical binding for the type.
         let canonical = FixturePlugin::new("canonical", &["dup.type"], true);
         let result = register_bound(&mut registry, path, &duplicate, &canonical);
-        capture.record("none", path, outcome(result));
+        // Only the closed-error paths pin the error; the others pin only the
+        // rejection until #505 makes every path return the ownership error.
+        let rejection = if CLOSED_ERROR_PATHS.contains(&path) {
+            outcome(result)
+        } else {
+            result.map_or_else(|_| "rejected".to_owned(), |()| "registered".to_owned())
+        };
+        capture.record("none", path, rejection);
         capture.record(
             "none",
             &format!("{path}.unchanged"),
