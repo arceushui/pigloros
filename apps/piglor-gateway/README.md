@@ -146,10 +146,12 @@ credential directory are selected by the installed
 argument. The binary requires `CREDENTIALS_DIRECTORY` to be the exact unit
 directory, so direct invocation fails before it opens the authority database.
 
-The two inputs are separate encrypted systemd credentials named
-`pigloros.fork-admission-auth` (FACR1) and
-`pigloros.fork-admission-host-signer` (FAHK1). Create separate envelopes with
-systemd 250 or newer; `host+tpm2` is the production default:
+The managed service has exactly three separate encrypted systemd credentials:
+`pigloros.fork-admission-auth` (FACR1),
+`pigloros.fork-admission-host-signer` (FAHK1), and
+`pigloros.fork-classifier-profile` (FCP1, ADR-099 r11 / ADR-107 r6). The
+one-shot provisioner reads only FACR1 and FAHK1. Create separate envelopes
+with systemd 250 or newer; `host+tpm2` is the production default:
 
 ```bash
 systemd-creds encrypt --name=pigloros.fork-admission-auth \
@@ -208,13 +210,70 @@ The HTTP routes and the listener share the one erasure host of the database
 (ADR-109 revision 9): the process opens exactly one read-write adapter, owned
 by the Gateway's store executor, so listener writes never make HTTP protected
 operations fail with `503`. Managed startup fails closed in this order:
-credential validation, host recovery with a verified inventory (the binary
+validation of the three managed credentials (FACR1, FAHK1, and the FCP1
+classifier profile below), host recovery with a verified inventory (the binary
 composes only the closed erasure authority, so a store with any erasure request
-does not start), the FAO1 open proof on the host's adapter, private FRP1 journal
-reconciliation, the executor, then the TCP listener and, last, the Unix socket.
+does not start), the read-only FCP1 preflight and the FAO1 open proof on the
+host's adapter, private FRP1 journal reconciliation, the executor, then the TCP
+listener and, last, the Unix socket.
 Shutdown stops TCP, then the listener (an in-flight request finishes), then
 drains the executor. A new admitted Fork runs inside the host's erasure
 topology transition and returns code 0 only after the successor inventory is
 published; while the host is not Ready it fails closed with code 5. A saturated
 executor or a lost reply answers code 6, and an exact retry recovers a
 committed result through FRP1.
+
+### Fork classifier profile (FCP1)
+
+FCP1 selects the classifier source for locally admitted Forks. Its plaintext
+is one deterministic-CBOR array `["FCP1", 1,
+"piglor-gateway.local-fork-classifier/v1", [1*4 FCS1]]` of at most 786,688
+bytes. Each row is the exact canonical FCS1 for one room revision descriptor
+hash, carries that fixed registrar identifier, and rows are strictly
+increasing by descriptor hash. It holds route identifiers and schema digests
+only, never keys, payloads, or subject data. Record its activation digest,
+`BLAKE3("pigloros/fork-classifier-profile/v1" || FCP1 bytes)`, with its
+SHA-256 in the deployment inventory.
+
+Encrypt it like the key credentials, from its own root-only non-swappable
+staging file, verify its same-name decrypt byte-for-byte, and destroy the
+plaintext before service start:
+
+```bash
+systemd-creds encrypt --name=pigloros.fork-classifier-profile \
+  --with-key=host+tpm2 FCP1.cbor pigloros.fork-classifier-profile.cred
+install -o root -g root -m 0600 pigloros.fork-classifier-profile.cred \
+  /etc/credstore.encrypted/pigloros.fork-classifier-profile.cred
+```
+
+Startup order is fixed (ADR-109 revision 12): the three exact credential
+files, FACR1/FAHK1, and the strict FCP1 decode are checked before the database
+opens; after the erasure host opens, a read-only preflight on its adapter
+requires every durable FCS1 to equal one FCP1 row byte-for-byte, before the
+FAH1 open proof; then the delivery journal is reconciled, the session's
+permit issuer and the immutable profile move into the store executor's private
+Fork-admission slot, and only then are the sockets bound. At each Fork commit
+or same-operation recovery, the executor registers the FCS1 row that the
+durable FAR1 selects before the result is released. A missing, fourth,
+renamed, unreadable, malformed, or oversized credential, a durable FCS1 for
+another registrar, or an absent or changed row fails startup before the
+listener exists and writes no authority record. A committed Fork whose
+descriptor has no row stays retryable (code 6) and never falls back to another
+table.
+
+To activate or change FCP1 on an existing database: stop
+`piglor-gateway.service`; back up the exact database file and all three
+ciphertext files together; install the reviewed binary, unit, and new FCP1
+envelope; run `systemctl daemon-reload`; and start the service once. A new
+profile may add rows for new descriptor hashes, but every previously
+registered row must stay byte-identical; changing a table needs a new room
+revision descriptor hash. Keep the FCP1 recovery copy in the deployment
+inventory apart from the database backup.
+
+To restore, restore the database and the matching three-credential set as one
+release while the service is stopped. Before any new classifier registration
+or classified append, rollback may restore the prior binary, unit, database,
+and credentials. After one exists, rollback can only stop the new activation:
+an older binary must not reopen the listener, and committed FCS1, FCT1, FCR1,
+and FOP1 records are never rewritten. Replay verifies those durable records
+without FCP1.

@@ -23,6 +23,8 @@ use pos_crypto::fork_authentication::{
 use rand::{rngs::SysRng, TryRng};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::fork_event_authority::ForkEventPermitIssuerV1;
+
 #[cfg(test)]
 use std::{
     collections::HashSet,
@@ -104,6 +106,7 @@ pub struct ForkAdmissionAuthoritySessionV1 {
     identity: Hash,
     host_key: PublicKey,
     policy_digest: Hash,
+    event_permit_issuer_taken: bool,
 }
 
 /// The integrity-only private operation row used by both durable adapters.
@@ -511,6 +514,20 @@ impl ForkAdmissionAuthoritySessionV1 {
     pub(crate) const fn store_id(&self) -> Hash {
         self.store_id
     }
+
+    /// Take this live session's one ADR-099 Fork Event permit issuer.
+    ///
+    /// A session exists only after the host signed its FAO1 open challenge,
+    /// so its holder is the protected composition root that owns the host
+    /// signing credential. The session yields its issuer exactly once: no
+    /// request, Plugin, client, imported record, or later borrower of the
+    /// session can obtain a second issuer and mint registrar or append
+    /// permits (ADR-099 r11 section 4). Every permit the issuer issued dies
+    /// with the issuer, and any other or non-live session refuses it.
+    pub fn take_event_permit_issuer(&mut self) -> Option<ForkEventPermitIssuerV1> {
+        (!std::mem::replace(&mut self.event_permit_issuer_taken, true))
+            .then(|| ForkEventPermitIssuerV1::for_session(self.store_id, self.identity))
+    }
 }
 
 /// The private durable state shared by `MemoryStore` and `SQLite`.
@@ -662,6 +679,7 @@ pub(crate) fn finalize_open(
         identity,
         host_key: host.host_verifying_key(),
         policy_digest: host.authentication_policy_digest(),
+        event_permit_issuer_taken: false,
     })
 }
 
@@ -1008,6 +1026,7 @@ mod tests {
             identity: Hash::from_bytes([65; 32]),
             host_key: host.host_verifying_key(),
             policy_digest: host.authentication_policy_digest(),
+            event_permit_issuer_taken: false,
         };
         let command = encode(&Value::Array(vec![
             Value::Text("FRC1".to_owned()),
