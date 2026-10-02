@@ -4,7 +4,8 @@ These fixtures drive the first-party and in-process ADR-021 pipeline
 conformance profile (Redmine #488, the first half of #321). The profile proves
 human and AI ingress through atomic host admission, failure precedence,
 recovery, Replay and evaluation non-authority, the ADR-021 Revision 3
-observation profiles, exclusive Event-type ownership (ADR-024 Revision 1) and
+observation profiles, exclusive Event-type ownership and source quarantine
+(ADR-024 Revisions 1 and 2) and
 revocation persistence. Its runner is
 `apps/piglor-gateway/tests/pipeline_conformance/main.rs`, which the workspace test
 job executes.
