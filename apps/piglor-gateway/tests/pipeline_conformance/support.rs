@@ -26,6 +26,10 @@ use pos_runtime::{
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore, StoreConfig};
 
 /// Unwrap a fixture step, failing the runner with the unexpected error.
+///
+/// `resume_unwind` is deliberate: the workspace denies `unwrap`, `expect` and
+/// `panic!`, and the suite harness catches the unwind and reports it as a
+/// `RunnerPanicked` failure of the case rather than aborting the profile.
 pub trait TestOk<T> {
     fn test_ok(self) -> T;
 }

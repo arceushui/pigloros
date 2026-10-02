@@ -20,6 +20,7 @@ pub mod eval_seam;
 pub mod gateway;
 pub mod harness;
 pub mod ingress;
+pub mod nonparticipant;
 pub mod ownership;
 pub mod profiles;
 pub mod quarantine;
@@ -36,10 +37,10 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "7b240d7893b4d039cc7b26629f8b142c8d8dbc890a26238cc5e6bba5d0ef1679";
+const MANIFEST_SHA256: &str = "5231dcbe90def4e71008f2b06a0b1ea35d12c502b91fa39ad57f86349895f16b";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 41] = [
+const RUNNERS: [(&str, Runner); 45] = [
     ("PCF-ING-001", ingress::ingress_parity),
     ("PCF-ING-002", ingress::human_admission_receipt),
     ("PCF-ING-003", gateway::first_party_has_no_privileged_route),
@@ -55,6 +56,19 @@ const RUNNERS: [(&str, Runner); 41] = [
     ("PCF-R3-001", profiles::participant_pass_needs_its_fence),
     ("PCF-R3-002", profiles::one_pass_one_profile),
     ("PCF-R3-003", profiles::digest_domain_separation),
+    ("PCF-R3-005", profiles::participant_views_are_per_driver),
+    (
+        "PCF-R3-006",
+        profiles::participant_views_are_revalidated_at_commit,
+    ),
+    (
+        "PCF-R3-007",
+        nonparticipant::non_participant_pass_is_subscription_scoped,
+    ),
+    (
+        "PCF-R3-008",
+        nonparticipant::late_revocation_or_freeze_aborts_the_pass,
+    ),
     ("PCF-REG-001", ownership::second_claimant_rejected),
     ("PCF-REG-002", ownership::duplicate_declaration_rejected),
     ("PCF-REG-003", ownership::host_type_not_claimable),
@@ -114,7 +128,14 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
     assert!(report.skipped_optional.is_empty());
     assert_eq!(manifest.suite, "pigloros.pipeline-cross-path");
     assert_eq!(report.passed.len(), RUNNERS.len());
-    assert_eq!(report.not_applicable, vec!["PCF-R3-004".to_owned()]);
+    let inapplicable: Vec<String> = manifest
+        .cases
+        .iter()
+        .filter(|case| case.applicability != Applicability::Applicable)
+        .map(|case| case.id.clone())
+        .collect();
+    assert_eq!(report.not_applicable, inapplicable);
+    assert_eq!(manifest.cases.len(), 46);
     assert_eq!(
         report.passed.len() + report.not_applicable.len(),
         manifest.cases.len()
@@ -123,7 +144,7 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
         .cases
         .iter()
         .all(|case| case.mandatory && !case.id.is_empty()));
-    assert_eq!(manifest.exclusions.len(), 4);
+    assert_eq!(manifest.exclusions.len(), 7);
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────
@@ -422,4 +443,33 @@ fn the_legacy_history_fixture_fails_closed_on_an_unknown_version_or_field() {
         Err(ConformanceError::UnknownField { .. })
     ));
     assert!(verify_pinned(b"{}", eval_seam::LEGACY_HISTORY_SHA256).is_err());
+}
+
+#[test]
+fn the_v1_directory_holds_exactly_the_pinned_files() {
+    let directory = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/conformance/pipeline/v1"
+    );
+    let mut files: Vec<(String, String)> = std::fs::read_dir(directory)
+        .test_ok()
+        .map(|entry| {
+            let entry = entry.test_ok();
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                harness::sha256_hex(&std::fs::read(entry.path()).test_ok()),
+            )
+        })
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        vec![
+            (
+                "legacy-eval-history.json".to_owned(),
+                eval_seam::LEGACY_HISTORY_SHA256.to_owned()
+            ),
+            ("manifest.json".to_owned(), MANIFEST_SHA256.to_owned()),
+        ]
+    );
 }
