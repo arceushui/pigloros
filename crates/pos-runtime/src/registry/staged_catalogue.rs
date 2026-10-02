@@ -23,6 +23,12 @@ pub const MAX_STAGED_CALLBACK_BOUND_V1: Duration = Duration::from_millis(250);
 
 /// Factory types of the eight audited Plugin reducers. Each factory is
 /// implemented on its Plugin type in the owning Plugin crate.
+///
+/// Membership and the identity hash use `std::any::type_name`, whose output
+/// is not stable across compiler versions, so these names are only compared
+/// within one compiler build: the host and every Plugin crate it admits are
+/// compiled together. Each Plugin crate's `staged_factory_type_name` test
+/// pins its entry to `type_name` of the real factory type in that build.
 const REVIEWED_STAGED_FACTORIES_V1: [&str; 8] = [
     "pos_plugin_agent::AgentPlugin",
     "pos_plugin_bridges::BridgePlugin",

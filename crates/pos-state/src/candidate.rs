@@ -74,17 +74,11 @@ pub trait ProtectedProjectionProviderV1 {
     ) -> Result<DetachedProjectionCandidateV1, ProjectionCandidateErrorV1>;
 }
 
-/// One candidate-owned reducer instance and its private State map.
+/// One candidate-owned reducer instance and its private State map, held in
+/// the same slot type the visible registry folds.
 struct CandidateSlotV1 {
     consumer: RecordedConsumerV1,
-    reducer: Box<dyn Reducer>,
-    registry: StateRegistry,
-}
-
-impl CandidateSlotV1 {
-    fn fold_parts(&mut self) -> (&dyn Reducer, &mut StateRegistry) {
-        (self.reducer.as_ref(), &mut self.registry)
-    }
+    slot: crate::Slot,
 }
 
 /// Private projection candidate: ordered, freshly built reducer instances
@@ -112,8 +106,12 @@ impl DetachedProjectionCandidateV1 {
             .into_iter()
             .map(|(consumer, reducer)| CandidateSlotV1 {
                 consumer,
-                reducer,
-                registry: StateRegistry::new(),
+                slot: crate::Slot {
+                    plugin_id: Some(consumer.plugin_id),
+                    reducer,
+                    registry: StateRegistry::new(),
+                    observation_policy: None,
+                },
             })
             .collect();
         let repeated = slots.iter().enumerate().any(|(index, slot)| {
@@ -142,12 +140,14 @@ impl DetachedProjectionCandidateV1 {
     pub fn fold_events(&mut self, events: &[Event]) {
         for event in events {
             let revocation = crate::fold_bound_event(
-                self.slots.iter_mut().map(CandidateSlotV1::fold_parts),
+                self.slots
+                    .iter_mut()
+                    .map(|candidate| candidate.slot.fold_parts()),
                 event,
             );
             if let Some(revocation) = revocation {
-                for slot in &mut self.slots {
-                    slot.registry.remove(&revocation.subject_id);
+                for candidate in &mut self.slots {
+                    candidate.slot.registry.remove(&revocation.subject_id);
                 }
             }
         }
@@ -159,6 +159,6 @@ impl DetachedProjectionCandidateV1 {
         self.slots
             .iter()
             .find(|slot| slot.consumer.plugin_id == plugin_id)
-            .and_then(|slot| slot.registry.get(entity))
+            .and_then(|candidate| candidate.slot.registry.get(entity))
     }
 }

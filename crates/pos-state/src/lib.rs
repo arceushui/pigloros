@@ -78,7 +78,8 @@ pub enum ProjectionSlotErrorV1 {
     DuplicatePluginId { plugin_id: PluginId },
 }
 
-/// One named slot inside the registry.
+/// One named slot inside the registry, also the slot type of a detached
+/// candidate, so both fold through one `Slot::fold_parts`.
 struct Slot {
     plugin_id: Option<PluginId>,
     reducer: Box<dyn Reducer>,
