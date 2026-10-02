@@ -122,13 +122,6 @@ fn sqlite_local_cut_owner_timeline(bytes: &[u8]) -> Result<TimelineId, LocalCutO
     Ok(TimelineId::from_ulid(ulid::Ulid::from_bytes(bytes)))
 }
 
-fn sqlite_local_cut_owner_plugin(bytes: &[u8]) -> Result<PluginId, LocalCutOwnerErrorV1> {
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
-    Ok(PluginId::from_ulid(ulid::Ulid::from_bytes(bytes)))
-}
-
 struct SqliteLocalCutOwnerCursorV1<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -152,41 +145,61 @@ impl<'a> SqliteLocalCutOwnerCursorV1<'a> {
         Ok(bytes)
     }
 
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], LocalCutOwnerErrorV1> {
+        let bytes = *self
+            .bytes
+            .get(self.offset..)
+            .and_then(<[u8]>::first_chunk::<N>)
+            .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+        self.offset += N;
+        Ok(bytes)
+    }
+
     fn u8(&mut self) -> Result<u8, LocalCutOwnerErrorV1> {
-        self.take(1).and_then(|bytes| {
-            bytes
-                .first()
-                .copied()
-                .ok_or(LocalCutOwnerErrorV1::CorruptState)
-        })
+        let [byte] = self.array()?;
+        Ok(byte)
     }
 
     fn u32(&mut self) -> Result<u32, LocalCutOwnerErrorV1> {
-        let bytes: [u8; 4] = self
-            .take(4)?
-            .try_into()
-            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
-        Ok(u32::from_be_bytes(bytes))
+        self.array().map(u32::from_be_bytes)
     }
 
     fn u64(&mut self) -> Result<u64, LocalCutOwnerErrorV1> {
-        let bytes: [u8; 8] = self
-            .take(8)?
-            .try_into()
-            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
-        Ok(u64::from_be_bytes(bytes))
+        self.array().map(u64::from_be_bytes)
     }
 
     fn hash(&mut self) -> Result<Hash, LocalCutOwnerErrorV1> {
-        sqlite_local_cut_owner_hash(self.take(32)?)
+        self.array().map(Hash::from_bytes)
     }
 
-    fn blob(&mut self, maximum: usize) -> Result<&'a [u8], LocalCutOwnerErrorV1> {
-        let length =
-            usize::try_from(self.u32()?).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    fn timeline(&mut self) -> Result<TimelineId, LocalCutOwnerErrorV1> {
+        let bytes = self.array()?;
+        Ok(TimelineId::from_ulid(ulid::Ulid::from_bytes(bytes)))
+    }
+
+    fn plugin(&mut self) -> Result<PluginId, LocalCutOwnerErrorV1> {
+        let bytes = self.array()?;
+        Ok(PluginId::from_ulid(ulid::Ulid::from_bytes(bytes)))
+    }
+
+    fn length(&mut self, maximum: usize) -> Result<usize, LocalCutOwnerErrorV1> {
+        // A length beyond the address space saturates and fails the bound.
+        let length = usize::try_from(self.u32()?).unwrap_or(usize::MAX);
         if length > maximum {
             return Err(LocalCutOwnerErrorV1::CorruptState);
         }
+        Ok(length)
+    }
+
+    fn count(&mut self) -> Result<usize, LocalCutOwnerErrorV1> {
+        match self.length(MAX_LOCAL_CUT_OWNER_ROWS_V1)? {
+            0 => Err(LocalCutOwnerErrorV1::CorruptState),
+            count => Ok(count),
+        }
+    }
+
+    fn blob(&mut self, maximum: usize) -> Result<&'a [u8], LocalCutOwnerErrorV1> {
+        let length = self.length(maximum)?;
         self.take(length)
     }
 
@@ -211,22 +224,17 @@ impl<'a> SqliteLocalCutOwnerCursorV1<'a> {
     }
 }
 
-fn sqlite_append_local_cut_owner_u32(
-    out: &mut Vec<u8>,
-    value: usize,
-) -> Result<(), LocalCutOwnerErrorV1> {
-    let value = u32::try_from(value).map_err(|_| LocalCutOwnerErrorV1::BoundExceeded)?;
+// Encoded counts and lengths stay far below `u32::MAX`: the encoder only sees
+// requests whose intent digest accepted at most `MAX_LOCAL_CUT_OWNER_ROWS_V1`
+// rows per table, 64-byte Plugin versions, and canonical 64 KiB records.
+fn sqlite_append_local_cut_owner_u32(out: &mut Vec<u8>, value: usize) {
+    let value = u32::try_from(value).unwrap_or(u32::MAX);
     out.extend_from_slice(&value.to_be_bytes());
-    Ok(())
 }
 
-fn sqlite_append_local_cut_owner_blob(
-    out: &mut Vec<u8>,
-    bytes: &[u8],
-) -> Result<(), LocalCutOwnerErrorV1> {
-    sqlite_append_local_cut_owner_u32(out, bytes.len())?;
+fn sqlite_append_local_cut_owner_blob(out: &mut Vec<u8>, bytes: &[u8]) {
+    sqlite_append_local_cut_owner_u32(out, bytes.len());
     out.extend_from_slice(bytes);
-    Ok(())
 }
 
 fn sqlite_append_local_cut_owner_optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
@@ -261,25 +269,27 @@ fn sqlite_read_local_cut_owner_table(
         .map_err(|_| LocalCutOwnerErrorV1::CorruptState)
 }
 
-fn sqlite_local_cut_owner_request_bytes(
-    request: &LocalCutOwnerRequestV1,
-) -> Result<Vec<u8>, LocalCutOwnerErrorV1> {
-    local_cut_owner_intent_digest_v1(request)?;
+/// Encode a request that `local_cut_owner_intent_digest_v1` already accepted.
+///
+/// Those request bounds cap the encoding near 520 MB, below
+/// `SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1`, so no accepted request can
+/// exceed the stored column limit.
+fn sqlite_local_cut_owner_request_bytes(request: &LocalCutOwnerRequestV1) -> Vec<u8> {
     let mut out = Vec::with_capacity(2048);
     out.extend_from_slice(SQLITE_LOCAL_CUT_OWNER_REQUEST_MAGIC_V1);
     out.push(1);
     out.extend_from_slice(request.operation_id.as_bytes());
-    sqlite_append_local_cut_owner_blob(&mut out, &request.seal.to_canonical_cbor())?;
+    sqlite_append_local_cut_owner_blob(&mut out, &request.seal.to_canonical_cbor());
     out.extend_from_slice(request.manifest_hash.as_bytes());
-    sqlite_append_local_cut_owner_u32(&mut out, request.manifest_binding_table.records().len())?;
+    sqlite_append_local_cut_owner_u32(&mut out, request.manifest_binding_table.records().len());
     for record in request.manifest_binding_table.records() {
-        sqlite_append_local_cut_owner_blob(&mut out, record)?;
+        sqlite_append_local_cut_owner_blob(&mut out, record);
     }
-    sqlite_append_local_cut_owner_u32(&mut out, request.composition_rows.len())?;
+    sqlite_append_local_cut_owner_u32(&mut out, request.composition_rows.len());
     for row in &request.composition_rows {
         out.extend_from_slice(&row.plugin_id.inner().to_bytes());
         out.extend_from_slice(&row.timeline_id.inner().to_bytes());
-        sqlite_append_local_cut_owner_blob(&mut out, row.plugin_version.as_bytes())?;
+        sqlite_append_local_cut_owner_blob(&mut out, row.plugin_version.as_bytes());
         out.extend_from_slice(row.implementation_hash.as_bytes());
         out.extend_from_slice(row.eop1_native_digest.as_bytes());
         sqlite_append_local_cut_owner_optional_u64(&mut out, row.driver_interval_ns);
@@ -287,7 +297,7 @@ fn sqlite_local_cut_owner_request_bytes(
         out.extend_from_slice(&row.event_cursor.to_be_bytes());
         out.extend_from_slice(row.participant_native_state_hash.as_bytes());
     }
-    sqlite_append_local_cut_owner_u32(&mut out, request.recording_context_rows.len())?;
+    sqlite_append_local_cut_owner_u32(&mut out, request.recording_context_rows.len());
     for row in &request.recording_context_rows {
         out.extend_from_slice(&row.timeline_id.inner().to_bytes());
         out.extend_from_slice(row.wcs_hash.as_bytes());
@@ -307,10 +317,7 @@ fn sqlite_local_cut_owner_request_bytes(
     }
     out.extend_from_slice(request.result_inventory_generation.as_bytes());
     out.extend_from_slice(request.release_fence_proof_digest.as_bytes());
-    if out.len() > SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1 {
-        return Err(LocalCutOwnerErrorV1::BoundExceeded);
-    }
-    Ok(out)
+    out
 }
 
 fn sqlite_local_cut_owner_request_cursor(
@@ -331,31 +338,23 @@ fn sqlite_local_cut_owner_request_cursor(
 
 fn sqlite_decode_local_cut_owner_request(
     bytes: &[u8],
-) -> Result<LocalCutOwnerRequestV1, LocalCutOwnerErrorV1> {
+) -> Result<(LocalCutOwnerRequestV1, Hash), LocalCutOwnerErrorV1> {
     let mut cursor = sqlite_local_cut_owner_request_cursor(bytes)?;
     let operation_id = cursor.hash()?;
     let seal_bytes = cursor.blob(4096)?;
     let seal = LocalCutSealV2::from_canonical_cbor(seal_bytes)
         .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
     let manifest_hash = cursor.hash()?;
-    let record_count =
-        usize::try_from(cursor.u32()?).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
-    if record_count == 0 || record_count > MAX_LOCAL_CUT_OWNER_ROWS_V1 {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
+    let record_count = cursor.count()?;
     let mut records = Vec::with_capacity(record_count);
     for _ in 0..record_count {
         records.push(cursor.blob(1_048_576)?.to_vec());
     }
-    let composition_count =
-        usize::try_from(cursor.u32()?).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
-    if composition_count == 0 || composition_count > MAX_LOCAL_CUT_OWNER_ROWS_V1 {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
+    let composition_count = cursor.count()?;
     let mut composition_rows = Vec::with_capacity(composition_count);
     for _ in 0..composition_count {
-        let plugin_id = sqlite_local_cut_owner_plugin(cursor.take(16)?)?;
-        let timeline_id = sqlite_local_cut_owner_timeline(cursor.take(16)?)?;
+        let plugin_id = cursor.plugin()?;
+        let timeline_id = cursor.timeline()?;
         let plugin_version = String::from_utf8(cursor.blob(64)?.to_vec())
             .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
         composition_rows.push(LocalCutCompositionBindingRowV1 {
@@ -370,15 +369,11 @@ fn sqlite_decode_local_cut_owner_request(
             participant_native_state_hash: cursor.hash()?,
         });
     }
-    let context_count =
-        usize::try_from(cursor.u32()?).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
-    if context_count == 0 || context_count > MAX_LOCAL_CUT_OWNER_ROWS_V1 {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
+    let context_count = cursor.count()?;
     let mut recording_context_rows = Vec::with_capacity(context_count);
     for _ in 0..context_count {
         recording_context_rows.push(LocalCutRecordingContextRowV1 {
-            timeline_id: sqlite_local_cut_owner_timeline(cursor.take(16)?)?,
+            timeline_id: cursor.timeline()?,
             wcs_hash: cursor.hash()?,
             retention_lease_hash: cursor.hash()?,
             predecessor_wcb_hash: cursor.optional_hash()?,
@@ -421,15 +416,12 @@ fn sqlite_decode_local_cut_owner_request(
         result_inventory_generation,
         release_fence_proof_digest,
     };
-    local_cut_owner_intent_digest_v1(&request).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
-    if sqlite_local_cut_owner_request_bytes(&request)
-        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?
-        .as_slice()
-        != bytes
-    {
+    let intent_digest = local_cut_owner_intent_digest_v1(&request)
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    if sqlite_local_cut_owner_request_bytes(&request) != bytes {
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
-    Ok(request)
+    Ok((request, intent_digest))
 }
 
 #[derive(Clone)]
@@ -466,17 +458,9 @@ fn sqlite_validate_local_cut_owner_cut(
     cut_id: u64,
     cut: &SqliteLocalCutOwnerCutV1,
 ) -> Result<(), LocalCutOwnerErrorV1> {
-    let actual_intent = local_cut_owner_intent_digest_v1(&cut.request)
-        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
-    if actual_intent != cut.intent_digest || cut.request.operation_id == Hash::zero() {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
     sqlite_validate_local_cut_owner_result(owner_id, cut_id, &cut.result)?;
     let commit = cut.result.commit.as_input();
-    if cut.request.seal.as_input().owner_id != owner_id
-        || cut.request.seal.as_input().cut_id != cut_id
-        || cut.result.seal != cut.request.seal
-        || commit.partition_ledger_seq != cut.request.partition_ledger_seq
+    if commit.partition_ledger_seq != cut.request.partition_ledger_seq
         || commit.manifest_hash != cut.request.manifest_hash
         || commit.result_heads_table != cut.request.result_heads_table
         || commit.participant_successor_table != cut.request.participant_successor_table
@@ -522,11 +506,14 @@ fn sqlite_local_cut_owner_cut_by_id(
     };
     let operation_id = sqlite_local_cut_owner_hash(&operation_id)?;
     let intent_digest = sqlite_local_cut_owner_hash(&intent_digest)?;
-    let request = sqlite_decode_local_cut_owner_request(&request_bytes)?;
+    let (request, decoded_intent) = sqlite_decode_local_cut_owner_request(&request_bytes)?;
     let commit = LocalCutCommitV1::from_canonical_cbor(&commit_bytes)
         .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
     let receipt = LocalCutReceiptV1::from_canonical_cbor(&receipt_bytes)
         .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    if request.operation_id != operation_id || decoded_intent != intent_digest {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
     let seal = request.seal;
     let cut = SqliteLocalCutOwnerCutV1 {
         intent_digest,
@@ -538,11 +525,19 @@ fn sqlite_local_cut_owner_cut_by_id(
             receipt,
         },
     };
-    if cut.request.operation_id != operation_id {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
     sqlite_validate_local_cut_owner_cut(owner_id, cut_id, &cut)?;
     Ok(Some(cut))
+}
+
+// Load a cut whose identity was read from `local_cut_owner_cuts` in the same
+// transaction, so the row is present.
+fn sqlite_local_cut_owner_existing_cut(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    cut_id: u64,
+) -> Result<SqliteLocalCutOwnerCutV1, LocalCutOwnerErrorV1> {
+    sqlite_local_cut_owner_cut_by_id(connection, owner_id, cut_id)
+        .and_then(|cut| cut.ok_or(LocalCutOwnerErrorV1::CorruptState))
 }
 
 fn sqlite_local_cut_owner_cut_by_operation(
@@ -561,8 +556,7 @@ fn sqlite_local_cut_owner_cut_by_operation(
         .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
     row.map(|cut_id| {
         let cut_id = sqlite_local_cut_owner_u64(&cut_id)?;
-        sqlite_local_cut_owner_cut_by_id(connection, owner_id, cut_id)?
-            .ok_or(LocalCutOwnerErrorV1::CorruptState)
+        sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)
     })
     .transpose()
 }
@@ -609,8 +603,7 @@ pub(super) fn sqlite_local_cut_owner_state_raw(
         .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
     let timeline_rows = statement
         .query_map(params![owner_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?
-        .collect::<Result<Vec<_>, _>>()
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
     let timelines = timeline_rows
         .iter()
@@ -641,17 +634,11 @@ fn sqlite_read_local_cut_owner_state(
             Ok(None)
         };
     };
-    let admission = sqlite_read_manifest_owner_current_state(connection, owner_id)
-        .map_err(map_sqlite_manifest_owner_to_local_error)?
-        .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
-    if state.owner_id != admission.owner_id
-        || state.configuration_generation != admission.configuration_generation
-        || state.previous_visible_lcq1_hash != admission.previous_visible_lcq1_hash
-        || state.inventory_generation != admission.inventory_generation
-        || state.timelines != admission.timelines
-    {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
+    // The admitted-state read compares this same local-cut row with the admitted
+    // generation, roster, receipt, and inventory. Its local-cut rows make a
+    // missing admitted row corrupt there, so it never returns `None` here.
+    sqlite_read_manifest_owner_current_state(connection, owner_id)
+        .map_err(map_sqlite_manifest_owner_to_local_error)?;
     let mut statement = connection
         .prepare(
             "SELECT cut_id FROM local_cut_owner_cuts
@@ -660,14 +647,12 @@ fn sqlite_read_local_cut_owner_state(
         .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
     let cut_rows = statement
         .query_map(params![owner_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?
-        .collect::<Result<Vec<_>, _>>()
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
     let mut found_current = false;
     for cut_bytes in cut_rows {
         let cut_id = sqlite_local_cut_owner_u64(&cut_bytes)?;
-        let cut = sqlite_local_cut_owner_cut_by_id(connection, owner_id, cut_id)?
-            .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+        let cut = sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)?;
         if cut_id > state.last_visible_cut_id {
             return Err(LocalCutOwnerErrorV1::CorruptState);
         }
@@ -716,7 +701,7 @@ fn sqlite_insert_local_cut_owner_cut(
         return Err(LocalCutOwnerErrorV1::Conflict);
     }
     let result = batch.applied_result();
-    let request_bytes = sqlite_local_cut_owner_request_bytes(request)?;
+    let request_bytes = sqlite_local_cut_owner_request_bytes(request);
     let cut_id_bytes = cut_id.to_be_bytes();
     connection
         .execute(
@@ -860,27 +845,14 @@ fn sqlite_validate_local_cut_owner_batch(
     admission: &ManifestOwnerAdmissionOwnerStateV1,
     current_state: Option<&LocalCutOwnerStateV1>,
 ) -> Result<(), LocalCutOwnerErrorV1> {
-    let request = batch.request();
-    let owner_id = batch.successor_state().owner_id;
-    let result = batch.applied_result();
-    if local_cut_owner_intent_digest_v1(request)? != batch.intent_digest() {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
-    batch.successor_state().validate()?;
-    let cut_id = request.seal.as_input().cut_id;
-    sqlite_validate_local_cut_owner_result(owner_id, cut_id, &result)?;
-    let seal = request.seal.as_input();
+    // Preparation derived the intent, LCC1/LCQ1 result, and validated successor
+    // from this request, its seal, and the admitted generation it was built
+    // against, so only the persisted pre-state can differ here.
+    let seal = batch.request().seal.as_input();
     let successor = batch.successor_state();
-    if seal.owner_id != owner_id
-        || seal.configuration_generation != admission.configuration_generation
+    if seal.configuration_generation != admission.configuration_generation
         || seal.previous_visible_receipt_hash != admission.previous_visible_lcq1_hash
         || seal.expected_inventory_generation != admission.inventory_generation
-        || successor.last_visible_cut_id != cut_id
-        || successor.last_visible_tick != seal.tick
-        || successor.membership_epoch != seal.membership_epoch
-        || successor.configuration_generation != admission.configuration_generation
-        || successor.previous_visible_lcq1_hash != Some(result.receipt.digest())
-        || successor.inventory_generation != request.result_inventory_generation
         || successor.timelines != admission.timelines
     {
         return Err(LocalCutOwnerErrorV1::Conflict);
@@ -1066,8 +1038,7 @@ pub(super) fn sqlite_sync_local_cut_owner_after_admission(
         };
     };
     let current_state = current_state.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
-    if local_cut_state.owner_id != owner_id
-        || local_cut_state.configuration_generation != current_state.configuration_generation
+    if local_cut_state.configuration_generation != current_state.configuration_generation
         || local_cut_state.previous_visible_lcq1_hash != current_state.previous_visible_lcq1_hash
         || local_cut_state.inventory_generation != current_state.inventory_generation
         || local_cut_state.timelines != current_state.timelines
@@ -1865,7 +1836,6 @@ mod local_cut_owner_coverage {
         assert_eq!(sqlite_local_cut_owner_u32(&short).err(), corrupt);
         assert_eq!(sqlite_local_cut_owner_hash(&short).err(), corrupt);
         assert_eq!(sqlite_local_cut_owner_timeline(&short).err(), corrupt);
-        assert_eq!(sqlite_local_cut_owner_plugin(&short).err(), corrupt);
 
         let mut overflowing = SqliteLocalCutOwnerCursorV1 {
             bytes: &short,
@@ -1873,9 +1843,13 @@ mod local_cut_owner_coverage {
         };
         assert_eq!(overflowing.take(1), Err(LocalError::CorruptState));
         let mut empty = SqliteLocalCutOwnerCursorV1::new(&[]);
+        assert_eq!(empty.u8(), Err(LocalError::CorruptState));
         assert_eq!(empty.u32(), Err(LocalError::CorruptState));
         assert_eq!(empty.u64(), Err(LocalError::CorruptState));
         assert_eq!(empty.hash(), Err(LocalError::CorruptState));
+        assert_eq!(empty.timeline(), Err(LocalError::CorruptState));
+        assert_eq!(empty.plugin(), Err(LocalError::CorruptState));
+        assert_eq!(empty.count(), Err(LocalError::CorruptState));
         assert_eq!(empty.blob(1), Err(LocalError::CorruptState));
         assert_eq!(empty.optional_hash(), Err(LocalError::CorruptState));
         assert_eq!(empty.optional_u64(), Err(LocalError::CorruptState));
@@ -1898,17 +1872,10 @@ mod local_cut_owner_coverage {
             sqlite_read_local_cut_owner_table(&mut table_cursor).err(),
             Some(LocalError::CorruptState)
         );
-
-        let mut out = Vec::new();
-        assert_eq!(
-            sqlite_append_local_cut_owner_u32(&mut out, usize::MAX),
-            Err(LocalError::BoundExceeded)
-        );
-        assert!(out.is_empty());
     }
 
     #[test]
-    fn request_header_and_encoding_bounds_are_enforced() -> TestResult {
+    fn request_header_and_length_bounds_are_enforced() {
         // Zeroed allocation is lazily mapped; the length check rejects it unread.
         let oversized = vec![0_u8; SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1 + 1];
         assert_eq!(
@@ -1922,20 +1889,15 @@ mod local_cut_owner_coverage {
                 Some(LocalError::CorruptState)
             );
         }
-        let mut request = synthetic_request(1)?;
-        request.operation_id = Hash::zero();
-        assert_eq!(
-            sqlite_local_cut_owner_request_bytes(&request),
-            Err(LocalError::BoundExceeded)
-        );
-        Ok(())
     }
 
     #[test]
     fn request_decoder_rejects_every_truncated_prefix() -> TestResult {
         let request = synthetic_request(1)?;
-        let bytes = sqlite_local_cut_owner_request_bytes(&request)?;
-        assert_eq!(sqlite_decode_local_cut_owner_request(&bytes)?, request);
+        let bytes = sqlite_local_cut_owner_request_bytes(&request);
+        let (decoded, intent_digest) = sqlite_decode_local_cut_owner_request(&bytes)?;
+        assert_eq!(decoded, request);
+        assert_eq!(intent_digest, local_cut_owner_intent_digest_v1(&request)?);
         for length in 0..bytes.len() {
             assert_eq!(
                 sqlite_decode_local_cut_owner_request(&bytes[..length]).err(),
@@ -1949,7 +1911,7 @@ mod local_cut_owner_coverage {
     #[test]
     fn request_decoder_rejects_structurally_invalid_fields() -> TestResult {
         let request = synthetic_request(1)?;
-        let bytes = sqlite_local_cut_owner_request_bytes(&request)?;
+        let bytes = sqlite_local_cut_owner_request_bytes(&request);
         // Magic, version, operation, then the length-prefixed LCS2 seal.
         let seal_at = 42;
         let records_at = seal_at + request.seal.to_canonical_cbor().len() + 32;
@@ -1986,14 +1948,14 @@ mod local_cut_owner_coverage {
     #[test]
     fn request_decoder_rejects_reordered_manifest_records() -> TestResult {
         let request = synthetic_request(65)?;
-        let bytes = sqlite_local_cut_owner_request_bytes(&request)?;
+        let bytes = sqlite_local_cut_owner_request_bytes(&request);
         let records = request.manifest_binding_table.records();
         let first_record_at = 42 + request.seal.to_canonical_cbor().len() + 32 + 4;
         let records_len = records.iter().map(|record| 4 + record.len()).sum::<usize>();
         let prefix = bytes.get(..first_record_at).ok_or("short request")?;
         let mut reordered = prefix.to_vec();
         for record in records.iter().rev() {
-            sqlite_append_local_cut_owner_blob(&mut reordered, record)?;
+            sqlite_append_local_cut_owner_blob(&mut reordered, record);
         }
         let suffix = bytes
             .get(first_record_at + records_len..)
@@ -2357,6 +2319,18 @@ mod local_cut_owner_coverage {
         let stale = prepare_cut(stale_request, None, &fixture.genesis, &fixture.snapshots)?;
         assert_eq!(
             fixture.store.commit_local_cut_owner_v1(stale.clone()),
+            Err(LocalError::Conflict)
+        );
+        // Reusing the committed operation for another intent conflicts on retry lookup.
+        let reused_shape = CutShape {
+            result_inventory: hash(117),
+            ..FIRST_CUT
+        };
+        let reused_request = cut_request(&fixture.genesis, &fixture.snapshots, reused_shape)?;
+        let reused = prepare_cut(reused_request, None, &fixture.genesis, &fixture.snapshots)?;
+        assert_ne!(reused.intent_digest(), fixture.batch.intent_digest());
+        assert_eq!(
+            fixture.store.commit_local_cut_owner_v1(reused),
             Err(LocalError::Conflict)
         );
         fixture
