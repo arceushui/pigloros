@@ -5,7 +5,8 @@
 //! ingress through atomic host admission (#316, #318, #319), failure
 //! precedence, recovery, Replay and evaluation non-authority (#320), the
 //! ADR-021 Revision 3 observation profiles, draft and exclusive Event-type
-//! ownership (#484, #486, ADR-024 Revision 1) and revocation persistence
+//! ownership (#484, #486, ADR-024 Revision 1), source quarantine (#493,
+//! ADR-024 Revision 2) and revocation persistence
 //! (#483). Each case runs only through public seams, on `MemoryStore` and
 //! `SQLite` wherever a store is involved, and its expected observations are
 //! data in the manifest.
@@ -21,6 +22,7 @@ pub mod harness;
 pub mod ingress;
 pub mod ownership;
 pub mod profiles;
+pub mod quarantine;
 pub mod revocation;
 pub mod support;
 
@@ -34,10 +36,10 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "58e0c6633e62012b57aa925c324863947bf2acbc0731dce8f740895523dac028";
+const MANIFEST_SHA256: &str = "7b240d7893b4d039cc7b26629f8b142c8d8dbc890a26238cc5e6bba5d0ef1679";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 34] = [
+const RUNNERS: [(&str, Runner); 41] = [
     ("PCF-ING-001", ingress::ingress_parity),
     ("PCF-ING-002", ingress::human_admission_receipt),
     ("PCF-ING-003", gateway::first_party_has_no_privileged_route),
@@ -72,6 +74,31 @@ const RUNNERS: [(&str, Runner); 34] = [
     ("PCF-EVAL-008", eval_seam::injected_orphan_outcome),
     ("PCF-EVAL-009", eval_seam::legacy_history),
     ("PCF-EVAL-010", eval_seam::derived_evaluation_profile_tag),
+    (
+        "PCF-EVAL-R2-001",
+        quarantine::bad_eligible_sources_are_quarantined,
+    ),
+    (
+        "PCF-EVAL-R2-002",
+        quarantine::invalid_probabilities_are_quarantined,
+    ),
+    ("PCF-EVAL-R2-003", quarantine::later_mapping_derives_once),
+    (
+        "PCF-EVAL-R2-004",
+        quarantine::mapping_rollback_never_rederives,
+    ),
+    (
+        "PCF-EVAL-R2-005",
+        quarantine::precedence_and_bounded_decoding,
+    ),
+    (
+        "PCF-EVAL-R2-006",
+        quarantine::invalid_prefix_discards_the_pass,
+    ),
+    (
+        "PCF-EVAL-R2-007",
+        quarantine::erased_sources_never_reach_eval,
+    ),
     ("PCF-REV-001", revocation::learned_revocation_is_persisted),
     ("PCF-REV-002", revocation::equal_epochs_distinct_revisions),
     ("PCF-REV-003", revocation::cross_connection_staleness),
