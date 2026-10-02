@@ -11,7 +11,7 @@ use pos_core::{
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
     ManifestSlotAdmissionReceiptV1, PluginId, TimelineId, WorldArtifactKindV1,
     WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
-    WorldProducerV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    WorldConsumerV1, WorldProducerV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 use pos_store::{memory::MemoryStore, ManifestOwnerAdmissionPersistencePortV1};
 
@@ -294,7 +294,12 @@ fn request(
             let scope = hash(70 + u8::try_from(index).unwrap_or(u8::MAX));
             let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
                 scope,
-                consumers: Vec::new(),
+                consumers: vec![WorldConsumerV1::new(
+                    "local-observer".to_owned(),
+                    hash(130),
+                    hash(131),
+                    hash(132),
+                )?],
                 // The second same-name Plugin is reducer-only and deliberately
                 // absent from WCS1 while remaining in MCA1/MSB1 and the copies.
                 producers: vec![WorldProducerV1::new(plugin(1), sources[0].0.digest())?],
