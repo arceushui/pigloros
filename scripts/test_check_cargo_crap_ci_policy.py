@@ -405,7 +405,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             lambda workflow: workflow["jobs"]["cargo-crap"].update(
                 {
                     "if": workflow["jobs"]["cargo-crap"]["if"].replace(
-                        "always() && ", ""
+                        "!cancelled() && ", ""
                     )
                 }
             )
@@ -414,12 +414,12 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
     def test_staged_main_jobs_ignore_accepted_skipped_ancestors(self) -> None:
         for job_name in CHECKER.STAGED_MAIN_JOBS:
             with self.subTest(job=job_name):
-                def remove_always(workflow, *, job_name=job_name):
+                def remove_status_check(workflow, *, job_name=job_name):
                     workflow["jobs"][job_name]["if"] = workflow["jobs"][job_name][
                         "if"
-                    ].replace("always() && ", "")
+                    ].replace("!cancelled() && ", "")
 
-                self.assert_rejected(remove_always)
+                self.assert_rejected(remove_status_check)
 
     def test_staged_main_jobs_require_successful_direct_dependencies(self) -> None:
         for job_name, needs in CHECKER.STAGED_MAIN_JOBS.items():

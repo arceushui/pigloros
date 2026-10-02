@@ -26,6 +26,7 @@ Read these files before making a change:
 - [`CONTEXT.md`](CONTEXT.md) — domain vocabulary and current product boundaries.
 - [`AGENTS.md`](AGENTS.md) — worktree, tracker, coverage, and quality-gate rules.
 - [`docs/test-policy.md`](docs/test-policy.md) — test, coverage, and change-risk policy.
+- [`docs/merge-queue.md`](docs/merge-queue.md) — how pull requests are approved and merged through the merge queue.
 
 Keep current contributor instructions in Git. Dated plans, execution notes,
 and architectural decisions belong in the linked Redmine or Notion records,
@@ -358,6 +359,11 @@ Before requesting review, confirm:
   evidence; and
 - the pull request description explains any hosted-only or resource-dependent
   validation and links to the relevant artifacts.
+
+Pull requests merge only through the merge queue: a maintainer adds the
+`ready-to-merge` label after review. Who can merge, queue behaviour, and
+troubleshooting are in
+[`docs/merge-queue.md`](docs/merge-queue.md).
 
 When a hosted gate fails, fix the earliest meaningful failure first. Read the
 job log and uploaded artifact before changing timeouts, shard counts, or
