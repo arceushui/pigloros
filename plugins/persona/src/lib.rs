@@ -5,8 +5,11 @@
 //! `pos-plugin-persona` — calibrated digital twin plugin.
 //!
 //! This plugin represents a calibrated personal preference model as a simulation entity.
-//! It owns event types `"persona.preference"` and `"persona.decision"`,
-//! and entity kind `"persona"`.
+//! It owns event types `"persona.preference"`, `"persona.decision"` and the
+//! versioned prediction source `"persona.prediction"`, and entity kind
+//! `"persona"`. Under exclusive Event-type ownership (ADR-024 Revision 1)
+//! Persona never emits `eval.*`; Eval derives its records from the committed
+//! prediction source.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
@@ -15,7 +18,6 @@ use pos_core::{
     plugin::{Capability, Plugin},
     state::{Reducer, State},
 };
-use pos_plugin_eval::{draft_outcome, draft_prediction, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION};
 use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +29,12 @@ use serde::{Deserialize, Serialize};
 pub const EVENT_TYPE_PREFERENCE: &str = "persona.preference";
 /// Event type for decisions.
 pub const EVENT_TYPE_DECISION: &str = "persona.decision";
+/// Event type for a Persona-owned prediction source (ADR-024 Revision 1
+/// Decision 5). Eval's Driver derives `eval.prediction` / `eval.outcome`
+/// from committed Events of this type.
+pub const EVENT_TYPE_PREDICTION_SOURCE: &str = "persona.prediction";
+/// The only prediction source payload version this crate defines.
+pub const PREDICTION_SOURCE_VERSION_V1: u32 = 1;
 /// Entity kind for personas.
 pub const ENTITY_KIND: &str = "persona";
 
@@ -56,6 +64,53 @@ pub struct DecisionPayload {
     pub chosen: String,
     /// Probability of regret [0.0, 0.5].
     pub regret_prob: f64,
+}
+
+/// Whether a prediction source carries its outcome. The field is required in
+/// every payload, so an outcome is either explicitly present or explicitly
+/// absent; it is never silently missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PredictionOutcomeV1 {
+    /// The source carries no outcome.
+    Absent,
+    /// The source carries the observed binary outcome.
+    Observed(bool),
+}
+
+/// Payload for a `persona.prediction` source Event, version 1.
+///
+/// The ground truth, when present, is supplied by the predicting Persona
+/// itself, so evaluation built from it is predictor-supplied evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PredictionSourceV1 {
+    /// Payload version; [`PREDICTION_SOURCE_VERSION_V1`] for this schema.
+    pub version: u32,
+    /// Predicted probability in `[0.0, 1.0]`.
+    pub predicted_prob: f64,
+    /// The explicit outcome field.
+    pub outcome: PredictionOutcomeV1,
+}
+
+/// Build a version 1 `persona.prediction` source [`EventDraft`].
+#[must_use]
+pub fn draft_prediction_source(
+    entity: EntityId,
+    predicted_prob: f64,
+    outcome: PredictionOutcomeV1,
+) -> EventDraft {
+    let payload = PredictionSourceV1 {
+        version: PREDICTION_SOURCE_VERSION_V1,
+        predicted_prob,
+        outcome,
+    };
+    let mut buf = Vec::new();
+    // `Vec<u8>` is an infallible CBOR sink.
+    drop(ciborium::into_writer(&payload, &mut buf));
+    EventDraft::new(
+        entity,
+        Kind::new(EVENT_TYPE_PREDICTION_SOURCE),
+        CanonicalBytes::from_vec(buf),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -92,13 +147,18 @@ impl Plugin for PersonaPlugin {
         "persona"
     }
 
+    /// Version 0.2.0 drops `eval.*` ownership for the prediction source, so
+    /// its pinned identity never matches an earlier Persona pin.
+    fn version(&self) -> &'static str {
+        "0.2.0"
+    }
+
     fn capability(&self) -> Capability {
         Capability {
             owned_event_types: vec![
                 Kind::new(EVENT_TYPE_PREFERENCE),
                 Kind::new(EVENT_TYPE_DECISION),
-                Kind::new(EVENT_TYPE_PREDICTION),
-                Kind::new(EVENT_TYPE_OUTCOME),
+                Kind::new(EVENT_TYPE_PREDICTION_SOURCE),
             ],
             owned_entity_kinds: vec![ENTITY_KIND.to_owned()],
             has_driver: true,
@@ -251,13 +311,13 @@ pub struct PreferencePair {
     pub prefers_a: bool,
 }
 
-/// Driver that emits `persona.decision` plus matched `eval.prediction` /
-/// `eval.outcome` events each tick — closing the calibration loop.
+/// Driver that emits `persona.decision` plus a Persona-owned prediction source
+/// each tick. Eval's own Driver closes the calibration loop in a later pass.
 ///
 /// On tick `i` (cycling through `pairs`):
 /// 1. `persona.decision` from [`PersonaModel::to_draft`]
-/// 2. `eval.prediction` with `predicted_prob = score(option_a)` (P(prefer A))
-/// 3. `eval.outcome` with the pair's ground-truth `prefers_a`
+/// 2. `persona.prediction` with `predicted_prob = score(option_a)`
+///    (P(prefer A)) and the pair's ground-truth `prefers_a` as its outcome
 pub struct PersonaEvalDriver {
     entity: EntityId,
     model: PersonaModel,
@@ -298,18 +358,19 @@ impl Driver for PersonaEvalDriver {
         let idx =
             usize::try_from(self.tick % u64::try_from(self.pairs.len()).unwrap_or(1)).unwrap_or(0);
         let pair = &self.pairs[idx];
-        let prediction_id = format!("pred-{}", self.tick);
-        let entity_id = self.entity.to_string();
 
         let predicted_prob = self.model.score_option(&pair.option_a);
         let decision = self
             .model
             .to_draft(self.entity, &pair.option_a, &pair.option_b);
-        let prediction = draft_prediction(self.entity, &entity_id, predicted_prob, &prediction_id);
-        let outcome = draft_outcome(self.entity, &prediction_id, pair.prefers_a);
+        let source = draft_prediction_source(
+            self.entity,
+            predicted_prob,
+            PredictionOutcomeV1::Observed(pair.prefers_a),
+        );
 
         self.tick += 1;
-        Ok(StepOutput::new(vec![decision, prediction, outcome]))
+        Ok(StepOutput::new(vec![decision, source]))
     }
 }
 
@@ -326,9 +387,7 @@ mod tests {
         crypto::Hash,
         event::SchemaVersion,
         ids::EventId,
-        ErasureContainmentGateV1,
     };
-    use std::sync::Arc;
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -384,26 +443,22 @@ mod tests {
     fn plugin_capability() {
         let plugin = PersonaPlugin::new();
         let cap = plugin.capability();
-        assert_eq!(cap.owned_event_types.len(), 4);
-        assert!(cap
-            .owned_event_types
+        let owned: Vec<&str> = cap.owned_event_types.iter().map(Kind::as_str).collect();
+        assert_eq!(
+            owned,
+            vec![
+                EVENT_TYPE_PREFERENCE,
+                EVENT_TYPE_DECISION,
+                EVENT_TYPE_PREDICTION_SOURCE
+            ]
+        );
+        assert!(owned
             .iter()
-            .any(|k| k.as_str() == EVENT_TYPE_PREFERENCE));
-        assert!(cap
-            .owned_event_types
-            .iter()
-            .any(|k| k.as_str() == EVENT_TYPE_DECISION));
-        assert!(cap
-            .owned_event_types
-            .iter()
-            .any(|k| k.as_str() == EVENT_TYPE_PREDICTION));
-        assert!(cap
-            .owned_event_types
-            .iter()
-            .any(|k| k.as_str() == EVENT_TYPE_OUTCOME));
+            .all(|event_type| !event_type.starts_with("eval.")));
         assert_eq!(cap.owned_entity_kinds, vec![ENTITY_KIND.to_owned()]);
         assert!(cap.has_driver);
         assert!(cap.has_reducer);
+        assert_eq!(plugin.version(), "0.2.0");
     }
 
     #[test]
@@ -869,113 +924,36 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn persona_eval_driver_emits_decision_prediction_outcome() {
-        use pos_store::{open_store, StoreConfig};
-
-        let model = PersonaModel::new(vec![("nature".to_owned(), 0.8)]);
+    fn persona_eval_driver_emits_decision_and_prediction_source() {
+        let model = PersonaModel::new(vec![("quiet".to_owned(), 0.8)]);
         let entity = EntityId::new();
         let mut driver = PersonaEvalDriver::new(entity, model, vec![quiet_workspace_pair()]);
         assert_eq!(driver.name(), "persona-eval");
 
-        let mut store = open_store(StoreConfig::Memory).test_ok();
-        store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+        let out = driver
+            .step(TimelineId::new(), ObservationView::empty())
             .test_ok();
-        let tl = store.create_timeline("persona-eval").test_ok();
-        let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
 
-        assert_eq!(out.drafts.len(), 3);
+        assert_eq!(out.drafts.len(), 2);
         assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);
-        assert_eq!(out.drafts[1].event_type.as_str(), "eval.prediction");
-        assert_eq!(out.drafts[2].event_type.as_str(), "eval.outcome");
+        assert_eq!(
+            out.drafts[1].event_type.as_str(),
+            EVENT_TYPE_PREDICTION_SOURCE
+        );
+        assert_eq!(out.drafts[1].entity, entity);
+        let source: PredictionSourceV1 =
+            ciborium::from_reader(out.drafts[1].payload.as_slice()).test_ok();
+        assert_eq!(source.version, PREDICTION_SOURCE_VERSION_V1);
+        assert!((source.predicted_prob - 0.9).abs() < 1e-10);
+        assert_eq!(source.outcome, PredictionOutcomeV1::Observed(true));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn persona_eval_driver_closes_eval_loop() {
-        use pos_core::store::EventStore;
-        use pos_plugin_eval::{compute_report, EvalPlugin, EvalReducer};
-        use pos_runtime::{LocalScheduledAdmissionHostV1, PluginRegistry};
-
-        let model = PersonaModel::new(vec![
-            ("nature".to_owned(), 0.8),
-            ("city".to_owned(), 0.5),
-            ("food".to_owned(), 0.9),
-            ("quiet".to_owned(), 0.7),
-        ]);
-        let entity = EntityId::new();
-
-        let mut store = pos_store::memory::MemoryStore::new();
-        store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
-            .test_ok();
-        let tl = store.create_timeline("loop").test_ok();
-        let authority = pos_core::ConsentAuthority::new();
-        let grant = pos_core::ConsentGrantedV1 {
-            subject_id: entity,
-            grantee_id: pos_core::EntityId::new(),
-            purpose: "persona-eval-test".to_owned(),
-            modalities: pos_core::MODALITY_PERSONA,
-            min_geo_resolution: 0,
-            fork_permitted: false,
-            export_permitted: false,
-            retention_days: 0,
-            expiry_secs: 0,
-            grant_seq: 1,
-        };
-        let token = authority.record_grant_on_timeline(tl.id(), &grant);
-        let mut registry = PluginRegistry::new()
-            .with_consent_authority(authority)
-            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
-        let persona = PersonaPlugin::new();
-        registry
-            .register_generated(
-                &persona,
-                Some(Box::new(PersonaReducer)),
-                Some(Box::new(PersonaEvalDriver::new(
-                    entity,
-                    model,
-                    vec![quiet_workspace_pair()],
-                ))),
-            )
-            .test_ok();
-        let eval = EvalPlugin::new();
-        registry
-            .register_generated(&eval, Some(Box::new(EvalReducer)), None)
-            .test_ok();
-        let host = LocalScheduledAdmissionHostV1::shared().test_ok();
-        for _ in 0..5 {
-            let revisions = host.observe(&registry, &mut store, tl.id()).test_ok();
-            let drafts = registry
-                .step_all_anchored_protected(tl.id(), Seq::ZERO, token.clone(), 0, &[])
-                .test_ok();
-            registry.schemas.validate_batch(&drafts).test_ok();
-            let head = store.logical_head(tl.id()).test_ok();
-            host.admit(&mut registry, &mut store, revisions, head, 0)
-                .test_ok();
-        }
-
-        let digest = pos_core::ErasureReferenceV1::from_digest([221; 32]);
-        let evaluation = pos_core::ReplayClaimEvaluatorV1::evaluate(
-            pos_core::ErasureReplayClaimV1::Exact,
-            &[pos_core::ArtifactClaimInputV1 {
-                registration: pos_core::RegisteredArtifactV1::new(
-                    pos_core::ErasureArtifactClassV1::CalibrationReport,
-                    digest,
-                    pos_core::ArtifactDataClassV1::AggregateData,
-                    None,
-                    pos_core::ErasureReferenceV1::from_digest([222; 32]),
-                    pos_core::ArtifactOptionalityV1::Required,
-                    pos_core::ArtifactTransitionRuleV1::PreserveExact,
-                ),
-                current_claim: pos_core::ErasureReplayClaimV1::Exact,
-                state: pos_core::ArtifactStateV1::Retained,
-            }],
-        )
-        .test_ok();
-        let report = compute_report(&store, tl.id(), digest, &evaluation).test_ok();
-        assert_eq!(report.n_predictions, 5);
-        assert_eq!(report.n_resolved, 5);
-        assert!(report.brier_score >= 0.0);
+    fn prediction_source_records_an_explicitly_absent_outcome() {
+        let draft = draft_prediction_source(EntityId::new(), 0.25, PredictionOutcomeV1::Absent);
+        let source: PredictionSourceV1 = ciborium::from_reader(draft.payload.as_slice()).test_ok();
+        assert_eq!(source.outcome, PredictionOutcomeV1::Absent);
+        assert_eq!(source.version, PREDICTION_SOURCE_VERSION_V1);
     }
 }

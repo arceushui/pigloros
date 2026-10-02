@@ -1,18 +1,19 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope,
-    AppendIdentity, ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
-    ArtifactStateV1, ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
-    AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1,
-    AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
-    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
-    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, EntityId,
-    ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    Event, EventDraft, Hash, Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1,
-    MemoryPolicyRevisionV1, ObservationSnapshotV1, PersistedAuthorityV1, PipelineAdmissionBasisV1,
+    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, ArtifactClaimInputV1, ArtifactDataClassV1,
+    ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, AssuranceLevelV1,
+    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, AuthorityErrorV1,
+    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, Capability,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
+    ConsentGrantRefV1, ConsentGrantStatusV1, EntityId, ErasureArtifactClassV1,
+    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, Hash,
+    Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
+    ObservationSnapshotV1, PersistedAuthorityV1, PipelineAdmissionBasisV1,
     PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
     PipelineCommitReceiptV1, PipelineEvidenceRefV1, PipelineOutcomeV1,
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
@@ -404,6 +405,7 @@ impl Reducer for EmptyReducer {
 
 struct TestPlugin {
     id: PluginId,
+    event_type: &'static str,
 }
 
 impl Plugin for TestPlugin {
@@ -417,7 +419,7 @@ impl Plugin for TestPlugin {
 
     fn capability(&self) -> Capability {
         Capability {
-            owned_event_types: vec![Kind::new("participant.planned")],
+            owned_event_types: vec![Kind::new(self.event_type)],
             owned_entity_kinds: Vec::new(),
             has_driver: true,
             has_reducer: false,
@@ -588,19 +590,32 @@ impl Driver for ParticipantDriver {
 fn registry_with_mode(
     fixture: &Fixture,
     ambient: bool,
+    registry: PluginRegistry,
+) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
+    registry_with_event_type(fixture, ambient, registry, "participant.planned")
+}
+
+/// Register one participant Driver that owns and emits `event_type`. Under
+/// exclusive Event-type ownership (ADR-024 Revision 1) each participant
+/// registration in one registry owns its own type.
+fn registry_with_event_type(
+    fixture: &Fixture,
+    ambient: bool,
     mut registry: PluginRegistry,
+    event_type: &'static str,
 ) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
     let state = Arc::new(Mutex::new(DriverState::default()));
     let driver = ParticipantDriver {
         state: Arc::clone(&state),
         entity: EntityId::new(),
-        event_type: Kind::new("participant.planned"),
+        event_type: Kind::new(event_type),
         ambient_subscription: ambient.then(|| pos_runtime::ProjectionKey::new(EntityId::new())),
     };
     registry
         .register_generated(
             &TestPlugin {
                 id: fixture.plugin_id,
+                event_type,
             },
             None,
             Some(Box::new(driver)),
@@ -806,14 +821,13 @@ impl AdmissionStore {
         store
             .issue_capability_grant(host.authorize_grant(&root).test_ok(), &root)
             .test_ok();
+        let authority = store.load_authority(root.grant_id()).test_ok();
         let revisions =
             PipelineSecurityRevisionsV1::try_from_draft(PipelineSecurityRevisionsDraftV1 {
-                authority: pipeline_authority_revision_v1(
-                    &store.load_authority(root.grant_id()).test_ok(),
-                ),
+                authority: pipeline_authority_revision_v1(&authority),
                 consent: hash_from_repeated_byte(51),
                 capability: hash_from_repeated_byte(52),
-                delegation: hash_from_repeated_byte(53),
+                delegation: pipeline_delegation_revision_v1(&authority),
                 policy: hash_from_repeated_byte(54),
                 execution_profile: hash_from_repeated_byte(55),
                 erasure: pipeline_erasure_revision_v1(gate.inventory_generation().ok()),
@@ -1410,6 +1424,7 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
             .register_generated(
                 &TestPlugin {
                     id: fixture.plugin_id,
+                    event_type: "participant.planned",
                 },
                 None,
                 Some(Box::new(driver)),
@@ -1452,6 +1467,7 @@ fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
         .register_generated(
             &TestPlugin {
                 id: fixture.plugin_id,
+                event_type: "participant.planned",
             },
             None,
             Some(Box::new(driver)),
@@ -1575,7 +1591,12 @@ fn two_participants(
     second_ambient: bool,
 ) -> (PluginRegistry, [Arc<Mutex<DriverState>>; 2]) {
     let (registry, first_state) = registry_with_mode(first, false, gated_registry());
-    let (registry, second_state) = registry_with_mode(second, second_ambient, registry);
+    let (registry, second_state) = registry_with_event_type(
+        second,
+        second_ambient,
+        registry,
+        "participant.second.planned",
+    );
     (registry, [first_state, second_state])
 }
 
@@ -1895,6 +1916,7 @@ fn authorized_pass_rejects_another_plugins_event_type_and_commits_nothing() {
             .register_generated(
                 &TestPlugin {
                     id: second.plugin_id,
+                    event_type: "participant.intruder",
                 },
                 None,
                 Some(Box::new(ParticipantDriver {

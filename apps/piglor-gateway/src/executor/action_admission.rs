@@ -4,10 +4,12 @@
 //! its single store command, after Principal authorization has been rechecked
 //! at the commit fence, it:
 //!
-//! 1. persists the authority chain behind that decision (before the
-//!    Timeline's erasure fence opens, in the same command) and publishes the
-//!    Timeline's admission fence from it, so the store composes the persisted
-//!    chain, erasure generation, and remaining Event budget at commit;
+//! 1. persists the authority chain and every revocation record behind that
+//!    decision (before the Timeline's erasure fence opens, in the same
+//!    command) and publishes the Timeline's admission fence from the chain as
+//!    the store then resolves it, so the store composes the persisted chain,
+//!    its revocation records, erasure generation, and remaining Event budget
+//!    at commit, including a revocation another host persisted;
 //! 2. derives the attempt from the authenticated Principal, the Timeline, the
 //!    caller's idempotency key, and the exact request, so an exact retry is
 //!    the same attempt and a different Principal never shares a key, and
@@ -34,10 +36,11 @@
 //! the other host's fence.
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendIdentity,
-    EntityId, Hash, PersistedAuthorityV1, PipelineAdmissionFenceV1, PipelineAttemptIdV1,
-    PipelineContractErrorV1, PipelineEvidenceRefV1, PipelineObservationAnchorV1, PipelineOutcomeV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, ProposedAction, Seq, TimelineId,
+    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
+    AppendDedupKey, AppendIdentity, EntityId, Hash, PersistedAuthorityV1, PipelineAdmissionFenceV1,
+    PipelineAttemptIdV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
+    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1,
+    PipelineSecurityRevisionsV1, ProposedAction, Seq, TimelineId,
 };
 use pos_runtime::{
     HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1, PluginRegistry,
@@ -112,7 +115,10 @@ impl GatewayActionAdmission<'_> {
 
     /// The complete security revision set for the persisted authority.
     ///
-    /// Authority and erasure are read from their persisted owners. The other
+    /// Authority, delegation, and erasure are read from their persisted
+    /// owners: delegation binds the chain's delegation edges and every
+    /// persisted revocation record on its authority Timeline, so a revocation
+    /// another host persisted moves it even at an unchanged epoch. The other
     /// revisions are derived from the same persisted chain and the host's
     /// pinned registry, so they move whenever that authority moves.
     fn revisions(
@@ -138,10 +144,7 @@ impl GatewayActionAdmission<'_> {
             authority: pipeline_authority_revision_v1(authority),
             consent: keyed(b"consent", &consent),
             capability: keyed(b"capability", &hash_slices(&grant_ids)),
-            delegation: keyed(
-                b"delegation",
-                &[&authority.revocation_epoch().to_be_bytes()],
-            ),
+            delegation: pipeline_delegation_revision_v1(authority),
             policy: keyed(b"policy", &hash_slices(&policies)),
             execution_profile: keyed(
                 b"execution-profile",
@@ -240,11 +243,12 @@ impl GatewayActionAdmission<'_> {
     }
 }
 
-/// Persist the authority chain behind a decision in the admission store.
+/// Persist the authority chain and every revocation record behind a decision
+/// in the admission store.
 ///
 /// The host runs this in the same store command as the admission but before
 /// the Timeline's erasure fence opens, because authority persistence commits
-/// its own store transaction. A chain the store cannot persist or resolve is
+/// its own store transaction. A view the store cannot persist or resolve is
 /// [`PipelineOutcomeV1::PolicyIndeterminate`].
 pub(super) fn persist_authority(
     authorization: &GatewayAuthorization,

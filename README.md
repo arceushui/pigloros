@@ -100,12 +100,12 @@ pigloros/
   plugins/
     entities/rule-agent/  # Wave 4 ✅ — deterministic rule-based agent plugin
     observations/synthetic/ # Wave 4 ✅ — synthetic sin-wave observation plugin
-    persona/              # Wave 5 ✅ — PersonaModel + PersonaEvalDriver (closes eval loop)
+    persona/              # Wave 5 ✅ — PersonaModel + PersonaEvalDriver (emits Persona-owned prediction sources)
     world/                # Wave 5 ✅ — WorldBackend + SimpleKinematic (rapier deferred)
     agent/                # Wave 5 ✅ — AgentPolicy + RoundRobin/RandomSeed (no LLM yet)
     geo/                  # Wave 5 ✅ — SpatialCloaker degree-grid cloaking (not H3)
     bridges/              # Wave 6+ ✅ — BridgeIngestor + minimized OwnTracks observations (ADR-026 / #60); gateway owns opt-in loopback HTTP ingress; MQTT/public ingress deferred
-    eval/                 # Wave 5 ✅ — compute_report → CalibrationReport (Brier/ECE/lift)
+    eval/                 # Wave 5 ✅ — compute_report → CalibrationReport (Brier/ECE/lift); EvalDerivationDriver closes the eval loop (ADR-024 R1)
     society/              # Wave 6 ✅ — SocietySignal + SocietyReducer (trust/opinion/… metrics)
     ledger/               # Wave 4 ✅ — Prediction Ledger domain, port, adapters (ADR-017 / #58)
 ```

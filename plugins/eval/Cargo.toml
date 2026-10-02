@@ -7,6 +7,8 @@ publish.workspace = true
 
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
+pos-plugin-persona = { path = "../persona" }
+pos-runtime = { path = "../../crates/pos-runtime" }
 pos-store = { path = "../../crates/pos-store" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -15,6 +17,8 @@ ciborium = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
+pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
+pos-store = { path = "../../crates/pos-store", features = ["sqlite"] }
 
 [lints]
 workspace = true

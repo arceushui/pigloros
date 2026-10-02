@@ -12,23 +12,25 @@
 //! `local-admission-host` feature; see the parent module for why that is not
 //! a security boundary against in-process code.
 //!
-//! The authority and erasure revisions are always read from persisted state.
-//! The consent, capability, delegation, policy, and execution-profile
-//! revisions are fixed local-session constants pending republication by
-//! their owning contracts (#316), so a change to one of those owners does not
-//! yet move the fence.
+//! The authority, delegation, and erasure revisions are always read from
+//! persisted state, so a revocation persisted in the session store moves the
+//! fence. The consent, capability, policy, and execution-profile revisions
+//! are fixed local-session constants pending republication by their owning
+//! contracts (#316), so a change to one of those owners does not yet move the
+//! fence.
 
 use std::sync::OnceLock;
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_draft_vector_digest_v1, pipeline_erasure_revision_v1,
-    AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1,
+    pipeline_authority_revision_v1, pipeline_delegation_revision_v1,
+    pipeline_draft_vector_digest_v1, pipeline_erasure_revision_v1, AppendDedupKey,
+    AppendDedupScope, AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1,
     AuthorityPersistenceHostV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, EntityId,
-    EventDraft, Hash, PipelineAdmissionFenceV1, PipelineAttemptIdV1, PipelineCommitReceiptV1,
-    PipelineContractErrorV1, PipelineEvidenceRefV1, PipelineObservationAnchorV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1, ProposedAction,
-    Seq, TimelineId,
+    EventDraft, Hash, PersistedAuthorityV1, PipelineAdmissionFenceV1, PipelineAttemptIdV1,
+    PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
+    PipelineObservationAnchorV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    PrincipalRefV1, ProposedAction, Seq, TimelineId,
 };
 use ulid::Ulid;
 
@@ -128,7 +130,7 @@ impl LocalScheduledAdmissionHostV1 {
                             PipelineAdmissionFenceV1::remaining_event_budget,
                         );
                         local_revisions(
-                            pipeline_authority_revision_v1(&authority),
+                            &authority,
                             pipeline_erasure_revision_v1(
                                 registry
                                     .clone_erasure_gate()
@@ -330,18 +332,19 @@ fn local_scope() -> Result<CapabilityScopeV1, AuthorityErrorV1> {
 /// The complete local security revisions for one persisted authority and
 /// erasure revision.
 ///
-/// Only `authority` and `erasure` are live. The other five revisions are
-/// fixed local-session constants until their owning contracts republish them
-/// (#316).
+/// Only `authority`, `delegation`, and `erasure` are live: the first two are
+/// derived from the persisted authority chain and its persisted revocation
+/// records (#483). The other four revisions are fixed local-session constants
+/// until their owning contracts republish them (#316).
 fn local_revisions(
-    authority: Hash,
+    authority: &PersistedAuthorityV1,
     erasure: Hash,
 ) -> Result<PipelineSecurityRevisionsV1, PipelineContractErrorV1> {
     PipelineSecurityRevisionsV1::try_from_draft(PipelineSecurityRevisionsDraftV1 {
-        authority,
+        authority: pipeline_authority_revision_v1(authority),
         consent: keyed(b"consent", &[]),
         capability: keyed(b"capability", &[]),
-        delegation: keyed(b"delegation", &[]),
+        delegation: pipeline_delegation_revision_v1(authority),
         policy: keyed(POLICY_LABEL, &[]),
         execution_profile: keyed(b"execution-profile", &[]),
         erasure,

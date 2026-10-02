@@ -81,9 +81,10 @@ pub use pos_core::store::{
 };
 use pos_core::{
     is_consent_event_type, is_geographic_event_type, pipeline_authority_revision_v1,
-    pipeline_erasure_revision_v1, ErasureGate, ErasureReferenceV1, Hash, PipelineAdmissionBasisV1,
-    PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineIngressV1,
-    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1, Seq,
+    pipeline_delegation_revision_v1, pipeline_erasure_revision_v1, ErasureGate, ErasureReferenceV1,
+    Hash, PipelineAdmissionBasisV1, PipelineAttemptIdV1, PipelineCommitReceiptV1,
+    PipelineContractErrorV1, PipelineIngressV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, Seq,
 };
 pub use pos_core::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
@@ -760,10 +761,10 @@ pub(crate) struct PipelinePersistedStateV1<'a> {
 ///
 /// `Ok` carries the fence after the batch consumes its Event budget; `Err` is
 /// the typed fail-closed outcome for which the adapter commits nothing. The
-/// authority and erasure revisions are compared with their persisted owners;
-/// the remaining revisions are compared with the persisted host-published
-/// fence, which is their persisted source until an owning contract stores
-/// them in the Event Store (see `pos_core::pipeline_admission`).
+/// authority, delegation, and erasure revisions are compared with their
+/// persisted owners; the remaining revisions are compared with the persisted
+/// host-published fence, which is their persisted source until an owning
+/// contract stores them in the Event Store (see `pos_core::pipeline_admission`).
 pub(crate) fn evaluate_pipeline_admission(
     basis: &PipelineAdmissionBasisV1,
     persisted: &PipelinePersistedStateV1<'_>,
@@ -833,11 +834,21 @@ fn evaluate_pipeline_authority(
     {
         return Err(PipelineOutcomeV1::AuthorityExpired);
     }
-    if pipeline_authority_revision_v1(&authority) != basis.security_revisions().as_draft().authority
-    {
+    if !binds_persisted_authority(&basis.security_revisions(), &authority) {
         return Err(PipelineOutcomeV1::AdmissionConflict);
     }
     Ok(())
+}
+
+/// Whether the authority and delegation revisions both name the persisted
+/// chain, its revocation epoch, and its persisted revocation records.
+fn binds_persisted_authority(
+    revisions: &PipelineSecurityRevisionsV1,
+    authority: &PersistedAuthorityV1,
+) -> bool {
+    let revisions = revisions.as_draft();
+    pipeline_authority_revision_v1(authority) == revisions.authority
+        && pipeline_delegation_revision_v1(authority) == revisions.delegation
 }
 
 /// Run `install` for a passing comparison, or return its typed rejection
