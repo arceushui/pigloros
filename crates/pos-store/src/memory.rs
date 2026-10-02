@@ -11267,14 +11267,14 @@ mod coverage_entrypoints {
     use super::tests::new_store;
     use super::*;
     use pos_core::{
-        ConsentAuthority, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
-        KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey, ERASURE_MAX_INVENTORY_TIMELINES,
-    };
-    use pos_core::{
         adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
         AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterDataClassV1, AdapterEffectModeV1,
         AdapterInvocationInputV1, AdapterInvocationV1, WorldReplayHandleInputV1,
         WorldReplayHandleV1,
+    };
+    use pos_core::{
+        ConsentAuthority, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
+        KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey, ERASURE_MAX_INVENTORY_TIMELINES,
     };
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -12177,7 +12177,8 @@ mod coverage_entrypoints {
     fn memory_adapter_recording_fixture(
         owner_byte: u8,
         run_byte: u8,
-    ) -> Result<(AdapterRecordingSessionV1, AdapterCallReservationV1), Box<dyn std::error::Error>> {
+    ) -> Result<(AdapterRecordingSessionV1, AdapterCallReservationV1), Box<dyn std::error::Error>>
+    {
         let owner_reference = Hash::from_bytes([owner_byte; 32]);
         let plugin_id = pos_core::PluginId::new();
         let configuration = b"memory-coverage-adapter".to_vec();
@@ -12259,7 +12260,8 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn memory_adapter_recording_rejects_retained_corruption() -> Result<(), Box<dyn std::error::Error>> {
+    fn memory_adapter_recording_rejects_retained_corruption(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (mut store, session) = closed_memory_adapter_recording(181)?;
         let owner_reference = session.owner_reference();
         let run_operation_id = session.run_operation_id();
