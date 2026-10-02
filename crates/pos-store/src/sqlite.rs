@@ -95,7 +95,8 @@ use crate::fork_delivery_journal::{
     ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 use crate::fork_event_authority::{
-    fork_append_request, permitted_fork_admission, preflight_classifier_sources,
+    classified_event_matches_operation, fork_append_request, permitted_fork_admission,
+    preflight_classifier_sources,
 };
 use crate::fork_manifest_publication::{
     authorize_publication, publication_parent_head, publication_sources,
@@ -9916,7 +9917,7 @@ fn sqlite_validate_classified_records(
                 .filter(|classification| {
                     let (expected_origin, expected_intervention) =
                         operation.expected_provenance(table, *classification);
-                    event.payload_hash == input.payload_hash
+                    classified_event_matches_operation(&event, operation)
                         && origin == expected_origin
                         && origin.digest() == input.event_origin_digest
                         && intervention == expected_intervention

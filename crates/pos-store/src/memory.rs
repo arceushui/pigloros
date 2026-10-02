@@ -83,7 +83,8 @@ use crate::fork_delivery_journal::{
     ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 use crate::fork_event_authority::{
-    fork_append_request, permitted_fork_admission, preflight_classifier_sources,
+    classified_event_matches_operation, fork_append_request, permitted_fork_admission,
+    preflight_classifier_sources,
 };
 use crate::fork_manifest_publication::{
     authorize_publication, publication_parent_head, publication_sources,
@@ -2118,9 +2119,7 @@ impl MemoryStore {
                     operation.expected_provenance(table, *classification);
                 event.id == input.event_id
                     && event.seq.as_u64() == input.logical_seq
-                    && event.wall_time == input.wall_time
-                    && event.payload_hash == input.payload_hash
-                    && event.signature.is_none()
+                    && classified_event_matches_operation(event, operation)
                     && **origin == expected_origin
                     && origin.digest() == input.event_origin_digest
                     && intervention == expected_intervention.as_ref()
@@ -5491,6 +5490,26 @@ impl MemoryStore {
         let _ = self
             .fork_classifier_sources
             .remove(&(room, registrar.to_owned()));
+    }
+
+    /// Tamper one classified Event in both its `FOP1` record and its Timeline.
+    pub(crate) fn test_tamper_classified_event(
+        &mut self,
+        operation_id: Hash,
+        tamper: fn(&mut Event),
+    ) {
+        let event_id = self
+            .fork_append_operations
+            .get_mut(&operation_id)
+            .map(|(_, event)| {
+                tamper(event);
+                event.id
+            });
+        self.timelines
+            .values_mut()
+            .flat_map(|state| state.events.iter_mut())
+            .filter(|event| Some(event.id) == event_id)
+            .for_each(tamper);
     }
 }
 

@@ -541,6 +541,21 @@ pub(crate) fn fork_append_request(
     .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
 }
 
+/// Whether a stored classified Event carries exactly the content its `FOP1` binds.
+///
+/// ADR-105 r6 R6.5 P8/P9 and R6.9: every adapter requires the `FOP1`
+/// `WallTime` and payload hash, and a local-origin child stores the one
+/// unsigned Event that its ADR-099 local append inserted.
+pub(crate) fn classified_event_matches_operation(
+    event: &Event,
+    operation: &ForkAppendOperationV1,
+) -> bool {
+    let input = operation.input();
+    event.wall_time == input.wall_time
+        && event.payload_hash == input.payload_hash
+        && event.signature.is_none()
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -3703,6 +3718,101 @@ mod tests {
             sqlite_store_at(&path)?.read_fork_event_suffix(fixture.fork.child_id, 1),
             Err(ForkEventAuthorityErrorV1::CorruptAuthority)
         );
+        Ok(())
+    }
+
+    const fn tamper_wall_time(event: &mut Event) {
+        event.wall_time = WallTime::from_micros(11);
+    }
+
+    const fn tamper_signature(event: &mut Event) {
+        event.signature = Some(Signature::from_bytes([0; 64]));
+    }
+
+    /// The same local classified-Event tampers, expressed for each adapter.
+    ///
+    /// ADR-105 r6 R6.5 P8/P9: the stored Event keeps the `FOP1` `WallTime`,
+    /// and ADR-099 local append stores it unsigned.
+    const CLASSIFIED_EVENT_TAMPERS: [(&str, fn(&mut Event), &str); 2] = [
+        (
+            "wall-time",
+            tamper_wall_time,
+            "UPDATE events SET wall_time = 11 WHERE event_id = (\
+             SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        ),
+        (
+            "signature",
+            tamper_signature,
+            "UPDATE events SET signature = zeroblob(64) WHERE event_id = (\
+             SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        ),
+    ];
+
+    /// Read a `MemoryStore` suffix after one host-internal Event is tampered.
+    fn memory_tampered_suffix_error(
+        tamper: fn(&mut Event),
+    ) -> Result<Option<ForkEventAuthorityErrorV1>, Box<dyn Error>> {
+        let mut store = MemoryStore::new();
+        let fixture = create_lifecycle(&mut store)?;
+        assert_host_append(&mut store, &fixture)?;
+        assert_eq!(
+            store
+                .read_fork_event_suffix(fixture.fork.child_id, 1)?
+                .len(),
+            1
+        );
+        store.test_tamper_classified_event(Hash::from_bytes([47; 32]), tamper);
+        let result = store.read_fork_event_suffix(fixture.fork.child_id, 1);
+        Ok(result.err())
+    }
+
+    #[test]
+    fn memory_classified_suffix_rejects_tampered_local_event() -> Result<(), Box<dyn Error>> {
+        for (name, tamper, _) in CLASSIFIED_EVENT_TAMPERS {
+            assert_eq!(
+                memory_tampered_suffix_error(tamper)?,
+                Some(ForkEventAuthorityErrorV1::CorruptAuthority),
+                "{name} must make the MemoryStore suffix unavailable"
+            );
+        }
+        Ok(())
+    }
+
+    /// ADR-105 r6 R6.9 adapter parity: the same tampered durable graph gives
+    /// the same result on `SQLite` as on `MemoryStore`.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_classified_suffix_matches_memory_for_tampered_local_event(
+    ) -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let operation_id = Hash::from_bytes([47; 32]).as_bytes().to_vec();
+        for (name, tamper, statement) in CLASSIFIED_EVENT_TAMPERS {
+            let path = directory.path().join(format!("tampered-{name}.sqlite"));
+            let fixture = {
+                let mut store = sqlite_store_at(&path)?;
+                let fixture = create_lifecycle(&mut store)?;
+                assert_host_append(&mut store, &fixture)?;
+                assert_eq!(
+                    store
+                        .read_fork_event_suffix(fixture.fork.child_id, 1)?
+                        .len(),
+                    1
+                );
+                fixture
+            };
+            let connection = Connection::open(&path)?;
+            let changed = connection.execute(statement, params![operation_id])?;
+            assert_eq!(changed, 1, "{name} fixture must be present");
+            let memory = memory_tampered_suffix_error(tamper)?;
+            assert_eq!(memory, Some(ForkEventAuthorityErrorV1::CorruptAuthority));
+            assert_eq!(
+                sqlite_store_at(&path)?
+                    .read_fork_event_suffix(fixture.fork.child_id, 1)
+                    .err(),
+                memory,
+                "{name} must give the same result on SQLite as on MemoryStore"
+            );
+        }
         Ok(())
     }
 
