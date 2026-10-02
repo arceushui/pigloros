@@ -15,11 +15,11 @@ use pos_core::{
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
     ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-    ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1,
-    ManifestSlotBindingRowV1, ManifestSlotBindingV1, OwnerIdV1, Plugin, PluginId,
-    PreparedManifestOwnerAdmissionV1, TimelineId, WorldArtifactKindV1, WorldArtifactLeafInputV1,
-    WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
-    WorldProducerV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1,
+    ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1, OwnerIdV1, Plugin,
+    PluginId, PreparedManifestOwnerAdmissionV1, TimelineId, WorldArtifactKindV1,
+    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
+    WorldConsumerV1, WorldProducerV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 use pos_runtime::{
     recover_manifest_owner_admission_retry_v1, AdmittedCompositionV1, PluginRegistry,
