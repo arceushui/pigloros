@@ -201,7 +201,11 @@ impl InstalledPluginFactoryV1 for EntityStatePlugin {
 
 fn admitted_fixture(
     configuration: FixtureConfiguration,
-) -> (HostProjectionProviderV1, RecordedConsumerV1, Arc<AtomicUsize>) {
+) -> (
+    HostProjectionProviderV1,
+    RecordedConsumerV1,
+    Arc<AtomicUsize>,
+) {
     let builds = Arc::clone(&configuration.builds);
     let mut provider = HostProjectionProviderV1::default();
     let consumer = test_ok(provider.admit_fixture::<CountingPlugin>(Arc::new(configuration)));

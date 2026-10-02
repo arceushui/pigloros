@@ -15,8 +15,8 @@ use pos_core::{
     plugin::{Capability, Plugin},
 };
 use pos_runtime::{
-    Driver, InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1, ObservationView,
-    RuntimeError, StepOutput,
+    Driver, InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1,
+    ObservationView, RuntimeError, StepOutput,
 };
 use serde::{Deserialize, Serialize};
 

@@ -131,11 +131,7 @@ fn candidate_fold_equals_the_live_registry_fold() {
         "counting",
         Box::new(CountingReducer),
     ));
-    test_ok(live.register_installed_reducer(
-        typed.plugin_id(),
-        "typed",
-        Box::new(LastTypeReducer),
-    ));
+    test_ok(live.register_installed_reducer(typed.plugin_id(), "typed", Box::new(LastTypeReducer)));
     live.fold_events(timeline, &events);
 
     let mut candidate = candidate_for(counting, typed);
