@@ -10025,8 +10025,17 @@ fn with_fork_authority_transaction<T>(
 /// `Unchanged` it stays `Unchanged`. An exact retry is therefore answered from
 /// one committed read without taking the write lock (#491). Any other outcome,
 /// including an error, is decided again under `BEGIN IMMEDIATE`, and only a
-/// `Committed` outcome rewrites the authority state there. Other connections
-/// sharing the file thus observe no `PRAGMA data_version` change for a replay.
+/// `Committed` outcome rewrites the authority state there.
+///
+/// Before #491 every outcome rewrote the state. That never failed another
+/// connection closed: the canonical bytes were identical, `SQLite` wrote no
+/// page, and `PRAGMA data_version` did not move. The real cost was write-lock
+/// contention, since each replay waited up to the 4 s busy timeout behind
+/// another writer and then failed as `Unavailable`.
+///
+/// A read-only store answers an exact retry as `Unchanged`, because no write is
+/// needed; any mutation that must write still fails. A first-time record pays
+/// one extra read and decode of the authority state before the locked path.
 fn commit_authority_mutation(
     conn: &Connection,
     mutate: impl Fn(
@@ -10063,6 +10072,7 @@ fn authority_mutation_is_unchanged(
         &mut AuthorityPersistenceStateV1,
     ) -> Result<AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1>,
 ) -> bool {
+    // A failed or malformed read deliberately falls through to the locked path.
     conn.is_autocommit()
         && read_authority_state(conn).and_then(|mut state| mutate(&mut state))
             == Ok(AuthorityCommitOutcomeV1::Unchanged)

@@ -732,3 +732,34 @@ fn a_sqlite_store_inside_a_transaction_still_refuses_an_unchanged_replay() {
         persisted
     );
 }
+
+#[test]
+fn a_read_only_sqlite_store_answers_an_exact_retry_but_refuses_a_new_record() {
+    let grants = Grants::new();
+    let directory = ok(tempdir());
+    let path = directory.path().join("replay-read-only.db");
+    let current = view(&grants, &[], &grants.child);
+    let persisted = ok(host(&grants).persist_authority(&mut open_file(&path), &current));
+
+    let authority = host(&grants);
+    let mut read_only = ok(SqliteStore::open_read_only(
+        path.to_str().unwrap_or_default(),
+    ));
+    // An exact retry needs no write, so even a read-only store answers it.
+    assert_eq!(
+        ok(authority.persist_authority(&mut read_only, &current)),
+        persisted
+    );
+    // A record the file lacks must be written and fails closed.
+    assert_eq!(
+        authority.persist_authority(
+            &mut read_only,
+            &view(&grants, &[&grants.sibling], &grants.child)
+        ),
+        Err(AuthorityPersistenceErrorV1::Unavailable)
+    );
+    assert_eq!(
+        ok(read_only.load_authority(grants.child.grant_id())),
+        persisted
+    );
+}
