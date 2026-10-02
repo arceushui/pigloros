@@ -42,6 +42,7 @@ pub mod fork_manifest_publication;
 pub mod memory;
 pub mod stitch;
 mod timeline_range;
+pub mod trusted_clock;
 
 pub use fork_admission_authority::{
     ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
