@@ -12,7 +12,7 @@ use pos_core::{
     event::{CanonicalBytes, Event, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentGrantedV1,
-    ConsentRevokedV1, Plugin, PluginId, ProposedAction, Reducer, State,
+    ConsentRevokedV1, ErasureContainmentGateV1, Plugin, PluginId, ProposedAction, Reducer, State,
     EVENT_TYPE_CONSENT_REVOKED_V1, GEOGRAPHIC_EVENT_TYPE, HOST_CONSENT_CLOSED_EVENT_TYPE,
 };
 use pos_runtime::{
@@ -37,7 +37,7 @@ const REJECTED: &str = "staged.rejected";
 
 fn test_ok<T, E: Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
+        std::panic::panic_any(format!("unexpected fixture error: {error:?}"))
     })
 }
 
@@ -224,7 +224,7 @@ fn admitted_fixture(
 }
 
 fn test_some<T>(value: Option<T>) -> T {
-    value.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
+    value.unwrap_or_else(|| std::panic::panic_any("missing fixture value"))
 }
 
 fn count_of(state: Option<&State>) -> Option<u64> {
@@ -445,10 +445,15 @@ fn revocation(subject: EntityId, seq: u64) -> Event {
 
 /// One live `PluginRegistry::fold_events` over `events`, read for `subject`
 /// through the consent-authorized projection path.
+///
+/// A default registry keeps its erasure containment fail-closed, so the
+/// fixture binds the open test gate before any projection read.
 fn live_fold_state(timeline: TimelineId, subject: EntityId, events: &[Event]) -> Option<State> {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
-    let mut live = PluginRegistry::new().with_consent_authority(authority);
+    let mut live = PluginRegistry::new()
+        .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
+        .with_consent_authority(authority);
     let plugin = CountingPlugin {
         id: PluginId::new(),
     };
