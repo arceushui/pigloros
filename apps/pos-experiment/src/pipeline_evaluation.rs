@@ -308,12 +308,12 @@ impl PipelineEvaluatorV1 for CalibrationReportEvaluatorV1 {
 
 /// Evaluators a host registered explicitly for one session.
 #[derive(Default)]
-pub(super) struct PipelineEvaluatorRegistryV1 {
+pub(crate) struct PipelineEvaluatorRegistryV1 {
     evaluators: BTreeMap<&'static str, Box<dyn PipelineEvaluatorV1>>,
 }
 
 /// One admitted evaluation request, ready for the host to read its inputs.
-pub(super) struct PreparedPipelineEvaluationV1<'a> {
+pub(crate) struct PreparedPipelineEvaluationV1<'a> {
     evaluator: &'a dyn PipelineEvaluatorV1,
     evidence: &'a PipelineCommitEvidenceV1,
     claim: &'a ReplayClaimEvaluationV1,
@@ -321,7 +321,7 @@ pub(super) struct PreparedPipelineEvaluationV1<'a> {
 
 impl PipelineEvaluatorRegistryV1 {
     /// Register one evaluator; a duplicate name is refused.
-    pub(super) fn register(&mut self, evaluator: Box<dyn PipelineEvaluatorV1>) -> bool {
+    pub(crate) fn register(&mut self, evaluator: Box<dyn PipelineEvaluatorV1>) -> bool {
         match self.evaluators.entry(evaluator.name()) {
             std::collections::btree_map::Entry::Occupied(_) => false,
             std::collections::btree_map::Entry::Vacant(slot) => {
@@ -332,13 +332,23 @@ impl PipelineEvaluatorRegistryV1 {
     }
 
     /// Resolve the evaluator and check that the evidence permits its scope.
-    pub(super) fn prepare<'a>(
+    ///
+    /// A refusal is returned as the boxed unavailable record.
+    pub(crate) fn prepare<'a>(
         &'a self,
         name: &'static str,
         evidence: &'a PipelineCommitEvidenceV1,
         claim: &'a ReplayClaimEvaluationV1,
-    ) -> Result<PreparedPipelineEvaluationV1<'a>, PipelineEvaluationRecordV1> {
-        let refuse = |reason| Err(record(name, evidence, None, claim, unavailable(reason)));
+    ) -> Result<PreparedPipelineEvaluationV1<'a>, Box<PipelineEvaluationRecordV1>> {
+        let refuse = |reason| {
+            Err(Box::new(record(
+                name,
+                evidence,
+                None,
+                claim,
+                unavailable(reason),
+            )))
+        };
         let Some(evaluator) = self.evaluators.get(name) else {
             return refuse(PipelineEvaluationUnavailableV1::MissingEvaluator);
         };
@@ -374,12 +384,12 @@ impl PreparedPipelineEvaluationV1<'_> {
     }
 
     /// The last Event of the folded prefix this evaluation reads, if any.
-    pub(super) fn folded_through(&self) -> Option<Seq> {
+    pub(crate) fn folded_through(&self) -> Option<Seq> {
         self.cut().map(PipelineProjectionCutV1::folded_through)
     }
 
     /// Run the evaluator over host-read inputs and classify its output.
-    pub(super) fn run(
+    pub(crate) fn run(
         self,
         committed_events: &[Event],
         folded_prefix: &[Event],

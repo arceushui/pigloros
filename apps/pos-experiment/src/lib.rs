@@ -11,7 +11,9 @@
 
 include!("host_store.rs");
 
-mod pipeline_evaluation;
+// Public module reachability keeps the crate-only evaluator registry
+// compatible with both `unreachable_pub` and Clippy's `redundant_pub_crate`.
+pub mod pipeline_evaluation;
 
 pub use pipeline_evaluation::{
     CalibrationReportEvaluatorV1, CommittedRangeIntegrityEvaluatorV1, PipelineEvaluationClassV1,
@@ -2168,7 +2170,7 @@ impl ExperimentSession {
         self.pipeline_evaluators
             .prepare(evaluator, evidence, claim)
             .map_or_else(
-                |record| Ok(Some(record)),
+                |record| Ok(Some(*record)),
                 |prepared| {
                     self.read_evaluation_inputs(
                         evidence.committed_range(),
