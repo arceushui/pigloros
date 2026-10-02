@@ -37,11 +37,11 @@ forbid_header() {
   sed -n '/^#!\[forbid($/,/^)\]$/p' "$1"
 }
 
-for threshold in $(grep -E '^[a-z-]+-threshold = ' clippy.toml | tr -d ' '); do
+while IFS= read -r threshold; do
   if ! tr -d ' ' <"$canonical" | grep -qxF -- "$threshold"; then
     fail "$canonical does not copy root setting $threshold"
   fi
-done
+done < <(grep -E '^[a-z-]+-threshold = ' clippy.toml | tr -d ' ')
 
 header="$(forbid_header plugins/agent/src/reducer.rs)"
 for lint in disallowed_methods disallowed_types disallowed_macros print_stdout print_stderr \
@@ -165,18 +165,20 @@ pub use reducer::FieldReducer;" 'pub struct FieldReducer(pub u8);
 
 const _: () = assert!(core::mem::size_of::<FieldReducer>() == 0);'
 
-write_crate '#![expect(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    reason = "ADR-113 §7: the disallowed lists apply only inside reducer.rs"
-)]
-
-mod reducer;
+write_crate 'mod reducer;
 
 pub use reducer::GuardReducer;
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "ADR-113 §7: the disallowed lists apply only inside reducer.rs"
+)]
 pub static CELL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "ADR-113 §7: the disallowed lists apply only inside reducer.rs"
+)]
 pub fn effect() {
     let _ = std::fs::write("guard", b"x");
 }' "$clean_reducer"

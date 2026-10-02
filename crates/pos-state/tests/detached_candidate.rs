@@ -111,10 +111,17 @@ fn candidate_for(
     counting: RecordedConsumerV1,
     typed: RecordedConsumerV1,
 ) -> DetachedProjectionCandidateV1 {
-    let mut candidate = DetachedProjectionCandidateV1::default();
-    test_ok(candidate.push_reducer(counting, Box::new(CountingReducer)));
-    test_ok(candidate.push_reducer(typed, Box::new(LastTypeReducer)));
-    candidate
+    test_ok(DetachedProjectionCandidateV1::from_reducers(vec![
+        built(counting, CountingReducer),
+        built(typed, LastTypeReducer),
+    ]))
+}
+
+fn built(
+    consumer: RecordedConsumerV1,
+    reducer: impl Reducer + 'static,
+) -> (RecordedConsumerV1, Box<dyn Reducer>) {
+    (consumer, Box::new(reducer))
 }
 
 #[test]
@@ -171,17 +178,30 @@ fn candidates_own_independent_ordered_reducer_state() {
 }
 
 #[test]
-fn a_consumer_cannot_be_pushed_twice() {
-    let counting = consumer(5);
-    let mut candidate = DetachedProjectionCandidateV1::default();
-    test_ok(candidate.push_reducer(counting, Box::new(CountingReducer)));
+fn a_consumer_cannot_be_assembled_twice() {
+    let (counting, typed) = (consumer(5), consumer(8));
     let duplicate = RecordedConsumerV1::new(counting.plugin_id(), Hash::from_bytes([6; 32]));
+    let repeated_later = DetachedProjectionCandidateV1::from_reducers(vec![
+        built(counting, CountingReducer),
+        built(typed, LastTypeReducer),
+        built(duplicate, LastTypeReducer),
+    ]);
+    let repeated_adjacent = DetachedProjectionCandidateV1::from_reducers(vec![
+        built(typed, LastTypeReducer),
+        built(counting, CountingReducer),
+        built(duplicate, LastTypeReducer),
+    ]);
+    let mismatch = Some(ProjectionCandidateErrorV1::ConsumerSetMismatch);
+    assert_eq!(repeated_later.err(), mismatch);
+    assert_eq!(repeated_adjacent.err(), mismatch);
 
-    assert_eq!(
-        candidate.push_reducer(duplicate, Box::new(LastTypeReducer)),
-        Err(ProjectionCandidateErrorV1::ConsumerSetMismatch)
-    );
-    assert_eq!(candidate.consumers(), vec![counting]);
+    let distinct = test_ok(DetachedProjectionCandidateV1::from_reducers(vec![
+        built(typed, LastTypeReducer),
+        built(counting, CountingReducer),
+    ]));
+    assert_eq!(distinct.consumers(), vec![typed, counting]);
+    let empty = test_ok(DetachedProjectionCandidateV1::from_reducers(Vec::new()));
+    assert!(empty.consumers().is_empty());
 }
 
 /// A provider is object-safe and is held as a shared trait object.

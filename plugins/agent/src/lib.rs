@@ -1,11 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
-#![expect(
-    clippy::disallowed_types,
-    reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
-              the fixture provider's call counter uses an atomic"
-)]
 
 //! `pos-plugin-agent` — AI-agent entity plugin with swappable `AgentPolicy`.
 //!

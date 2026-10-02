@@ -91,37 +91,39 @@ impl CandidateSlotV1 {
 /// with their own State maps and no reference to a visible registry.
 ///
 /// Its reducer instances are never exposed; only bounded State reads are.
-/// A provider starts from [`Default`] and appends one freshly built reducer
-/// per recorded consumer with [`Self::push_reducer`].
+/// A provider assembles it with [`Self::from_reducers`] from one freshly
+/// built reducer per recorded consumer; [`Default`] is the empty candidate.
 #[derive(Default)]
 pub struct DetachedProjectionCandidateV1 {
     slots: Vec<CandidateSlotV1>,
 }
 
 impl DetachedProjectionCandidateV1 {
-    /// Append the freshly built reducer of the next recorded consumer.
+    /// Assemble a candidate from one freshly built reducer per recorded
+    /// consumer, in recorded order.
     ///
     /// # Errors
-    /// Returns [`ProjectionCandidateErrorV1::ConsumerSetMismatch`] without
-    /// changing the candidate when the consumer's Plugin is already present.
-    pub fn push_reducer(
-        &mut self,
-        consumer: RecordedConsumerV1,
-        reducer: Box<dyn Reducer>,
-    ) -> Result<(), ProjectionCandidateErrorV1> {
-        if self
-            .slots
-            .iter()
-            .any(|slot| slot.consumer.plugin_id == consumer.plugin_id)
-        {
-            return Err(ProjectionCandidateErrorV1::ConsumerSetMismatch);
-        }
-        self.slots.push(CandidateSlotV1 {
-            consumer,
-            reducer,
-            registry: StateRegistry::new(),
+    /// Returns [`ProjectionCandidateErrorV1::ConsumerSetMismatch`] when two
+    /// entries name the same Plugin.
+    pub fn from_reducers(
+        reducers: Vec<(RecordedConsumerV1, Box<dyn Reducer>)>,
+    ) -> Result<Self, ProjectionCandidateErrorV1> {
+        let slots: Vec<CandidateSlotV1> = reducers
+            .into_iter()
+            .map(|(consumer, reducer)| CandidateSlotV1 {
+                consumer,
+                reducer,
+                registry: StateRegistry::new(),
+            })
+            .collect();
+        let repeated = slots.iter().enumerate().any(|(index, slot)| {
+            slots[..index]
+                .iter()
+                .any(|earlier| earlier.consumer.plugin_id == slot.consumer.plugin_id)
         });
-        Ok(())
+        (!repeated)
+            .then_some(Self { slots })
+            .ok_or(ProjectionCandidateErrorV1::ConsumerSetMismatch)
     }
 
     /// The recorded consumers of this candidate, in fold order.

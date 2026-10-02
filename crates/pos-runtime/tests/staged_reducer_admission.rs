@@ -1,14 +1,19 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 //! Staged Reducer admission and fresh per-candidate builds (ADR-113 §1;
 //! acceptance cases 1, 14 and 25).
+//!
+//! The provider under test is standalone: it is not yet bound to the live
+//! `PluginRegistry`, so case 14 compares two independent folds of the same
+//! Event range rather than a candidate opened from the live registry.
 
 use pos_core::{
     clock::{Seq, WallTime},
     crypto::Hash,
     event::{CanonicalBytes, Event, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
-    ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentGrantedV1, Plugin,
-    PluginId, ProposedAction, Reducer, State, HOST_CONSENT_CLOSED_EVENT_TYPE,
+    ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentGrantedV1,
+    ConsentRevokedV1, Plugin, PluginId, ProposedAction, Reducer, State,
+    EVENT_TYPE_CONSENT_REVOKED_V1, GEOGRAPHIC_EVENT_TYPE, HOST_CONSENT_CLOSED_EVENT_TYPE,
 };
 use pos_runtime::{
     fold_detached_candidate_v1, HostProjectionProviderV1, InstalledPluginFactoryV1,
@@ -28,6 +33,7 @@ use std::{
 };
 
 const COUNTED: &str = "staged.counted";
+const REJECTED: &str = "staged.rejected";
 
 fn test_ok<T, E: Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
@@ -53,11 +59,16 @@ fn event(entity: EntityId, event_type: &str, seq: u64) -> Event {
     }
 }
 
+/// Counts every projected Event and rejects one Event type (ADR-090).
 struct CountingReducer;
 
 impl Reducer for CountingReducer {
     fn initial(&self) -> State {
         State::new()
+    }
+
+    fn projects_event(&self, event: &Event) -> bool {
+        event.event_type.as_str() != REJECTED
     }
 
     fn apply(&self, state: &mut State, _event: &Event) {
@@ -345,7 +356,9 @@ fn one_plugin_identity_is_admitted_once() {
 }
 
 /// Acceptance case 1: a reducer registered outside the catalogue is not
-/// admitted, and the plan fails before any callback.
+/// admitted, and the plan fails before any callback. The admitted consumer
+/// comes first in the plan, so an unchanged build counter proves the whole
+/// plan is resolved before any factory is built for the candidate.
 #[test]
 fn effectful_reducer_registered_outside_the_catalogue_is_not_admitted() {
     let counter = Arc::new(AtomicU64::new(0));
@@ -363,6 +376,7 @@ fn effectful_reducer_registered_outside_the_catalogue_is_not_admitted() {
         consumer,
         RecordedConsumerV1::new(outside.id, consumer.reducer_identity()),
     ];
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
 
     assert_eq!(
         provider.open_candidate(&plan).err(),
@@ -374,6 +388,12 @@ fn effectful_reducer_registered_outside_the_catalogue_is_not_admitted() {
 }
 
 /// Acceptance case 25: `EntityStateProjection` is never admitted.
+///
+/// `HostProjectionProviderV1` is standalone in this change: it is not yet
+/// linked to the live `PluginRegistry`, so registering the bare projection
+/// there cannot admit it. The evidence is the provider's own reviewed
+/// admission list, which refuses the factory carrying the projection, and
+/// the resulting `NotAdmitted` when a plan names its Plugin.
 #[test]
 fn entity_state_projection_is_not_admitted() {
     let bare = EntityStatePlugin {
@@ -381,9 +401,13 @@ fn entity_state_projection_is_not_admitted() {
     };
     let mut registry = PluginRegistry::new();
     test_ok(registry.register_generated(&bare, Some(Box::new(EntityStateProjection)), None));
-    let (provider, consumer, _) = admitted_fixture(FixtureConfiguration::default());
+    let (mut provider, consumer, _) = admitted_fixture(FixtureConfiguration::default());
     let named = RecordedConsumerV1::new(bare.id, consumer.reducer_identity());
 
+    assert_eq!(
+        provider.admit::<EntityStatePlugin>(Arc::new(())),
+        Err(StagedReducerAdmissionErrorV1::NotReviewed)
+    );
     assert_eq!(
         provider.open_candidate(&[named]).err(),
         Some(ProjectionCandidateErrorV1::NotAdmitted)
@@ -405,12 +429,23 @@ fn grant(subject_id: EntityId) -> ConsentGrantedV1 {
     }
 }
 
-/// Acceptance case 14 for the host filter: a candidate folded through the
-/// host fold equals `PluginRegistry::fold_events` on the same range.
-#[test]
-fn candidate_fold_matches_the_live_plugin_registry_fold() {
-    let timeline = TimelineId::new();
-    let subject = EntityId::new();
+fn revocation(subject: EntityId, seq: u64) -> Event {
+    let mut revoked = event(subject, EVENT_TYPE_CONSENT_REVOKED_V1, seq);
+    revoked.payload = test_ok(
+        ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
+            fence_seq: seq,
+        }
+        .encode(),
+    );
+    revoked
+}
+
+/// One live `PluginRegistry::fold_events` over `events`, read for `subject`
+/// through the consent-authorized projection path.
+fn live_fold_state(timeline: TimelineId, subject: EntityId, events: &[Event]) -> Option<State> {
     let authority = ConsentAuthority::new();
     let token = authority.record_grant_on_timeline(timeline, &grant(subject));
     let mut live = PluginRegistry::new().with_consent_authority(authority);
@@ -418,30 +453,58 @@ fn candidate_fold_matches_the_live_plugin_registry_fold() {
         id: PluginId::new(),
     };
     test_ok(live.register_generated(&plugin, Some(Box::new(CountingReducer)), None));
+    live.fold_events(timeline, events);
+    let head = Seq::from_u64(u64::try_from(events.len()).unwrap_or(u64::MAX));
+    let projections =
+        test_ok(live.into_authorized_projections(timeline, head, 1, Some(&token), None));
+    test_ok(projections.state_for_reducer(timeline, plugin.name(), &subject))
+}
+
+/// Acceptance case 14: a candidate folded through the host fold equals
+/// `PluginRegistry::fold_events` on the same range, across every filtering
+/// branch: a host consent-closed marker, a non-revocation consent Event, a
+/// geographic Event, an Event the reducer's `projects_event` rejects, and a
+/// `consent.revoked.v1` for a subject that already holds State.
+#[test]
+fn candidate_fold_matches_the_live_plugin_registry_fold() {
+    let timeline = TimelineId::new();
+    let (kept, revoked) = (EntityId::new(), EntityId::new());
     let (provider, consumer, _) = admitted_fixture(FixtureConfiguration::default());
     let events = [
-        event(subject, COUNTED, 1),
-        event(subject, COUNTED, 2),
-        event(subject, HOST_CONSENT_CLOSED_EVENT_TYPE, 3),
-        event(subject, "consent.granted.v1", 4),
+        event(kept, COUNTED, 1),
+        event(revoked, COUNTED, 2),
+        event(revoked, COUNTED, 3),
+        event(kept, REJECTED, 4),
+        event(kept, GEOGRAPHIC_EVENT_TYPE, 5),
+        event(kept, HOST_CONSENT_CLOSED_EVENT_TYPE, 6),
+        event(kept, "consent.granted.v1", 7),
+        revocation(revoked, 8),
+        event(kept, COUNTED, 9),
     ];
 
-    live.fold_events(timeline, &events);
     let mut candidate = test_ok(provider.open_candidate(&[consumer]));
     fold_detached_candidate_v1(&mut candidate, &events);
-    let projections = test_ok(live.into_authorized_projections(
-        timeline,
-        Seq::from_u64(4),
-        1,
-        Some(&token),
-        None,
-    ));
-    let expected = test_ok(projections.state_for_reducer(timeline, plugin.name(), &subject));
+    let expected_kept = live_fold_state(timeline, kept, &events);
+    let expected_revoked = live_fold_state(timeline, revoked, &events);
 
-    assert_eq!(count_of(expected.as_ref()), Some(2));
+    assert_eq!(count_of(expected_kept.as_ref()), Some(2));
+    assert_eq!(expected_revoked, None);
     assert_eq!(
-        candidate.state_for(consumer.plugin_id(), &subject),
-        expected.as_ref()
+        candidate.state_for(consumer.plugin_id(), &kept),
+        expected_kept.as_ref()
+    );
+    assert_eq!(
+        candidate.state_for(consumer.plugin_id(), &revoked),
+        expected_revoked.as_ref()
+    );
+    let prefix = &events[..3];
+    let mut before_revocation = test_ok(provider.open_candidate(&[consumer]));
+    fold_detached_candidate_v1(&mut before_revocation, prefix);
+    let revoked_prior = live_fold_state(timeline, revoked, prefix);
+    assert_eq!(count_of(revoked_prior.as_ref()), Some(2));
+    assert_eq!(
+        before_revocation.state_for(consumer.plugin_id(), &revoked),
+        revoked_prior.as_ref()
     );
 }
 

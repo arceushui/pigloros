@@ -216,6 +216,10 @@ static GENERATED_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDesc
     source_files: &[],
 };
 
+// Size note: this bundle is the largest one. At ADR-113 it leaves only about
+// 190 bytes of headroom under `MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1`,
+// so any growth of the gateway sources or `plugins/world/src/lib.rs` can push
+// the implementation artifact over the limit.
 static GATEWAY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "gateway-world-actions",

@@ -305,12 +305,12 @@ impl ProtectedProjectionProviderV1 for HostProjectionProviderV1 {
         recorded_consumers: &[RecordedConsumerV1],
     ) -> Result<DetachedProjectionCandidateV1, ProjectionCandidateErrorV1> {
         let entries = self.admitted_set(recorded_consumers)?;
-        let mut candidate = DetachedProjectionCandidateV1::default();
-        for entry in entries {
-            let reducer = (entry.build)().ok_or(ProjectionCandidateErrorV1::PluginMismatch)?;
-            candidate.push_reducer(entry.consumer, reducer)?;
-        }
-        Ok(candidate)
+        entries
+            .into_iter()
+            .map(|entry| (entry.build)().map(|reducer| (entry.consumer, reducer)))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(ProjectionCandidateErrorV1::PluginMismatch)
+            .and_then(DetachedProjectionCandidateV1::from_reducers)
     }
 }
 

@@ -1,11 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
-#![expect(
-    clippy::disallowed_types,
-    reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
-              the Driver's static subscription list uses a `OnceLock`"
-)]
 
 //! `pos-plugin-world` — spatial + embodiment plugin with an installed Live backend.
 //!
@@ -1895,6 +1890,10 @@ impl Driver for WorldDriver {
     }
 
     fn event_subscriptions(&self) -> &[Kind] {
+        #[expect(
+            clippy::disallowed_types,
+            reason = "ADR-113 §7 applies in reducer.rs only"
+        )]
         static SUBSCRIPTIONS: std::sync::OnceLock<Vec<Kind>> = std::sync::OnceLock::new();
         SUBSCRIPTIONS.get_or_init(|| {
             vec![
@@ -2001,6 +2000,10 @@ impl Driver for WorldDriver {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[expect(
+    clippy::disallowed_types,
+    reason = "ADR-113 §7 applies in reducer.rs only"
+)]
 mod tests {
 
     trait TestValueExt<T> {
