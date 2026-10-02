@@ -17,32 +17,24 @@ use pos_core::{
 use pos_plugin_eval::{
     EvalDerivationConfigV1, EvalDerivationDriver, EvalDiagnosticsV1,
     EvalIntegrityFindingKindV1::{
-        self, InvalidPrediction, MissingOutcome, OrphanOutcome, UndecodableSource,
+        InvalidPrediction, MissingOutcome, OrphanOutcome, UndecodableSource,
         UnsupportedSourceVersion,
     },
-    EvalIntegrityFindingV1, EvalPlugin, EvalReducer, OutcomeEvidenceV1, OutcomePayload,
-    PredictionPayload, EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
+    EvalPlugin, EvalReducer, OutcomeEvidenceV1, OutcomePayload, PredictionPayload,
+    EVENT_TYPE_OUTCOME, EVENT_TYPE_PREDICTION,
 };
-use pos_plugin_persona::{
-    draft_prediction_source, PredictionOutcomeV1, PredictionSourceV1, EVENT_TYPE_PREDICTION_SOURCE,
-};
+use pos_plugin_persona::{draft_prediction_source, PredictionOutcomeV1};
 use pos_runtime::{
     Driver, InstalledOutputPolicySourceV1, LocalScheduledAdmissionHostV1, ObservationView,
     OutputPolicyBindingV1, PluginRegistry, RuntimeError, ScheduledAdmissionStoreV1, StepOutput,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
-trait TestValueExt<T> {
-    fn test_ok(self) -> T;
-}
+pub mod common;
 
-impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
-    fn test_ok(self) -> T {
-        self.unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("unexpected seam error: {error:?}")))
-        })
-    }
-}
+use common::{
+    envelope_only, finding, naming_drafts, raw_source, unreadable, TestOptionExt, TestValueExt,
+};
 
 fn stores() -> Vec<(&'static str, Box<dyn ScheduledAdmissionStoreV1>)> {
     let mut stores: Vec<(&'static str, Box<dyn ScheduledAdmissionStoreV1>)> = vec![
@@ -216,45 +208,6 @@ fn events(store: &dyn ScheduledAdmissionStoreV1, timeline: TimelineId) -> Vec<Ev
     store.read(timeline, SeqRange::all()).test_ok()
 }
 
-fn encoded<T: serde::Serialize>(payload: &T) -> CanonicalBytes {
-    let mut buf = Vec::new();
-    ciborium::into_writer(payload, &mut buf).test_ok();
-    CanonicalBytes::from_vec(buf)
-}
-
-fn source_draft(entity: EntityId, payload: CanonicalBytes) -> EventDraft {
-    EventDraft::new(entity, Kind::new(EVENT_TYPE_PREDICTION_SOURCE), payload)
-}
-
-fn raw_source(
-    entity: EntityId,
-    version: u32,
-    predicted_prob: f64,
-    outcome: PredictionOutcomeV1,
-) -> EventDraft {
-    source_draft(
-        entity,
-        encoded(&PredictionSourceV1 {
-            version,
-            predicted_prob,
-            outcome,
-        }),
-    )
-}
-
-/// A readable envelope and version with no prediction fields.
-fn envelope_only(entity: EntityId, version: u32) -> EventDraft {
-    #[derive(serde::Serialize)]
-    struct Envelope {
-        version: u32,
-    }
-    source_draft(entity, encoded(&Envelope { version }))
-}
-
-fn unreadable(entity: EntityId) -> EventDraft {
-    source_draft(entity, CanonicalBytes::from_vec(vec![0xff]))
-}
-
 fn ids(
     store: &mut dyn ScheduledAdmissionStoreV1,
     timeline: TimelineId,
@@ -266,10 +219,6 @@ fn ids(
         .iter()
         .map(|event| event.id)
         .collect()
-}
-
-const fn finding(source: EventId, kind: EvalIntegrityFindingKindV1) -> EvalIntegrityFindingV1 {
-    EvalIntegrityFindingV1 { source, kind }
 }
 
 /// Committed `eval.*` Events caused by `source`, by type.
@@ -286,18 +235,6 @@ fn eval_drafts(types: &[String]) -> usize {
         .iter()
         .filter(|event_type| event_type.starts_with("eval."))
         .count()
-}
-
-/// Every pass yields at most one finding per source.
-fn assert_one_finding_per_source(findings: &[EvalIntegrityFindingV1], name: &str) {
-    let mut sources: Vec<EventId> = findings.iter().map(|finding| finding.source).collect();
-    sources.sort_unstable_by_key(ToString::to_string);
-    sources.dedup();
-    assert_eq!(
-        sources.len(),
-        findings.len(),
-        "{name}: one finding per source"
-    );
 }
 
 #[test]
@@ -340,7 +277,8 @@ fn each_bad_eligible_source_is_quarantined_while_the_pass_commits_and_recurs() {
         );
         assert_eq!(
             derived_for(&history, sources[5]),
-            vec![EVENT_TYPE_PREDICTION]
+            vec![EVENT_TYPE_PREDICTION],
+            "{name}"
         );
         let quarantined = vec![
             finding(sources[1], UndecodableSource),
@@ -440,7 +378,8 @@ fn a_later_mapping_derives_a_quarantined_source_exactly_once() {
         let mut pinned = open_registry(&authority, mapping(64, &[1]), &diagnostics);
         assert_eq!(
             eval_drafts(&pass(&mut pinned, store.as_mut(), timeline, &token)),
-            2
+            2,
+            "{name}"
         );
         assert_eq!(
             diagnostics.findings(),
@@ -452,12 +391,14 @@ fn a_later_mapping_derives_a_quarantined_source_exactly_once() {
         let mut later = open_registry(&authority, mapping(64, &[1, 2]), &diagnostics);
         assert_eq!(
             eval_drafts(&pass(&mut later, store.as_mut(), timeline, &token)),
-            2
+            2,
+            "{name}"
         );
         assert!(diagnostics.findings().is_empty(), "{name}");
         assert_eq!(
             eval_drafts(&pass(&mut later, store.as_mut(), timeline, &token)),
-            0
+            0,
+            "{name}"
         );
         assert!(diagnostics.decoded_sources().is_empty(), "{name}");
 
@@ -477,7 +418,11 @@ fn a_later_mapping_derives_a_quarantined_source_exactly_once() {
             })
             .test_ok_option();
         assert!(!outcome.outcome, "{name}");
-        assert_eq!(outcome.evidence, Some(OutcomeEvidenceV1::PredictorSupplied));
+        assert_eq!(
+            outcome.evidence,
+            Some(OutcomeEvidenceV1::PredictorSupplied),
+            "{name}"
+        );
     }
 }
 
@@ -500,7 +445,8 @@ fn a_mapping_rollback_records_findings_only_and_never_rederives() {
         let mut pinned = open_registry(&authority, mapping(64, &[1]), &diagnostics);
         assert_eq!(
             eval_drafts(&pass(&mut pinned, store.as_mut(), timeline, &token)),
-            3
+            3,
+            "{name}"
         );
         let eligible = ids(
             store.as_mut(),
@@ -529,7 +475,11 @@ fn a_mapping_rollback_records_findings_only_and_never_rederives() {
             "{name}"
         );
         // The complete pair is never decoded and records nothing.
-        assert_eq!(diagnostics.decoded_sources(), vec![derived[1], eligible]);
+        assert_eq!(
+            diagnostics.decoded_sources(),
+            vec![derived[1], eligible],
+            "{name}"
+        );
         let history = events(store.as_ref(), timeline);
         assert_eq!(derived_for(&history, derived[0]).len(), 2, "{name}");
         assert_eq!(derived_for(&history, derived[1]).len(), 1, "{name}");
@@ -537,32 +487,11 @@ fn a_mapping_rollback_records_findings_only_and_never_rederives() {
     }
 }
 
-/// Append Eval records naming `source`, as an earlier pass would have.
-fn name_source(
-    store: &mut dyn ScheduledAdmissionStoreV1,
-    timeline: TimelineId,
-    source: EventId,
-    prediction: bool,
-    outcome: bool,
-) {
-    let prediction_id = format!("eval:src:{source}");
-    let entity = EntityId::new();
-    let mut drafts = Vec::new();
-    if prediction {
-        let mut draft = pos_plugin_eval::draft_prediction(entity, "injected", 0.5, &prediction_id);
-        draft.causation_id = Some(source);
-        drafts.push(draft);
-    }
-    if outcome {
-        let mut draft = pos_plugin_eval::draft_outcome(entity, &prediction_id, true);
-        draft.causation_id = Some(source);
-        drafts.push(draft);
-    }
-    store.append(timeline, &drafts).test_ok();
-}
-
+/// The host commits a pass whose only Eval output is diagnostics, and
+/// publishes which sources it decoded. The full precedence scenario is a
+/// pure-function test in `derivation.rs`.
 #[test]
-fn precedence_gives_one_outcome_per_source_and_decodes_only_awaiting_predictions() {
+fn the_host_publishes_partial_pair_findings_and_the_decoded_sources() {
     for (name, mut store) in stores() {
         let timeline = store.create_timeline("precedence").test_ok().id();
         let entity = EntityId::new();
@@ -571,21 +500,19 @@ fn precedence_gives_one_outcome_per_source_and_decodes_only_awaiting_predictions
             store.as_mut(),
             timeline,
             &[
-                // An orphan outcome wins and needs no decode.
                 unreadable(entity),
-                // A complete pair is never decoded.
                 unreadable(entity),
                 raw_source(entity, 1, 0.5, PredictionOutcomeV1::Observed(true)),
-                raw_source(entity, 1, 0.5, PredictionOutcomeV1::Absent),
-                unreadable(entity),
-                // Check 4 applies only to eligible sources.
-                raw_source(entity, 1, f64::NAN, PredictionOutcomeV1::Absent),
             ],
         );
-        name_source(store.as_mut(), timeline, sources[0], false, true);
-        name_source(store.as_mut(), timeline, sources[1], true, true);
-        for awaiting in &sources[2..] {
-            name_source(store.as_mut(), timeline, *awaiting, true, false);
+        for (source, prediction, outcome) in [
+            (sources[0], false, true),
+            (sources[1], true, true),
+            (sources[2], true, false),
+        ] {
+            store
+                .append(timeline, &naming_drafts(source, prediction, outcome))
+                .test_ok();
         }
         let token = persona_token(&authority, timeline, entity);
         let diagnostics = EvalDiagnosticsV1::default();
@@ -594,22 +521,16 @@ fn precedence_gives_one_outcome_per_source_and_decodes_only_awaiting_predictions
         let committed = pass(&mut registry, store.as_mut(), timeline, &token);
 
         assert_eq!(committed, vec!["witness.tick".to_owned()], "{name}");
-        let findings = diagnostics.findings();
         assert_eq!(
-            findings,
+            diagnostics.findings(),
             vec![
                 finding(sources[0], OrphanOutcome),
                 finding(sources[2], MissingOutcome),
-                finding(sources[4], UndecodableSource),
             ],
             "{name}"
         );
-        assert_one_finding_per_source(&findings, name);
-        assert_eq!(
-            diagnostics.decoded_sources(),
-            sources[2..].to_vec(),
-            "{name}"
-        );
+        // Neither the orphan nor the complete pair is decoded.
+        assert_eq!(diagnostics.decoded_sources(), vec![sources[2]], "{name}");
     }
 }
 
@@ -699,22 +620,13 @@ fn a_timeline_inside_a_frozen_erasure_scope_never_reaches_eval() {
         let open_token = persona_token(&authority, open, entity);
         assert_eq!(
             eval_drafts(&pass(&mut registry, store.as_mut(), open, &open_token)),
-            2
+            2,
+            "{name}"
         );
         assert_eq!(
             diagnostics.findings(),
             vec![finding(open_sources[1], UndecodableSource)],
             "{name}"
         );
-    }
-}
-
-trait TestOptionExt<T> {
-    fn test_ok_option(self) -> T;
-}
-
-impl<T> TestOptionExt<T> for Option<T> {
-    fn test_ok_option(self) -> T {
-        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
     }
 }

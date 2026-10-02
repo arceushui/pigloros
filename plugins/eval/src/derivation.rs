@@ -26,12 +26,17 @@
 //!    check's kind. A quarantined source emits nothing, consumes no budget
 //!    and stays eligible, so its finding recurs in every later pass.
 //!
-//! Erased sources (Revision 2 Decision 3b) never reach this function. The
-//! host's ADR-060 containment fence authorizes Plugin input per Timeline and
-//! refuses the whole pass for a Timeline inside a frozen erasure scope, and
-//! committed payloads are never rewritten. Every source in an authorized
-//! verified prefix is therefore outside every erasure scope (user decision
-//! on #493, 2026-10-02), and an undecodable source is never an erased one.
+//! Erased sources (ADR-024 Revision 2 Decision 3b) never reach this
+//! function. The host's ADR-060 containment fence authorizes Plugin input
+//! per Timeline and refuses the whole pass for a Timeline inside a frozen
+//! erasure scope, and committed payloads are never rewritten. Under the
+//! option-A interpretation of Decision 3b ([#493]), that fence is the
+//! host-owned evidence that rules out erasure: every source in an authorized
+//! verified prefix is outside every erasure scope, so the "erased" step of
+//! the precedence order never applies, and an undecodable source is never
+//! an erased one.
+//!
+//! [#493]: https://redmine.piglor.com/issues/493
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -64,6 +69,11 @@ pub const MIN_DRAFTS_PER_PASS: u32 = 2;
 ///
 /// The supported source mappings and the per-pass draft budget are part of
 /// the configuration identity through [`Self::configuration_details`].
+///
+/// The set of supported source versions may be empty. An empty set derives
+/// nothing: every eligible source is quarantined as
+/// [`EvalIntegrityFindingKindV1::UnsupportedSourceVersion`], and nothing
+/// already derived is derived again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalDerivationConfigV1 {
     max_drafts_per_pass: u32,
@@ -110,11 +120,6 @@ impl EvalDerivationConfigV1 {
     #[must_use]
     pub const fn max_drafts_per_pass(&self) -> u32 {
         self.max_drafts_per_pass
-    }
-
-    /// The source versions with a pinned mapping, in ascending order.
-    pub fn source_versions(&self) -> impl Iterator<Item = u32> + '_ {
-        self.source_versions.iter().copied()
     }
 
     /// Canonical configuration details for Eval's pinned configuration
@@ -313,15 +318,6 @@ impl EvalDerivationV1 {
         });
     }
 
-    fn decode(
-        &mut self,
-        source: &Event,
-        config: &EvalDerivationConfigV1,
-    ) -> Result<PredictionSourceV1, EvalIntegrityFindingKindV1> {
-        self.decoded_sources.push(source.id);
-        decode_source(source, config)
-    }
-
     /// Derive an eligible source as one whole unit within budget, or
     /// quarantine it with the first failing check's kind.
     fn derive_eligible(
@@ -330,7 +326,8 @@ impl EvalDerivationV1 {
         config: &EvalDerivationConfigV1,
         budget: &mut UnitBudgetV1,
     ) {
-        match self.decode(source, config).and_then(valid_prediction) {
+        self.decoded_sources.push(source.id);
+        match decode_source(source, config).and_then(valid_prediction) {
             Ok(payload) => {
                 let unit = derived_unit(source, &payload);
                 let fits = budget.admit(unit.len());
@@ -343,7 +340,8 @@ impl EvalDerivationV1 {
     /// A derived source whose prediction has no outcome: decode it to learn
     /// whether it expects one.
     fn check_awaiting_outcome(&mut self, source: &Event, config: &EvalDerivationConfigV1) {
-        match self.decode(source, config) {
+        self.decoded_sources.push(source.id);
+        match decode_source(source, config) {
             Ok(payload) if payload.outcome != PredictionOutcomeV1::Absent => {
                 self.record(source, EvalIntegrityFindingKindV1::MissingOutcome);
             }

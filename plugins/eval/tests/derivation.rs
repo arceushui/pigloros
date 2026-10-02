@@ -4,7 +4,7 @@
 use pos_core::{
     clock::{Seq, WallTime},
     crypto::Hash,
-    event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+    event::{Event, EventDraft, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
     Plugin,
 };
@@ -15,22 +15,17 @@ use pos_plugin_eval::{
     EVENT_TYPE_PREDICTION, MIN_DRAFTS_PER_PASS,
 };
 use pos_plugin_persona::{
-    draft_prediction_source, PredictionOutcomeV1, PredictionSourceV1, EVENT_TYPE_PREDICTION_SOURCE,
+    draft_prediction_source, PredictionOutcomeV1, EVENT_TYPE_PREDICTION_SOURCE,
     PREDICTION_SOURCE_VERSION_V1,
 };
 use pos_runtime::{Driver, ObservationView, RuntimeError};
 
-trait TestValueExt<T> {
-    fn test_ok(self) -> T;
-}
+pub mod common;
 
-impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
-    fn test_ok(self) -> T {
-        self.unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("unexpected eval error: {error:?}")))
-        })
-    }
-}
+use common::{
+    encoded, envelope_only, finding, naming_drafts, raw_source, unreadable, TestOptionExt,
+    TestValueExt,
+};
 
 /// Commit a draft as the next Event of a synthetic prefix.
 fn commit(prefix: &mut Vec<Event>, draft: EventDraft) -> EventId {
@@ -58,18 +53,6 @@ fn source(prefix: &mut Vec<Event>, entity: EntityId, outcome: PredictionOutcomeV
     commit(prefix, draft_prediction_source(entity, 0.75, outcome))
 }
 
-fn caused(event_type: &str, cause: EventId, payload: CanonicalBytes) -> EventDraft {
-    let mut draft = EventDraft::new(EntityId::new(), Kind::new(event_type), payload);
-    draft.causation_id = Some(cause);
-    draft
-}
-
-fn encoded<T: serde::Serialize>(payload: &T) -> CanonicalBytes {
-    let mut buf = Vec::new();
-    ciborium::into_writer(payload, &mut buf).test_ok();
-    CanonicalBytes::from_vec(buf)
-}
-
 fn config(max_drafts: u32) -> EvalDerivationConfigV1 {
     EvalDerivationConfigV1::new(max_drafts).test_ok()
 }
@@ -84,16 +67,6 @@ fn sources_of(drafts: &[EventDraft]) -> Vec<(String, EventId)> {
             )
         })
         .collect()
-}
-
-trait TestOptionExt<T> {
-    fn test_ok_option(self) -> T;
-}
-
-impl<T> TestOptionExt<T> for Option<T> {
-    fn test_ok_option(self) -> T {
-        self.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
-    }
 }
 
 #[test]
@@ -166,30 +139,12 @@ fn partial_pairs_are_quarantined_and_other_sources_still_derive() {
     let orphaned = source(&mut prefix, entity, PredictionOutcomeV1::Observed(true));
     let missing = source(&mut prefix, entity, PredictionOutcomeV1::Observed(true));
     let healthy = source(&mut prefix, entity, PredictionOutcomeV1::Observed(false));
-    commit(
-        &mut prefix,
-        caused(
-            EVENT_TYPE_OUTCOME,
-            orphaned,
-            encoded(&OutcomePayload {
-                prediction_id: format!("eval:src:{orphaned}"),
-                outcome: true,
-                evidence: Some(OutcomeEvidenceV1::PredictorSupplied),
-            }),
-        ),
-    );
-    commit(
-        &mut prefix,
-        caused(
-            EVENT_TYPE_PREDICTION,
-            missing,
-            encoded(&PredictionPayload {
-                entity_id: entity.to_string(),
-                predicted_prob: 0.75,
-                prediction_id: format!("eval:src:{missing}"),
-            }),
-        ),
-    );
+    for draft in naming_drafts(orphaned, false, true)
+        .into_iter()
+        .chain(naming_drafts(missing, true, false))
+    {
+        commit(&mut prefix, draft);
+    }
 
     let derivation = derive_eval_units(&prefix, &config(64));
 
@@ -274,16 +229,11 @@ fn the_configuration_admits_at_least_one_whole_unit_and_pins_its_mapping() {
         details,
         "eval-derivation-v2;source=persona.prediction;versions=1;max-drafts=2"
     );
-    assert_eq!(smallest.source_versions().collect::<Vec<_>>(), vec![1]);
     assert_ne!(
         config(3).configuration_details(),
         smallest.configuration_details()
     );
     let remapped = smallest.clone().with_source_versions([3, 1, 2]);
-    assert_eq!(
-        remapped.source_versions().collect::<Vec<_>>(),
-        vec![1, 2, 3]
-    );
     assert_eq!(
         String::from_utf8(remapped.configuration_details()).test_ok(),
         "eval-derivation-v2;source=persona.prediction;versions=1,2,3;max-drafts=2"
@@ -351,46 +301,17 @@ fn legacy_outcomes_keep_their_exact_encoding() {
 
 // ── ADR-024 Revision 2: quarantine of bad eligible sources ─────────────────
 
-/// A source payload with an explicit version, probability and outcome.
-fn raw_source(version: u32, predicted_prob: f64, outcome: PredictionOutcomeV1) -> CanonicalBytes {
-    encoded(&PredictionSourceV1 {
-        version,
-        predicted_prob,
-        outcome,
-    })
-}
-
-fn commit_source(prefix: &mut Vec<Event>, payload: CanonicalBytes) -> EventId {
-    commit(
-        prefix,
-        EventDraft::new(
-            EntityId::new(),
-            Kind::new(EVENT_TYPE_PREDICTION_SOURCE),
-            payload,
-        ),
-    )
-}
-
 /// A readable envelope whose version is not a number.
-fn unreadable_version() -> CanonicalBytes {
+fn unreadable_version() -> EventDraft {
     #[derive(serde::Serialize)]
     struct Envelope {
         version: &'static str,
     }
-    encoded(&Envelope { version: "one" })
-}
-
-/// A readable envelope and version with no prediction fields.
-fn envelope_only(version: u32) -> CanonicalBytes {
-    #[derive(serde::Serialize)]
-    struct Envelope {
-        version: u32,
-    }
-    encoded(&Envelope { version })
-}
-
-const fn finding(source: EventId, kind: EvalIntegrityFindingKindV1) -> EvalIntegrityFindingV1 {
-    EvalIntegrityFindingV1 { source, kind }
+    EventDraft::new(
+        EntityId::new(),
+        Kind::new(EVENT_TYPE_PREDICTION_SOURCE),
+        encoded(&Envelope { version: "one" }),
+    )
 }
 
 #[test]
@@ -401,19 +322,22 @@ fn bad_eligible_sources_are_quarantined_in_check_order_and_consume_no_budget() {
     let entity = EntityId::new();
     let mut prefix = Vec::new();
     let first = source(&mut prefix, entity, PredictionOutcomeV1::Observed(true));
-    let not_cbor = commit_source(&mut prefix, CanonicalBytes::from_vec(vec![0xff]));
-    let bad_version = commit_source(&mut prefix, unreadable_version());
+    let not_cbor = commit(&mut prefix, unreadable(entity));
+    let bad_version = commit(&mut prefix, unreadable_version());
     // Check 2 precedes checks 3 and 4.
-    let unsupported = commit_source(
+    let unsupported = commit(
         &mut prefix,
-        raw_source(2, f64::NAN, PredictionOutcomeV1::Absent),
+        raw_source(entity, 2, f64::NAN, PredictionOutcomeV1::Absent),
     );
-    let unsupported_partial = commit_source(&mut prefix, envelope_only(2));
+    let unsupported_partial = commit(&mut prefix, envelope_only(entity, 2));
     // Check 3 precedes check 4.
-    let partial = commit_source(&mut prefix, envelope_only(PREDICTION_SOURCE_VERSION_V1));
-    let invalid = commit_source(
+    let partial = commit(
         &mut prefix,
-        raw_source(1, f64::NAN, PredictionOutcomeV1::Observed(true)),
+        envelope_only(entity, PREDICTION_SOURCE_VERSION_V1),
+    );
+    let invalid = commit(
+        &mut prefix,
+        raw_source(entity, 1, f64::NAN, PredictionOutcomeV1::Observed(true)),
     );
     let last = source(&mut prefix, entity, PredictionOutcomeV1::Observed(false));
 
@@ -465,9 +389,14 @@ fn predicted_probabilities_must_be_finite_and_within_the_closed_unit_interval() 
         1.000_001,
     ] {
         let mut prefix = Vec::new();
-        let bad = commit_source(
+        let bad = commit(
             &mut prefix,
-            raw_source(1, rejected, PredictionOutcomeV1::Observed(true)),
+            raw_source(
+                EntityId::new(),
+                1,
+                rejected,
+                PredictionOutcomeV1::Observed(true),
+            ),
         );
         let derivation = derive_eval_units(&prefix, &config(64));
         assert!(derivation.drafts.is_empty(), "{rejected}");
@@ -479,9 +408,9 @@ fn predicted_probabilities_must_be_finite_and_within_the_closed_unit_interval() 
     }
     for accepted in [0.0, 1.0] {
         let mut prefix = Vec::new();
-        let good = commit_source(
+        let good = commit(
             &mut prefix,
-            raw_source(1, accepted, PredictionOutcomeV1::Absent),
+            raw_source(EntityId::new(), 1, accepted, PredictionOutcomeV1::Absent),
         );
         let derivation = derive_eval_units(&prefix, &config(64));
         assert!(derivation.findings.is_empty(), "{accepted}");
@@ -495,71 +424,46 @@ fn predicted_probabilities_must_be_finite_and_within_the_closed_unit_interval() 
     }
 }
 
-/// Commit Eval records naming `source`, as an earlier pass would have.
-fn name_source(prefix: &mut Vec<Event>, source: EventId, prediction: bool, outcome: bool) {
-    let prediction_id = format!("eval:src:{source}");
-    if prediction {
-        commit(
-            prefix,
-            caused(
-                EVENT_TYPE_PREDICTION,
-                source,
-                encoded(&PredictionPayload {
-                    entity_id: EntityId::new().to_string(),
-                    predicted_prob: 0.5,
-                    prediction_id: prediction_id.clone(),
-                }),
-            ),
-        );
-    }
-    if outcome {
-        commit(
-            prefix,
-            caused(
-                EVENT_TYPE_OUTCOME,
-                source,
-                encoded(&OutcomePayload {
-                    prediction_id,
-                    outcome: true,
-                    evidence: Some(OutcomeEvidenceV1::PredictorSupplied),
-                }),
-            ),
-        );
-    }
-}
-
+/// The one full precedence scenario (Revision 2 Decision 0); the seam tests
+/// cover only how the host commits the pass and publishes its diagnostics.
 #[test]
 fn each_source_has_one_outcome_and_only_a_prediction_without_outcome_is_decoded() {
     use EvalIntegrityFindingKindV1::{
         MissingOutcome, OrphanOutcome, UndecodableSource, UnsupportedSourceVersion,
     };
-    let unreadable = || CanonicalBytes::from_vec(vec![0xff]);
+    let entity = EntityId::new();
     let mut prefix = Vec::new();
-    let orphan = commit_source(&mut prefix, unreadable());
-    let complete = commit_source(&mut prefix, unreadable());
-    let missing = commit_source(
+    let orphan = commit(&mut prefix, unreadable(entity));
+    let complete = commit(&mut prefix, unreadable(entity));
+    let missing = commit(
         &mut prefix,
-        raw_source(1, 0.5, PredictionOutcomeV1::Observed(true)),
+        raw_source(entity, 1, 0.5, PredictionOutcomeV1::Observed(true)),
     );
-    let without_outcome =
-        commit_source(&mut prefix, raw_source(1, 0.5, PredictionOutcomeV1::Absent));
-    let undecodable = commit_source(&mut prefix, unreadable());
+    let without_outcome = commit(
+        &mut prefix,
+        raw_source(entity, 1, 0.5, PredictionOutcomeV1::Absent),
+    );
+    let undecodable = commit(&mut prefix, unreadable(entity));
     // Check 4 applies only to eligible sources.
-    let out_of_range = commit_source(&mut prefix, raw_source(1, 2.0, PredictionOutcomeV1::Absent));
-    let unsupported = commit_source(
+    let out_of_range = commit(
         &mut prefix,
-        raw_source(9, 0.5, PredictionOutcomeV1::Observed(true)),
+        raw_source(entity, 1, 2.0, PredictionOutcomeV1::Absent),
     );
-    name_source(&mut prefix, orphan, false, true);
-    name_source(&mut prefix, complete, true, true);
-    for awaiting in [
-        missing,
-        without_outcome,
-        undecodable,
-        out_of_range,
-        unsupported,
-    ] {
-        name_source(&mut prefix, awaiting, true, false);
+    let unsupported = commit(
+        &mut prefix,
+        raw_source(entity, 9, 0.5, PredictionOutcomeV1::Observed(true)),
+    );
+    let naming = [
+        naming_drafts(orphan, false, true),
+        naming_drafts(complete, true, true),
+        naming_drafts(missing, true, false),
+        naming_drafts(without_outcome, true, false),
+        naming_drafts(undecodable, true, false),
+        naming_drafts(out_of_range, true, false),
+        naming_drafts(unsupported, true, false),
+    ];
+    for draft in naming.into_iter().flatten() {
+        commit(&mut prefix, draft);
     }
 
     let derivation = derive_eval_units(&prefix, &config(64));
