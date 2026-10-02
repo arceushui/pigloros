@@ -193,7 +193,7 @@ fn field_mutations() -> Fallible<Vec<ForkAttributionAuthorityEnvelopeInputV1>> {
             2 => changed.import_operation_id = hash(0x12),
             3 => {
                 changed.issuer =
-                    ForkAttributionIssuerV1::new("issuer-b", 1, base.issuer.public_key())?
+                    ForkAttributionIssuerV1::new("issuer-b", 1, base.issuer.public_key())?;
             }
             4 => changed.issuer_policy_digest = hash(0x34),
             5 | 6 => continue,
