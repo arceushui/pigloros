@@ -398,10 +398,14 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
 
     let mut mismatched_catalog = request(&admitted, &sources, timeline_id, operation_id)?;
     let catalog = mismatched_catalog.catalog.as_input().clone();
+    let mismatched_configuration_generation = catalog
+        .configuration_generation
+        .checked_add(1)
+        .ok_or("fixture configuration generation overflow")?;
     mismatched_catalog.catalog =
         ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
             owner_id: catalog.owner_id,
-            configuration_generation: 2,
+            configuration_generation: mismatched_configuration_generation,
             rows: catalog.rows,
         })?;
     assert_eq!(
