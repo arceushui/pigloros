@@ -236,6 +236,100 @@ fn minimal_envelope_matches_independent_root_origin_and_digest_vectors() -> Test
     Ok(())
 }
 
+/// Every closure leaf type: its code, record bound, and whether it may be absent.
+const LEAF_TABLE: [(Leaf, u8, usize, bool); 15] = [
+    (
+        Leaf::PrincipalOwnerBinding,
+        1,
+        MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::ForkAdmission,
+        2,
+        MAX_FORK_ADMISSION_RECORD_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::EventOrigin,
+        3,
+        MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::InterventionAdmission,
+        4,
+        MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::PublicationOperation,
+        5,
+        MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::PublicationBinding,
+        6,
+        MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::PublicationArtifact,
+        7,
+        MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::ImportedKeyRecord,
+        8,
+        MAX_IMPORTED_KEY_RECORD_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::ImportedKeyTombstone,
+        9,
+        MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
+        true,
+    ),
+    (
+        Leaf::EventEvidence,
+        10,
+        MAX_FORK_EVENT_EVIDENCE_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::TimelineImport,
+        11,
+        MAX_FORK_TIMELINE_IMPORT_BYTES_V1,
+        false,
+    ),
+    (
+        Leaf::ClassifierSource,
+        12,
+        MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
+        true,
+    ),
+    (
+        Leaf::ClassifierTable,
+        13,
+        MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
+        true,
+    ),
+    (
+        Leaf::ClassifierRegistration,
+        14,
+        MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1,
+        true,
+    ),
+    (
+        Leaf::AppendOperation,
+        15,
+        MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1,
+        false,
+    ),
+];
+
 #[test]
 fn closure_leaves_match_independent_vectors_codes_and_bounds() -> TestResult {
     assert_eq!(
@@ -256,100 +350,8 @@ fn closure_leaves_match_independent_vectors_codes_and_bounds() -> TestResult {
             .to_vec(),
         unhex(LEAF_FOP1_ABC_HEX)?
     );
-    let table = [
-        (
-            Leaf::PrincipalOwnerBinding,
-            1,
-            MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::ForkAdmission,
-            2,
-            MAX_FORK_ADMISSION_RECORD_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::EventOrigin,
-            3,
-            MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::InterventionAdmission,
-            4,
-            MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::PublicationOperation,
-            5,
-            MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::PublicationBinding,
-            6,
-            MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::PublicationArtifact,
-            7,
-            MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::ImportedKeyRecord,
-            8,
-            MAX_IMPORTED_KEY_RECORD_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::ImportedKeyTombstone,
-            9,
-            MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
-            true,
-        ),
-        (
-            Leaf::EventEvidence,
-            10,
-            MAX_FORK_EVENT_EVIDENCE_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::TimelineImport,
-            11,
-            MAX_FORK_TIMELINE_IMPORT_BYTES_V1,
-            false,
-        ),
-        (
-            Leaf::ClassifierSource,
-            12,
-            MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
-            true,
-        ),
-        (
-            Leaf::ClassifierTable,
-            13,
-            MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1,
-            true,
-        ),
-        (
-            Leaf::ClassifierRegistration,
-            14,
-            MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1,
-            true,
-        ),
-        (
-            Leaf::AppendOperation,
-            15,
-            MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1,
-            false,
-        ),
-    ];
     let buffer = vec![0x5a; MAX_FORK_EVENT_EVIDENCE_BYTES_V1 + 1];
-    for (leaf, code, maximum, absent) in table {
+    for (leaf, code, maximum, absent) in LEAF_TABLE {
         assert_eq!(leaf.code(), code);
         assert!(fork_attribution_closure_leaf_v1(leaf, &buffer[..maximum]).is_ok());
         assert_eq!(
