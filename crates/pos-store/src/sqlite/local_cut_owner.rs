@@ -851,16 +851,11 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
             .conn
             .unchecked_transaction()
             .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
-        let result = sqlite_read_local_cut_owner_state(&transaction, owner_id);
-        match result {
-            Ok(state) => {
-                transaction
-                    .commit()
-                    .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
-                Ok(state)
-            }
-            Err(error) => Err(error),
-        }
+        let state = sqlite_read_local_cut_owner_state(&transaction, owner_id)?;
+        transaction
+            .commit()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        Ok(state)
     }
 
     fn resolve_local_cut_owner_retry_v1(
@@ -874,21 +869,16 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
             .unchecked_transaction()
             .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
         sqlite_read_local_cut_owner_state(&transaction, owner_id)?;
-        let result = sqlite_resolve_local_cut_owner_retry(
+        let retry = sqlite_resolve_local_cut_owner_retry(
             &transaction,
             owner_id,
             operation_id,
             intent_digest,
-        );
-        match result {
-            Ok(retry) => {
-                transaction
-                    .commit()
-                    .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
-                Ok(retry)
-            }
-            Err(error) => Err(error),
-        }
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        Ok(retry)
     }
 
     fn commit_local_cut_owner_v1(
@@ -939,17 +929,11 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
             .unchecked_transaction()
             .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
         sqlite_read_local_cut_owner_state(&transaction, owner_id)?;
-        let result = sqlite_local_cut_owner_cut_by_id(&transaction, owner_id, cut_id)
-            .map(|cut| cut.map(|cut| cut.result));
-        match result {
-            Ok(cut) => {
-                transaction
-                    .commit()
-                    .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
-                Ok(cut)
-            }
-            Err(error) => Err(error),
-        }
+        let cut = sqlite_local_cut_owner_cut_by_id(&transaction, owner_id, cut_id)?;
+        transaction
+            .commit()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        Ok(cut.map(|cut| cut.result))
     }
 }
 
