@@ -11270,6 +11270,12 @@ mod coverage_entrypoints {
         ConsentAuthority, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
         KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey, ERASURE_MAX_INVENTORY_TIMELINES,
     };
+    use pos_core::{
+        adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
+        AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterDataClassV1, AdapterEffectModeV1,
+        AdapterInvocationInputV1, AdapterInvocationV1, WorldReplayHandleInputV1,
+        WorldReplayHandleV1,
+    };
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
@@ -12165,5 +12171,179 @@ mod coverage_entrypoints {
             store.recovery_error_refs(request),
             Err(ErasureErrorV1::ScopeInvalid)
         );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_adapter_recording_fixture(
+        owner_byte: u8,
+        run_byte: u8,
+    ) -> Result<(AdapterRecordingSessionV1, AdapterCallReservationV1), Box<dyn std::error::Error>> {
+        let owner_reference = Hash::from_bytes([owner_byte; 32]);
+        let plugin_id = pos_core::PluginId::new();
+        let configuration = b"memory-coverage-adapter".to_vec();
+        let schema_digest = public_adapter_schema_digest_v1();
+        let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+            owner_reference,
+            configuration_generation: 1,
+            scope_digest: Hash::from_bytes([owner_byte.wrapping_add(1); 32]),
+            entries: vec![AdapterAdmissionEntryV1 {
+                plugin_id,
+                adapter_id: "coverage.adapter".to_owned(),
+                provider_id: "coverage.provider".to_owned(),
+                operation_id: "coverage-operation".to_owned(),
+                protocol_version: 1,
+                request_schema_digest: schema_digest,
+                response_schema_digest: schema_digest,
+                configuration_digest: adapter_configuration_digest_v1(&configuration),
+                exact_configuration_bytes: configuration,
+                input_data_class: AdapterDataClassV1::PublicRecord,
+                output_data_class: AdapterDataClassV1::PublicRecord,
+                effect_mode: AdapterEffectModeV1::ReadOnly,
+            }],
+        })?;
+        let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+            owner_reference,
+            timeline_id: TimelineId::new(),
+            cut_id: 1,
+            commit_receipt_digest: Hash::from_bytes([owner_byte.wrapping_add(2); 32]),
+            recording_receipt_digest: Hash::from_bytes([owner_byte.wrapping_add(3); 32]),
+            logical_head: 0,
+            stitched_head_hash: Hash::from_bytes([owner_byte.wrapping_add(4); 32]),
+        })?;
+        let run_operation_id = Hash::from_bytes([run_byte; 32]);
+        let session = AdapterRecordingSessionV1::new(
+            owner_reference,
+            world_handle,
+            run_operation_id,
+            admission,
+        )?;
+        let invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
+            adapter_id: "coverage.adapter".to_owned(),
+            provider_id: "coverage.provider".to_owned(),
+            operation_id: "coverage-operation".to_owned(),
+            protocol_version: 1,
+            request_schema_digest: schema_digest,
+            response_schema_digest: schema_digest,
+            configuration_digest: adapter_configuration_digest_v1(b"memory-coverage-adapter"),
+            global_call_index: 0,
+            exact_request_payload: b"coverage request".to_vec(),
+        })?;
+        let reservation = AdapterCallReservationV1::new(
+            plugin_id,
+            0,
+            invocation,
+            Hash::from_bytes([owner_byte.wrapping_add(5); 32]),
+            1,
+        )?;
+        Ok((session, reservation))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn closed_memory_adapter_recording(
+        run_byte: u8,
+    ) -> Result<(MemoryStore, AdapterRecordingSessionV1), Box<dyn std::error::Error>> {
+        let (session, reservation) = memory_adapter_recording_fixture(180, run_byte)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let mut store = MemoryStore::new();
+        store.open_adapter_recording_session(session.clone())?;
+        store.reserve_adapter_call(owner_reference, run_operation_id, reservation)?;
+        store.complete_adapter_call(
+            owner_reference,
+            run_operation_id,
+            0,
+            b"coverage response".to_vec(),
+        )?;
+        store.close_adapter_recording_session(owner_reference, run_operation_id)?;
+        Ok((store, session))
+    }
+
+    #[test]
+    fn memory_adapter_recording_rejects_retained_corruption(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, session) = closed_memory_adapter_recording(181)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal.transcript_bytes = None;
+        }
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+
+        let (mut store, session) = closed_memory_adapter_recording(182)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal.transcript_bytes = Some(b"changed retained transcript".to_vec());
+        }
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+
+        let (mut store, session) = closed_memory_adapter_recording(183)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal.calls.clear();
+        }
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+
+        let (mut store, session) = closed_memory_adapter_recording(184)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal
+                .calls
+                .get_mut(&0)
+                .ok_or("missing memory recorder call")?
+                .output_bytes = None;
+        }
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
+
+        let (mut store, session) = closed_memory_adapter_recording(185)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let (wrong_session, _) = memory_adapter_recording_fixture(186, 185)?;
+        {
+            let journal = store
+                .adapter_recording_sessions
+                .get_mut(&(owner_reference, run_operation_id))
+                .ok_or("missing closed memory recorder")?;
+            journal.session = wrong_session;
+        }
+        assert_eq!(
+            store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+        Ok(())
     }
 }
