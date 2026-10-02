@@ -44,6 +44,7 @@ use pos_core::{
     },
     hasher::Hasher,
     ids::{EntityId, EventId, TimelineId},
+    local_cut_owner_intent_digest_v1,
     owntracks_enrollment::{
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStatusViewV1, OwnTracksEnrollmentStore,
@@ -81,7 +82,11 @@ use pos_core::{
     ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
     ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
     KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1, LocalCutCommitV1,
+    LocalCutCompositionBindingRowV1, LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1,
+    LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
+    LocalCutOwnerRequestV1, LocalCutOwnerStateV1, LocalCutReceiptV1, LocalCutRecordingContextRowV1,
+    LocalCutSealV2, LocalCutTableRefV1,
     ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionInputV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
@@ -89,10 +94,11 @@ use pos_core::{
     ManifestOwnerTimelineAdmissionV1, ManifestSlotAdmissionReceiptV1, ManifestSlotBindingV1,
     OwnerIdV1, PersistedAuthorityV1, PluginId, PreparedArtifactRegistrationBatchV1,
     PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1,
-    PrincipalOwnerBindingV1, PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
-    WorldArtifactLeafV1, WorldConsumerSetV1, WorldReplayHandleV1, ERASURE_MAX_RECOVERY_ERRORS,
-    GEOGRAPHIC_EVENT_TYPE, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+    PreparedErasureRecoveryErrorV1, PreparedLocalCutOwnerCommitV1,
+    PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
+    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1, WorldArtifactLeafV1,
+    WorldConsumerSetV1, WorldReplayHandleV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    MAX_ADAPTER_TRANSCRIPT_CALLS_V1, MAX_LOCAL_CUT_OWNER_ROWS_V1,
 };
 
 use crate::fork_admission_authority::{
@@ -1145,6 +1151,36 @@ const MANIFEST_OWNER_ADMISSION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS ma
          CHECK (length(eop1_bytes) <= 16777216)
      );";
 
+const LOCAL_CUT_OWNER_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS local_cut_owner_state (
+         owner_id BLOB PRIMARY KEY CHECK (length(owner_id) = 32),
+         last_visible_cut_id BLOB NOT NULL CHECK (length(last_visible_cut_id) = 8),
+         last_visible_tick BLOB NOT NULL CHECK (length(last_visible_tick) = 8),
+         membership_epoch BLOB NOT NULL CHECK (length(membership_epoch) = 4),
+         configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
+         previous_visible_lcq1_hash BLOB NOT NULL CHECK (length(previous_visible_lcq1_hash) = 32),
+         inventory_generation BLOB NOT NULL CHECK (length(inventory_generation) = 32)
+     );
+     CREATE TABLE IF NOT EXISTS local_cut_owner_state_timelines (
+         owner_id BLOB NOT NULL CHECK (length(owner_id) = 32),
+         timeline_id BLOB NOT NULL CHECK (length(timeline_id) = 16),
+         PRIMARY KEY (owner_id, timeline_id),
+         FOREIGN KEY (owner_id) REFERENCES local_cut_owner_state(owner_id)
+     );
+     CREATE TABLE IF NOT EXISTS local_cut_owner_cuts (
+         owner_id BLOB NOT NULL CHECK (length(owner_id) = 32),
+         cut_id BLOB NOT NULL CHECK (length(cut_id) = 8),
+         operation_id BLOB NOT NULL CHECK (length(operation_id) = 32),
+         intent_digest BLOB NOT NULL CHECK (length(intent_digest) = 32),
+         request_bytes BLOB NOT NULL CHECK (length(request_bytes) <= 536870912),
+         commit_cbor BLOB NOT NULL CHECK (length(commit_cbor) <= 2048),
+         receipt_cbor BLOB NOT NULL CHECK (length(receipt_cbor) <= 256),
+         PRIMARY KEY (owner_id, cut_id),
+         UNIQUE (owner_id, operation_id)
+     );";
+
+const SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1: usize = 536_870_912;
+const SQLITE_LOCAL_CUT_OWNER_REQUEST_MAGIC_V1: &[u8] = b"LCOQ1";
+
 const SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1: u32 = 1_048_576;
 
 /// Validated `(EOR1, optional FIA1, FOP1)` rows for one child suffix.
@@ -1806,6 +1842,7 @@ impl SqliteStore {
         } else {
             self.conn
                 .execute_batch(MANIFEST_OWNER_ADMISSION_SCHEMA_SQL)
+                .and_then(|()| self.conn.execute_batch(LOCAL_CUT_OWNER_SCHEMA_SQL))
                 .map_err(Self::into_storage_error)
         }
     }
@@ -6626,6 +6663,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
             sqlite_validate_manifest_owner_transition(input, current_state.as_ref())?;
             sqlite_insert_manifest_owner_rows(&self.conn, input)?;
             sqlite_write_manifest_owner_state(&self.conn, input)?;
+            sqlite_sync_local_cut_owner_after_admission(&self.conn, input, current_state.as_ref())?;
             let receipt_hashes = input
                 .timelines
                 .iter()
@@ -6662,15 +6700,19 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
         else {
             return Ok(None);
         };
-        let receipt = snapshot.timeline.receipt.as_input();
-        let generation = sqlite_read_manifest_owner_generation(
-            &self.conn,
-            owner_id,
-            configuration_generation,
-            receipt.previous_visible_lcq1_hash,
-            snapshot.resulting_inventory_generation,
-        )?;
+        let generation =
+            sqlite_read_manifest_owner_generation(&self.conn, owner_id, configuration_generation)?;
+        let inventory_matches =
+            generation.inventory_generation == snapshot.resulting_inventory_generation;
+        let previous_receipt_matches = generation.previous_visible_lcq1_hash
+            == snapshot
+                .timeline
+                .receipt
+                .as_input()
+                .previous_visible_lcq1_hash;
         if generation.operation_id != snapshot.operation_id
+            || !inventory_matches
+            || !previous_receipt_matches
             || !generation.timelines.contains(&timeline_id)
         {
             return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
@@ -6679,7 +6721,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
             &self.conn,
             owner_id,
             configuration_generation,
-            snapshot.resulting_inventory_generation,
+            generation.inventory_generation,
             generation.operation_id,
             &generation.receipt_hashes,
         )?;
@@ -6722,6 +6764,8 @@ struct SqliteManifestOwnerAdmissionGenerationV1 {
     operation_id: Hash,
     timelines: Vec<TimelineId>,
     receipt_hashes: Vec<Hash>,
+    inventory_generation: Hash,
+    previous_visible_lcq1_hash: Option<Hash>,
 }
 
 fn sqlite_read_manifest_owner_current_state(
@@ -6731,7 +6775,10 @@ fn sqlite_read_manifest_owner_current_state(
     let Some((generation, previous_visible_lcq1_hash, inventory_generation)) =
         sqlite_manifest_owner_state(connection, owner_id)?
     else {
-        return if sqlite_manifest_owner_has_rows(connection, owner_id)? {
+        return if sqlite_manifest_owner_has_rows(connection, owner_id)?
+            || sqlite_local_cut_owner_has_rows(connection, owner_id)
+                .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
+        {
             Err(ManifestOwnerAdmissionErrorV1::CorruptState)
         } else {
             Ok(None)
@@ -6740,21 +6787,41 @@ fn sqlite_read_manifest_owner_current_state(
     if inventory_generation == Hash::zero() || previous_visible_lcq1_hash == Some(Hash::zero()) {
         return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
     }
-    let generation_rows = sqlite_read_manifest_owner_generation(
-        connection,
-        owner_id,
-        generation,
-        previous_visible_lcq1_hash,
-        inventory_generation,
-    )?;
+    let generation_rows = sqlite_read_manifest_owner_generation(connection, owner_id, generation)?;
     sqlite_validate_manifest_owner_generation_operation(
         connection,
         owner_id,
         generation,
-        inventory_generation,
+        generation_rows.inventory_generation,
         generation_rows.operation_id,
         &generation_rows.receipt_hashes,
     )?;
+    match sqlite_local_cut_owner_state_raw(connection, owner_id)
+        .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
+    {
+        Some(local_cut_state) => {
+            local_cut_state
+                .validate()
+                .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+            if local_cut_state.owner_id != owner_id
+                || local_cut_state.configuration_generation != generation
+                || local_cut_state.previous_visible_lcq1_hash != previous_visible_lcq1_hash
+                || local_cut_state.inventory_generation != inventory_generation
+                || local_cut_state.timelines != generation_rows.timelines
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+        }
+        None => {
+            if sqlite_local_cut_owner_has_rows(connection, owner_id)
+                .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
+                || generation_rows.previous_visible_lcq1_hash != previous_visible_lcq1_hash
+                || generation_rows.inventory_generation != inventory_generation
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+        }
+    }
     Ok(Some(ManifestOwnerAdmissionOwnerStateV1 {
         owner_id,
         configuration_generation: generation,
@@ -6768,8 +6835,6 @@ fn sqlite_read_manifest_owner_generation(
     connection: &Connection,
     owner_id: [u8; 32],
     configuration_generation: u64,
-    previous_visible_lcq1_hash: Option<Hash>,
-    inventory_generation: Hash,
 ) -> Result<SqliteManifestOwnerAdmissionGenerationV1, ManifestOwnerAdmissionErrorV1> {
     let mut statement = connection
         .prepare(
@@ -6801,6 +6866,8 @@ fn sqlite_read_manifest_owner_generation(
     let mut catalog_digest = None;
     let mut scopes = HashSet::with_capacity(timeline_bytes.len());
     let mut receipt_hashes = Vec::with_capacity(timeline_bytes.len());
+    let mut inventory_generation = None;
+    let mut previous_visible_lcq1_hash = None;
     for bytes in timeline_bytes {
         let raw: [u8; 16] = bytes
             .try_into()
@@ -6813,21 +6880,32 @@ fn sqlite_read_manifest_owner_generation(
             timeline_id,
         )?
         .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
-        if snapshot.resulting_inventory_generation != inventory_generation
-            || snapshot
-                .timeline
-                .receipt
-                .as_input()
-                .previous_visible_lcq1_hash
-                != previous_visible_lcq1_hash
-            || operation_id.is_some_and(|stored| stored != snapshot.operation_id)
+        if operation_id.is_some_and(|stored| stored != snapshot.operation_id)
             || catalog_digest.is_some_and(|stored| stored != snapshot.catalog.digest())
+            || inventory_generation
+                .is_some_and(|stored| stored != snapshot.resulting_inventory_generation)
+            || previous_visible_lcq1_hash.is_some_and(|stored| {
+                stored
+                    != snapshot
+                        .timeline
+                        .receipt
+                        .as_input()
+                        .previous_visible_lcq1_hash
+            })
             || !scopes.insert(snapshot.timeline.scope)
         {
             return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
         }
         operation_id = Some(snapshot.operation_id);
         catalog_digest = Some(snapshot.catalog.digest());
+        inventory_generation = Some(snapshot.resulting_inventory_generation);
+        previous_visible_lcq1_hash = Some(
+            snapshot
+                .timeline
+                .receipt
+                .as_input()
+                .previous_visible_lcq1_hash,
+        );
         receipt_hashes.push(snapshot.timeline.receipt.digest());
         timelines.push(timeline_id);
     }
@@ -6835,6 +6913,10 @@ fn sqlite_read_manifest_owner_generation(
         operation_id: operation_id.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
         timelines,
         receipt_hashes,
+        inventory_generation: inventory_generation
+            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
+        previous_visible_lcq1_hash: previous_visible_lcq1_hash
+            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
     })
 }
 
@@ -7488,6 +7570,1102 @@ fn manifest_owner_generation(bytes: Vec<u8>) -> Result<u64, ManifestOwnerAdmissi
         return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
     }
     Ok(generation)
+}
+
+const fn map_sqlite_local_cut_owner_to_manifest_error(
+    error: LocalCutOwnerErrorV1,
+) -> ManifestOwnerAdmissionErrorV1 {
+    match error {
+        LocalCutOwnerErrorV1::Conflict => ManifestOwnerAdmissionErrorV1::Conflict,
+        LocalCutOwnerErrorV1::StorageFailure => ManifestOwnerAdmissionErrorV1::StorageFailure,
+        LocalCutOwnerErrorV1::BoundExceeded
+        | LocalCutOwnerErrorV1::InvalidBatch
+        | LocalCutOwnerErrorV1::OwnerRejected
+        | LocalCutOwnerErrorV1::CorruptState => ManifestOwnerAdmissionErrorV1::CorruptState,
+    }
+}
+
+const fn map_sqlite_manifest_owner_to_local_error(
+    error: ManifestOwnerAdmissionErrorV1,
+) -> LocalCutOwnerErrorV1 {
+    match error {
+        ManifestOwnerAdmissionErrorV1::Conflict => LocalCutOwnerErrorV1::Conflict,
+        ManifestOwnerAdmissionErrorV1::StorageFailure => LocalCutOwnerErrorV1::StorageFailure,
+        ManifestOwnerAdmissionErrorV1::BoundExceeded
+        | ManifestOwnerAdmissionErrorV1::InvalidBatch
+        | ManifestOwnerAdmissionErrorV1::OwnerRejected
+        | ManifestOwnerAdmissionErrorV1::CorruptState => LocalCutOwnerErrorV1::CorruptState,
+    }
+}
+
+fn sqlite_local_cut_owner_has_rows(
+    connection: &Connection,
+    owner_id: [u8; 32],
+) -> Result<bool, LocalCutOwnerErrorV1> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM local_cut_owner_state_timelines WHERE owner_id = ?1
+                 UNION ALL
+                 SELECT 1 FROM local_cut_owner_cuts WHERE owner_id = ?1
+             )",
+            params![owner_id.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)
+}
+
+fn sqlite_local_cut_owner_u64(bytes: &[u8]) -> Result<u64, LocalCutOwnerErrorV1> {
+    let bytes: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    Ok(u64::from_be_bytes(bytes))
+}
+
+fn sqlite_local_cut_owner_u32(bytes: &[u8]) -> Result<u32, LocalCutOwnerErrorV1> {
+    let bytes: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    Ok(u32::from_be_bytes(bytes))
+}
+
+fn sqlite_local_cut_owner_hash(bytes: &[u8]) -> Result<Hash, LocalCutOwnerErrorV1> {
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    Ok(Hash::from_bytes(bytes))
+}
+
+fn sqlite_local_cut_owner_timeline(bytes: &[u8]) -> Result<TimelineId, LocalCutOwnerErrorV1> {
+    let bytes: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    Ok(TimelineId::from_ulid(ulid::Ulid::from_bytes(bytes)))
+}
+
+fn sqlite_local_cut_owner_plugin(bytes: &[u8]) -> Result<PluginId, LocalCutOwnerErrorV1> {
+    let bytes: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    Ok(PluginId::from_ulid(ulid::Ulid::from_bytes(bytes)))
+}
+
+struct SqliteLocalCutOwnerCursorV1<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> SqliteLocalCutOwnerCursorV1<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], LocalCutOwnerErrorV1> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn u8(&mut self) -> Result<u8, LocalCutOwnerErrorV1> {
+        self.take(1).and_then(|bytes| {
+            bytes
+                .first()
+                .copied()
+                .ok_or(LocalCutOwnerErrorV1::CorruptState)
+        })
+    }
+
+    fn u32(&mut self) -> Result<u32, LocalCutOwnerErrorV1> {
+        let bytes: [u8; 4] = self
+            .take(4)?
+            .try_into()
+            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+        Ok(u32::from_be_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, LocalCutOwnerErrorV1> {
+        let bytes: [u8; 8] = self
+            .take(8)?
+            .try_into()
+            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+        Ok(u64::from_be_bytes(bytes))
+    }
+
+    fn hash(&mut self) -> Result<Hash, LocalCutOwnerErrorV1> {
+        sqlite_local_cut_owner_hash(self.take(32)?)
+    }
+
+    fn blob(&mut self, maximum: usize) -> Result<&'a [u8], LocalCutOwnerErrorV1> {
+        let length =
+            usize::try_from(self.u32()?).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+        if length > maximum {
+            return Err(LocalCutOwnerErrorV1::CorruptState);
+        }
+        self.take(length)
+    }
+
+    fn optional_hash(&mut self) -> Result<Option<Hash>, LocalCutOwnerErrorV1> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => self.hash().map(Some),
+            _ => Err(LocalCutOwnerErrorV1::CorruptState),
+        }
+    }
+
+    fn optional_u64(&mut self) -> Result<Option<u64>, LocalCutOwnerErrorV1> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => self.u64().map(Some),
+            _ => Err(LocalCutOwnerErrorV1::CorruptState),
+        }
+    }
+
+    const fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+}
+
+fn sqlite_append_local_cut_owner_u32(
+    out: &mut Vec<u8>,
+    value: usize,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let value = u32::try_from(value).map_err(|_| LocalCutOwnerErrorV1::BoundExceeded)?;
+    out.extend_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+
+fn sqlite_append_local_cut_owner_blob(
+    out: &mut Vec<u8>,
+    bytes: &[u8],
+) -> Result<(), LocalCutOwnerErrorV1> {
+    sqlite_append_local_cut_owner_u32(out, bytes.len())?;
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn sqlite_append_local_cut_owner_optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            out.extend_from_slice(value.as_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+fn sqlite_append_local_cut_owner_optional_u64(out: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+fn sqlite_append_local_cut_owner_table(out: &mut Vec<u8>, table: LocalCutTableRefV1) {
+    out.extend_from_slice(&table.row_count().to_be_bytes());
+    sqlite_append_local_cut_owner_optional_hash(out, table.root_hash());
+}
+
+fn sqlite_read_local_cut_owner_table(
+    cursor: &mut SqliteLocalCutOwnerCursorV1<'_>,
+) -> Result<LocalCutTableRefV1, LocalCutOwnerErrorV1> {
+    LocalCutTableRefV1::new(cursor.u64()?, cursor.optional_hash()?)
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)
+}
+
+fn sqlite_local_cut_owner_request_bytes(
+    request: &LocalCutOwnerRequestV1,
+) -> Result<Vec<u8>, LocalCutOwnerErrorV1> {
+    local_cut_owner_intent_digest_v1(request)?;
+    let mut out = Vec::with_capacity(2048);
+    out.extend_from_slice(SQLITE_LOCAL_CUT_OWNER_REQUEST_MAGIC_V1);
+    out.push(1);
+    out.extend_from_slice(request.operation_id.as_bytes());
+    sqlite_append_local_cut_owner_blob(&mut out, &request.seal.to_canonical_cbor())?;
+    out.extend_from_slice(request.manifest_hash.as_bytes());
+    sqlite_append_local_cut_owner_u32(&mut out, request.manifest_binding_table.records().len())?;
+    for record in request.manifest_binding_table.records() {
+        sqlite_append_local_cut_owner_blob(&mut out, record)?;
+    }
+    sqlite_append_local_cut_owner_u32(&mut out, request.composition_rows.len())?;
+    for row in &request.composition_rows {
+        out.extend_from_slice(&row.plugin_id.inner().to_bytes());
+        out.extend_from_slice(&row.timeline_id.inner().to_bytes());
+        sqlite_append_local_cut_owner_blob(&mut out, row.plugin_version.as_bytes())?;
+        out.extend_from_slice(row.implementation_hash.as_bytes());
+        out.extend_from_slice(row.eop1_native_digest.as_bytes());
+        sqlite_append_local_cut_owner_optional_u64(&mut out, row.driver_interval_ns);
+        sqlite_append_local_cut_owner_optional_u64(&mut out, row.last_due_ns);
+        out.extend_from_slice(&row.event_cursor.to_be_bytes());
+        out.extend_from_slice(row.participant_native_state_hash.as_bytes());
+    }
+    sqlite_append_local_cut_owner_u32(&mut out, request.recording_context_rows.len())?;
+    for row in &request.recording_context_rows {
+        out.extend_from_slice(&row.timeline_id.inner().to_bytes());
+        out.extend_from_slice(row.wcs_hash.as_bytes());
+        out.extend_from_slice(row.retention_lease_hash.as_bytes());
+        sqlite_append_local_cut_owner_optional_hash(&mut out, row.predecessor_wcb_hash);
+    }
+    out.extend_from_slice(&request.partition_ledger_seq.to_be_bytes());
+    for table in [
+        request.result_heads_table,
+        request.participant_successor_table,
+        request.cpu_completion_table,
+        request.action_disposition_table,
+        request.candidate_bases_table,
+        request.invocation_bridges_table,
+    ] {
+        sqlite_append_local_cut_owner_table(&mut out, table);
+    }
+    out.extend_from_slice(request.result_inventory_generation.as_bytes());
+    out.extend_from_slice(request.release_fence_proof_digest.as_bytes());
+    if out.len() > SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1 {
+        return Err(LocalCutOwnerErrorV1::BoundExceeded);
+    }
+    Ok(out)
+}
+
+fn sqlite_local_cut_owner_request_cursor(
+    bytes: &[u8],
+) -> Result<SqliteLocalCutOwnerCursorV1<'_>, LocalCutOwnerErrorV1> {
+    if bytes.len() > SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1 {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    let mut cursor = SqliteLocalCutOwnerCursorV1::new(bytes);
+    if cursor.take(SQLITE_LOCAL_CUT_OWNER_REQUEST_MAGIC_V1.len())?
+        != SQLITE_LOCAL_CUT_OWNER_REQUEST_MAGIC_V1
+        || cursor.u8()? != 1
+    {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    Ok(cursor)
+}
+
+fn sqlite_decode_local_cut_owner_request(
+    bytes: &[u8],
+) -> Result<LocalCutOwnerRequestV1, LocalCutOwnerErrorV1> {
+    let mut cursor = sqlite_local_cut_owner_request_cursor(bytes)?;
+    let operation_id = cursor.hash()?;
+    let seal_bytes = cursor.blob(4096)?;
+    let seal = LocalCutSealV2::from_canonical_cbor(seal_bytes)
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    let manifest_hash = cursor.hash()?;
+    let record_count =
+        usize::try_from(cursor.u32()?).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    if record_count == 0 || record_count > MAX_LOCAL_CUT_OWNER_ROWS_V1 {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    let mut records = Vec::with_capacity(record_count);
+    for _ in 0..record_count {
+        records.push(cursor.blob(1_048_576)?.to_vec());
+    }
+    let composition_count =
+        usize::try_from(cursor.u32()?).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    if composition_count == 0 || composition_count > MAX_LOCAL_CUT_OWNER_ROWS_V1 {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    let mut composition_rows = Vec::with_capacity(composition_count);
+    for _ in 0..composition_count {
+        let plugin_id = sqlite_local_cut_owner_plugin(cursor.take(16)?)?;
+        let timeline_id = sqlite_local_cut_owner_timeline(cursor.take(16)?)?;
+        let plugin_version = String::from_utf8(cursor.blob(64)?.to_vec())
+            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+        composition_rows.push(LocalCutCompositionBindingRowV1 {
+            plugin_id,
+            timeline_id,
+            plugin_version,
+            implementation_hash: cursor.hash()?,
+            eop1_native_digest: cursor.hash()?,
+            driver_interval_ns: cursor.optional_u64()?,
+            last_due_ns: cursor.optional_u64()?,
+            event_cursor: cursor.u64()?,
+            participant_native_state_hash: cursor.hash()?,
+        });
+    }
+    let context_count =
+        usize::try_from(cursor.u32()?).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    if context_count == 0 || context_count > MAX_LOCAL_CUT_OWNER_ROWS_V1 {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    let mut recording_context_rows = Vec::with_capacity(context_count);
+    for _ in 0..context_count {
+        recording_context_rows.push(LocalCutRecordingContextRowV1 {
+            timeline_id: sqlite_local_cut_owner_timeline(cursor.take(16)?)?,
+            wcs_hash: cursor.hash()?,
+            retention_lease_hash: cursor.hash()?,
+            predecessor_wcb_hash: cursor.optional_hash()?,
+        });
+    }
+    let partition_ledger_seq = cursor.u64()?;
+    let result_heads_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
+    let participant_successor_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
+    let cpu_completion_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
+    let action_disposition_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
+    let candidate_bases_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
+    let invocation_bridges_table = sqlite_read_local_cut_owner_table(&mut cursor)?;
+    let result_inventory_generation = cursor.hash()?;
+    let release_fence_proof_digest = cursor.hash()?;
+    if !cursor.is_finished() {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    let seal_input = seal.as_input();
+    let manifest_binding_table = LocalCutManifestBindingTableV1::from_records(
+        seal_input.owner_id,
+        seal_input.cut_id,
+        seal_input.manifest_binding_table,
+        &records,
+    )
+    .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    let request = LocalCutOwnerRequestV1 {
+        operation_id,
+        seal,
+        manifest_hash,
+        manifest_binding_table,
+        composition_rows,
+        recording_context_rows,
+        partition_ledger_seq,
+        result_heads_table,
+        participant_successor_table,
+        cpu_completion_table,
+        action_disposition_table,
+        candidate_bases_table,
+        invocation_bridges_table,
+        result_inventory_generation,
+        release_fence_proof_digest,
+    };
+    local_cut_owner_intent_digest_v1(&request).map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    if sqlite_local_cut_owner_request_bytes(&request)
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?
+        .as_slice()
+        != bytes
+    {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    Ok(request)
+}
+
+#[derive(Clone)]
+struct SqliteLocalCutOwnerCutV1 {
+    intent_digest: Hash,
+    request: LocalCutOwnerRequestV1,
+    result: LocalCutOwnerCommitV1,
+}
+
+fn sqlite_validate_local_cut_owner_result(
+    owner_id: [u8; 32],
+    cut_id: u64,
+    result: &LocalCutOwnerCommitV1,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let seal = result.seal.as_input();
+    let commit = result.commit.as_input();
+    let receipt = result.receipt.as_input();
+    if result.kind != LocalCutOwnerCommitKindV1::Applied
+        || seal.owner_id != owner_id
+        || seal.cut_id != cut_id
+        || commit.owner_id != owner_id
+        || commit.cut_id != cut_id
+        || commit.seal_hash != result.seal.digest()
+        || receipt.commit_record_hash != result.commit.digest()
+        || result.receipt.digest() == Hash::zero()
+    {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    Ok(())
+}
+
+fn sqlite_validate_local_cut_owner_cut(
+    owner_id: [u8; 32],
+    cut_id: u64,
+    cut: &SqliteLocalCutOwnerCutV1,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let actual_intent = local_cut_owner_intent_digest_v1(&cut.request)
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    if actual_intent != cut.intent_digest || cut.request.operation_id == Hash::zero() {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    sqlite_validate_local_cut_owner_result(owner_id, cut_id, &cut.result)?;
+    let commit = cut.result.commit.as_input();
+    if cut.request.seal.as_input().owner_id != owner_id
+        || cut.request.seal.as_input().cut_id != cut_id
+        || cut.result.seal != cut.request.seal
+        || commit.partition_ledger_seq != cut.request.partition_ledger_seq
+        || commit.manifest_hash != cut.request.manifest_hash
+        || commit.result_heads_table != cut.request.result_heads_table
+        || commit.participant_successor_table != cut.request.participant_successor_table
+        || commit.cpu_completion_table != cut.request.cpu_completion_table
+        || commit.action_disposition_table != cut.request.action_disposition_table
+        || commit.candidate_bases_table != cut.request.candidate_bases_table
+        || commit.invocation_bridges_table != cut.request.invocation_bridges_table
+        || commit.result_inventory_generation != cut.request.result_inventory_generation
+        || commit.release_fence_proof_digest != cut.request.release_fence_proof_digest
+    {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    Ok(())
+}
+
+fn sqlite_local_cut_owner_cut_by_id(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    cut_id: u64,
+) -> Result<Option<SqliteLocalCutOwnerCutV1>, LocalCutOwnerErrorV1> {
+    let cut_id_bytes = cut_id.to_be_bytes();
+    let row = connection
+        .query_row(
+            "SELECT operation_id, intent_digest, request_bytes, commit_cbor, receipt_cbor
+             FROM local_cut_owner_cuts
+             WHERE owner_id = ?1 AND cut_id = ?2",
+            params![owner_id.as_slice(), cut_id_bytes.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    let Some((operation_id, intent_digest, request_bytes, commit_bytes, receipt_bytes)) = row
+    else {
+        return Ok(None);
+    };
+    let operation_id = sqlite_local_cut_owner_hash(&operation_id)?;
+    let intent_digest = sqlite_local_cut_owner_hash(&intent_digest)?;
+    let request = sqlite_decode_local_cut_owner_request(&request_bytes)?;
+    let commit = LocalCutCommitV1::from_canonical_cbor(&commit_bytes)
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    let receipt = LocalCutReceiptV1::from_canonical_cbor(&receipt_bytes)
+        .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    let seal = request.seal;
+    let cut = SqliteLocalCutOwnerCutV1 {
+        intent_digest,
+        request,
+        result: LocalCutOwnerCommitV1 {
+            kind: LocalCutOwnerCommitKindV1::Applied,
+            seal,
+            commit,
+            receipt,
+        },
+    };
+    if cut.request.operation_id != operation_id {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    sqlite_validate_local_cut_owner_cut(owner_id, cut_id, &cut)?;
+    Ok(Some(cut))
+}
+
+fn sqlite_local_cut_owner_cut_by_operation(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    operation_id: Hash,
+) -> Result<Option<SqliteLocalCutOwnerCutV1>, LocalCutOwnerErrorV1> {
+    let row = connection
+        .query_row(
+            "SELECT cut_id FROM local_cut_owner_cuts
+             WHERE owner_id = ?1 AND operation_id = ?2",
+            params![owner_id.as_slice(), operation_id.as_bytes().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    row.map(|cut_id| {
+        let cut_id = sqlite_local_cut_owner_u64(&cut_id)?;
+        sqlite_local_cut_owner_cut_by_id(connection, owner_id, cut_id)?
+            .ok_or(LocalCutOwnerErrorV1::CorruptState)
+    })
+    .transpose()
+}
+
+fn sqlite_local_cut_owner_state_raw(
+    connection: &Connection,
+    owner_id: [u8; 32],
+) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
+    let row = connection
+        .query_row(
+            "SELECT last_visible_cut_id, last_visible_tick, membership_epoch,
+                    configuration_generation, previous_visible_lcq1_hash, inventory_generation
+             FROM local_cut_owner_state WHERE owner_id = ?1",
+            params![owner_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    let Some((
+        last_visible_cut_id,
+        last_visible_tick,
+        membership_epoch,
+        generation,
+        previous,
+        inventory,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT timeline_id FROM local_cut_owner_state_timelines
+             WHERE owner_id = ?1 ORDER BY timeline_id",
+        )
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    let timeline_rows = statement
+        .query_map(params![owner_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    let timelines = timeline_rows
+        .iter()
+        .map(|bytes| sqlite_local_cut_owner_timeline(bytes))
+        .collect::<Result<Vec<_>, _>>()?;
+    let state = LocalCutOwnerStateV1 {
+        owner_id,
+        last_visible_cut_id: sqlite_local_cut_owner_u64(&last_visible_cut_id)?,
+        last_visible_tick: sqlite_local_cut_owner_u64(&last_visible_tick)?,
+        membership_epoch: sqlite_local_cut_owner_u32(&membership_epoch)?,
+        configuration_generation: sqlite_local_cut_owner_u64(&generation)?,
+        previous_visible_lcq1_hash: Some(sqlite_local_cut_owner_hash(&previous)?),
+        inventory_generation: sqlite_local_cut_owner_hash(&inventory)?,
+        timelines,
+    };
+    state.validate()?;
+    Ok(Some(state))
+}
+
+fn sqlite_read_local_cut_owner_state(
+    connection: &Connection,
+    owner_id: [u8; 32],
+) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
+    let Some(state) = sqlite_local_cut_owner_state_raw(connection, owner_id)? else {
+        return if sqlite_local_cut_owner_has_rows(connection, owner_id)? {
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        } else {
+            Ok(None)
+        };
+    };
+    let admission = sqlite_read_manifest_owner_current_state(connection, owner_id)
+        .map_err(map_sqlite_manifest_owner_to_local_error)?
+        .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+    if state.owner_id != admission.owner_id
+        || state.configuration_generation != admission.configuration_generation
+        || state.previous_visible_lcq1_hash != admission.previous_visible_lcq1_hash
+        || state.inventory_generation != admission.inventory_generation
+        || state.timelines != admission.timelines
+    {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT cut_id FROM local_cut_owner_cuts
+             WHERE owner_id = ?1 ORDER BY cut_id",
+        )
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    let cut_rows = statement
+        .query_map(params![owner_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    let mut found_current = false;
+    for cut_bytes in cut_rows {
+        let cut_id = sqlite_local_cut_owner_u64(&cut_bytes)?;
+        let cut = sqlite_local_cut_owner_cut_by_id(connection, owner_id, cut_id)?
+            .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+        if cut_id > state.last_visible_cut_id {
+            return Err(LocalCutOwnerErrorV1::CorruptState);
+        }
+        if cut_id == state.last_visible_cut_id {
+            if state.previous_visible_lcq1_hash != Some(cut.result.receipt.digest()) {
+                return Err(LocalCutOwnerErrorV1::CorruptState);
+            }
+            found_current = true;
+        }
+    }
+    if !found_current {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    Ok(Some(state))
+}
+
+fn sqlite_resolve_local_cut_owner_retry(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    operation_id: Hash,
+    intent_digest: Hash,
+) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+    let Some(cut) = sqlite_local_cut_owner_cut_by_operation(connection, owner_id, operation_id)?
+    else {
+        return Ok(None);
+    };
+    if cut.intent_digest != intent_digest {
+        return Err(LocalCutOwnerErrorV1::Conflict);
+    }
+    let mut retry = cut.result;
+    retry.kind = LocalCutOwnerCommitKindV1::ExactRetry;
+    Ok(Some(retry))
+}
+
+fn sqlite_insert_local_cut_owner_cut(
+    connection: &Connection,
+    batch: &PreparedLocalCutOwnerCommitV1,
+) -> Result<LocalCutOwnerCommitV1, LocalCutOwnerErrorV1> {
+    let request = batch.request();
+    let owner_id = batch.successor_state().owner_id;
+    let cut_id = request.seal.as_input().cut_id;
+    if sqlite_local_cut_owner_cut_by_id(connection, owner_id, cut_id)?.is_some()
+        || sqlite_local_cut_owner_cut_by_operation(connection, owner_id, request.operation_id)?
+            .is_some()
+    {
+        return Err(LocalCutOwnerErrorV1::Conflict);
+    }
+    let result = batch.applied_result();
+    let request_bytes = sqlite_local_cut_owner_request_bytes(request)?;
+    let cut_id_bytes = cut_id.to_be_bytes();
+    connection
+        .execute(
+            "INSERT INTO local_cut_owner_cuts
+             (owner_id, cut_id, operation_id, intent_digest, request_bytes, commit_cbor, receipt_cbor)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                owner_id.as_slice(),
+                cut_id_bytes.as_slice(),
+                request.operation_id.as_bytes().as_slice(),
+                batch.intent_digest().as_bytes().as_slice(),
+                request_bytes,
+                result.commit.to_canonical_cbor(),
+                result.receipt.to_canonical_cbor(),
+            ],
+        )
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    Ok(result)
+}
+
+fn sqlite_write_local_cut_owner_state(
+    connection: &Connection,
+    current_state: Option<&LocalCutOwnerStateV1>,
+    successor: &LocalCutOwnerStateV1,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    successor.validate()?;
+    let owner_id = successor.owner_id;
+    let previous = successor
+        .previous_visible_lcq1_hash
+        .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+    let changed = match current_state {
+        Some(current_state) => connection
+            .execute(
+                "UPDATE local_cut_owner_state
+                 SET last_visible_cut_id = ?1, last_visible_tick = ?2, membership_epoch = ?3,
+                     configuration_generation = ?4, previous_visible_lcq1_hash = ?5,
+                     inventory_generation = ?6
+                 WHERE owner_id = ?7 AND last_visible_cut_id = ?8 AND last_visible_tick = ?9
+                   AND membership_epoch = ?10 AND configuration_generation = ?11
+                   AND previous_visible_lcq1_hash = ?12 AND inventory_generation = ?13",
+                params![
+                    successor.last_visible_cut_id.to_be_bytes().as_slice(),
+                    successor.last_visible_tick.to_be_bytes().as_slice(),
+                    successor.membership_epoch.to_be_bytes().as_slice(),
+                    successor.configuration_generation.to_be_bytes().as_slice(),
+                    previous.as_bytes().as_slice(),
+                    successor.inventory_generation.as_bytes().as_slice(),
+                    owner_id.as_slice(),
+                    current_state.last_visible_cut_id.to_be_bytes().as_slice(),
+                    current_state.last_visible_tick.to_be_bytes().as_slice(),
+                    current_state.membership_epoch.to_be_bytes().as_slice(),
+                    current_state
+                        .configuration_generation
+                        .to_be_bytes()
+                        .as_slice(),
+                    current_state
+                        .previous_visible_lcq1_hash
+                        .map(|hash| hash.as_bytes().to_vec()),
+                    current_state.inventory_generation.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?,
+        None => connection
+            .execute(
+                "INSERT INTO local_cut_owner_state
+                 (owner_id, last_visible_cut_id, last_visible_tick, membership_epoch,
+                  configuration_generation, previous_visible_lcq1_hash, inventory_generation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    owner_id.as_slice(),
+                    successor.last_visible_cut_id.to_be_bytes().as_slice(),
+                    successor.last_visible_tick.to_be_bytes().as_slice(),
+                    successor.membership_epoch.to_be_bytes().as_slice(),
+                    successor.configuration_generation.to_be_bytes().as_slice(),
+                    previous.as_bytes().as_slice(),
+                    successor.inventory_generation.as_bytes().as_slice(),
+                ],
+            )
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?,
+    };
+    if changed != 1 {
+        return Err(LocalCutOwnerErrorV1::Conflict);
+    }
+    connection
+        .execute(
+            "DELETE FROM local_cut_owner_state_timelines WHERE owner_id = ?1",
+            params![owner_id.as_slice()],
+        )
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    for timeline_id in &successor.timelines {
+        let timeline_bytes = timeline_id.inner().to_bytes();
+        connection
+            .execute(
+                "INSERT INTO local_cut_owner_state_timelines (owner_id, timeline_id)
+                 VALUES (?1, ?2)",
+                params![owner_id.as_slice(), timeline_bytes.as_slice()],
+            )
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    }
+    Ok(())
+}
+
+fn sqlite_update_manifest_owner_state_after_local_cut(
+    connection: &Connection,
+    current: &ManifestOwnerAdmissionOwnerStateV1,
+    result: &LocalCutOwnerCommitV1,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let receipt_hash = result.receipt.digest();
+    let changed = connection
+        .execute(
+            "UPDATE manifest_owner_admission_state
+             SET previous_visible_lcq1_hash = ?1, inventory_generation = ?2
+             WHERE owner_id = ?3 AND configuration_generation = ?4
+               AND previous_visible_lcq1_hash IS ?5 AND inventory_generation = ?6",
+            params![
+                receipt_hash.as_bytes().as_slice(),
+                result
+                    .commit
+                    .as_input()
+                    .result_inventory_generation
+                    .as_bytes()
+                    .as_slice(),
+                current.owner_id.as_slice(),
+                current.configuration_generation.to_be_bytes().as_slice(),
+                current
+                    .previous_visible_lcq1_hash
+                    .map(|hash| hash.as_bytes().to_vec()),
+                current.inventory_generation.as_bytes().as_slice(),
+            ],
+        )
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(LocalCutOwnerErrorV1::Conflict)
+    }
+}
+
+fn sqlite_validate_local_cut_owner_batch(
+    batch: &PreparedLocalCutOwnerCommitV1,
+    admission: &ManifestOwnerAdmissionOwnerStateV1,
+    current_state: Option<&LocalCutOwnerStateV1>,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let request = batch.request();
+    let owner_id = batch.successor_state().owner_id;
+    let result = batch.applied_result();
+    if local_cut_owner_intent_digest_v1(request)? != batch.intent_digest() {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    batch.successor_state().validate()?;
+    let cut_id = request.seal.as_input().cut_id;
+    sqlite_validate_local_cut_owner_result(owner_id, cut_id, &result)?;
+    let seal = request.seal.as_input();
+    let successor = batch.successor_state();
+    if seal.owner_id != owner_id
+        || seal.configuration_generation != admission.configuration_generation
+        || seal.previous_visible_receipt_hash != admission.previous_visible_lcq1_hash
+        || seal.expected_inventory_generation != admission.inventory_generation
+        || successor.last_visible_cut_id != cut_id
+        || successor.last_visible_tick != seal.tick
+        || successor.membership_epoch != seal.membership_epoch
+        || successor.configuration_generation != admission.configuration_generation
+        || successor.previous_visible_lcq1_hash != Some(result.receipt.digest())
+        || successor.inventory_generation != request.result_inventory_generation
+        || successor.timelines != admission.timelines
+    {
+        return Err(LocalCutOwnerErrorV1::Conflict);
+    }
+    match current_state {
+        Some(state) => {
+            let expected_tick = state
+                .last_visible_tick
+                .checked_add(1)
+                .ok_or(LocalCutOwnerErrorV1::Conflict)?;
+            if successor.last_visible_cut_id <= state.last_visible_cut_id
+                || successor.last_visible_tick != expected_tick
+                || successor.membership_epoch != state.membership_epoch
+            {
+                return Err(LocalCutOwnerErrorV1::Conflict);
+            }
+        }
+        None => {
+            if admission.previous_visible_lcq1_hash.is_some()
+                || successor.last_visible_tick != 1
+                || successor.membership_epoch != 0
+            {
+                return Err(LocalCutOwnerErrorV1::Conflict);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn finish_local_cut_owner_scope<T>(
+    connection: &Connection,
+    scope: SqliteImmediateScopeV1,
+    result: Result<T, LocalCutOwnerErrorV1>,
+) -> Result<T, LocalCutOwnerErrorV1> {
+    match scope {
+        SqliteImmediateScopeV1::Transaction => finish_transaction(
+            connection,
+            result,
+            |_, _| LocalCutOwnerErrorV1::StorageFailure,
+            |_, _| LocalCutOwnerErrorV1::StorageFailure,
+        ),
+        SqliteImmediateScopeV1::Savepoint => match result {
+            Ok(value) => connection
+                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+                .map(|()| value)
+                .map_err(|_| LocalCutOwnerErrorV1::StorageFailure),
+            Err(error) => {
+                let rollback = connection.execute_batch(
+                    "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
+                     RELEASE SAVEPOINT pigloros_protected_effect",
+                );
+                match rollback {
+                    Ok(()) => Err(error),
+                    Err(_) => Err(LocalCutOwnerErrorV1::StorageFailure),
+                }
+            }
+        },
+    }
+}
+
+impl LocalCutOwnerPersistencePortV1 for SqliteStore {
+    fn read_local_cut_owner_state_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        let result = sqlite_read_local_cut_owner_state(&transaction, owner_id);
+        match result {
+            Ok(state) => {
+                transaction
+                    .commit()
+                    .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+                Ok(state)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn resolve_local_cut_owner_retry_v1(
+        &self,
+        owner_id: [u8; 32],
+        operation_id: Hash,
+        intent_digest: Hash,
+    ) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        sqlite_read_local_cut_owner_state(&transaction, owner_id)?;
+        let result = sqlite_resolve_local_cut_owner_retry(
+            &transaction,
+            owner_id,
+            operation_id,
+            intent_digest,
+        );
+        match result {
+            Ok(retry) => {
+                transaction
+                    .commit()
+                    .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+                Ok(retry)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn commit_local_cut_owner_v1(
+        &mut self,
+        batch: PreparedLocalCutOwnerCommitV1,
+    ) -> Result<LocalCutOwnerCommitV1, LocalCutOwnerErrorV1> {
+        let scope =
+            begin_immediate_scope(&self.conn).map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        let result = (|| {
+            let owner_id = batch.successor_state().owner_id;
+            let operation_id = batch.request().operation_id;
+            let admission = sqlite_read_manifest_owner_current_state(&self.conn, owner_id)
+                .map_err(map_sqlite_manifest_owner_to_local_error)?
+                .ok_or(LocalCutOwnerErrorV1::Conflict)?;
+            let current_state = sqlite_read_local_cut_owner_state(&self.conn, owner_id)?;
+            if let Some(retry) = sqlite_resolve_local_cut_owner_retry(
+                &self.conn,
+                owner_id,
+                operation_id,
+                batch.intent_digest(),
+            )? {
+                return Ok(retry);
+            }
+            sqlite_validate_local_cut_owner_batch(&batch, &admission, current_state.as_ref())?;
+            let applied = sqlite_insert_local_cut_owner_cut(&self.conn, &batch)?;
+            sqlite_write_local_cut_owner_state(
+                &self.conn,
+                current_state.as_ref(),
+                batch.successor_state(),
+            )?;
+            sqlite_update_manifest_owner_state_after_local_cut(&self.conn, &admission, &applied)?;
+            Ok(applied)
+        })();
+        finish_local_cut_owner_scope(&self.conn, scope, result)
+    }
+
+    fn read_local_cut_owner_commit_v1(
+        &self,
+        owner_id: [u8; 32],
+        cut_id: u64,
+    ) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        sqlite_read_local_cut_owner_state(&transaction, owner_id)?;
+        let result = sqlite_local_cut_owner_cut_by_id(&transaction, owner_id, cut_id)
+            .map(|cut| cut.map(|cut| cut.result));
+        match result {
+            Ok(cut) => {
+                transaction
+                    .commit()
+                    .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+                Ok(cut)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn sqlite_sync_local_cut_owner_after_admission(
+    connection: &Connection,
+    input: &ManifestOwnerAdmissionInputV1,
+    current_state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let owner_id = input.catalog.as_input().owner_id;
+    let Some(local_cut_state) = sqlite_local_cut_owner_state_raw(connection, owner_id)
+        .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
+    else {
+        return if sqlite_local_cut_owner_has_rows(connection, owner_id)
+            .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
+        {
+            Err(ManifestOwnerAdmissionErrorV1::CorruptState)
+        } else {
+            Ok(())
+        };
+    };
+    let current_state = current_state.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    if local_cut_state.owner_id != owner_id
+        || local_cut_state.configuration_generation != current_state.configuration_generation
+        || local_cut_state.previous_visible_lcq1_hash != current_state.previous_visible_lcq1_hash
+        || local_cut_state.inventory_generation != current_state.inventory_generation
+        || local_cut_state.timelines != current_state.timelines
+        || input.expected_configuration_generation != Some(local_cut_state.configuration_generation)
+        || input.previous_visible_lcq1_hash != local_cut_state.previous_visible_lcq1_hash
+        || input.expected_inventory_generation != Some(local_cut_state.inventory_generation)
+    {
+        return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+    }
+    let timelines = input
+        .timelines
+        .iter()
+        .map(|timeline| timeline.timeline_id)
+        .collect::<Vec<_>>();
+    let membership_epoch = if timelines == local_cut_state.timelines {
+        local_cut_state.membership_epoch
+    } else {
+        local_cut_state
+            .membership_epoch
+            .checked_add(1)
+            .ok_or(ManifestOwnerAdmissionErrorV1::Conflict)?
+    };
+    let changed = connection
+        .execute(
+            "UPDATE local_cut_owner_state
+             SET membership_epoch = ?1, configuration_generation = ?2,
+                 previous_visible_lcq1_hash = ?3, inventory_generation = ?4
+             WHERE owner_id = ?5 AND last_visible_cut_id = ?6 AND last_visible_tick = ?7
+               AND membership_epoch = ?8 AND configuration_generation = ?9
+               AND previous_visible_lcq1_hash = ?10 AND inventory_generation = ?11",
+            params![
+                membership_epoch.to_be_bytes().as_slice(),
+                input
+                    .catalog
+                    .as_input()
+                    .configuration_generation
+                    .to_be_bytes()
+                    .as_slice(),
+                input
+                    .previous_visible_lcq1_hash
+                    .map(|hash| hash.as_bytes().to_vec()),
+                input.resulting_inventory_generation.as_bytes().as_slice(),
+                owner_id.as_slice(),
+                local_cut_state.last_visible_cut_id.to_be_bytes().as_slice(),
+                local_cut_state.last_visible_tick.to_be_bytes().as_slice(),
+                local_cut_state.membership_epoch.to_be_bytes().as_slice(),
+                local_cut_state
+                    .configuration_generation
+                    .to_be_bytes()
+                    .as_slice(),
+                local_cut_state
+                    .previous_visible_lcq1_hash
+                    .map(|hash| hash.as_bytes().to_vec()),
+                local_cut_state.inventory_generation.as_bytes().as_slice(),
+            ],
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    if changed != 1 {
+        return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+    }
+    connection
+        .execute(
+            "DELETE FROM local_cut_owner_state_timelines WHERE owner_id = ?1",
+            params![owner_id.as_slice()],
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    for timeline_id in timelines {
+        let timeline_bytes = timeline_id.inner().to_bytes();
+        connection
+            .execute(
+                "INSERT INTO local_cut_owner_state_timelines (owner_id, timeline_id)
+                 VALUES (?1, ?2)",
+                params![owner_id.as_slice(), timeline_bytes.as_slice()],
+            )
+            .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    }
+    Ok(())
 }
 
 impl AdapterRecordingStoreV1 for SqliteStore {
