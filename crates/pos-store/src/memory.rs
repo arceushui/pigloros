@@ -11267,10 +11267,17 @@ mod coverage_entrypoints {
     use super::tests::new_store;
     use super::*;
     use pos_core::{
-        adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
-        AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterDataClassV1, AdapterEffectModeV1,
-        AdapterInvocationInputV1, AdapterInvocationV1, WorldReplayHandleInputV1,
-        WorldReplayHandleV1,
+        adapter_configuration_digest_v1, extract_adapter_admission_registration_v1,
+        extract_adapter_transcript_registration_v1, extract_repro_manifest_root_registration_v1,
+        prepare_artifact_registration_batch_v1, public_adapter_schema_digest_v1,
+        AdapterAdmissionEntryV1, AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterDataClassV1,
+        AdapterEffectModeV1, AdapterInvocationInputV1, AdapterInvocationV1,
+        AdapterTranscriptInputV1, ArtifactChildEdgeV1, ArtifactDataClassV1, ArtifactOptionalityV1,
+        ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
+        ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
+        ArtifactRegistrationV1, ArtifactTransitionRuleV1, ReproManifestRootInputV1,
+        ReproManifestRootRegistrationInputV1, WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,
+        WorldReplayHandleInputV1, WorldReplayHandleV1,
     };
     use pos_core::{
         ConsentAuthority, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
@@ -12260,6 +12267,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn memory_adapter_recording_rejects_retained_corruption(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (mut store, session) = closed_memory_adapter_recording(181)?;
@@ -12329,6 +12337,10 @@ mod coverage_entrypoints {
             store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
             Err(AdapterRecordingStoreErrorV1::InvalidState)
         );
+        assert_eq!(
+            store.close_adapter_recording_session(owner_reference, run_operation_id),
+            Err(AdapterRecordingStoreErrorV1::InvalidState)
+        );
 
         let (mut store, session) = closed_memory_adapter_recording(185)?;
         let owner_reference = session.owner_reference();
@@ -12344,6 +12356,453 @@ mod coverage_entrypoints {
         assert_eq!(
             store.read_closed_adapter_recording_session(owner_reference, run_operation_id),
             Err(AdapterRecordingStoreErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    type CatalogFixture = (PreparedArtifactRegistrationBatchV1, AdapterRecordingSessionV1);
+    type CommittedCatalog = (MemoryStore, PreparedArtifactRegistrationBatchV1, (Hash, Hash));
+
+    // This fixture isolates the memory catalog port. Its synthetic WCR1
+    // registration is not Wave 8 owner-verification evidence.
+    struct MemoryCatalogOwnerVerifier;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl ArtifactRegistrationOwnerVerifierV1 for MemoryCatalogOwnerVerifier {
+        fn derive_native_registration(
+            &self,
+            owner_id: &OwnerIdV1,
+            artifact_class: ErasureArtifactClassV1,
+            artifact_bytes: &[u8],
+        ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+            structural_registration(owner_id, artifact_class, artifact_bytes, Vec::new())
+                .map_err(|_| ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+        }
+
+        fn verify_committed_artifact(
+            &self,
+            _owner_id: &OwnerIdV1,
+            _artifact_bytes: &[u8],
+            _registration: &ArtifactRegistrationV1,
+        ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+            Ok(())
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn structural_registration(
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+        child_artifacts: Vec<ArtifactChildEdgeV1>,
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationErrorV1> {
+        ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+            artifact_class,
+            artifact_digest: ArtifactRegistrationV1::artifact_digest(
+                artifact_class,
+                artifact_bytes,
+            ),
+            owner_reference: ArtifactRegistrationV1::owner_reference(owner_id),
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            optionality: ArtifactOptionalityV1::Required,
+            transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+            required_key_roles: Vec::new(),
+            key_dependencies: Vec::new(),
+            child_artifacts,
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn catalog_row(
+        owner_id: OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+        child_artifacts: Vec<ArtifactChildEdgeV1>,
+    ) -> Result<ArtifactRegistrationCatalogRowV1, Box<dyn std::error::Error>> {
+        let registration =
+            structural_registration(&owner_id, artifact_class, artifact_bytes, child_artifacts)?;
+        let row = ArtifactRegistrationCatalogRowV1::from_persisted(
+            owner_id,
+            artifact_class,
+            registration.fields().artifact_digest,
+            registration.address(),
+            artifact_bytes.to_vec(),
+            registration.canonical_cbor(),
+        )?;
+        Ok(row)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn child_edge(row: &ArtifactRegistrationCatalogRowV1) -> ArtifactChildEdgeV1 {
+        ArtifactChildEdgeV1 {
+            artifact_class: row.artifact_class(),
+            artifact_digest: row.artifact_digest(),
+            registration_address: row.registration_address(),
+            required: true,
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn insert_catalog_row(store: &mut MemoryStore, row: ArtifactRegistrationCatalogRowV1) {
+        let address = row.registration_address();
+        let identity = (*row.owner_id(), row.artifact_class(), row.artifact_digest());
+        store
+            .artifact_registration_identities
+            .insert(identity, address);
+        store.artifact_registrations.insert(address, row);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn commit_catalog(
+        store: &mut MemoryStore,
+        batch: PreparedArtifactRegistrationBatchV1,
+    ) -> Result<ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1> {
+        ArtifactRegistrationPersistencePortV1::commit_artifact_registration_batch(store, batch)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_catalog_error(
+        store: &MemoryStore,
+        owner: &OwnerIdV1,
+        address: Hash,
+    ) -> Option<ArtifactRegistrationPersistenceErrorV1> {
+        ArtifactRegistrationPersistencePortV1::read_artifact_registration(store, owner, address)
+            .err()
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_batch() -> Result<CatalogFixture, Box<dyn std::error::Error>> {
+        let owner_id = OwnerIdV1::from_static("memory-coverage-catalog");
+        let owner_reference = ArtifactRegistrationV1::owner_reference(&owner_id);
+        let operation_id = Hash::from_bytes([0x61; 32]);
+        let commit_receipt_digest = Hash::from_bytes([0x62; 32]);
+        let recording = WorldRecordingReceiptV1::new(WorldRecordingReceiptInputV1 {
+            binding_hash: Hash::from_bytes([0x63; 32]),
+            operation_id,
+            actual_commit_receipt_digest: commit_receipt_digest,
+            installed_inventory_generation: Hash::from_bytes([0x64; 32]),
+        })?;
+        let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+            owner_reference,
+            timeline_id: TimelineId::new(),
+            cut_id: 2,
+            commit_receipt_digest,
+            recording_receipt_digest: recording.digest(),
+            logical_head: 0,
+            stitched_head_hash: Hash::from_bytes([0x65; 32]),
+        })?;
+        let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+            owner_reference,
+            configuration_generation: 1,
+            scope_digest: Hash::from_bytes([0x66; 32]),
+            entries: Vec::new(),
+        })?;
+        let transcript = AdapterTranscriptV1::new(AdapterTranscriptInputV1 {
+            owner_reference,
+            world_handle,
+            run_operation_id: operation_id,
+            adapter_admission_digest: admission.digest(),
+            calls: Vec::new(),
+        })?;
+        let root = ReproManifestRootV1::new(ReproManifestRootInputV1 {
+            owner_reference,
+            world_handle,
+            run_operation_id: operation_id,
+            plugin_roster_digest: admission.as_input().scope_digest,
+            adapter_transcript_digest: transcript.digest(),
+            created_at_micros: 2,
+            label: None,
+        })?;
+        let session = AdapterRecordingSessionV1::new(
+            owner_reference,
+            world_handle,
+            operation_id,
+            admission.clone(),
+        )?;
+        let admission_bytes = admission.to_canonical_cbor();
+        let transcript_bytes = transcript.to_canonical_cbor();
+        let recording_bytes = recording.to_canonical_cbor();
+        let root_bytes = root.to_canonical_cbor();
+        let admission_registration = extract_adapter_admission_registration_v1(&admission_bytes)?;
+        let transcript_registration = extract_adapter_transcript_registration_v1(
+            &transcript_bytes,
+            &admission_bytes,
+            &admission_registration,
+        )?;
+        let recording_registration = structural_registration(
+            &owner_id,
+            ErasureArtifactClassV1::TimelineReplay,
+            &recording_bytes,
+            Vec::new(),
+        )?;
+        let root_registration =
+            extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
+                root_bytes: &root_bytes,
+                recording_receipt_bytes: &recording_bytes,
+                recording_registration: &recording_registration,
+                transcript_bytes: &transcript_bytes,
+                admission_bytes: &admission_bytes,
+                admission_registration: &admission_registration,
+                transcript_registration: &transcript_registration,
+                owner_id: &owner_id,
+                label_data_class: None,
+            })?;
+        let root_address = root_registration.address();
+        let inputs = [
+            (admission_bytes, admission_registration),
+            (transcript_bytes, transcript_registration),
+            (recording_bytes, recording_registration),
+            (root_bytes, root_registration),
+        ]
+        .into_iter()
+        .map(|(artifact_bytes, registration)| ArtifactRegistrationInputV1 {
+            owner_id,
+            artifact_bytes,
+            registration_cbor: registration.canonical_cbor().to_vec(),
+        })
+        .collect();
+        let batch = prepare_artifact_registration_batch_v1(
+            owner_id,
+            root_address,
+            inputs,
+            &MemoryCatalogOwnerVerifier,
+        )?;
+        Ok((batch, session))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn committed_memory_catalog() -> Result<CommittedCatalog, Box<dyn std::error::Error>> {
+        let (batch, session) = memory_catalog_batch()?;
+        let key = (session.owner_reference(), session.run_operation_id());
+        let mut store = MemoryStore::new();
+        store.open_adapter_recording_session(session)?;
+        store.close_adapter_recording_session(key.0, key.1)?;
+        assert_eq!(
+            commit_catalog(&mut store, batch.clone())?,
+            ArtifactRegistrationCommitOutcomeV1::Applied
+        );
+        Ok((store, batch, key))
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_commit_rejects_corrupt_retained_indexes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        store.artifact_registration_identities.clear();
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::Conflict)
+        );
+
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let owner = *batch.owner_id();
+        let root = batch.root_registration_address();
+        store.artifact_registration_operations.clear();
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let second_operation = (*batch.owner_id(), Hash::from_bytes([0x6f; 32]));
+        store
+            .artifact_registration_operations
+            .insert(second_operation, batch.root_registration_address());
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_read_rejects_corrupt_retained_rows_and_indexes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let owner = *batch.owner_id();
+        let root = batch.root_registration_address();
+        store.artifact_registrations.remove(&root);
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let root = batch.root_registration_address();
+        store
+            .artifact_registrations
+            .retain(|address, _| *address == root);
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, _) = committed_memory_catalog()?;
+        let root = batch.root_registration_address();
+        store
+            .artifact_registration_identities
+            .retain(|_, address| *address == root);
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, key) = committed_memory_catalog()?;
+        let root = batch.root_registration_address();
+        store
+            .adapter_recording_sessions
+            .get_mut(&key)
+            .ok_or("missing memory catalog recorder")?
+            .status = MemoryAdapterRecordingStatusV1::Open;
+        assert_eq!(
+            read_catalog_error(&store, &owner, root),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_commit_rejects_a_recorder_that_no_longer_derives_the_root(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_, reservation) = memory_adapter_recording_fixture(190, 191)?;
+        let pending = MemoryAdapterRecordingCallV1 {
+            reservation,
+            output_bytes: None,
+        };
+        let (mut store, batch, key) = committed_memory_catalog()?;
+        store
+            .adapter_recording_sessions
+            .get_mut(&key)
+            .ok_or("missing memory catalog recorder")?
+            .calls
+            .insert(0, pending);
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+
+        let (mut store, batch, key) = committed_memory_catalog()?;
+        let journal = store
+            .adapter_recording_sessions
+            .get_mut(&key)
+            .ok_or("missing memory catalog recorder")?;
+        journal.session = AdapterRecordingSessionV1::new(
+            journal.session.owner_reference(),
+            journal.session.world_handle(),
+            Hash::from_bytes([0x6e; 32]),
+            journal.session.admission().clone(),
+        )?;
+        assert_eq!(
+            commit_catalog(&mut store, batch),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_read_revalidates_shared_children_and_native_rows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let owner = OwnerIdV1::from_static("memory-coverage-graph");
+        let class = ErasureArtifactClassV1::TimelineReplay;
+        let leaf = catalog_row(owner, class, b"shared leaf", Vec::new())?;
+        let middle = catalog_row(owner, class, b"middle", vec![child_edge(&leaf)])?;
+        let mut root_children = vec![child_edge(&middle), child_edge(&leaf)];
+        root_children.sort_by_key(|edge| edge.artifact_digest);
+        let root = catalog_row(owner, class, b"diamond root", root_children)?;
+        let mut store = MemoryStore::new();
+        for row in [leaf, middle, root.clone()] {
+            insert_catalog_row(&mut store, row);
+        }
+        let read = ArtifactRegistrationPersistencePortV1::read_artifact_registration(
+            &store,
+            &owner,
+            root.registration_address(),
+        )?;
+        assert_eq!(read, Some(root));
+
+        let native = catalog_row(
+            owner,
+            ErasureArtifactClassV1::ReproManifest,
+            b"not a native manifest",
+            Vec::new(),
+        )?;
+        let native_address = native.registration_address();
+        insert_catalog_row(&mut store, native);
+        assert_eq!(
+            read_catalog_error(&store, &owner, native_address),
+            Some(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_catalog_root_lookup_rejects_a_duplicated_transcript_row(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (store, batch, _) = committed_memory_catalog()?;
+        let rows: Vec<_> = store.artifact_registrations.values().collect();
+        let root_row = rows
+            .iter()
+            .find(|row| row.registration_address() == batch.root_registration_address())
+            .ok_or("missing memory catalog root")?;
+        let root = ReproManifestRootV1::from_canonical_cbor(root_row.artifact_bytes())?;
+        assert_eq!(
+            find_memory_root_transcript_bytes(rows.iter().chain(rows.iter()).copied(), &root),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn memory_adapter_reservation_requires_the_next_plugin_ordinal(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (session, reservation) = memory_adapter_recording_fixture(192, 193)?;
+        let owner_reference = session.owner_reference();
+        let run_operation_id = session.run_operation_id();
+        let mut store = MemoryStore::new();
+        store.open_adapter_recording_session(session)?;
+        store.reserve_adapter_call(owner_reference, run_operation_id, reservation.clone())?;
+        let invocation = AdapterInvocationV1::new(AdapterInvocationInputV1 {
+            global_call_index: 1,
+            ..reservation.invocation().as_input().clone()
+        })?;
+        let repeated_ordinal = AdapterCallReservationV1::new(
+            reservation.plugin_id(),
+            0,
+            invocation.clone(),
+            Hash::from_bytes([0x6d; 32]),
+            2,
+        )?;
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, repeated_ordinal),
+            Err(AdapterRecordingStoreErrorV1::InvalidCall)
+        );
+        let next_ordinal = AdapterCallReservationV1::new(
+            reservation.plugin_id(),
+            1,
+            invocation,
+            Hash::from_bytes([0x6c; 32]),
+            2,
+        )?;
+        let expected = AdapterCallReservationOutcomeV1::Reserved {
+            reserved_at_micros: 2,
+        };
+        assert_eq!(
+            store.reserve_adapter_call(owner_reference, run_operation_id, next_ordinal),
+            Ok(expected)
         );
         Ok(())
     }
