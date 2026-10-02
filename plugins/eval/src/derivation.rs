@@ -224,7 +224,7 @@ struct UnitBudgetV1 {
 }
 
 impl UnitBudgetV1 {
-    fn admit(&mut self, unit_len: usize) -> bool {
+    const fn admit(&mut self, unit_len: usize) -> bool {
         if self.closed || unit_len > self.remaining {
             self.closed = true;
             return false;
