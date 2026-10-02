@@ -2,8 +2,9 @@
 #
 # The repository has a single maintainer, and GitHub does not let a pull
 # request author approve their own pull request, so required human approvals
-# would block every maintainer PR in Trunk Merge Queue. This required check
-# replaces that approval. It passes when either:
+# would block every maintainer PR in Trunk Merge Queue. The required
+# `maintainer-approval` commit status replaces that approval. It is success
+# when either:
 #
 #   - the pull request author is allowed:
 #       arceushui      — the maintainer
@@ -12,14 +13,21 @@
 #   - a collaborator with the admin or maintain role has an "Approve" review
 #     on the pull request's current head commit.
 #
+# Otherwise it is pending ("waiting for a maintainer"), never failure: an
+# unapproved contributor pull request is not broken, it is waiting. A pending
+# required status still blocks merging and merge-queue admission. If this
+# workflow cannot run, no status is posted and the pull request stays blocked.
+#
 # GitHub binds every review to the commit it approved, so new commits always
 # need a fresh approval. Reviews do not trigger pull_request_target, so the
-# maintainer-approved label is only the button that re-runs this check after
+# maintainer-approved label is only the button that re-runs this gate after
 # approving; the label grants nothing by itself. New commits remove it.
 #
 # pull_request_target runs this file from the base branch, never from the pull
 # request, so a fork cannot edit the gate to pass. The job reads event and API
-# metadata only and never checks out pull request code.
+# metadata only and never checks out pull request code. Public repositories
+# need an Actions event policy that allows pull_request_target (see
+# docs/merge-queue.md).
 
 name: maintainer-approval
 
@@ -29,18 +37,19 @@ on:
 
 permissions:
   pull-requests: write
+  statuses: write
 
 concurrency:
   group: maintainer-approval-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  maintainer-approval:
-    name: maintainer-approval
+  maintainer-approval-gate:
+    name: maintainer-approval-gate
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Require an allowed author or a maintainer approval of the head commit
+      - name: Report maintainer approval of the head commit
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -49,11 +58,18 @@ jobs:
           AUTHOR: ${{ github.event.pull_request.user.login }}
           ACTION: ${{ github.event.action }}
           HAS_APPROVAL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'maintainer-approved') }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          report() {
+            gh api --method POST "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+              -f state="$1" -f context=maintainer-approval \
+              -f description="$2" -f target_url="${RUN_URL}" >/dev/null
+            echo "maintainer-approval: $1 - $2"
+          }
           case "${AUTHOR}" in
             arceushui | 'trunk-io[bot]')
-              echo "Pull request author ${AUTHOR} is allowed."
+              report success "Opened by ${AUTHOR}"
               exit 0
               ;;
           esac
@@ -75,10 +91,9 @@ jobs:
               | jq -r '.role_name // "none"')" || role=none
             case "${role}" in
               admin | maintain)
-                echo "Head commit ${HEAD_SHA} is approved by ${approver} (${role})."
+                report success "Approved by ${approver}"
                 exit 0
                 ;;
             esac
           done
-          echo "::error::Pull request author ${AUTHOR} needs an Approve review of commit ${HEAD_SHA} from an admin or maintainer; after approving, add the maintainer-approved label to re-run this check."
-          exit 1
+          report pending "Waiting for a maintainer to approve this commit"

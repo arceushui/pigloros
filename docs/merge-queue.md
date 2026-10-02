@@ -22,7 +22,9 @@ flowchart LR
 ## Merging a pull request
 
 1. Open the pull request against `main` and let its CI run.
-2. Make sure `maintainer-approval` is green (see [Approval](#approval)).
+2. Make sure `maintainer-approval` is green (see [Approval](#approval)). On a
+   pull request from anyone else it shows as pending until a maintainer
+   approves it.
 3. Comment **`/trunk merge`** (or tick the box in Trunk's comment). You may do
    this before CI finishes; Trunk waits until GitHub reports the pull request
    as mergeable.
@@ -45,15 +47,18 @@ Other commands: `/trunk cancel` removes a pull request from the queue;
 
 ## Approval
 
-The required `maintainer-approval` check (`.github/workflows/maintainer-approval.yml`)
-replaces GitHub's required-review count, which a sole maintainer cannot
-satisfy on their own pull requests.
+The required `maintainer-approval` status, posted by the `maintainer-approval-gate`
+job in `.github/workflows/maintainer-approval.yml`, replaces GitHub's
+required-review count, which a sole maintainer cannot satisfy on their own pull
+requests. It is **success** or **pending** ("Waiting for a maintainer to approve
+this commit"), never failure: an unapproved pull request is waiting, not broken.
+A pending required status still blocks merging and queue admission.
 
 | Pull request | How it passes |
 |---|---|
 | Opened by the maintainer (`arceushui`) | Automatically |
 | Trunk's queue test pull requests (`trunk-io[bot]`) | Automatically; they contain only already-approved pull requests |
-| Anyone else, including Dependabot | An admin or maintainer submits an **Approve** review on the **current head commit**, then adds the `maintainer-approved` label to re-run the check |
+| Anyone else, including Dependabot | Pending until an admin or maintainer submits an **Approve** review on the **current head commit** and adds the `maintainer-approved` label to re-run the gate |
 
 - The review is the approval. GitHub binds it to the commit it approved, so
   any new push needs a fresh review; the workflow also removes the label on new
@@ -65,6 +70,8 @@ satisfy on their own pull requests.
   merges.
 - The workflow runs the copy on `main`, never checks out pull request code,
   and its policy test is `scripts/test_maintainer_approval_policy.py`.
+- If the workflow cannot run, no status is posted and the pull request stays
+  blocked, so the gate fails closed.
 
 ## Stacked pull requests
 
@@ -92,6 +99,7 @@ linked job log before changing anything.
 | Every gate fails within seconds after a scope step error | GitHub's changed-file API was unavailable; the scope jobs fall back to the full gate set, so a repeat means a different problem | Read the scope job log |
 | `CodeQL (Rust)` reports "analyses from advanced configurations cannot be processed when the default setup is enabled" | CodeQL **default setup** was enabled for the repository | Settings → Advanced Security → CodeQL analysis → **Switch to advanced** |
 | Queue test pull request has no CI at all | The `ci` workflow is disabled | Actions → `ci` → **Enable workflow** |
+| `maintainer-approval` stays "Expected — waiting for status" | The gate workflow did not run, for example because `pull_request_target` is not allowed by the repository's Actions event policy | Allow `pull_request_target` (see [Repository configuration](#repository-configuration)), then add or remove any label to re-run the gate |
 | `github-advanced-security` fails with "requested model is not supported" | The optional Copilot code-scanning AI findings agent | Not a required check; ignore or disable it |
 
 "Flaky" is not a diagnosis: a retry is reasonable only for a confirmed
@@ -110,10 +118,19 @@ these.
     Trunk GitHub App is the only bypass actor, as **Exempt**. Adding a person
     to this bypass list lets merges skip the queue and reset it.
   - `Require Rust quality gates` — required checks `ci-gate`,
-    `diff mutation testing`, `Trunk Code Quality`, `CodeQL (Rust)` and
-    `maintainer-approval`; "require branches to be up to date" stays **off**.
+    `diff mutation testing`, `Trunk Code Quality`, `CodeQL (Rust)` and the
+    `maintainer-approval` commit status (source: any); "require branches to be
+    up to date" stays **off**.
   - `main` — pull request required (0 approvals), resolved conversations,
     linear history, CodeQL alerts block.
 - Trunk must not bypass the two mergeability rulesets: they decide when a pull
   request may enter the queue.
 - Keep Trunk's merge method compatible with linear history (squash or rebase).
+- **Actions event policy:** the approval gate uses `pull_request_target`.
+  From 2 November 2026 GitHub blocks that event by default in public
+  repositories without an applicable Actions event policy
+  ([GitHub docs](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)).
+  Configure a policy that allows `pull_request_target` for this repository
+  before making `maintainer-approval` required; without it the gate never
+  reports and every pull request stays blocked.
+- **Label:** create the `maintainer-approved` label once (Issues → Labels).
