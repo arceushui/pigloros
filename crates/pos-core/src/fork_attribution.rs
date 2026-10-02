@@ -1021,12 +1021,16 @@ impl<'a> Reader<'a> {
             _ => Err(ForkAttributionCodecErrorV1::InvalidEncoding),
         }
     }
+    /// Read the raw bytes of one text string.
+    fn text_bytes(&mut self) -> Result<&'a [u8], ForkAttributionCodecErrorV1> {
+        // A length that does not fit `usize` is necessarily unavailable to `take`.
+        let length = usize::try_from(self.head(3)?).unwrap_or(usize::MAX);
+        self.take(length)
+    }
     /// Compare a text-string marker byte-for-byte; any other length or
     /// content is an invalid encoding.
     fn magic(&mut self, expected: &str) -> Result<(), ForkAttributionCodecErrorV1> {
-        // A length that does not fit `usize` is necessarily unavailable to `take`.
-        let length = usize::try_from(self.head(3)?).unwrap_or(usize::MAX);
-        if self.take(length)? == expected.as_bytes() {
+        if self.text_bytes()? == expected.as_bytes() {
             Ok(())
         } else {
             Err(ForkAttributionCodecErrorV1::InvalidEncoding)
