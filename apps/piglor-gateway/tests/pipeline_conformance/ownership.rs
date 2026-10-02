@@ -19,7 +19,9 @@ use pos_runtime::{
 
 use super::{
     harness::Capture,
-    support::{gated_registry, CountingApprover, FixturePlugin, ScriptedDriver, TestOk},
+    support::{
+        gated_registry, register_declared, CountingApprover, FixturePlugin, ScriptedDriver, TestOk,
+    },
 };
 
 /// Every public registration path that installs owned Event types.
@@ -127,6 +129,17 @@ fn register(
     path: &str,
     plugin: &FixturePlugin,
 ) -> Result<(), RuntimeError> {
+    register_bound(registry, path, plugin, plugin)
+}
+
+/// Register `plugin` through one named path; explicit-binding paths other
+/// than the test-support Driver path take the binding of `bound`.
+fn register_bound(
+    registry: &mut PluginRegistry,
+    path: &str,
+    plugin: &FixturePlugin,
+    bound: &FixturePlugin,
+) -> Result<(), RuntimeError> {
     match path {
         "generated" => registry.register_generated(plugin, None, None),
         "generated-with-approver" => registry.register_generated_with_approver(
@@ -145,10 +158,10 @@ fn register(
             Some(approver()),
             kinds(plugin),
         ),
-        "verified" => generated_binding(plugin).and_then(|binding| {
+        "verified" => generated_binding(bound).and_then(|binding| {
             registry.register_with_verified_output_policy(plugin, binding, None, None)
         }),
-        "verified-with-approver" => generated_binding(plugin).and_then(|binding| {
+        "verified-with-approver" => generated_binding(bound).and_then(|binding| {
             registry.register_with_verified_output_policy_and_approver(
                 plugin,
                 binding,
@@ -165,10 +178,10 @@ fn register(
                 Box::new(ScriptedDriver::new("conformance-claimant", Vec::new())),
             )
         }),
-        "installed" => generated_binding(plugin).and_then(|binding| {
+        "installed" => generated_binding(bound).and_then(|binding| {
             registry.register_installed_output(plugin, binding, registration(3), None)
         }),
-        _ => generated_binding(plugin).and_then(|binding| {
+        _ => generated_binding(bound).and_then(|binding| {
             registry.register_installed_output_in_manifest_slot(
                 plugin,
                 binding,
@@ -232,7 +245,10 @@ pub fn duplicate_declaration_rejected() -> Capture {
         let mut registry = gated_registry(None);
         let before = snapshot(&registry, &probes);
         let duplicate = FixturePlugin::new("duplicate", &["dup.type", "dup.type"], true);
-        let result = register(&mut registry, path, &duplicate);
+        // A binding cannot itself list a type twice, so the explicit-binding
+        // paths carry another Plugin's canonical binding for the type.
+        let canonical = FixturePlugin::new("canonical", &["dup.type"], true);
+        let result = register_bound(&mut registry, path, &duplicate, &canonical);
         capture.record("none", path, outcome(result));
         capture.record(
             "none",
@@ -269,8 +285,8 @@ pub fn host_type_not_claimable() -> Capture {
 /// registration owns the contested type.
 fn race(first: &dyn Plugin, second: &dyn Plugin) -> (String, Vec<String>) {
     let mut registry = gated_registry(None);
-    registry.register_generated(first, None, None).test_ok();
-    let rejected = outcome(registry.register_generated(second, None, None));
+    register_declared(&mut registry, first).test_ok();
+    let rejected = outcome(register_declared(&mut registry, second));
     (
         rejected,
         registry.plugin_names().map(str::to_owned).collect(),
@@ -343,7 +359,7 @@ pub fn recorder_single_claimant() -> Capture {
     let mut registry = gated_registry(None);
     let host_schema = recorder_description(&registry);
     capture.record("none", "host-schema-present", host_schema.is_some());
-    let agent = outcome(registry.register_generated(&AgentPlugin::new(), None, None));
+    let agent = outcome(register_declared(&mut registry, &AgentPlugin::new()));
     capture.record("none", "agent", agent);
     capture.record(
         "none",
@@ -386,7 +402,7 @@ pub fn persona_owns_no_eval_type() -> Capture {
     capture.record(
         "none",
         "registers",
-        outcome(registry.register_generated(&PersonaPlugin::new(), None, None)),
+        outcome(register_declared(&mut registry, &PersonaPlugin::new())),
     );
     capture
 }

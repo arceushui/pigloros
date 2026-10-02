@@ -764,7 +764,11 @@ pub fn legacy_history() -> Capture {
         let authority = ConsentAuthority::new();
         let mut registry = gated_registry(Some(&authority));
         registry
-            .register_generated(&PersonaPlugin::new(), Some(Box::new(PersonaReducer)), None)
+            .register_generated(
+                &PersonaPlugin::new(),
+                Some(Box::new(PersonaReducer)),
+                Some(Box::new(ScriptedDriver::new("persona-idle", Vec::new()))),
+            )
             .test_ok();
         register_eval(&mut registry, 64, &EvalDiagnosticsV1::default());
         registry.fold_events(timeline, &committed);

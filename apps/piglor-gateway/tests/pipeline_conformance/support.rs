@@ -15,8 +15,8 @@ use pos_core::{
     ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
     Event, EventDraft, Kind, PipelineAdmissionBasisV1, PipelineAdmissionPortV1,
     PipelineAttemptIdV1, PipelineOutcomeV1, PipelineReceiptLookupV1, Plugin, PluginId,
-    ProposedAction, PurgeOutcome, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, ScheduledObservationProfileV1, Seq, SeqRange, TimelineId,
+    ProposedAction, PurgeOutcome, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, ScheduledObservationProfileV1, Seq, SeqRange, State, TimelineId,
     MODALITY_PERSONA,
 };
 use pos_runtime::{
@@ -322,6 +322,37 @@ impl Driver for ScriptedDriver {
     fn abort_step(&mut self) {
         self.aborts.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// A Reducer that keeps no state, for registrations that only need one.
+pub struct IdleReducer;
+
+impl Reducer for IdleReducer {
+    fn initial(&self) -> State {
+        State::new()
+    }
+
+    fn apply(&self, _: &mut State, _: &Event) {}
+}
+
+/// Register `plugin` on the generated path with idle components matching
+/// its declared capability.
+///
+/// # Errors
+///
+/// Returns the registration error.
+pub fn register_declared(
+    registry: &mut PluginRegistry,
+    plugin: &dyn Plugin,
+) -> Result<(), RuntimeError> {
+    let capability = plugin.capability();
+    let reducer: Option<Box<dyn Reducer>> = capability
+        .has_reducer
+        .then(|| Box::new(IdleReducer) as Box<dyn Reducer>);
+    let driver: Option<Box<dyn Driver>> = capability
+        .has_driver
+        .then(|| Box::new(ScriptedDriver::new(plugin.name(), Vec::new())) as Box<dyn Driver>);
+    registry.register_generated(plugin, reducer, driver)
 }
 
 /// One fixed draft of `event_type` for `entity`.

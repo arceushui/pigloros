@@ -465,9 +465,11 @@ pub fn participant_pass_needs_its_fence() -> Capture {
     capture
 }
 
-/// PCF-R3-002: one scheduled pass is never both profiles: an authorized
-/// stage while an anchored pass is pending, the authorized admission of an
-/// anchored pass, and a subscription-scoped Driver offered to the authorized
+/// PCF-R3-002: one scheduled pass is never both observation profiles.
+///
+/// An authorized stage while an anchored pass is pending, the authorized
+/// admission of an anchored pass, and a subscription-scoped Driver offered to
+/// the authorized
 /// path all fail closed before anything reaches the store.
 #[must_use]
 pub fn one_pass_one_profile() -> Capture {
