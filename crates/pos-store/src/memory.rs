@@ -87,6 +87,8 @@ use crate::{
     ForkEventProvenanceAuthorityPortV1,
 };
 
+mod pipeline_admission;
+
 #[cfg(test)]
 thread_local! {
     /// Test-only evidence that bounded reads inspect only selected Event slots.
@@ -219,6 +221,11 @@ pub struct MemoryStore {
     key_registry: Option<KeyRegistryStateV1>,
     /// Canonical authority records shared with the durable adapter contract.
     authority_state: AuthorityPersistenceStateV1,
+    /// Host-published ADR-021 admission fences keyed by Timeline.
+    pipeline_admission_fences: HashMap<TimelineId, pos_core::PipelineAdmissionFenceV1>,
+    /// Retained ADR-021 admitted-batch receipts keyed by opaque idempotency key.
+    pipeline_admission_receipts:
+        HashMap<AppendDedupKey, pipeline_admission::PipelineReceiptRecordV1>,
     /// Opaque trusted-host capability bound to authority mutations.
     authority_persistence_binding: Option<AuthorityPersistenceBindingV1>,
     /// ADR-106 bootstrap root, one-use challenges, session, and rollback fence.
@@ -399,6 +406,7 @@ fn delete_visible_timeline_impl(store: &mut MemoryStore, id: TimelineId) -> Resu
                 }
             }
             store.append_identities = retained_identities;
+            store.forget_pipeline_admission_timeline(id);
             store.geographic_timelines.remove(&id);
             if store
                 .owntracks_enrollment
@@ -583,6 +591,8 @@ impl MemoryStore {
             erasure_topology_store_binding: None,
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
+            pipeline_admission_fences: HashMap::new(),
+            pipeline_admission_receipts: HashMap::new(),
             authority_persistence_binding: None,
             fork_admission_authority: ForkAdmissionAuthorityStateV1::default(),
             fork_admission_authority_enabled: true,
