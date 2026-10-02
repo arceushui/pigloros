@@ -10,7 +10,11 @@ publish.workspace = true
 # Enables downstream fixture registration and draft-profile/verifier seam tests only.
 # Never enable in deployable builds; fixtures do not establish installed authority.
 # Enforced by scripts/check_test_support_features.py in CI.
-test-support = []
+test-support = ["local-admission-host"]
+# Exposes the process-wide local scheduled-admission host to the local
+# experiment composition root. Keeps the host out of deployable Plugin,
+# Driver, and provider graphs; it is not an in-process security boundary.
+local-admission-host = []
 
 [dependencies]
 blake3 = { workspace = true }
@@ -20,6 +24,7 @@ pos-state = { path = "../pos-state" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
+ulid = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance" }
@@ -30,7 +35,6 @@ pos-core = { path = "../pos-core", features = ["test-support"] }
 pos-crypto = { path = "../pos-crypto" }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
-ulid = { workspace = true }
 
 [[test]]
 name = "output_admission_public"

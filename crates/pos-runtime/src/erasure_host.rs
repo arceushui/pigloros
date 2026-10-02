@@ -162,7 +162,7 @@ impl ErasureVerifiedInventoryQueryV1 for SingleUseVerifiedInventoryQueryV1 {
 }
 
 trait ErasureHostStore:
-    pos_core::store::EventStore
+    crate::ScheduledAdmissionStoreV1
     + ErasureInventoryPersistencePortV1
     + ErasureForkPersistencePortV1
     + ErasurePersistencePortV1
@@ -180,7 +180,7 @@ trait ErasureHostStore:
 
 impl<T> ErasureHostStore for T
 where
-    T: pos_core::store::EventStore
+    T: crate::ScheduledAdmissionStoreV1
         + ErasureInventoryPersistencePortV1
         + ErasureForkPersistencePortV1
         + ErasurePersistencePortV1
@@ -3554,6 +3554,30 @@ impl ErasureCommandSenderV1<'_> {
         }
     }
 
+    /// Run one host-only ADR-021 scheduled-admission operation on the owned
+    /// store.
+    ///
+    /// The closure receives the owned store only as
+    /// [`crate::ScheduledAdmissionPortsV1`]: the admitted-batch,
+    /// admission-fence, and authority-persistence ports. That view has no
+    /// `EventStore` supertrait, so the closure cannot raw-append, create, or
+    /// Fork a Timeline outside the fenced admission path, and the borrow
+    /// cannot outlive the closure. Each adapter operation serializes under
+    /// the store's own bound erasure fence. Adapter errors, including an
+    /// unknown commit outcome, reach the caller unchanged.
+    ///
+    /// # Errors
+    /// Returns a payload-free host error for a stale or unavailable sender.
+    pub fn with_scheduled_admission<T>(
+        &mut self,
+        operation: impl FnOnce(&mut dyn crate::ScheduledAdmissionPortsV1) -> T,
+    ) -> Result<T, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation).map(|()| {
+            let ports: &mut dyn crate::ScheduledAdmissionPortsV1 = self.host.store.host_store();
+            operation(ports)
+        })
+    }
+
     /// Append authoritative Events inside the installed erasure fence.
     ///
     /// # Errors
@@ -4817,6 +4841,94 @@ mod tests {
                 });
             }
             None
+        }
+    }
+
+    impl pos_core::PipelineAdmissionPortV1 for FaultStoreV1 {
+        fn admit_pipeline_batch(
+            &mut self,
+            basis: &pos_core::PipelineAdmissionBasisV1,
+        ) -> Result<pos_core::PipelineOutcomeV1, CoreError> {
+            pos_core::PipelineAdmissionPortV1::admit_pipeline_batch(&mut self.inner, basis)
+        }
+
+        fn purge_expired_pipeline_receipts_bounded(
+            &mut self,
+            limit: NonZeroUsize,
+        ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
+            pos_core::PipelineAdmissionPortV1::purge_expired_pipeline_receipts_bounded(
+                &mut self.inner,
+                limit,
+            )
+        }
+    }
+
+    impl pos_core::PipelineAdmissionFencePublisherV1 for FaultStoreV1 {
+        fn set_pipeline_admission_fence(
+            &mut self,
+            timeline: TimelineId,
+            fence: pos_core::PipelineAdmissionFenceV1,
+        ) -> Result<(), CoreError> {
+            pos_core::PipelineAdmissionFencePublisherV1::set_pipeline_admission_fence(
+                &mut self.inner,
+                timeline,
+                fence,
+            )
+        }
+
+        fn pipeline_admission_fence(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<Option<pos_core::PipelineAdmissionFenceV1>, CoreError> {
+            pos_core::PipelineAdmissionFencePublisherV1::pipeline_admission_fence(
+                &self.inner,
+                timeline,
+            )
+        }
+    }
+
+    impl pos_core::AuthorityPersistencePortV1 for FaultStoreV1 {
+        fn bind_authority_persistence(
+            &mut self,
+            binding: pos_core::AuthorityPersistenceBindingV1,
+        ) -> Result<(), pos_core::AuthorityPersistenceErrorV1> {
+            pos_core::AuthorityPersistencePortV1::bind_authority_persistence(
+                &mut self.inner,
+                binding,
+            )
+        }
+
+        fn issue_capability_grant(
+            &mut self,
+            permit: pos_core::AuthorityMutationPermitV1,
+            grant: &pos_core::CapabilityGrantV1,
+        ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1>
+        {
+            pos_core::AuthorityPersistencePortV1::issue_capability_grant(
+                &mut self.inner,
+                permit,
+                grant,
+            )
+        }
+
+        fn revoke_capability_grant(
+            &mut self,
+            permit: pos_core::AuthorityMutationPermitV1,
+            revocation: &pos_core::CapabilityRevocationV1,
+        ) -> Result<pos_core::AuthorityCommitOutcomeV1, pos_core::AuthorityPersistenceErrorV1>
+        {
+            pos_core::AuthorityPersistencePortV1::revoke_capability_grant(
+                &mut self.inner,
+                permit,
+                revocation,
+            )
+        }
+
+        fn load_authority(
+            &self,
+            leaf_grant_id: Hash,
+        ) -> Result<PersistedAuthorityV1, pos_core::AuthorityPersistenceErrorV1> {
+            pos_core::AuthorityPersistencePortV1::load_authority(&self.inner, leaf_grant_id)
         }
     }
 

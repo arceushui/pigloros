@@ -148,6 +148,9 @@ pub enum RuntimeError {
     #[error("participant-authorized Driver work requires a fresh authority fence")]
     AuthorityFenceRequired,
 
+    #[error("scheduled admission authority persistence failed closed: {0}")]
+    AuthorityPersistence(pos_core::AuthorityPersistenceErrorV1),
+
     #[error("scheduled pass admission basis is invalid: {0}")]
     PipelineContract(pos_core::PipelineContractErrorV1),
 

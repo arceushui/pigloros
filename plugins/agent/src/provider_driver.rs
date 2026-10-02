@@ -441,13 +441,14 @@ mod tests {
     };
     use pos_core::{
         clock::Seq,
+        event::Kind,
         ids::{EntityId, PluginId, TimelineId},
-        ErasureContainmentGateV1,
+        ErasureContainmentGateV1, EventStore,
     };
     use pos_runtime::recorder::RECORDER_EVENT_TYPE;
     use pos_runtime::{
-        Driver, ObservationView, PluginRegistry, Recorder, RuntimeError, SnapshotAnchor,
-        TimelineHistorySegment,
+        schema::EventTypeSchema, Driver, LocalScheduledAdmissionHostV1, ObservationView,
+        PluginRegistry, Recorder, RuntimeError, SnapshotAnchor, TimelineHistorySegment,
     };
     use std::{sync::Arc, time::Duration};
 
@@ -511,7 +512,7 @@ mod tests {
 
     struct DriverFixture {
         registry: PluginRegistry,
-        store: Box<dyn pos_core::EventStore>,
+        store: pos_store::memory::MemoryStore,
         calls: FixtureProviderCallCount,
         timeline: TimelineId,
         entity: EntityId,
@@ -571,7 +572,12 @@ mod tests {
                 Box::new(driver),
             )
             .test_ok();
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Memory).test_ok();
+        registry.schemas.register(EventTypeSchema {
+            event_type: Kind::new(EVENT_TYPE_ACTION),
+            description: "host-constructed Agent action".to_owned(),
+            json_schema: None,
+        });
+        let mut store = pos_store::memory::MemoryStore::new();
         store
             .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
             .test_ok();
@@ -584,6 +590,25 @@ mod tests {
             entity,
             host,
         }
+    }
+
+    /// Admit the staged pass through the local host's atomic admission and
+    /// return the committed Event count.
+    fn admit_staged(fixture: &mut DriverFixture) -> usize {
+        let host = LocalScheduledAdmissionHostV1::shared().test_ok();
+        let revisions = host
+            .observe(&fixture.registry, &mut fixture.store, fixture.timeline)
+            .test_ok();
+        let head = fixture.store.logical_head(fixture.timeline).test_ok();
+        host.admit(
+            &mut fixture.registry,
+            &mut fixture.store,
+            revisions,
+            head,
+            0,
+        )
+        .test_ok()
+        .map_or(0, |receipt| receipt.committed_events().len())
     }
 
     fn response(decision: ProviderDecisionV1) -> Vec<u8> {
@@ -1120,12 +1145,12 @@ mod tests {
         ]);
         let first = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::from_u64(4))
+            .step_all_anchored(fixture.timeline, Seq::ZERO)
             .test_ok();
         assert_eq!(fixture.calls.get(), 1);
         let pending = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::from_u64(4))
+            .step_all_anchored(fixture.timeline, Seq::ZERO)
             .test_err();
         assert_eq!(
             pending.to_string(),
@@ -1136,15 +1161,11 @@ mod tests {
         fixture.registry.abort_step();
         let retry = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::from_u64(4))
+            .step_all_anchored(fixture.timeline, Seq::ZERO)
             .test_ok();
         assert_eq!(fixture.calls.get(), 2);
         assert_eq!(first[0].payload, retry[0].payload);
-        let committed = fixture
-            .registry
-            .append_and_commit_step_at(fixture.store.as_mut(), Seq::ZERO, 0, &retry)
-            .test_ok();
-        assert_eq!(committed.len(), retry.len());
+        assert_eq!(admit_staged(&mut fixture), retry.len());
         fixture.registry.commit_step_at(Seq::ZERO, 0).test_ok();
 
         let next = fixture
@@ -1312,10 +1333,7 @@ mod tests {
             .registry
             .step_all_anchored(fixture.timeline, Seq::ZERO)
             .test_ok();
-        fixture
-            .registry
-            .append_and_commit_step_at(fixture.store.as_mut(), Seq::ZERO, 0, &drafts)
-            .test_ok();
+        assert_eq!(admit_staged(&mut fixture), drafts.len());
         // committed_tick is now 1; the guard fires before verifying evidence.
         let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
         let err = fixture

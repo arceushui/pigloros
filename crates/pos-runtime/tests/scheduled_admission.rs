@@ -7,19 +7,20 @@ use std::time::Duration;
 
 use pos_core::{
     pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope,
-    AppendIdentity, AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1,
-    ConsentRevokedV1, CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, Event,
-    EventDraft, EventStore, Hash, Kind, PipelineAdmissionBasisV1,
+    AppendIdentity, AuthorityGranteeV1, AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1,
+    AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes,
+    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority,
+    ConsentGrantedV1, ConsentRevokedV1, CoreError, DelegateClassV1, EntityId,
+    ErasureContainmentGateV1, Event, EventDraft, EventStore, Hash, Kind, PipelineAdmissionBasisV1,
     PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
     PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
     PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
     PluginId, PrincipalRefV1, Reducer, Seq, SeqRange, State, TimelineId, DELEGATE_ACTION_V1,
 };
 use pos_runtime::{
-    schema::EventTypeSchema, Driver, ObservationView, PluginRegistry, ProjectionKey, RuntimeError,
+    schema::EventTypeSchema, Driver, LocalScheduledAdmissionHostV1, ObservationView,
+    PluginRegistry, ProjectionKey, RuntimeError, ScheduledAdmissionStoreV1,
     ScheduledPassAdmissionV1, StepOutput,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
@@ -30,20 +31,15 @@ const PROJECTION: &str = "agent.scheduled.projection";
 type Admitted = Result<Option<PipelineCommitReceiptV1>, RuntimeError>;
 
 trait Harness:
-    EventStore
+    ScheduledAdmissionStoreV1
+    + EventStore
     + PipelineAdmissionPortV1
     + PipelineAdmissionFencePublisherV1
     + AuthorityPersistencePortV1
 {
 }
 
-impl<T> Harness for T where
-    T: EventStore
-        + PipelineAdmissionPortV1
-        + PipelineAdmissionFencePublisherV1
-        + AuthorityPersistencePortV1
-{
-}
+impl<T: ScheduledAdmissionStoreV1> Harness for T {}
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -977,4 +973,189 @@ fn protected_pass_binds_its_authorized_snapshot_and_rechecks_consent() {
     assert_eq!(committed_events(&store, host.timeline).len(), 3);
     assert_eq!(count(&log, ":commit"), 2);
     assert_eq!(count(&log, ":abort"), 2);
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn local_host_publishes_admits_and_refreshes_the_session_fence() {
+    for (name, mut store) in stores() {
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        ok(store.bind_erasure_gate(Arc::clone(&gate)));
+        let timeline = ok(store.create_timeline("local-admission")).id();
+        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        let log = Log::default();
+        let mut registry = PluginRegistry::new().with_erasure_gate(gate);
+        register(&mut registry, driver("first", vec![b"a1", b"a2"], &log));
+
+        let revisions = ok(host.observe(&registry, store.as_mut(), timeline));
+        let fence = ok(store.pipeline_admission_fence(timeline));
+        assert_eq!(
+            fence.map(|fence| (fence.authority_grant(), fence.security_revisions())),
+            Some((host.authority_grant(), revisions)),
+            "{name}"
+        );
+        assert_eq!(budget(store.as_ref(), timeline), Some(u64::MAX), "{name}");
+        assert_eq!(
+            ok(host.observe(&registry, store.as_mut(), timeline)),
+            revisions,
+            "{name}"
+        );
+
+        let drafts = ok(registry.step_all_anchored(timeline, Seq::ZERO));
+        assert_eq!(drafts.len(), 2, "{name}");
+        let head = ok(store.logical_head(timeline));
+        let committed = receipt(host.admit(&mut registry, store.as_mut(), revisions, head, 1));
+        assert_eq!(committed.committed_events().len(), 2, "{name}");
+        assert_eq!(
+            budget(store.as_ref(), timeline),
+            Some(u64::MAX - 2),
+            "{name}"
+        );
+        assert_eq!(entries(&log), ["first:step@0", "first:commit"], "{name}");
+
+        // A fence published under other revisions is replaced from the
+        // current persisted state, keeping its remaining Event budget.
+        publish(store.as_mut(), timeline, stale_consent(revisions), 5);
+        assert_eq!(
+            ok(host.observe(&registry, store.as_mut(), timeline)),
+            revisions,
+            "{name}"
+        );
+        let fence = ok(store.pipeline_admission_fence(timeline));
+        assert_eq!(
+            fence.map(|fence| (fence.authority_grant(), fence.security_revisions())),
+            Some((host.authority_grant(), revisions)),
+            "{name}"
+        );
+        assert_eq!(budget(store.as_ref(), timeline), Some(5), "{name}");
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn local_host_fails_closed_for_a_store_bound_to_another_authority_host() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let unfenced = ok(store.create_timeline("unfenced")).id();
+        let local = ok(LocalScheduledAdmissionHostV1::shared());
+        let error = err(local.observe(&host.registry(), store.as_mut(), unfenced));
+        assert!(
+            matches!(
+                error,
+                RuntimeError::AuthorityPersistence(AuthorityPersistenceErrorV1::Unavailable)
+            ),
+            "{name}: {error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "scheduled admission authority persistence failed closed: \
+             authority persistence is unavailable",
+            "{name}"
+        );
+        assert_eq!(budget(store.as_ref(), unfenced), None, "{name}");
+    }
+}
+
+/// Admission ports whose fence publication fails after authority binds.
+struct FenceRejectingPorts<'a> {
+    inner: &'a mut MemoryStore,
+}
+
+impl PipelineAdmissionPortV1 for FenceRejectingPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.inner.admit_pipeline_batch(basis)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: NonZeroUsize,
+    ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
+        self.inner.purge_expired_pipeline_receipts_bounded(limit)
+    }
+}
+
+impl PipelineAdmissionFencePublisherV1 for FenceRejectingPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn set_pipeline_admission_fence(
+        &mut self,
+        _: TimelineId,
+        _: PipelineAdmissionFenceV1,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Storage(
+            "injected fence publication failure".to_owned(),
+        ))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn pipeline_admission_fence(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<PipelineAdmissionFenceV1>, CoreError> {
+        self.inner.pipeline_admission_fence(timeline)
+    }
+}
+
+impl AuthorityPersistencePortV1 for FenceRejectingPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bind_authority_persistence(
+        &mut self,
+        binding: pos_core::AuthorityPersistenceBindingV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        self.inner.bind_authority_persistence(binding)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn issue_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        grant: &CapabilityGrantV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        self.inner.issue_capability_grant(permit, grant)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revoke_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        revocation: &CapabilityRevocationV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        self.inner.revoke_capability_grant(permit, revocation)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authority(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<pos_core::PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
+        self.inner.load_authority(leaf_grant_id)
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn local_host_reports_a_fence_publication_failure_as_a_store_error() {
+    let mut store = MemoryStore::new();
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    ok(store.bind_erasure_gate(Arc::clone(&gate)));
+    let timeline = ok(store.create_timeline("fence-publication-failure")).id();
+    let host = ok(LocalScheduledAdmissionHostV1::shared());
+    let registry = PluginRegistry::new().with_erasure_gate(gate);
+
+    let error = err(host.observe(
+        &registry,
+        &mut FenceRejectingPorts { inner: &mut store },
+        timeline,
+    ));
+    assert!(
+        matches!(&error, RuntimeError::Store(CoreError::Storage(message))
+            if message == "injected fence publication failure"),
+        "{error}"
+    );
+    assert!(ok(store.pipeline_admission_fence(timeline)).is_none());
+    assert!(store.load_authority(host.authority_grant()).is_ok());
 }

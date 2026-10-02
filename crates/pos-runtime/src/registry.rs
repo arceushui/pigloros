@@ -173,29 +173,12 @@ mod coverage_paths {
         crypto::Hash,
         event::{CanonicalBytes, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
-        ConsentGrantedV1, Event,
+        Event,
     };
-    use pos_store::{open_store, StoreConfig};
     use std::sync::{Arc, Mutex};
 
     fn gated_registry() -> PluginRegistry {
         PluginRegistry::new().with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
-    }
-
-    fn gated_store() -> Box<dyn pos_core::store::EventStore> {
-        let mut store = open_store(StoreConfig::Memory).unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!(
-                "opening the in-memory store failed: {error:?}"
-            )))
-        });
-        store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
-            .unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!(
-                    "binding the in-memory erasure gate failed: {error:?}"
-                )))
-            });
-        store
     }
 
     struct RestoreDriver {
@@ -263,92 +246,6 @@ mod coverage_paths {
                 }));
             Ok(())
         }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_commit_rejects_a_forged_protected_draft_after_fences() {
-        struct EmptyDriver;
-        impl Driver for EmptyDriver {
-            fn name(&self) -> &'static str {
-                "empty"
-            }
-            fn step(
-                &mut self,
-                _: TimelineId,
-                _: ObservationView<'_>,
-            ) -> Result<StepOutput, RuntimeError> {
-                Ok(StepOutput::empty())
-            }
-        }
-        let timeline = TimelineId::new();
-        let subject = EntityId::new();
-        let authority = ConsentAuthority::new();
-        let grant = ConsentGrantedV1 {
-            subject_id: subject,
-            grantee_id: EntityId::new(),
-            purpose: "append-boundary".to_owned(),
-            modalities: 0,
-            min_geo_resolution: 0,
-            fork_permitted: false,
-            export_permitted: false,
-            retention_days: 0,
-            expiry_secs: 0,
-            grant_seq: 1,
-        };
-        let token = authority.record_grant_on_timeline(timeline, &grant);
-        let forged = vec![EventDraft::new(
-            subject,
-            Kind::new("world.test"),
-            CanonicalBytes::from_static(b"forged"),
-        )];
-        let mut registry = gated_registry().with_consent_authority(authority);
-        registry.register_test_driver(Box::new(EmptyDriver));
-        assert!(registry
-            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
-            .is_ok());
-        let mut store = gated_store();
-        assert!(matches!(
-            registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
-            Err(RuntimeError::Authority(
-                pos_core::AuthorityErrorV1::UnauthorizedSource
-            ))
-        ));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_commit_rejects_a_forged_public_draft_after_fences() {
-        struct EmptyDriver;
-        impl Driver for EmptyDriver {
-            fn name(&self) -> &'static str {
-                "empty"
-            }
-            fn step(
-                &mut self,
-                _: TimelineId,
-                _: ObservationView<'_>,
-            ) -> Result<StepOutput, RuntimeError> {
-                Ok(StepOutput::empty())
-            }
-        }
-        let timeline = TimelineId::new();
-        let subject = EntityId::new();
-        let forged = vec![EventDraft::new(
-            subject,
-            Kind::new("world.test"),
-            CanonicalBytes::from_static(b"forged"),
-        )];
-        let mut registry = gated_registry();
-        registry.register_test_driver(Box::new(EmptyDriver));
-        assert!(registry.step_all_anchored(timeline, Seq::ZERO).is_ok());
-        let mut store = gated_store();
-        assert!(matches!(
-            registry.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &forged),
-            Err(RuntimeError::Authority(
-                pos_core::AuthorityErrorV1::UnauthorizedSource
-            ))
-        ));
     }
 
     #[test]
@@ -1136,7 +1033,7 @@ pub struct PluginRegistry {
     /// Scheduled pass whose admission outcome is unknown; only an exact
     /// retry of its retained basis or an explicit abort may resolve it. Boxed
     /// so the rarely used retained basis does not enlarge every registry.
-    in_doubt_admission: Option<Box<(PendingStep, pos_core::PipelineAdmissionBasisV1)>>,
+    in_doubt_admission: Option<Box<scheduled_admission::InDoubtAdmission>>,
     run_mode: RunMode,
     composition_mode: PluginExecutionModeV1,
     resource_limit: Option<u64>,
@@ -2441,7 +2338,7 @@ impl PluginRegistry {
     /// Returns an authorization error or [`RuntimeError::UnappendedDriverOutput`]
     /// and aborts every staged Driver on failure. This compatibility seam
     /// commits only empty-output steps; nonempty output must use
-    /// [`Self::append_and_commit_step_at`] so append precedes Driver commit.
+    /// [`Self::admit_scheduled_pass`], which appends only inside admission.
     pub fn commit_step_at(
         &mut self,
         timeline_head: Seq,
@@ -2532,123 +2429,6 @@ impl PluginRegistry {
         }
     }
 
-    /// # Errors
-    /// Returns a consent, erasure-containment, pending-step, or store error
-    /// when the Tick Boundary cannot be committed. A post-append containment
-    /// error means Events and Driver state were committed and the host must
-    /// quarantine the boundary.
-    pub fn append_and_commit_step_at(
-        &mut self,
-        store: &mut dyn pos_core::store::EventStore,
-        timeline_head: Seq,
-        commit_now_secs: u64,
-        drafts: &[EventDraft],
-    ) -> Result<Vec<Event>, RuntimeError> {
-        self.append_and_commit_legacy_step_at(store, timeline_head, commit_now_secs, drafts)
-    }
-
-    fn append_and_commit_protected_legacy_step(
-        &self,
-        store: &mut dyn pos_core::store::EventStore,
-        pending: &PendingStep,
-        token: &ConsentCapabilityToken,
-        timeline_head: Seq,
-        commit_now_secs: u64,
-        drafts: &[EventDraft],
-    ) -> Result<Vec<Event>, RuntimeError> {
-        let Some(gate) = self.consent_gate.clone() else {
-            return Err(RuntimeError::ConsentOperationUnavailable);
-        };
-        reject_host_owned_draft_slice(drafts).and_then(|()| {
-            self.validate_protected_drafts(
-                pending.timeline,
-                &OperationContext::Protected {
-                    token: token.clone(),
-                    now_secs: commit_now_secs,
-                },
-                timeline_head,
-                drafts,
-            )
-        })?;
-        if drafts != pending.staged_drafts.as_slice() {
-            return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
-        }
-        let mut append_result = Ok(Vec::new());
-        let mut append = || {
-            append_result = self.append_with_erasure_fence(store, pending.timeline, drafts);
-        };
-        if let Err(error) = gate.with_token_fence(
-            pending.timeline,
-            token,
-            timeline_head.as_u64(),
-            commit_now_secs,
-            &mut append,
-        ) {
-            return Err(RuntimeError::Consent(error));
-        }
-        append_result
-    }
-
-    fn append_and_commit_public_legacy_step(
-        &self,
-        store: &mut dyn pos_core::store::EventStore,
-        pending: &PendingStep,
-        timeline_head: Seq,
-        commit_now_secs: u64,
-        drafts: &[EventDraft],
-    ) -> Result<Vec<Event>, RuntimeError> {
-        self.validate_operation(
-            pending.timeline,
-            &OperationContext::Public,
-            timeline_head,
-            Some(commit_now_secs),
-        )?;
-        reject_host_owned_draft_slice(drafts).and_then(|()| {
-            self.validate_protected_drafts(
-                pending.timeline,
-                &OperationContext::Public,
-                timeline_head,
-                drafts,
-            )
-        })?;
-        if drafts != pending.staged_drafts.as_slice() {
-            return Err(pos_core::AuthorityErrorV1::UnauthorizedSource.into());
-        }
-        self.append_with_erasure_fence(store, pending.timeline, drafts)
-    }
-
-    fn append_and_commit_legacy_step_at(
-        &mut self,
-        store: &mut dyn pos_core::store::EventStore,
-        timeline_head: Seq,
-        commit_now_secs: u64,
-        drafts: &[EventDraft],
-    ) -> Result<Vec<Event>, RuntimeError> {
-        let Some(pending) = self.take_legacy_pending_step()? else {
-            return Err(RuntimeError::PendingDriverStep);
-        };
-        let operation = pending.operation.clone();
-        let events = match operation {
-            OperationContext::Protected { token, .. } => self
-                .append_and_commit_protected_legacy_step(
-                    store,
-                    &pending,
-                    &token,
-                    timeline_head,
-                    commit_now_secs,
-                    drafts,
-                ),
-            OperationContext::Public => self.append_and_commit_public_legacy_step(
-                store,
-                &pending,
-                timeline_head,
-                commit_now_secs,
-                drafts,
-            ),
-        };
-        self.finish_pending_append(pending, events)
-    }
-
     /// Revalidate, append, and commit one participant-authorized Driver step.
     ///
     /// The exact OBS1 grant/revocation identity is checked against current
@@ -2709,7 +2489,10 @@ impl PluginRegistry {
     /// An in-doubt scheduled admission is abandoned as well; the host then
     /// rebuilds Driver state only from committed history.
     pub fn abort_step(&mut self) {
-        let in_doubt = self.in_doubt_admission.take().map(|in_doubt| in_doubt.0);
+        let in_doubt = self
+            .in_doubt_admission
+            .take()
+            .map(|in_doubt| in_doubt.pending);
         for pending in self.pending_step.take().into_iter().chain(in_doubt) {
             let _ = self.abort_drivers(&pending.driver_ids);
         }
@@ -7759,8 +7542,7 @@ mod tests {
             .test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
-        reg.append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &drafts)
-            .test_ok();
+        reg.abort_step();
 
         let drafts = reg
             .step_all_anchored_protected(timeline.id(), Seq::ZERO, token.clone(), 0, &[])
@@ -7926,336 +7708,6 @@ mod tests {
         ) -> Result<Option<pos_core::timeline::Timeline>, CoreError> {
             Ok(None)
         }
-    }
-
-    struct PoisonOnAppendStore {
-        inner: Box<dyn EventStore>,
-        gate: Arc<ErasureContainmentGateV1>,
-    }
-
-    impl EventStore for PoisonOnAppendStore {
-        fn bind_erasure_gate(
-            &mut self,
-            gate: Arc<ErasureContainmentGateV1>,
-        ) -> Result<(), CoreError> {
-            self.inner.bind_erasure_gate(gate)
-        }
-
-        fn create_timeline(
-            &mut self,
-            name: &str,
-        ) -> Result<pos_core::timeline::Timeline, CoreError> {
-            self.inner.create_timeline(name)
-        }
-
-        fn append(
-            &mut self,
-            timeline: TimelineId,
-            drafts: &[EventDraft],
-        ) -> Result<Vec<Event>, CoreError> {
-            let events = self.inner.append(timeline, drafts)?;
-            self.gate.poison();
-            Ok(events)
-        }
-
-        fn read(
-            &self,
-            timeline: TimelineId,
-            range: pos_core::store::SeqRange,
-        ) -> Result<Vec<Event>, CoreError> {
-            self.inner.read(timeline, range)
-        }
-
-        fn fork(
-            &mut self,
-            parent: TimelineId,
-            at: Seq,
-            name: &str,
-        ) -> Result<pos_core::timeline::Timeline, CoreError> {
-            self.inner.fork(parent, at, name)
-        }
-
-        fn list_timelines(&self) -> Result<Vec<pos_core::timeline::Timeline>, CoreError> {
-            self.inner.list_timelines()
-        }
-
-        fn get_timeline(
-            &self,
-            timeline: TimelineId,
-        ) -> Result<Option<pos_core::timeline::Timeline>, CoreError> {
-            self.inner.get_timeline(timeline)
-        }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn protected_append_fences_cover_missing_gate_and_store_errors() {
-        struct EmptyDriver;
-
-        impl Driver for EmptyDriver {
-            fn name(&self) -> &'static str {
-                "empty"
-            }
-
-            fn step(
-                &mut self,
-                _: TimelineId,
-                _: ObservationView<'_>,
-            ) -> Result<StepOutput, RuntimeError> {
-                Ok(StepOutput::empty())
-            }
-        }
-
-        let timeline = TimelineId::new();
-        let subject = EntityId::new();
-        let authority = ConsentAuthority::new();
-        let grant = ConsentGrantedV1 {
-            subject_id: subject,
-            grantee_id: EntityId::new(),
-            purpose: "append-boundary".to_owned(),
-            modalities: 0,
-            min_geo_resolution: 0,
-            fork_permitted: false,
-            export_permitted: false,
-            retention_days: 0,
-            expiry_secs: 0,
-            grant_seq: 1,
-        };
-        let token = authority.record_grant_on_timeline(timeline, &grant);
-        let append_drafts = vec![EventDraft::new(
-            subject,
-            Kind::new("world.test"),
-            CanonicalBytes::from_static(b"append"),
-        )];
-
-        let mut missing_gate = gated_registry().with_consent_authority(authority.clone());
-        missing_gate.register_test_driver(Box::new(EmptyDriver));
-        missing_gate
-            .step_all_anchored_protected(timeline, Seq::ZERO, token.clone(), 0, &[])
-            .test_ok();
-        missing_gate.consent_gate = None;
-        let mut missing_gate_store = gated_store();
-        assert!(matches!(
-            missing_gate
-                .append_and_commit_step_at(
-                    missing_gate_store.as_mut(),
-                    Seq::ZERO,
-                    0,
-                    &append_drafts,
-                )
-                .test_err(),
-            RuntimeError::ConsentOperationUnavailable
-        ));
-
-        let mut store_error = gated_registry().with_consent_authority(authority.clone());
-        store_error.register_test_driver(Box::new(EmptyDriver));
-        store_error
-            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
-            .test_ok();
-        let mut failing_store = AppendFailStore;
-        assert!(matches!(
-            store_error
-                .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &[],)
-                .test_err(),
-            RuntimeError::Store(CoreError::Storage(_))
-        ));
-
-        let mut public_fence = gated_registry().with_consent_authority(authority);
-        public_fence.register_test_driver(Box::new(EmptyDriver));
-        let drafts = public_fence
-            .step_all_anchored(timeline, Seq::ZERO)
-            .test_ok();
-        public_fence.consent_gate = None;
-        let mut public_store = gated_store();
-        assert!(matches!(
-            public_fence
-                .append_and_commit_step_at(public_store.as_mut(), Seq::ZERO, 0, &drafts)
-                .test_err(),
-            RuntimeError::ConsentOperationUnavailable
-        ));
-
-        let mut public_replacement = gated_registry();
-        public_replacement.register_test_driver(Box::new(EmptyDriver));
-        public_replacement
-            .step_all_anchored(timeline, Seq::ZERO)
-            .test_ok();
-        let forged = vec![EventDraft::new(
-            subject,
-            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
-            CanonicalBytes::from_static(b"forged"),
-        )];
-        let mut public_replacement_store = gated_store();
-        assert!(matches!(
-            public_replacement
-                .append_and_commit_step_at(
-                    public_replacement_store.as_mut(),
-                    Seq::ZERO,
-                    0,
-                    &forged,
-                )
-                .test_err(),
-            RuntimeError::ConsentDraft { .. }
-        ));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_commit_rejects_when_no_step_is_pending() {
-        let mut no_pending = gated_registry();
-        let mut no_pending_store = gated_store();
-        assert!(matches!(
-            no_pending.append_and_commit_step_at(no_pending_store.as_mut(), Seq::ZERO, 0, &[]),
-            Err(RuntimeError::PendingDriverStep)
-        ));
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_commit_accepts_an_empty_public_step() {
-        let mut public_store = gated_store();
-        let public_timeline = public_store.create_timeline("append-public").test_ok();
-        let mut public_success = gated_registry();
-        public_success
-            .step_all_anchored(public_timeline.id(), Seq::ZERO)
-            .test_ok();
-        assert!(public_success
-            .append_and_commit_step_at(public_store.as_mut(), Seq::ZERO, 0, &[])
-            .test_ok()
-            .is_empty());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_commit_reports_post_append_gate_failure_and_preserves_committed_state() {
-        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        let state = Arc::new(Mutex::new(OutputTransactionState::default()));
-        let mut inner = gated_store();
-        let timeline = inner.create_timeline("post-append-gate-failure").test_ok();
-        let mut store = PoisonOnAppendStore {
-            inner,
-            gate: Arc::clone(&gate),
-        };
-        let mut registry = PluginRegistry::new().with_erasure_gate(gate);
-        register_output_driver(
-            &mut registry,
-            &["probe.event"],
-            Box::new(OutputTransactionDriver {
-                state: Arc::clone(&state),
-                event_type: "probe.event",
-                poison_after_step: None,
-            }),
-        );
-        let drafts = registry
-            .step_all_anchored(timeline.id(), Seq::ZERO)
-            .test_ok();
-
-        let error = registry
-            .append_and_commit_step_at(&mut store, Seq::ZERO, 0, &drafts)
-            .test_err();
-
-        assert!(matches!(
-            error,
-            RuntimeError::ErasureContainmentAfterCommit {
-                event_count: 1,
-                source: ErasureContainmentErrorV1::RecoveryUnavailable,
-            }
-        ));
-        assert_eq!(
-            store
-                .read(timeline.id(), pos_core::store::SeqRange::all())
-                .test_ok()
-                .len(),
-            1
-        );
-        let state = state.lock().test_ok();
-        assert!(!state.staged);
-        assert_eq!(state.commits, 1);
-        assert_eq!(state.aborts, 0);
-        drop(state);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_commit_propagates_store_failures() {
-        let timeline = TimelineId::new();
-        let mut public_store_error = gated_registry();
-        public_store_error
-            .step_all_anchored(timeline, Seq::ZERO)
-            .test_ok();
-        let mut failing_store = AppendFailStore;
-        assert!(matches!(
-            public_store_error
-                .append_and_commit_step_at(&mut failing_store, Seq::ZERO, 0, &[])
-                .test_err(),
-            RuntimeError::Store(CoreError::Storage(_))
-        ));
-    }
-
-    fn append_grant(subject_id: EntityId) -> ConsentGrantedV1 {
-        ConsentGrantedV1 {
-            subject_id,
-            grantee_id: EntityId::new(),
-            purpose: "append-coverage".to_owned(),
-            modalities: 0,
-            min_geo_resolution: 0,
-            fork_permitted: false,
-            export_permitted: false,
-            retention_days: 0,
-            expiry_secs: 0,
-            grant_seq: 1,
-        }
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_commit_accepts_an_empty_protected_step() {
-        let subject = EntityId::new();
-        let mut protected_store = gated_store();
-        let protected_timeline = protected_store
-            .create_timeline("append-protected")
-            .test_ok();
-        let authority = ConsentAuthority::new();
-        let token =
-            authority.record_grant_on_timeline(protected_timeline.id(), &append_grant(subject));
-        let mut protected_success = gated_registry().with_consent_authority(authority);
-        protected_success
-            .step_all_anchored_protected(protected_timeline.id(), Seq::ZERO, token, 0, &[])
-            .test_ok();
-        assert!(protected_success
-            .append_and_commit_step_at(protected_store.as_mut(), Seq::ZERO, 0, &[])
-            .test_ok()
-            .is_empty());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn append_commit_rejects_a_forged_protected_draft() {
-        let subject = EntityId::new();
-        let mut protected_store = gated_store();
-        let protected_timeline = protected_store
-            .create_timeline("append-protected-reject")
-            .test_ok();
-        let reject_authority = ConsentAuthority::new();
-        let reject_token = reject_authority
-            .record_grant_on_timeline(protected_timeline.id(), &append_grant(subject));
-        let mut protected_reject = gated_registry().with_consent_authority(reject_authority);
-        protected_reject
-            .step_all_anchored_protected(protected_timeline.id(), Seq::ZERO, reject_token, 0, &[])
-            .test_ok();
-        let forged = [EventDraft::new(
-            subject,
-            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
-            CanonicalBytes::from_static(b"forged"),
-        )];
-        assert!(matches!(
-            protected_reject.append_and_commit_step_at(
-                protected_store.as_mut(),
-                Seq::ZERO,
-                0,
-                &forged,
-            ),
-            Err(RuntimeError::ConsentDraft { .. })
-        ));
     }
 
     #[test]
@@ -9178,7 +8630,6 @@ mod coverage_public_error_paths {
         ids::{EntityId, TimelineId},
         ConsentGrantedV1, ConsentRevokedV1,
     };
-    use pos_store::{open_store, StoreConfig};
     use std::sync::Arc;
 
     fn gated_registry() -> PluginRegistry {
@@ -9252,23 +8703,6 @@ mod coverage_public_error_paths {
             .is_ok());
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn memory_store() -> Box<dyn pos_core::store::EventStore> {
-        let mut store = open_store(StoreConfig::Memory).unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!(
-                "opening the in-memory store failed: {error:?}"
-            )))
-        });
-        store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
-            .unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!(
-                    "binding the in-memory erasure gate failed: {error:?}"
-                )))
-            });
-        store
-    }
-
     #[test]
     fn protected_step_rejects_sensitive_draft_for_another_subject() {
         let timeline = TimelineId::new();
@@ -9300,62 +8734,12 @@ mod coverage_public_error_paths {
         revoke(&authority, timeline, &consent_grant);
         assert!(commit.commit_step_at(Seq::ZERO, 1).is_err());
     }
-
-    #[test]
-    fn revocation_rejects_staged_append() {
-        let timeline = TimelineId::new();
-        let subject = EntityId::new();
-        let authority = ConsentAuthority::new();
-        let consent_grant = grant(subject);
-        let token = authority.record_grant_on_timeline(timeline, &consent_grant);
-        let mut fenced_append = gated_registry().with_consent_authority(authority.clone());
-        fenced_append.register_test_driver(Box::new(EmptyDriver));
-        assert!(fenced_append
-            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
-            .is_ok());
-        revoke(&authority, timeline, &consent_grant);
-        let mut store = memory_store();
-        assert!(fenced_append
-            .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 1, &[])
-            .is_err());
-    }
-
-    #[test]
-    fn missing_gate_rejects_staged_protected_append() {
-        let timeline = TimelineId::new();
-        let authority = ConsentAuthority::new();
-        let token = authority.record_grant_on_timeline(timeline, &grant(EntityId::new()));
-        let mut protected_append = gated_registry().with_consent_authority(authority);
-        protected_append.register_test_driver(Box::new(EmptyDriver));
-        assert!(protected_append
-            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
-            .is_ok());
-        protected_append = protected_append.without_consent_gate();
-        let mut store = memory_store();
-        assert!(protected_append
-            .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
-            .is_err());
-    }
-
-    #[test]
-    fn missing_gate_rejects_staged_public_append() {
-        let timeline = TimelineId::new();
-        let mut public_append = gated_registry();
-        public_append.register_test_driver(Box::new(EmptyDriver));
-        assert!(public_append.step_all_anchored(timeline, Seq::ZERO).is_ok());
-        public_append = public_append.without_consent_gate();
-        let mut store = memory_store();
-        assert!(public_append
-            .append_and_commit_step_at(store.as_mut(), Seq::ZERO, 0, &[])
-            .is_err());
-    }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod erasure_gate_coverage {
     use super::*;
-    use pos_store::EventStore;
 
     #[test]
     fn with_erasure_gate_binds_the_shared_gate() {
@@ -9378,44 +8762,18 @@ mod erasure_gate_coverage {
         assert!(missing
             .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
             .is_ok());
-        let mut missing = missing.without_erasure_gate();
-        let mut missing_store = pos_store::memory::MemoryStore::new();
-        assert!(matches!(
-            missing.append_and_commit_step_at(
-                &mut missing_store,
-                pos_core::clock::Seq::ZERO,
-                0,
-                &[],
-            ),
-            Err(RuntimeError::ErasureOperationUnavailable)
-        ));
+        missing.abort_step();
 
         let mut rejecting = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         // A second binding is ignored, so a host cannot replace the original
         // gate after composition and reopen the protected path.
         rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
-        let mut rejecting_store = pos_store::memory::MemoryStore::new();
-        rejecting_store
-            .bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
-            .unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!(
-                    "test store erasure gate binding should succeed: {error:?}"
-                )))
-            });
-        let rejecting_timeline = rejecting_store
-            .create_timeline("erasure-gate-coverage")
-            .unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!(
-                    "test timeline creation should succeed: {error:?}"
-                )))
-            })
-            .id();
         assert!(rejecting
-            .step_all_anchored(rejecting_timeline, pos_core::clock::Seq::ZERO)
+            .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
             .is_ok());
         assert!(rejecting
-            .append_and_commit_step_at(&mut rejecting_store, pos_core::clock::Seq::ZERO, 0, &[],)
+            .commit_step_at(pos_core::clock::Seq::ZERO, 0)
             .is_ok());
     }
 

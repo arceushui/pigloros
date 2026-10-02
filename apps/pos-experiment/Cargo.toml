@@ -14,7 +14,9 @@ pos-core = { path = "../../crates/pos-core" }
 pos-crypto = { path = "../../crates/pos-crypto" }
 pos-store = { path = "../../crates/pos-store" }
 pos-state = { path = "../../crates/pos-state" }
-pos-runtime = { path = "../../crates/pos-runtime" }
+pos-runtime = { path = "../../crates/pos-runtime", features = [
+  "local-admission-host",
+] }
 pos-conformance = { path = "../../crates/pos-conformance" }
 pos-reference = { path = "../../crates/pos-reference" }
 pos-plugin-eval = { path = "../../plugins/eval" }
