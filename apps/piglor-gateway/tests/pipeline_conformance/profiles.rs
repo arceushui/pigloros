@@ -8,7 +8,7 @@
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex, PoisonError,
 };
 
 use pos_core::{
@@ -17,12 +17,12 @@ use pos_core::{
     AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, AuthorityEvaluatorV1,
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistenceStateV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorizationRequestDraftV1,
-    AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
-    CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1,
-    ConsentGrantStatusV1, DelegationChainV1, EntityId, ErasureArtifactClassV1,
-    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, Hash,
-    KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1, ObservationSnapshotV1,
-    PersistedAuthorityV1, PipelineAttemptIdV1, PipelineEvidenceRefV1,
+    AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
+    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DelegationChainV1, EntityId,
+    ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    Event, Hash, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
+    ObservationSnapshotV1, PersistedAuthorityV1, PipelineAttemptIdV1, PipelineEvidenceRefV1,
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PluginId, PrincipalRefV1,
     Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, State,
     TimelineId, WallTime,
@@ -57,6 +57,7 @@ struct Participant {
     observation: AuthorizedObservationV1,
     knowledge: KnowledgeSnapshotV1,
     state: AuthorityPersistenceStateV1,
+    host: AuthorityPersistenceHostV1,
     authority_registry: AuthorityRegistrySnapshotV1,
     grant: CapabilityGrantV1,
     plugin_id: PluginId,
@@ -236,6 +237,11 @@ fn observation_evaluation(observation: &AuthorizedObservationV1) -> ReplayClaimE
 }
 
 fn participant() -> Participant {
+    participant_on(TimelineId::new())
+}
+
+/// A participant view of `timeline_id` for a fresh participant Plugin.
+fn participant_on(timeline_id: TimelineId) -> Participant {
     let ids = Ids {
         principal: PrincipalRefV1::try_new([1; 16], "host.test").test_ok(),
         participant_id: EntityId::new(),
@@ -244,7 +250,6 @@ fn participant() -> Participant {
         actor_id: EntityId::new(),
         subject_id: EntityId::new(),
     };
-    let timeline_id = TimelineId::new();
     let consent = consent_grant(&ids);
     let grant = capability_grant(&ids);
     let request = authorization_request(&ids, consent.clone());
@@ -303,6 +308,7 @@ fn participant() -> Participant {
         observation,
         knowledge,
         state,
+        host,
         authority_registry,
         grant,
         plugin_id: ids.plugin_id,
@@ -340,8 +346,10 @@ impl Participant {
 /// A participant Driver that emits one planned draft and counts aborts.
 struct PlannedDriver {
     entity: EntityId,
+    event_type: &'static str,
     aborts: Arc<AtomicUsize>,
     ambient: Option<ProjectionKey>,
+    observed: Arc<Mutex<Vec<String>>>,
 }
 
 impl Driver for PlannedDriver {
@@ -353,10 +361,23 @@ impl Driver for PlannedDriver {
         self.ambient.as_slice()
     }
 
-    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+    fn step(
+        &mut self,
+        _: TimelineId,
+        observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let snapshot = observations.authorized_snapshot().map_or_else(
+            || "none".to_owned(),
+            |snapshot| format!("{:?}", snapshot.digest()),
+        );
+        let raw_input = !observations.events().is_empty() || observations.len() > 0;
+        self.observed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(format!("{snapshot}|raw-input={raw_input}"));
         Ok(StepOutput::new(vec![draft(
             self.entity,
-            PLANNED,
+            self.event_type,
             b"planned",
         )]))
     }
@@ -370,25 +391,40 @@ fn participant_registry(
     participant: &Participant,
     ambient: bool,
 ) -> (PluginRegistry, Arc<AtomicUsize>) {
-    let aborts = Arc::new(AtomicUsize::new(0));
     let mut registry = gated_registry(None);
+    let (aborts, _) = register_participant(&mut registry, participant, PLANNED, ambient);
+    (registry, aborts)
+}
+
+/// Register one participant Driver owning `event_type`; returns its abort
+/// counter and the observations it recorded.
+fn register_participant(
+    registry: &mut PluginRegistry,
+    participant: &Participant,
+    event_type: &'static str,
+    ambient: bool,
+) -> (Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
+    let aborts = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(Mutex::new(Vec::new()));
     registry
         .register_generated(
             &FixturePlugin {
                 id: participant.plugin_id,
                 name: "participant-driver",
-                owned: vec![PLANNED],
+                owned: vec![event_type],
                 has_driver: true,
             },
             None,
             Some(Box::new(PlannedDriver {
                 entity: EntityId::new(),
+                event_type,
                 aborts: Arc::clone(&aborts),
                 ambient: ambient.then(|| ProjectionKey::new(EntityId::new())),
+                observed: Arc::clone(&observed),
             })),
         )
         .test_ok();
-    (registry, aborts)
+    (aborts, observed)
 }
 
 /// Host admission inputs for a port that never commits.
@@ -554,5 +590,237 @@ pub fn digest_domain_separation() -> Capture {
         !ANCHORED_DOMAIN.starts_with(AUTHORIZED_DOMAIN)
             && !AUTHORIZED_DOMAIN.starts_with(ANCHORED_DOMAIN),
     );
+    capture
+}
+
+/// Two participant Drivers registered in schedule order, each with its own
+/// abort counter and observation record.
+struct ParticipantPass {
+    registry: PluginRegistry,
+    aborts: [Arc<AtomicUsize>; 2],
+    observed: [Arc<Mutex<Vec<String>>>; 2],
+}
+
+fn participant_pass(
+    first: &Participant,
+    second: &Participant,
+    mut registry: PluginRegistry,
+) -> ParticipantPass {
+    let (first_aborts, first_observed) =
+        register_participant(&mut registry, first, "participant.planned.1", false);
+    let (second_aborts, second_observed) =
+        register_participant(&mut registry, second, "participant.planned.2", false);
+    ParticipantPass {
+        registry,
+        aborts: [first_aborts, second_aborts],
+        observed: [first_observed, second_observed],
+    }
+}
+
+impl ParticipantPass {
+    fn observed(&self, index: usize) -> Vec<String> {
+        self.observed[index]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn aborts(&self) -> String {
+        format!(
+            "{},{}",
+            self.aborts[0].load(Ordering::SeqCst),
+            self.aborts[1].load(Ordering::SeqCst)
+        )
+    }
+}
+
+/// Stage one authorized pass over `views` at the shared cut.
+fn stage_views(
+    registry: &mut PluginRegistry,
+    views: &[&Participant],
+) -> Result<usize, RuntimeError> {
+    let evaluations: Vec<ReplayClaimEvaluationV1> = views
+        .iter()
+        .map(|view| observation_evaluation(&view.observation))
+        .collect();
+    let current: Vec<PersistedAuthorityV1> =
+        views.iter().map(|view| view.current_authority()).collect();
+    let authorities: Vec<AuthorizedViewAuthorityV1<'_>> = views
+        .iter()
+        .zip(&evaluations)
+        .zip(&current)
+        .map(|((view, evaluation), authority)| view.authority(evaluation, authority))
+        .collect();
+    let drivers: Vec<AuthorizedDriverViewV1> = views.iter().map(|view| view.view()).collect();
+    registry
+        .stage_authorized_scheduled_pass(
+            views[0].timeline_id,
+            Seq::from_u64(CUT),
+            &drivers,
+            &authorities,
+        )
+        .map(|drafts| drafts.len())
+}
+
+/// Offer the staged pass to `port` with each view's commit-boundary
+/// authority evaluated at position 11.
+fn admit_views(
+    registry: &mut PluginRegistry,
+    views: &[&Participant],
+    commit_authority: &[PersistedAuthorityV1],
+    port: &mut RecordingPort,
+) -> RuntimeError {
+    let evaluations: Vec<ReplayClaimEvaluationV1> = views
+        .iter()
+        .map(|view| observation_evaluation(&view.observation))
+        .collect();
+    let authorities: Vec<AuthorizedViewAuthorityV1<'_>> = views
+        .iter()
+        .zip(&evaluations)
+        .zip(commit_authority)
+        .map(
+            |((view, evaluation), authority)| AuthorizedViewAuthorityV1 {
+                authority_position: Seq::from_u64(11),
+                ..view.authority(evaluation, authority)
+            },
+        )
+        .collect();
+    expect_err(registry.admit_authorized_scheduled_pass(port, &admission(), &authorities))
+}
+
+fn snapshot_digest(participant: &Participant) -> String {
+    format!(
+        "{:?}",
+        participant
+            .observation
+            .authoritative_snapshot(&observation_evaluation(&participant.observation))
+            .test_ok()
+            .digest()
+    )
+}
+
+fn offered_types(port: &RecordingPort, index: usize) -> String {
+    port.offered.get(index).map_or_else(String::new, |basis| {
+        basis
+            .batch()
+            .drafts()
+            .iter()
+            .map(|draft| draft.event_type.as_str().to_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    })
+}
+
+/// PCF-R3-005: each participant Driver observes only its own view.
+///
+/// No Driver receives Projection state or Events, the batch keeps host
+/// schedule order, the bound digest changes with the view set, and Replay
+/// never stages a participant pass.
+#[must_use]
+pub fn participant_views_are_per_driver() -> Capture {
+    let mut capture = Capture::default();
+    let timeline = TimelineId::new();
+    let first = participant_on(timeline);
+    let second = participant_on(timeline);
+    let mut pass = participant_pass(&first, &second, gated_registry(None));
+    let mut port = RecordingPort::default();
+    let both = [first.current_authority(), second.current_authority()];
+    capture.record(
+        "none",
+        "both.staged",
+        stage_views(&mut pass.registry, &[&first, &second]).test_ok(),
+    );
+    capture.record(
+        "none",
+        "both.refusal",
+        admit_views(&mut pass.registry, &[&first, &second], &both, &mut port),
+    );
+    capture.record(
+        "none",
+        "first.observed-only-its-view",
+        pass.observed(0) == vec![format!("{}|raw-input=false", snapshot_digest(&first))],
+    );
+    capture.record(
+        "none",
+        "second.observed-only-its-view",
+        pass.observed(1) == vec![format!("{}|raw-input=false", snapshot_digest(&second))],
+    );
+    capture.record("none", "both.order", offered_types(&port, 0));
+    capture.record(
+        "none",
+        "first-only.staged",
+        stage_views(&mut pass.registry, &[&first]).test_ok(),
+    );
+    capture.record(
+        "none",
+        "first-only.refusal",
+        admit_views(&mut pass.registry, &[&first], &both[..1], &mut port),
+    );
+    let digests: Vec<Hash> = port
+        .offered
+        .iter()
+        .map(|basis| basis.attempt().observation().snapshot_digest())
+        .collect();
+    capture.record("none", "offered", digests.len());
+    capture.record(
+        "none",
+        "digest-changes-with-view-set",
+        digests.first() != digests.get(1),
+    );
+    let mut replay = participant_pass(
+        &first,
+        &second,
+        PluginRegistry::new_replay()
+            .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())),
+    );
+    capture.record(
+        "none",
+        "replay.stage",
+        matches!(
+            stage_views(&mut replay.registry, &[&first, &second]),
+            Err(RuntimeError::ModeMismatch { .. })
+        ),
+    );
+    capture
+}
+
+/// PCF-R3-006: commit-boundary revalidation rejects a view whose grant was
+/// revoked after staging and aborts the whole participant pass.
+#[must_use]
+pub fn participant_views_are_revalidated_at_commit() -> Capture {
+    let mut capture = Capture::default();
+    let timeline = TimelineId::new();
+    let mut first = participant_on(timeline);
+    let second = participant_on(timeline);
+    let mut pass = participant_pass(&first, &second, gated_registry(None));
+    let mut port = RecordingPort::default();
+    capture.record(
+        "none",
+        "staged",
+        stage_views(&mut pass.registry, &[&first, &second]).test_ok(),
+    );
+    let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+        grant_id: first.grant.grant_id(),
+        authority_timeline: first.grant.issuance_timeline(),
+        fence_position: Seq::from_u64(11),
+        revocation_epoch: 1,
+        policy_revision: first.grant.policy_revision(),
+        authority_registry_digest: first.grant.authority_registry_digest(),
+    })
+    .test_ok();
+    let permit = first
+        .host
+        .authorize_revocation(&first.grant, &revocation)
+        .test_ok();
+    first.state.revoke_grant(permit, revocation).test_ok();
+    let commit = [first.current_authority(), second.current_authority()];
+    let rejected = admit_views(&mut pass.registry, &[&first, &second], &commit, &mut port);
+    capture.record(
+        "none",
+        "revoked-view",
+        matches!(rejected, RuntimeError::Authority(_)),
+    );
+    capture.record("none", "aborted", pass.aborts());
+    capture.record("none", "offered-to-store", port.offered.len());
     capture
 }

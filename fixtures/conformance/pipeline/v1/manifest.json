@@ -8,29 +8,43 @@
     "ADR-021 R3",
     "ADR-024 R1",
     "ADR-024 R2",
-    "ADR-059",
     "ADR-062"
   ],
   "exclusions": [
     {
       "id": "R3-COMPOSITION-UNASSIGNED-DRIVER",
-      "reason": "ADR-021 Revision 3 Decision 2 composition-time profile assignment has no implementation; no host can reject an unassigned Driver yet",
-      "owner": "unassigned: needs an implementation ticket under epic #244"
+      "reason": "ADR-021 Revision 3 Decision 2 composition-time profile assignment is not implemented, so no host can reject an unassigned Driver yet",
+      "owner": "#504"
     },
     {
       "id": "R3-COMPOSITION-ANCHORED-PATH",
-      "reason": "Rejecting a participant-bound Driver before anchored staging needs the same composition-time assignment; PCF-R3-001 covers only the AuthorityFenceRequired backstop",
-      "owner": "unassigned: needs an implementation ticket under epic #244"
+      "reason": "Rejecting a participant-bound Driver before anchored staging needs the same assignment; PCF-R3-001 covers only the AuthorityFenceRequired backstop",
+      "owner": "#504"
     },
     {
       "id": "R3-COMPOSITION-MIXED-PASS",
-      "reason": "Composition-time rejection of a mixed-profile host needs the same assignment; PCF-R3-002 covers the runtime rule that one pass is one profile",
-      "owner": "unassigned: needs an implementation ticket under epic #244"
+      "reason": "Rejecting a mixed-profile host at composition needs the same assignment; PCF-R3-002 covers the runtime rule that one pass is one profile",
+      "owner": "#504"
+    },
+    {
+      "id": "R3-PARTICIPANT-COMMIT-RECOVERY",
+      "reason": "Recovery and duplicate-receipt of a committed participant-authorized pass need a published participant authority fence in a store; the test host offers participant passes to a recording port only",
+      "owner": "#481"
+    },
+    {
+      "id": "REG-DUPLICATE-CLOSED-ERROR",
+      "reason": "A type listed twice must fail with DuplicateEventTypeOwner on every path; the generated, pinned and test-support Driver paths reject it earlier with a binding error, so PCF-REG-002 pins only the rejection there",
+      "owner": "#505"
+    },
+    {
+      "id": "GATEWAY-HUMAN-SUCCESS-PATH",
+      "reason": "Wave 8 has no installed Gateway action EPF1, so the authorized Gateway composition fails closed and its human success path is not publicly composable",
+      "owner": "#461"
     },
     {
       "id": "COMMUNITY-PLUGIN-HOST",
       "reason": "Missing, invalid or over-budget governed Plugins and first-party versus community-replaceable parity need the ADR-061 community host",
-      "owner": "#489 (blocked by #194)"
+      "owner": "#489"
     }
   ],
   "cases": [
@@ -430,6 +444,108 @@
       "expected": {}
     },
     {
+      "id": "PCF-R3-005",
+      "title": "Each participant Driver observes only its own view; order, view-set digest and Replay",
+      "sources": [
+        "#481",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "both.staged": "2",
+        "both.refusal": "scheduled pass was not admitted: Rejected",
+        "first.observed-only-its-view": "true",
+        "second.observed-only-its-view": "true",
+        "both.order": "participant.planned.1,participant.planned.2",
+        "first-only.staged": "1",
+        "first-only.refusal": "scheduled pass was not admitted: Rejected",
+        "offered": "2",
+        "digest-changes-with-view-set": "true",
+        "replay.stage": "true"
+      }
+    },
+    {
+      "id": "PCF-R3-006",
+      "title": "Commit-boundary revalidation rejects a revoked view and aborts the whole participant pass",
+      "sources": [
+        "#481",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "staged": "2",
+        "revoked-view": "true",
+        "aborted": "1,1",
+        "offered-to-store": "0"
+      }
+    },
+    {
+      "id": "PCF-R3-007",
+      "title": "A non-participant pass shares one base cut, is subscription-scoped, and its digest tracks the observed state",
+      "sources": [
+        "#480",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "staged": "2",
+        "observers": "observer-a@2:a=true,b=false|observer-b@2:a=false,b=true",
+        "offered": "3",
+        "digest.changes-with-state": "true",
+        "digest.stable-without-change": "true"
+      }
+    },
+    {
+      "id": "PCF-R3-008",
+      "title": "A late consent revocation or erasure freeze aborts the whole non-participant pass",
+      "sources": [
+        "#480",
+        "ADR-021 R3",
+        "ADR-039",
+        "ADR-060"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "consent.staged": "2",
+        "consent.refused": "true",
+        "consent.aborted": "1,1",
+        "consent.committed": "0",
+        "erasure.staged": "2",
+        "erasure.refused": "true",
+        "erasure.aborted": "1,1"
+      }
+    },
+    {
       "id": "PCF-REG-001",
       "title": "A second claimant of an owned type is rejected on every public registration path",
       "sources": [
@@ -481,19 +597,19 @@
       ],
       "observation_profile": null,
       "expected": {
-        "generated": "plugin 'duplicate' capability mismatch: noncanonical output policy",
+        "generated": "rejected",
         "generated.unchanged": "true",
-        "generated-with-approver": "plugin 'duplicate' capability mismatch: noncanonical output policy",
+        "generated-with-approver": "rejected",
         "generated-with-approver.unchanged": "true",
-        "pinned": "plugin 'duplicate' capability mismatch: noncanonical output policy",
+        "pinned": "rejected",
         "pinned.unchanged": "true",
-        "pinned-with-approver": "plugin 'duplicate' capability mismatch: noncanonical output policy",
+        "pinned-with-approver": "rejected",
         "pinned-with-approver.unchanged": "true",
         "verified": "Event type 'dup.type' has more than one owner",
         "verified.unchanged": "true",
         "verified-with-approver": "Event type 'dup.type' has more than one owner",
         "verified-with-approver.unchanged": "true",
-        "test-driver": "EOP1 artifact is missing or malformed",
+        "test-driver": "rejected",
         "test-driver.unchanged": "true",
         "installed": "fails-closed:EPF1",
         "installed.unchanged": "true",
