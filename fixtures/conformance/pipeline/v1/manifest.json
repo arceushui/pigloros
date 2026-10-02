@@ -7,6 +7,7 @@
     "#321",
     "ADR-021 R3",
     "ADR-024 R1",
+    "ADR-024 R2",
     "ADR-059",
     "ADR-062"
   ],
@@ -842,6 +843,184 @@
         "evidence.ingress": "ScheduledAiDriver",
         "report": "resolved=1,predictor_supplied=1",
         "never-participant-bound": "true"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-001",
+      "title": "An undecodable, unsupported or out-of-range eligible source is quarantined without blocking the pass",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "undecodable.pass": "5",
+        "undecodable.derived": "eval.prediction<-0,eval.outcome<-0,eval.prediction<-2,eval.outcome<-2",
+        "undecodable.witness": "1",
+        "undecodable.finding": "UndecodableSource@1",
+        "undecodable.recurrence.pass": "1",
+        "undecodable.recurrence.finding": "UndecodableSource@1",
+        "unsupported.pass": "5",
+        "unsupported.derived": "eval.prediction<-0,eval.outcome<-0,eval.prediction<-2,eval.outcome<-2",
+        "unsupported.witness": "1",
+        "unsupported.finding": "UnsupportedSourceVersion@1",
+        "unsupported.recurrence.pass": "1",
+        "unsupported.recurrence.finding": "UnsupportedSourceVersion@1",
+        "invalid.pass": "5",
+        "invalid.derived": "eval.prediction<-0,eval.outcome<-0,eval.prediction<-2,eval.outcome<-2",
+        "invalid.witness": "1",
+        "invalid.finding": "InvalidPrediction@1",
+        "invalid.recurrence.pass": "1",
+        "invalid.recurrence.finding": "InvalidPrediction@1"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-002",
+      "title": "NaN, infinities and values outside [0, 1] are InvalidPrediction; the bounds derive",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "pass": "3",
+        "derived": "eval.prediction<-5,eval.prediction<-6",
+        "findings": "InvalidPrediction@0,InvalidPrediction@1,InvalidPrediction@2,InvalidPrediction@3,InvalidPrediction@4"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-003",
+      "title": "A quarantined source derives exactly once under a later supporting mapping",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "v1.pass": "1",
+        "v1.finding": "UnsupportedSourceVersion@0",
+        "v2.passes": "3,1",
+        "v2.derived": "eval.prediction<-0,eval.outcome<-0",
+        "v2.finding": ""
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-004",
+      "title": "A mapping rollback records findings only and never re-derives",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "pass": "1",
+        "derived": "",
+        "findings": "UnsupportedSourceVersion@1,UnsupportedSourceVersion@2",
+        "decoded": "1,2"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-005",
+      "title": "Each source has one outcome per pass in precedence order and a complete pair is never decoded",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "pass": "1",
+        "derived": "",
+        "witness": "1",
+        "findings": "OrphanOutcome@0,MissingOutcome@1,UndecodableSource@3",
+        "decoded": "1,2,3"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-006",
+      "title": "An invalid verified prefix still discards the pass",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "discarded": "true",
+        "committed": "2",
+        "findings": "0",
+        "decoded": "0"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-007",
+      "title": "A source behind the host erasure fence never reaches Eval and never yields UndecodableSource",
+      "sources": [
+        "#493",
+        "ADR-024 R2",
+        "ADR-060"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "frozen.refused": "true",
+        "frozen.findings": "0",
+        "frozen.decoded": "0",
+        "open.pass": "3",
+        "open.findings": "UndecodableSource@1"
       }
     },
     {
