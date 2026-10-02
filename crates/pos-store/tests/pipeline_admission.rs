@@ -6,20 +6,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AdmissionClock, AppendDedupKey,
-    AppendDedupScope, AppendIdentity, AuthorityGranteeV1, AuthorityPersistenceHostV1,
-    AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, CoreError, DelegateClassV1, EntityId,
-    ErasureContainmentGateV1, EventDraft, EventStore, Hash, Kind, PipelineAdmissionBasisDraftV1,
-    PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1,
-    PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
-    PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
-    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineReceiptLookupV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
-    PrincipalRefV1, Seq, SeqRange, TentativePipelineResultV1, TimelineId, WallTime,
-    APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE,
-    PIPELINE_CONTRACT_VERSION_V1,
+    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
+    AdmissionClock, AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityGranteeV1,
+    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1,
+    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+    CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, EventDraft, EventStore, Hash,
+    Kind, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
+    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
+    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
+    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
+    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
+    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1, Seq, SeqRange,
+    TentativePipelineResultV1, TimelineId, WallTime, APPEND_IDENTITY_RETENTION_MICROS,
+    DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE, PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -178,13 +178,13 @@ fn root_revocation() -> CapabilityRevocationV1 {
     ))
 }
 
-fn revisions_with(authority: Hash, erasure: Hash) -> PipelineSecurityRevisionsV1 {
+fn revisions_with(authority: Hash, delegation: Hash, erasure: Hash) -> PipelineSecurityRevisionsV1 {
     ok(PipelineSecurityRevisionsV1::try_from_draft(
         PipelineSecurityRevisionsDraftV1 {
             authority,
             consent: hash(11),
             capability: hash(12),
-            delegation: hash(13),
+            delegation,
             policy: hash(14),
             execution_profile: hash(15),
             erasure,
@@ -217,8 +217,10 @@ fn prepare(store: &mut dyn Harness) -> Fixture {
     ok(store.bind_authority_persistence(host.persistence_binding()));
     let root = root_grant();
     ok(store.issue_capability_grant(ok(host.authorize_grant(&root)), &root));
+    let authority = ok(store.load_authority(hash(1)));
     let revisions = revisions_with(
-        pipeline_authority_revision_v1(&ok(store.load_authority(hash(1)))),
+        pipeline_authority_revision_v1(&authority),
+        pipeline_delegation_revision_v1(&authority),
         pipeline_erasure_revision_v1(gate.inventory_generation().ok()),
     );
     let fence = fence_for(revisions, hash(1));
@@ -491,7 +493,11 @@ fn rejection_cases(
         (
             "stale security revisions",
             Attempt {
-                revisions: revisions_with(hash(99), valid.revisions.as_draft().erasure),
+                revisions: revisions_with(
+                    hash(99),
+                    valid.revisions.as_draft().delegation,
+                    valid.revisions.as_draft().erasure,
+                ),
                 ..valid.clone()
             },
             PipelineOutcomeV1::AdmissionConflict,
@@ -575,7 +581,8 @@ fn persisted_authority_and_erasure_are_composed_at_commit() {
         );
 
         let erasure = fixture.revisions.as_draft().erasure;
-        let forged = revisions_with(hash(99), erasure);
+        let delegation = fixture.revisions.as_draft().delegation;
+        let forged = revisions_with(hash(99), delegation, erasure);
         ok(store.set_pipeline_admission_fence(fixture.timeline, fence_for(forged, hash(1))));
         assert_eq!(
             ok(admit(
@@ -592,7 +599,7 @@ fn persisted_authority_and_erasure_are_composed_at_commit() {
         // The host fence and the basis agree, but neither names the persisted
         // erasure inventory generation, so the comparison fails closed.
         let authority = fixture.revisions.as_draft().authority;
-        let stale_erasure = revisions_with(authority, hash(16));
+        let stale_erasure = revisions_with(authority, delegation, hash(16));
         assert_ne!(stale_erasure.as_draft().erasure, erasure, "{name}");
         ok(store.set_pipeline_admission_fence(fixture.timeline, fence_for(stale_erasure, hash(1))));
         assert_eq!(

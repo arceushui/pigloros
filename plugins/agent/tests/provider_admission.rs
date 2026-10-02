@@ -4,14 +4,14 @@
 use std::sync::Arc;
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope,
-    AppendIdentity, AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, Capability, CapabilityGrantDraftV1,
-    CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1, DelegateClassV1, EntityId,
-    ErasureContainmentGateV1, EventStore, Hash, Kind, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionFenceV1, PipelineAttemptIdV1, PipelineEvidenceRefV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
-    PrincipalRefV1, Seq, SeqRange, TimelineId, DELEGATE_ACTION_V1,
+    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityGranteeV1,
+    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, DelegateClassV1, EntityId, ErasureContainmentGateV1, EventStore, Hash, Kind,
+    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAttemptIdV1,
+    PipelineEvidenceRefV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
+    PluginId, PrincipalRefV1, Seq, SeqRange, TimelineId, DELEGATE_ACTION_V1,
 };
 use pos_plugin_agent::{
     protocol::{
@@ -88,13 +88,18 @@ fn root_grant() -> CapabilityGrantV1 {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn revisions(authority: Hash, erasure: Hash, consent: u8) -> PipelineSecurityRevisionsV1 {
+fn revisions(
+    authority: Hash,
+    delegation: Hash,
+    erasure: Hash,
+    consent: u8,
+) -> PipelineSecurityRevisionsV1 {
     ok(PipelineSecurityRevisionsV1::try_from_draft(
         PipelineSecurityRevisionsDraftV1 {
             authority,
             consent: hash(consent),
             capability: hash(12),
-            delegation: hash(13),
+            delegation,
             policy: hash(14),
             execution_profile: hash(15),
             erasure,
@@ -132,8 +137,10 @@ fn admission_store(
     ok(store.bind_authority_persistence(host.persistence_binding()));
     let root = root_grant();
     ok(store.issue_capability_grant(ok(host.authorize_grant(&root)), &root));
+    let authority = ok(store.load_authority(hash(1)));
     let current = revisions(
-        pipeline_authority_revision_v1(&ok(store.load_authority(hash(1)))),
+        pipeline_authority_revision_v1(&authority),
+        pipeline_delegation_revision_v1(&authority),
         pipeline_erasure_revision_v1(gate.inventory_generation().ok()),
         11,
     );
@@ -253,7 +260,12 @@ fn provider_proposal_commits_only_through_host_admission() {
     publish(
         &mut store,
         timeline,
-        revisions(hash(70), current.as_draft().erasure, 71),
+        revisions(
+            hash(70),
+            current.as_draft().delegation,
+            current.as_draft().erasure,
+            71,
+        ),
     );
     let stale = admission(&store, timeline, current, 1);
     let rejected = registry.admit_scheduled_pass(&mut store, &stale);

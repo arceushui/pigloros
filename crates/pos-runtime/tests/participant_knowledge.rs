@@ -1,18 +1,19 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope,
-    AppendIdentity, ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1,
-    ArtifactStateV1, ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
-    AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1,
-    AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
-    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
-    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, EntityId,
-    ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    Event, EventDraft, Hash, Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1,
-    MemoryPolicyRevisionV1, ObservationSnapshotV1, PersistedAuthorityV1, PipelineAdmissionBasisV1,
+    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, ArtifactClaimInputV1, ArtifactDataClassV1,
+    ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, AssuranceLevelV1,
+    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, AuthorityErrorV1,
+    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
+    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
+    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, Capability,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
+    ConsentGrantRefV1, ConsentGrantStatusV1, EntityId, ErasureArtifactClassV1,
+    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, Hash,
+    Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
+    ObservationSnapshotV1, PersistedAuthorityV1, PipelineAdmissionBasisV1,
     PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
     PipelineCommitReceiptV1, PipelineEvidenceRefV1, PipelineOutcomeV1,
     PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
@@ -806,14 +807,13 @@ impl AdmissionStore {
         store
             .issue_capability_grant(host.authorize_grant(&root).test_ok(), &root)
             .test_ok();
+        let authority = store.load_authority(root.grant_id()).test_ok();
         let revisions =
             PipelineSecurityRevisionsV1::try_from_draft(PipelineSecurityRevisionsDraftV1 {
-                authority: pipeline_authority_revision_v1(
-                    &store.load_authority(root.grant_id()).test_ok(),
-                ),
+                authority: pipeline_authority_revision_v1(&authority),
                 consent: hash_from_repeated_byte(51),
                 capability: hash_from_repeated_byte(52),
-                delegation: hash_from_repeated_byte(53),
+                delegation: pipeline_delegation_revision_v1(&authority),
                 policy: hash_from_repeated_byte(54),
                 execution_profile: hash_from_repeated_byte(55),
                 erasure: pipeline_erasure_revision_v1(gate.inventory_generation().ok()),

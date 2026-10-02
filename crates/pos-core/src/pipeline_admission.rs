@@ -16,10 +16,14 @@
 //!   root-to-leaf grant chain (#178) named by the fence, at its current
 //!   revocation epoch. It binds every grant identity, delegation link, and
 //!   per-grant policy revision of that chain.
+//! - **delegation**: [`pipeline_delegation_revision_v1`] over the same
+//!   persisted chain: its delegation edges and every persisted revocation
+//!   record on its authority Timeline (#483), so a revocation another host
+//!   persists in the same store stales every basis published before it.
 //! - **erasure**: [`pipeline_erasure_revision_v1`] over the persisted erasure
 //!   inventory generation (#186) that the adapter has already validated
 //!   against its bound containment gate.
-//! - **consent, capability, delegation, policy, execution profile**: the
+//! - **consent, capability, policy, execution profile**: the
 //!   Event Store owns no separate persisted revision for these yet. The
 //!   host-published fence, persisted in the same store and replaced only by the
 //!   trusted host, is their persisted source until an owning contract stores
@@ -183,6 +187,36 @@ pub fn pipeline_authority_revision_v1(authority: &PersistedAuthorityV1) -> Hash 
     for grant in authority.chain().grants() {
         hasher.update(grant.grant_id().as_bytes());
         hasher.update(grant.policy_revision().as_bytes());
+    }
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Derive the delegation revision an admission basis must bind for one
+/// persisted root-to-leaf delegation chain.
+///
+/// It binds the current revocation epoch, every delegation edge of the chain
+/// (each grant in root-to-leaf order with its delegation depth and bound), and
+/// every field of every persisted revocation record on the chain's authority
+/// Timeline. Any persisted revocation change therefore moves it, even between
+/// two revocation states with the same epoch.
+#[must_use]
+pub fn pipeline_delegation_revision_v1(authority: &PersistedAuthorityV1) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.PipelineDelegationRevision.v1\0");
+    hasher.update(&authority.revocation_epoch().to_be_bytes());
+    for grant in authority.chain().grants() {
+        hasher.update(b"E");
+        hasher.update(grant.grant_id().as_bytes());
+        hasher.update(&[grant.delegation_depth(), grant.max_delegation_depth()]);
+    }
+    for revocation in authority.revocations() {
+        hasher.update(b"R");
+        hasher.update(revocation.grant_id().as_bytes());
+        hasher.update(&revocation.authority_timeline().inner().to_bytes());
+        hasher.update(&revocation.fence_position().as_u64().to_be_bytes());
+        hasher.update(&revocation.revocation_epoch().to_be_bytes());
+        hasher.update(revocation.policy_revision().as_bytes());
+        hasher.update(revocation.authority_registry_digest().as_bytes());
     }
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
