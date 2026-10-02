@@ -264,26 +264,21 @@ fn validate_transcript_catalog_row(
 ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
     let transcript = AdapterTranscriptV1::from_canonical_cbor(row.artifact_bytes())
         .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-    let admission = find_catalog_native_row(
+    let (admission, _) = find_catalog_native_row(
         rows,
         ErasureArtifactClassV1::ReproManifest,
         transcript.as_input().adapter_admission_digest,
         |bytes| {
             AdapterAdmissionV1::from_canonical_cbor(bytes)
                 .ok()
-                .map(|value| value.digest())
+                .map(|value| (value.digest(), value))
         },
     )?;
-    let admission_registration =
-        extract_adapter_admission_registration_v1(admission.artifact_bytes())
-            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-    if admission_registration != *admission.registration() {
-        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
-    }
+    // MAT1 extraction rejects an admission row whose ARD1 differs from MAA1 extraction.
     let expected = extract_adapter_transcript_registration_v1(
         row.artifact_bytes(),
         admission.artifact_bytes(),
-        &admission_registration,
+        admission.registration(),
     )
     .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
     if &expected == row.registration() {
@@ -299,7 +294,7 @@ fn validate_root_catalog_row(
 ) -> Result<(), ArtifactRegistrationPersistenceErrorV1> {
     let root = ReproManifestRootV1::from_canonical_cbor(row.artifact_bytes())
         .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-    let recording = find_catalog_native_row(
+    let (recording, _) = find_catalog_native_row(
         rows,
         ErasureArtifactClassV1::TimelineReplay,
         root.as_input()
@@ -309,46 +304,31 @@ fn validate_root_catalog_row(
         |bytes| {
             WorldRecordingReceiptV1::from_canonical_cbor(bytes)
                 .ok()
-                .map(|value| value.digest())
+                .map(|value| (value.digest(), value))
         },
     )?;
-    let transcript = find_catalog_native_row(
+    let (transcript, transcript_record) = find_catalog_native_row(
         rows,
         ErasureArtifactClassV1::ReproManifest,
         root.as_input().adapter_transcript_digest,
         |bytes| {
             AdapterTranscriptV1::from_canonical_cbor(bytes)
                 .ok()
-                .map(|value| value.digest())
+                .map(|value| (value.digest(), value))
         },
     )?;
-    let transcript_record = AdapterTranscriptV1::from_canonical_cbor(transcript.artifact_bytes())
-        .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-    let admission = find_catalog_native_row(
+    let (admission, _) = find_catalog_native_row(
         rows,
         ErasureArtifactClassV1::ReproManifest,
         transcript_record.as_input().adapter_admission_digest,
         |bytes| {
             AdapterAdmissionV1::from_canonical_cbor(bytes)
                 .ok()
-                .map(|value| value.digest())
+                .map(|value| (value.digest(), value))
         },
     )?;
-    let admission_registration =
-        extract_adapter_admission_registration_v1(admission.artifact_bytes())
-            .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-    if admission_registration != *admission.registration() {
-        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
-    }
-    let transcript_registration = extract_adapter_transcript_registration_v1(
-        transcript.artifact_bytes(),
-        admission.artifact_bytes(),
-        &admission_registration,
-    )
-    .map_err(|_| ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)?;
-    if transcript_registration != *transcript.registration() {
-        return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
-    }
+    // MRM1 extraction rejects stored MAA1 and MAT1 rows whose ARD1 differs
+    // from their exact extraction.
     let expected =
         extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
             root_bytes: row.artifact_bytes(),
@@ -356,8 +336,8 @@ fn validate_root_catalog_row(
             recording_registration: recording.registration(),
             transcript_bytes: transcript.artifact_bytes(),
             admission_bytes: admission.artifact_bytes(),
-            admission_registration: &admission_registration,
-            transcript_registration: &transcript_registration,
+            admission_registration: admission.registration(),
+            transcript_registration: transcript.registration(),
             owner_id: row.owner_id(),
             label_data_class: None,
         })
@@ -369,22 +349,23 @@ fn validate_root_catalog_row(
     }
 }
 
-fn find_catalog_native_row(
+fn find_catalog_native_row<T>(
     rows: &[ArtifactRegistrationCatalogRowV1],
     artifact_class: ErasureArtifactClassV1,
     native_digest: Hash,
-    digest: impl Fn(&[u8]) -> Option<Hash>,
-) -> Result<&ArtifactRegistrationCatalogRowV1, ArtifactRegistrationPersistenceErrorV1> {
+    parse: impl Fn(&[u8]) -> Option<(Hash, T)>,
+) -> Result<(&ArtifactRegistrationCatalogRowV1, T), ArtifactRegistrationPersistenceErrorV1> {
     let mut found = None;
-    for row in rows {
-        if row.artifact_class() == artifact_class
-            && digest(row.artifact_bytes()) == Some(native_digest)
-        {
-            if found.is_some() {
-                return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
-            }
-            found = Some(row);
+    for (row, (_, value)) in rows
+        .iter()
+        .filter(|row| row.artifact_class() == artifact_class)
+        .filter_map(|row| parse(row.artifact_bytes()).map(|parsed| (row, parsed)))
+        .filter(|(_, (digest, _))| *digest == native_digest)
+    {
+        if found.is_some() {
+            return Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog);
         }
+        found = Some((row, value));
     }
     found.ok_or(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
 }
@@ -556,13 +537,8 @@ pub fn prepare_artifact_registration_batch_v1(
     owner_verifier: &dyn ArtifactRegistrationOwnerVerifierV1,
 ) -> Result<PreparedArtifactRegistrationBatchV1, ArtifactRegistrationPreparationErrorV1> {
     let parsed = parse_artifact_inputs(inputs)?;
-    let records = derive_records(root_registration_address, &owner_id, parsed, owner_verifier)?;
-    let root_operation_id = records
-        .iter()
-        .find(|record| record.registration_address() == root_registration_address)
-        .and_then(|record| ReproManifestRootV1::from_canonical_cbor(record.artifact_bytes()).ok())
-        .map(|root| root.as_input().run_operation_id)
-        .ok_or(ArtifactRegistrationPreparationErrorV1::InvalidGraph)?;
+    let (records, root_operation_id) =
+        derive_records(root_registration_address, &owner_id, parsed, owner_verifier)?;
     let graph_nodes: Vec<_> = records
         .iter()
         .map(|record| ArtifactRegistrationGraphNodeV1 {
@@ -633,12 +609,15 @@ fn parse_artifact_inputs(
     Ok(parsed)
 }
 
+/// Prepared records with the root MRM1 run operation identity.
+type DerivedArtifactRecordsV1 = (Vec<PreparedArtifactRegistrationRecordV1>, Hash);
+
 fn derive_records(
     root_registration_address: Hash,
     owner_id: &OwnerIdV1,
     parsed: Vec<ParsedArtifact>,
     owner_verifier: &dyn ArtifactRegistrationOwnerVerifierV1,
-) -> Result<Vec<PreparedArtifactRegistrationRecordV1>, ArtifactRegistrationPreparationErrorV1> {
+) -> Result<DerivedArtifactRecordsV1, ArtifactRegistrationPreparationErrorV1> {
     let mut expected_registrations = Vec::with_capacity(parsed.len());
     for candidate in &parsed {
         let expected = derive_expected_registration(candidate, &parsed, owner_id, owner_verifier)?;
@@ -648,19 +627,20 @@ fn derive_records(
         expected_registrations.push(expected);
     }
 
-    let root_is_manifest =
-        parsed
-            .iter()
-            .zip(&expected_registrations)
-            .any(|(candidate, registration)| {
-                registration.address() == root_registration_address
-                    && candidate.owner_id == *owner_id
-                    && matches!(&candidate.native, NativeArtifactV1::ReproManifestRoot(_))
-            });
-    if !root_is_manifest {
-        return Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph);
-    }
-    Ok(parsed
+    let root_operation_id = parsed
+        .iter()
+        .zip(&expected_registrations)
+        .find_map(|(candidate, registration)| match &candidate.native {
+            NativeArtifactV1::ReproManifestRoot(root)
+                if registration.address() == root_registration_address
+                    && candidate.owner_id == *owner_id =>
+            {
+                Some(root.as_input().run_operation_id)
+            }
+            _ => None,
+        })
+        .ok_or(ArtifactRegistrationPreparationErrorV1::InvalidGraph)?;
+    let records = parsed
         .into_iter()
         .zip(expected_registrations)
         .map(
@@ -673,7 +653,8 @@ fn derive_records(
                 registration: expected,
             },
         )
-        .collect())
+        .collect();
+    Ok((records, root_operation_id))
 }
 
 enum NativeArtifactV1 {
@@ -733,15 +714,8 @@ fn derive_expected_registration(
         NativeArtifactV1::AdapterTranscript(transcript) => {
             let admission =
                 find_admission(closure, transcript.as_input().adapter_admission_digest)?;
-            let admission_registration =
-                extract_adapter_admission_registration_v1(&admission.artifact_bytes)
-                    .map_err(|_| ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)?;
-            extract_adapter_transcript_registration_v1(
-                &candidate.artifact_bytes,
-                &admission.artifact_bytes,
-                &admission_registration,
-            )
-            .map_err(|_| ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)
+            extract_adapter_registrations(&candidate.artifact_bytes, &admission.artifact_bytes)
+                .map(|(_, transcript_registration)| transcript_registration)
         }
         NativeArtifactV1::WorldRecordingReceipt(_) | NativeArtifactV1::OwnerNative => {
             owner_verifier
@@ -771,15 +745,10 @@ fn derive_expected_registration(
                     &recording.artifact_bytes,
                 )
                 .map_err(|_| ArtifactRegistrationPreparationErrorV1::OwnerRejected)?;
-            let admission_registration =
-                extract_adapter_admission_registration_v1(&admission.artifact_bytes)
-                    .map_err(|_| ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)?;
-            let transcript_registration = extract_adapter_transcript_registration_v1(
+            let (admission_registration, transcript_registration) = extract_adapter_registrations(
                 &transcript.artifact_bytes,
                 &admission.artifact_bytes,
-                &admission_registration,
-            )
-            .map_err(|_| ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)?;
+            )?;
             let label_data_class = root
                 .as_input()
                 .label
@@ -817,6 +786,25 @@ fn derive_expected_registration(
             })
         }
     }
+}
+
+/// Exact MAA1 registration and the MAT1 registration that names it.
+type AdapterRegistrationsV1 = (ArtifactRegistrationV1, ArtifactRegistrationV1);
+
+fn extract_adapter_registrations(
+    transcript_bytes: &[u8],
+    admission_bytes: &[u8],
+) -> Result<AdapterRegistrationsV1, ArtifactRegistrationPreparationErrorV1> {
+    extract_adapter_admission_registration_v1(admission_bytes)
+        .and_then(|admission_registration| {
+            extract_adapter_transcript_registration_v1(
+                transcript_bytes,
+                admission_bytes,
+                &admission_registration,
+            )
+            .map(|transcript_registration| (admission_registration, transcript_registration))
+        })
+        .map_err(|_| ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)
 }
 
 fn find_admission(
@@ -900,3 +888,483 @@ const fn map_graph_error(
 }
 
 const _: () = assert!(MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1 == 256 * 1024 * 1024);
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::{
+        AdapterAdmissionInputV1, AdapterTranscriptInputV1, ArtifactOptionalityV1,
+        ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1, ArtifactTransitionRuleV1,
+        ReproManifestRootInputV1, TimelineId, WorldRecordingReceiptInputV1,
+        WorldReplayHandleInputV1, WorldReplayHandleV1,
+    };
+    use ulid::Ulid;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    const RUN_OPERATION_ID: [u8; 32] = [0x51; 32];
+
+    struct StructuralOwner;
+
+    impl ArtifactRegistrationOwnerVerifierV1 for StructuralOwner {
+        fn derive_native_registration(
+            &self,
+            owner_id: &OwnerIdV1,
+            artifact_class: ErasureArtifactClassV1,
+            artifact_bytes: &[u8],
+        ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationOwnerVerificationErrorV1> {
+            loose_registration(owner_id, artifact_class, artifact_bytes)
+                .map_err(|_| ArtifactRegistrationOwnerVerificationErrorV1::Rejected)
+        }
+
+        fn verify_committed_artifact(
+            &self,
+            _owner_id: &OwnerIdV1,
+            _artifact_bytes: &[u8],
+            _registration: &ArtifactRegistrationV1,
+        ) -> Result<(), ArtifactRegistrationOwnerVerificationErrorV1> {
+            Ok(())
+        }
+    }
+
+    struct NativeRecords {
+        admission: AdapterAdmissionV1,
+        transcript: AdapterTranscriptV1,
+        recording: WorldRecordingReceiptV1,
+        root: ReproManifestRootV1,
+    }
+
+    struct ManifestClosure {
+        owner_id: OwnerIdV1,
+        root: Hash,
+        admission: ArtifactRegistrationInputV1,
+        transcript: ArtifactRegistrationInputV1,
+        recording: ArtifactRegistrationInputV1,
+        manifest: ArtifactRegistrationInputV1,
+    }
+
+    impl ManifestClosure {
+        fn inputs(&self) -> Vec<ArtifactRegistrationInputV1> {
+            vec![
+                self.admission.clone(),
+                self.transcript.clone(),
+                self.recording.clone(),
+                self.manifest.clone(),
+            ]
+        }
+    }
+
+    struct CatalogRows {
+        admission: ArtifactRegistrationCatalogRowV1,
+        transcript: ArtifactRegistrationCatalogRowV1,
+        recording: ArtifactRegistrationCatalogRowV1,
+        manifest: ArtifactRegistrationCatalogRowV1,
+    }
+
+    impl CatalogRows {
+        fn all(&self) -> Vec<ArtifactRegistrationCatalogRowV1> {
+            vec![
+                self.admission.clone(),
+                self.transcript.clone(),
+                self.recording.clone(),
+                self.manifest.clone(),
+            ]
+        }
+
+        fn without(&self, magic: &[u8]) -> Vec<ArtifactRegistrationCatalogRowV1> {
+            self.all()
+                .into_iter()
+                .filter(|row| row.artifact_bytes().get(2..6) != Some(magic))
+                .collect()
+        }
+    }
+
+    fn loose_registration(
+        owner_id: &OwnerIdV1,
+        artifact_class: ErasureArtifactClassV1,
+        artifact_bytes: &[u8],
+    ) -> Result<ArtifactRegistrationV1, ArtifactRegistrationErrorV1> {
+        ArtifactRegistrationV1::new(ArtifactRegistrationFieldsV1 {
+            artifact_class,
+            artifact_digest: ArtifactRegistrationV1::artifact_digest(
+                artifact_class,
+                artifact_bytes,
+            ),
+            owner_reference: ArtifactRegistrationV1::owner_reference(owner_id),
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            optionality: ArtifactOptionalityV1::Required,
+            transition_rule: ArtifactTransitionRuleV1::PreserveExact,
+            required_key_roles: Vec::new(),
+            key_dependencies: Vec::new(),
+            child_artifacts: Vec::new(),
+        })
+    }
+
+    fn native_records(
+        owner_id: &OwnerIdV1,
+        admission_owner_id: &OwnerIdV1,
+    ) -> Result<NativeRecords, Box<dyn std::error::Error>> {
+        let owner_reference = ArtifactRegistrationV1::owner_reference(owner_id);
+        let run_operation_id = Hash::from_bytes(RUN_OPERATION_ID);
+        let commit_receipt_digest = Hash::from_bytes([0x52; 32]);
+        let recording = WorldRecordingReceiptV1::new(WorldRecordingReceiptInputV1 {
+            binding_hash: Hash::from_bytes([0x53; 32]),
+            operation_id: run_operation_id,
+            actual_commit_receipt_digest: commit_receipt_digest,
+            installed_inventory_generation: Hash::from_bytes([0x54; 32]),
+        })?;
+        let world_handle = WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+            owner_reference,
+            timeline_id: TimelineId::from_ulid(Ulid::from(1_u128)),
+            cut_id: 1,
+            commit_receipt_digest,
+            recording_receipt_digest: recording.digest(),
+            logical_head: 0,
+            stitched_head_hash: Hash::from_bytes([0x55; 32]),
+        })?;
+        let admission = AdapterAdmissionV1::new(AdapterAdmissionInputV1 {
+            owner_reference: ArtifactRegistrationV1::owner_reference(admission_owner_id),
+            configuration_generation: 1,
+            scope_digest: Hash::from_bytes([0x56; 32]),
+            entries: Vec::new(),
+        })?;
+        let transcript = AdapterTranscriptV1::new(AdapterTranscriptInputV1 {
+            owner_reference,
+            world_handle,
+            run_operation_id,
+            adapter_admission_digest: admission.digest(),
+            calls: Vec::new(),
+        })?;
+        let root = ReproManifestRootV1::new(ReproManifestRootInputV1 {
+            owner_reference,
+            world_handle,
+            run_operation_id,
+            plugin_roster_digest: Hash::from_bytes([0x57; 32]),
+            adapter_transcript_digest: transcript.digest(),
+            created_at_micros: 1,
+            label: None,
+        })?;
+        Ok(NativeRecords {
+            admission,
+            transcript,
+            recording,
+            root,
+        })
+    }
+
+    fn registration_input(
+        owner_id: OwnerIdV1,
+        artifact_bytes: Vec<u8>,
+        registration: &ArtifactRegistrationV1,
+    ) -> ArtifactRegistrationInputV1 {
+        ArtifactRegistrationInputV1 {
+            owner_id,
+            artifact_bytes,
+            registration_cbor: registration.canonical_cbor().to_vec(),
+        }
+    }
+
+    fn complete_closure() -> Result<ManifestClosure, Box<dyn std::error::Error>> {
+        let owner_id = OwnerIdV1::from_static("registration-commit-unit-owner");
+        let records = native_records(&owner_id, &owner_id)?;
+        let admission_bytes = records.admission.to_canonical_cbor();
+        let transcript_bytes = records.transcript.to_canonical_cbor();
+        let recording_bytes = records.recording.to_canonical_cbor();
+        let manifest_bytes = records.root.to_canonical_cbor();
+        let admission_registration = extract_adapter_admission_registration_v1(&admission_bytes)?;
+        let transcript_registration = extract_adapter_transcript_registration_v1(
+            &transcript_bytes,
+            &admission_bytes,
+            &admission_registration,
+        )?;
+        let recording_registration = loose_registration(
+            &owner_id,
+            ErasureArtifactClassV1::TimelineReplay,
+            &recording_bytes,
+        )?;
+        let manifest_registration =
+            extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
+                root_bytes: &manifest_bytes,
+                recording_receipt_bytes: &recording_bytes,
+                recording_registration: &recording_registration,
+                transcript_bytes: &transcript_bytes,
+                admission_bytes: &admission_bytes,
+                admission_registration: &admission_registration,
+                transcript_registration: &transcript_registration,
+                owner_id: &owner_id,
+                label_data_class: None,
+            })?;
+        Ok(ManifestClosure {
+            owner_id,
+            root: manifest_registration.address(),
+            admission: registration_input(owner_id, admission_bytes, &admission_registration),
+            transcript: registration_input(owner_id, transcript_bytes, &transcript_registration),
+            recording: registration_input(owner_id, recording_bytes, &recording_registration),
+            manifest: registration_input(owner_id, manifest_bytes, &manifest_registration),
+        })
+    }
+
+    fn prepare(
+        owner_id: OwnerIdV1,
+        root: Hash,
+        inputs: Vec<ArtifactRegistrationInputV1>,
+    ) -> Result<PreparedArtifactRegistrationBatchV1, ArtifactRegistrationPreparationErrorV1> {
+        prepare_artifact_registration_batch_v1(owner_id, root, inputs, &StructuralOwner)
+    }
+
+    fn catalog_row(
+        owner_id: OwnerIdV1,
+        artifact_bytes: &[u8],
+        registration: ArtifactRegistrationV1,
+    ) -> ArtifactRegistrationCatalogRowV1 {
+        ArtifactRegistrationCatalogRowV1 {
+            owner_id,
+            artifact_class: registration.fields().artifact_class,
+            artifact_digest: registration.fields().artifact_digest,
+            registration_address: registration.address(),
+            artifact_bytes: artifact_bytes.to_vec(),
+            registration,
+        }
+    }
+
+    fn input_row(
+        input: &ArtifactRegistrationInputV1,
+    ) -> Result<ArtifactRegistrationCatalogRowV1, ArtifactRegistrationErrorV1> {
+        let registration = ArtifactRegistrationV1::from_canonical_cbor(&input.registration_cbor)?;
+        Ok(catalog_row(input.owner_id, &input.artifact_bytes, registration))
+    }
+
+    fn catalog_rows() -> Result<CatalogRows, Box<dyn std::error::Error>> {
+        let closure = complete_closure()?;
+        Ok(CatalogRows {
+            admission: input_row(&closure.admission)?,
+            transcript: input_row(&closure.transcript)?,
+            recording: input_row(&closure.recording)?,
+            manifest: input_row(&closure.manifest)?,
+        })
+    }
+
+    fn malformed_row(
+        magic: &[u8],
+    ) -> Result<ArtifactRegistrationCatalogRowV1, ArtifactRegistrationErrorV1> {
+        let owner_id = OwnerIdV1::from_static("registration-commit-unit-owner");
+        let mut artifact_bytes = b"\x84\x44".to_vec();
+        artifact_bytes.extend_from_slice(magic);
+        artifact_bytes.extend_from_slice(b" is not a canonical record");
+        let registration =
+            loose_registration(&owner_id, ErasureArtifactClassV1::ReproManifest, &artifact_bytes)?;
+        Ok(catalog_row(owner_id, &artifact_bytes, registration))
+    }
+
+    #[test]
+    fn prepared_batch_carries_the_root_run_operation() -> TestResult {
+        let closure = complete_closure()?;
+        let prepared = prepare(closure.owner_id, closure.root, closure.inputs())?;
+        assert_eq!(prepared.root_registration_address(), closure.root);
+        assert_eq!(prepared.root_operation_id(), Hash::from_bytes(RUN_OPERATION_ID));
+        assert_eq!(prepared.records().len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn preparation_rejects_a_root_address_that_names_a_child() -> TestResult {
+        let closure = complete_closure()?;
+        let admission =
+            ArtifactRegistrationV1::from_canonical_cbor(&closure.admission.registration_cbor)?;
+        assert_eq!(
+            prepare(closure.owner_id, admission.address(), closure.inputs()),
+            Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preparation_rejects_a_root_bound_to_another_batch_owner() -> TestResult {
+        let closure = complete_closure()?;
+        assert_eq!(
+            prepare(
+                OwnerIdV1::from_static("registration-commit-other-owner"),
+                closure.root,
+                closure.inputs(),
+            ),
+            Err(ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preparation_rejects_a_leading_root_without_its_admission() -> TestResult {
+        let ManifestClosure {
+            owner_id,
+            root,
+            transcript,
+            recording,
+            manifest,
+            ..
+        } = complete_closure()?;
+        assert_eq!(
+            prepare(owner_id, root, vec![manifest, transcript, recording]),
+            Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preparation_skips_an_unrelated_transcript_and_rejects_the_extra_row() -> TestResult {
+        let closure = complete_closure()?;
+        let transcript =
+            AdapterTranscriptV1::from_canonical_cbor(&closure.transcript.artifact_bytes)?;
+        let mut other_run = transcript.as_input().clone();
+        other_run.run_operation_id = Hash::from_bytes([0x5f; 32]);
+        let other_bytes = AdapterTranscriptV1::new(other_run)?.to_canonical_cbor();
+        let admission_registration =
+            ArtifactRegistrationV1::from_canonical_cbor(&closure.admission.registration_cbor)?;
+        let other_registration = extract_adapter_transcript_registration_v1(
+            &other_bytes,
+            &closure.admission.artifact_bytes,
+            &admission_registration,
+        )?;
+        let mut inputs = closure.inputs();
+        inputs.push(registration_input(closure.owner_id, other_bytes, &other_registration));
+        assert_eq!(
+            prepare(closure.owner_id, closure.root, inputs),
+            Err(ArtifactRegistrationPreparationErrorV1::InvalidGraph)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transcript_naming_another_owners_admission_is_rejected() -> TestResult {
+        let owner_id = OwnerIdV1::from_static("registration-commit-unit-owner");
+        let foreign_owner_id = OwnerIdV1::from_static("registration-commit-foreign-owner");
+        let records = native_records(&owner_id, &foreign_owner_id)?;
+        let admission_bytes = records.admission.to_canonical_cbor();
+        let transcript_bytes = records.transcript.to_canonical_cbor();
+        let recording_bytes = records.recording.to_canonical_cbor();
+        let manifest_bytes = records.root.to_canonical_cbor();
+        let admission_registration = extract_adapter_admission_registration_v1(&admission_bytes)?;
+        let recording_registration = loose_registration(
+            &owner_id,
+            ErasureArtifactClassV1::TimelineReplay,
+            &recording_bytes,
+        )?;
+        // MAT1 extraction fails before the supplied MAT1 registration is compared.
+        assert_eq!(
+            extract_repro_manifest_root_registration_v1(ReproManifestRootRegistrationInputV1 {
+                root_bytes: &manifest_bytes,
+                recording_receipt_bytes: &recording_bytes,
+                recording_registration: &recording_registration,
+                transcript_bytes: &transcript_bytes,
+                admission_bytes: &admission_bytes,
+                admission_registration: &admission_registration,
+                transcript_registration: &admission_registration,
+                owner_id: &owner_id,
+                label_data_class: None,
+            }),
+            Err(ReproManifestArtifactRegistrationErrorV1::InvalidTranscript)
+        );
+
+        let transcript_registration = loose_registration(
+            &owner_id,
+            ErasureArtifactClassV1::ReproManifest,
+            &transcript_bytes,
+        )?;
+        let manifest_registration =
+            loose_registration(&owner_id, ErasureArtifactClassV1::ReproManifest, &manifest_bytes)?;
+        let root = manifest_registration.address();
+        // The root is derived first, so its own MAT1 extraction reports the foreign MAA1.
+        let inputs = vec![
+            registration_input(owner_id, manifest_bytes, &manifest_registration),
+            registration_input(owner_id, transcript_bytes, &transcript_registration),
+            registration_input(owner_id, recording_bytes, &recording_registration),
+            registration_input(foreign_owner_id, admission_bytes, &admission_registration),
+        ];
+        assert_eq!(
+            prepare(owner_id, root, inputs),
+            Err(ArtifactRegistrationPreparationErrorV1::UnsupportedArtifact)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_bound_failures_keep_their_bound_classification() {
+        assert_eq!(
+            map_graph_error(ArtifactRegistrationGraphErrorV1::BoundExceeded),
+            ArtifactRegistrationPreparationErrorV1::BoundExceeded
+        );
+        assert_eq!(
+            map_graph_error(ArtifactRegistrationGraphErrorV1::Cycle),
+            ArtifactRegistrationPreparationErrorV1::InvalidGraph
+        );
+    }
+
+    #[test]
+    fn catalog_rows_reject_malformed_native_bytes() -> TestResult {
+        let rows = catalog_rows()?.all();
+        assert_eq!(
+            validate_admission_catalog_row(&malformed_row(b"MAA1")?),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        assert_eq!(
+            validate_transcript_catalog_row(&malformed_row(b"MAT1")?, &rows),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        assert_eq!(
+            validate_root_catalog_row(&malformed_row(b"MRM1")?, &rows),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_rows_reject_missing_native_dependencies() -> TestResult {
+        let rows = catalog_rows()?;
+        assert_eq!(validate_transcript_catalog_row(&rows.transcript, &rows.all()), Ok(()));
+        assert_eq!(validate_root_catalog_row(&rows.manifest, &rows.all()), Ok(()));
+        assert_eq!(
+            validate_transcript_catalog_row(&rows.transcript, &rows.without(b"MAA1")),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        for magic in [b"WCR1", b"MAT1", b"MAA1"] {
+            assert_eq!(
+                validate_root_catalog_row(&rows.manifest, &rows.without(magic)),
+                Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_rows_reject_a_duplicate_native_dependency() -> TestResult {
+        let rows = catalog_rows()?;
+        let mut duplicated = rows.all();
+        duplicated.extend(rows.all());
+        assert_eq!(
+            validate_transcript_catalog_row(&rows.transcript, &duplicated),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_rows_reject_a_stored_admission_registration_unlike_extraction() -> TestResult {
+        let mut rows = catalog_rows()?;
+        let owner_id = *rows.admission.owner_id();
+        let changed = loose_registration(
+            &owner_id,
+            ErasureArtifactClassV1::ReproManifest,
+            rows.admission.artifact_bytes(),
+        )?;
+        rows.admission = catalog_row(owner_id, rows.admission.artifact_bytes(), changed);
+        assert_eq!(
+            validate_transcript_catalog_row(&rows.transcript, &rows.all()),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        assert_eq!(
+            validate_root_catalog_row(&rows.manifest, &rows.all()),
+            Err(ArtifactRegistrationPersistenceErrorV1::CorruptCatalog)
+        );
+        Ok(())
+    }
+}

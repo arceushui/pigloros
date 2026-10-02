@@ -255,6 +255,12 @@ impl ArtifactRegistrationV1 {
 pub fn extract_adapter_admission_registration_v1(
     bytes: &[u8],
 ) -> Result<ArtifactRegistrationV1, AdapterArtifactRegistrationErrorV1> {
+    parse_adapter_admission_registration(bytes).map(|(_, registration)| registration)
+}
+
+fn parse_adapter_admission_registration(
+    bytes: &[u8],
+) -> Result<(AdapterAdmissionV1, ArtifactRegistrationV1), AdapterArtifactRegistrationErrorV1> {
     let admission = AdapterAdmissionV1::from_canonical_cbor(bytes)
         .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidAdmission)?;
     let artifact_digest =
@@ -270,6 +276,7 @@ pub fn extract_adapter_admission_registration_v1(
         key_dependencies: Vec::new(),
         child_artifacts: Vec::new(),
     })
+    .map(|registration| (admission, registration))
     .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidAdmission)
 }
 
@@ -291,9 +298,7 @@ pub fn extract_adapter_transcript_registration_v1(
 ) -> Result<ArtifactRegistrationV1, AdapterArtifactRegistrationErrorV1> {
     let transcript = AdapterTranscriptV1::from_canonical_cbor(transcript_bytes)
         .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidTranscript)?;
-    let admission = AdapterAdmissionV1::from_canonical_cbor(admission_bytes)
-        .map_err(|_| AdapterArtifactRegistrationErrorV1::InvalidAdmission)?;
-    let expected_admission = extract_adapter_admission_registration_v1(admission_bytes)?;
+    let (admission, expected_admission) = parse_adapter_admission_registration(admission_bytes)?;
     if admission_registration != &expected_admission {
         return Err(AdapterArtifactRegistrationErrorV1::AdmissionRegistrationMismatch);
     }
