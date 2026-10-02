@@ -28,7 +28,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
-zlink = { version = "=0.7.0", default-features = false, features = [
+zlink = { version = "=0.7.1", default-features = false, features = [
   "proxy",
   "tokio",
   "tracing",
