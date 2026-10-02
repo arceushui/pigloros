@@ -494,6 +494,80 @@ pub fn prepare_local_cut_owner_commit_v1(
     })
 }
 
+/// Validate one retained applied result against its owner and cut keys.
+///
+/// # Errors
+/// Returns `CorruptState` unless the result is an applied LCS2, LCC1, and LCQ1
+/// chain keyed by exactly `owner_id` and `cut_id`.
+pub fn validate_local_cut_owner_result_v1(
+    owner_id: [u8; 32],
+    cut_id: u64,
+    result: &LocalCutOwnerCommitV1,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let seal = result.seal.as_input();
+    let commit = result.commit.as_input();
+    let receipt = result.receipt.as_input();
+    if result.kind != LocalCutOwnerCommitKindV1::Applied
+        || seal.owner_id != owner_id
+        || seal.cut_id != cut_id
+        || commit.owner_id != owner_id
+        || commit.cut_id != cut_id
+        || commit.seal_hash != result.seal.digest()
+        || receipt.commit_record_hash != result.commit.digest()
+        || result.receipt.digest() == Hash::zero()
+    {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    Ok(())
+}
+
+/// Compare a prepared batch with the persisted owner pre-state it replaces.
+///
+/// Preparation derived the intent, LCC1 and LCQ1 result, and successor state
+/// from the request, its seal, and the admitted state it was built against, so
+/// only the admitted and local-cut state read inside the commit transaction can
+/// differ here.
+///
+/// # Errors
+/// Returns `Conflict` when the current admitted state or local-cut owner state
+/// no longer matches the seal pre-state, the successor roster, or the next cut,
+/// tick, and membership epoch.
+pub fn validate_local_cut_owner_successor_v1(
+    batch: &PreparedLocalCutOwnerCommitV1,
+    admission: &ManifestOwnerAdmissionOwnerStateV1,
+    current_state: Option<&LocalCutOwnerStateV1>,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let seal = batch.request.seal.as_input();
+    let successor = &batch.successor_state;
+    if seal.configuration_generation != admission.configuration_generation
+        || seal.previous_visible_receipt_hash != admission.previous_visible_lcq1_hash
+        || seal.expected_inventory_generation != admission.inventory_generation
+        || successor.timelines != admission.timelines
+    {
+        return Err(LocalCutOwnerErrorV1::Conflict);
+    }
+    match current_state {
+        Some(state) => {
+            let expected_tick = state
+                .last_visible_tick
+                .checked_add(1)
+                .ok_or(LocalCutOwnerErrorV1::Conflict)?;
+            if successor.last_visible_cut_id <= state.last_visible_cut_id
+                || successor.last_visible_tick != expected_tick
+                || successor.membership_epoch != state.membership_epoch
+            {
+                return Err(LocalCutOwnerErrorV1::Conflict);
+            }
+        }
+        None => {
+            if successor.last_visible_tick != 1 || successor.membership_epoch != 0 {
+                return Err(LocalCutOwnerErrorV1::Conflict);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_request_shape(request: &LocalCutOwnerRequestV1) -> Result<(), LocalCutOwnerErrorV1> {
     if request.operation_id == Hash::zero()
         || request.manifest_hash == Hash::zero()

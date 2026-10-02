@@ -235,6 +235,7 @@ pub use local_cut_commit::{
 };
 pub use local_cut_owner::{
     local_cut_owner_intent_digest_v1, prepare_local_cut_owner_commit_v1,
+    validate_local_cut_owner_result_v1, validate_local_cut_owner_successor_v1,
     LocalCutCompositionBindingRowV1, LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1,
     LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
     LocalCutOwnerStateV1, LocalCutOwnerVerifierV1, LocalCutRecordingContextRowV1,

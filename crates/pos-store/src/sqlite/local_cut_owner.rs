@@ -6,7 +6,8 @@
 //! cut together with the admitted owner's receipt and inventory generation.
 
 use pos_core::{
-    local_cut_owner_intent_digest_v1, Hash, LocalCutCommitV1, LocalCutCompositionBindingRowV1,
+    local_cut_owner_intent_digest_v1, validate_local_cut_owner_result_v1,
+    validate_local_cut_owner_successor_v1, Hash, LocalCutCommitV1, LocalCutCompositionBindingRowV1,
     LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1,
     LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
     LocalCutOwnerStateV1, LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutSealV2,
@@ -433,34 +434,12 @@ struct SqliteLocalCutOwnerCutV1 {
     result: LocalCutOwnerCommitV1,
 }
 
-fn sqlite_validate_local_cut_owner_result(
-    owner_id: [u8; 32],
-    cut_id: u64,
-    result: &LocalCutOwnerCommitV1,
-) -> Result<(), LocalCutOwnerErrorV1> {
-    let seal = result.seal.as_input();
-    let commit = result.commit.as_input();
-    let receipt = result.receipt.as_input();
-    if result.kind != LocalCutOwnerCommitKindV1::Applied
-        || seal.owner_id != owner_id
-        || seal.cut_id != cut_id
-        || commit.owner_id != owner_id
-        || commit.cut_id != cut_id
-        || commit.seal_hash != result.seal.digest()
-        || receipt.commit_record_hash != result.commit.digest()
-        || result.receipt.digest() == Hash::zero()
-    {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
-    Ok(())
-}
-
 fn sqlite_validate_local_cut_owner_cut(
     owner_id: [u8; 32],
     cut_id: u64,
     cut: &SqliteLocalCutOwnerCutV1,
 ) -> Result<(), LocalCutOwnerErrorV1> {
-    sqlite_validate_local_cut_owner_result(owner_id, cut_id, &cut.result)?;
+    validate_local_cut_owner_result_v1(owner_id, cut_id, &cut.result)?;
     let commit = cut.result.commit.as_input();
     if commit.partition_ledger_seq != cut.request.partition_ledger_seq
         || commit.manifest_hash != cut.request.manifest_hash
@@ -893,48 +872,6 @@ fn sqlite_update_manifest_owner_state_after_local_cut(
     }
 }
 
-fn sqlite_validate_local_cut_owner_batch(
-    batch: &PreparedLocalCutOwnerCommitV1,
-    admission: &ManifestOwnerAdmissionOwnerStateV1,
-    current_state: Option<&LocalCutOwnerStateV1>,
-) -> Result<(), LocalCutOwnerErrorV1> {
-    // Preparation derived the intent, LCC1/LCQ1 result, and validated successor
-    // from this request, its seal, and the admitted generation it was built
-    // against, so only the persisted pre-state can differ here.
-    let seal = batch.request().seal.as_input();
-    let successor = batch.successor_state();
-    if seal.configuration_generation != admission.configuration_generation
-        || seal.previous_visible_receipt_hash != admission.previous_visible_lcq1_hash
-        || seal.expected_inventory_generation != admission.inventory_generation
-        || successor.timelines != admission.timelines
-    {
-        return Err(LocalCutOwnerErrorV1::Conflict);
-    }
-    match current_state {
-        Some(state) => {
-            let expected_tick = state
-                .last_visible_tick
-                .checked_add(1)
-                .ok_or(LocalCutOwnerErrorV1::Conflict)?;
-            if successor.last_visible_cut_id <= state.last_visible_cut_id
-                || successor.last_visible_tick != expected_tick
-                || successor.membership_epoch != state.membership_epoch
-            {
-                return Err(LocalCutOwnerErrorV1::Conflict);
-            }
-        }
-        None => {
-            if admission.previous_visible_lcq1_hash.is_some()
-                || successor.last_visible_tick != 1
-                || successor.membership_epoch != 0
-            {
-                return Err(LocalCutOwnerErrorV1::Conflict);
-            }
-        }
-    }
-    Ok(())
-}
-
 fn finish_local_cut_owner_scope<T>(
     connection: &Connection,
     scope: SqliteImmediateScopeV1,
@@ -1036,7 +973,7 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
             )? {
                 return Ok(retry);
             }
-            sqlite_validate_local_cut_owner_batch(&batch, &admission, current_state.as_ref())?;
+            validate_local_cut_owner_successor_v1(&batch, &admission, current_state.as_ref())?;
             let applied = sqlite_insert_local_cut_owner_cut(&self.conn, &batch)?;
             sqlite_write_local_cut_owner_state(
                 &self.conn,
@@ -2405,7 +2342,7 @@ mod local_cut_owner_coverage {
         let mut advanced = genesis.clone();
         advanced.configuration_generation += 1;
         assert_eq!(
-            sqlite_validate_local_cut_owner_batch(batch, &advanced, None),
+            validate_local_cut_owner_successor_v1(batch, &advanced, None),
             conflict
         );
         let exhausted = LocalCutOwnerStateV1 {
@@ -2413,7 +2350,7 @@ mod local_cut_owner_coverage {
             ..batch.successor_state().clone()
         };
         assert_eq!(
-            sqlite_validate_local_cut_owner_batch(batch, genesis, Some(&exhausted)),
+            validate_local_cut_owner_successor_v1(batch, genesis, Some(&exhausted)),
             conflict
         );
         let ahead = LocalCutOwnerStateV1 {
@@ -2422,7 +2359,7 @@ mod local_cut_owner_coverage {
             ..batch.successor_state().clone()
         };
         assert_eq!(
-            sqlite_validate_local_cut_owner_batch(batch, genesis, Some(&ahead)),
+            validate_local_cut_owner_successor_v1(batch, genesis, Some(&ahead)),
             conflict
         );
         let current = current_admission(&fixture.store)?;
@@ -2439,11 +2376,11 @@ mod local_cut_owner_coverage {
         let second_request = cut_request(&current, &fixture.snapshots, second_shape)?;
         let second = prepare_cut(second_request, Some(&local), &current, &fixture.snapshots)?;
         assert_eq!(
-            sqlite_validate_local_cut_owner_batch(&second, &current, None),
+            validate_local_cut_owner_successor_v1(&second, &current, None),
             conflict
         );
         assert_eq!(
-            sqlite_validate_local_cut_owner_batch(&second, &current, Some(&local)),
+            validate_local_cut_owner_successor_v1(&second, &current, Some(&local)),
             Ok(())
         );
         Ok(())
