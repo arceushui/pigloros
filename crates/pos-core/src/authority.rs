@@ -25,8 +25,9 @@ pub use knowledge::{
 pub use persistence::{
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityPersistenceStateV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    PersistedAuthorityV1, MAX_PERSISTED_AUTHORITY_GRANTS, MAX_PERSISTED_AUTHORITY_STATE_BYTES,
+    AuthorityPersistenceStateV1, AuthorityViewV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, PersistedAuthorityV1, MAX_PERSISTED_AUTHORITY_GRANTS,
+    MAX_PERSISTED_AUTHORITY_STATE_BYTES,
 };
 
 const PRINCIPAL_MAGIC: [u8; 4] = *b"PRN1";

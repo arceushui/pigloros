@@ -157,6 +157,60 @@ impl AuthorityPersistenceHostV1 {
             },
         })
     }
+
+    /// Persist every immutable record behind one authority view into `store`
+    /// and load the chain back as `store` now resolves it.
+    ///
+    /// The view's grants and revocation records are replayed in Timeline
+    /// Order, each under its own [`Self::authorize_grant`] or
+    /// [`Self::authorize_revocation`] permit, so an exact retry or a record
+    /// another host already persisted is unchanged. The returned authority is
+    /// the store's: it also carries any revocation another host persisted.
+    ///
+    /// Each record commits in its own store transaction, as the
+    /// [`AuthorityPersistencePortV1`] contract defines. An interrupted replay
+    /// therefore leaves a valid Timeline-Order prefix, and a retry completes
+    /// it. A replay costs one store mutation per record, so it is
+    /// O(grants + revocations) behind the view on every call. A view whose
+    /// history diverged from the store's fails closed with
+    /// [`AuthorityPersistenceErrorV1::StaleEpoch`],
+    /// [`AuthorityPersistenceErrorV1::TimelineOrder`], or
+    /// [`AuthorityPersistenceErrorV1::Conflict`] and is never merged.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error when `store` is bound to another
+    /// host, a record is not attested by this host's registry, or a record
+    /// conflicts with the persisted state.
+    pub fn persist_authority(
+        &self,
+        store: &mut dyn AuthorityPersistencePortV1,
+        view: &AuthorityViewV1,
+    ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
+        store
+            .bind_authority_persistence(self.binding)
+            .and_then(|()| {
+                view.records
+                    .iter()
+                    .try_for_each(|record| self.persist_record(store, record))
+            })
+            .and_then(|()| store.load_authority(view.authority.leaf_grant_id))
+    }
+
+    fn persist_record(
+        &self,
+        store: &mut dyn AuthorityPersistencePortV1,
+        record: &AuthorityRecordV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        match record {
+            AuthorityRecordV1::Grant(grant) => self
+                .authorize_grant(grant)
+                .and_then(|permit| store.issue_capability_grant(permit, grant)),
+            AuthorityRecordV1::Revocation { grant, revocation } => self
+                .authorize_revocation(grant, revocation)
+                .and_then(|permit| store.revoke_capability_grant(permit, revocation)),
+        }
+        .map(|_| ())
+    }
 }
 
 impl AuthorityMutationPermitV1 {
@@ -369,18 +423,77 @@ pub struct AuthorityPersistenceStateV1 {
     timelines: BTreeMap<TimelineId, TimelineAuthorityStateV1>,
 }
 
+/// One immutable record behind a persisted authority view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AuthorityRecordV1 {
+    Grant(CapabilityGrantV1),
+    Revocation {
+        grant: CapabilityGrantV1,
+        revocation: CapabilityRevocationV1,
+    },
+}
+
 /// One resolved root-to-leaf chain and its current invalidation identity.
+///
+/// Besides the chain, it carries every persisted revocation record on the
+/// chain's authority Timeline, in Timeline Order, so two revocation states are
+/// distinct even at the same revocation epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistedAuthorityV1 {
+    leaf_grant_id: Hash,
+    chain: DelegationChainV1,
+    revocation_epoch: u64,
+    head_position: Seq,
+    revocations: Vec<CapabilityRevocationV1>,
+}
+
+/// A trusted host's authority view: one resolved chain plus the exact
+/// immutable records behind it.
+///
+/// The records are the as-issued grants of the chain, and every revocation
+/// record on the chain's authority Timeline together with the grants (and
+/// their ancestors) those records revoke. Replayed in Timeline Order through
+/// [`AuthorityPersistenceHostV1::persist_authority`], they reproduce the
+/// chain's revocation epoch and fences in another store. Equality includes
+/// the records, so two views are equal only when they replay identically.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorityViewV1 {
+    authority: PersistedAuthorityV1,
+    records: Vec<AuthorityRecordV1>,
+}
+
+impl AuthorityViewV1 {
+    /// The resolved chain this view authorizes with.
+    #[must_use]
+    pub const fn authority(&self) -> &PersistedAuthorityV1 {
+        &self.authority
+    }
+}
+
+/// A resolved chain before its revocation records are attached.
+struct ResolvedChainV1 {
     chain: DelegationChainV1,
     revocation_epoch: u64,
     head_position: Seq,
 }
 
 impl PersistedAuthorityV1 {
+    /// The leaf grant that names this chain in its persisted store.
+    #[must_use]
+    pub const fn leaf_grant_id(&self) -> Hash {
+        self.leaf_grant_id
+    }
+
     #[must_use]
     pub const fn chain(&self) -> &DelegationChainV1 {
         &self.chain
+    }
+
+    /// Every persisted revocation record on this chain's authority Timeline,
+    /// in Timeline Order.
+    #[must_use]
+    pub fn revocations(&self) -> &[CapabilityRevocationV1] {
+        &self.revocations
     }
 
     #[must_use]
@@ -454,7 +567,7 @@ impl AuthorityPersistenceStateV1 {
                 head_position: issuance_seq,
             },
         );
-        let valid_chain = self.resolve(grant_id);
+        let valid_chain = self.resolve_chain(grant_id);
         if valid_chain.is_err() {
             self.grants.remove(&grant_id);
             match previous_timeline {
@@ -523,7 +636,8 @@ impl AuthorityPersistenceStateV1 {
         Ok(AuthorityCommitOutcomeV1::Committed)
     }
 
-    /// Resolve one root-to-leaf delegation chain at the current persisted epoch.
+    /// Resolve one root-to-leaf delegation chain at the current persisted epoch,
+    /// with every persisted revocation record on its authority Timeline.
     ///
     /// # Errors
     /// Returns the same closed conflict for a missing leaf, missing parent, or cycle.
@@ -531,6 +645,103 @@ impl AuthorityPersistenceStateV1 {
         &self,
         leaf_grant_id: Hash,
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
+        self.resolve_chain(leaf_grant_id).map(|resolved| {
+            let timelines = chain_timelines(&resolved.chain);
+            let mut revocations = self
+                .revocations
+                .values()
+                .filter(|revocation| timelines.contains(&revocation.authority_timeline()))
+                .cloned()
+                .collect::<Vec<_>>();
+            revocations.sort_by_key(CapabilityRevocationV1::fence_position);
+            PersistedAuthorityV1 {
+                leaf_grant_id,
+                chain: resolved.chain,
+                revocation_epoch: resolved.revocation_epoch,
+                head_position: resolved.head_position,
+                revocations,
+            }
+        })
+    }
+
+    /// Resolve one chain as a trusted host's view, with the immutable records
+    /// behind it.
+    ///
+    /// # Errors
+    /// Returns the same closed errors as [`Self::resolve`].
+    pub fn view(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<AuthorityViewV1, AuthorityPersistenceErrorV1> {
+        self.resolve(leaf_grant_id)
+            .map(|authority| AuthorityViewV1 {
+                records: self.replay_records(&authority),
+                authority,
+            })
+    }
+
+    /// The immutable records behind `authority`, in Timeline Order.
+    ///
+    /// A delegation chain lives on one authority Timeline, and a store
+    /// reproduces that Timeline's revocation epoch only from its complete
+    /// revocation history. The records are therefore the chain's grants, each
+    /// revoked grant on that Timeline, the ancestors of both, and every
+    /// revocation record, ordered by Timeline position. Parents precede their
+    /// children on the same Timeline, so one pass from the latest position
+    /// back closes the set over ancestors without looking any grant up.
+    fn replay_records(&self, authority: &PersistedAuthorityV1) -> Vec<AuthorityRecordV1> {
+        let timelines = chain_timelines(&authority.chain);
+        let mut on_timeline = self
+            .grants
+            .values()
+            .filter(|grant| timelines.contains(&grant.issuance_timeline()))
+            .collect::<Vec<_>>();
+        on_timeline.sort_by_key(|grant| grant.issuance_seq());
+        let mut needed = authority
+            .chain
+            .grants()
+            .iter()
+            .map(CapabilityGrantV1::grant_id)
+            .chain(
+                authority
+                    .revocations
+                    .iter()
+                    .map(CapabilityRevocationV1::grant_id),
+            )
+            .collect::<BTreeSet<_>>();
+        for grant in on_timeline.iter().rev() {
+            if needed.contains(&grant.grant_id()) {
+                needed.extend(grant.parent_grant_id());
+            }
+        }
+        let mut records = Vec::new();
+        for grant in on_timeline
+            .into_iter()
+            .filter(|grant| needed.contains(&grant.grant_id()))
+        {
+            records.push((
+                grant.issuance_seq(),
+                AuthorityRecordV1::Grant(grant.clone()),
+            ));
+            if let Some(revocation) = self.revocations.get(&grant.grant_id()) {
+                records.push((
+                    revocation.fence_position(),
+                    AuthorityRecordV1::Revocation {
+                        grant: grant.clone(),
+                        revocation: revocation.clone(),
+                    },
+                ));
+            }
+        }
+        records.sort_by_key(|(position, _)| *position);
+        records.into_iter().map(|(_, record)| record).collect()
+    }
+
+    /// Resolve one root-to-leaf delegation chain at the current persisted epoch.
+    fn resolve_chain(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<ResolvedChainV1, AuthorityPersistenceErrorV1> {
         let Some(timeline) = self
             .grants
             .get(&leaf_grant_id)
@@ -572,7 +783,7 @@ impl AuthorityPersistenceStateV1 {
             .collect();
         DelegationChainV1::try_from_grants(resolved)
             .map_err(AuthorityPersistenceErrorV1::from)
-            .map(|chain| PersistedAuthorityV1 {
+            .map(|chain| ResolvedChainV1 {
                 chain,
                 revocation_epoch: current.revocation_epoch,
                 head_position: current.head_position,
@@ -735,7 +946,7 @@ impl AuthorityPersistenceStateV1 {
             {
                 return Err(AuthorityPersistenceErrorV1::InvalidRecord);
             }
-            if self.resolve(grant.grant_id()).is_err() {
+            if self.resolve_chain(grant.grant_id()).is_err() {
                 return Err(AuthorityPersistenceErrorV1::InvalidRecord);
             }
         }
@@ -847,6 +1058,15 @@ pub trait AuthorityPersistencePortV1 {
         &self,
         leaf_grant_id: Hash,
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1>;
+}
+
+/// The authority Timelines a delegation chain was issued on.
+fn chain_timelines(chain: &DelegationChainV1) -> BTreeSet<TimelineId> {
+    chain
+        .grants()
+        .iter()
+        .map(CapabilityGrantV1::issuance_timeline)
+        .collect()
 }
 
 fn bounded_values(value: &Value) -> Result<&[Value], AuthorityPersistenceErrorV1> {

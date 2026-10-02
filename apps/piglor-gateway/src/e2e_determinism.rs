@@ -458,7 +458,7 @@ fn gateway_authorization_for(
     state
         .issue_grant(host.authorize_grant(&grant).test_ok()?, grant.clone())
         .test_ok()?;
-    let authority = state.resolve(grant.grant_id()).test_ok()?;
+    let authority = state.view(grant.grant_id()).test_ok()?;
     Ok(GatewayAuthorization::new(
         Arc::new(LocalAuthenticationAdapter::new(authenticated)),
         authority,
