@@ -1294,3 +1294,299 @@ fn local_host_rejects_another_plugins_event_type_and_commits_nothing() {
         assert_eq!(budget(store.as_ref(), timeline), Some(u64::MAX), "{name}");
     }
 }
+
+/// Driver that records which probed Projections its view exposes (#513).
+struct ProbingDriver {
+    name: &'static str,
+    event_type: &'static str,
+    entity: EntityId,
+    subscriptions: Vec<ProjectionKey>,
+    probes: [ProjectionKey; 2],
+    log: Log,
+}
+
+impl Driver for ProbingDriver {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn subscriptions(&self) -> &[ProjectionKey] {
+        &self.subscriptions
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step(
+        &mut self,
+        _: TimelineId,
+        observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        let seen: Vec<String> = self
+            .probes
+            .iter()
+            .map(|key| {
+                observations
+                    .state_for(key)
+                    .and_then(|state| state.get("count"))
+                    .map_or_else(|| "none".to_owned(), ToString::to_string)
+            })
+            .collect();
+        record(&self.log, format!("{}:{}", self.name, seen.join(",")));
+        Ok(StepOutput::new(vec![EventDraft::new(
+            self.entity,
+            Kind::new(self.event_type),
+            CanonicalBytes::from_static(b"probed"),
+        )]))
+    }
+}
+
+/// Register a probing Driver that subscribes to `subscriptions` and probes
+/// both `probes`, emitting its own Event type on `entity`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn register_probe(
+    registry: &mut PluginRegistry,
+    name: &'static str,
+    subscriptions: Vec<ProjectionKey>,
+    probes: [EntityId; 2],
+    entity: EntityId,
+    log: &Log,
+) {
+    let event_type = match name {
+        "blind" => "agent.scheduled.blind",
+        _ => "agent.scheduled.subscriber",
+    };
+    let plugin = TestPlugin {
+        id: PluginId::new(),
+        name,
+        event_type,
+        reducer: false,
+    };
+    let driver = ProbingDriver {
+        name,
+        event_type,
+        entity,
+        subscriptions,
+        probes: probes.map(ProjectionKey::new),
+        log: Arc::clone(log),
+    };
+    ok(registry.register_generated(&plugin, None, Some(Box::new(driver))));
+}
+
+/// Register the counting Projection reducer every probe reads from.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn register_projection(registry: &mut PluginRegistry) {
+    ok(registry.register_generated(
+        &TestPlugin {
+            id: PluginId::new(),
+            name: "projection",
+            event_type: PROJECTION,
+            reducer: true,
+        },
+        Some(Box::new(CountingReducer)),
+        None,
+    ));
+}
+
+/// Commit one Projection Event per subject in any store and fold them.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn fold_subjects(
+    store: &mut dyn Harness,
+    registry: &mut PluginRegistry,
+    timeline: TimelineId,
+    subjects: &[EntityId],
+) -> Seq {
+    let drafts: Vec<EventDraft> = subjects
+        .iter()
+        .map(|subject| {
+            EventDraft::new(
+                *subject,
+                Kind::new(PROJECTION),
+                CanonicalBytes::from_static(b"projection"),
+            )
+        })
+        .collect();
+    let events = ok(store.append(timeline, &drafts));
+    registry.fold_events(timeline, &events);
+    ok(store.logical_head(timeline))
+}
+
+/// Port that records each offered snapshot digest and commits through the
+/// real store.
+struct DigestRecordingPort<'a> {
+    inner: &'a mut dyn Harness,
+    digests: Vec<Hash>,
+}
+
+impl PipelineAdmissionPortV1 for DigestRecordingPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.digests
+            .push(basis.attempt().observation().snapshot_digest());
+        self.inner.admit_pipeline_batch(basis)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: NonZeroUsize,
+    ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
+        self.inner.purge_expired_pipeline_receipts_bounded(limit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, CoreError> {
+        self.inner
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+/// Admit the staged pass and return the snapshot digest it bound.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn admit_recording_digest(
+    host: &Host,
+    registry: &mut PluginRegistry,
+    store: &mut dyn Harness,
+    key: u8,
+) -> Hash {
+    let admission = host.admission(store, key);
+    let mut port = DigestRecordingPort {
+        inner: store,
+        digests: Vec::new(),
+    };
+    receipt(registry.admit_scheduled_pass(&mut port, &admission));
+    assert_eq!(port.digests.len(), 1);
+    port.digests[0]
+}
+
+/// The ADR-021 scheduled snapshot digest recomputed independently of the
+/// runtime from its documented layout. `states` holds each captured entity
+/// with its canonical State JSON, in ascending entity byte order.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn expected_digest(
+    timeline: TimelineId,
+    observed_through: Seq,
+    states: &[(EntityId, &str)],
+) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.ScheduledObservationSnapshot.v1\0");
+    hasher.update(&timeline.inner().to_bytes());
+    hasher.update(&observed_through.as_u64().to_be_bytes());
+    hasher.update(&(states.len() as u64).to_be_bytes());
+    for (entity, state) in states {
+        hasher.update(&entity.inner().to_bytes());
+        hasher.update(&(state.len() as u64).to_be_bytes());
+        hasher.update(state.as_bytes());
+    }
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// #513, ADR-021 Revision 3 Decision 1: in a protected multi-Driver pass the
+/// shared snapshot holds the union of every due Driver's subscriptions, but
+/// each Driver reads only its own. The Driver with no subscription reads
+/// nothing, the subscriber reads only subject A, and the bound digest still
+/// covers the whole union.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn protected_pass_scopes_each_drivers_view_to_its_own_subscriptions() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let (subject, other) = (entity(50), entity(51));
+        let authority = ConsentAuthority::new();
+        let token = authority.record_grant_on_timeline(host.timeline, &consent_grant(subject));
+        let log = Log::default();
+        let mut registry = host.registry().with_consent_authority(authority);
+        register_projection(&mut registry);
+        let probes = [subject, other];
+        register_probe(&mut registry, "blind", Vec::new(), probes, subject, &log);
+        let subscribed = vec![ProjectionKey::new(subject)];
+        register_probe(
+            &mut registry,
+            "subscriber",
+            subscribed,
+            probes,
+            subject,
+            &log,
+        );
+        let observed = fold_subjects(store.as_mut(), &mut registry, host.timeline, &probes);
+
+        let staged =
+            ok(registry.step_all_anchored_protected(host.timeline, observed, token, 1, &[]));
+        assert_eq!(staged.len(), 2, "{name}");
+        assert_eq!(
+            entries(&log),
+            ["blind:none,none", "subscriber:1,none"],
+            "{name}"
+        );
+        let digest = admit_recording_digest(&host, &mut registry, store.as_mut(), 1);
+        assert_eq!(
+            digest,
+            expected_digest(host.timeline, observed, &[(subject, r#"{"count":1}"#)]),
+            "{name}"
+        );
+        assert_eq!(
+            committed_events(store.as_ref(), host.timeline).len(),
+            4,
+            "{name}"
+        );
+    }
+}
+
+/// #513: a public pass materializes no Projection. A Driver with no
+/// subscription reads nothing even though Projection state exists, and a
+/// public pass with any subscriber fails closed before any Driver steps.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn public_pass_exposes_no_projection_to_any_driver() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let (subject, other) = (entity(50), entity(51));
+        let log = Log::default();
+        let mut registry = host.registry();
+        register_projection(&mut registry);
+        let probes = [subject, other];
+        register_probe(&mut registry, "blind", Vec::new(), probes, entity(10), &log);
+        let observed = fold_subjects(store.as_mut(), &mut registry, host.timeline, &probes);
+
+        assert_eq!(
+            ok(registry.step_all_anchored(host.timeline, observed)).len(),
+            1,
+            "{name}"
+        );
+        assert_eq!(entries(&log), ["blind:none,none"], "{name}");
+        let digest = admit_recording_digest(&host, &mut registry, store.as_mut(), 1);
+        assert_eq!(
+            digest,
+            expected_digest(host.timeline, observed, &[]),
+            "{name}"
+        );
+
+        let subscribed = vec![ProjectionKey::new(subject)];
+        register_probe(
+            &mut registry,
+            "subscriber",
+            subscribed,
+            probes,
+            entity(10),
+            &log,
+        );
+        let head = ok(store.logical_head(host.timeline));
+        let refused = err(registry.step_all_anchored(host.timeline, head));
+        assert!(
+            matches!(
+                refused,
+                RuntimeError::Consent(pos_core::ConsentError::NoConsent)
+            ),
+            "{name}: {refused}"
+        );
+        assert_eq!(entries(&log), ["blind:none,none"], "{name}");
+    }
+}
