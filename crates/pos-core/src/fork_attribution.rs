@@ -4,7 +4,7 @@
 //! In particular, a valid `FSM1` is only a mathematical signature until the
 //! local publication authority has committed and read it.
 
-use crate::{Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, Signature, TimelineId};
+use crate::{Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey, Signature, TimelineId};
 
 /// Maximum accepted `FAR1` bytes.
 pub const MAX_FORK_ADMISSION_RECORD_BYTES_V1: usize = 768;
@@ -12,6 +12,18 @@ pub const MAX_FORK_ADMISSION_RECORD_BYTES_V1: usize = 768;
 pub const MAX_FORK_REPRO_MANIFEST_BYTES_V1: usize = 16_384;
 /// Maximum accepted `FSM1` bytes.
 pub const MAX_SIGNED_FORK_REPRO_MANIFEST_BYTES_V1: usize = 16_640;
+/// Maximum accepted `FPO1` bytes.
+pub const MAX_FORK_PUBLICATION_OPERATION_BYTES_V1: usize = 1_024;
+/// Maximum accepted `FPB1` bytes.
+pub const MAX_FORK_PUBLICATION_BINDING_BYTES_V1: usize = 192;
+/// Maximum accepted `FPA1` bytes.
+pub const MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1: usize = 17_024;
+/// Upper bound on the derived `FPR1` encoding produced by
+/// [`ForkPublicationReceiptV1::to_canonical_cbor`].
+///
+/// `FPR1` is encode-only under ADR-099: no decoder accepts caller `FPR1` bytes,
+/// so this bounds derived output rather than gating decoder input.
+pub const MAX_FORK_PUBLICATION_RECEIPT_BYTES_V1: usize = 192;
 /// Maximum intervention coordinates in one `FRM1`.
 pub const MAX_FORK_MANIFEST_INTERVENTIONS_V1: usize = 1_024;
 
@@ -143,12 +155,7 @@ impl ForkAdmissionRecordV1 {
         uint(&mut out, value.post_fold_tick_boundary);
         hash(&mut out, value.plugin_composition_hash);
         uint(&mut out, u64::from(value.attribution_required));
-        match value.origin {
-            ForkAttributionOriginV1::Local => {
-                array(&mut out, 1);
-                uint(&mut out, 1);
-            }
-        }
+        authority_origin(&mut out, value.origin);
         out
     }
 
@@ -169,8 +176,7 @@ impl ForkAdmissionRecordV1 {
         wire.version()?;
         let operation_id = wire.hash()?;
         let principal_owner_binding_digest = wire.hash()?;
-        let creator = OwnerIdV1::new(wire.text(128)?)
-            .map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)?;
+        let creator = wire.owner()?;
         let parent_timeline_id = wire.timeline()?;
         let child_timeline_id = wire.timeline()?;
         let room_revision_descriptor_hash = wire.hash()?;
@@ -180,16 +186,7 @@ impl ForkAdmissionRecordV1 {
         let post_fold_tick_boundary = wire.uint()?;
         let plugin_composition_hash = wire.hash()?;
         let attribution_required = wire.bool()?;
-        // ADR-099: authority-origin-v1 = [1] / [2, bstr .size 32].
-        let origin = match (wire.head(4)?, wire.uint()?) {
-            (1, 1) => ForkAttributionOriginV1::Local,
-            (2, 2) => {
-                return wire.fixed::<32>().and_then(|_| wire.finish()).and(Err(
-                    ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable,
-                ));
-            }
-            _ => return Err(ForkAttributionCodecErrorV1::InvalidEncoding),
-        };
+        let origin = wire.authority_origin()?;
         wire.finish()?;
         let record = Self::new(ForkAdmissionRecordInputV1 {
             operation_id,
@@ -535,8 +532,7 @@ impl SignedForkReproManifestV1 {
         wire.array(7)?;
         wire.magic("FSM1")?;
         wire.version()?;
-        let owner = OwnerIdV1::new(wire.text(128)?)
-            .map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)?;
+        let owner = wire.owner()?;
         let role = KeyRoleV1::from_code(
             u8::try_from(wire.uint()?).map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)?,
         )
@@ -553,6 +549,304 @@ impl SignedForkReproManifestV1 {
         )?;
         canonical(bytes_in, &record.to_canonical_cbor())?;
         Ok(record)
+    }
+}
+
+/// Construction fields for a local `FPO1` publication-operation record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkPublicationOperationInputV1 {
+    pub operation_id: Hash,
+    pub child_timeline_id: TimelineId,
+    pub final_logical_head: u64,
+    pub final_chain_head_hash: Hash,
+    pub admission_digest: Hash,
+    pub signing_identity: KeyIdentityV1,
+    pub private_material_digest: Hash,
+    pub public_verification_key: PublicKey,
+    pub signed_manifest_record_id: Hash,
+    pub origin: ForkAttributionOriginV1,
+}
+
+/// Strict portable `FPO1` bytes. This value does not prove authorized issuance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkPublicationOperationV1(ForkPublicationOperationInputV1);
+
+impl ForkPublicationOperationV1 {
+    /// Construct a local publication-operation projection with a role-bound signer.
+    ///
+    /// The final chain head hash may be the zero genesis hash of an empty
+    /// Fork, exactly as `FAR1` and `FRM1` permit for an empty parent cut.
+    ///
+    /// # Errors
+    /// Returns an error when required publication fields or the signing identity are invalid.
+    pub fn new(
+        input: ForkPublicationOperationInputV1,
+    ) -> Result<Self, ForkAttributionCodecErrorV1> {
+        if input.operation_id == Hash::zero()
+            || input.admission_digest == Hash::zero()
+            || input.private_material_digest == Hash::zero()
+            || input.signed_manifest_record_id == Hash::zero()
+            || input.signing_identity.role != KeyRoleV1::SubjectAttributionSigning
+            || input.signing_identity.epoch == 0
+        {
+            return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
+        }
+        Ok(Self(input))
+    }
+
+    #[must_use]
+    pub const fn input(&self) -> &ForkPublicationOperationInputV1 {
+        &self.0
+    }
+
+    /// Encode the exact 14-field deterministic-CBOR `FPO1` array.
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let value = &self.0;
+        let mut out = Vec::with_capacity(512);
+        array(&mut out, 14);
+        text(&mut out, "FPO1");
+        uint(&mut out, 1);
+        hash(&mut out, value.operation_id);
+        timeline(&mut out, value.child_timeline_id);
+        uint(&mut out, value.final_logical_head);
+        hash(&mut out, value.final_chain_head_hash);
+        hash(&mut out, value.admission_digest);
+        text(&mut out, value.signing_identity.owner_id.as_str());
+        uint(&mut out, u64::from(value.signing_identity.role.code()));
+        uint(&mut out, value.signing_identity.epoch);
+        hash(&mut out, value.private_material_digest);
+        bytes(&mut out, value.public_verification_key.as_bytes());
+        hash(&mut out, value.signed_manifest_record_id);
+        authority_origin(&mut out, value.origin);
+        out
+    }
+
+    /// Decode only exact canonical local-origin `FPO1` bytes.
+    ///
+    /// # Errors
+    /// Returns an error when bytes are malformed, noncanonical, out of bounds, or imported.
+    pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAttributionCodecErrorV1> {
+        let mut wire = Reader::new(bytes_in, MAX_FORK_PUBLICATION_OPERATION_BYTES_V1)?;
+        wire.array(14)?;
+        wire.magic("FPO1")?;
+        wire.version()?;
+        let operation_id = wire.hash()?;
+        let child_timeline_id = wire.timeline()?;
+        let final_logical_head = wire.uint()?;
+        let final_chain_head_hash = wire.hash()?;
+        let admission_digest = wire.hash()?;
+        let owner_id = wire.owner()?;
+        let role = KeyRoleV1::from_code(
+            u8::try_from(wire.uint()?).map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)?,
+        )
+        .map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)?;
+        let epoch = wire.uint()?;
+        let private_material_digest = wire.hash()?;
+        let public_verification_key = PublicKey::from_bytes(wire.fixed()?);
+        let signed_manifest_record_id = wire.hash()?;
+        let origin = wire.authority_origin()?;
+        wire.finish()?;
+        let record = Self::new(ForkPublicationOperationInputV1 {
+            operation_id,
+            child_timeline_id,
+            final_logical_head,
+            final_chain_head_hash,
+            admission_digest,
+            signing_identity: KeyIdentityV1::from_parts(owner_id, role, epoch),
+            private_material_digest,
+            public_verification_key,
+            signed_manifest_record_id,
+            origin,
+        })?;
+        canonical(bytes_in, &record.to_canonical_cbor())?;
+        Ok(record)
+    }
+}
+
+/// Construction fields for a portable `FPB1` publication binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForkPublicationBindingInputV1 {
+    pub child_timeline_id: TimelineId,
+    pub final_logical_head: u64,
+    pub operation_id: Hash,
+    pub signed_manifest_record_id: Hash,
+}
+
+/// Strict portable `FPB1` bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForkPublicationBindingV1(ForkPublicationBindingInputV1);
+
+impl ForkPublicationBindingV1 {
+    /// Construct one nonzero publication binding.
+    ///
+    /// # Errors
+    /// Returns an error when an operation or signed-manifest record ID is zero.
+    pub fn new(input: ForkPublicationBindingInputV1) -> Result<Self, ForkAttributionCodecErrorV1> {
+        if input.operation_id == Hash::zero() || input.signed_manifest_record_id == Hash::zero() {
+            return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
+        }
+        Ok(Self(input))
+    }
+
+    #[must_use]
+    pub const fn input(&self) -> &ForkPublicationBindingInputV1 {
+        &self.0
+    }
+
+    /// Encode the exact six-field deterministic-CBOR `FPB1` array.
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let value = &self.0;
+        let mut out = Vec::with_capacity(128);
+        array(&mut out, 6);
+        text(&mut out, "FPB1");
+        uint(&mut out, 1);
+        timeline(&mut out, value.child_timeline_id);
+        uint(&mut out, value.final_logical_head);
+        hash(&mut out, value.operation_id);
+        hash(&mut out, value.signed_manifest_record_id);
+        out
+    }
+
+    /// Decode exact canonical `FPB1` bytes.
+    ///
+    /// # Errors
+    /// Returns an error when bytes are malformed, noncanonical, or out of bounds.
+    pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAttributionCodecErrorV1> {
+        let mut wire = Reader::new(bytes_in, MAX_FORK_PUBLICATION_BINDING_BYTES_V1)?;
+        wire.array(6)?;
+        wire.magic("FPB1")?;
+        wire.version()?;
+        let record = Self::new(ForkPublicationBindingInputV1 {
+            child_timeline_id: wire.timeline()?,
+            final_logical_head: wire.uint()?,
+            operation_id: wire.hash()?,
+            signed_manifest_record_id: wire.hash()?,
+        })?;
+        wire.finish()?;
+        canonical(bytes_in, &record.to_canonical_cbor())?;
+        Ok(record)
+    }
+}
+
+/// Construction fields for a portable `FPA1` publication artifact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkPublicationArtifactInputV1 {
+    pub signed_manifest_record_id: Hash,
+    pub operation_id: Hash,
+    pub signed_manifest_bytes: Vec<u8>,
+}
+
+/// Strict portable `FPA1` bytes carrying the sole complete `FSM1` copy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForkPublicationArtifactV1(ForkPublicationArtifactInputV1);
+
+impl ForkPublicationArtifactV1 {
+    /// Construct an artifact only when its exact nested `FSM1` identifier agrees.
+    ///
+    /// # Errors
+    /// Returns an error when identifiers are zero, nested bytes are invalid, or IDs disagree.
+    pub fn new(input: ForkPublicationArtifactInputV1) -> Result<Self, ForkAttributionCodecErrorV1> {
+        if input.signed_manifest_record_id == Hash::zero() || input.operation_id == Hash::zero() {
+            return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
+        }
+        let manifest =
+            SignedForkReproManifestV1::from_canonical_cbor(&input.signed_manifest_bytes)?;
+        if manifest.record_id() != input.signed_manifest_record_id {
+            return Err(ForkAttributionCodecErrorV1::FieldMismatch);
+        }
+        Ok(Self(input))
+    }
+
+    #[must_use]
+    pub const fn input(&self) -> &ForkPublicationArtifactInputV1 {
+        &self.0
+    }
+
+    /// Encode the exact five-field deterministic-CBOR `FPA1` array.
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let value = &self.0;
+        let mut out = Vec::with_capacity(value.signed_manifest_bytes.len() + 96);
+        array(&mut out, 5);
+        text(&mut out, "FPA1");
+        uint(&mut out, 1);
+        hash(&mut out, value.signed_manifest_record_id);
+        hash(&mut out, value.operation_id);
+        bytes(&mut out, &value.signed_manifest_bytes);
+        out
+    }
+
+    /// Decode exact canonical `FPA1` bytes and its nested `FSM1` bytes.
+    ///
+    /// # Errors
+    /// Returns an error when bytes are malformed, noncanonical, out of bounds, or inconsistent.
+    pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAttributionCodecErrorV1> {
+        let mut wire = Reader::new(bytes_in, MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1)?;
+        wire.array(5)?;
+        wire.magic("FPA1")?;
+        wire.version()?;
+        let record = Self::new(ForkPublicationArtifactInputV1 {
+            signed_manifest_record_id: wire.hash()?,
+            operation_id: wire.hash()?,
+            signed_manifest_bytes: wire
+                .bytes(MAX_SIGNED_FORK_REPRO_MANIFEST_BYTES_V1)?
+                .to_vec(),
+        })?;
+        wire.finish()?;
+        canonical(bytes_in, &record.to_canonical_cbor())?;
+        Ok(record)
+    }
+}
+
+/// Derived receipt fields returned only after a complete publication commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForkPublicationReceiptV1 {
+    pub operation_id: Hash,
+    pub child_timeline_id: TimelineId,
+    pub final_logical_head: u64,
+    pub signed_manifest_record_id: Hash,
+}
+
+impl ForkPublicationReceiptV1 {
+    /// Derive a receipt from matching committed operation and binding records.
+    ///
+    /// # Errors
+    /// Returns an error when the duplicated operation, Fork, head, or record ID differs.
+    pub fn from_records(
+        operation: &ForkPublicationOperationV1,
+        binding: &ForkPublicationBindingV1,
+    ) -> Result<Self, ForkAttributionCodecErrorV1> {
+        let value = operation.input();
+        let bound = binding.input();
+        if value.operation_id != bound.operation_id
+            || value.child_timeline_id != bound.child_timeline_id
+            || value.final_logical_head != bound.final_logical_head
+            || value.signed_manifest_record_id != bound.signed_manifest_record_id
+        {
+            return Err(ForkAttributionCodecErrorV1::FieldMismatch);
+        }
+        Ok(Self {
+            operation_id: value.operation_id,
+            child_timeline_id: value.child_timeline_id,
+            final_logical_head: value.final_logical_head,
+            signed_manifest_record_id: value.signed_manifest_record_id,
+        })
+    }
+
+    /// Encode the exact six-field deterministic-CBOR derived `FPR1` array.
+    #[must_use]
+    pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(128);
+        array(&mut out, 6);
+        text(&mut out, "FPR1");
+        uint(&mut out, 1);
+        hash(&mut out, self.operation_id);
+        timeline(&mut out, self.child_timeline_id);
+        uint(&mut out, self.final_logical_head);
+        hash(&mut out, self.signed_manifest_record_id);
+        out
     }
 }
 
@@ -576,6 +870,17 @@ fn text(out: &mut Vec<u8>, value: &str) {
     head(out, 3, value.len() as u64);
     out.extend_from_slice(value.as_bytes());
 }
+
+/// Encode ADR-099 `authority-origin-v1`; only the local `[1]` form exists in V1.
+fn authority_origin(out: &mut Vec<u8>, origin: ForkAttributionOriginV1) {
+    match origin {
+        ForkAttributionOriginV1::Local => {
+            array(out, 1);
+            uint(out, 1);
+        }
+    }
+}
+
 fn array(out: &mut Vec<u8>, value: u64) {
     head(out, 4, value);
 }
@@ -658,6 +963,18 @@ impl<'a> Reader<'a> {
             Err(ForkAttributionCodecErrorV1::InvalidEncoding)
         }
     }
+    /// Decode ADR-099 `authority-origin-v1 = [1] / [2, bstr .size 32]` as the
+    /// final record field. A well-formed import origin stays unavailable until
+    /// #447 installs its authenticated import boundary.
+    fn authority_origin(&mut self) -> Result<ForkAttributionOriginV1, ForkAttributionCodecErrorV1> {
+        match (self.head(4)?, self.uint()?) {
+            (1, 1) => Ok(ForkAttributionOriginV1::Local),
+            (2, 2) => self.fixed::<32>().and_then(|_| self.finish()).and(Err(
+                ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable,
+            )),
+            _ => Err(ForkAttributionCodecErrorV1::InvalidEncoding),
+        }
+    }
     fn array_len(&mut self) -> Result<usize, ForkAttributionCodecErrorV1> {
         usize::try_from(self.head(4)?).map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)
     }
@@ -680,17 +997,16 @@ impl<'a> Reader<'a> {
         }
         self.take(length)
     }
-    fn text(&mut self, maximum: usize) -> Result<&'a str, ForkAttributionCodecErrorV1> {
-        let length = usize::try_from(self.head(3)?)
-            .map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)?;
-        if length > maximum {
+    /// Read a 1..=128-byte owner, leaving emptiness to `OwnerIdV1` itself.
+    fn owner(&mut self) -> Result<OwnerIdV1, ForkAttributionCodecErrorV1> {
+        // A length that does not fit `usize` is necessarily over the bound.
+        let length = usize::try_from(self.head(3)?).unwrap_or(usize::MAX);
+        if length > 128 {
             return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
         }
-        let value = self.take(length)?;
-        if value.is_empty() {
-            return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
-        }
-        std::str::from_utf8(value).map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)
+        let value = std::str::from_utf8(self.take(length)?)
+            .map_err(|_| ForkAttributionCodecErrorV1::InvalidEncoding)?;
+        OwnerIdV1::new(value).map_err(|_| ForkAttributionCodecErrorV1::FieldOutOfBounds)
     }
     fn hash(&mut self) -> Result<Hash, ForkAttributionCodecErrorV1> {
         Ok(Hash::from_bytes(self.fixed()?))
@@ -705,8 +1021,16 @@ impl<'a> Reader<'a> {
             _ => Err(ForkAttributionCodecErrorV1::InvalidEncoding),
         }
     }
+    /// Read the raw bytes of one text string.
+    fn text_bytes(&mut self) -> Result<&'a [u8], ForkAttributionCodecErrorV1> {
+        // A length that does not fit `usize` is necessarily unavailable to `take`.
+        let length = usize::try_from(self.head(3)?).unwrap_or(usize::MAX);
+        self.take(length)
+    }
+    /// Compare a text-string marker byte-for-byte; any other length or
+    /// content is an invalid encoding.
     fn magic(&mut self, expected: &str) -> Result<(), ForkAttributionCodecErrorV1> {
-        if self.text(4)? == expected {
+        if self.text_bytes()? == expected.as_bytes() {
             Ok(())
         } else {
             Err(ForkAttributionCodecErrorV1::InvalidEncoding)

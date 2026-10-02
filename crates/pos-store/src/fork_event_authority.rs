@@ -557,13 +557,21 @@ mod tests {
         },
         CanonicalBytes, EntityId, EventDraft, EventStore, ForkAdmissionHostCommandV1,
         ForkAdmissionOperationResultV1, ForkAdmissionReceiptV1, ForkClassifierSourceInputV1,
-        ForkClassifierSourceV1, ForkEventSourceDescriptorV1, ForkExternalInputRouteV1, Hash, Kind,
-        PrincipalRefV1, PublicKey, TimelineId, WallTime,
+        ForkClassifierSourceV1, ForkEventSourceDescriptorV1, ForkExternalInputRouteV1, Hash,
+        KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+        Kind, PrincipalRefV1, PublicKey, Signature, TimelineId, WallTime,
     };
     use pos_crypto::chain::Blake3Hasher;
     use pos_crypto::fork_authentication::{
         verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
         ForkHostSigningKeyV1, VerifiedAuthenticatedPrincipalEvidenceV1,
+    };
+    use pos_crypto::{
+        key_roles::{
+            destroy_registered_signing_key, sign_for_registered_role, KeyDestructionPersistence,
+            SigningKeyMaterial,
+        },
+        signing::generate_keypair,
     };
     #[cfg(feature = "sqlite")]
     use rusqlite::{params, Connection};
@@ -573,6 +581,8 @@ mod tests {
     use crate::sqlite::SqliteStore;
     use crate::{
         memory::MemoryStore, ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
+        ForkManifestPublicationErrorV1, ForkManifestPublicationPortV1,
+        ForkManifestPublicationRequestV1,
     };
 
     fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -1186,6 +1196,750 @@ mod tests {
                 ForkAppendSourceIdentityV1::HostInternal
             )
             .is_ok());
+        Ok(())
+    }
+
+    /// Drives key destruction through the store's durable two-phase registry
+    /// transition, as an owned-material adapter does in production.
+    struct StoreKeyDestruction<'a, S: ?Sized>(&'a mut S);
+
+    impl<S: EventStore + ?Sized> KeyDestructionPersistence for StoreKeyDestruction<'_, S> {
+        type Error = pos_core::CoreError;
+
+        fn begin(
+            &mut self,
+            request: KeyDestructionRequestV1,
+        ) -> Result<pos_core::KeyDestructionBeginOutcomeV1, Self::Error> {
+            self.0
+                .begin_key_registry_destruction(request)
+                .map(|(outcome, _)| outcome)
+        }
+
+        fn complete(
+            &mut self,
+            request: KeyDestructionRequestV1,
+            deletion_receipt: Hash,
+        ) -> Result<pos_core::KeyDestructionOutcomeV1, Self::Error> {
+            self.0
+                .complete_key_registry_destruction(request, deletion_receipt)
+                .map(|(outcome, _)| outcome)
+        }
+    }
+
+    trait PublicationTestStoreV1:
+        EventStore
+        + ForkAdmissionAuthorityBootstrapPortV1
+        + ForkAdmissionAuthorityPortV1
+        + ForkEventProvenanceAuthorityPortV1
+        + ForkEventPermitIssuerPortV1
+        + ForkManifestPublicationPortV1
+    {
+    }
+
+    impl<S> PublicationTestStoreV1 for S where
+        S: EventStore
+            + ForkAdmissionAuthorityBootstrapPortV1
+            + ForkAdmissionAuthorityPortV1
+            + ForkEventProvenanceAuthorityPortV1
+            + ForkEventPermitIssuerPortV1
+            + ForkManifestPublicationPortV1
+    {
+    }
+
+    struct PublicationFixtureV1 {
+        identity: KeyIdentityV1,
+        material: SigningKeyMaterial,
+        registry: KeyRegistryStateV1,
+        request: ForkManifestPublicationRequestV1,
+    }
+
+    /// Register the creator's attribution key and build a request for the
+    /// admitted child at `head`.
+    fn publication_fixture<S: EventStore>(
+        store: &mut S,
+        lifecycle: &LifecycleFixtureV1,
+        operation: u8,
+        head: u64,
+    ) -> Result<PublicationFixtureV1, Box<dyn Error>> {
+        let (private_key, _) = generate_keypair();
+        let material = SigningKeyMaterial::new(private_key);
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::SubjectAttributionSigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            material.material_digest(),
+            Some(material.public_verification_key()),
+        ))?;
+        store.save_key_registry(&registry)?;
+        let request = ForkManifestPublicationRequestV1 {
+            operation_id: Hash::from_bytes([operation; 32]),
+            child_timeline_id: lifecycle.fork.child_id,
+            expected_final_logical_head: head,
+            signing_identity: identity,
+            private_material_digest: material.material_digest(),
+            public_verification_key: material.public_verification_key(),
+            expected_registry: registry.clone(),
+        };
+        Ok(PublicationFixtureV1 {
+            identity,
+            material,
+            registry,
+            request,
+        })
+    }
+
+    fn commit_fork_publication<S: ForkManifestPublicationPortV1>(
+        store: &mut S,
+        fixture: &PublicationFixtureV1,
+        request: ForkManifestPublicationRequestV1,
+    ) -> Result<pos_core::ForkPublicationReceiptV1, ForkManifestPublicationErrorV1> {
+        commit_counting_signer(store, fixture, request).0
+    }
+
+    /// Commit with the fixture's real signer and count its invocations. The
+    /// signer refuses any held authorization other than the fixture's key.
+    fn commit_counting_signer<S: ForkManifestPublicationPortV1>(
+        store: &mut S,
+        fixture: &PublicationFixtureV1,
+        request: ForkManifestPublicationRequestV1,
+    ) -> (
+        Result<pos_core::ForkPublicationReceiptV1, ForkManifestPublicationErrorV1>,
+        usize,
+    ) {
+        let calls = std::cell::Cell::new(0_usize);
+        let mut signing_registry = fixture.registry.clone();
+        let expected = (
+            fixture.identity,
+            fixture.material.material_digest(),
+            fixture.material.public_verification_key(),
+        );
+        let result = store.commit_authorized(request, |held, bytes| {
+            calls.set(calls.get() + 1);
+            let observed = (
+                held.identity(),
+                held.private_material_digest(),
+                held.public_verification_key(),
+            );
+            if observed != expected {
+                return Err(pos_core::KeyRegistryErrorV1::SigningKeyMismatch);
+            }
+            sign_for_registered_role(
+                &mut signing_registry,
+                &fixture.material,
+                fixture.identity,
+                &CanonicalBytes::from_vec(bytes.to_vec()),
+            )
+        });
+        (result, calls.get())
+    }
+
+    /// Commit with a signer that only records whether it was invoked.
+    fn commit_without_signing<S: ForkManifestPublicationPortV1>(
+        store: &mut S,
+        request: ForkManifestPublicationRequestV1,
+    ) -> (
+        Result<pos_core::ForkPublicationReceiptV1, ForkManifestPublicationErrorV1>,
+        bool,
+    ) {
+        let invoked = std::cell::Cell::new(false);
+        let result = store.commit_authorized(request, |_, _| {
+            invoked.set(true);
+            Err::<Signature, _>("publication signer was invoked")
+        });
+        (result, invoked.get())
+    }
+
+    fn append_intervention<S>(
+        store: &mut S,
+        lifecycle: &LifecycleFixtureV1,
+    ) -> Result<(), Box<dyn Error>>
+    where
+        S: ForkEventProvenanceAuthorityPortV1 + ForkEventPermitIssuerPortV1,
+    {
+        let permit = store.issue_append_source_permit(
+            &lifecycle.issuer,
+            &lifecycle.session,
+            lifecycle.fork.child_id,
+            &lifecycle.source,
+            ForkAppendSourceIdentityV1::ExternalInput {
+                adapter_identifier: "gateway.adapter".to_owned(),
+                source: lifecycle.external.clone(),
+            },
+        )?;
+        store.append_classified(
+            &lifecycle.session,
+            &permit,
+            Hash::from_bytes([95; 32]),
+            draft(b"published-intervention"),
+        )?;
+        Ok(())
+    }
+
+    /// An empty admitted Fork publishes at head 0 with the zero genesis chain
+    /// hash; exact retries recover without signing and conflicts never sign.
+    fn assert_fork_publication_success<S: PublicationTestStoreV1>(
+        store: &mut S,
+    ) -> Result<(), Box<dyn Error>> {
+        let lifecycle = create_lifecycle(store)?;
+        let fixture = publication_fixture(store, &lifecycle, 91, 0)?;
+        let (receipt, calls) = commit_counting_signer(store, &fixture, fixture.request.clone());
+        assert_eq!(calls, 1);
+        let receipt = receipt?;
+        assert_eq!(
+            commit_without_signing(store, fixture.request.clone()),
+            (Ok(receipt), false)
+        );
+        let mut conflict = fixture.request.clone();
+        conflict.private_material_digest = Hash::from_bytes([92; 32]);
+        assert_eq!(
+            commit_without_signing(store, conflict),
+            (Err(ForkManifestPublicationErrorV1::Conflict), false)
+        );
+        let mut occupied = fixture.request.clone();
+        occupied.operation_id = Hash::from_bytes([97; 32]);
+        assert_eq!(
+            commit_without_signing(store, occupied),
+            (Err(ForkManifestPublicationErrorV1::Conflict), false)
+        );
+        let committed = store.read_committed(lifecycle.fork.child_id, 0)?;
+        assert_eq!(committed.receipt, receipt);
+        assert_eq!(committed.record_id, receipt.signed_manifest_record_id);
+        assert_eq!(committed.binding.input().operation_id, receipt.operation_id);
+        assert_eq!(
+            committed.operation.input().final_chain_head_hash,
+            Hash::zero()
+        );
+        let signed =
+            pos_core::SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+        assert_eq!(signed.record_id(), receipt.signed_manifest_record_id);
+        assert_eq!(
+            store.read_committed(lifecycle.fork.child_id, 1),
+            Err(ForkManifestPublicationErrorV1::PublicationMissing)
+        );
+        assert_eq!(
+            store.read_committed(lifecycle.fork.child_id, u64::MAX),
+            Err(ForkManifestPublicationErrorV1::PublicationMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fork_manifest_publication_succeeds_and_reads_in_memory() -> Result<(), Box<dyn Error>> {
+        assert_fork_publication_success(&mut MemoryStore::new())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn fork_manifest_publication_succeeds_and_reads_in_sqlite() -> Result<(), Box<dyn Error>> {
+        assert_fork_publication_success(&mut SqliteStore::open_in_memory()?)
+    }
+
+    /// Every pre-signing rejection leaves no graph and never invokes the signer.
+    fn assert_fork_publication_rejections<S: PublicationTestStoreV1>(
+        store: &mut S,
+    ) -> Result<(), Box<dyn Error>> {
+        let lifecycle = create_lifecycle(store)?;
+        let unregistered =
+            KeyIdentityV1::new("test-owner", KeyRoleV1::SubjectAttributionSigning, 1);
+        let unavailable = ForkManifestPublicationRequestV1 {
+            operation_id: Hash::from_bytes([93; 32]),
+            child_timeline_id: lifecycle.fork.child_id,
+            expected_final_logical_head: 0,
+            signing_identity: unregistered,
+            private_material_digest: Hash::from_bytes([94; 32]),
+            public_verification_key: PublicKey::from_bytes([94; 32]),
+            expected_registry: KeyRegistryStateV1::new(),
+        };
+        assert_eq!(
+            commit_without_signing(store, unavailable),
+            (
+                Err(ForkManifestPublicationErrorV1::RegistryUnavailable),
+                false
+            )
+        );
+        let fixture = publication_fixture(store, &lifecycle, 93, 0)?;
+        let plain = store.create_timeline("unadmitted-publication-child")?;
+        let mut requests = Vec::new();
+        let mut zero_epoch = fixture.request.clone();
+        zero_epoch.signing_identity =
+            KeyIdentityV1::new("test-owner", KeyRoleV1::SubjectAttributionSigning, 0);
+        zero_epoch.operation_id = Hash::zero();
+        requests.push((zero_epoch, ForkManifestPublicationErrorV1::InvalidEpoch));
+        let mut wrong_role = fixture.request.clone();
+        wrong_role.signing_identity =
+            KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        wrong_role.operation_id = Hash::zero();
+        requests.push((
+            wrong_role,
+            ForkManifestPublicationErrorV1::SigningRoleRequired,
+        ));
+        let mut invalid = fixture.request.clone();
+        invalid.operation_id = Hash::zero();
+        requests.push((invalid, ForkManifestPublicationErrorV1::InvalidRequest));
+        let mut changed = fixture.request.clone();
+        changed.expected_registry = KeyRegistryStateV1::new();
+        changed.expected_final_logical_head = 1;
+        requests.push((changed, ForkManifestPublicationErrorV1::RegistryChanged));
+        // An unregistered identity for another owner fails authorization
+        // before the admitted creator is ever compared.
+        let mut foreign = fixture.request.clone();
+        foreign.signing_identity =
+            KeyIdentityV1::new("other-owner", KeyRoleV1::SubjectAttributionSigning, 1);
+        requests.push((foreign, ForkManifestPublicationErrorV1::NotFound));
+        let mut stale = fixture.request.clone();
+        stale.expected_final_logical_head = 1;
+        requests.push((stale, ForkManifestPublicationErrorV1::SequenceOrHeadChanged));
+        let mut unadmitted = fixture.request.clone();
+        unadmitted.child_timeline_id = plain.id();
+        requests.push((unadmitted, ForkManifestPublicationErrorV1::CorruptAuthority));
+        for (request, expected) in requests {
+            assert_eq!(
+                commit_without_signing(store, request),
+                (Err(expected), false)
+            );
+        }
+        assert_eq!(
+            commit_without_signing(store, fixture.request.clone()),
+            (Err(ForkManifestPublicationErrorV1::SigningFailed), true)
+        );
+        assert_eq!(
+            store.read_committed(lifecycle.fork.child_id, 0),
+            Err(ForkManifestPublicationErrorV1::PublicationMissing)
+        );
+        assert!(commit_fork_publication(store, &fixture, fixture.request.clone()).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn fork_manifest_publication_rejects_before_signing_in_memory() -> Result<(), Box<dyn Error>> {
+        assert_fork_publication_rejections(&mut MemoryStore::new())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn fork_manifest_publication_rejects_before_signing_in_sqlite() -> Result<(), Box<dyn Error>> {
+        assert_fork_publication_rejections(&mut SqliteStore::open_in_memory()?)
+    }
+
+    /// Register a fresh attribution-signing key for `identity`.
+    fn register_signing_key(
+        registry: &mut KeyRegistryStateV1,
+        identity: KeyIdentityV1,
+    ) -> Result<SigningKeyMaterial, Box<dyn Error>> {
+        let (private_key, _) = generate_keypair();
+        let material = SigningKeyMaterial::new(private_key);
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            material.material_digest(),
+            Some(material.public_verification_key()),
+        ))?;
+        Ok(material)
+    }
+
+    /// ADR-099 registry vectors: material/public-key mismatch, creator
+    /// mismatch, inactive, destruction-pending, and destroyed keys each return
+    /// their distinct error without invoking the signer.
+    fn assert_fork_publication_registry_vectors<S: PublicationTestStoreV1>(
+        store: &mut S,
+    ) -> Result<(), Box<dyn Error>> {
+        let lifecycle = create_lifecycle(store)?;
+        let fixture = publication_fixture(store, &lifecycle, 81, 0)?;
+        let mut material = fixture.request.clone();
+        material.private_material_digest = Hash::from_bytes([82; 32]);
+        let mut public_key = fixture.request.clone();
+        public_key.public_verification_key = PublicKey::from_bytes([83; 32]);
+        for request in [material, public_key] {
+            assert_eq!(
+                commit_without_signing(store, request),
+                (
+                    Err(ForkManifestPublicationErrorV1::SigningKeyMismatch),
+                    false
+                )
+            );
+        }
+        let mut registry = fixture.registry.clone();
+        let other = KeyIdentityV1::new("other-owner", KeyRoleV1::SubjectAttributionSigning, 1);
+        let other_material = register_signing_key(&mut registry, other)?;
+        let rotated = KeyIdentityV1::new("test-owner", KeyRoleV1::SubjectAttributionSigning, 2);
+        let mut rotated_material = register_signing_key(&mut registry, rotated)?;
+        store.save_key_registry(&registry)?;
+        let creator = ForkManifestPublicationRequestV1 {
+            signing_identity: other,
+            private_material_digest: other_material.material_digest(),
+            public_verification_key: other_material.public_verification_key(),
+            expected_registry: registry.clone(),
+            ..fixture.request
+        };
+        assert_eq!(
+            commit_without_signing(store, creator),
+            (
+                Err(ForkManifestPublicationErrorV1::PrincipalOwnerConflict),
+                false
+            )
+        );
+        let inactive = ForkManifestPublicationRequestV1 {
+            expected_registry: registry.clone(),
+            ..fixture.request
+        };
+        assert_eq!(
+            commit_without_signing(store, inactive),
+            (Err(ForkManifestPublicationErrorV1::InactiveKey), false)
+        );
+        let destruction = KeyDestructionRequestV1::new(
+            rotated,
+            rotated_material.material_digest(),
+            Hash::from_bytes([84; 32]),
+        );
+        let (_, pending_registry) = store.begin_key_registry_destruction(destruction)?;
+        let pending = ForkManifestPublicationRequestV1 {
+            signing_identity: rotated,
+            private_material_digest: rotated_material.material_digest(),
+            public_verification_key: rotated_material.public_verification_key(),
+            expected_registry: pending_registry,
+            ..fixture.request
+        };
+        assert_eq!(
+            commit_without_signing(store, pending.clone()),
+            (
+                Err(ForkManifestPublicationErrorV1::DestructionPending),
+                false
+            )
+        );
+        destroy_registered_signing_key(
+            &mut rotated_material,
+            destruction,
+            &mut StoreKeyDestruction(store),
+        )?;
+        let durable = store
+            .load_key_registry()?
+            .ok_or("durable key registry is missing")?;
+        let destroyed = ForkManifestPublicationRequestV1 {
+            expected_registry: durable,
+            ..pending
+        };
+        assert_eq!(
+            commit_without_signing(store, destroyed),
+            (Err(ForkManifestPublicationErrorV1::Destroyed), false)
+        );
+        assert_eq!(
+            store.read_committed(lifecycle.fork.child_id, 0),
+            Err(ForkManifestPublicationErrorV1::PublicationMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fork_manifest_publication_registry_vectors_in_memory() -> Result<(), Box<dyn Error>> {
+        assert_fork_publication_registry_vectors(&mut MemoryStore::new())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn fork_manifest_publication_registry_vectors_in_sqlite() -> Result<(), Box<dyn Error>> {
+        assert_fork_publication_registry_vectors(&mut SqliteStore::open_in_memory()?)
+    }
+
+    /// A classified intervention is listed in the published `FRM1`, a second
+    /// head publishes beside an earlier graph, and a later key destruction
+    /// keeps the graph readable through its tombstone.
+    fn assert_fork_publication_read_accepts_retained_destroyed_key<S: PublicationTestStoreV1>(
+        store: &mut S,
+    ) -> Result<(), Box<dyn Error>> {
+        let lifecycle = create_lifecycle(store)?;
+        let mut fixture = publication_fixture(store, &lifecycle, 96, 1)?;
+        let initial = ForkManifestPublicationRequestV1 {
+            operation_id: Hash::from_bytes([86; 32]),
+            expected_final_logical_head: 0,
+            ..fixture.request.clone()
+        };
+        let initial = commit_fork_publication(store, &fixture, initial)?;
+        append_intervention(store, &lifecycle)?;
+        let receipt = commit_fork_publication(store, &fixture, fixture.request.clone())?;
+        assert_ne!(
+            receipt.signed_manifest_record_id,
+            initial.signed_manifest_record_id
+        );
+        let committed = store.read_committed(lifecycle.fork.child_id, 1)?;
+        let signed =
+            pos_core::SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+        assert_eq!(signed.manifest().input().intervention_sequences, vec![1]);
+        assert_ne!(
+            committed.operation.input().final_chain_head_hash,
+            Hash::zero()
+        );
+        let destruction = KeyDestructionRequestV1::new(
+            fixture.identity,
+            fixture.material.material_digest(),
+            Hash::from_bytes([94; 32]),
+        );
+        // Destruction is persisted in two phases (pending, then tombstone):
+        // the registry rejects any replacement that drops private material
+        // whose destruction was not already durably pending.
+        destroy_registered_signing_key(
+            &mut fixture.material,
+            destruction,
+            &mut StoreKeyDestruction(store),
+        )?;
+        assert_eq!(
+            store.read_committed(lifecycle.fork.child_id, 1)?.receipt,
+            receipt
+        );
+        assert_eq!(
+            commit_without_signing(store, fixture.request.clone()),
+            (Ok(receipt), false)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fork_manifest_read_accepts_retained_destroyed_key_in_memory() -> Result<(), Box<dyn Error>> {
+        assert_fork_publication_read_accepts_retained_destroyed_key(&mut MemoryStore::new())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn fork_manifest_read_accepts_retained_destroyed_key_in_sqlite() -> Result<(), Box<dyn Error>> {
+        assert_fork_publication_read_accepts_retained_destroyed_key(
+            &mut SqliteStore::open_in_memory()?,
+        )
+    }
+
+    /// Publish once in a durable `SQLite` file and return its fixture.
+    #[cfg(feature = "sqlite")]
+    fn durable_publication(path: &Path) -> Result<PublicationFixtureV1, Box<dyn Error>> {
+        let mut store = sqlite_store_at(path)?;
+        let lifecycle = create_lifecycle(&mut store)?;
+        let fixture = publication_fixture(&mut store, &lifecycle, 91, 0)?;
+        commit_fork_publication(&mut store, &fixture, fixture.request.clone())?;
+        Ok(fixture)
+    }
+
+    /// The public registry port cannot drop a retained key, so a durable
+    /// registry row without it is substituted directly; trusted read reports
+    /// a publication conflict and recovery a corrupt or conflicting graph.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_fork_manifest_read_rejects_missing_retained_key() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("publication-missing-key.sqlite");
+        let request = durable_publication(&path)?.request;
+        let mut empty = Vec::new();
+        ciborium::into_writer(&KeyRegistryStateV1::new(), &mut empty)?;
+        assert_eq!(
+            Connection::open(&path)?.execute(
+                "UPDATE key_registry SET state_cbor = ?1 WHERE singleton = 1",
+                params![empty],
+            )?,
+            1
+        );
+        let mut store = sqlite_store_at(&path)?;
+        assert_eq!(
+            store.read_committed(request.child_timeline_id, 0),
+            Err(ForkManifestPublicationErrorV1::PublicationConflict)
+        );
+        assert_eq!(
+            commit_without_signing(&mut store, request),
+            (
+                Err(ForkManifestPublicationErrorV1::CorruptOrConflicting),
+                false
+            )
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_fork_manifest_read_rejects_substituted_admission_source() -> Result<(), Box<dyn Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join("publication-far1-substitution.sqlite");
+        let child_timeline_id = durable_publication(&path)?.request.child_timeline_id;
+        let connection = Connection::open(&path)?;
+        let bytes: Vec<u8> = connection.query_row(
+            "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+            params![child_timeline_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let substituted = replace_cbor_field(&bytes, 4, Value::Text("other-owner".to_owned()))?;
+        assert_eq!(
+            connection.execute(
+                "UPDATE fork_admissions SET far1_cbor = ?1 WHERE child_id = ?2",
+                params![substituted, child_timeline_id.to_string()],
+            )?,
+            1
+        );
+        assert_eq!(
+            sqlite_store_at(&path)?.read_committed(child_timeline_id, 0),
+            Err(ForkManifestPublicationErrorV1::PublicationConflict)
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_fork_manifest_read_rejects_missing_or_corrupt_graph_rows(
+    ) -> Result<(), Box<dyn Error>> {
+        for (index, tamper) in [
+            "DELETE FROM fork_publication_artifacts",
+            "DELETE FROM fork_publication_operations",
+            "UPDATE fork_publication_operations SET fpo1_cbor = x'00'",
+            "UPDATE fork_publication_bindings SET fpb1_cbor = x'00'",
+            "UPDATE fork_publication_artifacts SET fpa1_cbor = x'00'",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = tempfile::tempdir()?;
+            let path = directory
+                .path()
+                .join(format!("publication-graph-{index}.sqlite"));
+            let child_timeline_id = durable_publication(&path)?.request.child_timeline_id;
+            Connection::open(&path)?.execute_batch(tamper)?;
+            assert_eq!(
+                sqlite_store_at(&path)?.read_committed(child_timeline_id, 0),
+                Err(ForkManifestPublicationErrorV1::PublicationConflict)
+            );
+        }
+        Ok(())
+    }
+
+    /// ADR-099 recovery: an orphan `FPB1` or `FPA1` that references an absent
+    /// operation, a partial graph, and a noncanonical `FPO1` all fail closed
+    /// without signing; an orphan `FPA1`, `FPO1`, or relocated `FPB1` at the
+    /// freshly signed record ID fails after the single signer call and
+    /// before any insert.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_fork_manifest_commit_rejects_orphan_or_partial_graph() -> Result<(), Box<dyn Error>> {
+        let orphan_artifact =
+            "DELETE FROM fork_publication_operations; DELETE FROM fork_publication_bindings;";
+        let orphan_operation =
+            "DELETE FROM fork_publication_bindings; DELETE FROM fork_publication_artifacts;";
+        let orphan_binding = "UPDATE fork_publication_bindings SET final_logical_head = 7; \
+             DELETE FROM fork_publication_operations; DELETE FROM fork_publication_artifacts;";
+        for (index, (tamper, operation, calls)) in [
+            ("DELETE FROM fork_publication_operations", 91, 0),
+            (orphan_artifact, 91, 0),
+            (orphan_artifact, 98, 1),
+            (orphan_operation, 98, 1),
+            (orphan_binding, 98, 1),
+            ("DELETE FROM fork_publication_artifacts", 91, 0),
+            (
+                "UPDATE fork_publication_operations SET fpo1_cbor = x'00'",
+                91,
+                0,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = tempfile::tempdir()?;
+            let path = directory
+                .path()
+                .join(format!("publication-orphan-{index}.sqlite"));
+            let fixture = durable_publication(&path)?;
+            Connection::open(&path)?.execute_batch(tamper)?;
+            let mut store = sqlite_store_at(&path)?;
+            let request = ForkManifestPublicationRequestV1 {
+                operation_id: Hash::from_bytes([operation; 32]),
+                ..fixture.request.clone()
+            };
+            assert_eq!(
+                commit_counting_signer(&mut store, &fixture, request),
+                (
+                    Err(ForkManifestPublicationErrorV1::CorruptOrConflicting),
+                    calls
+                )
+            );
+        }
+        Ok(())
+    }
+
+    /// A failing insert after signing rolls back every row of the graph.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_fork_manifest_commit_rolls_back_failed_insert() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("publication-insert-failure.sqlite");
+        let mut store = sqlite_store_at(&path)?;
+        let lifecycle = create_lifecycle(&mut store)?;
+        let fixture = publication_fixture(&mut store, &lifecycle, 91, 0)?;
+        let control = Connection::open(&path)?;
+        control.execute_batch(
+            "CREATE TRIGGER deny_publication_artifact
+             BEFORE INSERT ON fork_publication_artifacts
+             BEGIN SELECT RAISE(ABORT, 'deny'); END;",
+        )?;
+        assert_eq!(
+            commit_counting_signer(&mut store, &fixture, fixture.request.clone()),
+            (Err(ForkManifestPublicationErrorV1::StorageIndeterminate), 1)
+        );
+        assert_eq!(
+            store.read_committed(lifecycle.fork.child_id, 0),
+            Err(ForkManifestPublicationErrorV1::PublicationMissing)
+        );
+        control.execute_batch("DROP TRIGGER deny_publication_artifact")?;
+        let receipt = commit_fork_publication(&mut store, &fixture, fixture.request.clone())?;
+        assert_eq!(
+            store.read_committed(lifecycle.fork.child_id, 0)?.receipt,
+            receipt
+        );
+        Ok(())
+    }
+
+    /// A publication signer that unwinds instead of returning.
+    #[cfg(feature = "sqlite")]
+    fn unwinding_signer(
+        _: &crate::HeldRegistryAuthorizationV1,
+        _: &[u8],
+    ) -> Result<Signature, &'static str> {
+        std::panic::resume_unwind(Box::new("publication signer unwound"))
+    }
+
+    /// An unwinding signer leaves no open `BEGIN IMMEDIATE` behind.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_fork_manifest_commit_rolls_back_unwinding_signer() -> Result<(), Box<dyn Error>> {
+        let mut store = SqliteStore::open_in_memory()?;
+        let lifecycle = create_lifecycle(&mut store)?;
+        let fixture = publication_fixture(&mut store, &lifecycle, 91, 0)?;
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.commit_authorized(fixture.request.clone(), unwinding_signer)
+        }));
+        assert!(unwound.is_err());
+        let receipt = commit_fork_publication(&mut store, &fixture, fixture.request.clone())?;
+        assert_eq!(
+            store.read_committed(lifecycle.fork.child_id, 0)?.receipt,
+            receipt
+        );
+        Ok(())
+    }
+
+    /// The trusted read re-derives the `FRM1` intervention vector from the
+    /// durable classified rows, so a substituted intervention row is rejected.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_fork_manifest_read_rejects_substituted_intervention_rows(
+    ) -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory
+            .path()
+            .join("publication-intervention-substitution.sqlite");
+        let mut store = sqlite_store_at(&path)?;
+        let lifecycle = create_lifecycle(&mut store)?;
+        append_intervention(&mut store, &lifecycle)?;
+        let fixture = publication_fixture(&mut store, &lifecycle, 96, 1)?;
+        commit_fork_publication(&mut store, &fixture, fixture.request.clone())?;
+        assert_eq!(
+            Connection::open(&path)?.execute("DELETE FROM fork_intervention_admissions", [])?,
+            1
+        );
+        assert_eq!(
+            store.read_committed(lifecycle.fork.child_id, 1),
+            Err(ForkManifestPublicationErrorV1::PublicationConflict)
+        );
         Ok(())
     }
 
