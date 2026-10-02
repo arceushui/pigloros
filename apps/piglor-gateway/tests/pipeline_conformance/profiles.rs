@@ -370,7 +370,13 @@ impl Driver for PlannedDriver {
             || "none".to_owned(),
             |snapshot| format!("{:?}", snapshot.digest()),
         );
-        let raw_input = !observations.events().is_empty() || !observations.is_empty();
+        // An authorized view carries its OBS1 records, so emptiness of the
+        // view is not the observable; raw input is any Projection state or
+        // committed Event beside the released snapshot.
+        let raw_input = !observations.events().is_empty()
+            || observations
+                .verified_prefix_events()
+                .is_some_and(|events| !events.is_empty());
         self.observed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

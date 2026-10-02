@@ -511,7 +511,7 @@
       "observation_profile": null,
       "expected": {
         "staged": "2",
-        "observers": "observer-a@2:a=true,b=false|observer-b@2:a=false,b=true",
+        "observers": "observer-a@2:a=true,b=false|observer-b@2:a=false,b=false",
         "offered": "3",
         "digest.changes-with-state": "true",
         "digest.stable-without-change": "true"
