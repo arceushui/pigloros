@@ -30465,7 +30465,7 @@ mod local_cut_owner_coverage {
             if matches!(
                 context.action,
                 AuthAction::Transaction {
-                    operation: TransactionOperation::Commit
+                    operation: TransactionOperation::Unknown
                 }
             ) {
                 Authorization::Deny
