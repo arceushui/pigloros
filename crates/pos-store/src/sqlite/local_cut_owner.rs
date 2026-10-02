@@ -54,32 +54,6 @@ pub(super) const LOCAL_CUT_OWNER_SCHEMA_SQL: &str =
 const SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1: usize = 536_870_912;
 const SQLITE_LOCAL_CUT_OWNER_REQUEST_MAGIC_V1: &[u8] = b"LCOQ1";
 
-const fn map_sqlite_local_cut_owner_to_manifest_error(
-    error: LocalCutOwnerErrorV1,
-) -> ManifestOwnerAdmissionErrorV1 {
-    match error {
-        LocalCutOwnerErrorV1::Conflict => ManifestOwnerAdmissionErrorV1::Conflict,
-        LocalCutOwnerErrorV1::StorageFailure => ManifestOwnerAdmissionErrorV1::StorageFailure,
-        LocalCutOwnerErrorV1::BoundExceeded
-        | LocalCutOwnerErrorV1::InvalidBatch
-        | LocalCutOwnerErrorV1::OwnerRejected
-        | LocalCutOwnerErrorV1::CorruptState => ManifestOwnerAdmissionErrorV1::CorruptState,
-    }
-}
-
-const fn map_sqlite_manifest_owner_to_local_error(
-    error: ManifestOwnerAdmissionErrorV1,
-) -> LocalCutOwnerErrorV1 {
-    match error {
-        ManifestOwnerAdmissionErrorV1::Conflict => LocalCutOwnerErrorV1::Conflict,
-        ManifestOwnerAdmissionErrorV1::StorageFailure => LocalCutOwnerErrorV1::StorageFailure,
-        ManifestOwnerAdmissionErrorV1::BoundExceeded
-        | ManifestOwnerAdmissionErrorV1::InvalidBatch
-        | ManifestOwnerAdmissionErrorV1::OwnerRejected
-        | ManifestOwnerAdmissionErrorV1::CorruptState => LocalCutOwnerErrorV1::CorruptState,
-    }
-}
-
 fn sqlite_local_cut_owner_has_rows(
     connection: &Connection,
     owner_id: [u8; 32],
@@ -613,7 +587,7 @@ pub(super) fn sqlite_manifest_or_local_cut_owner_has_rows(
         return Ok(true);
     }
     sqlite_local_cut_owner_has_rows(connection, owner_id)
-        .map_err(map_sqlite_local_cut_owner_to_manifest_error)
+        .map_err(ManifestOwnerAdmissionErrorV1::from)
 }
 
 /// Check the owner's local-cut rows against the admitted state just read.
@@ -629,9 +603,7 @@ pub(super) fn sqlite_validate_local_cut_owner_admission(
     inventory_generation: Hash,
     generation_rows: &SqliteManifestOwnerAdmissionGenerationV1,
 ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-    match sqlite_local_cut_owner_state_raw(connection, owner_id)
-        .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
-    {
+    match sqlite_local_cut_owner_state_raw(connection, owner_id)? {
         // The raw read already validated the row and keyed it by `owner_id`.
         Some(local_cut_state) => {
             if local_cut_state.configuration_generation != configuration_generation
@@ -643,8 +615,7 @@ pub(super) fn sqlite_validate_local_cut_owner_admission(
             }
         }
         None => {
-            if sqlite_local_cut_owner_has_rows(connection, owner_id)
-                .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
+            if sqlite_local_cut_owner_has_rows(connection, owner_id)?
                 || generation_rows.previous_visible_lcq1_hash != previous_visible_lcq1_hash
                 || generation_rows.inventory_generation != inventory_generation
             {
@@ -669,8 +640,7 @@ fn sqlite_read_local_cut_owner_state(
     // The admitted-state read compares this same local-cut row with the admitted
     // generation, roster, receipt, and inventory. Its local-cut rows make a
     // missing admitted row corrupt there, so it never returns `None` here.
-    sqlite_read_manifest_owner_current_state(connection, owner_id)
-        .map_err(map_sqlite_manifest_owner_to_local_error)?;
+    sqlite_read_manifest_owner_current_state(connection, owner_id)?;
     let mut statement = connection
         .prepare(
             "SELECT cut_id FROM local_cut_owner_cuts
@@ -961,8 +931,7 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
         let result = (|| {
             let owner_id = batch.successor_state().owner_id;
             let operation_id = batch.request().operation_id;
-            let admission = sqlite_read_manifest_owner_current_state(&self.conn, owner_id)
-                .map_err(map_sqlite_manifest_owner_to_local_error)?
+            let admission = sqlite_read_manifest_owner_current_state(&self.conn, owner_id)?
                 .ok_or(LocalCutOwnerErrorV1::Conflict)?;
             let current_state = sqlite_read_local_cut_owner_state(&self.conn, owner_id)?;
             if let Some(retry) = sqlite_resolve_local_cut_owner_retry(
@@ -1016,12 +985,8 @@ pub(super) fn sqlite_sync_local_cut_owner_after_admission(
     current_state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
 ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
     let owner_id = input.catalog.as_input().owner_id;
-    let Some(local_cut_state) = sqlite_local_cut_owner_state_raw(connection, owner_id)
-        .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
-    else {
-        return if sqlite_local_cut_owner_has_rows(connection, owner_id)
-            .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
-        {
+    let Some(local_cut_state) = sqlite_local_cut_owner_state_raw(connection, owner_id)? else {
+        return if sqlite_local_cut_owner_has_rows(connection, owner_id)? {
             Err(ManifestOwnerAdmissionErrorV1::CorruptState)
         } else {
             Ok(())
@@ -1789,33 +1754,6 @@ mod local_cut_owner_coverage {
             &AdmissionOwner,
             Some(current),
         )?)
-    }
-
-    #[test]
-    fn owner_error_maps_preserve_retryable_classes() {
-        for (local, admission) in [
-            (LocalError::Conflict, AdmissionError::Conflict),
-            (LocalError::StorageFailure, AdmissionError::StorageFailure),
-            (LocalError::BoundExceeded, AdmissionError::CorruptState),
-            (LocalError::InvalidBatch, AdmissionError::CorruptState),
-            (LocalError::OwnerRejected, AdmissionError::CorruptState),
-            (LocalError::CorruptState, AdmissionError::CorruptState),
-        ] {
-            assert_eq!(
-                map_sqlite_local_cut_owner_to_manifest_error(local),
-                admission
-            );
-        }
-        for (admission, local) in [
-            (AdmissionError::Conflict, LocalError::Conflict),
-            (AdmissionError::StorageFailure, LocalError::StorageFailure),
-            (AdmissionError::BoundExceeded, LocalError::CorruptState),
-            (AdmissionError::InvalidBatch, LocalError::CorruptState),
-            (AdmissionError::OwnerRejected, LocalError::CorruptState),
-            (AdmissionError::CorruptState, LocalError::CorruptState),
-        ] {
-            assert_eq!(map_sqlite_manifest_owner_to_local_error(admission), local);
-        }
     }
 
     #[test]
