@@ -42,11 +42,11 @@ pub mod world_replay;
 
 pub use authorization_cache::AuthorizationCacheKeyV1;
 pub use composition::{
-    AdmittedCompositionV1, DomainImplementationKindV1, ManifestRegistrationErrorV1,
-    PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1,
-    PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1, RegisteredEventSchema,
-    RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
-    ResolvedPluginV1, MAX_REQUIRED_PLUGINS_V1,
+    AdmittedCompositionV1, AdmittedManifestPolicySourceV1, DomainImplementationKindV1,
+    ManifestRegistrationErrorV1, PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1,
+    PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1,
+    RegisteredEventSchema, RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1,
+    ResolvedPluginCompositionV1, ResolvedPluginV1, MAX_REQUIRED_PLUGINS_V1,
 };
 pub use driver::{
     CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey,
@@ -60,16 +60,18 @@ pub use erasure_host::{
 pub use error::{ActionSubmissionError, RuntimeError, WorldInstallationErrorV1};
 pub use measured_process_image::MeasuredProcessImageV1;
 pub use output_admission::{
-    validate_output_policy_artifacts_v1, InstalledOutputPolicySourceV1, OutputAdmissionErrorV1,
-    OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1,
+    validate_output_policy_artifacts_v1, OutputAdmissionErrorV1, OutputAdmissionV1,
+    OutputPolicyBindingV1, OutputPolicyClosureV1, OutputPolicySourceV1,
     MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1,
 };
 pub use recorder::{RecordedOutput, Recorder, RunMode};
 pub use registry::{
-    AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, HostCatalogueEntryV1,
-    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
-    InstalledPluginFactoryV1, InstalledPluginProductV1, OperationContext, PluginRegistry,
-    ScheduledPassAdmissionV1,
+    recover_manifest_owner_admission_retry_v1, AuthorizedDriverViewV1, AuthorizedViewAuthorityV1,
+    ClosedAdapterTranscriptV1, HostCatalogueEntryV1, HumanActionAdmissionErrorV1,
+    HumanActionAdmissionV1, HumanActionReceiptV1, InstalledPluginFactoryV1,
+    InstalledPluginProductV1, LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1,
+    LocalAdapterProviderResponseV1, LocalAdapterProviderV1, LocalAdapterSessionV1,
+    OperationContext, PluginRegistry, ScheduledPassAdmissionV1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,

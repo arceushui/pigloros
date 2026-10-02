@@ -3601,6 +3601,32 @@ pub use artifact::{
     ArtifactTransitionRuleV1, EvaluatedArtifactClaimV1, RegisteredArtifactV1,
     ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
 };
+mod registration;
+pub use registration::{
+    extract_adapter_admission_registration_v1, extract_adapter_transcript_registration_v1,
+    extract_repro_manifest_root_registration_v1, AdapterArtifactRegistrationErrorV1,
+    ArtifactChildEdgeV1, ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1,
+    ArtifactRegistrationV1, ReproManifestArtifactRegistrationErrorV1,
+    ReproManifestRootRegistrationInputV1, MAX_ARTIFACT_REGISTRATION_BYTES_V1,
+    MAX_ARTIFACT_REGISTRATION_CHILDREN_V1, MAX_ARTIFACT_REGISTRATION_KEYS_V1,
+};
+mod registration_graph;
+pub use registration_graph::{
+    inspect_artifact_registration_graph_v1, ArtifactRegistrationGraphErrorV1,
+    ArtifactRegistrationGraphNodeV1, ArtifactRegistrationGraphSummaryV1,
+    MAX_ARTIFACT_GRAPH_DEPTH_V1, MAX_ARTIFACT_GRAPH_EDGES_V1, MAX_ARTIFACT_GRAPH_KEYS_V1,
+    MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1, MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1,
+};
+mod registration_commit;
+pub use registration_commit::{
+    prepare_artifact_registration_batch_v1, validate_artifact_registration_catalog_graph_v1,
+    ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
+    ArtifactRegistrationInputV1, ArtifactRegistrationOwnerVerificationErrorV1,
+    ArtifactRegistrationOwnerVerifierV1, ArtifactRegistrationPersistenceErrorV1,
+    ArtifactRegistrationPersistencePortV1, ArtifactRegistrationPreparationErrorV1,
+    PreparedArtifactRegistrationBatchV1, PreparedArtifactRegistrationRecordV1,
+    MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
+};
 mod rejoin;
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,
