@@ -560,7 +560,9 @@ pub fn validate_local_cut_owner_result_v1(
 /// Preparation derived the intent, LCC1 and LCQ1 result, and successor state
 /// from the request, its seal, and the admitted state it was built against, so
 /// only the admitted and local-cut state read inside the commit transaction can
-/// differ here.
+/// differ here. The batch can only come from [`prepare_local_cut_owner_commit_v1`],
+/// which already checked the seal owner, successor generation, previous receipt,
+/// and result inventory, so this guard does not repeat those checks.
 ///
 /// # Errors
 /// Returns `Conflict` when the current admitted state or local-cut owner state
