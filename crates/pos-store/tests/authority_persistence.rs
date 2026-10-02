@@ -744,10 +744,21 @@ fn failed_sqlite_authority_write_rolls_back_without_partial_state() {
     {
         let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
         let root = root_grant();
-        let host = authority_host(hash(7), &[&root]);
+        // A new root issued after the revocation, at its epoch, must write.
+        let late = ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+            grant_id: hash(4),
+            revocation_epoch: 1,
+            ..grant_draft(&root_grant_at(4))
+        }));
+        let host = authority_host(hash(7), &[&root, &late]);
         ok(store.bind_authority_persistence(host.persistence_binding()));
+        // An exact retry writes nothing, so the rejected update cannot fail it.
         assert_eq!(
             store.issue_capability_grant(ok(host.authorize_grant(&root)), &root),
+            Ok(AuthorityCommitOutcomeV1::Unchanged)
+        );
+        assert_eq!(
+            store.issue_capability_grant(ok(host.authorize_grant(&late)), &late),
             Err(AuthorityPersistenceErrorV1::Unavailable)
         );
     }
@@ -756,6 +767,10 @@ fn failed_sqlite_authority_write_rolls_back_without_partial_state() {
         ok(connection.execute_batch("DROP TRIGGER reject_authority_update"));
     }
     let reopened = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
+    assert_eq!(
+        reopened.load_authority(hash(4)),
+        Err(AuthorityPersistenceErrorV1::Conflict)
+    );
     let retained = ok(reopened.load_authority(hash(2)));
     assert_eq!(retained.revocation_epoch(), 1);
     assert_eq!(
