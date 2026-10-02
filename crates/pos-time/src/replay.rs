@@ -588,6 +588,78 @@ mod tests {
     }
 
     #[test]
+    fn world_replay_matches_the_timeline_without_its_disposable_telemetry() {
+        const TELEMETRY: &str = "world.telemetry.ephemeral";
+        fn telemetry(entity: EntityId) -> EventDraft {
+            EventDraft::new(
+                entity,
+                Kind::new(TELEMETRY),
+                CanonicalBytes::from_static(b"discardable"),
+            )
+        }
+        let (mut host, _, bodies, action, committed) = committed_world_step();
+        let gate = host.containment_gate();
+        let timeline = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands
+                .create_timeline("world-telemetry-replay")
+                .test_ok()
+                .id();
+            let mut copied_action = None;
+            for event in std::iter::once(&action).chain(&committed) {
+                let mut draft = EventDraft::new(
+                    event.entity,
+                    event.event_type.clone(),
+                    event.payload.clone(),
+                );
+                draft.causation_id = event.causation_id.and(copied_action);
+                let appended = commands
+                    .append(timeline, &[telemetry(event.entity), draft])
+                    .test_ok();
+                copied_action = copied_action.or(Some(appended[1].id));
+            }
+            let trailing = [telemetry(bodies[1])];
+            commands.append(timeline, &trailing).test_ok();
+            timeline
+        };
+
+        let closure = crate::test_support::closure_for_host_consumer(&mut host, timeline, "world");
+        let mut reads = host.read_sender().test_ok();
+        let mut with_telemetry = world_registry(gate.clone());
+        let events = super::replay(&mut reads, timeline, &mut with_telemetry, &closure).test_ok();
+        let authoritative: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_type.as_str() != TELEMETRY)
+            .cloned()
+            .collect();
+        assert_eq!(authoritative.len(), committed.len() + 1);
+        assert_eq!(events.len(), 2 * authoritative.len() + 1);
+
+        let states = |registry: &ProjectionRegistry| -> Vec<Option<State>> {
+            bodies
+                .iter()
+                .map(|body| {
+                    registry
+                        .state_for_reducer(timeline, "world", body)
+                        .test_ok()
+                })
+                .collect()
+        };
+        for (index, boundary) in authoritative.iter().enumerate() {
+            let mut replayed = world_registry(gate.clone());
+            super::replay_at(&mut reads, timeline, boundary.seq, &mut replayed, &closure).test_ok();
+            let mut without_telemetry = world_registry(gate.clone());
+            without_telemetry.fold_events(timeline, &authoritative[..=index]);
+            assert_eq!(states(&replayed), states(&without_telemetry));
+        }
+        let mut without_telemetry = world_registry(gate);
+        without_telemetry.fold_events(timeline, &authoritative);
+        let expected = states(&without_telemetry);
+        assert!(expected.iter().all(Option::is_some));
+        assert_eq!(states(&with_telemetry), expected);
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_replay_commands_use_an_installed_world_verifier() {
         let mut host = crate::test_support::open_exact_host();
