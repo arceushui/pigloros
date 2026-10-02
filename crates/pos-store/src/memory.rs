@@ -2080,19 +2080,53 @@ impl MemoryStore {
             })
     }
 
+    /// Read the logical Timeline Event one FOP1 binds, as `SQLite` reads its row.
+    ///
+    /// ADR-105 r6 R6.9: the committed Timeline Event, never the copy kept
+    /// beside the FOP1, is what every adapter validates and returns.
+    fn committed_classified_event(
+        &self,
+        operation: &ForkAppendOperationV1,
+    ) -> Result<Event, ForkEventAuthorityErrorV1> {
+        let input = operation.input();
+        self.timelines
+            .get(&input.child_timeline_id)
+            .and_then(|state| {
+                let prefix = state
+                    .timeline
+                    .meta
+                    .fork_point
+                    .map_or(0, |(_, fork)| fork.as_u64());
+                input
+                    .logical_seq
+                    .checked_sub(prefix)
+                    .and_then(|local_seq| {
+                        state
+                            .events
+                            .binary_search_by_key(&local_seq, |event| event.seq.as_u64())
+                            .ok()
+                    })
+                    .and_then(|index| state.events.get(index))
+                    .and_then(|event| Self::logical_event(prefix, event.clone()).ok())
+            })
+            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+    }
+
     fn validate_classified_provenance(
         &self,
         operation: &ForkAppendOperationV1,
-        event: &Event,
-    ) -> Result<(), ForkEventAuthorityErrorV1> {
+    ) -> Result<Event, ForkEventAuthorityErrorV1> {
         let input = operation.input();
-        self.validate_classified_authority_graph(
-            input.child_timeline_id,
-            input.fork_admission_digest,
-            input.classifier_revision_digest,
-        )
-        .and_then(|(_, table)| self.validate_classified_records(operation, event, &table))
-        .map(|_| ())
+        self.committed_classified_event(operation)
+            .and_then(|event| {
+                self.validate_classified_authority_graph(
+                    input.child_timeline_id,
+                    input.fork_admission_digest,
+                    input.classifier_revision_digest,
+                )
+                .and_then(|(_, table)| self.validate_classified_records(operation, &event, &table))
+                .map(|_| event)
+            })
     }
 
     /// Require the logical Event, EOR1, and FIA1 exactly bound by one FOP1.
@@ -2252,16 +2286,16 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
         }
         let request = fork_append_request(operation_id, child_timeline_id, source, &draft)?;
         let table = self.validate_classified_permit(permit)?;
-        if let Some((operation, event)) = self.fork_append_operations.get(&operation_id) {
+        if let Some((operation, _)) = self.fork_append_operations.get(&operation_id) {
             if operation.input().request_digest != request.digest() {
                 return Err(ForkEventAuthorityErrorV1::Conflict);
             }
-            return self
-                .validate_classified_provenance(operation, event)
-                .map(|()| ForkClassifiedAppendReceiptV1 {
-                    event: event.clone(),
+            return self.validate_classified_provenance(operation).map(|event| {
+                ForkClassifiedAppendReceiptV1 {
+                    event,
                     operation: operation.clone(),
-                });
+                }
+            });
         }
         let classification = ForkEventClassifierV1::from_table(&table)
             .classify_identity(source)
@@ -2334,20 +2368,19 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
             return Err(ForkEventAuthorityErrorV1::Unauthenticated);
         }
         self.validate_classified_permit(permit)?;
-        let Some((operation, event)) = self.fork_append_operations.get(&operation_id) else {
+        let Some((operation, _)) = self.fork_append_operations.get(&operation_id) else {
             return Ok(None);
         };
         let request = fork_append_request(operation_id, child_timeline_id, source, draft)?;
         if operation.input().request_digest != request.digest() {
             return Err(ForkEventAuthorityErrorV1::Conflict);
         }
-        self.validate_classified_provenance(operation, event)
-            .map(|()| {
-                Some(ForkClassifiedAppendReceiptV1 {
-                    event: event.clone(),
-                    operation: operation.clone(),
-                })
+        self.validate_classified_provenance(operation).map(|event| {
+            Some(ForkClassifiedAppendReceiptV1 {
+                event,
+                operation: operation.clone(),
             })
+        })
     }
 
     fn read_fork_event_suffix(
@@ -2425,7 +2458,8 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
                 {
                     return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
                 }
-                self.validate_classified_records(operation, stored_event, &table)
+                self.committed_classified_event(operation)
+                    .and_then(|event| self.validate_classified_records(operation, &event, &table))
                     .map(|(origin, intervention)| (origin, intervention, operation.clone()))
             })
             .collect()
@@ -5492,7 +5526,7 @@ impl MemoryStore {
             .remove(&(room, registrar.to_owned()));
     }
 
-    /// Tamper one classified Event in both its `FOP1` record and its Timeline.
+    /// Tamper one classified Timeline Event, leaving the copy beside its FOP1 intact.
     pub(crate) fn test_tamper_classified_event(
         &mut self,
         operation_id: Hash,
@@ -5500,11 +5534,8 @@ impl MemoryStore {
     ) {
         let event_id = self
             .fork_append_operations
-            .get_mut(&operation_id)
-            .map(|(_, event)| {
-                tamper(event);
-                event.id
-            });
+            .get(&operation_id)
+            .map(|(operation, _)| operation.input().event_id);
         self.timelines
             .values_mut()
             .flat_map(|state| state.events.iter_mut())

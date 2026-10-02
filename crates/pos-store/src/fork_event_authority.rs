@@ -544,8 +544,9 @@ pub(crate) fn fork_append_request(
 /// Whether a stored classified Event carries exactly the content its `FOP1` binds.
 ///
 /// ADR-105 r6 R6.5 P8/P9 and R6.9: every adapter requires the `FOP1`
-/// `WallTime` and payload hash, and a local-origin child stores the one
-/// unsigned Event that its ADR-099 local append inserted.
+/// `WallTime`, payload hash, and origin (this child at the `FOP1` logical
+/// sequence), and a local-origin child stores the one unsigned Event that its
+/// ADR-099 local append inserted.
 pub(crate) fn classified_event_matches_operation(
     event: &Event,
     operation: &ForkAppendOperationV1,
@@ -554,6 +555,10 @@ pub(crate) fn classified_event_matches_operation(
     event.wall_time == input.wall_time
         && event.payload_hash == input.payload_hash
         && event.signature.is_none()
+        && event.origin.is_some_and(|origin| {
+            origin.origin_timeline_id == input.child_timeline_id
+                && origin.origin_logical_seq.as_u64() == input.logical_seq
+        })
 }
 
 #[cfg(test)]
@@ -3729,6 +3734,16 @@ mod tests {
         event.signature = Some(Signature::from_bytes([0; 64]));
     }
 
+    const fn tamper_payload_hash(event: &mut Event) {
+        event.payload_hash = Hash::from_bytes([9; 32]);
+    }
+
+    const fn tamper_origin(event: &mut Event) {
+        if let Some(origin) = &mut event.origin {
+            origin.origin_logical_seq = pos_core::Seq::from_u64(999_999);
+        }
+    }
+
     /// One local classified-Event tamper, expressed for each adapter.
     struct ClassifiedEventTamperV1 {
         name: &'static str,
@@ -3738,8 +3753,11 @@ mod tests {
     }
 
     /// ADR-105 r6 R6.5 P8/P9: the stored Event keeps the `FOP1` `WallTime`,
-    /// and ADR-099 local append stores it unsigned.
-    const CLASSIFIED_EVENT_TAMPERS: [ClassifiedEventTamperV1; 2] = [
+    /// payload hash, and origin, and ADR-099 local append stores it unsigned.
+    ///
+    /// Each tamper touches only the Timeline Event: `MemoryStore` keeps its
+    /// copy beside the `FOP1` intact, as `SQLite` has no such copy.
+    const CLASSIFIED_EVENT_TAMPERS: [ClassifiedEventTamperV1; 4] = [
         ClassifiedEventTamperV1 {
             name: "wall-time",
             memory: tamper_wall_time,
@@ -3752,6 +3770,20 @@ mod tests {
             memory: tamper_signature,
             #[cfg(feature = "sqlite")]
             sqlite: "UPDATE events SET signature = zeroblob(64) WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "payload-hash",
+            memory: tamper_payload_hash,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET payload_hash = zeroblob(32) WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "origin",
+            memory: tamper_origin,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET origin_logical_seq = 999999 WHERE event_id = (\
                      SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
         },
     ];

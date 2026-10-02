@@ -9786,14 +9786,7 @@ fn sqlite_classified_event(
                 .and_then(|event| SqliteStore::logical_event(prefix, event).ok())
             })
         })
-        .filter(|event| {
-            event.id == operation.input().event_id
-                && event.seq.as_u64() == logical_seq
-                && event.origin.is_some_and(|origin| {
-                    origin.origin_timeline_id == child_timeline_id
-                        && origin.origin_logical_seq.as_u64() == logical_seq
-                })
-        })
+        .filter(|event| event.id == operation.input().event_id && event.seq.as_u64() == logical_seq)
         .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
 }
 
