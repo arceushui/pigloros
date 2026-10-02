@@ -52,7 +52,7 @@ RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
 
 ### Merging
 
-Merge only through the Trunk merge queue: comment `/trunk merge` on the pull request. Never press Merge or call the GitHub merge API, and never rebase or update a branch only because `main` moved — only to resolve conflicts. See [`docs/merge-queue.md`](docs/merge-queue.md).
+Merge only through the Trunk merge queue, which enqueues pull requests labelled `ready-to-merge`. Add that label only when the maintainer explicitly asks; `/trunk merge` comments are disabled. Never press Merge or call the GitHub merge API, and never rebase or update a branch only because `main` moved — only to resolve conflicts. See [`docs/merge-queue.md`](docs/merge-queue.md).
 
 ### Features and sizing
 

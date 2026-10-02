@@ -360,8 +360,9 @@ Before requesting review, confirm:
 - the pull request description explains any hosted-only or resource-dependent
   validation and links to the relevant artifacts.
 
-Pull requests merge only through the merge queue: comment `/trunk merge`
-once CI is green. Approval, queue behaviour, and troubleshooting are in
+Pull requests merge only through the merge queue: a maintainer adds the
+`ready-to-merge` label after review. Who can merge, queue behaviour, and
+troubleshooting are in
 [`docs/merge-queue.md`](docs/merge-queue.md).
 
 When a hosted gate fails, fix the earliest meaningful failure first. Read the
