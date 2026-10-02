@@ -28,10 +28,10 @@ pub enum LocalCutCommitErrorV1 {
     /// The record uses a wire version that this implementation does not support.
     #[error("unsupported local-cut commit version")]
     UnsupportedVersion,
-    /// A record exceeds its accepted size or an encoded coordinate is out of range.
+    /// A record exceeds its accepted size or an encoded field is out of range.
     #[error("local-cut commit field is out of bounds")]
     FieldOutOfBounds,
-    /// A required owner, positive coordinate, content address, or table reference is invalid.
+    /// A required owner, coordinate, content address, or table reference is invalid.
     #[error("local-cut commit contains an invalid identity or content address")]
     InvalidIdentity,
     /// One embedded table reference is structurally invalid.
