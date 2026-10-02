@@ -148,7 +148,7 @@ EXPECTED_SETUP_STEPS = [
     {
         "name": "Install cargo-nextest for partitioned public bundle tests",
         "if": "${{ startsWith(matrix.shard, 'bundle-public-') }}",
-        "uses": "taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b",
+        "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
         "with": {"tool": "cargo-nextest"},
     },
     {
