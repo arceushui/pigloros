@@ -70,6 +70,12 @@ pub mod sqlite;
 #[cfg(all(feature = "sqlite", target_os = "linux"))]
 pub mod trust_policy_registry;
 
+// Shared Manifest owner-admission fixtures for the memory and SQLite test modules.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[doc(hidden)]
+pub mod manifest_owner_fixtures;
+
 // Re-export the port, its append-deduplication surface, and Wave 6 export/import helpers so
 // hosts need one crate.
 pub use pos_core::store::{
@@ -87,15 +93,20 @@ use pos_core::{
     PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, Seq,
 };
 pub use pos_core::{
+    ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
+    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
     AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     CanonicalBytes, CapabilityRevocationV1, CoreError, CorrelationId, EntityId,
     ErasureCasOutcomeV1, ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event,
     EventDraft, EventId, GeographicAdmissionAdmin, GeographicAdmissionOutcome,
     GeographicAdmissionStore, GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind,
+    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
+    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
+    ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerAdmissionSnapshotV1,
     OwnTracksEnrollmentStore, PersistedAuthorityV1, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, TimelineId, ValidatedGeographicAdmissionV1,
-    WallTime,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PreparedManifestOwnerAdmissionV1,
+    TimelineId, ValidatedGeographicAdmissionV1, WallTime,
 };
 
 /// A committed or indeterminate topology write invalidates a cached inventory.

@@ -492,9 +492,9 @@ mod tests {
             id: plugin_id,
             version: plugin_version,
         };
-        Ok(pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        Ok(pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            pos_runtime::OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )?)

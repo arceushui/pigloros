@@ -66,14 +66,14 @@ mod coverage_entrypoints {
         let plugin = pos_plugin_rule_agent::RuleAgentPlugin::new();
         assert!(builtin_output_binding(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            pos_runtime::OutputPolicySourceV1::RuleAgent,
             &[],
             "unknown-profile",
         )
         .is_err());
         assert!(builtin_output_binding(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+            pos_runtime::OutputPolicySourceV1::SyntheticObservation,
             &[],
             "deterministic-local-v1",
         )
@@ -81,7 +81,7 @@ mod coverage_entrypoints {
 
         assert!(builtin_output_binding(
             &InvalidVersionPlugin,
-            pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+            pos_runtime::OutputPolicySourceV1::RuleAgent,
             &[],
             "deterministic-local-v1",
         )
@@ -94,7 +94,7 @@ mod coverage_entrypoints {
         let plugin = SyntheticObsPlugin::new();
         assert!(builtin_output_binding(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+            pos_runtime::OutputPolicySourceV1::SyntheticObservation,
             &1.0_f64.to_be_bytes(),
             "deterministic-local-v1",
         )
@@ -135,11 +135,11 @@ const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 100
 
 fn builtin_output_binding<P: Plugin>(
     plugin: &P,
-    source: pos_runtime::InstalledOutputPolicySourceV1,
+    source: pos_runtime::OutputPolicySourceV1,
     configuration_details: &[u8],
     profile_id: &str,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, Box<dyn std::error::Error>> {
-    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    pos_runtime::OutputPolicyBindingV1::from_source(
         plugin,
         source,
         configuration_details,
@@ -611,7 +611,7 @@ fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::E
     // `and` evaluates both bindings eagerly, so both are exercised either way.
     let obs_binding = builtin_output_binding(
         &obs_plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::SyntheticObservation,
+        pos_runtime::OutputPolicySourceV1::SyntheticObservation,
         &obs_configuration,
         "deterministic-local-v1",
     );
@@ -620,7 +620,7 @@ fn run_builtin_reference_experiment() -> Result<RunResult, Box<dyn std::error::E
         .and_then(|agent_configuration| {
             builtin_output_binding(
                 &agent_plugin,
-                pos_runtime::InstalledOutputPolicySourceV1::RuleAgent,
+                pos_runtime::OutputPolicySourceV1::RuleAgent,
                 &agent_configuration,
                 "deterministic-local-v1",
             )
