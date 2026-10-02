@@ -26,8 +26,8 @@ use pos_plugin_persona::{
     PredictionOutcomeV1, PredictionSourceV1, PreferencePair, EVENT_TYPE_PREDICTION_SOURCE,
 };
 use pos_runtime::{
-    Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, RuntimeError,
-    ScheduledAdmissionStoreV1, StepOutput,
+    Driver, InstalledOutputPolicySourceV1, LocalScheduledAdmissionHostV1, ObservationView,
+    OutputPolicyBindingV1, PluginRegistry, RuntimeError, ScheduledAdmissionStoreV1, StepOutput,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
@@ -64,21 +64,37 @@ fn quiet_pair() -> PreferencePair {
     }
 }
 
-fn eval_driver(max_drafts: u32, diagnostics: &EvalDiagnosticsV1) -> Box<dyn Driver> {
-    Box::new(EvalDerivationDriver::new(
-        EvalDerivationConfigV1::new(max_drafts).test_ok(),
-        diagnostics.clone(),
-    ))
+/// Register Eval with its source mapping and per-pass budget bound into its
+/// pinned configuration identity.
+fn register_eval_plugin(
+    registry: &mut PluginRegistry,
+    eval: &EvalPlugin,
+    max_drafts: u32,
+    diagnostics: &EvalDiagnosticsV1,
+) {
+    let config = EvalDerivationConfigV1::new(max_drafts).test_ok();
+    let binding = OutputPolicyBindingV1::from_installed_source(
+        eval,
+        InstalledOutputPolicySourceV1::Generated,
+        &config.configuration_details(),
+        "deterministic-local-v1",
+    )
+    .test_ok();
+    registry
+        .register_with_verified_output_policy(
+            eval,
+            binding,
+            Some(Box::new(EvalReducer)),
+            Some(Box::new(EvalDerivationDriver::new(
+                config,
+                diagnostics.clone(),
+            ))),
+        )
+        .test_ok();
 }
 
 fn register_eval(registry: &mut PluginRegistry, max_drafts: u32, diagnostics: &EvalDiagnosticsV1) {
-    registry
-        .register_generated(
-            &EvalPlugin::new(),
-            Some(Box::new(EvalReducer)),
-            Some(eval_driver(max_drafts, diagnostics)),
-        )
-        .test_ok();
+    register_eval_plugin(registry, &EvalPlugin::new(), max_drafts, diagnostics);
 }
 
 fn gated_registry(authority: &ConsentAuthority) -> PluginRegistry {
@@ -582,4 +598,25 @@ fn persona_cannot_emit_eval_records_and_nothing_commits() {
         ));
         assert!(events(store.as_ref(), timeline).is_empty(), "{name}");
     }
+}
+
+#[test]
+fn the_derivation_mapping_enters_evals_pinned_configuration_identity() {
+    let authority = ConsentAuthority::new();
+    let eval = EvalPlugin::new();
+    let identity = |max_drafts: u32| {
+        let mut registry = gated_registry(&authority);
+        register_eval_plugin(
+            &mut registry,
+            &eval,
+            max_drafts,
+            &EvalDiagnosticsV1::default(),
+        );
+        registry
+            .replay_policy_closure_identities()
+            .map(|(_, digest)| digest)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(identity(64), identity(64));
+    assert_ne!(identity(3), identity(64));
 }
