@@ -7,9 +7,9 @@ use std::sync::{
 
 use pos_core::{
     AppendDedupKey, AppendDedupScope, AppendIdentity, Capability, ConsentAuthority,
-    ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Event, Hash, Kind, PipelineAttemptIdV1,
-    PipelineEvidenceRefV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
-    PluginId, Reducer, Seq, State, TimelineId,
+    ConsentCapabilityToken, ConsentRevokedV1, EntityId, ErasureContainmentGateV1, Event, Hash,
+    Kind, PipelineAttemptIdV1, PipelineEvidenceRefV1, PipelineSecurityRevisionsDraftV1,
+    PipelineSecurityRevisionsV1, Plugin, PluginId, Reducer, Seq, State, TimelineId,
 };
 use pos_runtime::{
     Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
@@ -158,9 +158,10 @@ fn offer(
     registry: &mut PluginRegistry,
     backend: &dyn ScheduledAdmissionStoreV1,
     timeline: TimelineId,
+    token: &ConsentCapabilityToken,
     port: &mut RecordingPort,
 ) -> usize {
-    let (head, drafts) = stage(registry, backend, timeline, None).test_ok();
+    let (head, drafts) = stage(registry, backend, timeline, Some(token)).test_ok();
     let _refused = registry.admit_scheduled_pass(port, &admission(head));
     drafts.len()
 }
@@ -175,7 +176,9 @@ pub fn non_participant_pass_is_subscription_scoped() -> Capture {
         let timeline = backend.create_timeline("non-participant").test_ok().id();
         let (first, second) = (EntityId::new(), EntityId::new());
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut registry = gated_registry(None);
+        let authority = ConsentAuthority::new();
+        let token = persona_token(&authority, timeline, first);
+        let mut registry = gated_registry(Some(&authority));
         registry
             .register_generated(
                 &ProjectionPlugin {
@@ -185,9 +188,12 @@ pub fn non_participant_pass_is_subscription_scoped() -> Capture {
                 None,
             )
             .test_ok();
-        for (label, event_type, subject) in [
-            ("observer-a", "observer.a", first),
-            ("observer-b", "observer.b", second),
+        // Projection subscriptions are consent-gated: the token names the
+        // first subject only, so only observer-a subscribes, and observer-b
+        // probes the same Projections without a subscription.
+        for (label, event_type, subscriptions) in [
+            ("observer-a", "observer.a", vec![ProjectionKey::new(first)]),
+            ("observer-b", "observer.b", Vec::new()),
         ] {
             registry
                 .register_generated(
@@ -196,7 +202,7 @@ pub fn non_participant_pass_is_subscription_scoped() -> Capture {
                     Some(Box::new(ObserverDriver {
                         label,
                         event_type,
-                        subscriptions: vec![ProjectionKey::new(subject)],
+                        subscriptions,
                         probes: [ProjectionKey::new(first), ProjectionKey::new(second)],
                         seen: Arc::clone(&seen),
                     })),
@@ -205,14 +211,14 @@ pub fn non_participant_pass_is_subscription_scoped() -> Capture {
         }
         fold(&mut registry, backend.as_mut(), timeline, &[first, second]);
         let mut port = RecordingPort::default();
-        let staged = offer(&mut registry, backend.as_ref(), timeline, &mut port);
+        let staged = offer(&mut registry, backend.as_ref(), timeline, &token, &mut port);
         let observers = seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .join("|");
         fold(&mut registry, backend.as_mut(), timeline, &[first]);
-        offer(&mut registry, backend.as_ref(), timeline, &mut port);
-        offer(&mut registry, backend.as_ref(), timeline, &mut port);
+        offer(&mut registry, backend.as_ref(), timeline, &token, &mut port);
+        offer(&mut registry, backend.as_ref(), timeline, &token, &mut port);
         let digests: Vec<Hash> = port
             .offered
             .iter()
