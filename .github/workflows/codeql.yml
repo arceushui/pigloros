@@ -16,8 +16,10 @@ permissions:
   pull-requests: read
   security-events: write
 
+# Matches ci.yml: pull request runs cancel superseded runs, while each main
+# push keeps its own group so overlapping main runs do not cancel each other.
 concurrency:
-  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  group: codeql-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
