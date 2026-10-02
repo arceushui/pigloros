@@ -130,9 +130,8 @@ mod local_cut_owner;
 mod pipeline_admission;
 
 use local_cut_owner::{
-    map_sqlite_local_cut_owner_to_manifest_error, sqlite_local_cut_owner_has_rows,
-    sqlite_local_cut_owner_state_raw, sqlite_sync_local_cut_owner_after_admission,
-    LOCAL_CUT_OWNER_SCHEMA_SQL,
+    sqlite_manifest_or_local_cut_owner_has_rows, sqlite_sync_local_cut_owner_after_admission,
+    sqlite_validate_local_cut_owner_admission, LOCAL_CUT_OWNER_SCHEMA_SQL,
 };
 
 #[cfg(test)]
@@ -6746,10 +6745,7 @@ fn sqlite_read_manifest_owner_current_state(
     let Some((generation, previous_visible_lcq1_hash, inventory_generation)) =
         sqlite_manifest_owner_state(connection, owner_id)?
     else {
-        return if sqlite_manifest_owner_has_rows(connection, owner_id)?
-            || sqlite_local_cut_owner_has_rows(connection, owner_id)
-                .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
-        {
+        return if sqlite_manifest_or_local_cut_owner_has_rows(connection, owner_id)? {
             Err(ManifestOwnerAdmissionErrorV1::CorruptState)
         } else {
             Ok(None)
@@ -6767,29 +6763,14 @@ fn sqlite_read_manifest_owner_current_state(
         generation_rows.operation_id,
         &generation_rows.receipt_hashes,
     )?;
-    match sqlite_local_cut_owner_state_raw(connection, owner_id)
-        .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
-    {
-        Some(local_cut_state) => {
-            // The raw read already validated the row and keyed it by `owner_id`.
-            if local_cut_state.configuration_generation != generation
-                || local_cut_state.previous_visible_lcq1_hash != previous_visible_lcq1_hash
-                || local_cut_state.inventory_generation != inventory_generation
-                || local_cut_state.timelines != generation_rows.timelines
-            {
-                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
-            }
-        }
-        None => {
-            if sqlite_local_cut_owner_has_rows(connection, owner_id)
-                .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
-                || generation_rows.previous_visible_lcq1_hash != previous_visible_lcq1_hash
-                || generation_rows.inventory_generation != inventory_generation
-            {
-                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
-            }
-        }
-    }
+    sqlite_validate_local_cut_owner_admission(
+        connection,
+        owner_id,
+        generation,
+        previous_visible_lcq1_hash,
+        inventory_generation,
+        &generation_rows,
+    )?;
     Ok(Some(ManifestOwnerAdmissionOwnerStateV1 {
         owner_id,
         configuration_generation: generation,

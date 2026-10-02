@@ -17,8 +17,9 @@ use pos_core::{
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{
-    begin_immediate_scope, finish_transaction, sqlite_read_manifest_owner_current_state,
-    SqliteImmediateScopeV1, SqliteStore,
+    begin_immediate_scope, finish_transaction, sqlite_manifest_owner_has_rows,
+    sqlite_read_manifest_owner_current_state, SqliteImmediateScopeV1,
+    SqliteManifestOwnerAdmissionGenerationV1, SqliteStore,
 };
 
 pub(super) const LOCAL_CUT_OWNER_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS local_cut_owner_state (
@@ -51,7 +52,7 @@ pub(super) const LOCAL_CUT_OWNER_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS 
 const SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1: usize = 536_870_912;
 const SQLITE_LOCAL_CUT_OWNER_REQUEST_MAGIC_V1: &[u8] = b"LCOQ1";
 
-pub(super) const fn map_sqlite_local_cut_owner_to_manifest_error(
+const fn map_sqlite_local_cut_owner_to_manifest_error(
     error: LocalCutOwnerErrorV1,
 ) -> ManifestOwnerAdmissionErrorV1 {
     match error {
@@ -77,7 +78,7 @@ const fn map_sqlite_manifest_owner_to_local_error(
     }
 }
 
-pub(super) fn sqlite_local_cut_owner_has_rows(
+fn sqlite_local_cut_owner_has_rows(
     connection: &Connection,
     owner_id: [u8; 32],
 ) -> Result<bool, LocalCutOwnerErrorV1> {
@@ -561,7 +562,7 @@ fn sqlite_local_cut_owner_cut_by_operation(
     .transpose()
 }
 
-pub(super) fn sqlite_local_cut_owner_state_raw(
+fn sqlite_local_cut_owner_state_raw(
     connection: &Connection,
     owner_id: [u8; 32],
 ) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
@@ -621,6 +622,57 @@ pub(super) fn sqlite_local_cut_owner_state_raw(
     };
     state.validate()?;
     Ok(Some(state))
+}
+
+/// Report admitted-owner or local-cut rows that lack an admitted state row.
+pub(super) fn sqlite_manifest_or_local_cut_owner_has_rows(
+    connection: &Connection,
+    owner_id: [u8; 32],
+) -> Result<bool, ManifestOwnerAdmissionErrorV1> {
+    if sqlite_manifest_owner_has_rows(connection, owner_id)? {
+        return Ok(true);
+    }
+    sqlite_local_cut_owner_has_rows(connection, owner_id)
+        .map_err(map_sqlite_local_cut_owner_to_manifest_error)
+}
+
+/// Check the owner's local-cut rows against the admitted state just read.
+///
+/// After a visible cut, the local-cut row must carry the admitted generation,
+/// receipt, inventory, and roster. Before one, the admitted receipt and
+/// inventory must still be those of the admitted generation's own rows.
+pub(super) fn sqlite_validate_local_cut_owner_admission(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+    previous_visible_lcq1_hash: Option<Hash>,
+    inventory_generation: Hash,
+    generation_rows: &SqliteManifestOwnerAdmissionGenerationV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    match sqlite_local_cut_owner_state_raw(connection, owner_id)
+        .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
+    {
+        // The raw read already validated the row and keyed it by `owner_id`.
+        Some(local_cut_state) => {
+            if local_cut_state.configuration_generation != configuration_generation
+                || local_cut_state.previous_visible_lcq1_hash != previous_visible_lcq1_hash
+                || local_cut_state.inventory_generation != inventory_generation
+                || local_cut_state.timelines != generation_rows.timelines
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+        }
+        None => {
+            if sqlite_local_cut_owner_has_rows(connection, owner_id)
+                .map_err(map_sqlite_local_cut_owner_to_manifest_error)?
+                || generation_rows.previous_visible_lcq1_hash != previous_visible_lcq1_hash
+                || generation_rows.inventory_generation != inventory_generation
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sqlite_read_local_cut_owner_state(
