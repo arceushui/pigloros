@@ -25511,4 +25511,79 @@ pub(super) mod key_registry_coverage {
         store.abort_adapter_recording_session(owner_reference, run_operation_id)?;
         Ok(())
     }
+
+    #[test]
+    fn sqlite_adapter_recording_rejects_durable_sql_type_corruption(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (run_byte, mutation, ignore_check_constraints) in [
+            (
+                162,
+                "UPDATE adapter_recording_calls SET global_call_index = 'invalid' \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                163,
+                "UPDATE adapter_recording_calls SET plugin_id = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                164,
+                "UPDATE adapter_recording_calls SET per_plugin_call_index = 'invalid' \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                165,
+                "UPDATE adapter_recording_calls SET invocation_cbor = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                false,
+            ),
+            (
+                166,
+                "UPDATE adapter_recording_calls SET idempotency_key = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                167,
+                "UPDATE adapter_recording_calls SET reserved_at_micros = 'invalid' \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                true,
+            ),
+            (
+                168,
+                "UPDATE adapter_recording_calls SET output_bytes = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+                false,
+            ),
+        ] {
+            assert_closed_recording_rejects_call_mutation(
+                run_byte,
+                mutation,
+                ignore_check_constraints,
+            )?;
+        }
+        for (run_byte, mutation) in [
+            (
+                169,
+                "UPDATE adapter_recording_sessions SET world_handle_cbor = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                170,
+                "UPDATE adapter_recording_sessions SET admission_cbor = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+            (
+                171,
+                "UPDATE adapter_recording_sessions SET transcript_cbor = 7 \
+                 WHERE owner_reference = ?1 AND run_operation_id = ?2",
+            ),
+        ] {
+            assert_closed_recording_rejects_session_mutation(run_byte, mutation)?;
+        }
+        Ok(())
+    }
 }
