@@ -11276,8 +11276,8 @@ mod coverage_entrypoints {
         ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1, ArtifactRegistrationInputV1,
         ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
         ArtifactRegistrationV1, ArtifactTransitionRuleV1, ReproManifestRootInputV1,
-        ReproManifestRootRegistrationInputV1, WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,
-        WorldReplayHandleInputV1, WorldReplayHandleV1,
+        ReproManifestRootRegistrationInputV1, WorldRecordingReceiptInputV1,
+        WorldRecordingReceiptV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
     };
     use pos_core::{
         ConsentAuthority, ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1,
