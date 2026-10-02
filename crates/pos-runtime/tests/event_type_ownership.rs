@@ -45,7 +45,7 @@ impl OwnerPlugin {
         }
     }
 
-    fn with_reducer(mut self) -> Self {
+    const fn with_reducer(mut self) -> Self {
         self.has_reducer = true;
         self
     }
