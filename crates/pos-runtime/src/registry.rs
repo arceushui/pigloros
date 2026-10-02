@@ -118,19 +118,6 @@ pub fn recover_local_cut_owner_retry_v1<S: LocalCutOwnerPersistencePortV1>(
     )
 }
 
-const fn map_manifest_owner_admission_to_local_cut_error(
-    error: ManifestOwnerAdmissionErrorV1,
-) -> LocalCutOwnerErrorV1 {
-    match error {
-        ManifestOwnerAdmissionErrorV1::Conflict => LocalCutOwnerErrorV1::Conflict,
-        ManifestOwnerAdmissionErrorV1::StorageFailure => LocalCutOwnerErrorV1::StorageFailure,
-        ManifestOwnerAdmissionErrorV1::BoundExceeded
-        | ManifestOwnerAdmissionErrorV1::InvalidBatch
-        | ManifestOwnerAdmissionErrorV1::OwnerRejected
-        | ManifestOwnerAdmissionErrorV1::CorruptState => LocalCutOwnerErrorV1::CorruptState,
-    }
-}
-
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
@@ -1550,8 +1537,7 @@ impl PluginRegistry {
         }
         let owner_id = request.seal.as_input().owner_id;
         let admission_state = store
-            .read_manifest_owner_state_v1(owner_id)
-            .map_err(map_manifest_owner_admission_to_local_cut_error)?
+            .read_manifest_owner_state_v1(owner_id)?
             .ok_or(LocalCutOwnerErrorV1::OwnerRejected)?;
         if !self.is_admitted_composition_current_for_generation(
             admitted,
@@ -1569,8 +1555,7 @@ impl PluginRegistry {
                     owner_id,
                     admission_state.configuration_generation,
                     *timeline_id,
-                )
-                .map_err(map_manifest_owner_admission_to_local_cut_error)?
+                )?
                 .ok_or(LocalCutOwnerErrorV1::OwnerRejected)?;
             if &snapshot.catalog != admitted.catalog() {
                 return Err(LocalCutOwnerErrorV1::OwnerRejected);

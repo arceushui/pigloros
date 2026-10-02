@@ -12,8 +12,8 @@ use crate::local_cut_seal::{
     local_cut_tree_scope_v1, LocalCutManifestBindingTableV1, LocalCutSealV2, LocalCutTableRefV1,
 };
 use crate::manifest_owner_admission::{
-    validate_manifest_owner_admission_snapshot_v1, ManifestOwnerAdmissionOwnerStateV1,
-    ManifestOwnerAdmissionSnapshotV1,
+    validate_manifest_owner_admission_snapshot_v1, ManifestOwnerAdmissionErrorV1,
+    ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionSnapshotV1,
 };
 use crate::{Hash, ManifestAdmissionCatalogV1, PluginId, TimelineId};
 
@@ -43,6 +43,40 @@ pub enum LocalCutOwnerErrorV1 {
     /// The durable transaction outcome could not be determined.
     #[error("local-cut owner storage outcome is unavailable")]
     StorageFailure,
+}
+
+/// Read an admitted-owner failure through the local-cut boundary.
+///
+/// Retryable conflict and storage classes are preserved; every other admitted
+/// owner failure means the shared owner boundary is corrupt.
+impl From<ManifestOwnerAdmissionErrorV1> for LocalCutOwnerErrorV1 {
+    fn from(error: ManifestOwnerAdmissionErrorV1) -> Self {
+        match error {
+            ManifestOwnerAdmissionErrorV1::Conflict => Self::Conflict,
+            ManifestOwnerAdmissionErrorV1::StorageFailure => Self::StorageFailure,
+            ManifestOwnerAdmissionErrorV1::BoundExceeded
+            | ManifestOwnerAdmissionErrorV1::InvalidBatch
+            | ManifestOwnerAdmissionErrorV1::OwnerRejected
+            | ManifestOwnerAdmissionErrorV1::CorruptState => Self::CorruptState,
+        }
+    }
+}
+
+/// Read a local-cut owner failure through the admitted-owner boundary.
+///
+/// Retryable conflict and storage classes are preserved; every other local-cut
+/// failure means the shared owner boundary is corrupt.
+impl From<LocalCutOwnerErrorV1> for ManifestOwnerAdmissionErrorV1 {
+    fn from(error: LocalCutOwnerErrorV1) -> Self {
+        match error {
+            LocalCutOwnerErrorV1::Conflict => Self::Conflict,
+            LocalCutOwnerErrorV1::StorageFailure => Self::StorageFailure,
+            LocalCutOwnerErrorV1::BoundExceeded
+            | LocalCutOwnerErrorV1::InvalidBatch
+            | LocalCutOwnerErrorV1::OwnerRejected
+            | LocalCutOwnerErrorV1::CorruptState => Self::CorruptState,
+        }
+    }
 }
 
 /// One complete kind-1 composition binding selected for a prospective cut.

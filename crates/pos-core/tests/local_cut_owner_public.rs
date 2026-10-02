@@ -194,3 +194,30 @@ fn owner_state_requires_one_complete_visible_or_genesis_shape() {
         Err(LocalCutOwnerErrorV1::CorruptState)
     );
 }
+
+#[test]
+fn owner_error_conversions_preserve_retryable_classes() {
+    use pos_core::LocalCutOwnerErrorV1 as Local;
+    use pos_core::ManifestOwnerAdmissionErrorV1 as Admission;
+
+    for (local, admission) in [
+        (Local::Conflict, Admission::Conflict),
+        (Local::StorageFailure, Admission::StorageFailure),
+        (Local::BoundExceeded, Admission::CorruptState),
+        (Local::InvalidBatch, Admission::CorruptState),
+        (Local::OwnerRejected, Admission::CorruptState),
+        (Local::CorruptState, Admission::CorruptState),
+    ] {
+        assert_eq!(Admission::from(local), admission);
+    }
+    for (admission, local) in [
+        (Admission::Conflict, Local::Conflict),
+        (Admission::StorageFailure, Local::StorageFailure),
+        (Admission::BoundExceeded, Local::CorruptState),
+        (Admission::InvalidBatch, Local::CorruptState),
+        (Admission::OwnerRejected, Local::CorruptState),
+        (Admission::CorruptState, Local::CorruptState),
+    ] {
+        assert_eq!(Local::from(admission), local);
+    }
+}
