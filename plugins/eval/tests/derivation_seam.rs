@@ -9,7 +9,7 @@ use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, EventId, PluginId, TimelineId},
-    store::{EventStore, SeqRange},
+    store::SeqRange,
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, AuthorityErrorV1, Capability, ConsentAuthority,
     ConsentCapabilityToken, ConsentGrantedV1, ErasureArtifactClassV1, ErasureContainmentGateV1,

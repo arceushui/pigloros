@@ -477,6 +477,35 @@ fn compute_report_authorized(
     report_from_events(&events)
 }
 
+/// A zero-filled report for a prefix with no resolved pair.
+fn empty_report(n_predictions: u64) -> CalibrationReport {
+    CalibrationReport {
+        replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+        redaction_state: pos_core::ArtifactRedactionStateV1::None,
+        brier_score: 0.0,
+        crps: 0.0,
+        lift_vs_personal_base_rate: 0.0,
+        ece: 0.0,
+        lift_vs_population_avg: 0.0,
+        lift_vs_persistence: 0.0,
+        n_predictions,
+        n_resolved: 0,
+        n_predictor_supplied: 0,
+        reliability_bins: build_bins(&[]),
+    }
+}
+
+/// Resolved pairs whose outcome is labelled predictor-supplied.
+fn predictor_supplied_count(resolved: &[ResolvedPair]) -> u64 {
+    u64::try_from(
+        resolved
+            .iter()
+            .filter(|pair| pair.predictor_supplied)
+            .count(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
 fn report_from_events(events: &[Event]) -> Result<CalibrationReport, EvalError> {
     // Collect raw data.
     let mut raw_predictions: Vec<PredictionPayload> = Vec::new();
@@ -520,21 +549,7 @@ fn report_from_events(events: &[Event]) -> Result<CalibrationReport, EvalError> 
 
     // Empty case: return a zero-filled report.
     if resolved.is_empty() {
-        let empty_bins = build_bins(&[]);
-        return Ok(CalibrationReport {
-            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
-            redaction_state: pos_core::ArtifactRedactionStateV1::None,
-            brier_score: 0.0,
-            crps: 0.0,
-            lift_vs_personal_base_rate: 0.0,
-            ece: 0.0,
-            lift_vs_population_avg: 0.0,
-            lift_vs_persistence: 0.0,
-            n_predictions,
-            n_resolved: 0,
-            n_predictor_supplied: 0,
-            reliability_bins: empty_bins,
-        });
+        return Ok(empty_report(n_predictions));
     }
 
     let n_resolved_f = f64::from(u32::try_from(resolved.len()).unwrap_or(u32::MAX));
@@ -601,13 +616,7 @@ fn report_from_events(events: &[Event]) -> Result<CalibrationReport, EvalError> 
         lift_vs_persistence,
         n_predictions,
         n_resolved,
-        n_predictor_supplied: u64::try_from(
-            resolved
-                .iter()
-                .filter(|pair| pair.predictor_supplied)
-                .count(),
-        )
-        .unwrap_or(u64::MAX),
+        n_predictor_supplied: predictor_supplied_count(&resolved),
         reliability_bins,
     })
 }
