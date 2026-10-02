@@ -158,7 +158,7 @@ impl InstalledPluginFactoryV1 for CountingPlugin {
         };
         InstalledPluginProductV1 {
             plugin: Self {
-                id: configuration.fixed_id.unwrap_or_else(PluginId::new),
+                id: configuration.fixed_id.unwrap_or_default(),
             },
             reducer,
             approver: NoActionApproverV1,
