@@ -7,16 +7,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::local_cut_commit::{
-    LocalCutCommitErrorV1, LocalCutCommitInputV1, LocalCutCommitV1, LocalCutReceiptV1,
-};
+use crate::local_cut_commit::{LocalCutCommitInputV1, LocalCutCommitV1, LocalCutReceiptV1};
 use crate::local_cut_seal::{
-    local_cut_tree_scope_v1, LocalCutManifestBindingTableV1, LocalCutSealErrorV2, LocalCutSealV2,
-    LocalCutTableRefV1,
+    local_cut_tree_scope_v1, LocalCutManifestBindingTableV1, LocalCutSealV2, LocalCutTableRefV1,
 };
 use crate::manifest_owner_admission::{
-    validate_manifest_owner_admission_snapshot_v1, ManifestOwnerAdmissionErrorV1,
-    ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionSnapshotV1,
+    validate_manifest_owner_admission_snapshot_v1, ManifestOwnerAdmissionOwnerStateV1,
+    ManifestOwnerAdmissionSnapshotV1,
 };
 use crate::{Hash, ManifestAdmissionCatalogV1, PluginId, TimelineId};
 
@@ -442,8 +439,10 @@ pub fn prepare_local_cut_owner_commit_v1(
     validate_recording_contexts(&request.recording_context_rows, admissions)?;
     verifier.verify_authenticated_cut(&request, current_state, admission_state, admissions)?;
 
+    // The request shape already rejected every zero LCC1 identity, and the
+    // seal address is a BLAKE3 digest, so the commit fields are structurally valid.
     let seal_hash = request.seal.digest();
-    let commit = LocalCutCommitV1::new(LocalCutCommitInputV1 {
+    let commit = LocalCutCommitV1::from_owner_validated(LocalCutCommitInputV1 {
         owner_id: request.seal.as_input().owner_id,
         cut_id: request.seal.as_input().cut_id,
         partition_ledger_seq: request.partition_ledger_seq,
@@ -457,8 +456,7 @@ pub fn prepare_local_cut_owner_commit_v1(
         invocation_bridges_table: request.invocation_bridges_table,
         result_inventory_generation: request.result_inventory_generation,
         release_fence_proof_digest: request.release_fence_proof_digest,
-    })
-    .map_err(map_commit_error)?;
+    });
     let receipt = verifier.sign_local_cut_receipt(&commit)?;
     if receipt.as_input().commit_record_hash != commit.digest()
         || admissions.iter().any(|snapshot| {
@@ -474,6 +472,9 @@ pub fn prepare_local_cut_owner_commit_v1(
     }
     verifier.verify_local_cut_receipt(&receipt, &commit, admissions)?;
 
+    // Every field comes from the validated admission state, request, LCS2 seal
+    // (positive cut and tick), or a BLAKE3 receipt digest, so the successor is
+    // a valid visible owner state by construction.
     let successor_state = LocalCutOwnerStateV1 {
         owner_id: admission_state.owner_id,
         last_visible_cut_id: request.seal.as_input().cut_id,
@@ -484,7 +485,6 @@ pub fn prepare_local_cut_owner_commit_v1(
         inventory_generation: request.result_inventory_generation,
         timelines: admission_state.timelines.clone(),
     };
-    successor_state.validate()?;
     Ok(PreparedLocalCutOwnerCommitV1 {
         request,
         intent_digest,
@@ -519,23 +519,12 @@ fn validate_request_shape(request: &LocalCutOwnerRequestV1) -> Result<(), LocalC
             )
         || request.manifest_binding_table.table_ref()
             != request.seal.as_input().manifest_binding_table
-        || row_count(request.composition_rows.len())?
+        || request.composition_rows.len() as u64
             != request.seal.as_input().composition_table.row_count()
-        || row_count(request.recording_context_rows.len())?
+        || request.recording_context_rows.len() as u64
             != request.seal.as_input().recording_context_table.row_count()
     {
         return Err(LocalCutOwnerErrorV1::InvalidBatch);
-    }
-    for reference in [
-        request.result_heads_table,
-        request.participant_successor_table,
-        request.cpu_completion_table,
-        request.action_disposition_table,
-        request.candidate_bases_table,
-        request.invocation_bridges_table,
-    ] {
-        LocalCutTableRefV1::new(reference.row_count(), reference.root_hash())
-            .map_err(map_seal_error)?;
     }
     validate_composition_row_order(&request.composition_rows)?;
     validate_recording_context_row_order(&request.recording_context_rows)?;
@@ -582,7 +571,9 @@ fn validate_current_admissions<'a>(
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
     for (snapshot, timeline_id) in admissions.iter().zip(&admission_state.timelines) {
-        validate_manifest_owner_admission_snapshot_v1(snapshot).map_err(map_admission_error)?;
+        // Snapshot validation only produces BoundExceeded or InvalidBatch.
+        validate_manifest_owner_admission_snapshot_v1(snapshot)
+            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
         if &snapshot.catalog != catalog
             || snapshot.timeline.timeline_id != *timeline_id
             || snapshot.catalog.as_input().owner_id != admission_state.owner_id
@@ -670,12 +661,8 @@ fn validate_composition_bindings(
     admission_state: &ManifestOwnerAdmissionOwnerStateV1,
     catalog: &ManifestAdmissionCatalogV1,
 ) -> Result<(), LocalCutOwnerErrorV1> {
-    let expected = catalog
-        .as_input()
-        .rows
-        .len()
-        .checked_mul(admission_state.timelines.len())
-        .ok_or(LocalCutOwnerErrorV1::BoundExceeded)?;
+    // At most 256 catalog rows times 1,048,576 Timelines cannot overflow.
+    let expected = catalog.as_input().rows.len() * admission_state.timelines.len();
     if rows.len() != expected {
         return Err(LocalCutOwnerErrorV1::InvalidBatch);
     }
@@ -755,46 +742,6 @@ fn validate_recording_context_row_order(
         return Err(LocalCutOwnerErrorV1::InvalidBatch);
     }
     Ok(())
-}
-
-fn row_count(length: usize) -> Result<u64, LocalCutOwnerErrorV1> {
-    u64::try_from(length).map_err(|_| LocalCutOwnerErrorV1::BoundExceeded)
-}
-
-const fn map_commit_error(error: LocalCutCommitErrorV1) -> LocalCutOwnerErrorV1 {
-    match error {
-        LocalCutCommitErrorV1::FieldOutOfBounds => LocalCutOwnerErrorV1::BoundExceeded,
-        LocalCutCommitErrorV1::InvalidEncoding
-        | LocalCutCommitErrorV1::NonCanonical
-        | LocalCutCommitErrorV1::UnsupportedVersion
-        | LocalCutCommitErrorV1::InvalidIdentity
-        | LocalCutCommitErrorV1::InvalidTableReference => LocalCutOwnerErrorV1::InvalidBatch,
-    }
-}
-
-const fn map_seal_error(error: LocalCutSealErrorV2) -> LocalCutOwnerErrorV1 {
-    match error {
-        LocalCutSealErrorV2::FieldOutOfBounds => LocalCutOwnerErrorV1::BoundExceeded,
-        LocalCutSealErrorV2::InvalidEncoding
-        | LocalCutSealErrorV2::NonCanonical
-        | LocalCutSealErrorV2::UnsupportedVersion
-        | LocalCutSealErrorV2::ZeroContentAddress
-        | LocalCutSealErrorV2::InvalidTableReference
-        | LocalCutSealErrorV2::RowsNotSorted
-        | LocalCutSealErrorV2::InvalidTableNode
-        | LocalCutSealErrorV2::TableMismatch => LocalCutOwnerErrorV1::InvalidBatch,
-    }
-}
-
-const fn map_admission_error(error: ManifestOwnerAdmissionErrorV1) -> LocalCutOwnerErrorV1 {
-    match error {
-        ManifestOwnerAdmissionErrorV1::Conflict => LocalCutOwnerErrorV1::Conflict,
-        ManifestOwnerAdmissionErrorV1::StorageFailure => LocalCutOwnerErrorV1::StorageFailure,
-        ManifestOwnerAdmissionErrorV1::BoundExceeded
-        | ManifestOwnerAdmissionErrorV1::InvalidBatch
-        | ManifestOwnerAdmissionErrorV1::OwnerRejected
-        | ManifestOwnerAdmissionErrorV1::CorruptState => LocalCutOwnerErrorV1::CorruptState,
-    }
 }
 
 fn hash_count(hasher: &mut blake3::Hasher, count: usize) {

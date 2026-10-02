@@ -77,9 +77,12 @@ pub struct LocalCutCommitV1(LocalCutCommitInputV1);
 impl LocalCutCommitV1 {
     /// Validate the LCC1 structural fields without authenticating an owner.
     ///
+    /// Every [`LocalCutTableRefV1`] is already structurally valid, because its
+    /// only constructor validates it, so the table references need no recheck.
+    ///
     /// # Errors
-    /// Returns an error for zero identities or addresses, invalid table
-    /// references, and absent positive cut or ledger coordinates.
+    /// Returns an error for zero identities or addresses and absent positive
+    /// cut or ledger coordinates.
     pub fn new(input: LocalCutCommitInputV1) -> Result<Self, LocalCutCommitErrorV1> {
         if input.owner_id == [0; 32]
             || input.cut_id == 0
@@ -94,18 +97,16 @@ impl LocalCutCommitV1 {
         {
             return Err(LocalCutCommitErrorV1::InvalidIdentity);
         }
-        for table in [
-            input.result_heads_table,
-            input.participant_successor_table,
-            input.cpu_completion_table,
-            input.action_disposition_table,
-            input.candidate_bases_table,
-            input.invocation_bridges_table,
-        ] {
-            LocalCutTableRefV1::new(table.row_count(), table.root_hash())
-                .map_err(map_table_error)?;
-        }
         Ok(Self(input))
+    }
+
+    /// Wrap fields whose LCC1 structural invariants the local owner already proved.
+    ///
+    /// The owner preparation path admits only nonzero owner, cut, ledger,
+    /// manifest, inventory, and release-fence values, and derives the seal
+    /// address as a BLAKE3 digest, so [`Self::new`] cannot reject its input.
+    pub(crate) const fn from_owner_validated(input: LocalCutCommitInputV1) -> Self {
+        Self(input)
     }
 
     /// Borrow the exact validated LCC1 fields.
@@ -401,18 +402,13 @@ fn read_table_ref(
     LocalCutTableRefV1::new(row_count, root_hash).map_err(map_table_error)
 }
 
+/// Map the only failures [`LocalCutTableRefV1::new`] produces: an excess row
+/// count, an invalid count/root pair, or a zero root address.
 const fn map_table_error(error: LocalCutSealErrorV2) -> LocalCutCommitErrorV1 {
-    match error {
-        LocalCutSealErrorV2::FieldOutOfBounds => LocalCutCommitErrorV1::FieldOutOfBounds,
-        LocalCutSealErrorV2::InvalidTableReference | LocalCutSealErrorV2::ZeroContentAddress => {
-            LocalCutCommitErrorV1::InvalidTableReference
-        }
-        LocalCutSealErrorV2::InvalidEncoding
-        | LocalCutSealErrorV2::NonCanonical
-        | LocalCutSealErrorV2::UnsupportedVersion
-        | LocalCutSealErrorV2::RowsNotSorted
-        | LocalCutSealErrorV2::InvalidTableNode
-        | LocalCutSealErrorV2::TableMismatch => LocalCutCommitErrorV1::InvalidTableReference,
+    if matches!(error, LocalCutSealErrorV2::FieldOutOfBounds) {
+        LocalCutCommitErrorV1::FieldOutOfBounds
+    } else {
+        LocalCutCommitErrorV1::InvalidTableReference
     }
 }
 
