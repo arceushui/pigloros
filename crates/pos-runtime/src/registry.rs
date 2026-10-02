@@ -212,6 +212,33 @@ fn consent_visible_event(operation: &OperationContext, event: &Event) -> bool {
                 && token.authorize_event_type(&event.event_type).is_ok())
 }
 
+/// The committed Events one Driver may observe through its Event
+/// subscriptions: its subscribed types, minus host-owned consent and
+/// geographic Events, and, for a verified-prefix Driver only, minus
+/// consent-sensitive Events this pass may not show it.
+///
+/// A Driver without Event subscriptions observes no committed Event, so the
+/// prefix is neither filtered nor copied for it.
+fn subscribed_driver_events(
+    committed_events: &[Event],
+    event_subscriptions: &[Kind],
+    verified_prefix_required: bool,
+    operation: &OperationContext,
+) -> Vec<Event> {
+    if event_subscriptions.is_empty() {
+        return Vec::new();
+    }
+    committed_events
+        .iter()
+        .filter(|event| {
+            event_subscriptions.contains(&event.event_type)
+                && driver_visible_event(event)
+                && (!verified_prefix_required || consent_visible_event(operation, event))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Vet one Driver's output with the single chain every Driver output path
 /// shares: the anchored non-participant pass, public cadence, live
 /// stepping, and the participant-authorized pass (ADR-021 Revision 3
@@ -1969,26 +1996,16 @@ impl PluginRegistry {
                 committed_events,
             )?;
         }
-        let event_subscriptions = driver.event_subscriptions();
-        // A Driver without Event subscriptions observes no committed Event,
-        // so the prefix is neither filtered nor copied for it.
-        let subscribed_events: Vec<Event> = if event_subscriptions.is_empty() {
-            Vec::new()
-        } else {
-            committed_events
-                .iter()
-                .filter(|event| {
-                    event_subscriptions.contains(&event.event_type)
-                        && driver_visible_event(event)
-                        && (!verified_prefix_required || consent_visible_event(operation, event))
-                })
-                .cloned()
-                .collect()
-        };
+        let subscribed_events = subscribed_driver_events(
+            committed_events,
+            driver.event_subscriptions(),
+            verified_prefix_required,
+            operation,
+        );
         let observations = snapshot.view_for_events_after(
             driver.subscriptions(),
             &subscribed_events,
-            event_subscriptions,
+            driver.event_subscriptions(),
             entry.event_cursor,
         );
         let observations = if verified_prefix_required {

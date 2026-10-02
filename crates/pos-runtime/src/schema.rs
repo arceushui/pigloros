@@ -47,12 +47,18 @@ impl SchemaRegistry {
     /// Returns [`crate::PluginCompositionErrorV1::DuplicateEventTypeOwner`]
     /// when the event type already has a schema.
     pub fn register(&mut self, schema: EventTypeSchema) -> Result<(), RuntimeError> {
+        self.insert_vacant(schema).map_err(|event_type| {
+            RuntimeError::Composition(crate::PluginCompositionErrorV1::DuplicateEventTypeOwner {
+                event_type,
+            })
+        })
+    }
+
+    /// The one insert path: insert into a vacant entry, or keep the existing
+    /// entry and return its event type.
+    fn insert_vacant(&mut self, schema: EventTypeSchema) -> Result<(), String> {
         match self.schemas.entry(schema.event_type.as_str().to_owned()) {
-            Entry::Occupied(occupied) => Err(RuntimeError::Composition(
-                crate::PluginCompositionErrorV1::DuplicateEventTypeOwner {
-                    event_type: occupied.key().clone(),
-                },
-            )),
+            Entry::Occupied(occupied) => Err(occupied.key().clone()),
             Entry::Vacant(vacant) => {
                 vacant.insert(schema);
                 Ok(())
@@ -70,11 +76,12 @@ impl SchemaRegistry {
     }
 
     /// Record the schema of a type whose ownership the registry has already
-    /// settled, through [`Self::register`]. The only entry that can already
-    /// exist is a host schema a Plugin may claim (the Recorder type); it is
-    /// kept and never replaced, so the duplicate result carries no new fact.
+    /// settled, through the same non-overwriting insert path as
+    /// [`Self::register`]. The only entry that can already exist is a host
+    /// schema a Plugin may claim (the Recorder type); it is kept and never
+    /// replaced, so the occupied result carries no new fact.
     pub(crate) fn register_claimed(&mut self, schema: EventTypeSchema) {
-        self.register(schema).unwrap_or_default();
+        self.insert_vacant(schema).unwrap_or_default();
     }
 
     /// Returns `true` if the event type is registered.

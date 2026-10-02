@@ -2255,7 +2255,12 @@ mod tests {
                 "{sensitive}"
             );
         }
-        for ordinary in ["eval.prediction", "timeline.forked", "retention", "agent.action"] {
+        for ordinary in [
+            "eval.prediction",
+            "timeline.forked",
+            "retention",
+            "agent.action",
+        ] {
             assert!(
                 !is_consent_sensitive_event_type(&Kind::new(ordinary)),
                 "{ordinary}"
