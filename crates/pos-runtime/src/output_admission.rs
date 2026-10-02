@@ -922,7 +922,7 @@ impl OutputPolicyClosureV1 {
                 kind: "configuration",
             });
         }
-        validate_execution_profile_artifact_v1(execution_profile_artifact)?;
+        validate_optional_execution_profile_artifact_v1(execution_profile_artifact)?;
         let retention_policy =
             WorldRetentionPolicyV1::from_canonical_cbor(retention_policy_artifact)
                 .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "RTP1" })?;
@@ -1227,7 +1227,9 @@ const fn validate_leaf_lengths(
     Ok(())
 }
 
-fn validate_execution_profile_artifact_v1(bytes: &[u8]) -> Result<(), OutputAdmissionErrorV1> {
+fn validate_optional_execution_profile_artifact_v1(
+    bytes: &[u8],
+) -> Result<(), OutputAdmissionErrorV1> {
     if bytes.is_empty() {
         return Ok(());
     }

@@ -1186,13 +1186,22 @@ impl PluginRegistry {
             .as_ref()
             .ok_or(ManifestRegistrationErrorV1::BatchState)?;
         self.validate_complete_manifest_batch(batch)?;
+        self.admitted_composition_for(batch.clone())
+    }
+
+    /// Bind a validated complete catalog to this registry's current identity
+    /// and its derived local adapter admission.
+    fn admitted_composition_for(
+        &self,
+        catalog: ManifestAdmissionCatalogV1,
+    ) -> Result<AdmittedCompositionV1, ManifestRegistrationErrorV1> {
         let adapter_admission = self
-            .adapter_admission_for_catalog(batch)
+            .adapter_admission_for_catalog(&catalog)
             .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
         Ok(AdmittedCompositionV1 {
             registry_identity: Arc::clone(&self.manifest_identity),
             registration_revision: self.registration_revision,
-            catalog: batch.clone(),
+            catalog,
             adapter_admission,
         })
     }
@@ -1292,15 +1301,7 @@ impl PluginRegistry {
             return Err(ManifestRegistrationErrorV1::IncompleteBatch);
         }
         self.validate_complete_manifest_batch(&batch)?;
-        let adapter_admission = self
-            .adapter_admission_for_catalog(&batch)
-            .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
-        Ok(AdmittedCompositionV1 {
-            registry_identity: Arc::clone(&self.manifest_identity),
-            registration_revision: self.registration_revision,
-            catalog: batch,
-            adapter_admission,
-        })
+        self.admitted_composition_for(batch)
     }
 
     /// Whether the capability belongs to this unmodified registry and the
@@ -1318,10 +1319,17 @@ impl PluginRegistry {
             && self.registration_revision == admitted.registration_revision
             && admitted.catalog.as_input().configuration_generation
                 == owner_configuration_generation
-            && self.manifest_batch.as_ref().is_some_and(|batch| {
-                batch.as_input().owner_id == admitted.catalog.as_input().owner_id
-                    && batch.as_input().rows == admitted.catalog.as_input().rows
-            })
+            && self.manifest_batch_is_current(admitted)
+    }
+
+    /// Whether the retained complete batch and its derived adapter admission
+    /// still match an admitted composition.
+    fn manifest_batch_is_current(&self, admitted: &AdmittedCompositionV1) -> bool {
+        let batch_matches = self.manifest_batch.as_ref().is_some_and(|batch| {
+            batch.as_input().owner_id == admitted.catalog.as_input().owner_id
+                && batch.as_input().rows == admitted.catalog.as_input().rows
+        });
+        batch_matches
             && matches!(
                 self.adapter_admission_for_catalog(&admitted.catalog),
                 Ok(ref current) if current == &admitted.adapter_admission
