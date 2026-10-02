@@ -209,7 +209,6 @@ fn an_abandoned_fold_quarantines_the_process_until_it_ends() {
         plan(consumer, &events),
     );
     assert_eq!(refused.err(), Some(StagedFoldErrorV1::ExecutorQuarantined));
-    drop(executor);
     assert_eq!(worker_threads(), 1);
 
     // Case 18: the abandoned job ends at its next check, its late result is
