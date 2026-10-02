@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use pos_core::{
     pipeline_authority_revision_v1, pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope,
-    AppendIdentity, AuthorityGranteeV1, AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1,
-    AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes,
-    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority,
-    ConsentGrantedV1, ConsentRevokedV1, CoreError, DelegateClassV1, EntityId,
+    AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1,
+    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, CanonicalBytes, Capability, CapabilityGrantDraftV1, CapabilityGrantV1,
+    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+    ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, CoreError, DelegateClassV1, EntityId,
     ErasureContainmentGateV1, Event, EventDraft, EventStore, Hash, Kind, PipelineAdmissionBasisV1,
     PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
     PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
@@ -1180,4 +1180,113 @@ fn local_host_reports_a_fence_publication_failure_as_a_store_error() {
     );
     assert!(ok(store.pipeline_admission_fence(timeline)).is_none());
     assert!(store.load_authority(host.authority_grant()).is_ok());
+}
+
+// ── Plugin draft ownership on the non-participant path (#484) ──────────────
+
+/// The Event type the "first" Driver's Plugin owns.
+const FIRST_OWNED: &str = "agent.scheduled.first";
+
+/// A Driver whose Plugin owns only `agent.scheduled.intruder` but which
+/// emits the Event type that the "first" Driver's Plugin owns.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn register_intruder(registry: &mut PluginRegistry, log: &Log) {
+    let plugin = TestPlugin {
+        id: PluginId::new(),
+        name: "intruder",
+        event_type: "agent.scheduled.intruder",
+        reducer: false,
+    };
+    let intruder = ScriptedDriver {
+        event_type: FIRST_OWNED,
+        ..driver("intruder", vec![b"forged"], log)
+    };
+    ok(registry.register_generated(&plugin, None, Some(Box::new(intruder))));
+}
+
+/// Assert the pass was rejected as an unauthorized source and that every
+/// Driver it staged was aborted without a commit.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn assert_ownership_rejected(error: &RuntimeError, log: &Log, name: &str) {
+    assert!(
+        matches!(
+            error,
+            RuntimeError::Authority(AuthorityErrorV1::UnauthorizedSource)
+        ),
+        "{name}: {error}"
+    );
+    assert_eq!(
+        entries(log),
+        [
+            "first:step@0",
+            "intruder:step@0",
+            "first:abort",
+            "intruder:abort"
+        ],
+        "{name}"
+    );
+}
+
+/// ADR-021 Revision 3 Decision 4: a scheduled Driver that emits another
+/// Plugin's Event type is rejected on the anchored non-participant path with
+/// the same error as on the participant-authorized path, and nothing commits.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn anchored_pass_rejects_another_plugins_event_type_and_commits_nothing() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1"], &log));
+        register_intruder(&mut registry, &log);
+
+        let error = err(registry.step_all_anchored(host.timeline, Seq::ZERO));
+        assert_ownership_rejected(&error, &log, name);
+        assert!(
+            matches!(
+                err(host.admit(&mut registry, store.as_mut(), 1)),
+                RuntimeError::PendingDriverStep
+            ),
+            "{name}"
+        );
+        assert!(
+            committed_events(store.as_ref(), host.timeline).is_empty(),
+            "{name}"
+        );
+        assert_eq!(budget(store.as_ref(), host.timeline), Some(10), "{name}");
+    }
+}
+
+/// The local scheduled admission host (`ExperimentSession`'s host) applies
+/// the same ownership rule before it publishes or admits anything.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn local_host_rejects_another_plugins_event_type_and_commits_nothing() {
+    for (name, mut store) in stores() {
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        ok(store.bind_erasure_gate(Arc::clone(&gate)));
+        let timeline = ok(store.create_timeline("local-foreign-draft")).id();
+        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        let log = Log::default();
+        let mut registry = PluginRegistry::new().with_erasure_gate(gate);
+        register(&mut registry, driver("first", vec![b"a1"], &log));
+        register_intruder(&mut registry, &log);
+        let revisions = ok(host.observe(&registry, store.as_mut(), timeline));
+
+        let error = err(registry.step_all_anchored(timeline, Seq::ZERO));
+        assert_ownership_rejected(&error, &log, name);
+        let head = ok(store.logical_head(timeline));
+        assert!(
+            matches!(
+                err(host.admit(&mut registry, store.as_mut(), revisions, head, 1)),
+                RuntimeError::PendingDriverStep
+            ),
+            "{name}"
+        );
+        assert!(
+            committed_events(store.as_ref(), timeline).is_empty(),
+            "{name}"
+        );
+        assert_eq!(budget(store.as_ref(), timeline), Some(u64::MAX), "{name}");
+    }
 }

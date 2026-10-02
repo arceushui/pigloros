@@ -1879,3 +1879,74 @@ fn an_empty_authorized_pass_commits_without_admission() {
     assert_eq!(observed(&state).observed_digest, None);
     assert!(stage_current(&mut registry, &fixture).is_ok());
 }
+
+/// ADR-021 Revision 3 Decision 4 (#484): the participant-authorized path
+/// shares the anchored path's Driver output vetting. A Driver that emits
+/// another Plugin's Event type aborts every Driver the pass staged, and
+/// nothing commits on either store.
+#[test]
+fn authorized_pass_rejects_another_plugins_event_type_and_commits_nothing() {
+    for (name, mut prepared) in admission_stores() {
+        let first = fixture_with_timeline(prepared.timeline);
+        let second = fixture_with_timeline(prepared.timeline);
+        let (mut registry, first_state) = registry_with_mode(&first, false, gated_registry());
+        let intruder_state = Arc::new(Mutex::new(DriverState::default()));
+        registry
+            .register_generated(
+                &TestPlugin {
+                    id: second.plugin_id,
+                },
+                None,
+                Some(Box::new(ParticipantDriver {
+                    state: Arc::clone(&intruder_state),
+                    entity: EntityId::new(),
+                    event_type: Kind::new("foreign.owned"),
+                    ambient_subscription: None,
+                })),
+            )
+            .test_ok();
+        registry
+            .register_generated(
+                &ForeignEventOwner {
+                    id: PluginId::new(),
+                },
+                None,
+                None,
+            )
+            .test_ok();
+        let first_evaluation = observation_evaluation(&first.observation);
+        let second_evaluation = observation_evaluation(&second.observation);
+        let first_authority = current_authority(&first);
+        let second_authority = current_authority(&second);
+        let authorities = [
+            view_authority(&first, &first_evaluation, &first_authority),
+            view_authority(&second, &second_evaluation, &second_authority),
+        ];
+
+        assert_eq!(
+            authority_error(registry.stage_authorized_scheduled_pass(
+                prepared.timeline,
+                Seq::from_u64(12),
+                &[driver_view(&first), driver_view(&second)],
+                &authorities,
+            )),
+            AuthorityErrorV1::UnauthorizedSource,
+            "{name}"
+        );
+        let admission = prepared.admission(9);
+        assert!(
+            error_text(registry.admit_authorized_scheduled_pass(
+                prepared.store.as_mut(),
+                &admission,
+                &authorities,
+            ))
+            .contains("already pending"),
+            "{name}"
+        );
+        assert!(prepared.committed().is_empty(), "{name}");
+        for state in [&first_state, &intruder_state] {
+            let state = observed(state);
+            assert_eq!((state.aborts, state.commits), (1, 0), "{name}");
+        }
+    }
+}
