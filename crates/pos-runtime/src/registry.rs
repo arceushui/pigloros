@@ -2654,14 +2654,12 @@ impl PluginRegistry {
         configuration_details: &[u8],
     ) -> Result<OutputPolicyBindingV1, RuntimeError> {
         let plugin_version = plugin.version().to_owned();
-        let (policy, budget) =
-            Self::generated_output_binding_with_budget_input_for_profile_with_details(
-                plugin,
-                &plugin_version,
-                Self::generated_budget_input(plugin),
-                "deterministic-local-v1",
-                configuration_details,
-            )?;
+        let (policy, budget) = Self::generated_output_binding_with_budget_input_and_details(
+            plugin,
+            &plugin_version,
+            Self::generated_budget_input(plugin),
+            configuration_details,
+        )?;
         Ok(OutputPolicyBindingV1::from_source_with_policy(
             plugin,
             OutputPolicySourceV1::Generated,
@@ -2722,40 +2720,18 @@ impl PluginRegistry {
         ),
         RuntimeError,
     > {
-        Self::generated_output_binding_with_budget_input_for_profile(
+        Self::generated_output_binding_with_budget_input_and_details(
             plugin,
             plugin_version,
             budget_input,
-            "deterministic-local-v1",
-        )
-    }
-
-    fn generated_output_binding_with_budget_input_for_profile(
-        plugin: &dyn Plugin,
-        plugin_version: &str,
-        budget_input: pos_core::ExecutableBudgetPolicyInputV1,
-        profile_id: &str,
-    ) -> Result<
-        (
-            pos_core::output_policy::OutputPolicyV1,
-            pos_core::ExecutableBudgetPolicyV1,
-        ),
-        RuntimeError,
-    > {
-        Self::generated_output_binding_with_budget_input_for_profile_with_details(
-            plugin,
-            plugin_version,
-            budget_input,
-            profile_id,
             &[],
         )
     }
 
-    fn generated_output_binding_with_budget_input_for_profile_with_details(
+    fn generated_output_binding_with_budget_input_and_details(
         plugin: &dyn Plugin,
         plugin_version: &str,
         mut budget_input: pos_core::ExecutableBudgetPolicyInputV1,
-        _profile_id: &str,
         configuration_details: &[u8],
     ) -> Result<
         (
@@ -4245,7 +4221,7 @@ mod tests {
     #[test]
     fn generated_binding_does_not_claim_a_named_execution_profile() {
         let plugin = simple_plugin("profile-fixture", &["profile.output"]);
-        let result = PluginRegistry::generated_output_binding_with_budget_input_for_profile(
+        let result = PluginRegistry::generated_output_binding_with_budget_input(
             &plugin,
             plugin.version(),
             ExecutableBudgetPolicyInputV1 {
@@ -4284,7 +4260,6 @@ mod tests {
                 execution_profile_hash: Hash::zero(),
                 max_pass_wall_duration_us: 1_000,
             },
-            "missing-profile",
         );
         let (_, budget) = result.test_ok();
         assert_eq!(
