@@ -248,6 +248,7 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
             per_plugin_call_index,
             global_call_index,
             &invocation,
+            SystemTime::now(),
         )?;
         self.retain_call(
             plugin_id,
@@ -298,29 +299,31 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
         entry: &AdapterAdmissionEntryV1,
         exact_request_payload: Vec<u8>,
     ) -> Result<(u64, AdapterInvocationV1), LocalAdapterErrorV1> {
-        let Ok(global_call_index) = u64::try_from(self.calls.len()) else {
+        // The call-count bound and the AIR1 envelope bound share one closed
+        // failure, so a single terminal branch rejects either.
+        let built = u64::try_from(self.calls.len())
+            .ok()
+            .filter(|_| self.calls.len() < MAX_ADAPTER_TRANSCRIPT_CALLS_V1)
+            .and_then(|global_call_index| {
+                AdapterInvocationV1::new(AdapterInvocationInputV1 {
+                    adapter_id: entry.adapter_id.clone(),
+                    provider_id: entry.provider_id.clone(),
+                    operation_id: entry.operation_id.clone(),
+                    protocol_version: entry.protocol_version,
+                    request_schema_digest: entry.request_schema_digest,
+                    response_schema_digest: entry.response_schema_digest,
+                    configuration_digest: entry.configuration_digest,
+                    global_call_index,
+                    exact_request_payload,
+                })
+                .ok()
+                .map(|invocation| (global_call_index, invocation))
+            });
+        let Some(built) = built else {
             self.failed = true;
             return Err(LocalAdapterErrorV1::CallBoundExceeded);
         };
-        if self.calls.len() >= MAX_ADAPTER_TRANSCRIPT_CALLS_V1 {
-            self.failed = true;
-            return Err(LocalAdapterErrorV1::CallBoundExceeded);
-        }
-        let Ok(invocation) = AdapterInvocationV1::new(AdapterInvocationInputV1 {
-            adapter_id: entry.adapter_id.clone(),
-            provider_id: entry.provider_id.clone(),
-            operation_id: entry.operation_id.clone(),
-            protocol_version: entry.protocol_version,
-            request_schema_digest: entry.request_schema_digest,
-            response_schema_digest: entry.response_schema_digest,
-            configuration_digest: entry.configuration_digest,
-            global_call_index,
-            exact_request_payload,
-        }) else {
-            self.failed = true;
-            return Err(LocalAdapterErrorV1::CallBoundExceeded);
-        };
-        Ok((global_call_index, invocation))
+        Ok(built)
     }
 
     fn ensure_call_fits_transcript(
@@ -352,8 +355,9 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
         per_plugin_call_index: u64,
         global_call_index: u64,
         invocation: &AdapterInvocationV1,
+        now: SystemTime,
     ) -> Result<(Vec<u8>, u64), LocalAdapterErrorV1> {
-        let Some(recorded_wall_time_micros) = SystemTime::now()
+        let Some(recorded_wall_time_micros) = now
             .duration_since(SystemTime::UNIX_EPOCH)
             .ok()
             .and_then(|duration| u64::try_from(duration.as_micros()).ok())
@@ -368,19 +372,22 @@ impl LocalAdapterSessionV1<'_, '_, '_> {
             plugin_id,
             invocation.digest(),
         );
-        let reservation = AdapterCallReservationV1::new(
+        // A reservation the store cannot accept fails like a store refusal.
+        let reserved = AdapterCallReservationV1::new(
             plugin_id,
             per_plugin_call_index,
             (*invocation).clone(),
             idempotency_key,
             recorded_wall_time_micros,
         )
-        .map_err(|_| LocalAdapterErrorV1::RecordingFailed)?;
-        let output = match self.recorder.reserve_adapter_call(
-            self.recording_session.owner_reference(),
-            self.recording_session.run_operation_id(),
-            reservation,
-        ) {
+        .and_then(|reservation| {
+            self.recorder.reserve_adapter_call(
+                self.recording_session.owner_reference(),
+                self.recording_session.run_operation_id(),
+                reservation,
+            )
+        });
+        let output = match reserved {
             Ok(AdapterCallReservationOutcomeV1::Completed {
                 output_bytes,
                 reserved_at_micros,
@@ -604,20 +611,17 @@ impl PluginRegistry {
         recorder: &'store mut dyn AdapterRecordingStoreV1,
     ) -> Result<LocalAdapterSessionV1<'registry, 'composition, 'store>, LocalAdapterErrorV1> {
         let generation = admitted.catalog().as_input().configuration_generation;
-        if run_operation_id == Hash::zero()
-            || !self.is_admitted_composition_current_for_generation(admitted, generation)
-            || world_handle.as_input().owner_reference
-                != admitted.adapter_admission().as_input().owner_reference
-        {
-            return Err(LocalAdapterErrorV1::StaleAdmission);
-        }
+        // The recorder session rejects a zero run operation and a World handle
+        // of another owner; together with the currency check they are stale.
         let recording_session = AdapterRecordingSessionV1::new(
             admitted.adapter_admission().as_input().owner_reference,
             world_handle,
             run_operation_id,
             admitted.adapter_admission().clone(),
         )
-        .map_err(|_| LocalAdapterErrorV1::StaleAdmission)?;
+        .ok()
+        .filter(|_| self.is_admitted_composition_current_for_generation(admitted, generation))
+        .ok_or(LocalAdapterErrorV1::StaleAdmission)?;
         recorder
             .open_adapter_recording_session(recording_session.clone())
             .map_err(|_| LocalAdapterErrorV1::RecordingFailed)?;
@@ -764,4 +768,298 @@ fn adapter_idempotency_key(
     hasher.update(&plugin_id.inner().to_bytes());
     hasher.update(input_digest.as_bytes());
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::composition::{ManifestRegistrationErrorV1, PluginRegistrationV1};
+    use pos_core::{
+        adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterDataClassV1,
+        ArtifactRegistrationV1, Capability, OwnerIdV1, Plugin, TimelineId,
+        WorldReplayHandleInputV1,
+    };
+    use pos_store::memory::MemoryStore;
+    use std::time::Duration;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    struct LocalPlugin {
+        id: PluginId,
+    }
+
+    impl Plugin for LocalPlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            "local-adapter-unit-plugin"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability::default()
+        }
+    }
+
+    struct EchoProvider;
+
+    impl LocalAdapterProviderV1 for EchoProvider {
+        fn invoke(
+            &mut self,
+            invocation: &AdapterInvocationV1,
+            _: LocalAdapterIdempotencyKeyV1,
+        ) -> Result<LocalAdapterProviderResponseV1, LocalAdapterErrorV1> {
+            Ok(LocalAdapterProviderResponseV1::unacknowledged(
+                invocation.as_input().exact_request_payload.clone(),
+            ))
+        }
+    }
+
+    fn adapter_entry(plugin_id: PluginId) -> AdapterAdmissionEntryV1 {
+        let configuration = b"local-unit-provider-config".to_vec();
+        AdapterAdmissionEntryV1 {
+            plugin_id,
+            adapter_id: "weather.client".to_owned(),
+            provider_id: "fixture.provider".to_owned(),
+            operation_id: "read-current".to_owned(),
+            protocol_version: 1,
+            request_schema_digest: public_adapter_schema_digest_v1(),
+            response_schema_digest: public_adapter_schema_digest_v1(),
+            configuration_digest: adapter_configuration_digest_v1(&configuration),
+            exact_configuration_bytes: configuration,
+            input_data_class: AdapterDataClassV1::PublicRecord,
+            output_data_class: AdapterDataClassV1::PublicRecord,
+            effect_mode: AdapterEffectModeV1::ReadOnly,
+        }
+    }
+
+    fn owner() -> OwnerIdV1 {
+        OwnerIdV1::from_static("local-adapter-unit-owner")
+    }
+
+    fn world_handle() -> Result<WorldReplayHandleV1, Box<dyn std::error::Error>> {
+        Ok(WorldReplayHandleV1::new(WorldReplayHandleInputV1 {
+            owner_reference: ArtifactRegistrationV1::owner_reference(&owner()),
+            timeline_id: TimelineId::new(),
+            cut_id: 4,
+            commit_receipt_digest: Hash::from_bytes([11; 32]),
+            recording_receipt_digest: Hash::from_bytes([12; 32]),
+            logical_head: 7,
+            stitched_head_hash: Hash::from_bytes([13; 32]),
+        })?)
+    }
+
+    fn register_echo(
+        registry: &mut PluginRegistry,
+        plugin_id: PluginId,
+    ) -> Result<(), LocalAdapterErrorV1> {
+        registry.register_local_adapter(adapter_entry(plugin_id), Box::new(EchoProvider))
+    }
+
+    fn local_registry() -> Result<(PluginRegistry, PluginId), Box<dyn std::error::Error>> {
+        let plugin = LocalPlugin {
+            id: PluginId::new(),
+        };
+        let mut registry = PluginRegistry::new();
+        registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+        register_echo(&mut registry, plugin.id)?;
+        Ok((registry, plugin.id))
+    }
+
+    fn plugin_entry(
+        registry: &mut PluginRegistry,
+        plugin_id: PluginId,
+    ) -> Result<&mut PluginEntry, Box<dyn std::error::Error>> {
+        registry
+            .plugins
+            .get_mut(&plugin_id)
+            .ok_or_else(|| "registered Plugin is missing".into())
+    }
+
+    fn invoke(
+        session: &mut LocalAdapterSessionV1<'_, '_, '_>,
+        plugin_id: PluginId,
+        request: Vec<u8>,
+    ) -> Result<Vec<u8>, LocalAdapterErrorV1> {
+        session.invoke(
+            plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            request,
+        )
+    }
+
+    #[test]
+    fn open_session_rejects_a_registry_that_became_stale() -> TestResult {
+        let (mut registry, plugin_id) = local_registry()?;
+        let admitted = registry.admit_local_manifest_registration(owner(), 1)?;
+        let mut recorder = MemoryStore::new();
+        let mut session = registry.begin_local_adapter_session(
+            &admitted,
+            world_handle()?,
+            Hash::from_bytes([41; 32]),
+            &mut recorder,
+        )?;
+        session.registry.registration_revision += 1;
+        assert_eq!(
+            invoke(&mut session, plugin_id, b"request".to_vec()),
+            Err(LocalAdapterErrorV1::StaleAdmission)
+        );
+        assert!(matches!(
+            session.finish(),
+            Err(LocalAdapterErrorV1::SessionAborted)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn call_that_could_overflow_the_transcript_byte_bound_aborts_the_session() -> TestResult {
+        let (mut registry, plugin_id) = local_registry()?;
+        let admitted = registry.admit_local_manifest_registration(owner(), 1)?;
+        let mut recorder = MemoryStore::new();
+        let mut session = registry.begin_local_adapter_session(
+            &admitted,
+            world_handle()?,
+            Hash::from_bytes([42; 32]),
+            &mut recorder,
+        )?;
+        session.encoded_call_bytes = MAX_ADAPTER_TRANSCRIPT_BYTES_V1;
+        assert_eq!(
+            invoke(&mut session, plugin_id, b"request".to_vec()),
+            Err(LocalAdapterErrorV1::CallBoundExceeded)
+        );
+        assert_eq!(
+            invoke(&mut session, plugin_id, b"request".to_vec()),
+            Err(LocalAdapterErrorV1::SessionAborted)
+        );
+        session.abort()?;
+        Ok(())
+    }
+
+    #[test]
+    fn retained_call_rechecks_its_output_and_transcript_byte_bounds() -> TestResult {
+        let (mut registry, plugin_id) = local_registry()?;
+        let admitted = registry.admit_local_manifest_registration(owner(), 1)?;
+        let mut recorder = MemoryStore::new();
+        let mut session = registry.begin_local_adapter_session(
+            &admitted,
+            world_handle()?,
+            Hash::from_bytes([43; 32]),
+            &mut recorder,
+        )?;
+        let entry = adapter_entry(plugin_id);
+        let (_, invocation) = session.build_invocation(&entry, b"request".to_vec())?;
+        assert_eq!(
+            session.retain_call(
+                plugin_id,
+                0,
+                invocation.clone(),
+                vec![0; MAX_ADAPTER_CALL_BYTES_V1 + 1],
+                1,
+            ),
+            Err(LocalAdapterErrorV1::CallBoundExceeded)
+        );
+        session.encoded_call_bytes = MAX_ADAPTER_TRANSCRIPT_BYTES_V1;
+        assert_eq!(
+            session.retain_call(plugin_id, 0, invocation, b"response".to_vec(), 1),
+            Err(LocalAdapterErrorV1::CallBoundExceeded)
+        );
+        assert!(session.failed);
+        assert!(session.calls.is_empty());
+        session.abort()?;
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_call_rejects_a_wall_clock_before_the_unix_epoch() -> TestResult {
+        let (mut registry, plugin_id) = local_registry()?;
+        let admitted = registry.admit_local_manifest_registration(owner(), 1)?;
+        let mut recorder = MemoryStore::new();
+        let mut session = registry.begin_local_adapter_session(
+            &admitted,
+            world_handle()?,
+            Hash::from_bytes([44; 32]),
+            &mut recorder,
+        )?;
+        let entry = adapter_entry(plugin_id);
+        let (global_call_index, invocation) =
+            session.build_invocation(&entry, b"request".to_vec())?;
+        let before_epoch = SystemTime::UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .ok_or("the platform clock cannot represent a pre-epoch instant")?;
+        assert_eq!(
+            session.record_call(
+                0,
+                plugin_id,
+                0,
+                global_call_index,
+                &invocation,
+                before_epoch,
+            ),
+            Err(LocalAdapterErrorV1::ClockUnavailable)
+        );
+        assert!(session.failed);
+        session.abort()?;
+        Ok(())
+    }
+
+    #[test]
+    fn adapter_registration_requires_a_verified_available_plugin() -> TestResult {
+        let plugin = LocalPlugin {
+            id: PluginId::new(),
+        };
+        let mut registry = PluginRegistry::new();
+        registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+
+        let admission = plugin_entry(&mut registry, plugin.id)?
+            .output_admission
+            .take();
+        assert_eq!(
+            register_echo(&mut registry, plugin.id),
+            Err(LocalAdapterErrorV1::PluginUnavailable)
+        );
+
+        let entry = plugin_entry(&mut registry, plugin.id)?;
+        entry.output_admission = admission;
+        let pin = entry
+            .registration
+            .as_ref()
+            .ok_or("local Plugin has no pin")?
+            .pin()
+            .clone();
+        let disabled = PluginRegistrationV1::new(pin.clone(), PluginAvailabilityV1::Disabled);
+        entry.registration = Some(disabled);
+        assert_eq!(
+            register_echo(&mut registry, plugin.id),
+            Err(LocalAdapterErrorV1::PluginUnavailable)
+        );
+
+        let available = PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available);
+        plugin_entry(&mut registry, plugin.id)?.registration = Some(available);
+        register_echo(&mut registry, plugin.id)?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_admission_rejects_an_adapter_whose_plugin_left_the_registry() -> TestResult {
+        let (mut registry, plugin_id) = local_registry()?;
+        let other = LocalPlugin {
+            id: PluginId::new(),
+        };
+        registry.register_local(&other, vec!["weather.other".to_owned()], None, None)?;
+        registry
+            .plugins
+            .shift_remove(&plugin_id)
+            .ok_or("registered Plugin is missing")?;
+        assert!(matches!(
+            registry.admit_local_manifest_registration(owner(), 1),
+            Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+        assert!(registry.manifest_batch.is_none());
+        Ok(())
+    }
 }

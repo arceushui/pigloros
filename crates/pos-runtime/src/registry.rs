@@ -61,6 +61,11 @@ pub use human_admission::{
 };
 pub use scheduled_admission::ScheduledPassAdmissionV1;
 
+/// Stable manifest slot of a Plugin in a registry-derived local catalog.
+fn local_manifest_slot(plugin_id: PluginId) -> String {
+    format!("plugin-{plugin_id}")
+}
+
 fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
@@ -1144,10 +1149,6 @@ impl PluginRegistry {
         let owner_reference = pos_core::ArtifactRegistrationV1::owner_reference(&owner_id);
         let mut rows = Vec::with_capacity(self.plugins.len());
         for (plugin_id, entry) in &self.plugins {
-            let registration = entry
-                .registration
-                .as_ref()
-                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
             let admission = entry
                 .output_admission
                 .as_ref()
@@ -1156,7 +1157,7 @@ impl PluginRegistry {
                 .closure()
                 .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
             let row = ManifestAdmissionCatalogRowV1 {
-                stable_slot: format!("plugin-{plugin_id}"),
+                stable_slot: local_manifest_slot(*plugin_id),
                 plugin_id: *plugin_id,
                 plugin_name: entry.name.clone(),
                 plugin_version: entry.version.clone(),
@@ -1164,13 +1165,10 @@ impl PluginRegistry {
                 eop1_native_digest: admission.policy_digest(),
                 closure_hash: closure.manifest_closure_hash(),
             };
+            // This requires the available native pin, so the local catalog
+            // never contains an unpinned row.
             Self::validate_manifest_entry_fields(&row, entry)?;
             rows.push(row);
-            // An available pin is required and checked above; retaining it
-            // here avoids accepting a local catalog made from an unpinned row.
-            if registration.availability() != PluginAvailabilityV1::Available {
-                return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
-            }
         }
         rows.sort_unstable_by(|left, right| left.stable_slot.cmp(&right.stable_slot));
         let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
@@ -1183,12 +1181,9 @@ impl PluginRegistry {
             .adapter_admission_for_catalog(&catalog)
             .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
 
-        for row in &catalog.as_input().rows {
-            let entry = self
-                .plugins
-                .get_mut(&row.plugin_id)
-                .ok_or(ManifestRegistrationErrorV1::IncompleteBatch)?;
-            entry.manifest_slot = Some(row.stable_slot.clone());
+        // The catalog has exactly one row per registered Plugin.
+        for (plugin_id, entry) in &mut self.plugins {
+            entry.manifest_slot = Some(local_manifest_slot(*plugin_id));
         }
         self.registration_revision += 1;
         self.manifest_batch = Some(catalog.clone());
@@ -5272,6 +5267,83 @@ mod tests {
         registry
             .validate_complete_manifest_batch(&catalog)
             .test_ok();
+    }
+
+    #[test]
+    fn manifest_batch_with_a_zero_owner_cannot_derive_an_adapter_admission() {
+        let (mut registry, _, catalog) = manifest_validation_fixture();
+        let mut zero_owner = catalog.as_input().clone();
+        zero_owner.owner_id = [0; 32];
+        let zero_owner = ManifestAdmissionCatalogV1::new(zero_owner).test_ok();
+        registry.manifest_batch = Some(zero_owner.clone());
+        assert!(matches!(
+            registry.admit_complete_manifest_registration(),
+            Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+        assert!(matches!(
+            registry.revalidate_manifest_registration(zero_owner),
+            Err(ManifestRegistrationErrorV1::IncompleteBatch)
+        ));
+    }
+
+    #[test]
+    fn local_admission_rejects_unverified_or_unavailable_local_entries() {
+        let plugin = simple_plugin("local-fixture", &[]);
+        let id = plugin.id;
+        let owner = OwnerIdV1::from_static("local-admission-fixture");
+        let mut registry = gated_registry();
+        registry
+            .register_local(&plugin, vec!["local.fixture".to_owned()], None, None)
+            .test_ok();
+
+        let verified = registry
+            .plugins
+            .get_mut(&id)
+            .test_ok()
+            .output_admission
+            .take()
+            .test_ok();
+        assert!(matches!(
+            registry.admit_local_manifest_registration(owner, 1),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+
+        let unverified = OutputAdmissionV1::try_new(
+            id,
+            plugin.version(),
+            verified.policy().clone(),
+            verified.budget().clone(),
+        )
+        .test_ok();
+        registry.plugins.get_mut(&id).test_ok().output_admission = Some(unverified);
+        assert!(matches!(
+            registry.admit_local_manifest_registration(owner, 1),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        registry.plugins.get_mut(&id).test_ok().output_admission = Some(verified);
+
+        let valid = registry
+            .plugins
+            .get(&id)
+            .test_ok()
+            .registration
+            .as_ref()
+            .test_ok()
+            .clone();
+        let disabled =
+            PluginRegistrationV1::new(valid.pin().clone(), PluginAvailabilityV1::Disabled);
+        registry.plugins.get_mut(&id).test_ok().registration = Some(disabled);
+        assert!(matches!(
+            registry.admit_local_manifest_registration(owner, 1),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        assert!(registry.manifest_batch.is_none());
+
+        registry.plugins.get_mut(&id).test_ok().registration = Some(valid);
+        let admitted = registry
+            .admit_local_manifest_registration(owner, 1)
+            .test_ok();
+        assert_eq!(admitted.catalog().as_input().rows[0].plugin_id, id);
     }
 
     #[test]

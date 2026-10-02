@@ -573,7 +573,9 @@ impl LocalAdapterProviderV1 for PanickingProvider {
 enum RecorderFailure {
     Open,
     Reserve,
+    OversizedCompletion,
     Close,
+    CorruptClose,
     Abort,
 }
 
@@ -603,6 +605,12 @@ impl AdapterRecordingStoreV1 for FailingRecordingStore {
         if matches!(self.failure, RecorderFailure::Reserve) {
             return Err(pos_core::AdapterRecordingStoreErrorV1::StorageFailure);
         }
+        if matches!(self.failure, RecorderFailure::OversizedCompletion) {
+            return Ok(pos_core::AdapterCallReservationOutcomeV1::Completed {
+                output_bytes: vec![0; pos_core::MAX_ADAPTER_CALL_BYTES_V1 + 1],
+                reserved_at_micros: 1,
+            });
+        }
         self.inner
             .reserve_adapter_call(owner_reference, run_operation_id, reservation)
     }
@@ -629,6 +637,9 @@ impl AdapterRecordingStoreV1 for FailingRecordingStore {
     ) -> Result<Vec<u8>, pos_core::AdapterRecordingStoreErrorV1> {
         if matches!(self.failure, RecorderFailure::Close) {
             return Err(pos_core::AdapterRecordingStoreErrorV1::StorageFailure);
+        }
+        if matches!(self.failure, RecorderFailure::CorruptClose) {
+            return Ok(b"not a closed adapter transcript".to_vec());
         }
         self.inner
             .close_adapter_recording_session(owner_reference, run_operation_id)
@@ -899,5 +910,144 @@ fn local_adapter_registry_orders_multiple_contracts() -> TestResult {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].plugin_id, low.id());
     assert_eq!(entries[1].plugin_id, high.id());
+    Ok(())
+}
+
+#[test]
+fn local_adapter_session_rejects_oversized_stored_output_and_corrupt_records() -> TestResult {
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
+    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
+    let mut recorder = FailingRecordingStore {
+        inner: pos_store::memory::MemoryStore::new(),
+        failure: RecorderFailure::OversizedCompletion,
+    };
+    let mut session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([35; 32]),
+        &mut recorder,
+    )?;
+    assert_eq!(
+        session.invoke(
+            plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::CallBoundExceeded)
+    );
+    session.abort()?;
+
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
+    let mut recorder = FailingRecordingStore {
+        inner: pos_store::memory::MemoryStore::new(),
+        failure: RecorderFailure::CorruptClose,
+    };
+    let session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([36; 32]),
+        &mut recorder,
+    )?;
+    assert!(matches!(
+        session.finish(),
+        Err(LocalAdapterErrorV1::TranscriptInvalid)
+    ));
+    Ok(())
+}
+
+#[test]
+fn failed_local_adapter_session_cannot_finish() -> TestResult {
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(RejectingProvider))?;
+    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
+    let mut recorder = pos_store::memory::MemoryStore::new();
+    let owner_reference = handle.as_input().owner_reference;
+    let operation_id = Hash::from_bytes([37; 32]);
+    let mut session =
+        registry.begin_local_adapter_session(&admitted, handle, operation_id, &mut recorder)?;
+    assert_eq!(
+        session.invoke(
+            plugin_id,
+            "weather.client",
+            "fixture.provider",
+            "read-current",
+            1,
+            b"request".to_vec(),
+        ),
+        Err(LocalAdapterErrorV1::ProviderRejected)
+    );
+    assert!(matches!(
+        session.finish(),
+        Err(LocalAdapterErrorV1::SessionAborted)
+    ));
+    assert_eq!(
+        recorder.read_closed_adapter_recording_session(owner_reference, operation_id)?,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn local_adapter_registration_rejects_nonlocal_unpinned_and_invalid_contracts() -> TestResult {
+    let plugin = LocalPlugin {
+        id: PluginId::new(),
+    };
+    let mut air_gapped = PluginRegistry::new_air_gapped();
+    assert_eq!(
+        air_gapped.register_local_adapter(adapter_entry(plugin.id()), Box::new(RejectingProvider)),
+        Err(LocalAdapterErrorV1::RegistryState)
+    );
+
+    let mut unpinned = PluginRegistry::new();
+    unpinned.register_generated(&plugin, None, None)?;
+    assert_eq!(
+        unpinned.register_local_adapter(adapter_entry(plugin.id()), Box::new(RejectingProvider)),
+        Err(LocalAdapterErrorV1::PluginUnavailable)
+    );
+
+    let mut registry = PluginRegistry::new();
+    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+    let mut entry = adapter_entry(plugin.id());
+    entry.configuration_digest = Hash::from_bytes([9; 32]);
+    assert_eq!(
+        registry.register_local_adapter(entry, Box::new(RejectingProvider)),
+        Err(LocalAdapterErrorV1::InvalidContract)
+    );
+    registry.register_local_adapter(adapter_entry(plugin.id()), Box::new(RejectingProvider))?;
+    Ok(())
+}
+
+#[test]
+fn local_adapter_session_records_a_request_with_a_multi_byte_length() -> TestResult {
+    let provider = EchoProvider {
+        idempotency_keys: Arc::new(Mutex::new(Vec::new())),
+        completed_responses: Arc::new(Mutex::new(Vec::new())),
+    };
+    let (mut registry, admitted, handle) = registry_with_adapter(Box::new(provider))?;
+    let plugin_id = admitted.adapter_admission().as_input().entries[0].plugin_id;
+    let mut recorder = pos_store::memory::MemoryStore::new();
+    let mut session = registry.begin_local_adapter_session(
+        &admitted,
+        handle,
+        Hash::from_bytes([38; 32]),
+        &mut recorder,
+    )?;
+    let request = b"multi-byte-length-request|".repeat(40);
+    let response = session.invoke(
+        plugin_id,
+        "weather.client",
+        "fixture.provider",
+        "read-current",
+        1,
+        request.clone(),
+    )?;
+    assert_eq!(response, request.iter().rev().copied().collect::<Vec<_>>());
+    let closed = session.finish()?;
+    let calls = &closed.transcript().as_input().calls;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].input.as_input().exact_request_payload, request);
+    assert_eq!(calls[0].exact_output_bytes, response);
     Ok(())
 }
