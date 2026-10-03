@@ -13,7 +13,7 @@ use pos_plugin_eval::{
 };
 use pos_plugin_persona::{PredictionOutcomeV1, PredictionSourceV1, EVENT_TYPE_PREDICTION_SOURCE};
 use pos_runtime::{
-    InstalledOutputPolicySourceV1, OutputPolicyBindingV1, PluginRegistry, RuntimeError,
+    OutputPolicyBindingV1, OutputPolicySourceV1, PluginRegistry, RuntimeError,
     ScheduledAdmissionStoreV1,
 };
 
@@ -44,9 +44,9 @@ fn registry(
         .with_consent_authority(authority.clone())
         .with_erasure_gate(gate);
     let eval = EvalPlugin::new();
-    let binding = OutputPolicyBindingV1::from_installed_source(
+    let binding = OutputPolicyBindingV1::from_source(
         &eval,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &config.configuration_details(),
         "deterministic-local-v1",
     )

@@ -12,8 +12,8 @@ use pos_plugin_persona::PersonaPlugin;
 use pos_plugin_society::{SocietyPlugin, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION_V1};
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, DomainImplementationKindV1, InstalledOutputPolicySourceV1,
-    OutputAdmissionErrorV1, OutputPolicyBindingV1, PluginAvailabilityV1, PluginComposition,
+    recorder::RECORDER_EVENT_TYPE, DomainImplementationKindV1, OutputAdmissionErrorV1,
+    OutputPolicyBindingV1, OutputPolicySourceV1, PluginAvailabilityV1, PluginComposition,
     PluginIsolationV1, PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError,
 };
 
@@ -102,9 +102,9 @@ fn snapshot(registry: &PluginRegistry, probes: &[&str]) -> RegistrySnapshot {
 }
 
 fn generated_binding<P: Plugin>(plugin: &P) -> Result<OutputPolicyBindingV1, RuntimeError> {
-    OutputPolicyBindingV1::from_installed_source(
+    OutputPolicyBindingV1::from_source(
         plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &[],
         "deterministic-local-v1",
     )

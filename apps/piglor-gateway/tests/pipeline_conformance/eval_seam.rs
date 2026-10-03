@@ -19,8 +19,8 @@ use pos_plugin_persona::{
     PredictionOutcomeV1, PredictionSourceV1, PreferencePair, EVENT_TYPE_PREDICTION_SOURCE,
 };
 use pos_runtime::{
-    InstalledOutputPolicySourceV1, LocalScheduledAdmissionHostV1, OutputPolicyBindingV1,
-    PluginRegistry, RuntimeError,
+    LocalScheduledAdmissionHostV1, OutputPolicyBindingV1, OutputPolicySourceV1, PluginRegistry,
+    RuntimeError,
 };
 use serde_json::Value;
 use ulid::Ulid;
@@ -54,9 +54,9 @@ fn quiet_pair() -> PreferencePair {
 fn register_eval(registry: &mut PluginRegistry, max_drafts: u32, diagnostics: &EvalDiagnosticsV1) {
     let eval = EvalPlugin::new();
     let config = EvalDerivationConfigV1::new(max_drafts).test_ok();
-    let binding = OutputPolicyBindingV1::from_installed_source(
+    let binding = OutputPolicyBindingV1::from_source(
         &eval,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &config.configuration_details(),
         "deterministic-local-v1",
     )
