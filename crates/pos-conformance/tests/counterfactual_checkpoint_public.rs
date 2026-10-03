@@ -296,6 +296,25 @@ fn decoder_rejects_unsupported_magic_and_version() -> TestResult {
 }
 
 #[test]
+fn decoder_checks_the_header_before_the_field_count() -> TestResult {
+    let mut short = sample_fields()?;
+    short.truncate(FIELD_CURSOR);
+    for (index, replacement) in [(0, Value::Text("RCP2".to_owned())), (1, uint(2))] {
+        let mut future = short.clone();
+        future[index] = replacement;
+        assert_eq!(
+            decode_error(&encode(&Value::Array(future))?),
+            Some(RcpError::UnsupportedVersion)
+        );
+    }
+    assert_eq!(
+        decode_error(&encode(&Value::Array(short))?),
+        Some(RcpError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
 fn decoder_rejects_wrong_field_types_and_shapes() -> TestResult {
     let negative = Value::Integer((-1_i64).into());
     for (index, replacement) in [
