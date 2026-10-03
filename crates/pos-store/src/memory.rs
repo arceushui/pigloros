@@ -4884,7 +4884,7 @@ impl KeyRegistryHistoricalDecryptionPortV1 for MemoryStore {
         // The mutable store owner is held through the callback, as it is for
         // signing and destruction on this single-process adapter.
         identity
-            .validate_historical_subject_decryption()
+            .validate_historical_decryption()
             .and_then(|()| {
                 self.load_key_registry()
                     .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
