@@ -35,7 +35,7 @@ fn local_registration_admits_the_actual_complete_registry_without_epf1() -> Test
         },
         LocalPlugin {
             id: PluginId::new(),
-            name: "local-agent",
+            name: "local-world",
         },
     ];
     let owner = OwnerIdV1::from_static("open-source-app");
@@ -58,6 +58,24 @@ fn local_registration_admits_the_actual_complete_registry_without_epf1() -> Test
             .rows
             .iter()
             .any(|row| row.plugin_id == plugin.id()));
+    }
+    let policy_sources = registry.admitted_manifest_policy_sources(&admitted)?;
+    assert_eq!(policy_sources.len(), plugins.len());
+    assert!(policy_sources
+        .iter()
+        .all(|source| source.plugin_name() == "local-world"));
+    assert!(policy_sources
+        .iter()
+        .all(|source| source.eop1_bytes().starts_with(b"\x8a\x44EOP1")));
+    assert!(policy_sources
+        .iter()
+        .all(|source| source.opc1_bytes().starts_with(b"OPC1")));
+    for source in &policy_sources {
+        assert!(catalog
+            .as_input()
+            .rows
+            .iter()
+            .any(|row| row.plugin_id == source.plugin_id()));
     }
     assert!(registry.is_admitted_composition_current_for_generation(&admitted, 3));
     assert!(!PluginRegistry::new().is_admitted_composition_current_for_generation(&admitted, 3));
