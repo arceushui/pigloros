@@ -8168,48 +8168,48 @@ mod tests {
         );
     }
 
+    /// A Driver that emits one Event once its subscribed projection reaches 1.
+    struct ProjectionObservingDriver {
+        target: ProjectionKey,
+        entity: EntityId,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Driver for ProjectionObservingDriver {
+        fn name(&self) -> &'static str {
+            "observing"
+        }
+
+        fn subscriptions(&self) -> &[ProjectionKey] {
+            std::slice::from_ref(&self.target)
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<crate::driver::StepOutput, RuntimeError> {
+            let observed = observations
+                .state_for(&self.target)
+                .and_then(|state| state.get("n"))
+                .and_then(serde_json::Value::as_u64);
+            let drafts = (observed == Some(1))
+                .then(|| {
+                    EventDraft::new(
+                        self.entity,
+                        Kind::new("driver.observed"),
+                        CanonicalBytes::from_vec(vec![]),
+                    )
+                })
+                .into_iter()
+                .collect();
+            Ok(crate::driver::StepOutput::new(drafts))
+        }
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn tick_cadenced_materializes_only_subscribed_projection_state() {
-        use crate::driver::ProjectionKey;
-
-        struct ObservingDriver {
-            target: ProjectionKey,
-            entity: EntityId,
-        }
-
-        impl Driver for ObservingDriver {
-            fn name(&self) -> &'static str {
-                "observing"
-            }
-
-            fn subscriptions(&self) -> &[ProjectionKey] {
-                std::slice::from_ref(&self.target)
-            }
-
-            fn step(
-                &mut self,
-                _: pos_core::ids::TimelineId,
-                observations: ObservationView<'_>,
-            ) -> Result<crate::driver::StepOutput, RuntimeError> {
-                let observed = observations
-                    .state_for(&self.target)
-                    .and_then(|state| state.get("n"))
-                    .and_then(serde_json::Value::as_u64);
-                let drafts = (observed == Some(1))
-                    .then(|| {
-                        EventDraft::new(
-                            self.entity,
-                            Kind::new("driver.observed"),
-                            CanonicalBytes::from_vec(vec![]),
-                        )
-                    })
-                    .into_iter()
-                    .collect();
-                Ok(crate::driver::StepOutput::new(drafts))
-            }
-        }
-
         let mut store = gated_store();
         let timeline = store.create_timeline("t").test_ok();
         let observed_entity = EntityId::new();
@@ -8250,7 +8250,7 @@ mod tests {
         register_output_driver(
             &mut reg,
             &["driver.observed"],
-            Box::new(ObservingDriver {
+            Box::new(ProjectionObservingDriver {
                 target: ProjectionKey::new(observed_entity),
                 entity: observed_entity,
             }),

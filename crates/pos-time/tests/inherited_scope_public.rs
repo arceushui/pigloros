@@ -104,7 +104,6 @@ impl Hosted {
         };
         let (root, forks) = lineage("root");
         let (_, unrelated) = lineage("unrelated");
-        drop(commands);
         let mut reads = host.read_sender().test_ok();
         let closures = forks
             .into_iter()
@@ -127,7 +126,6 @@ impl Hosted {
                 (timeline, closure)
             })
             .collect();
-        drop(reads);
         let gate = host.containment_gate();
         Self {
             host,
@@ -190,7 +188,7 @@ impl Hosted {
     }
 }
 
-fn is_frozen<T>(result: &Result<T, CoreError>) -> bool {
+const fn is_frozen<T>(result: &Result<T, CoreError>) -> bool {
     matches!(result, Err(CoreError::ErasureAccessFrozen))
 }
 

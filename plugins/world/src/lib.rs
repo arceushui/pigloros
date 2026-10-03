@@ -3400,21 +3400,10 @@ mod tests {
             body_entity_id: body,
             tick: 0,
             step_index: 0,
-            pos_x: 1.0,
-            pos_y: 2.0,
             pos_z: 0.0,
-            orient_w: 1.0,
-            orient_x: 0.0,
-            orient_y: 0.0,
-            orient_z: 0.0,
             vel_lin_x: 1.0,
             vel_lin_y: 0.0,
-            vel_lin_z: 0.0,
-            vel_ang_x: 0.0,
-            vel_ang_y: 0.0,
-            vel_ang_z: 0.0,
-            sensor_kind: 0,
-            sensor_value: vec![],
+            ..sample_observation()
         };
         let mut events = vec![
             make_versioned_event(
@@ -3466,6 +3455,7 @@ mod tests {
             )
             .test_ok();
         registry.compose_non_participant_drivers().test_ok();
+        let ancestry = root_ancestry(timeline);
         registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(4))],
@@ -3473,22 +3463,12 @@ mod tests {
             )
             .test_ok();
         let resumed_drafts = registry
-            .step_all_anchored_with_events(
-                timeline,
-                &root_ancestry(timeline),
-                Seq::from_u64(4),
-                &events,
-            )
+            .step_all_anchored_with_events(timeline, &ancestry, Seq::from_u64(4), &events)
             .test_ok();
         assert_eq!(resumed_drafts[0].causation_id, Some(events[1].id));
         registry.abort_step();
         registry
-            .step_all_anchored_with_events(
-                timeline,
-                &root_ancestry(timeline),
-                Seq::from_u64(4),
-                &events,
-            )
+            .step_all_anchored_with_events(timeline, &ancestry, Seq::from_u64(4), &events)
             .test_ok();
         let mut reduced = WorldReducer.initial();
         WorldReducer.apply(&mut reduced, &events[2]);
