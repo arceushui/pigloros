@@ -3,10 +3,11 @@
 use std::collections::BTreeMap;
 
 use pos_core::{
-    CanonicalBytes, CounterfactualBasisV1, CounterfactualInvalidationCommandV1,
-    CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualStoreErrorV1, CounterfactualStorePortV1, EntityId, EventDraft, ForkGenerationV1,
-    Hash, InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, Seq,
+    CanonicalBytes, CounterfactualBasisV1, CounterfactualFactsV1,
+    CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
+    CounterfactualTickOutcomeV1, EntityId, EventDraft, ForkGenerationV1, Hash,
+    InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, Seq,
     StoredCounterfactualArtifactV1, SuffixInvalidationBytesV1, TimelineId,
     MAX_COUNTERFACTUAL_EVICTIONS_V1, MAX_COUNTERFACTUAL_FRONTIER_BYTES_V1,
     MAX_COUNTERFACTUAL_INVALIDATION_BYTES_V1, MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1,
@@ -14,6 +15,13 @@ use pos_core::{
 use ulid::Ulid;
 
 type StoreError = CounterfactualStoreErrorV1;
+/// One persisted-basis change and the conflict it must report.
+type BasisChange = (fn(&mut CounterfactualBasisV1), InvalidationConflictV1);
+/// One published-facts change and the epoch conflict it must report.
+type FactsChange = (
+    fn(&mut CounterfactualFactsV1),
+    Option<InvalidationConflictV1>,
+);
 
 const FRONTIER_DOMAIN: &[u8] = b"PiglorOS.RecomputationFrontier.v1";
 const INVALIDATION_DOMAIN: &[u8] = b"PiglorOS.SuffixInvalidation.v1";
@@ -568,12 +576,8 @@ fn command_binds_every_transaction_part() {
         command.expected_basis(),
         CounterfactualBasisV1 {
             fork_logical_head: Seq::from_u64(41),
-            plan_digest: hash(5),
-            dependency_graph_digest: hash(3),
             generation: 3,
-            trust_epoch: 6,
-            revocation_epoch: 7,
-            erasure_epoch: 8,
+            facts: facts(),
         }
     );
     assert_eq!(
@@ -596,6 +600,39 @@ fn command_binds_every_transaction_part() {
     assert_eq!(receipt.invalidation_digest(), input.invalidation.digest());
     assert_eq!(receipt.first_tick(), 17);
     assert_eq!(receipt.first_tick_head(), Seq::from_u64(42));
+    assert_eq!(receipt.facts(), facts());
+}
+
+const fn facts() -> CounterfactualFactsV1 {
+    CounterfactualFactsV1 {
+        plan_digest: hash(5),
+        dependency_graph_digest: hash(3),
+        trust_epoch: 6,
+        revocation_epoch: 7,
+        erasure_epoch: 8,
+    }
+}
+
+#[test]
+fn receipt_binds_its_committed_invalidation() {
+    let command = command();
+    let receipt = ok(command.committed_receipt(Seq::from_u64(42)));
+    assert!(receipt.matches_invalidation(command.invalidation()));
+    let same = ok(InvalidationFields::valid(command.frontier(), 3).parse());
+    assert!(receipt.matches_invalidation(&same));
+    let mut fields = InvalidationFields::valid(command.frontier(), 3);
+    fields.commit_tick = 18;
+    assert!(!receipt.matches_invalidation(&ok(fields.parse())));
+    let later = ok(InvalidationFields::valid(command.frontier(), 4).parse());
+    assert!(!receipt.matches_invalidation(&later));
+    assert_eq!(
+        receipt.tick_basis(Seq::from_u64(50)),
+        CounterfactualBasisV1 {
+            fork_logical_head: Seq::from_u64(50),
+            generation: 4,
+            facts: facts(),
+        }
+    );
 }
 
 #[test]
@@ -749,17 +786,17 @@ fn digest_sets_must_be_strictly_ascending() {
 fn basis_reports_the_first_conflict_in_canonical_order() {
     let expected = command().expected_basis();
     assert_eq!(expected.first_conflict(&expected), None);
-    let cases: [(fn(&mut CounterfactualBasisV1), InvalidationConflictV1); 7] = [
+    let cases: [BasisChange; 7] = [
         (
             |basis| basis.fork_logical_head = Seq::from_u64(42),
             InvalidationConflictV1::LogicalHead,
         ),
         (
-            |basis| basis.plan_digest = hash(99),
+            |basis| basis.facts.plan_digest = hash(99),
             InvalidationConflictV1::PlanDigest,
         ),
         (
-            |basis| basis.dependency_graph_digest = hash(99),
+            |basis| basis.facts.dependency_graph_digest = hash(99),
             InvalidationConflictV1::DependencyGraphDigest,
         ),
         (
@@ -767,15 +804,15 @@ fn basis_reports_the_first_conflict_in_canonical_order() {
             InvalidationConflictV1::PriorGeneration,
         ),
         (
-            |basis| basis.trust_epoch = 9,
+            |basis| basis.facts.trust_epoch = 9,
             InvalidationConflictV1::TrustEpoch,
         ),
         (
-            |basis| basis.revocation_epoch = 9,
+            |basis| basis.facts.revocation_epoch = 9,
             InvalidationConflictV1::RevocationEpoch,
         ),
         (
-            |basis| basis.erasure_epoch = 9,
+            |basis| basis.facts.erasure_epoch = 9,
             InvalidationConflictV1::ErasureEpoch,
         ),
     ];
@@ -785,12 +822,84 @@ fn basis_reports_the_first_conflict_in_canonical_order() {
         assert_eq!(expected.first_conflict(&persisted), Some(conflict));
     }
     let mut persisted = expected;
-    persisted.erasure_epoch = 9;
-    persisted.plan_digest = hash(99);
+    persisted.facts.erasure_epoch = 9;
+    persisted.facts.plan_digest = hash(99);
     assert_eq!(
         expected.first_conflict(&persisted),
         Some(InvalidationConflictV1::PlanDigest)
     );
+    persisted = expected;
+    persisted.facts.trust_epoch = 9;
+    persisted.generation = 9;
+    assert_eq!(
+        expected.first_conflict(&persisted),
+        Some(InvalidationConflictV1::PriorGeneration)
+    );
+}
+
+#[test]
+fn facts_compare_only_epochs_in_canonical_order() {
+    let admitted = facts();
+    assert_eq!(admitted.first_epoch_change(&admitted), None);
+    let cases: [FactsChange; 5] = [
+        (
+            |facts| {
+                facts.plan_digest = hash(99);
+                facts.dependency_graph_digest = hash(98);
+            },
+            None,
+        ),
+        (
+            |facts| facts.trust_epoch = 9,
+            Some(InvalidationConflictV1::TrustEpoch),
+        ),
+        (
+            |facts| facts.revocation_epoch = 9,
+            Some(InvalidationConflictV1::RevocationEpoch),
+        ),
+        (
+            |facts| facts.erasure_epoch = 9,
+            Some(InvalidationConflictV1::ErasureEpoch),
+        ),
+        (
+            |facts| {
+                facts.revocation_epoch = 9;
+                facts.erasure_epoch = 9;
+            },
+            Some(InvalidationConflictV1::RevocationEpoch),
+        ),
+    ];
+    for (change, conflict) in cases {
+        let mut current = admitted;
+        change(&mut current);
+        assert_eq!(admitted.first_epoch_change(&current), conflict);
+    }
+    let mut current = admitted;
+    current.erasure_epoch = 9;
+    current.trust_epoch = 9;
+    assert_eq!(
+        admitted.first_epoch_change(&current),
+        Some(InvalidationConflictV1::TrustEpoch)
+    );
+}
+
+#[test]
+fn committed_tick_requires_the_fork_head_to_advance() {
+    let basis = command().expected_basis();
+    for head in [0, 40, 41] {
+        assert_eq!(
+            basis.committed_tick(Seq::from_u64(head)),
+            Err(StoreError::CorruptState)
+        );
+    }
+    for head in [42, u64::MAX] {
+        assert_eq!(
+            basis.committed_tick(Seq::from_u64(head)),
+            Ok(CounterfactualTickOutcomeV1::Committed {
+                head: Seq::from_u64(head)
+            })
+        );
+    }
 }
 
 #[test]
@@ -846,34 +955,97 @@ fn errors_have_distinct_safe_messages() {
 
 /// Minimal fake showing the port is implementable without backend types.
 struct FakeStore {
-    basis: CounterfactualBasisV1,
+    head: Seq,
+    published: Option<(u64, CounterfactualFactsV1)>,
     artifacts: BTreeMap<Hash, Vec<u8>>,
     quarantined: Vec<Hash>,
 }
 
+impl FakeStore {
+    fn new() -> Self {
+        Self {
+            head: Seq::from_u64(41),
+            published: None,
+            artifacts: BTreeMap::from([(hash(10), vec![1]), (hash(20), vec![2])]),
+            quarantined: Vec::new(),
+        }
+    }
+
+    fn basis(&self, fork: TimelineId) -> Result<CounterfactualBasisV1, StoreError> {
+        match self.published {
+            Some((generation, facts)) if fork == crate::fork() => Ok(CounterfactualBasisV1 {
+                fork_logical_head: self.head,
+                generation,
+                facts,
+            }),
+            _ => Err(StoreError::ForkNotFound),
+        }
+    }
+
+    fn head_after(&self, drafts: &PipelineDraftBatchV1) -> Seq {
+        Seq::from_u64(self.head.as_u64() + ok(u64::try_from(drafts.drafts().len())))
+    }
+}
+
 impl CounterfactualStorePortV1 for FakeStore {
+    fn publish_counterfactual_facts(
+        &mut self,
+        fork: TimelineId,
+        facts: CounterfactualFactsV1,
+    ) -> Result<ForkGenerationV1, StoreError> {
+        if fork != crate::fork() {
+            return Err(StoreError::ForkNotFound);
+        }
+        let generation = self.published.map_or(0, |(generation, _)| generation);
+        self.published = Some((generation, facts));
+        Ok(ForkGenerationV1 { fork, generation })
+    }
+
     fn commit_counterfactual_invalidation(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
-        if let Some(conflict) = command.expected_basis().first_conflict(&self.basis) {
+        let persisted = self.basis(command.fork())?;
+        if let Some(conflict) = command.expected_basis().first_conflict(&persisted) {
             return Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
                 conflict,
             ));
         }
-        self.basis.generation = command.new_generation().generation;
+        let receipt = command.committed_receipt(self.head_after(command.first_tick_drafts()))?;
+        self.published = Some((receipt.generation().generation, persisted.facts));
+        self.head = receipt.first_tick_head();
         self.quarantined
             .extend_from_slice(command.invalid_artifacts());
-        command
-            .committed_receipt(Seq::from_u64(42))
-            .map(CounterfactualInvalidationOutcomeV1::Committed)
+        Ok(CounterfactualInvalidationOutcomeV1::Committed(receipt))
+    }
+
+    fn append_counterfactual_tick(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+    ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
+        let persisted = self.basis(fork)?;
+        if let Some(conflict) = expected.first_conflict(&persisted) {
+            return Ok(CounterfactualTickOutcomeV1::Stale(conflict));
+        }
+        let outcome = persisted.committed_tick(self.head_after(drafts))?;
+        self.head = self.head_after(drafts);
+        Ok(outcome)
     }
 
     fn current_fork_generation(&self, fork: TimelineId) -> Result<ForkGenerationV1, StoreError> {
-        Ok(ForkGenerationV1 {
+        self.basis(fork).map(|basis| ForkGenerationV1 {
             fork,
-            generation: self.basis.generation,
+            generation: basis.generation,
         })
+    }
+
+    fn current_counterfactual_basis(
+        &self,
+        fork: TimelineId,
+    ) -> Result<CounterfactualBasisV1, StoreError> {
+        self.basis(fork)
     }
 
     fn read_generation_artifact(
@@ -881,6 +1053,7 @@ impl CounterfactualStorePortV1 for FakeStore {
         at: ForkGenerationV1,
         artifact_digest: Hash,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        let current = self.basis(at.fork)?;
         let stored = if self.quarantined.contains(&artifact_digest) {
             StoredCounterfactualArtifactV1::Quarantined
         } else {
@@ -890,20 +1063,52 @@ impl CounterfactualStorePortV1 for FakeStore {
                     StoredCounterfactualArtifactV1::Authoritative(bytes.clone())
                 })
         };
-        at.resolve_read(self.basis.generation, stored)
+        at.resolve_read(current.generation, stored)
     }
+}
+
+#[test]
+fn port_publishes_facts_without_moving_the_generation() {
+    let mut store = FakeStore::new();
+    let other = TimelineId::from_ulid(Ulid::from(77_u128));
+    assert_eq!(
+        store.publish_counterfactual_facts(other, facts()),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.current_counterfactual_basis(fork()),
+        Err(StoreError::ForkNotFound)
+    );
+    let mut stale = facts();
+    stale.trust_epoch = 99;
+    let first = ok(store.publish_counterfactual_facts(fork(), stale));
+    assert_eq!(first.generation, 0);
+    assert_eq!(
+        ok(store.current_counterfactual_basis(fork())),
+        CounterfactualBasisV1 {
+            fork_logical_head: Seq::from_u64(41),
+            generation: 0,
+            facts: stale,
+        }
+    );
+    store.published = Some((3, stale));
+    assert_eq!(
+        ok(store.publish_counterfactual_facts(fork(), facts())).generation,
+        3
+    );
+    assert_eq!(
+        ok(store.current_counterfactual_basis(fork())).facts,
+        facts()
+    );
 }
 
 #[test]
 fn port_commits_whole_generation_or_reports_conflict() {
     let command = command();
-    let mut stale = command.expected_basis();
+    let mut stale = facts();
     stale.trust_epoch = 99;
-    let mut store = FakeStore {
-        basis: stale,
-        artifacts: BTreeMap::from([(hash(10), vec![1]), (hash(20), vec![2])]),
-        quarantined: Vec::new(),
-    };
+    let mut store = FakeStore::new();
+    store.published = Some((3, stale));
     let prior = ok(store.current_fork_generation(fork()));
     assert_eq!(
         ok(store.commit_counterfactual_invalidation(&command)),
@@ -917,7 +1122,7 @@ fn port_commits_whole_generation_or_reports_conflict() {
         Some(vec![1])
     );
 
-    store.basis = command.expected_basis();
+    ok(store.publish_counterfactual_facts(fork(), facts()));
     assert_eq!(
         ok(store.commit_counterfactual_invalidation(&command)),
         CounterfactualInvalidationOutcomeV1::Committed(ok(
@@ -939,4 +1144,66 @@ fn port_commits_whole_generation_or_reports_conflict() {
         Some(vec![2])
     );
     assert_eq!(ok(store.read_generation_artifact(current, hash(30))), None);
+}
+
+#[test]
+fn port_appends_later_ticks_only_on_the_expected_basis() {
+    let command = command();
+    let mut store = FakeStore::new();
+    ok(store.publish_counterfactual_facts(fork(), facts()));
+    let CounterfactualInvalidationOutcomeV1::Committed(receipt) =
+        ok(store.commit_counterfactual_invalidation(&command))
+    else {
+        std::panic::resume_unwind(Box::new("invalidation did not commit"));
+    };
+    let next = receipt.tick_basis(receipt.first_tick_head());
+    assert_eq!(ok(store.current_counterfactual_basis(fork())), next);
+    for (expected, conflict) in [
+        (
+            receipt.tick_basis(Seq::from_u64(41)),
+            InvalidationConflictV1::LogicalHead,
+        ),
+        (
+            command.expected_basis(),
+            InvalidationConflictV1::LogicalHead,
+        ),
+    ] {
+        assert_eq!(
+            ok(store.append_counterfactual_tick(fork(), &expected, &drafts())),
+            CounterfactualTickOutcomeV1::Stale(conflict)
+        );
+    }
+    let mut older = next;
+    older.generation = 3;
+    let mut epoch_moved = facts();
+    epoch_moved.erasure_epoch = 9;
+    ok(store.publish_counterfactual_facts(fork(), epoch_moved));
+    assert_eq!(
+        ok(store.append_counterfactual_tick(fork(), &older, &drafts())),
+        CounterfactualTickOutcomeV1::Stale(InvalidationConflictV1::PriorGeneration)
+    );
+    assert_eq!(
+        ok(store.append_counterfactual_tick(fork(), &next, &drafts())),
+        CounterfactualTickOutcomeV1::Stale(InvalidationConflictV1::ErasureEpoch)
+    );
+    assert_eq!(
+        ok(store.current_counterfactual_basis(fork())).fork_logical_head,
+        Seq::from_u64(42)
+    );
+    ok(store.publish_counterfactual_facts(fork(), facts()));
+    assert_eq!(
+        ok(store.append_counterfactual_tick(fork(), &next, &drafts())),
+        CounterfactualTickOutcomeV1::Committed {
+            head: Seq::from_u64(43)
+        }
+    );
+    assert_eq!(
+        ok(store.current_counterfactual_basis(fork())),
+        receipt.tick_basis(Seq::from_u64(43))
+    );
+    let other = TimelineId::from_ulid(Ulid::from(77_u128));
+    assert_eq!(
+        store.append_counterfactual_tick(other, &next, &drafts()),
+        Err(StoreError::ForkNotFound)
+    );
 }
