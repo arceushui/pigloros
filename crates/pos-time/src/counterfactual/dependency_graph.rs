@@ -499,9 +499,9 @@ fn validate_root(
     if root && !node.input_digests.is_empty() {
         Err(DependencyGraphErrorV1::UnclosedEndogenousInput)
     } else if root
-        && !bindings
+        && bindings
             .root_binding(node)
-            .is_some_and(|binding| binding.provenance_digest == node.provenance_digest)
+            .is_none_or(|binding| binding.provenance_digest != node.provenance_digest)
     {
         Err(DependencyGraphErrorV1::RootNotInPlan)
     } else {
