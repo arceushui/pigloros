@@ -15196,6 +15196,16 @@ mod local_cut_owner_coverage {
         Ok(&mut local_operation(store, FIRST_CUT.operation_id)?.request)
     }
 
+    /// Change one kind-5 row and its table so only the commit's head binding differs.
+    fn reheaded_first_cut(store: &mut MemoryStore) -> TestResult {
+        let request = first_request(store)?;
+        request.result_head_rows[0].event_count = 1;
+        let rows = &request.result_head_rows;
+        let table = LocalCutHeadsTableV1::result_heads(CUT_OWNER, FIRST_CUT.cut_id, rows)?;
+        request.result_heads_table = table.table_ref();
+        Ok(())
+    }
+
     #[test]
     fn local_cut_retry_rejects_each_mismatched_stored_binding() -> TestResult {
         // Each case breaks exactly one of the 13 compared bindings of the older
@@ -15226,10 +15236,7 @@ mod local_cut_owner_coverage {
                 first_request(store)?.manifest_hash = hash(0x99);
                 Ok(())
             },
-            |store| {
-                first_request(store)?.result_heads_table = table(1, 0x99)?;
-                Ok(())
-            },
+            reheaded_first_cut,
             |store| {
                 first_request(store)?.participant_successor_table = table(1, 0x99)?;
                 Ok(())
