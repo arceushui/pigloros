@@ -6779,6 +6779,31 @@ mod tests {
         store
             .fork_append_operations
             .remove(&duplicate_operation.input().operation_id);
+
+        for unbound in [
+            ForkAppendOperationInputV1 {
+                classifier_revision_digest: Hash::from_bytes([71; 32]),
+                ..suffix_operation.input().clone()
+            },
+            ForkAppendOperationInputV1 {
+                fork_admission_digest: Hash::from_bytes([72; 32]),
+                ..suffix_operation.input().clone()
+            },
+        ] {
+            store.fork_append_operations.insert(
+                suffix_operation.input().operation_id,
+                ForkAppendOperationV1::new(unbound)?,
+            );
+            assert_eq!(
+                store.read_fork_event_suffix(child_timeline_id, 1),
+                Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+            );
+        }
+        store.fork_append_operations.insert(
+            suffix_operation.input().operation_id,
+            suffix_operation.clone(),
+        );
+        assert_eq!(store.read_fork_event_suffix(child_timeline_id, 1)?.len(), 1);
         Ok(())
     }
 
