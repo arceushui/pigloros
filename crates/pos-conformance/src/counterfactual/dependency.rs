@@ -21,8 +21,8 @@
 //! uses the exact `[source.tick, consumer.tick]` span.
 
 use super::codec::{
-    bytes_value, decode_canonical, encode_value, node_value, text_value, uint_value, CborLimits,
-    FieldReader, WireError,
+    bytes_value, decode_canonical, encode_value, node_value, nonzero, text_value, uint_value,
+    CborLimits, FieldReader, WireError,
 };
 use crate::{domain_digest, DependencyClassV1, DependencyNodeV1};
 use ciborium::value::Value;
@@ -33,24 +33,73 @@ pub const INPUT_DEPENDENCY_MAGIC_V1: &str = "IDP1";
 /// Maximum encoded size of an IDP1 input-dependency record.
 pub const MAX_INPUT_DEPENDENCY_BYTES_V1: usize = 16 * 1024;
 
+/// Maximum UTF-8 byte length of a dependency-node owner ID.
+pub const MAX_DEPENDENCY_OWNER_ID_BYTES_V1: usize = 128;
+
 const FIELD_COUNT: usize = 9;
-/// Closed dependency classes indexed by their IDP1 wire code.
-const CLASSES: [DependencyClassV1; 5] = [
-    DependencyClassV1::ExogenousFrozen,
-    DependencyClassV1::InterventionAssigned,
-    DependencyClassV1::EndogenousRecomputed,
-    DependencyClassV1::FixedPolicy,
-    DependencyClassV1::PresentationOnly,
-];
 const LIMITS: CborLimits = CborLimits {
     maximum_bytes: MAX_INPUT_DEPENDENCY_BYTES_V1,
     maximum_depth: 2,
     maximum_items: 9,
     allow_simple_values: false,
 };
-const MAX_OWNER_ID_BYTES: usize = 128;
 const MAX_RULE_ID_BYTES: usize = 128;
 const DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.InputDependency.v1";
+
+impl DependencyClassV1 {
+    /// Every closed dependency class, indexed by its wire code.
+    ///
+    /// This is the one wire-code table shared by IDP1, the nested evidence
+    /// codec, and every consumer outside this crate.
+    pub const ALL_V1: [Self; 5] = [
+        Self::ExogenousFrozen,
+        Self::InterventionAssigned,
+        Self::EndogenousRecomputed,
+        Self::FixedPolicy,
+        Self::PresentationOnly,
+    ];
+
+    /// Stable wire code of this class: its index in [`Self::ALL_V1`].
+    #[must_use]
+    pub const fn wire_code(self) -> u8 {
+        self as u8
+    }
+
+    /// Class carrying wire code `code`, or `None` outside the closed set.
+    #[must_use]
+    pub fn from_wire_code(code: u64) -> Option<Self> {
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| Self::ALL_V1.get(index))
+            .copied()
+    }
+}
+
+impl DependencyNodeV1 {
+    /// Canonical coordinate order key `(tick, scheduler_position, owner_id
+    /// bytes, output_ordinal)`; the schema and artifact digest are not part
+    /// of the coordinate.
+    #[must_use]
+    pub const fn coordinate_key(&self) -> (u64, u32, &str, u32) {
+        (
+            self.tick,
+            self.scheduler_position,
+            self.owner_id.as_str(),
+            self.output_ordinal,
+        )
+    }
+
+    /// Whether the node is a valid IDP1 coordinate: a 1 to
+    /// [`MAX_DEPENDENCY_OWNER_ID_BYTES_V1`] byte owner ID, a nonzero schema
+    /// ID, and a nonzero artifact digest.
+    #[must_use]
+    pub fn is_valid_coordinate(&self) -> bool {
+        !self.owner_id.is_empty()
+            && self.owner_id.len() <= MAX_DEPENDENCY_OWNER_ID_BYTES_V1
+            && self.schema_id != 0
+            && nonzero(&self.artifact_digest)
+    }
+}
 
 /// Closed safe errors exposed by the IDP1 contract.
 ///
@@ -176,15 +225,15 @@ impl InputDependencyV1 {
     ///
     /// Returns a closed safe error when any field or coordinate is invalid.
     pub fn validate(&self) -> Result<(), InputDependencyContractErrorV1> {
-        if !valid_node(&self.consumer)
-            || !valid_node(&self.source)
+        if !self.consumer.is_valid_coordinate()
+            || !self.source.is_valid_coordinate()
             || !self.tick_range.covers(self.source.tick, self.consumer.tick)
             || !nonzero(&self.authorization_digest)
             || !valid_rule(&self.classification_rule)
             || !nonzero(&self.provenance_digest)
         {
             Err(InputDependencyContractErrorV1::FieldOutOfBounds)
-        } else if coordinate(&self.source) < coordinate(&self.consumer) {
+        } else if self.source.coordinate_key() < self.consumer.coordinate_key() {
             Ok(())
         } else {
             Err(InputDependencyContractErrorV1::NonCanonicalOrder)
@@ -265,29 +314,8 @@ const fn edge_order_key(dependency: &InputDependencyV1) -> (u64, u32, &str, u32,
     )
 }
 
-const fn coordinate(node: &DependencyNodeV1) -> (u64, u32, &str, u32) {
-    (
-        node.tick,
-        node.scheduler_position,
-        node.owner_id.as_str(),
-        node.output_ordinal,
-    )
-}
-
-fn valid_node(node: &DependencyNodeV1) -> bool {
-    valid_owner_id(&node.owner_id) && node.schema_id != 0 && nonzero(&node.artifact_digest)
-}
-
-const fn valid_owner_id(owner_id: &str) -> bool {
-    !owner_id.is_empty() && owner_id.len() <= MAX_OWNER_ID_BYTES
-}
-
 fn valid_rule(rule: &DependencyClassificationRuleV1) -> bool {
     crate::identifier(&rule.rule_id, MAX_RULE_ID_BYTES) && rule.rule_version != 0
-}
-
-fn nonzero(digest: &[u8; 32]) -> bool {
-    *digest != [0; 32]
 }
 
 fn encode_dependency(dependency: &InputDependencyV1) -> Value {
@@ -296,7 +324,7 @@ fn encode_dependency(dependency: &InputDependencyV1) -> Value {
         uint_value(1),
         node_value(&dependency.consumer),
         node_value(&dependency.source),
-        uint_value(class_code(dependency.dependency_class)),
+        uint_value(dependency.dependency_class.wire_code().into()),
         Value::Array(vec![
             uint_value(dependency.tick_range.first_tick),
             uint_value(dependency.tick_range.last_tick),
@@ -310,21 +338,14 @@ fn encode_dependency(dependency: &InputDependencyV1) -> Value {
     ])
 }
 
-const fn class_code(class: DependencyClassV1) -> u64 {
-    match class {
-        DependencyClassV1::ExogenousFrozen => 0,
-        DependencyClassV1::InterventionAssigned => 1,
-        DependencyClassV1::EndogenousRecomputed => 2,
-        DependencyClassV1::FixedPolicy => 3,
-        DependencyClassV1::PresentationOnly => 4,
-    }
-}
-
 fn decode_dependency(value: &Value) -> Result<InputDependencyV1, InputDependencyContractErrorV1> {
     let mut fields = FieldReader::with_header(value, FIELD_COUNT, INPUT_DEPENDENCY_MAGIC_V1, 1);
     let consumer = fields.read_node();
     let source = fields.read_node();
-    let dependency_class = fields.read_enum(&CLASSES, DependencyClassV1::ExogenousFrozen);
+    let dependency_class = fields.read_enum(
+        &DependencyClassV1::ALL_V1,
+        DependencyClassV1::ExogenousFrozen,
+    );
     let tick_range = fields.read_with(
         tick_range_field,
         DependencyTickRangeV1 {

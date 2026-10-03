@@ -6,7 +6,7 @@ use ciborium::value::Value;
 use pos_conformance::counterfactual::dependency::{
     validate_input_dependency_order_v1, DependencyClassificationRuleV1, DependencyTickRangeV1,
     InputDependencyContractErrorV1, InputDependencyV1, INPUT_DEPENDENCY_MAGIC_V1,
-    MAX_INPUT_DEPENDENCY_BYTES_V1,
+    MAX_DEPENDENCY_OWNER_ID_BYTES_V1, MAX_INPUT_DEPENDENCY_BYTES_V1,
 };
 use pos_conformance::{DependencyClassV1, DependencyNodeV1};
 use std::collections::BTreeSet;
@@ -170,6 +170,42 @@ fn every_closed_dependency_class_roundtrips_with_its_code() -> TestResult {
         assert_decode_error(&with_field(4, uint(code))?, ErrorV1::UnknownEnum, "class");
     }
     Ok(())
+}
+
+#[test]
+fn public_wire_code_table_is_the_closed_class_order() {
+    for (index, class) in DependencyClassV1::ALL_V1.into_iter().enumerate() {
+        assert_eq!(usize::from(class.wire_code()), index);
+        assert_eq!(
+            DependencyClassV1::from_wire_code(u64::from(class.wire_code())),
+            Some(class)
+        );
+    }
+    assert_eq!(DependencyClassV1::PresentationOnly.wire_code(), 4);
+    for code in [5, u64::MAX] {
+        assert_eq!(DependencyClassV1::from_wire_code(code), None);
+    }
+}
+
+#[test]
+fn public_node_coordinate_helpers_match_the_idp1_rules() {
+    let valid = node(5, 2, "agent-b", 1, 0x22);
+    assert_eq!(valid.coordinate_key(), (5, 2, "agent-b", 1));
+    assert!(valid.is_valid_coordinate());
+    assert_eq!(MAX_DEPENDENCY_OWNER_ID_BYTES_V1, 128);
+    let longest = node(5, 2, &"o".repeat(128), 1, 0x22);
+    assert!(longest.is_valid_coordinate());
+    let invalid: [fn(&mut DependencyNodeV1); 4] = [
+        |value| value.owner_id = String::new(),
+        |value| value.owner_id = "o".repeat(129),
+        |value| value.schema_id = 0,
+        |value| value.artifact_digest = [0; 32],
+    ];
+    for change in invalid {
+        let mut candidate = valid.clone();
+        change(&mut candidate);
+        assert!(!candidate.is_valid_coordinate());
+    }
 }
 
 #[test]
@@ -447,6 +483,22 @@ fn header_is_closed_to_other_magic_and_versions() -> TestResult {
             "header",
         );
     }
+    let mut short = canonical_fields()?;
+    short.truncate(5);
+    for (index, value) in [(0, text("IDP2")), (1, uint(2))] {
+        let mut future = short.clone();
+        future[index] = value;
+        assert_decode_error(
+            &encode_value(&Value::Array(future))?,
+            ErrorV1::UnsupportedVersion,
+            "future header with another field count",
+        );
+    }
+    assert_decode_error(
+        &encode_value(&Value::Array(short))?,
+        ErrorV1::InvalidEncoding,
+        "supported header with a short field count",
+    );
     let malformed = [
         (0, uint(1)),
         (1, text("1")),
