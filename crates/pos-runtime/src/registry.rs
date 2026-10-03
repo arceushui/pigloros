@@ -11,6 +11,11 @@ use pos_core::{
     clock::Seq,
     event::{Event, EventDraft, Kind},
     ids::{PluginId, TimelineId},
+    local_cut_owner::{
+        local_cut_owner_intent_digest_v1, prepare_local_cut_owner_commit_v1, LocalCutOwnerCommitV1,
+        LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
+        LocalCutOwnerVerifierV1,
+    },
     manifest_owner_admission::{
         manifest_owner_admission_intent_digest_v1, prepare_manifest_owner_admission_v1,
         ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1,
@@ -90,6 +95,24 @@ pub fn recover_manifest_owner_admission_retry_v1<S: ManifestOwnerAdmissionPersis
     let intent_digest = manifest_owner_admission_intent_digest_v1(request)?;
     store.resolve_manifest_owner_admission_retry_v1(
         request.catalog.as_input().owner_id,
+        request.operation_id,
+        intent_digest,
+    )
+}
+
+/// Recover an exact local-cut owner retry without a live Plugin registry or
+/// coordinator signer.
+///
+/// # Errors
+/// Returns request-shape, conflict, corruption, or storage failures from the
+/// installed persistence boundary.
+pub fn recover_local_cut_owner_retry_v1<S: LocalCutOwnerPersistencePortV1>(
+    request: &LocalCutOwnerRequestV1,
+    store: &S,
+) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+    let intent_digest = local_cut_owner_intent_digest_v1(request)?;
+    store.resolve_local_cut_owner_retry_v1(
+        request.seal.as_input().owner_id,
         request.operation_id,
         intent_digest,
     )
@@ -1154,6 +1177,7 @@ pub struct PluginRegistry {
     manifest_batch: Option<ManifestAdmissionCatalogV1>,
     manifest_identity: Arc<()>,
     manifest_owner_admission_verifier: Option<Box<dyn ManifestOwnerAdmissionVerifierV1>>,
+    local_cut_owner_verifier: Option<Box<dyn LocalCutOwnerVerifierV1>>,
     registration_revision: u64,
     local_adapters: Vec<adapter::RegisteredLocalAdapterV1>,
     approver_map: IndexMap<Kind, PluginId>,
@@ -1486,6 +1510,71 @@ impl PluginRegistry {
         let prepared =
             prepare_manifest_owner_admission_v1(request, verifier, current_state.as_ref())?;
         store.commit_manifest_owner_admission_v1(prepared)
+    }
+
+    /// Prepare and atomically commit an authenticated local cut through the
+    /// registry-bound installed owner service.
+    ///
+    /// Recovery resolves an exact durable operation before this method inspects
+    /// the live registry or asks the installed coordinator to sign again. The
+    /// active complete #418 admission is loaded from the same store and must
+    /// match this registry's still-current admitted composition.
+    ///
+    /// # Errors
+    /// Returns `OwnerRejected` when the registry capability or installed owner
+    /// service is unavailable or stale. Other errors preserve the closed
+    /// local-cut persistence and structural boundary.
+    pub fn commit_admitted_local_cut_owner_v1<
+        S: ManifestOwnerAdmissionPersistencePortV1 + LocalCutOwnerPersistencePortV1,
+    >(
+        &self,
+        admitted: &AdmittedCompositionV1,
+        request: LocalCutOwnerRequestV1,
+        store: &mut S,
+    ) -> Result<LocalCutOwnerCommitV1, LocalCutOwnerErrorV1> {
+        if let Some(retry) = recover_local_cut_owner_retry_v1(&request, store)? {
+            return Ok(retry);
+        }
+        let owner_id = request.seal.as_input().owner_id;
+        let admission_state = store
+            .read_manifest_owner_state_v1(owner_id)?
+            .ok_or(LocalCutOwnerErrorV1::OwnerRejected)?;
+        if !self.is_admitted_composition_current_for_generation(
+            admitted,
+            request.seal.as_input().configuration_generation,
+        ) || admitted.catalog().as_input().owner_id != owner_id
+            || admission_state.configuration_generation
+                != request.seal.as_input().configuration_generation
+        {
+            return Err(LocalCutOwnerErrorV1::OwnerRejected);
+        }
+        let mut admissions = Vec::with_capacity(admission_state.timelines.len());
+        for timeline_id in &admission_state.timelines {
+            let snapshot = store
+                .read_manifest_owner_admission_v1(
+                    owner_id,
+                    admission_state.configuration_generation,
+                    *timeline_id,
+                )?
+                .ok_or(LocalCutOwnerErrorV1::OwnerRejected)?;
+            if &snapshot.catalog != admitted.catalog() {
+                return Err(LocalCutOwnerErrorV1::OwnerRejected);
+            }
+            admissions.push(snapshot);
+        }
+        let current_state = store.read_local_cut_owner_state_v1(owner_id)?;
+        let verifier = self
+            .local_cut_owner_verifier
+            .as_deref()
+            .ok_or(LocalCutOwnerErrorV1::OwnerRejected)?;
+        let prepared = prepare_local_cut_owner_commit_v1(
+            request,
+            current_state.as_ref(),
+            &admission_state,
+            &admissions,
+            verifier,
+        )?;
+        store.commit_local_cut_owner_v1(prepared)
     }
 
     fn validate_complete_manifest_batch(
@@ -1854,6 +1943,21 @@ impl PluginRegistry {
         registry
     }
 
+    /// Bind the installed local-cut owner service once at registry construction.
+    ///
+    /// The verifier is retained by this registry and cannot be selected by a
+    /// prospective LCS2 request.
+    #[must_use]
+    pub fn with_local_cut_owner_verifier(
+        mut self,
+        verifier: impl LocalCutOwnerVerifierV1 + 'static,
+    ) -> Self {
+        if self.local_cut_owner_verifier.is_none() {
+            self.local_cut_owner_verifier = Some(Box::new(verifier));
+        }
+        self
+    }
+
     /// Create a live registry for an Air-Gapped execution profile.
     #[must_use]
     pub fn new_air_gapped() -> Self {
@@ -1882,6 +1986,7 @@ impl PluginRegistry {
             manifest_batch: None,
             manifest_identity: Arc::new(()),
             manifest_owner_admission_verifier: None,
+            local_cut_owner_verifier: None,
             registration_revision: 0,
             local_adapters: Vec::new(),
             approver_map: IndexMap::new(),

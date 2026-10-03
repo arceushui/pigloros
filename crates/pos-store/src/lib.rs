@@ -101,6 +101,8 @@ pub use pos_core::{
     ErasureCasOutcomeV1, ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, Event,
     EventDraft, EventId, GeographicAdmissionAdmin, GeographicAdmissionOutcome,
     GeographicAdmissionStore, GeographicReplayEvidenceV1, GeographicReplayVerifier, Kind,
+    LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1, LocalCutOwnerErrorV1,
+    LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1, LocalCutOwnerStateV1,
     ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerAdmissionSnapshotV1,

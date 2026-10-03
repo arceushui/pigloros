@@ -37,6 +37,8 @@ pub mod geo_cell_admission;
 pub mod hasher;
 pub mod ids;
 pub mod key_registry;
+pub mod local_cut_commit;
+pub mod local_cut_owner;
 pub mod local_cut_seal;
 pub mod manifest;
 pub mod manifest_owner_admission;
@@ -225,6 +227,19 @@ pub use adapter_transcript::{
     AdapterTranscriptCallV1, AdapterTranscriptErrorV1, AdapterTranscriptInputV1,
     AdapterTranscriptV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_BYTES_V1,
     MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+};
+pub use local_cut_commit::{
+    local_cut_receipt_signature_preimage_v1, LocalCutCommitErrorV1, LocalCutCommitInputV1,
+    LocalCutCommitV1, LocalCutReceiptInputV1, LocalCutReceiptV1, MAX_LOCAL_CUT_COMMIT_BYTES_V1,
+    MAX_LOCAL_CUT_RECEIPT_BYTES_V1,
+};
+pub use local_cut_owner::{
+    local_cut_owner_intent_digest_v1, prepare_local_cut_owner_commit_v1,
+    validate_local_cut_owner_result_v1, validate_local_cut_owner_successor_v1,
+    LocalCutCompositionBindingRowV1, LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1,
+    LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
+    LocalCutOwnerStateV1, LocalCutOwnerVerifierV1, LocalCutRecordingContextRowV1,
+    PreparedLocalCutOwnerCommitV1, MAX_LOCAL_CUT_OWNER_ROWS_V1,
 };
 pub use local_cut_seal::{
     local_cut_tree_scope_v1, LocalCutBranchChildV1, LocalCutManifestBindingBranchV1,

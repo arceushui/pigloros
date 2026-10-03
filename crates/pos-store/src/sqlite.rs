@@ -127,7 +127,13 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+mod local_cut_owner;
 mod pipeline_admission;
+
+use local_cut_owner::{
+    sqlite_manifest_or_local_cut_owner_has_rows, sqlite_sync_local_cut_owner_after_admission,
+    sqlite_validate_local_cut_owner_admission, LOCAL_CUT_OWNER_SCHEMA_SQL,
+};
 
 #[cfg(test)]
 thread_local! {
@@ -1807,6 +1813,7 @@ impl SqliteStore {
         } else {
             self.conn
                 .execute_batch(MANIFEST_OWNER_ADMISSION_SCHEMA_SQL)
+                .and_then(|()| self.conn.execute_batch(LOCAL_CUT_OWNER_SCHEMA_SQL))
                 .map_err(Self::into_storage_error)
         }
     }
@@ -6627,6 +6634,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
             sqlite_validate_manifest_owner_transition(input, current_state.as_ref())?;
             sqlite_insert_manifest_owner_rows(&self.conn, input)?;
             sqlite_write_manifest_owner_state(&self.conn, input)?;
+            sqlite_sync_local_cut_owner_after_admission(&self.conn, input, current_state.as_ref())?;
             let receipt_hashes = input
                 .timelines
                 .iter()
@@ -6645,7 +6653,12 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
                 receipt_hashes,
             })
         })();
-        finish_manifest_owner_admission_scope(&self.conn, scope, result)
+        finish_owner_scope(
+            &self.conn,
+            scope,
+            result,
+            ManifestOwnerAdmissionErrorV1::StorageFailure,
+        )
     }
 
     fn read_manifest_owner_admission_v1(
@@ -6663,15 +6676,19 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
         else {
             return Ok(None);
         };
-        let receipt = snapshot.timeline.receipt.as_input();
-        let generation = sqlite_read_manifest_owner_generation(
-            &self.conn,
-            owner_id,
-            configuration_generation,
-            receipt.previous_visible_lcq1_hash,
-            snapshot.resulting_inventory_generation,
-        )?;
+        let generation =
+            sqlite_read_manifest_owner_generation(&self.conn, owner_id, configuration_generation)?;
+        let inventory_matches =
+            generation.inventory_generation == snapshot.resulting_inventory_generation;
+        let previous_receipt_matches = generation.previous_visible_lcq1_hash
+            == snapshot
+                .timeline
+                .receipt
+                .as_input()
+                .previous_visible_lcq1_hash;
         if generation.operation_id != snapshot.operation_id
+            || !inventory_matches
+            || !previous_receipt_matches
             || !generation.timelines.contains(&timeline_id)
         {
             return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
@@ -6680,7 +6697,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
             &self.conn,
             owner_id,
             configuration_generation,
-            snapshot.resulting_inventory_generation,
+            generation.inventory_generation,
             generation.operation_id,
             &generation.receipt_hashes,
         )?;
@@ -6688,23 +6705,25 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
     }
 }
 
-fn finish_manifest_owner_admission_scope<T>(
+/// Finish an owner-boundary scope, reporting any lost outcome as `storage_failure`.
+fn finish_owner_scope<T, E: Copy>(
     connection: &Connection,
     scope: SqliteImmediateScopeV1,
-    result: Result<T, ManifestOwnerAdmissionErrorV1>,
-) -> Result<T, ManifestOwnerAdmissionErrorV1> {
+    result: Result<T, E>,
+    storage_failure: E,
+) -> Result<T, E> {
     match scope {
         SqliteImmediateScopeV1::Transaction => finish_transaction(
             connection,
             result,
-            |_, _| ManifestOwnerAdmissionErrorV1::StorageFailure,
-            |_, _| ManifestOwnerAdmissionErrorV1::StorageFailure,
+            |_, _| storage_failure,
+            |_, _| storage_failure,
         ),
         SqliteImmediateScopeV1::Savepoint => match result {
             Ok(value) => connection
                 .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
                 .map(|()| value)
-                .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure),
+                .map_err(|_| storage_failure),
             Err(error) => {
                 let rollback = connection.execute_batch(
                     "ROLLBACK TO SAVEPOINT pigloros_protected_effect;
@@ -6712,7 +6731,7 @@ fn finish_manifest_owner_admission_scope<T>(
                 );
                 match rollback {
                     Ok(()) => Err(error),
-                    Err(_) => Err(ManifestOwnerAdmissionErrorV1::StorageFailure),
+                    Err(_) => Err(storage_failure),
                 }
             }
         },
@@ -6723,6 +6742,8 @@ struct SqliteManifestOwnerAdmissionGenerationV1 {
     operation_id: Hash,
     timelines: Vec<TimelineId>,
     receipt_hashes: Vec<Hash>,
+    inventory_generation: Hash,
+    previous_visible_lcq1_hash: Option<Hash>,
 }
 
 fn sqlite_read_manifest_owner_current_state(
@@ -6732,7 +6753,7 @@ fn sqlite_read_manifest_owner_current_state(
     let Some((generation, previous_visible_lcq1_hash, inventory_generation)) =
         sqlite_manifest_owner_state(connection, owner_id)?
     else {
-        return if sqlite_manifest_owner_has_rows(connection, owner_id)? {
+        return if sqlite_manifest_or_local_cut_owner_has_rows(connection, owner_id)? {
             Err(ManifestOwnerAdmissionErrorV1::CorruptState)
         } else {
             Ok(None)
@@ -6741,36 +6762,38 @@ fn sqlite_read_manifest_owner_current_state(
     if inventory_generation == Hash::zero() || previous_visible_lcq1_hash == Some(Hash::zero()) {
         return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
     }
-    let generation_rows = sqlite_read_manifest_owner_generation(
-        connection,
-        owner_id,
-        generation,
-        previous_visible_lcq1_hash,
-        inventory_generation,
-    )?;
+    let generation_rows = sqlite_read_manifest_owner_generation(connection, owner_id, generation)?;
     sqlite_validate_manifest_owner_generation_operation(
         connection,
         owner_id,
         generation,
-        inventory_generation,
+        generation_rows.inventory_generation,
         generation_rows.operation_id,
         &generation_rows.receipt_hashes,
     )?;
-    Ok(Some(ManifestOwnerAdmissionOwnerStateV1 {
+    sqlite_validate_local_cut_owner_admission(
+        connection,
         owner_id,
-        configuration_generation: generation,
+        generation,
         previous_visible_lcq1_hash,
         inventory_generation,
-        timelines: generation_rows.timelines,
-    }))
+        &generation_rows,
+    )
+    .map(|()| {
+        Some(ManifestOwnerAdmissionOwnerStateV1 {
+            owner_id,
+            configuration_generation: generation,
+            previous_visible_lcq1_hash,
+            inventory_generation,
+            timelines: generation_rows.timelines,
+        })
+    })
 }
 
 fn sqlite_read_manifest_owner_generation(
     connection: &Connection,
     owner_id: [u8; 32],
     configuration_generation: u64,
-    previous_visible_lcq1_hash: Option<Hash>,
-    inventory_generation: Hash,
 ) -> Result<SqliteManifestOwnerAdmissionGenerationV1, ManifestOwnerAdmissionErrorV1> {
     let mut statement = connection
         .prepare(
@@ -6791,14 +6814,12 @@ fn sqlite_read_manifest_owner_generation(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
     drop(statement);
-    if timeline_bytes.is_empty()
-        || timeline_bytes.len() > pos_core::MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1
-    {
+    if timeline_bytes.len() > pos_core::MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1 {
         return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
     }
 
     let mut timelines = Vec::with_capacity(timeline_bytes.len());
-    let mut operation_id = None;
+    let mut generation_identity = None;
     let mut catalog_digest = None;
     let mut scopes = HashSet::with_capacity(timeline_bytes.len());
     let mut receipt_hashes = Vec::with_capacity(timeline_bytes.len());
@@ -6814,28 +6835,35 @@ fn sqlite_read_manifest_owner_generation(
             timeline_id,
         )?
         .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
-        if snapshot.resulting_inventory_generation != inventory_generation
-            || snapshot
+        let identity = (
+            snapshot.operation_id,
+            snapshot.resulting_inventory_generation,
+            snapshot
                 .timeline
                 .receipt
                 .as_input()
-                .previous_visible_lcq1_hash
-                != previous_visible_lcq1_hash
-            || operation_id.is_some_and(|stored| stored != snapshot.operation_id)
+                .previous_visible_lcq1_hash,
+        );
+        if generation_identity.is_some_and(|stored| stored != identity)
             || catalog_digest.is_some_and(|stored| stored != snapshot.catalog.digest())
             || !scopes.insert(snapshot.timeline.scope)
         {
             return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
         }
-        operation_id = Some(snapshot.operation_id);
+        generation_identity = Some(identity);
         catalog_digest = Some(snapshot.catalog.digest());
         receipt_hashes.push(snapshot.timeline.receipt.digest());
         timelines.push(timeline_id);
     }
+    // A generation without admission rows has no identity and is corrupt.
+    let (operation_id, inventory_generation, previous_visible_lcq1_hash) =
+        generation_identity.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
     Ok(SqliteManifestOwnerAdmissionGenerationV1 {
-        operation_id: operation_id.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?,
+        operation_id,
         timelines,
         receipt_hashes,
+        inventory_generation,
+        previous_visible_lcq1_hash,
     })
 }
 
