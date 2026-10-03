@@ -65,7 +65,6 @@
 //! parent-cut Tick determines it.
 
 use super::dependency_graph::{DependencyGraphNodeV1, ValidatedDependencyGraphV1};
-use pos_conformance::counterfactual::dependency::InputDependencyContractErrorV1;
 use pos_conformance::counterfactual::frontier_artifacts::FrontierArtifactErrorV1;
 use pos_conformance::counterfactual::plan::{
     CounterfactualPlanContractErrorV1, CounterfactualPlanV1,
@@ -90,9 +89,6 @@ pub enum RecomputationFrontierErrorV1 {
     /// The frontier provenance digest is all zero.
     #[error("recomputation-frontier provenance is missing")]
     ProvenanceMissing,
-    /// A dependency edge has no canonical IDP1 digest.
-    #[error("recomputation-frontier dependency edge is invalid")]
-    Dependency(#[source] InputDependencyContractErrorV1),
     /// The derived frontier violates the `RCF1` contract or its bounds.
     #[error("recomputation frontier violates the RCF1 contract")]
     Frontier(#[source] FrontierArtifactErrorV1),
@@ -116,29 +112,22 @@ pub fn derive_recomputation_frontier_v1(
     provenance_digest: [u8; 32],
 ) -> Result<RecomputationFrontierV1, RecomputationFrontierErrorV1> {
     check_inputs(plan, graph, provenance_digest)?;
-    dependency_graph_digest_v1(graph)
-        .map_err(RecomputationFrontierErrorV1::Dependency)
-        .and_then(|dependency_graph_digest| {
-            seal(RecomputationFrontierV1 {
-                frontier_id,
-                dependency_graph_digest,
-                provenance_digest,
-                ..unsealed_frontier(plan, graph)
-            })
-            .map_err(RecomputationFrontierErrorV1::Frontier)
-        })
+    seal(RecomputationFrontierV1 {
+        frontier_id,
+        dependency_graph_digest: dependency_graph_digest_v1(graph),
+        provenance_digest,
+        ..unsealed_frontier(plan, graph)
+    })
+    .map_err(RecomputationFrontierErrorV1::Frontier)
 }
 
 /// Compute the documented digest of a validated dependency graph.
 ///
-/// See the module documentation for the exact hashed frame.
-///
-/// # Errors
-///
-/// Returns the IDP1 error of an edge that has no canonical digest.
-pub fn dependency_graph_digest_v1(
-    graph: &ValidatedDependencyGraphV1,
-) -> Result<[u8; 32], InputDependencyContractErrorV1> {
+/// See the module documentation for the exact hashed frame. The edge digests
+/// are the ones recorded when the graph was validated, so no edge is
+/// re-encoded here.
+#[must_use]
+pub fn dependency_graph_digest_v1(graph: &ValidatedDependencyGraphV1) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(DEPENDENCY_GRAPH_DIGEST_DOMAIN_V1);
     hasher.update(&[0]);
@@ -147,16 +136,11 @@ pub fn dependency_graph_digest_v1(
     for node in graph.nodes() {
         hash_node(&mut hasher, node);
     }
-    hasher.update(&length(graph.edges().len()));
-    graph
-        .edges()
-        .iter()
-        .try_for_each(|edge| {
-            edge.digest().map(|digest| {
-                hasher.update(&digest);
-            })
-        })
-        .map(|()| *hasher.finalize().as_bytes())
+    hasher.update(&length(graph.edge_digests().len()));
+    for digest in graph.edge_digests() {
+        hasher.update(digest);
+    }
+    *hasher.finalize().as_bytes()
 }
 
 fn check_inputs(
@@ -289,6 +273,12 @@ fn owner_frontier(node: &DependencyGraphNodeV1, affected: &BTreeSet<[u8; 32]>) -
 }
 
 /// Fill the frontier digest, then run the standalone `RCF1` validation.
+///
+/// This is the fewest encodings the public `RCF1` API allows: `digest`
+/// encodes the unsigned fields once, and `validate` must run on the sealed
+/// record to enforce the field and encoded-size bounds. The re-encoding that
+/// `validate` does internally to verify the digest belongs to the `RCF1`
+/// contract, not to this derivation.
 fn seal(
     unsigned: RecomputationFrontierV1,
 ) -> Result<RecomputationFrontierV1, FrontierArtifactErrorV1> {
