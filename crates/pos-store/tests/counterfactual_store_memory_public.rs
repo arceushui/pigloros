@@ -288,7 +288,7 @@ fn committed(
     command: &CounterfactualInvalidationCommandV1,
 ) -> CounterfactualGenerationReceiptV1 {
     match ok(store.commit_counterfactual_invalidation(command)) {
-        CounterfactualInvalidationOutcomeV1::Committed(receipt) => receipt,
+        CounterfactualInvalidationOutcomeV1::Committed(receipt) => *receipt,
         other @ CounterfactualInvalidationOutcomeV1::InvalidationConflict(_) => {
             std::panic::resume_unwind(Box::new(format!("expected a commit, got {other:?}")))
         }
