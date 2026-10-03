@@ -713,33 +713,29 @@ fn validate_seal_prestate(
     {
         return Err(LocalCutOwnerErrorV1::Conflict);
     }
-    match current_state {
-        Some(state) => {
-            let last_visible_cut_id = state.last_visible_cut_id;
-            let expected_tick = state
-                .last_visible_tick
-                .checked_add(1)
-                .ok_or(LocalCutOwnerErrorV1::Conflict)?;
-            if state.owner_id != admission_state.owner_id
-                || state.previous_visible_lcq1_hash != admission_state.previous_visible_lcq1_hash
-                || state.configuration_generation != admission_state.configuration_generation
-                || state.inventory_generation != admission_state.inventory_generation
-                || state.timelines != admission_state.timelines
-                || seal.cut_id <= last_visible_cut_id
-                || seal.tick != expected_tick
-                || seal.membership_epoch != state.membership_epoch
-            {
-                return Err(LocalCutOwnerErrorV1::Conflict);
-            }
+    let Some(state) = current_state else {
+        if admission_state.previous_visible_lcq1_hash.is_some() {
+            return Err(LocalCutOwnerErrorV1::CorruptState);
         }
-        None => {
-            if admission_state.previous_visible_lcq1_hash.is_some() {
-                return Err(LocalCutOwnerErrorV1::CorruptState);
-            }
-            if seal.tick != 1 || seal.membership_epoch != 0 {
-                return Err(LocalCutOwnerErrorV1::Conflict);
-            }
+        if seal.tick != 1 || seal.membership_epoch != 0 {
+            return Err(LocalCutOwnerErrorV1::Conflict);
         }
+        return Ok(());
+    };
+    let expected_tick = state
+        .last_visible_tick
+        .checked_add(1)
+        .ok_or(LocalCutOwnerErrorV1::Conflict)?;
+    if state.owner_id != admission_state.owner_id
+        || state.previous_visible_lcq1_hash != admission_state.previous_visible_lcq1_hash
+        || state.configuration_generation != admission_state.configuration_generation
+        || state.inventory_generation != admission_state.inventory_generation
+        || state.timelines != admission_state.timelines
+        || seal.cut_id <= state.last_visible_cut_id
+        || seal.tick != expected_tick
+        || seal.membership_epoch != state.membership_epoch
+    {
+        return Err(LocalCutOwnerErrorV1::Conflict);
     }
     Ok(())
 }
