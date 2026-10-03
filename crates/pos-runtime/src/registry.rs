@@ -16,8 +16,8 @@ use pos_core::{
     },
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentError, ConsentGate, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
-    ErasureProtectedOperationV1, OwnerIdV1, Plugin, ProposedAction, Reducer, Timeline,
-    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ErasureProtectedOperationV1, OwnerIdV1, Plugin, ProposedAction, Reducer,
+    ScheduledObservationProfileV1, Timeline, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
@@ -48,6 +48,7 @@ mod adapter;
 mod authorized_pass;
 mod catalogue;
 mod human_admission;
+mod profile_composition;
 mod scheduled_admission;
 
 pub use adapter::{
@@ -59,6 +60,7 @@ pub use catalogue::{HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPlu
 pub use human_admission::{
     HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
 };
+pub use profile_composition::{ScheduledDriverBindingV1, ScheduledProfileErrorV1};
 pub use scheduled_admission::ScheduledPassAdmissionV1;
 
 /// Stable manifest slot of a Plugin in a registry-derived local catalog.
@@ -1130,6 +1132,8 @@ pub struct PluginRegistry {
     pub schemas: SchemaRegistry,
     projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
+    /// Composition-time scheduled observation profile of each Driver.
+    scheduled_profiles: profile_composition::ScheduledBindings,
     /// Scheduled pass whose admission outcome is unknown; only an exact
     /// retry of its retained basis or an explicit abort may resolve it. Boxed
     /// so the rarely used retained basis does not enlarge every registry.
@@ -1729,6 +1733,7 @@ impl PluginRegistry {
             // runtime and projection work can proceed.
             projections: ProjectionRegistry::new(),
             pending_step: None,
+            scheduled_profiles: profile_composition::ScheduledBindings::new(),
             in_doubt_admission: None,
             run_mode,
             composition_mode,
@@ -2193,14 +2198,19 @@ impl PluginRegistry {
         committed_events: &[Event],
         operation: &OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.ensure_live_execution()?;
-        self.step_anchored_transaction_live(
-            timeline,
-            observed_through,
-            selection,
-            committed_events,
-            operation,
-        )
+        self.ensure_live_execution()
+            .and_then(|()| {
+                self.require_scheduled_profile(ScheduledObservationProfileV1::NonParticipant)
+            })
+            .and_then(|()| {
+                self.step_anchored_transaction_live(
+                    timeline,
+                    observed_through,
+                    selection,
+                    committed_events,
+                    operation,
+                )
+            })
     }
 
     fn step_anchored_transaction_live(
@@ -3725,12 +3735,15 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.ensure_live_execution()?;
-        self.with_erasure_mut_fence(
-            timeline,
-            ErasureProtectedOperationV1::PluginInput,
-            |registry| registry.tick_cadenced_live(timeline, now_ns),
-        )
+        self.ensure_live_execution()
+            .and_then(|()| self.reject_participant_bound_drivers())
+            .and_then(|()| {
+                self.with_erasure_mut_fence(
+                    timeline,
+                    ErasureProtectedOperationV1::PluginInput,
+                    |registry| registry.tick_cadenced_live(timeline, now_ns),
+                )
+            })
     }
 
     fn tick_cadenced_live(
@@ -3909,8 +3922,9 @@ impl PluginRegistry {
         &mut self,
         timeline: pos_core::ids::TimelineId,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.ensure_live_execution()?;
-        self.step_all_live(timeline)
+        self.ensure_live_execution()
+            .and_then(|()| self.reject_participant_bound_drivers())
+            .and_then(|()| self.step_all_live(timeline))
     }
 
     fn step_all_live(
