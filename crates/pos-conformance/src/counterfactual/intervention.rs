@@ -239,7 +239,8 @@ impl InterventionV1 {
 /// A plan holds 1 to 1,024 valid Interventions strictly ordered by
 /// `(effective_tick, ordinal, intervention_id)`. Ordinals restart at zero for
 /// every effective tick and count contiguously, and Intervention IDs are
-/// unique across the plan.
+/// unique across the plan. An empty list is rejected: a counterfactual plan
+/// without an Intervention has no causal change to recompute.
 ///
 /// # Errors
 /// Returns a closed safe error for an out-of-bounds list or record, a
@@ -283,7 +284,7 @@ fn validate_contiguous_ordinals(
             return Err(InterventionContractErrorV1::NonContiguousOrdinal);
         }
         previous_tick = Some(intervention.effective_tick);
-        expected_ordinal = expected_ordinal.saturating_add(1);
+        expected_ordinal += 1;
     }
     Ok(())
 }
