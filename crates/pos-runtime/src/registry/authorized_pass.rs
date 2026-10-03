@@ -260,8 +260,7 @@ fn invoke_authorized_entry(
             name: entry.name.clone(),
         });
     };
-    if !driver.subscriptions().is_empty()
-        || !entry.event_observation.event_subscriptions.is_empty()
+    if !driver.subscriptions().is_empty() || !entry.event_observation.event_subscriptions.is_empty()
     {
         return Err(unauthorized());
     }
