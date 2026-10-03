@@ -43,6 +43,7 @@ pub mod local_cut_seal;
 pub mod manifest;
 pub mod manifest_owner_admission;
 pub mod manifest_owner_link;
+pub mod manifest_owner_members;
 pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
@@ -267,6 +268,12 @@ pub use manifest_owner_link::{
     ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1,
     MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, MAX_MANIFEST_OWNER_PLUGINS_V1,
     MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+};
+pub use manifest_owner_members::{
+    build_manifest_owner_scope_v1, validate_manifest_owner_lease_replacement_v1,
+    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
+    ManifestOwnerMemberLeafClassV1, ManifestOwnerMemberLeafV1, ManifestOwnerPolicySourceV1,
+    ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1,
 };
 pub use repro_manifest_root::{
     ReproManifestRootErrorV1, ReproManifestRootInputV1, ReproManifestRootV1,

@@ -7,21 +7,27 @@ use std::{
     },
 };
 
+use pos_core::retention::{
+    WorldRetentionLeaseInputV1, WorldRetentionLeaseV1, WorldRetentionPolicyV1,
+};
 use pos_core::{
-    manifest_owner_admission_intent_digest_v1, prepare_manifest_owner_admission_v1,
-    validate_manifest_owner_admission_snapshot_v1, ArtifactDataClassV1, ArtifactOptionalityV1,
-    ArtifactTransitionRuleV1, Hash, LocalCutOwnerCommitKindV1, LocalCutOwnerErrorV1,
-    LocalCutOwnerPersistencePortV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1,
-    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
+    build_manifest_owner_scope_v1, manifest_owner_admission_intent_digest_v1,
+    prepare_manifest_owner_admission_v1, validate_manifest_owner_admission_snapshot_v1,
+    ArtifactDataClassV1, ArtifactTransitionRuleV1, Hash, LocalCutOwnerCommitKindV1,
+    LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, ManifestAdmissionCatalogInputV1,
+    ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
-    ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
-    ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-    ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1,
-    ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1, OwnerIdV1, Plugin,
-    PluginId, PreparedManifestOwnerAdmissionV1, TimelineId, WorldArtifactKindV1,
-    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
-    WorldConsumerV1, WorldProducerV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerConsumerReferenceV1,
+    ManifestOwnerLeafClassificationV1, ManifestOwnerMemberLeafClassV1, ManifestOwnerPolicyCopiesV1,
+    ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1,
+    ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
+    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptInputV1,
+    ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1, ManifestSlotBindingRowV1,
+    ManifestSlotBindingV1, OutputPolicyClosureEnvelopeV1, OwnerIdV1, Plugin, PluginId,
+    PreparedManifestOwnerAdmissionV1, TimelineId, WorldArtifactKindV1, WorldClosureReadLimitsV1,
+    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
+    MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 use pos_runtime::{
     recover_local_cut_owner_retry_v1, recover_manifest_owner_admission_retry_v1,
@@ -40,6 +46,13 @@ type LocalCutPair = (
     pos_core::LocalCutOwnerCommitV1,
     pos_core::LocalCutOwnerCommitV1,
 );
+
+const DAY_MICROS: u64 = 86_400_000_000;
+const READ_LIMITS: WorldClosureReadLimitsV1 = WorldClosureReadLimitsV1 {
+    max_node_visits: 4096,
+    max_native_bytes: 1_048_576,
+    max_combined_depth: 32,
+};
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -165,55 +178,20 @@ fn request_for_timelines(
     }
 
     let mut timelines = Vec::with_capacity(timeline_ids.len());
-    for (index, timeline_id) in timeline_ids.iter().enumerate() {
-        let scope_byte = 70u8
-            .checked_add(u8::try_from(index)?)
-            .ok_or("too many fixture Timelines")?;
-        let scope = hash(scope_byte);
-        let mut policy_copies = Vec::with_capacity(sources.len());
-        for source in sources {
-            let eop1_bytes = source.eop1_bytes().to_vec();
-            let opc1_bytes = source.opc1_bytes().to_vec();
-            let eop1_leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-                scope,
-                kind: WorldArtifactKindV1::OutputPolicy,
-                native_digest: source.eop1_native_digest(),
-                native_byte_length: u64::try_from(eop1_bytes.len()).unwrap_or(u64::MAX),
-                owner: owner_id,
-                data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-                optionality: ArtifactOptionalityV1::Required,
-                transition: ArtifactTransitionRuleV1::PreserveExact,
-                source_lease_hash: hash(71),
-                key_dependencies: Vec::new(),
-                child_node_hashes: Vec::new(),
-            })?;
-            let opc1_leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-                scope,
-                kind: WorldArtifactKindV1::OutputPolicyClosure,
-                native_digest: source.closure_hash(),
-                native_byte_length: u64::try_from(opc1_bytes.len()).unwrap_or(u64::MAX),
-                owner: owner_id,
-                data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-                optionality: ArtifactOptionalityV1::Required,
-                transition: ArtifactTransitionRuleV1::PreserveExact,
-                source_lease_hash: hash(71),
-                key_dependencies: Vec::new(),
-                child_node_hashes: Vec::new(),
-            })?;
-            policy_copies.push(ManifestOwnerPolicyCopiesV1 {
-                plugin_id: source.plugin_id(),
-                eop1_bytes,
-                eop1_leaf,
-                opc1_bytes,
-                opc1_leaf,
-            });
-        }
-        let wcs1 = consumer_set(scope, producer.plugin_id(), producer.eop1_native_digest())?;
+    for timeline_id in timeline_ids {
+        let scope = admitted_scope(owner_id, timeline_id, sources)?;
+        let wcs1 = consumer_set(
+            scope.scope,
+            &scope.members,
+            producer.plugin_id(),
+            producer.eop1_native_digest(),
+        )?;
         timelines.push(ManifestOwnerTimelineAdmissionRequestV1 {
-            timeline_id: *timeline_id,
-            scope,
+            timeline_id,
+            scope: scope.scope,
             wcs1,
-            policy_copies,
+            policy_copies: scope.policy_copies,
+            members: scope.members,
         });
     }
 
@@ -224,12 +202,78 @@ fn request_for_timelines(
         previous_visible_lcq1_hash: transition.previous_visible_lcq1_hash,
         expected_inventory_generation: transition.expected_inventory_generation,
         resulting_inventory_generation: transition.resulting_inventory_generation,
+        read_limits: READ_LIMITS,
         timelines,
     })
 }
 
+/// Derive one scope from the admitted sources and a lease over their RTP1.
+fn admitted_scope(
+    owner_id: [u8; 32],
+    timeline_id: TimelineId,
+    sources: &[pos_runtime::AdmittedManifestPolicySourceV1],
+) -> Result<ManifestOwnerScopeV1, Box<dyn Error>> {
+    let first = sources.first().ok_or("empty admitted Plugin set")?;
+    let envelope = OutputPolicyClosureEnvelopeV1::from_canonical_bytes_v1(
+        first.opc1_bytes(),
+        first.eop1_bytes(),
+    )?;
+    let rtp1_bytes = envelope.retention_policy_artifact().to_vec();
+    let policy = WorldRetentionPolicyV1::from_canonical_cbor(&rtp1_bytes)?;
+    let lease = WorldRetentionLeaseV1::new(
+        &policy,
+        WorldRetentionLeaseInputV1 {
+            timeline_id,
+            policy_hash: policy.digest(),
+            started_at_micros: DAY_MICROS,
+            admission_closes_at_micros: 11 * DAY_MICROS,
+            retention_deadline_micros: 111 * DAY_MICROS,
+        },
+    )?;
+    let source = ManifestOwnerScopeSourceV1 {
+        owner_id,
+        timeline_id,
+        rtp1_bytes,
+        rls1_bytes: lease.to_canonical_cbor(),
+        consumer_references: vec![ManifestOwnerConsumerReferenceV1 {
+            schema: hash(80),
+            reducer: hash(79),
+            runtime: hash(81),
+        }],
+        policy_sources: sources
+            .iter()
+            .map(|source| ManifestOwnerPolicySourceV1 {
+                plugin_id: source.plugin_id(),
+                eop1_bytes: source.eop1_bytes().to_vec(),
+                opc1_bytes: source.opc1_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    let classify = |_: WorldArtifactKindV1, _: Hash| {
+        Some(ManifestOwnerLeafClassificationV1 {
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            transition: ArtifactTransitionRuleV1::PreserveExact,
+            key_dependencies: Vec::new(),
+        })
+    };
+    Ok(build_manifest_owner_scope_v1(&source, &classify)?)
+}
+
+fn reference_leaf(
+    members: &ManifestOwnerScopeMembersV1,
+    kind: WorldArtifactKindV1,
+) -> Result<Hash, Box<dyn Error>> {
+    members
+        .leaves
+        .iter()
+        .find(|member| member.leaf.as_input().kind == kind)
+        .map(|member| member.leaf.digest())
+        .ok_or_else(|| "missing reference leaf".into())
+}
+
 fn consumer_set(
     scope: Hash,
+    members: &ManifestOwnerScopeMembersV1,
     producer_id: PluginId,
     output_policy_hash: Hash,
 ) -> Result<WorldConsumerSetV1, Box<dyn Error>> {
@@ -237,9 +281,9 @@ fn consumer_set(
         scope,
         consumers: vec![WorldConsumerV1::new(
             "local-observer".to_owned(),
-            hash(79),
-            hash(80),
-            hash(81),
+            reference_leaf(members, WorldArtifactKindV1::ReducerImplementation)?,
+            reference_leaf(members, WorldArtifactKindV1::Schema)?,
+            reference_leaf(members, WorldArtifactKindV1::RuntimeIdentity)?,
         )?],
         producers: vec![WorldProducerV1::new(producer_id, output_policy_hash)?],
         optional_view_roots: Vec::new(),
@@ -369,6 +413,19 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
         } else {
             Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
         }
+    }
+
+    fn classify_scope_member_leaves(
+        &self,
+        _timeline_id: TimelineId,
+        _scope: Hash,
+        members: &ManifestOwnerScopeMembersV1,
+    ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+        Ok(members
+            .leaves
+            .iter()
+            .map(|member| ManifestOwnerMemberLeafClassV1::of_leaf(&member.leaf))
+            .collect())
     }
 }
 
@@ -1694,6 +1751,7 @@ enum OwnerFault {
     Composition,
     ScopeSet,
     NativeCopies,
+    MemberLeaves,
     Signature,
     ReceiptDraft,
     Receipt,
@@ -1776,6 +1834,17 @@ impl ManifestOwnerAdmissionVerifierV1 for FaultyOwner {
         self.inner
             .verify_native_policy_copies(timeline_id, scope, copies)
     }
+
+    fn classify_scope_member_leaves(
+        &self,
+        timeline_id: TimelineId,
+        scope: Hash,
+        members: &ManifestOwnerScopeMembersV1,
+    ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+        self.reject_at(OwnerFault::MemberLeaves)?;
+        self.inner
+            .classify_scope_member_leaves(timeline_id, scope, members)
+    }
 }
 
 /// Store whose owner-state read fails after a missing retry lookup.
@@ -1845,6 +1914,7 @@ fn prepared_snapshot(
         operation_id: input.operation_id,
         expected_inventory_generation: input.expected_inventory_generation,
         resulting_inventory_generation: input.resulting_inventory_generation,
+        read_limits: input.read_limits,
     })
 }
 
@@ -1878,6 +1948,7 @@ fn owner_verifier_rejections_stop_preparation_at_each_step() -> TestResult {
         OwnerFault::Composition,
         OwnerFault::ScopeSet,
         OwnerFault::NativeCopies,
+        OwnerFault::MemberLeaves,
         OwnerFault::Signature,
         OwnerFault::ReceiptDraft,
         OwnerFault::Receipt,
@@ -1968,11 +2039,13 @@ fn preparation_rejects_unknown_copies_unparseable_eop1_and_foreign_producers() -
 
     let mut foreign_producer = request(&admitted, &sources, timeline_id, operation_id)?;
     let scope = foreign_producer.timelines[0].scope;
+    let members = foreign_producer.timelines[0].members.clone();
     foreign_producer.timelines[0].wcs1 =
-        consumer_set(scope, unknown, producer.eop1_native_digest())?;
+        consumer_set(scope, &members, unknown, producer.eop1_native_digest())?;
 
     let mut drifted_producer = request(&admitted, &sources, timeline_id, operation_id)?;
-    drifted_producer.timelines[0].wcs1 = consumer_set(scope, producer.plugin_id(), hash(87))?;
+    drifted_producer.timelines[0].wcs1 =
+        consumer_set(scope, &members, producer.plugin_id(), hash(87))?;
 
     for invalid in [
         unknown_copy,

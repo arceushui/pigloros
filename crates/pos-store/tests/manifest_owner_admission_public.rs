@@ -1,17 +1,27 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use pos_core::output_policy::{OutputPolicyInputV1, OutputPolicyV1};
+use pos_core::retention::{
+    WorldRetentionLeaseInputV1, WorldRetentionLeaseV1, WorldRetentionPolicyInputV1,
+    WorldRetentionPolicyV1,
+};
 use pos_core::{
-    manifest_owner_admission_intent_digest_v1,
-    output_policy::{OutputPolicyInputV1, OutputPolicyV1},
-    prepare_manifest_owner_admission_v1, ArtifactDataClassV1, ArtifactOptionalityV1,
-    ArtifactTransitionRuleV1, Hash, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
-    ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionErrorV1,
+    build_manifest_owner_scope_v1, manifest_owner_admission_intent_digest_v1,
+    prepare_manifest_owner_admission_v1, validate_manifest_owner_lease_replacement_v1,
+    ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1,
+    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash,
+    ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
+    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionRequestV1,
-    ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
-    ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-    ManifestSlotAdmissionReceiptV1, PluginId, TimelineId, WorldArtifactKindV1,
-    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
-    WorldConsumerV1, WorldProducerV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerConsumerReferenceV1,
+    ManifestOwnerLeafClassificationV1, ManifestOwnerMemberLeafClassV1, ManifestOwnerMemberLeafV1,
+    ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
+    ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
+    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1,
+    PluginId, TimelineId, WorkloadProfileV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
+    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldClosureReadLimitsV1,
+    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
+    WorldReplayClosureV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 use pos_store::{memory::MemoryStore, ManifestOwnerAdmissionPersistencePortV1};
 
@@ -22,6 +32,16 @@ type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
 type TestResult = FixtureResult<()>;
 type PolicySource = (OutputPolicyV1, Vec<u8>);
 type CatalogFixture = (ManifestAdmissionCatalogV1, Vec<PolicySource>);
+type Classifier = dyn Fn(WorldArtifactKindV1, Hash) -> Option<ManifestOwnerLeafClassificationV1>;
+
+const DAY_MICROS: u64 = 86_400_000_000;
+const READ_LIMITS: WorldClosureReadLimitsV1 = WorldClosureReadLimitsV1 {
+    max_node_visits: 4096,
+    max_native_bytes: 1_048_576,
+    max_combined_depth: 32,
+};
+const BASE_CONFIGURATION_DOMAIN: &[u8] = b"pigloros.base-configuration.v1";
+const IMPLEMENTATION_DOMAIN: &[u8] = b"pigloros.implementation-artifact.v1";
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -35,12 +55,20 @@ const fn timeline(byte: u8) -> TimelineId {
     TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MemberFault {
+    Accept,
+    Reject,
+    Misclassify,
+}
+
 struct FixtureOwner {
     expected_timelines: Vec<TimelineId>,
     expected_operation: Hash,
     signatures_issued: AtomicUsize,
     coordinator_evidence: Hash,
     signature_byte: u8,
+    member_fault: MemberFault,
 }
 
 impl FixtureOwner {
@@ -51,12 +79,18 @@ impl FixtureOwner {
             signatures_issued: AtomicUsize::new(0),
             coordinator_evidence: hash(90),
             signature_byte: 0x5a,
+            member_fault: MemberFault::Accept,
         }
     }
 
     const fn with_signing_identity(mut self, evidence: Hash, signature_byte: u8) -> Self {
         self.coordinator_evidence = evidence;
         self.signature_byte = signature_byte;
+        self
+    }
+
+    const fn with_member_fault(mut self, member_fault: MemberFault) -> Self {
+        self.member_fault = member_fault;
         self
     }
 }
@@ -153,40 +187,185 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
         }
         Ok(())
     }
+
+    fn classify_scope_member_leaves(
+        &self,
+        _timeline_id: TimelineId,
+        _scope: Hash,
+        members: &ManifestOwnerScopeMembersV1,
+    ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+        let mut classes = members
+            .leaves
+            .iter()
+            .map(|member| ManifestOwnerMemberLeafClassV1::of_leaf(&member.leaf))
+            .collect::<Vec<_>>();
+        match self.member_fault {
+            MemberFault::Accept => Ok(classes),
+            MemberFault::Reject => Err(ManifestOwnerAdmissionErrorV1::OwnerRejected),
+            MemberFault::Misclassify => {
+                classes.pop();
+                Ok(classes)
+            }
+        }
+    }
 }
 
-fn policy_and_closure(
+const fn classification(data_class: ArtifactDataClassV1) -> ManifestOwnerLeafClassificationV1 {
+    ManifestOwnerLeafClassificationV1 {
+        data_class,
+        transition: ArtifactTransitionRuleV1::PreserveExact,
+        key_dependencies: Vec::new(),
+    }
+}
+
+fn structural() -> Box<Classifier> {
+    Box::new(|_: WorldArtifactKindV1, _: Hash| {
+        Some(classification(ArtifactDataClassV1::StructuralAuditMetadata))
+    })
+}
+
+fn host_digest(domain: &[u8], bytes: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&[0]);
+    hasher.update(bytes);
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn plain_digest(bytes: &[u8]) -> Hash {
+    Hash::from_bytes(*blake3::hash(bytes).as_bytes())
+}
+
+fn retention_policy() -> FixtureResult<WorldRetentionPolicyV1> {
+    Ok(WorldRetentionPolicyV1::new(WorldRetentionPolicyInputV1 {
+        policy_revision: 1,
+        purpose: "world-replay-v1".to_owned(),
+        audience_policy_hash: hash(0xa6),
+        minimum_post_admission_days: 90,
+        maximum_active_days: 30,
+        maximum_total_days: 120,
+    })?)
+}
+
+/// Lease from day 1 that closes and expires on the given days.
+fn retention_lease(
+    timeline_id: TimelineId,
+    closes_day: u64,
+    deadline_day: u64,
+) -> FixtureResult<WorldRetentionLeaseV1> {
+    let policy = retention_policy()?;
+    Ok(WorldRetentionLeaseV1::new(
+        &policy,
+        WorldRetentionLeaseInputV1 {
+            timeline_id,
+            policy_hash: policy.digest(),
+            started_at_micros: DAY_MICROS,
+            admission_closes_at_micros: closes_day * DAY_MICROS,
+            retention_deadline_micros: deadline_day * DAY_MICROS,
+        },
+    )?)
+}
+
+fn default_lease(timeline_id: TimelineId) -> FixtureResult<WorldRetentionLeaseV1> {
+    retention_lease(timeline_id, 11, 111)
+}
+
+const fn fidelity(level: u8, max_cpu_us: u32) -> FidelityBudgetV1 {
+    FidelityBudgetV1 {
+        level,
+        max_events: 100,
+        max_bytes: 100_000,
+        max_cpu_us,
+        shared_host_cpu_reservation_us: 100,
+    }
+}
+
+fn budget(plugin_id: PluginId, profile_hash: Hash) -> FixtureResult<ExecutableBudgetPolicyV1> {
+    Ok(ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
+        revision: 1,
+        workload_profile: WorkloadProfileV1::Interactive,
+        cut_budget_family: 0,
+        max_event_bytes: 4096,
+        fidelity_budgets: [
+            fidelity(0, 500_000),
+            fidelity(1, 250_000),
+            fidelity(2, 50_000),
+        ],
+        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+            plugin_id,
+            cpu_reservations_us: [100, 100, 100],
+        }],
+        accounting_semantics: 0,
+        execution_profile_hash: profile_hash,
+        max_pass_wall_duration_us: 1_000,
+    })?)
+}
+
+/// Native OPC1 members one to five; member zero is the EOP1 built over them.
+#[derive(Clone)]
+struct NativeMembers {
+    budget: Vec<u8>,
+    implementation: Vec<u8>,
+    configuration: Vec<u8>,
+    profile: Vec<u8>,
+    retention: Vec<u8>,
+}
+
+/// Self-consistent members; even seeds carry a non-empty EPF1.
+fn native_members(plugin_id: PluginId, seed: u8) -> FixtureResult<NativeMembers> {
+    let profile = if seed % 2 == 0 {
+        format!("EPF1-{seed}").into_bytes()
+    } else {
+        Vec::new()
+    };
+    Ok(NativeMembers {
+        budget: budget(plugin_id, plain_digest(&profile))?.to_canonical_cbor(),
+        implementation: format!("implementation-{seed}").into_bytes(),
+        configuration: format!("CFG1-{seed}").into_bytes(),
+        profile,
+        retention: retention_policy()?.to_canonical_cbor(),
+    })
+}
+
+/// EOP1 fields that name exactly the given members.
+fn policy_input(
     plugin_id: PluginId,
-    fixture_seed: u8,
-) -> Result<(OutputPolicyV1, Vec<u8>), Box<dyn std::error::Error>> {
-    let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
+    members: &NativeMembers,
+) -> FixtureResult<OutputPolicyInputV1> {
+    Ok(OutputPolicyInputV1 {
         plugin_id,
         plugin_version: "1.0.0".to_owned(),
-        implementation_hash: hash(fixture_seed + 30),
-        base_configuration_digest: hash(fixture_seed + 40),
-        executable_profile_hash: hash(fixture_seed + 50),
-        retention_policy_hash: hash(fixture_seed + 60),
+        implementation_hash: host_digest(IMPLEMENTATION_DOMAIN, &members.implementation),
+        base_configuration_digest: host_digest(BASE_CONFIGURATION_DOMAIN, &members.configuration),
+        executable_profile_hash: ExecutableBudgetPolicyV1::from_canonical_cbor(&members.budget)?
+            .digest(),
+        retention_policy_hash: retention_policy()?.digest(),
         policy_revision: 1,
         output_declarations: Vec::new(),
-    })?;
-    let members = [
+    })
+}
+
+fn assemble(input: OutputPolicyInputV1, members: &NativeMembers) -> FixtureResult<PolicySource> {
+    let policy = OutputPolicyV1::new(input)?;
+    let framed = [
         policy.to_canonical_cbor(),
-        b"EBP1-fixture".to_vec(),
-        b"implementation-fixture".to_vec(),
-        b"CFG1-fixture".to_vec(),
-        Vec::new(),
-        b"RTP1-fixture".to_vec(),
+        members.budget.clone(),
+        members.implementation.clone(),
+        members.configuration.clone(),
+        members.profile.clone(),
+        members.retention.clone(),
     ];
     let mut closure = b"OPC1".to_vec();
-    for member in members {
-        closure.extend_from_slice(
-            &u64::try_from(member.len())
-                .unwrap_or(u64::MAX)
-                .to_be_bytes(),
-        );
+    for member in framed {
+        closure.extend_from_slice(&u64::try_from(member.len())?.to_be_bytes());
         closure.extend_from_slice(&member);
     }
     Ok((policy, closure))
+}
+
+fn policy_and_closure(plugin_id: PluginId, seed: u8) -> FixtureResult<PolicySource> {
+    let members = native_members(plugin_id, seed)?;
+    assemble(policy_input(plugin_id, &members)?, &members)
 }
 
 fn opc1_digest(bytes: &[u8]) -> Hash {
@@ -196,11 +375,15 @@ fn opc1_digest(bytes: &[u8]) -> Hash {
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn catalog(owner_id: [u8; 32], generation: u64) -> FixtureResult<CatalogFixture> {
-    let source = vec![
+fn sources() -> FixtureResult<Vec<PolicySource>> {
+    Ok(vec![
         policy_and_closure(plugin(1), 1)?,
         policy_and_closure(plugin(2), 2)?,
-    ];
+    ])
+}
+
+fn catalog(owner_id: [u8; 32], generation: u64) -> FixtureResult<CatalogFixture> {
+    let source = sources()?;
     let rows = source
         .iter()
         .enumerate()
@@ -224,51 +407,85 @@ fn catalog(owner_id: [u8; 32], generation: u64) -> FixtureResult<CatalogFixture>
     ))
 }
 
-fn policy_copies(
-    scope: Hash,
+fn scope_source(
     owner_id: [u8; 32],
+    lease: &WorldRetentionLeaseV1,
     source: &[PolicySource],
-    lease_hash: Hash,
-) -> FixtureResult<Vec<ManifestOwnerPolicyCopiesV1>> {
-    source
-        .iter()
-        .map(|(policy, closure)| {
-            let eop1_bytes = policy.to_canonical_cbor();
-            let eop1_leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-                scope,
-                kind: WorldArtifactKindV1::OutputPolicy,
-                native_digest: policy.digest(),
-                native_byte_length: u64::try_from(eop1_bytes.len()).unwrap_or(u64::MAX),
-                owner: owner_id,
-                data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-                optionality: ArtifactOptionalityV1::Required,
-                transition: ArtifactTransitionRuleV1::PreserveExact,
-                source_lease_hash: lease_hash,
-                key_dependencies: Vec::new(),
-                child_node_hashes: Vec::new(),
-            })?;
-            let opc1_leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-                scope,
-                kind: WorldArtifactKindV1::OutputPolicyClosure,
-                native_digest: opc1_digest(closure),
-                native_byte_length: u64::try_from(closure.len()).unwrap_or(u64::MAX),
-                owner: owner_id,
-                data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-                optionality: ArtifactOptionalityV1::Required,
-                transition: ArtifactTransitionRuleV1::PreserveExact,
-                source_lease_hash: lease_hash,
-                key_dependencies: Vec::new(),
-                child_node_hashes: Vec::new(),
-            })?;
-            Ok(ManifestOwnerPolicyCopiesV1 {
+) -> FixtureResult<ManifestOwnerScopeSourceV1> {
+    Ok(ManifestOwnerScopeSourceV1 {
+        owner_id,
+        timeline_id: lease.as_input().timeline_id,
+        rtp1_bytes: retention_policy()?.to_canonical_cbor(),
+        rls1_bytes: lease.to_canonical_cbor(),
+        consumer_references: vec![ManifestOwnerConsumerReferenceV1 {
+            schema: hash(131),
+            reducer: hash(130),
+            runtime: hash(132),
+        }],
+        policy_sources: source
+            .iter()
+            .map(|(policy, closure)| ManifestOwnerPolicySourceV1 {
                 plugin_id: policy.fields().plugin_id,
-                eop1_bytes,
-                eop1_leaf,
+                eop1_bytes: policy.to_canonical_cbor(),
                 opc1_bytes: closure.clone(),
-                opc1_leaf,
             })
-        })
-        .collect()
+            .collect(),
+    })
+}
+
+fn member_of(
+    members: &ManifestOwnerScopeMembersV1,
+    kind: WorldArtifactKindV1,
+) -> FixtureResult<&ManifestOwnerMemberLeafV1> {
+    members
+        .leaves
+        .iter()
+        .find(|member| member.leaf.as_input().kind == kind)
+        .ok_or_else(|| "missing member leaf".into())
+}
+
+fn consumer_set(
+    scope: &ManifestOwnerScopeV1,
+    producer: &PolicySource,
+    schema_hash: Option<Hash>,
+    optional_view_roots: Vec<Hash>,
+) -> FixtureResult<WorldConsumerSetV1> {
+    let schema = member_of(&scope.members, WorldArtifactKindV1::Schema)?
+        .leaf
+        .digest();
+    Ok(WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+        scope: scope.scope,
+        consumers: vec![WorldConsumerV1::new(
+            "local-observer".to_owned(),
+            member_of(&scope.members, WorldArtifactKindV1::ReducerImplementation)?
+                .leaf
+                .digest(),
+            schema_hash.unwrap_or(schema),
+            member_of(&scope.members, WorldArtifactKindV1::RuntimeIdentity)?
+                .leaf
+                .digest(),
+        )?],
+        producers: vec![WorldProducerV1::new(producer.0.fields().plugin_id, producer.0.digest())?],
+        optional_view_roots,
+    })?)
+}
+
+fn timeline_request(
+    owner_id: [u8; 32],
+    lease: &WorldRetentionLeaseV1,
+    source: &[PolicySource],
+    classify: &Classifier,
+) -> FixtureResult<ManifestOwnerTimelineAdmissionRequestV1> {
+    let scope = build_manifest_owner_scope_v1(&scope_source(owner_id, lease, source)?, classify)?;
+    let producer = source.first().ok_or("missing fixture policy")?;
+    let wcs1 = consumer_set(&scope, producer, None, Vec::new())?;
+    Ok(ManifestOwnerTimelineAdmissionRequestV1 {
+        timeline_id: lease.as_input().timeline_id,
+        scope: scope.scope,
+        wcs1,
+        policy_copies: scope.policy_copies,
+        members: scope.members,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -282,42 +499,28 @@ struct AdmissionTransition {
     operation_id: Hash,
 }
 
-fn request(
+const fn genesis(owner_id: [u8; 32], operation_id: Hash) -> AdmissionTransition {
+    AdmissionTransition {
+        owner_id,
+        generation: 1,
+        expected_generation: None,
+        previous_receipt: None,
+        expected_inventory: None,
+        resulting_inventory: hash(44),
+        operation_id,
+    }
+}
+
+fn leased_request(
     transition: AdmissionTransition,
-    timeline_ids: &[TimelineId],
-) -> Result<ManifestOwnerAdmissionRequestV1, Box<dyn std::error::Error>> {
+    leases: &[WorldRetentionLeaseV1],
+    classify: &Classifier,
+) -> FixtureResult<ManifestOwnerAdmissionRequestV1> {
     let (catalog, sources) = catalog(transition.owner_id, transition.generation)?;
-    let timelines = timeline_ids
+    let timelines = leases
         .iter()
-        .enumerate()
-        .map(|(index, timeline_id)| {
-            let scope = hash(70 + u8::try_from(index).unwrap_or(u8::MAX));
-            let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-                scope,
-                consumers: vec![WorldConsumerV1::new(
-                    "local-observer".to_owned(),
-                    hash(130),
-                    hash(131),
-                    hash(132),
-                )?],
-                // The second same-name Plugin is reducer-only and deliberately
-                // absent from WCS1 while remaining in MCA1/MSB1 and the copies.
-                producers: vec![WorldProducerV1::new(plugin(1), sources[0].0.digest())?],
-                optional_view_roots: Vec::new(),
-            })?;
-            Ok(ManifestOwnerTimelineAdmissionRequestV1 {
-                timeline_id: *timeline_id,
-                scope,
-                wcs1,
-                policy_copies: policy_copies(
-                    scope,
-                    transition.owner_id,
-                    &sources,
-                    hash(80 + u8::try_from(index).unwrap_or(u8::MAX)),
-                )?,
-            })
-        })
-        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        .map(|lease| timeline_request(transition.owner_id, lease, &sources, classify))
+        .collect::<FixtureResult<Vec<_>>>()?;
     Ok(ManifestOwnerAdmissionRequestV1 {
         operation_id: transition.operation_id,
         catalog,
@@ -325,8 +528,20 @@ fn request(
         previous_visible_lcq1_hash: transition.previous_receipt,
         expected_inventory_generation: transition.expected_inventory,
         resulting_inventory_generation: transition.resulting_inventory,
+        read_limits: READ_LIMITS,
         timelines,
     })
+}
+
+fn request(
+    transition: AdmissionTransition,
+    timeline_ids: &[TimelineId],
+) -> FixtureResult<ManifestOwnerAdmissionRequestV1> {
+    let leases = timeline_ids
+        .iter()
+        .map(|timeline_id| default_lease(*timeline_id))
+        .collect::<FixtureResult<Vec<_>>>()?;
+    leased_request(transition, &leases, &*structural())
 }
 
 #[test]
@@ -911,4 +1126,613 @@ fn assert_sqlite_owner_receipt_corruption_is_rejected(
         Err(ManifestOwnerAdmissionErrorV1::CorruptState)
     );
     Ok(())
+}
+
+fn owner_scope(
+    classify: &Classifier,
+) -> FixtureResult<(WorldRetentionLeaseV1, ManifestOwnerScopeV1)> {
+    let lease = default_lease(timeline(1))?;
+    let source = scope_source([7; 32], &lease, &sources()?)?;
+    Ok((lease, build_manifest_owner_scope_v1(&source, classify)?))
+}
+
+fn leaf_address(
+    members: &ManifestOwnerScopeMembersV1,
+    kind: WorldArtifactKindV1,
+    native_digest: Hash,
+) -> FixtureResult<Hash> {
+    members
+        .leaves
+        .iter()
+        .map(|member| &member.leaf)
+        .find(|leaf| leaf.as_input().kind == kind && leaf.as_input().native_digest == native_digest)
+        .map(WorldArtifactLeafV1::digest)
+        .ok_or_else(|| "missing member leaf".into())
+}
+
+fn sorted(mut addresses: Vec<Hash>) -> Vec<Hash> {
+    addresses.sort_unstable();
+    addresses
+}
+
+fn public_configuration() -> Box<Classifier> {
+    Box::new(|kind: WorldArtifactKindV1, _: Hash| {
+        Some(classification(
+            if kind == WorldArtifactKindV1::BaseConfiguration {
+                ArtifactDataClassV1::PublicRecord
+            } else {
+                ArtifactDataClassV1::StructuralAuditMetadata
+            },
+        ))
+    })
+}
+
+const fn reference_state(kind: WorldArtifactKindV1) -> ArtifactStateV1 {
+    match kind {
+        WorldArtifactKindV1::AudiencePolicy => ArtifactStateV1::MissingFrozenInput,
+        WorldArtifactKindV1::Schema => ArtifactStateV1::MissingSchema,
+        WorldArtifactKindV1::ReducerImplementation => ArtifactStateV1::MissingPlugin,
+        WorldArtifactKindV1::RuntimeIdentity => ArtifactStateV1::MissingRuntime,
+        _ => ArtifactStateV1::Retained,
+    }
+}
+
+fn assert_policy_edges(scope: &ManifestOwnerScopeV1) -> TestResult {
+    let members = &scope.members;
+    let retention = member_of(members, WorldArtifactKindV1::RetentionPolicy)?
+        .leaf
+        .digest();
+    for copy in &scope.policy_copies {
+        let policy = OutputPolicyV1::from_canonical_cbor(&copy.eop1_bytes)?;
+        let fields = policy.fields();
+        let envelope = pos_core::OutputPolicyClosureEnvelopeV1::from_canonical_bytes_v1(
+            &copy.opc1_bytes,
+            &copy.eop1_bytes,
+        )?;
+        let budget = leaf_address(
+            members,
+            WorldArtifactKindV1::ExecutableBudgetPolicy,
+            fields.executable_profile_hash,
+        )?;
+        let mut children = vec![
+            budget,
+            retention,
+            leaf_address(
+                members,
+                WorldArtifactKindV1::BaseConfiguration,
+                fields.base_configuration_digest,
+            )?,
+            leaf_address(
+                members,
+                WorldArtifactKindV1::PluginImplementationIdentity,
+                fields.implementation_hash,
+            )?,
+        ];
+        assert_eq!(
+            copy.eop1_leaf.as_input().child_node_hashes,
+            sorted(children.clone())
+        );
+        let profile = envelope.execution_profile_artifact();
+        let budget_children = if profile.is_empty() {
+            Vec::new()
+        } else {
+            let kind = WorldArtifactKindV1::ExecutionProfile;
+            vec![leaf_address(members, kind, plain_digest(profile))?]
+        };
+        let budget_leaf = members
+            .leaves
+            .iter()
+            .find(|member| member.leaf.digest() == budget)
+            .ok_or("missing budget leaf")?;
+        assert_eq!(
+            budget_leaf.leaf.as_input().child_node_hashes,
+            budget_children
+        );
+        children.push(copy.eop1_leaf.digest());
+        children.extend(budget_children);
+        assert_eq!(
+            copy.opc1_leaf.as_input().child_node_hashes,
+            sorted(children)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn scope_builder_records_lease_members_edges_and_reference_states() -> TestResult {
+    let (lease, scope) = owner_scope(&*public_configuration())?;
+    let members = &scope.members;
+    assert_eq!(
+        scope.scope,
+        WorldReplayClosureV1::artifact_scope(timeline(1), lease.digest())
+    );
+    assert_eq!(members.rls1_bytes, lease.to_canonical_cbor());
+    assert_eq!(members.rtp1_bytes, retention_policy()?.to_canonical_cbor());
+    let kinds = members
+        .leaves
+        .iter()
+        .map(|member| member.leaf.as_input().kind.code())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, [1, 1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10, 10]);
+    for member in &members.leaves {
+        let leaf = member.leaf.as_input();
+        let state = reference_state(leaf.kind);
+        assert_eq!(member.state(), state);
+        assert_eq!(
+            member.native_bytes.is_empty(),
+            state != ArtifactStateV1::Retained
+        );
+        assert_eq!(
+            leaf.native_byte_length,
+            u64::try_from(member.native_bytes.len())?
+        );
+        assert_eq!(
+            leaf.data_class == ArtifactDataClassV1::PublicRecord,
+            leaf.kind == WorldArtifactKindV1::BaseConfiguration
+        );
+    }
+    let audience = member_of(members, WorldArtifactKindV1::AudiencePolicy)?;
+    assert_eq!(audience.leaf.as_input().native_digest, hash(0xa6));
+    let retention = member_of(members, WorldArtifactKindV1::RetentionPolicy)?;
+    assert_eq!(
+        retention.leaf.as_input().child_node_hashes,
+        [audience.leaf.digest()]
+    );
+    let recorded_lease = member_of(members, WorldArtifactKindV1::RetentionLease)?;
+    assert_eq!(recorded_lease.leaf.as_input().native_digest, lease.digest());
+    assert_eq!(
+        recorded_lease.leaf.as_input().child_node_hashes,
+        [retention.leaf.digest()]
+    );
+    assert_policy_edges(&scope)?;
+    let leaves = members.leaves.iter().map(|member| &member.leaf).chain(
+        scope
+            .policy_copies
+            .iter()
+            .flat_map(|copy| [&copy.eop1_leaf, &copy.opc1_leaf]),
+    );
+    for leaf in leaves {
+        let fields = leaf.as_input();
+        assert_eq!(fields.scope, scope.scope);
+        assert_eq!(fields.owner, [7; 32]);
+        assert_eq!(fields.optionality, ArtifactOptionalityV1::Required);
+        assert_eq!(fields.source_lease_hash, lease.digest());
+    }
+    Ok(())
+}
+
+fn with_plugin_source(
+    valid: &ManifestOwnerScopeSourceV1,
+    (policy, closure): PolicySource,
+) -> ManifestOwnerScopeSourceV1 {
+    let mut source = valid.clone();
+    source.policy_sources[1] = ManifestOwnerPolicySourceV1 {
+        plugin_id: policy.fields().plugin_id,
+        eop1_bytes: policy.to_canonical_cbor(),
+        opc1_bytes: closure,
+    };
+    source
+}
+
+/// Plugin 2 sources whose members disagree with their EOP1 or the scope RTP1.
+fn inconsistent_plugin_sources() -> FixtureResult<Vec<PolicySource>> {
+    let members = native_members(plugin(2), 2)?;
+    let input = policy_input(plugin(2), &members)?;
+    let mut other_terms = retention_policy()?.as_input().clone();
+    other_terms.policy_revision = 2;
+    let other_retention = WorldRetentionPolicyV1::new(other_terms)?;
+    let mut foreign_retention_hash = input.clone();
+    foreign_retention_hash.retention_policy_hash = other_retention.digest();
+    let mut foreign_retention_bytes = members.clone();
+    foreign_retention_bytes.retention = other_retention.to_canonical_cbor();
+    let mut foreign_configuration = input.clone();
+    foreign_configuration.base_configuration_digest = hash(1);
+    let mut foreign_implementation = input.clone();
+    foreign_implementation.implementation_hash = hash(2);
+    let mut foreign_budget = input.clone();
+    foreign_budget.executable_profile_hash = hash(3);
+    let mut foreign_profile = members.clone();
+    foreign_profile.budget = budget(plugin(2), hash(4))?.to_canonical_cbor();
+    let mut undecodable_budget = members.clone();
+    undecodable_budget.budget = b"EBP1".to_vec();
+    Ok(vec![
+        assemble(foreign_retention_hash, &members)?,
+        assemble(input.clone(), &foreign_retention_bytes)?,
+        assemble(foreign_configuration, &members)?,
+        assemble(foreign_implementation, &members)?,
+        assemble(foreign_budget, &members)?,
+        assemble(policy_input(plugin(2), &foreign_profile)?, &foreign_profile)?,
+        assemble(input, &undecodable_budget)?,
+    ])
+}
+
+#[test]
+fn scope_builder_rejects_inconsistent_native_members() -> TestResult {
+    let lease = default_lease(timeline(1))?;
+    let valid = scope_source([7; 32], &lease, &sources()?)?;
+    let mut candidates = vec![
+        ManifestOwnerScopeSourceV1 {
+            rtp1_bytes: b"RTP1".to_vec(),
+            ..valid.clone()
+        },
+        ManifestOwnerScopeSourceV1 {
+            rls1_bytes: b"RLS1".to_vec(),
+            ..valid.clone()
+        },
+        ManifestOwnerScopeSourceV1 {
+            rls1_bytes: default_lease(timeline(2))?.to_canonical_cbor(),
+            ..valid.clone()
+        },
+    ];
+    for source in inconsistent_plugin_sources()? {
+        candidates.push(with_plugin_source(&valid, source));
+    }
+    let mut undecodable_eop1 = valid.clone();
+    undecodable_eop1.policy_sources[1].eop1_bytes = b"EOP1".to_vec();
+    let mut undecodable_opc1 = valid.clone();
+    undecodable_opc1.policy_sources[1].opc1_bytes = b"OPC1".to_vec();
+    candidates.extend([undecodable_eop1, undecodable_opc1]);
+    for candidate in candidates {
+        assert_eq!(
+            build_manifest_owner_scope_v1(&candidate, &*structural()),
+            Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+        );
+    }
+
+    let duplicate_key = WorldArtifactKeyDependencyV1 {
+        role: pos_core::KeyRoleV1::SubjectDataEncryption,
+        identity_digest: hash(5),
+        owner: [5; 32],
+    };
+    let unordered_keys: Box<Classifier> = Box::new(move |_: WorldArtifactKindV1, _: Hash| {
+        let mut keyed = classification(ArtifactDataClassV1::PrivateSubjectData);
+        keyed.key_dependencies = vec![duplicate_key, duplicate_key];
+        Some(keyed)
+    });
+    let unclassified: Box<Classifier> = Box::new(|_: WorldArtifactKindV1, _: Hash| None);
+    for classify in [unordered_keys, unclassified] {
+        assert_eq!(
+            build_manifest_owner_scope_v1(&valid, &*classify),
+            Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+        );
+    }
+    Ok(())
+}
+
+fn recorded_members(lease: &WorldRetentionLeaseV1) -> FixtureResult<ManifestOwnerScopeMembersV1> {
+    Ok(ManifestOwnerScopeMembersV1 {
+        rtp1_bytes: retention_policy()?.to_canonical_cbor(),
+        rls1_bytes: lease.to_canonical_cbor(),
+        leaves: Vec::new(),
+    })
+}
+
+#[test]
+fn lease_replacement_never_extends_the_recorded_lease() -> TestResult {
+    let recorded = recorded_members(&retention_lease(timeline(1), 11, 111)?)?;
+    let extension = Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
+    for (closes_day, deadline_day, expected) in [
+        (11, 111, Ok(())),
+        (10, 110, Ok(())),
+        (12, 111, extension),
+        (11, 112, extension),
+    ] {
+        let next = recorded_members(&retention_lease(timeline(1), closes_day, deadline_day)?)?;
+        assert_eq!(
+            validate_manifest_owner_lease_replacement_v1(&recorded, &next),
+            expected
+        );
+    }
+    let undecodable = ManifestOwnerScopeMembersV1 {
+        rls1_bytes: b"RLS1".to_vec(),
+        ..recorded.clone()
+    };
+    assert_eq!(
+        validate_manifest_owner_lease_replacement_v1(&undecodable, &recorded),
+        Err(ManifestOwnerAdmissionErrorV1::CorruptState)
+    );
+    assert_eq!(
+        validate_manifest_owner_lease_replacement_v1(&recorded, &undecodable),
+        Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+    );
+    Ok(())
+}
+
+const fn read_limits(
+    max_node_visits: u64,
+    max_native_bytes: u64,
+    max_combined_depth: u8,
+) -> WorldClosureReadLimitsV1 {
+    WorldClosureReadLimitsV1 {
+        max_node_visits,
+        max_native_bytes,
+        max_combined_depth,
+    }
+}
+
+#[test]
+fn preparation_checks_read_limits_and_the_retained_byte_budget() -> TestResult {
+    let timeline_id = timeline(31);
+    let operation_id = hash(131);
+    let valid = request(genesis([31; 32], operation_id), &[timeline_id])?;
+    let scope = &valid.timelines[0];
+    let retained = scope
+        .members
+        .leaves
+        .iter()
+        .map(|member| member.native_bytes.len())
+        .chain(
+            scope
+                .policy_copies
+                .iter()
+                .flat_map(|copy| [copy.eop1_bytes.len(), copy.opc1_bytes.len()]),
+        )
+        .sum::<usize>();
+    let retained = u64::try_from(retained)?;
+    let invalid = Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
+    for (limits, expected) in [
+        (read_limits(0, retained, 32), invalid),
+        (read_limits(1, retained, 0), invalid),
+        (read_limits(1, retained, 33), invalid),
+        (
+            read_limits(1, retained - 1, 1),
+            Err(ManifestOwnerAdmissionErrorV1::BoundExceeded),
+        ),
+        (read_limits(1, retained, 1), Ok(())),
+    ] {
+        let mut candidate = valid.clone();
+        candidate.read_limits = limits;
+        assert_eq!(
+            manifest_owner_admission_intent_digest_v1(&candidate).map(drop),
+            expected
+        );
+        let owner = FixtureOwner::new(vec![timeline_id], operation_id);
+        assert_eq!(
+            prepare_manifest_owner_admission_v1(candidate, &owner, None).map(drop),
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn intent_digest_binds_read_limits_lease_and_member_bytes() -> TestResult {
+    let valid = request(genesis([32; 32], hash(132)), &[timeline(32)])?;
+    let digest = manifest_owner_admission_intent_digest_v1(&valid)?;
+    let mut limits = valid.clone();
+    limits.read_limits.max_node_visits += 1;
+    let mut lease = valid.clone();
+    lease.timelines[0].members.rls1_bytes.push(0);
+    let mut bytes = valid.clone();
+    bytes.timelines[0].members.leaves[0].native_bytes.push(0);
+    let mut leaves = valid;
+    leaves.timelines[0].members.leaves.pop();
+    for changed in [limits, lease, bytes, leaves] {
+        assert_ne!(manifest_owner_admission_intent_digest_v1(&changed)?, digest);
+    }
+    Ok(())
+}
+
+fn with_children(
+    leaf: &WorldArtifactLeafV1,
+    child_node_hashes: Vec<Hash>,
+) -> FixtureResult<WorldArtifactLeafV1> {
+    Ok(WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
+        child_node_hashes,
+        ..leaf.as_input().clone()
+    })?)
+}
+
+fn assert_rejected_before_signing(
+    candidate: ManifestOwnerAdmissionRequestV1,
+    owner: &FixtureOwner,
+    expected: ManifestOwnerAdmissionErrorV1,
+) {
+    assert_eq!(
+        prepare_manifest_owner_admission_v1(candidate, owner, None).map(drop),
+        Err(expected)
+    );
+    assert_eq!(owner.signatures_issued.load(Ordering::SeqCst), 0);
+}
+
+/// Requests that differ from the exact derivation in one checked part each.
+fn underived_requests(
+    valid: &ManifestOwnerAdmissionRequestV1,
+) -> FixtureResult<Vec<ManifestOwnerAdmissionRequestV1>> {
+    let timeline = &valid.timelines[0];
+    let scope = ManifestOwnerScopeV1 {
+        scope: timeline.scope,
+        policy_copies: timeline.policy_copies.clone(),
+        members: timeline.members.clone(),
+    };
+    let producer = sources()?.swap_remove(0);
+    let mut unlinked_policy = valid.clone();
+    let eop1_leaf = &mut unlinked_policy.timelines[0].policy_copies[0].eop1_leaf;
+    let unlinked = with_children(eop1_leaf, Vec::new())?;
+    *eop1_leaf = unlinked;
+    let mut missing_member = valid.clone();
+    missing_member.timelines[0].members.leaves.pop();
+    let mut retained_reference = valid.clone();
+    let references = &mut retained_reference.timelines[0].members.leaves;
+    let audience = references
+        .iter_mut()
+        .find(|member| member.state() == ArtifactStateV1::MissingFrozenInput)
+        .ok_or("missing audience reference leaf")?;
+    audience.native_bytes = vec![1];
+    let mut optional_view = valid.clone();
+    optional_view.timelines[0].wcs1 = consumer_set(&scope, &producer, None, vec![hash(201)])?;
+    let mut foreign_schema = valid.clone();
+    foreign_schema.timelines[0].wcs1 =
+        consumer_set(&scope, &producer, Some(hash(202)), Vec::new())?;
+    Ok(vec![
+        unlinked_policy,
+        missing_member,
+        retained_reference,
+        optional_view,
+        foreign_schema,
+    ])
+}
+
+#[test]
+fn preparation_requires_the_exact_derived_scope_members() -> TestResult {
+    let timeline_id = timeline(33);
+    let operation_id = hash(133);
+    let valid = request(genesis([33; 32], operation_id), &[timeline_id])?;
+    let owner = || FixtureOwner::new(vec![timeline_id], operation_id);
+    for candidate in underived_requests(&valid)? {
+        assert_rejected_before_signing(
+            candidate,
+            &owner(),
+            ManifestOwnerAdmissionErrorV1::InvalidBatch,
+        );
+    }
+    assert_rejected_before_signing(
+        valid.clone(),
+        &owner().with_member_fault(MemberFault::Misclassify),
+        ManifestOwnerAdmissionErrorV1::InvalidBatch,
+    );
+    assert_rejected_before_signing(
+        valid.clone(),
+        &owner().with_member_fault(MemberFault::Reject),
+        ManifestOwnerAdmissionErrorV1::OwnerRejected,
+    );
+    let prepared = prepare_manifest_owner_admission_v1(valid.clone(), &owner(), None)?;
+    assert_eq!(prepared.input().read_limits, READ_LIMITS);
+    assert_eq!(
+        prepared.input().timelines[0].members,
+        valid.timelines[0].members
+    );
+    Ok(())
+}
+
+type AdmissionOutcome = Result<ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionErrorV1>;
+
+fn commit<S: ManifestOwnerAdmissionPersistencePortV1>(
+    store: &mut S,
+    request: ManifestOwnerAdmissionRequestV1,
+) -> FixtureResult<AdmissionOutcome> {
+    let owner_id = request.catalog.as_input().owner_id;
+    let current = store.read_manifest_owner_state_v1(owner_id)?;
+    let timelines = request
+        .timelines
+        .iter()
+        .map(|timeline| timeline.timeline_id)
+        .collect();
+    let owner = FixtureOwner::new(timelines, request.operation_id);
+    let prepared = prepare_manifest_owner_admission_v1(request, &owner, current.as_ref())?;
+    Ok(store
+        .commit_manifest_owner_admission_v1(prepared)
+        .map(|result| result.kind))
+}
+
+fn owner_state<S: ManifestOwnerAdmissionPersistencePortV1>(
+    store: &S,
+    owner_id: [u8; 32],
+) -> FixtureResult<ManifestOwnerAdmissionOwnerStateV1> {
+    store
+        .read_manifest_owner_state_v1(owner_id)?
+        .ok_or_else(|| "missing owner state".into())
+}
+
+fn successor(state: &ManifestOwnerAdmissionOwnerStateV1, operation: u8) -> AdmissionTransition {
+    AdmissionTransition {
+        owner_id: state.owner_id,
+        generation: state.configuration_generation + 1,
+        expected_generation: Some(state.configuration_generation),
+        previous_receipt: state.previous_visible_lcq1_hash,
+        expected_inventory: Some(state.inventory_generation),
+        resulting_inventory: hash(operation + 1),
+        operation_id: hash(operation),
+    }
+}
+
+fn assert_recorded_scopes<S: ManifestOwnerAdmissionPersistencePortV1>(
+    store: &S,
+    request: &ManifestOwnerAdmissionRequestV1,
+) -> TestResult {
+    let owner_id = request.catalog.as_input().owner_id;
+    let generation = request.catalog.as_input().configuration_generation;
+    for timeline in &request.timelines {
+        let snapshot = store
+            .read_manifest_owner_admission_v1(owner_id, generation, timeline.timeline_id)?
+            .ok_or("missing recorded scope")?;
+        assert_eq!(snapshot.timeline.members, timeline.members);
+        assert_eq!(snapshot.timeline.policy_copies, timeline.policy_copies);
+        assert_eq!(snapshot.read_limits, request.read_limits);
+    }
+    Ok(())
+}
+
+/// Lease, deduplication and conflict rules that both stores apply identically.
+fn assert_lease_and_member_rules<S: ManifestOwnerAdmissionPersistencePortV1>(
+    mut store: S,
+) -> TestResult {
+    let owner_id = [34; 32];
+    let applied = Ok(ManifestOwnerAdmissionCommitKindV1::Applied);
+    let first = retention_lease(timeline(1), 11, 111)?;
+    let second = retention_lease(timeline(2), 10, 100)?;
+    let extended = retention_lease(timeline(1), 11, 112)?;
+    let genesis_request = leased_request(
+        genesis(owner_id, hash(140)),
+        &[first, second],
+        &*structural(),
+    )?;
+    assert_eq!(commit(&mut store, genesis_request.clone())?, applied);
+    assert_recorded_scopes(&store, &genesis_request)?;
+
+    let current = owner_state(&store, owner_id)?;
+    let renewal = leased_request(
+        successor(&current, 150),
+        &[extended, second],
+        &*structural(),
+    )?;
+    let reclassified = leased_request(
+        successor(&current, 152),
+        &[first, second],
+        &*public_configuration(),
+    )?;
+    for (candidate, expected) in [
+        (renewal, ManifestOwnerAdmissionErrorV1::OwnerRejected),
+        (reclassified, ManifestOwnerAdmissionErrorV1::Conflict),
+    ] {
+        assert_eq!(commit(&mut store, candidate)?, Err(expected));
+        assert_eq!(owner_state(&store, owner_id)?, current);
+    }
+    let unchanged = leased_request(successor(&current, 154), &[first, second], &*structural())?;
+    assert_eq!(commit(&mut store, unchanged.clone())?, applied);
+    assert_recorded_scopes(&store, &unchanged)?;
+
+    // A Timeline that leaves the roster keeps its latest recorded lease.
+    let current = owner_state(&store, owner_id)?;
+    let removal = leased_request(successor(&current, 156), &[second], &*structural())?;
+    assert_eq!(commit(&mut store, removal)?, applied);
+    let current = owner_state(&store, owner_id)?;
+    let readded = leased_request(
+        successor(&current, 158),
+        &[extended, second],
+        &*structural(),
+    )?;
+    assert_eq!(
+        commit(&mut store, readded)?,
+        Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
+    );
+    let shortened = retention_lease(timeline(1), 11, 110)?;
+    let readded = leased_request(
+        successor(&current, 160),
+        &[shortened, second],
+        &*structural(),
+    )?;
+    assert_eq!(commit(&mut store, readded.clone())?, applied);
+    assert_recorded_scopes(&store, &readded)
+}
+
+#[test]
+fn memory_owner_admission_records_leases_and_member_leaves() -> TestResult {
+    assert_lease_and_member_rules(MemoryStore::new())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_owner_admission_records_leases_and_member_leaves() -> TestResult {
+    assert_lease_and_member_rules(SqliteStore::open_in_memory()?)
 }
