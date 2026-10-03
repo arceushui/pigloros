@@ -99,12 +99,12 @@ fn denied(
         .err()
 }
 
-const fn registry_denial(error: KeyRegistryErrorV1) -> Option<RecipientExportDecryptionErrorV1> {
-    Some(RecipientExportDecryptionErrorV1::Registry(error))
+const fn registry_denial(error: KeyRegistryErrorV1) -> RecipientExportDecryptionErrorV1 {
+    RecipientExportDecryptionErrorV1::Registry(error)
 }
 
-const fn export_denial(error: RecipientExportErrorV1) -> Option<RecipientExportDecryptionErrorV1> {
-    Some(RecipientExportDecryptionErrorV1::Export(error))
+const fn export_denial(error: RecipientExportErrorV1) -> RecipientExportDecryptionErrorV1 {
+    RecipientExportDecryptionErrorV1::Export(error)
 }
 
 fn assert_decrypts(
@@ -203,20 +203,20 @@ fn recipient_decryption_public_contract_checks_the_envelope_before_the_locked_re
     );
     assert_eq!(
         denied(&store, &owner, &encoded, [6; 16], old),
-        export_denial(RecipientExportErrorV1::IdentityMismatch)
+        Some(export_denial(RecipientExportErrorV1::IdentityMismatch))
     );
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, current),
-        export_denial(RecipientExportErrorV1::IdentityMismatch)
+        Some(export_denial(RecipientExportErrorV1::IdentityMismatch))
     );
     assert_eq!(
         denied(&store, &foreign, &encoded, EXPORT_ID, old),
-        export_denial(RecipientExportErrorV1::IdentityMismatch)
+        Some(export_denial(RecipientExportErrorV1::IdentityMismatch))
     );
     // A held writer reservation leaves the live key unavailable, not denied.
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, old),
-        registry_denial(KeyRegistryErrorV1::RegistryUnavailable)
+        Some(registry_denial(KeyRegistryErrorV1::RegistryUnavailable))
     );
     contender.execute_batch("ROLLBACK")?;
     assert_decrypts(&store, &owner, old, &encrypted)
@@ -232,7 +232,7 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
     let encoded = encrypt(unenrolled, 1)?.encode();
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, unenrolled),
-        registry_denial(KeyRegistryErrorV1::RegistryUnavailable)
+        Some(registry_denial(KeyRegistryErrorV1::RegistryUnavailable))
     );
 
     let grantee = EntityId::new();
@@ -242,7 +242,7 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
     let encoded = encrypt(next_epoch, 1)?.encode();
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, next_epoch),
-        registry_denial(KeyRegistryErrorV1::NotFound)
+        Some(registry_denial(KeyRegistryErrorV1::NotFound))
     );
 
     let encoded = encrypt(enrolled, 1)?.encode();
@@ -250,7 +250,7 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
         .execute_batch("UPDATE key_registry SET state_cbor = X'01'")?;
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, enrolled),
-        registry_denial(KeyRegistryErrorV1::RegistryUnavailable)
+        Some(registry_denial(KeyRegistryErrorV1::RegistryUnavailable))
     );
     Ok(())
 }
@@ -267,7 +267,7 @@ fn recipient_decryption_public_contract_denies_a_public_key_not_bound_to_the_mat
     let encoded = encrypt(forged, 1)?.encode();
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, forged),
-        registry_denial(KeyRegistryErrorV1::EncryptionKeyMismatch)
+        Some(registry_denial(KeyRegistryErrorV1::EncryptionKeyMismatch))
     );
     Ok(())
 }
@@ -360,7 +360,7 @@ fn recipient_decryption_public_contract_rejects_tampered_ciphertext_without_plai
     *byte ^= 1;
     assert_eq!(
         denied(&store, &owner, &envelope.encode(), EXPORT_ID, descriptor),
-        export_denial(RecipientExportErrorV1::AuthenticationFailed)
+        Some(export_denial(RecipientExportErrorV1::AuthenticationFailed))
     );
     Ok(())
 }
@@ -382,7 +382,7 @@ fn recipient_decryption_public_contract_orders_rotation_pending_and_destroyed_ep
     ))?;
     assert_eq!(
         denied(&store, &owner, &old_export.encode(), EXPORT_ID, old),
-        registry_denial(KeyRegistryErrorV1::DestructionPending)
+        Some(registry_denial(KeyRegistryErrorV1::DestructionPending))
     );
     assert_decrypts(&store, &owner, current, &current_export)?;
 
@@ -391,7 +391,7 @@ fn recipient_decryption_public_contract_orders_rotation_pending_and_destroyed_ep
     assert_eq!(std::fs::read_dir(&directory)?.count(), 1);
     assert_eq!(
         denied(&store, &owner, &old_export.encode(), EXPORT_ID, old),
-        registry_denial(KeyRegistryErrorV1::Destroyed)
+        Some(registry_denial(KeyRegistryErrorV1::Destroyed))
     );
     assert_decrypts(&store, &owner, current, &current_export)
 }
