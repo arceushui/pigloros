@@ -153,10 +153,10 @@ fn head(out: &mut Vec<u8>, major: u8, value: u64) {
     let bytes = value.to_be_bytes();
     match value {
         0..=23 => out.push(tag | bytes[7]),
-        24..=255 => out.extend_from_slice(&[tag | 24, bytes[7]]),
+        24..=255 => out.extend_from_slice(&[tag | 0x18, bytes[7]]),
         // The oracle encodes only the values these fixtures use, all below 65,536.
         _ => {
-            out.push(tag | 25);
+            out.push(tag | 0x19);
             out.extend_from_slice(&bytes[6..]);
         }
     }
