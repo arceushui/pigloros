@@ -10,6 +10,24 @@
 //!
 //! RCP1 checkpoints are bound only by tick, Fork generation, and opaque
 //! 32-byte digest, so this contract does not depend on the RCP1 record shape.
+//!
+//! Contract decisions that ADR-064 leaves open:
+//!
+//! - The terminal error-code wire table (codes 0 through 32) is normative: the
+//!   25 base ADR-064 error codes in ADR order (0 through 24), then the 8
+//!   frontier/invalidation amendment codes (25 through 32). Codes are never
+//!   reordered or reused; a new code may only be appended in a new version.
+//! - A `Completed` result must carry a checkpoint at the horizon Tick, so a
+//!   completed result always carries evidence of the final recomputed state.
+//!   ADR-064 is silent here; the coordinator (#339) must therefore checkpoint
+//!   the horizon Tick before it emits a `Completed` result.
+//! - `fork_generation` starts at 1. Generation 0 is the initial generation
+//!   before any recomputation: SIV1 suffix invalidation accepts generation 0
+//!   only with prior generation 0 and no invalidated artifacts, and every
+//!   invalidation advances to the prior generation plus one. A CFR1 result
+//!   records a recomputation, so it never names generation 0.
+//! - Any terminal error code is accepted under `Failed`; CFR1 does not
+//!   restrict which codes may end a recomputation.
 //! The largest structurally valid record is far below the 16 MiB bound, which
 //! is therefore enforced on untrusted input before any allocation.
 
@@ -94,6 +112,9 @@ impl std::error::Error for CounterfactualResultContractErrorV1 {}
 #[repr(u8)]
 pub enum CounterfactualTerminalStateV1 {
     /// Every Tick through the horizon committed under the result generation.
+    ///
+    /// The last checkpoint must be at the horizon Tick, so a completed result
+    /// always carries evidence of its final state.
     Completed = 0,
     /// A typed failure stopped recomputation; the suffix remains incomplete.
     Failed = 1,
@@ -108,8 +129,11 @@ impl CounterfactualTerminalStateV1 {
 
 /// The closed ADR-064 error code that ended a failed recomputation.
 ///
-/// The discriminant is the exact CFR1 wire code: the base ADR-064 error set
-/// in declaration order, followed by the frontier/invalidation amendment.
+/// The discriminant is the exact CFR1 wire code and this table is the
+/// normative wire mapping: the 25 base ADR-064 error codes in ADR order
+/// (0 through 24), followed by the 8 frontier/invalidation amendment codes
+/// (25 through 32). It must never be reordered; any code is accepted under
+/// [`CounterfactualTerminalStateV1::Failed`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(u8)]
 pub enum CounterfactualTerminalErrorCodeV1 {
@@ -231,6 +255,9 @@ pub struct CounterfactualResultV1 {
     /// Fork identifier.
     pub fork_id: [u8; 16],
     /// Fork generation every recomputed Tick and checkpoint belongs to.
+    ///
+    /// It starts at 1; generation 0 is the initial generation before any
+    /// recomputation and is rejected as out of bounds.
     pub fork_generation: u64,
     /// First recomputation Tick of the plan.
     pub first_tick: u64,
@@ -276,23 +303,18 @@ impl CounterfactualResultV1 {
     ///
     /// Returns a closed safe error when any field, ordering, or digest is invalid.
     pub fn validate(&self) -> Result<(), CounterfactualResultContractErrorV1> {
-        validate_range(self)
-            .and_then(|()| validate_checkpoints(self))
-            .and_then(|()| validate_terminal_state(self))
-            .and_then(|()| validate_replay_claim(self))
-            .and_then(|()| validate_digest(self))
+        validated_body_fields(self).map(drop)
     }
 
     /// Encode this result as an exact deterministic-CBOR CFR1 array.
     ///
     /// # Errors
     ///
-    /// Returns a closed safe error when validation fails.
+    /// Returns a closed safe error when validation or encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, CounterfactualResultContractErrorV1> {
-        self.validate().map(|()| {
-            let mut fields = result_fields(self);
+        validated_body_fields(self).and_then(|mut fields| {
             fields.push(byte_string(&self.result_digest));
-            encode_value(&Value::Array(fields))
+            encode_value(&fields)
         })
     }
 
@@ -311,13 +333,47 @@ impl CounterfactualResultV1 {
     }
 
     /// Compute the CFR1 domain-separated digest over fields 0 through 18.
-    #[must_use]
-    pub fn digest(&self) -> [u8; 32] {
-        domain_digest(
-            RESULT_DIGEST_DOMAIN_V1,
-            &encode_value(&Value::Array(result_fields(self))),
-        )
+    ///
+    /// The digest is computed over the fields as they are, without validating
+    /// them, so a caller can seal a result before validating it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when the fields cannot be encoded.
+    pub fn digest(&self) -> Result<[u8; 32], CounterfactualResultContractErrorV1> {
+        digested_body_fields(self).map(|(_, digest)| digest)
     }
+}
+
+/// Validate every CFR1 rule and return the unsigned body fields 0 through 18,
+/// so encoding reuses the field list that the digest check already built.
+fn validated_body_fields(
+    result: &CounterfactualResultV1,
+) -> Result<Vec<Value>, CounterfactualResultContractErrorV1> {
+    validate_range(result)
+        .and_then(|()| validate_checkpoints(result))
+        .and_then(|()| validate_terminal_state(result))
+        .and_then(|()| validate_replay_claim(result))
+        .and_then(|()| digested_body_fields(result))
+        .and_then(|(fields, digest)| {
+            if digest == result.result_digest {
+                Ok(fields)
+            } else {
+                Err(CounterfactualResultContractErrorV1::DigestMismatch)
+            }
+        })
+}
+
+/// Build the unsigned body fields 0 through 18 once and digest their
+/// deterministic-CBOR array encoding under the CFR1 domain.
+fn digested_body_fields(
+    result: &CounterfactualResultV1,
+) -> Result<(Vec<Value>, [u8; 32]), CounterfactualResultContractErrorV1> {
+    let fields = body_fields(result);
+    encode_value(&fields).map(|unsigned| {
+        let digest = domain_digest(RESULT_DIGEST_DOMAIN_V1, &unsigned);
+        (fields, digest)
+    })
 }
 
 fn validate_range(
@@ -417,17 +473,7 @@ const fn validate_replay_claim(
     }
 }
 
-fn validate_digest(
-    result: &CounterfactualResultV1,
-) -> Result<(), CounterfactualResultContractErrorV1> {
-    if result.digest() == result.result_digest {
-        Ok(())
-    } else {
-        Err(CounterfactualResultContractErrorV1::DigestMismatch)
-    }
-}
-
-fn result_fields(result: &CounterfactualResultV1) -> Vec<Value> {
+fn body_fields(result: &CounterfactualResultV1) -> Vec<Value> {
     vec![
         Value::Text(COUNTERFACTUAL_RESULT_MAGIC_V1.to_owned()),
         uint(1),
@@ -557,11 +603,13 @@ fn decode_value(bytes: &[u8]) -> Result<Value, CounterfactualResultContractError
         .map_err(preflight_error)?;
     let value: Value = ciborium::from_reader(Cursor::new(bytes))
         .map_err(|_| CounterfactualResultContractErrorV1::InvalidEncoding)?;
-    if encode_value(&value) == bytes {
-        Ok(value)
-    } else {
-        Err(CounterfactualResultContractErrorV1::InvalidEncoding)
-    }
+    encode_value(&value).and_then(|canonical| {
+        if canonical == bytes {
+            Ok(value)
+        } else {
+            Err(CounterfactualResultContractErrorV1::InvalidEncoding)
+        }
+    })
 }
 
 const fn preflight_error(error: crate::CborPreflightError) -> CounterfactualResultContractErrorV1 {
@@ -575,10 +623,17 @@ const fn preflight_error(error: crate::CborPreflightError) -> CounterfactualResu
     }
 }
 
-fn encode_value(value: &Value) -> Vec<u8> {
-    let mut encoded = Vec::new();
-    ciborium::into_writer(value, &mut encoded).unwrap_or_else(|_| std::process::abort());
-    encoded
+/// Encode one value as deterministic CBOR.
+///
+/// A `Vec<Value>` encodes exactly like the equivalent `Value::Array`: both
+/// serialize as a definite-length array of the same items.
+fn encode_value<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> Result<Vec<u8>, CounterfactualResultContractErrorV1> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map(|()| bytes)
+        .or(Err(CounterfactualResultContractErrorV1::InvalidEncoding))
 }
 
 fn array(value: &Value, length: usize) -> Result<&[Value], CounterfactualResultContractErrorV1> {
