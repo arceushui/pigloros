@@ -103,6 +103,15 @@ const fn preflight_error(error: crate::CborPreflightError) -> WireError {
     }
 }
 
+/// Whether `bytes` holds any nonzero byte.
+///
+/// Counterfactual records reserve the all-zero value of every fixed-width
+/// identity and digest as "absent", so each contract rejects it through this
+/// one predicate.
+pub(super) fn nonzero<const LENGTH: usize>(bytes: &[u8; LENGTH]) -> bool {
+    *bytes != [0; LENGTH]
+}
+
 /// Unsigned integer value for encoding.
 pub(super) fn uint_value(value: u64) -> Value {
     Value::Integer(value.into())
@@ -148,15 +157,27 @@ impl<'a> FieldReader<'a> {
 
     /// Read a record array whose first two fields are `magic` and `version`.
     ///
-    /// Wrongly typed header fields record [`WireError::InvalidEncoding`]; a
-    /// well-typed but different magic or version records
-    /// [`WireError::UnsupportedVersion`].
+    /// The header is read before the field count is checked, so a record of
+    /// another magic or version is reported as such whatever its length:
+    /// a non-array value, a missing or wrongly typed header field records
+    /// [`WireError::InvalidEncoding`]; a well-typed but different magic or
+    /// version records [`WireError::UnsupportedVersion`]; only a supported
+    /// header with other than `length` fields records
+    /// [`WireError::InvalidEncoding`].
     pub(super) fn with_header(value: &'a Value, length: usize, magic: &str, version: u64) -> Self {
-        let mut reader = Self::new(value, length);
+        let count = match value {
+            Value::Array(fields) => fields.len(),
+            _ => length,
+        };
+        let mut reader = Self::new(value, count);
         let read_magic = reader.read_text();
         let read_version = reader.read_u64();
-        if reader.error.is_none() && (read_magic != magic || read_version != version) {
-            reader.error = Some(WireError::UnsupportedVersion);
+        if reader.error.is_none() {
+            if read_magic != magic || read_version != version {
+                reader.error = Some(WireError::UnsupportedVersion);
+            } else if count != length {
+                reader.error = Some(WireError::InvalidEncoding);
+            }
         }
         reader
     }

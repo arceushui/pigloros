@@ -326,6 +326,31 @@ fn header_and_integer_fields_are_closed() -> TestResult {
 }
 
 #[test]
+fn header_is_checked_before_the_field_count() -> TestResult {
+    let mut fields = fields()?;
+    fields.truncate(FIELD_COUNT - 3);
+    for (magic, version) in [("INT1", 2_u64), ("INT2", 1)] {
+        let mut future = fields.clone();
+        future[0] = Value::Text(magic.to_owned());
+        future[1] = Value::Integer(version.into());
+        assert_eq!(
+            decode_error(&encode(&Value::Array(future))?)?,
+            InterventionError::UnsupportedVersion
+        );
+    }
+    assert_eq!(
+        decode_error(&encode(&Value::Array(fields))?)?,
+        InterventionError::InvalidEncoding
+    );
+    let magic_only = encode(&Value::Array(vec![Value::Text("INT1".to_owned())]))?;
+    assert_eq!(
+        decode_error(&magic_only)?,
+        InterventionError::InvalidEncoding
+    );
+    Ok(())
+}
+
+#[test]
 fn every_field_rejects_a_wrong_cbor_type() -> TestResult {
     for index in 0..FIELD_COUNT {
         let bytes = bytes_with_field(index, Value::Array(Vec::new()))?;
