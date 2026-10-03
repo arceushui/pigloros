@@ -77,11 +77,6 @@ const INVALIDATION_LIMITS: CborLimits = CborLimits {
     maximum_bytes: MAX_SUFFIX_INVALIDATION_BYTES_V1,
     ..FRONTIER_LIMITS
 };
-/// Closed unknown-edge policies indexed by their `RCF1` wire code.
-const POLICIES: [UnknownEdgePolicyV1; 2] = [
-    UnknownEdgePolicyV1::Reject,
-    UnknownEdgePolicyV1::FullSuffixFromCut,
-];
 /// Closed invalidation reasons indexed by their `SIV1` wire code.
 const REASONS: [SuffixInvalidationReasonV1; 5] = [
     SuffixInvalidationReasonV1::NewIntervention,
@@ -257,6 +252,20 @@ impl std::error::Error for FrontierArtifactErrorV1 {}
 pub struct UnknownEdgeCoordinateV1 {
     pub consumer: DependencyNodeV1,
     pub missing_source_digest: Option<[u8; 32]>,
+}
+
+impl UnknownEdgePolicyV1 {
+    /// Every unknown-edge policy, indexed by its wire code.
+    ///
+    /// This is the one wire-code table shared by `RCF1`, `CFP1`, and every
+    /// consumer outside this crate.
+    pub const ALL_V1: [Self; 2] = [Self::Reject, Self::FullSuffixFromCut];
+
+    /// Stable wire code of this policy: its index in [`Self::ALL_V1`].
+    #[must_use]
+    pub const fn wire_code(self) -> u8 {
+        self as u8
+    }
 }
 
 impl RecomputationFrontierV1 {
@@ -565,7 +574,8 @@ fn decode_frontier(value: &Value) -> Result<RecomputationFrontierV1, FieldFailur
         owner_frontiers: fields.read_record_array(owner_frontier_field),
         global_frontier_tick: fields.read_u64(),
         global_frontier_scheduler_position: fields.read_u32(),
-        unknown_edge_policy: fields.read_enum(&POLICIES, UnknownEdgePolicyV1::Reject),
+        unknown_edge_policy: fields
+            .read_enum(&UnknownEdgePolicyV1::ALL_V1, UnknownEdgePolicyV1::Reject),
         unknown_edge_coordinates: fields.read_record_array(unknown_edge_field),
         endogenous_suffix_end_tick: fields.read_u64(),
         classification_bundle_digest: fields.read_bytes(),
@@ -980,7 +990,7 @@ fn frontier_fields(frontier: &RecomputationFrontierV1) -> Vec<Value> {
         ),
         uint_value(frontier.global_frontier_tick),
         uint_value(u64::from(frontier.global_frontier_scheduler_position)),
-        uint_value(unknown_edge_policy_code(frontier.unknown_edge_policy)),
+        uint_value(frontier.unknown_edge_policy.wire_code().into()),
         Value::Array(
             frontier
                 .unknown_edge_coordinates
@@ -1068,13 +1078,6 @@ fn digest_list(digests: &[[u8; 32]]) -> Value {
             .map(|digest| bytes_value(digest.as_slice()))
             .collect(),
     )
-}
-
-const fn unknown_edge_policy_code(policy: UnknownEdgePolicyV1) -> u64 {
-    match policy {
-        UnknownEdgePolicyV1::Reject => 0,
-        UnknownEdgePolicyV1::FullSuffixFromCut => 1,
-    }
 }
 
 const fn invalidation_reason_code(reason: SuffixInvalidationReasonV1) -> u64 {
