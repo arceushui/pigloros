@@ -59,14 +59,11 @@ struct MemoryTransactionV1 {
     acknowledgements: Vec<TrustedClockAcknowledgementRowV1>,
 }
 
-/// One standalone in-memory trusted-clock authority identity (test/dev; not
-/// linked to a `MemoryStore` catalogue until #509).
+/// One in-memory trusted-clock authority identity with append-only acknowledgements.
 ///
-/// Every handle from [`Self::handle`] shares one authority lock and one set of
-/// rows, so reservations and guards on different handles serialize exactly as
-/// `SQLite` connections on one file do. Durability is the identity's lifetime.
-/// Acknowledgements are append-only: a commit only extends them, and no
-/// method updates or removes one.
+/// # Note
+/// A standalone test/dev authority, not linked to a `MemoryStore` catalog
+/// (#509): it must not back a release host.
 #[derive(Debug, Default)]
 pub struct MemoryTrustedClockAuthorityV1 {
     shared: Arc<MemoryAuthorityV1>,
@@ -86,6 +83,10 @@ impl MemoryTrustedClockAuthorityV1 {
     }
 
     /// Another handle on the same identity and authority lock.
+    ///
+    /// All handles share one lock and one set of rows, so reservations and
+    /// guards on different handles serialize exactly as `SQLite` connections
+    /// on one file do. Durability is the identity's lifetime.
     #[must_use]
     pub fn handle(&self) -> Self {
         Self {
@@ -167,8 +168,8 @@ impl TrustedClockStorePortV1 for MemoryTrustedClockAuthorityV1 {
     }
 
     /// Always 0: a standalone memory authority, not linked to a
-    /// `MemoryStore` catalogue, so the migration may always create missing
-    /// rows. Test/dev only; linking it to the catalogue is #509.
+    /// `MemoryStore` catalog, so the migration may always create missing
+    /// rows. Test/dev only; linking it to the catalog is #509.
     fn authoritative_catalog_entries(&mut self) -> Result<u64, TrustedClockPortErrorV1> {
         Ok(0)
     }

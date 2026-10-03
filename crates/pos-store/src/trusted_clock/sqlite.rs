@@ -11,7 +11,7 @@
 //! `DELETE` and replacing `INSERT` on it.
 
 use super::fresh_clock_domain;
-use crate::sqlite::normalize_schema_sql;
+use crate::sqlite::{normalize_schema_sql, sqlite_artifact_registration_schema_exists};
 use pos_core::trusted_clock::{
     ReleaseGuardPortV1, TrustedClockAcknowledgementRowV1, TrustedClockHighWaterRowV1,
     TrustedClockOverrunLatchRowV1, TrustedClockPortErrorV1, TrustedClockRowsV1,
@@ -27,17 +27,11 @@ type PortResult<T> = Result<T, TrustedClockPortErrorV1>;
 
 const SYNCHRONOUS_FULL: i64 = 2;
 
-const SCHEMA_BEGIN: &str = "PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;";
-
-/// Whether the `SqliteStore` ARD1 catalog table exists in this file.
-const CATALOG_PRESENT: &str = "SELECT EXISTS(SELECT 1 FROM sqlite_master
-    WHERE type = 'table' AND name = 'artifact_registrations')";
-
 /// The ARD1 catalog entry count, read inside the reservation transaction.
 const CATALOG_ENTRIES: &str = "SELECT count(*) FROM artifact_registrations";
 
 const NOT_A_STORE: &str = "trusted-clock authority requires an initialized SqliteStore \
-    authority file holding the ARD1 artifact catalog";
+    authority file holding the complete ARD1 artifact catalog";
 
 /// Statement that reads one schema object's stored definition.
 const STORED_SQL: &str = "SELECT sql FROM sqlite_master WHERE name = ?1";
@@ -48,7 +42,12 @@ const TAMPERED_SCHEMA: &str = "trusted-clock schema differs from its reviewed de
 /// guard triggers, as `(name, CREATE statement)`. `CREATE ... IF NOT EXISTS`
 /// would keep a weaker object of the same name, so `open` creates each
 /// missing object and otherwise requires its stored definition to equal this
-/// one under the store's schema normalization (case and whitespace ignored).
+/// one under the store's schema normalization.
+///
+/// `normalize_schema_sql` lowercases the whole statement and strips all of
+/// its whitespace, string literals included, so a reviewed definition must
+/// not rely on a literal's case or spacing. The only literals here are the
+/// triggers' fixed `RAISE` messages, which carry no semantics.
 const REVIEWED_SCHEMA: [(&str, &str); 6] = [
     (
         "trusted_clock_high_water",
@@ -154,46 +153,51 @@ impl SqliteTrustedClockAuthorityV1 {
     /// foreign or empty file (which would also stop a later
     /// `SqliteStore::open` from initializing its schema there).
     ///
+    /// The catalog check and the table creation run in one `BEGIN IMMEDIATE`
+    /// transaction, so no writer can drop the catalog between them.
+    ///
     /// # Errors
-    /// Returns [`CoreError::Storage`] when the file cannot be opened, holds no
-    /// `SqliteStore` ARD1 catalog table, the tables cannot be created, or an
-    /// existing trusted-clock table or trigger differs from its reviewed
+    /// Returns [`CoreError::Storage`] when the file cannot be opened, lacks
+    /// the complete `SqliteStore` ARD1 catalog (`artifact_registrations` and
+    /// `artifact_registration_operations`), the tables cannot be created, or
+    /// an existing trusted-clock table or trigger differs from its reviewed
     /// definition.
     pub fn open(path: &str) -> Result<Self, CoreError> {
-        let connections = connect(path)
-            .and_then(|reservation| connect(path).map(|guard| Self { reservation, guard }));
-        connections
-            .and_then(Self::require_store_catalog)
-            .and_then(Self::with_schema)
-    }
-
-    fn require_store_catalog(self) -> Result<Self, CoreError> {
-        let present = self
+        let authority = connect(path)
+            .and_then(|reservation| connect(path).map(|guard| Self { reservation, guard }))?;
+        // The schema transaction's `BEGIN IMMEDIATE` relies on this bound.
+        let refusal = authority
             .reservation
             .busy_timeout(TRUSTED_CLOCK_WAIT_BUDGET)
-            .and_then(|()| pragma::<bool>(&self.reservation, CATALOG_PRESENT));
-        match present {
-            Ok(true) => Ok(self),
-            Ok(false) => Err(CoreError::Storage(NOT_A_STORE.to_owned())),
-            Err(error) => Err(CoreError::Storage(error.to_string())),
-        }
-    }
-
-    fn with_schema(self) -> Result<Self, CoreError> {
-        let verified = self
-            .reservation
-            .execute_batch(SCHEMA_BEGIN)
-            .and_then(|()| reviewed_schema_intact(&self.reservation))
-            .and_then(|intact| commit_if(&self.reservation, intact));
-        match verified {
-            Ok(true) => Ok(self),
-            Ok(false) => {
-                rollback_on(&self.reservation);
-                Err(CoreError::Storage(TAMPERED_SCHEMA.to_owned()))
+            .and_then(|()| schema_refusal(&authority.reservation));
+        match refusal {
+            Ok(None) => Ok(authority),
+            Ok(Some(refusal)) => {
+                rollback_on(&authority.reservation);
+                Err(CoreError::Storage(refusal.to_owned()))
             }
             Err(error) => Err(CoreError::Storage(error.to_string())),
         }
     }
+}
+
+/// In one immediate transaction, require the store's complete ARD1 catalog,
+/// then create or verify the reviewed trusted-clock schema. Commits and
+/// returns `None` when both hold; otherwise returns the refusal with the
+/// transaction still open.
+fn schema_refusal(connection: &Connection) -> rusqlite::Result<Option<&'static str>> {
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .and_then(|()| sqlite_artifact_registration_schema_exists(connection))
+        .and_then(|store| {
+            if store {
+                reviewed_schema_intact(connection)
+                    .map(|intact| (!intact).then_some(TAMPERED_SCHEMA))
+            } else {
+                Ok(Some(NOT_A_STORE))
+            }
+        })
+        .and_then(|refusal| commit_unless(connection, refusal))
 }
 
 fn stored_sql(connection: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
@@ -221,12 +225,14 @@ fn reviewed_schema_intact(connection: &Connection) -> rusqlite::Result<bool> {
         })
 }
 
-fn commit_if(connection: &Connection, intact: bool) -> rusqlite::Result<bool> {
-    if intact {
-        connection.execute_batch("COMMIT").map(|()| true)
-    } else {
-        Ok(false)
-    }
+fn commit_unless(
+    connection: &Connection,
+    refusal: Option<&'static str>,
+) -> rusqlite::Result<Option<&'static str>> {
+    refusal.map_or_else(
+        || connection.execute_batch("COMMIT").map(|()| None),
+        |refusal| Ok(Some(refusal)),
+    )
 }
 
 fn connect(path: &str) -> Result<Connection, CoreError> {
@@ -251,15 +257,15 @@ fn executed(result: rusqlite::Result<usize>) -> PortResult<()> {
     storage(result).map(|_changed| ())
 }
 
-fn pragma<T: FromSql>(connection: &Connection, sql: &str) -> rusqlite::Result<T> {
+fn query_scalar<T: FromSql>(connection: &Connection, sql: &str) -> rusqlite::Result<T> {
     connection.query_row(sql, [], |row| row.get(0))
 }
 
 fn durability_matches(connection: &Connection) -> rusqlite::Result<bool> {
-    let journal = pragma::<String>(connection, "PRAGMA journal_mode=WAL");
+    let journal = query_scalar::<String>(connection, "PRAGMA journal_mode=WAL");
     let synchronous = connection
         .execute_batch("PRAGMA synchronous=FULL")
-        .and_then(|()| pragma::<i64>(connection, "PRAGMA synchronous"));
+        .and_then(|()| query_scalar::<i64>(connection, "PRAGMA synchronous"));
     let wal = journal.map(|mode| mode == "wal");
     let full = synchronous.map(|level| level == SYNCHRONOUS_FULL);
     wal.and_then(|wal| full.map(|full| wal && full))
@@ -362,7 +368,7 @@ impl TrustedClockStorePortV1 for SqliteTrustedClockAuthorityV1 {
     /// The ARD1 catalog entry count, read on the reservation connection
     /// inside the open reservation transaction.
     fn authoritative_catalog_entries(&mut self) -> PortResult<u64> {
-        storage(pragma::<i64>(&self.reservation, CATALOG_ENTRIES))
+        storage(query_scalar::<i64>(&self.reservation, CATALOG_ENTRIES))
             .and_then(|count| u64::try_from(count).or(Err(TrustedClockPortErrorV1::Storage)))
     }
 

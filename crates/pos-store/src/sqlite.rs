@@ -8283,7 +8283,7 @@ fn sqlite_artifact_registration_table_exists(
     )
 }
 
-fn sqlite_artifact_registration_schema_exists(
+pub(crate) fn sqlite_artifact_registration_schema_exists(
     connection: &Connection,
 ) -> Result<bool, rusqlite::Error> {
     connection.query_row(

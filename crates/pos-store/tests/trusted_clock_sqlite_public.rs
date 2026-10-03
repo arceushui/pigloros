@@ -257,10 +257,13 @@ fn shared_memory_authority_fails_the_durability_read_back() -> TestResult {
     let process = std::process::id();
     let path = format!("file:trusted-clock-{process}?mode=memory&cache=shared");
     // The shared-memory file lives while this connection does; the catalog
-    // table makes it pass the store-file check so the durability read-back
+    // tables make it pass the store-file check so the durability read-back
     // is what refuses it.
     let store = Connection::open(&path)?;
-    store.execute_batch("CREATE TABLE artifact_registrations (owner_id TEXT)")?;
+    store.execute_batch(
+        "CREATE TABLE artifact_registrations (owner_id TEXT);
+         CREATE TABLE artifact_registration_operations (owner_id TEXT)",
+    )?;
     let mut authority = SqliteTrustedClockAuthorityV1::open(&path)?;
     let refused = reserve(&mut authority, T0).err();
     assert_eq!(refused, Some(Fence::DurabilityUnavailable));
@@ -442,6 +445,19 @@ fn an_authority_opened_before_its_store_fails_closed() -> TestResult {
     assert!(table_exists(&raw, "trusted_clock_high_water"));
     let reservation = reserve(&mut authority, T0)?;
     assert_eq!(reservation.reservation_seq(), 1);
+    Ok(())
+}
+
+#[test]
+fn an_incomplete_artifact_catalog_fails_open_closed() -> TestResult {
+    let directory = TempDir::new()?;
+    let path = store_backed(&directory);
+    let raw = Connection::open(&path)?;
+    raw.execute_batch("DROP TABLE artifact_registration_operations")?;
+    assert!(table_exists(&raw, "artifact_registrations"));
+    let refused = SqliteTrustedClockAuthorityV1::open(&path).err();
+    assert!(matches!(refused, Some(CoreError::Storage(_))));
+    assert!(!table_exists(&raw, "trusted_clock_high_water"));
     Ok(())
 }
 
