@@ -309,7 +309,10 @@ fn binding_construction_reports_a_duplicate_declaration_as_the_ownership_error()
     let closed = PluginCompositionErrorV1::DuplicateEventTypeOwner {
         event_type: "dup.type".to_owned(),
     };
-    assert_eq!(error, Some(OutputAdmissionErrorV1::Composition(closed.clone())));
+    assert_eq!(
+        error,
+        Some(OutputAdmissionErrorV1::Composition(closed.clone()))
+    );
     assert!(matches!(
         error.map(RuntimeError::from),
         Some(RuntimeError::Composition(ref inner)) if *inner == closed
