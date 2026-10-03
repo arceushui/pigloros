@@ -2451,7 +2451,7 @@ fn local_cut_preparation_rejects_conflicting_owner_prestate() -> TestResult {
     let exhausted = visible_owner_state(&fixture.state, u64::MAX);
     assert_eq!(
         prepare_request(&fixture, fixture.request.clone(), Some(&exhausted)),
-        Err(LocalCutOwnerErrorV1::BoundExceeded)
+        Err(LocalCutOwnerErrorV1::Conflict)
     );
     let stale = visible_owner_state(&fixture.state, 1);
     assert_eq!(
@@ -2465,6 +2465,26 @@ fn local_cut_preparation_rejects_conflicting_owner_prestate() -> TestResult {
     second_tick.seal = pos_core::LocalCutSealV2::new(seal)?;
     assert_eq!(
         prepare_request(&fixture, second_tick, None),
+        Err(LocalCutOwnerErrorV1::Conflict)
+    );
+
+    let receipt_without_cut_state = pos_core::ManifestOwnerAdmissionOwnerStateV1 {
+        previous_visible_lcq1_hash: Some(hash(141)),
+        ..fixture.state.clone()
+    };
+    let receipt_bound_request = local_cut_request(
+        fixture.state.owner_id,
+        &receipt_without_cut_state,
+        &fixture.snapshot,
+    )?;
+    assert_eq!(
+        pos_core::prepare_local_cut_owner_commit_v1(
+            receipt_bound_request,
+            None,
+            &receipt_without_cut_state,
+            std::slice::from_ref(&fixture.snapshot),
+            &fixture.verifier,
+        ),
         Err(LocalCutOwnerErrorV1::CorruptState)
     );
     Ok(())

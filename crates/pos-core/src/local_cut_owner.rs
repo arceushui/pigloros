@@ -719,7 +719,7 @@ fn validate_seal_prestate(
             let expected_tick = state
                 .last_visible_tick
                 .checked_add(1)
-                .ok_or(LocalCutOwnerErrorV1::BoundExceeded)?;
+                .ok_or(LocalCutOwnerErrorV1::Conflict)?;
             if state.owner_id != admission_state.owner_id
                 || state.previous_visible_lcq1_hash != admission_state.previous_visible_lcq1_hash
                 || state.configuration_generation != admission_state.configuration_generation
@@ -733,11 +733,11 @@ fn validate_seal_prestate(
             }
         }
         None => {
-            if admission_state.previous_visible_lcq1_hash.is_some()
-                || seal.tick != 1
-                || seal.membership_epoch != 0
-            {
+            if admission_state.previous_visible_lcq1_hash.is_some() {
                 return Err(LocalCutOwnerErrorV1::CorruptState);
+            }
+            if seal.tick != 1 || seal.membership_epoch != 0 {
+                return Err(LocalCutOwnerErrorV1::Conflict);
             }
         }
     }
