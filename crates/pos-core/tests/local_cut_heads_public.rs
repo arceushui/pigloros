@@ -312,3 +312,72 @@ fn tables_reject_duplicate_or_descending_timelines() {
         );
     }
 }
+
+#[test]
+fn rows_round_trip_through_their_canonical_encodings() {
+    let mut unchained = expected_row(1);
+    unchained.lineage_proof_hash = Some(hash(7));
+    unchained.predecessor_wcb_hash = None;
+    for row in [expected_row(1), unchained] {
+        let bytes = row.to_canonical_cbor();
+        assert_eq!(LocalCutExpectedHeadRowV1::from_canonical_cbor(&bytes), Ok(row));
+    }
+    let row = result_row(1);
+    let bytes = row.to_canonical_cbor();
+    assert_eq!(LocalCutResultHeadRowV1::from_canonical_cbor(&bytes), Ok(row));
+}
+
+#[test]
+fn row_decoders_reject_truncated_extended_or_misshapen_rows() {
+    let expected = expected_row(1).to_canonical_cbor();
+    let result = result_row(1).to_canonical_cbor();
+    for length in 0..expected.len() {
+        assert_eq!(
+            LocalCutExpectedHeadRowV1::from_canonical_cbor(&expected[..length]),
+            Err(LocalCutSealErrorV2::InvalidEncoding),
+            "{length}"
+        );
+    }
+    for length in 0..result.len() {
+        assert_eq!(
+            LocalCutResultHeadRowV1::from_canonical_cbor(&result[..length]),
+            Err(LocalCutSealErrorV2::InvalidEncoding),
+            "{length}"
+        );
+    }
+    let extended = [expected.as_slice(), [0].as_slice()].concat();
+    assert_eq!(
+        LocalCutExpectedHeadRowV1::from_canonical_cbor(&extended),
+        Err(LocalCutSealErrorV2::InvalidEncoding)
+    );
+    let extended = [result.as_slice(), [0].as_slice()].concat();
+    assert_eq!(
+        LocalCutResultHeadRowV1::from_canonical_cbor(&extended),
+        Err(LocalCutSealErrorV2::InvalidEncoding)
+    );
+    assert_eq!(
+        LocalCutExpectedHeadRowV1::from_canonical_cbor(&result),
+        Err(LocalCutSealErrorV2::InvalidEncoding)
+    );
+    assert_eq!(
+        LocalCutResultHeadRowV1::from_canonical_cbor(&expected),
+        Err(LocalCutSealErrorV2::InvalidEncoding)
+    );
+}
+
+#[test]
+fn row_decoders_reject_nonpreferred_integer_heads() {
+    // The array head and the 17-byte Timeline precede each logical head.
+    let expected = expected_row(1).to_canonical_cbor();
+    let widened = [&expected[..18], [0x18, 0x03].as_slice(), &expected[19..]].concat();
+    assert_eq!(
+        LocalCutExpectedHeadRowV1::from_canonical_cbor(&widened),
+        Err(LocalCutSealErrorV2::NonCanonical)
+    );
+    let result = result_row(1).to_canonical_cbor();
+    let widened = [&result[..18], [0x18, 0x04].as_slice(), &result[19..]].concat();
+    assert_eq!(
+        LocalCutResultHeadRowV1::from_canonical_cbor(&widened),
+        Err(LocalCutSealErrorV2::NonCanonical)
+    );
+}

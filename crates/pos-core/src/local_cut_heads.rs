@@ -6,9 +6,8 @@
 //! the cut.
 
 use crate::local_cut_seal::{
-    domain_digest, encode_bytes, encode_head, encode_optional_hash, local_cut_tree_scope_v1,
-    LocalCutBranchChildV1, LocalCutSealErrorV2, LocalCutTableRefV1, BRANCH_DOMAIN,
-    MAX_BRANCH_CHILDREN, MAX_PAGE_ROWS, PAGE_DOMAIN,
+    encode_bytes, encode_head, encode_optional_hash, local_cut_tree_scope_v1, pack_local_cut_table,
+    LocalCutSealErrorV2, LocalCutTableRefV1, Reader,
 };
 use crate::{Hash, TimelineId};
 
@@ -55,6 +54,28 @@ impl LocalCutExpectedHeadRowV1 {
         encode_optional_hash(&mut out, self.predecessor_wcb_hash);
         out
     }
+
+    /// Decode exactly the canonical nine-field kind-4 row.
+    ///
+    /// # Errors
+    /// Rejects a malformed, truncated, extended or nonpreferred encoding.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, LocalCutSealErrorV2> {
+        let mut reader = Reader::new(bytes);
+        reader.array(9)?;
+        let row = Self {
+            timeline_id: reader.timeline()?,
+            logical_head: reader.uint()?,
+            stitched_chain_hash: reader.hash()?,
+            source_timeline_id: reader.timeline()?,
+            source_segment_head: reader.uint()?,
+            source_chain_hash: reader.hash()?,
+            logical_prefix: reader.uint()?,
+            lineage_proof_hash: reader.optional_hash()?,
+            predecessor_wcb_hash: reader.optional_hash()?,
+        };
+        finish_row(&reader, bytes, &row.to_canonical_cbor())?;
+        Ok(row)
+    }
 }
 
 /// One prospective kind-5 result Timeline head; not a source-owner observation.
@@ -91,6 +112,41 @@ impl LocalCutResultHeadRowV1 {
         encode_head(&mut out, 0, self.event_count);
         out
     }
+
+    /// Decode exactly the canonical seven-field kind-5 row.
+    ///
+    /// # Errors
+    /// Rejects a malformed, truncated, extended or nonpreferred encoding.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, LocalCutSealErrorV2> {
+        let mut reader = Reader::new(bytes);
+        reader.array(7)?;
+        let row = Self {
+            timeline_id: reader.timeline()?,
+            result_logical_head: reader.uint()?,
+            result_stitched_hash: reader.hash()?,
+            result_source_segment_head: reader.uint()?,
+            result_source_chain_hash: reader.hash()?,
+            successor_wcb_hash: reader.hash()?,
+            event_count: reader.uint()?,
+        };
+        finish_row(&reader, bytes, &row.to_canonical_cbor())?;
+        Ok(row)
+    }
+}
+
+/// Require a decoded row to span its input and re-encode to the same bytes.
+fn finish_row(
+    reader: &Reader<'_>,
+    bytes: &[u8],
+    canonical: &[u8],
+) -> Result<(), LocalCutSealErrorV2> {
+    if !reader.is_finished() {
+        Err(LocalCutSealErrorV2::InvalidEncoding)
+    } else if canonical != bytes {
+        Err(LocalCutSealErrorV2::NonCanonical)
+    } else {
+        Ok(())
+    }
 }
 
 /// Canonically packed kind-4 or kind-5 records, still unauthenticated by any owner.
@@ -115,11 +171,7 @@ impl LocalCutHeadsTableV1 {
             .iter()
             .map(LocalCutExpectedHeadRowV1::to_canonical_cbor)
             .collect::<Vec<_>>();
-        pack(
-            EXPECTED_HEADS_KIND,
-            local_cut_tree_scope_v1(owner_id, cut_id),
-            &encoded,
-        )
+        pack(EXPECTED_HEADS_KIND, owner_id, cut_id, &encoded)
     }
 
     /// Pack ordered kind-5 rows into the minimal ADR-082 LCP1/LCT1 tree.
@@ -136,11 +188,7 @@ impl LocalCutHeadsTableV1 {
             .iter()
             .map(LocalCutResultHeadRowV1::to_canonical_cbor)
             .collect::<Vec<_>>();
-        pack(
-            RESULT_HEADS_KIND,
-            local_cut_tree_scope_v1(owner_id, cut_id),
-            &encoded,
-        )
+        pack(RESULT_HEADS_KIND, owner_id, cut_id, &encoded)
     }
 
     /// Return the exact `[row_count, root]` reference of the packed table.
@@ -156,99 +204,33 @@ impl LocalCutHeadsTableV1 {
     }
 }
 
-fn check_sorted(timelines: impl Iterator<Item = TimelineId>) -> Result<(), LocalCutSealErrorV2> {
-    let timelines = timelines.collect::<Vec<_>>();
-    if timelines.windows(2).any(|pair| pair[0] >= pair[1]) {
+fn check_sorted(
+    timelines: impl Iterator<Item = TimelineId> + Clone,
+) -> Result<(), LocalCutSealErrorV2> {
+    let mut pairs = timelines.clone().zip(timelines.skip(1));
+    if pairs.any(|(left, right)| left >= right) {
         Err(LocalCutSealErrorV2::RowsNotSorted)
     } else {
         Ok(())
     }
 }
 
-/// Pack encoded rows 64 per page and children 240 per branch, left to right.
+/// Pack one cut's encoded rows of `kind` with the shared LCP1/LCT1 packer.
 ///
-/// One page is its own root; otherwise branches rise until a single root
-/// remains. The table reference rejects a row count above the ADR-082 cap.
+/// The ADR-082 row cap is enforced once, by the table reference after
+/// packing. An earlier length check would return the same `FieldOutOfBounds`;
+/// only the work it saves would differ, which no public-seam test can observe
+/// without allocating more than a million rows, so none is made.
 fn pack(
     kind: u64,
-    tree_scope: Hash,
+    owner_id: [u8; 32],
+    cut_id: u64,
     rows: &[Vec<u8>],
 ) -> Result<LocalCutHeadsTableV1, LocalCutSealErrorV2> {
-    let mut node_records = Vec::new();
-    let mut level = Vec::new();
-    for (index, chunk) in rows.chunks(MAX_PAGE_ROWS).enumerate() {
-        let first_ordinal = (index * MAX_PAGE_ROWS) as u64;
-        let page = encode_page(kind, tree_scope, first_ordinal, chunk);
-        level.push(LocalCutBranchChildV1 {
-            first_ordinal,
-            row_count: chunk.len() as u64,
-            node_hash: domain_digest(PAGE_DOMAIN, &page),
-        });
-        node_records.push(page);
-    }
-    let mut height = 0_u8;
-    while level.len() > 1 {
-        height += 1;
-        let mut parents = Vec::new();
-        for children in level.chunks(MAX_BRANCH_CHILDREN) {
-            let branch = encode_branch(kind, tree_scope, height, children);
-            parents.push(LocalCutBranchChildV1 {
-                first_ordinal: children[0].first_ordinal,
-                row_count: children.iter().map(|child| child.row_count).sum(),
-                node_hash: domain_digest(BRANCH_DOMAIN, &branch),
-            });
-            node_records.push(branch);
-        }
-        level = parents;
-    }
-    LocalCutTableRefV1::new(rows.len() as u64, level.first().map(|root| root.node_hash)).map(
-        |reference| LocalCutHeadsTableV1 {
-            reference,
-            node_records,
-        },
-    )
-}
-
-fn encode_page(kind: u64, tree_scope: Hash, first_ordinal: u64, rows: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_head(&mut out, 4, 6);
-    encode_bytes(&mut out, b"LCP1");
-    encode_head(&mut out, 0, 1);
-    encode_head(&mut out, 0, kind);
-    encode_bytes(&mut out, tree_scope.as_bytes());
-    encode_head(&mut out, 0, first_ordinal);
-    encode_head(&mut out, 4, rows.len() as u64);
-    for row in rows {
-        out.extend_from_slice(row);
-    }
-    out
-}
-
-fn encode_branch(
-    kind: u64,
-    tree_scope: Hash,
-    height: u8,
-    children: &[LocalCutBranchChildV1],
-) -> Vec<u8> {
-    let mut out = Vec::new();
-    encode_head(&mut out, 4, 8);
-    encode_bytes(&mut out, b"LCT1");
-    encode_head(&mut out, 0, 1);
-    encode_head(&mut out, 0, kind);
-    encode_bytes(&mut out, tree_scope.as_bytes());
-    encode_head(&mut out, 0, u64::from(height));
-    encode_head(&mut out, 0, children[0].first_ordinal);
-    encode_head(
-        &mut out,
-        0,
-        children.iter().map(|child| child.row_count).sum(),
-    );
-    encode_head(&mut out, 4, children.len() as u64);
-    for child in children {
-        encode_head(&mut out, 4, 3);
-        encode_head(&mut out, 0, child.first_ordinal);
-        encode_head(&mut out, 0, child.row_count);
-        encode_bytes(&mut out, child.node_hash.as_bytes());
-    }
-    out
+    let tree_scope = local_cut_tree_scope_v1(owner_id, cut_id);
+    let packed = pack_local_cut_table(kind, tree_scope, rows);
+    packed.map(|(reference, node_records)| LocalCutHeadsTableV1 {
+        reference,
+        node_records,
+    })
 }
