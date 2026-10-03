@@ -154,14 +154,17 @@ impl SqliteTrustedClockAuthorityV1 {
     /// `SqliteStore::open` from initializing its schema there).
     ///
     /// The catalog check and the table creation run in one `BEGIN IMMEDIATE`
-    /// transaction, so no writer can drop the catalog between them.
+    /// transaction, so no writer can drop the catalog between them. A path
+    /// that does not exist yet is created as an empty file before the
+    /// refusal; it holds no schema, so `SqliteStore::open` still initializes
+    /// it.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the file cannot be opened, lacks
     /// the complete `SqliteStore` ARD1 catalog (`artifact_registrations` and
-    /// `artifact_registration_operations`), the tables cannot be created, or
-    /// an existing trusted-clock table or trigger differs from its reviewed
-    /// definition.
+    /// `artifact_registration_operations`), the schema objects cannot be
+    /// created, or an existing trusted-clock table or trigger differs from
+    /// its reviewed definition.
     pub fn open(path: &str) -> Result<Self, CoreError> {
         let authority = connect(path)
             .and_then(|reservation| connect(path).map(|guard| Self { reservation, guard }))?;
@@ -176,6 +179,8 @@ impl SqliteTrustedClockAuthorityV1 {
                 rollback_on(&authority.reservation);
                 Err(CoreError::Storage(refusal.to_owned()))
             }
+            // Dropping `authority` closes its connections, which rolls back
+            // any transaction `schema_refusal` left open.
             Err(error) => Err(CoreError::Storage(error.to_string())),
         }
     }
@@ -261,6 +266,11 @@ fn query_scalar<T: FromSql>(connection: &Connection, sql: &str) -> rusqlite::Res
     connection.query_row(sql, [], |row| row.get(0))
 }
 
+/// Enforce `journal_mode=WAL` and `synchronous=FULL` on the reservation
+/// connection and read both back (ADR-112 §4: set before `BEGIN`, then read
+/// back). Setting WAL switches a non-WAL file rather than refusing it; the
+/// read-back still fails closed when the mode cannot be applied, such as on
+/// an in-memory database.
 fn durability_matches(connection: &Connection) -> rusqlite::Result<bool> {
     let journal = query_scalar::<String>(connection, "PRAGMA journal_mode=WAL");
     let synchronous = connection
