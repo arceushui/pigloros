@@ -38,8 +38,8 @@
 //!
 //! [#493]: https://redmine.piglor.com/issues/493
 
-use std::collections::{BTreeSet, HashSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::BTreeSet;
+use std::sync::{Arc, PoisonError};
 
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -201,7 +201,12 @@ const fn source_state(has_prediction: bool, has_outcome: bool) -> SourceStateV1 
 
 /// Source Event ids named by the `causation_id` of committed Events of one
 /// type. Legacy `eval.*` Events carry no causation and never name a source.
-fn caused_sources(prefix: &[Event], event_type: &str) -> HashSet<EventId> {
+#[expect(
+    clippy::disallowed_types,
+    reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
+              source membership tests need no iteration order"
+)]
+fn caused_sources(prefix: &[Event], event_type: &str) -> std::collections::HashSet<EventId> {
     prefix
         .iter()
         .filter(|event| event.event_type.as_str() == event_type)
@@ -407,7 +412,11 @@ struct EvalPassDiagnosticsV1 {
 /// discarded pass publishes nothing. Nothing here is persisted or appended.
 #[derive(Clone, Debug, Default)]
 pub struct EvalDiagnosticsV1 {
-    pass: Arc<Mutex<EvalPassDiagnosticsV1>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "host-side diagnostics channel, not reducer code"
+    )]
+    pass: Arc<std::sync::Mutex<EvalPassDiagnosticsV1>>,
 }
 
 impl EvalDiagnosticsV1 {

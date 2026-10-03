@@ -72,6 +72,9 @@ bash "$ROOT/scripts/assert-no-ignored-in-test-summary.sh" "$test_log"
 echo "==> clippy"
 cargo clippy --workspace --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
 
+echo "==> staged reducer purity guard (ADR-113 §7)"
+bash "$ROOT/scripts/check-reducer-purity-guard.sh"
+
 # Coverage floor: production code is fully instrumented (coverage(off) is test-only).
 # Unnecessary code is deleted/simplified rather than left as dead branches.
 echo "==> coverage (99% lines + 99% regions)"

@@ -61,18 +61,28 @@ mod catalogue;
 mod human_admission;
 mod profile_composition;
 mod scheduled_admission;
+mod staged_catalogue;
 
 pub use adapter::{
     ClosedAdapterTranscriptV1, LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1,
     LocalAdapterProviderResponseV1, LocalAdapterProviderV1, LocalAdapterSessionV1,
 };
 pub use authorized_pass::{AuthorizedDriverViewV1, AuthorizedViewAuthorityV1};
-pub use catalogue::{HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPluginProductV1};
+pub use catalogue::{
+    HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1,
+    EMPTY_CONFIGURATION_DETAILS_V1,
+};
 pub use human_admission::{
     HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
 };
 pub use profile_composition::{ScheduledDriverBindingV1, ScheduledProfileErrorV1};
 pub use scheduled_admission::ScheduledPassAdmissionV1;
+#[cfg(any(test, feature = "test-support"))]
+pub use staged_catalogue::is_reviewed_staged_factory;
+pub use staged_catalogue::{
+    fold_detached_candidate_v1, HostProjectionProviderV1, StagedGrowthBoundV1,
+    StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1, MAX_STAGED_CALLBACK_BOUND_V1,
+};
 
 /// Stable manifest slot of a Plugin in a registry-derived local catalog.
 fn local_manifest_slot(plugin_id: PluginId) -> String {
@@ -252,6 +262,16 @@ fn plugin_claimable_event_type(kind: &Kind) -> bool {
         .iter()
         .find(|host| host.event_type == kind.as_str())
         .is_none_or(|host| host.claimable)
+}
+
+/// The host's projection input: every Event except the consent-closed
+/// control marker. The visible registry and detached candidates share it.
+fn host_projection_events(events: &[Event]) -> Vec<Event> {
+    events
+        .iter()
+        .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)
+        .cloned()
+        .collect()
 }
 
 fn driver_visible_event(event: &Event) -> bool {
@@ -2097,11 +2117,7 @@ impl PluginRegistry {
 
     /// Fold a host-captured Event range into the registered reducers.
     pub fn fold_events(&mut self, timeline: TimelineId, events: &[Event]) {
-        let visible_events: Vec<Event> = events
-            .iter()
-            .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)
-            .cloned()
-            .collect();
+        let visible_events = host_projection_events(events);
         self.projections.fold_events(timeline, &visible_events);
     }
 
@@ -2125,11 +2141,7 @@ impl PluginRegistry {
         events: &[Event],
         expected_generation: Option<pos_core::ErasureReferenceV1>,
     ) -> Result<(), RuntimeError> {
-        let visible_events: Vec<Event> = events
-            .iter()
-            .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)
-            .cloned()
-            .collect();
+        let visible_events = host_projection_events(events);
         self.projections
             .refold_events(timeline, &visible_events, expected_generation)?;
         Ok(())

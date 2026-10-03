@@ -4635,6 +4635,7 @@ dependencies = [
  "ciborium",
  "pos-core",
  "pos-plugin-geo",
+ "pos-runtime",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
