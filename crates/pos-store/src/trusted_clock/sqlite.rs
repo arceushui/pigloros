@@ -38,6 +38,24 @@ const STORED_SQL: &str = "SELECT sql FROM sqlite_master WHERE name = ?1";
 
 const TAMPERED_SCHEMA: &str = "trusted-clock schema differs from its reviewed definition";
 
+/// Why [`SqliteTrustedClockAuthorityV1::open`] refuses a file.
+#[derive(Clone, Copy)]
+enum SchemaRefusal {
+    /// The file lacks the complete `SqliteStore` ARD1 catalog.
+    NotAStore,
+    /// A trusted-clock table or trigger differs from its reviewed definition.
+    Tampered,
+}
+
+impl SchemaRefusal {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::NotAStore => NOT_A_STORE,
+            Self::Tampered => TAMPERED_SCHEMA,
+        }
+    }
+}
+
 /// The two row tables, the append-only acknowledgement table and its three
 /// guard triggers, as `(name, CREATE statement)`. `CREATE ... IF NOT EXISTS`
 /// would keep a weaker object of the same name, so `open` creates each
@@ -177,11 +195,12 @@ impl SqliteTrustedClockAuthorityV1 {
             Ok(None) => Ok(authority),
             Ok(Some(refusal)) => {
                 rollback_on(&authority.reservation);
-                Err(CoreError::Storage(refusal.to_owned()))
+                Err(CoreError::Storage(refusal.message().to_owned()))
             }
-            // Dropping `authority` closes its connections, which rolls back
-            // any transaction `schema_refusal` left open.
-            Err(error) => Err(CoreError::Storage(error.to_string())),
+            Err(error) => {
+                rollback_on(&authority.reservation);
+                Err(CoreError::Storage(error.to_string()))
+            }
         }
     }
 }
@@ -190,16 +209,16 @@ impl SqliteTrustedClockAuthorityV1 {
 /// then create or verify the reviewed trusted-clock schema. Commits and
 /// returns `None` when both hold; otherwise returns the refusal with the
 /// transaction still open.
-fn schema_refusal(connection: &Connection) -> rusqlite::Result<Option<&'static str>> {
+fn schema_refusal(connection: &Connection) -> rusqlite::Result<Option<SchemaRefusal>> {
     connection
         .execute_batch("BEGIN IMMEDIATE")
         .and_then(|()| sqlite_artifact_registration_schema_exists(connection))
         .and_then(|store| {
             if store {
                 reviewed_schema_intact(connection)
-                    .map(|intact| (!intact).then_some(TAMPERED_SCHEMA))
+                    .map(|intact| (!intact).then_some(SchemaRefusal::Tampered))
             } else {
-                Ok(Some(NOT_A_STORE))
+                Ok(Some(SchemaRefusal::NotAStore))
             }
         })
         .and_then(|refusal| commit_unless(connection, refusal))
@@ -232,8 +251,8 @@ fn reviewed_schema_intact(connection: &Connection) -> rusqlite::Result<bool> {
 
 fn commit_unless(
     connection: &Connection,
-    refusal: Option<&'static str>,
-) -> rusqlite::Result<Option<&'static str>> {
+    refusal: Option<SchemaRefusal>,
+) -> rusqlite::Result<Option<SchemaRefusal>> {
     refusal.map_or_else(
         || connection.execute_batch("COMMIT").map(|()| None),
         |refusal| Ok(Some(refusal)),
