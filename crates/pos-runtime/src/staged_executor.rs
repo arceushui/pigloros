@@ -485,7 +485,7 @@ fn run_callback<T>(callback: impl FnOnce() -> T) -> Option<T> {
 /// abandons it at its deadline.
 ///
 /// It loops rather than `mem::forget`ting the payload: `mem_forget` is
-/// denied workspace-wide, and a deliberate leak would fail the LSan job
+/// denied workspace-wide, and a deliberate leak would fail the `LSan` job
 /// (decision recorded under ADR-113 clarification ticket #515).
 fn drop_payload(mut payload: Box<dyn Any + Send>) {
     while let Err(next) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
