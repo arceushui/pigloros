@@ -249,7 +249,25 @@ jobs:
           type "%RUNNER_TEMP%\out\41-fixed-smoke.txt"
           echo probe exit code %RC%
           echo probe exit code %RC% >> "%RUNNER_TEMP%\out\41-fixed-smoke.txt"
+      - name: crash diagnosis under cdb (second-chance AV stack)
+        if: ${{ contains(github.event.head_commit.message, '[cdb]') }}
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          $o = "$env:RUNNER_TEMP\out"
+          $env:PROBE_RUNTIME = $env:RUNTIME_ROOT; $env:PROBE_TRACE = "1"; $env:PROBE_UDF_ROOT = "$env:RUNNER_TEMP\udf-c"; $env:PROBE_RUNS = "400"; $env:PROBE_CSV = "$o\43-cdb.csv"
+          $env:_NT_SYMBOL_PATH = "$pwd\target\release;srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols"
+          $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          Set-Content -Path "$env:RUNNER_TEMP\cdb-script.txt" -Encoding ascii -Value @(
+            'sxd -c2 ".echo SECOND_CHANCE_AV;.lastevent;.ecxr;r;kn 80;!analyze -v;q" av',
+            'g')
+          $p = Start-Process -FilePath $cdb -ArgumentList @('-G','-cf',"$env:RUNNER_TEMP\cdb-script.txt",'.\target\release\wv2probe.exe') -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$o\43-cdb.txt" -RedirectStandardError "$o\43-cdb.err"
+          "cdb exit=$($p.ExitCode)"
+          Get-Content "$o\43-cdb.txt" | Select-String -Pattern 'SECOND_CHANCE|Last event|ExceptionAddress|ExceptionCode|Attempt to|FAULTING_|SYMBOL_NAME|IMAGE_NAME|STACK_TEXT|^ *[0-9a-f]{2} [0-9a-f`]{17} ' -Context 0,0 | Select-Object -First 120
+          Get-Content "$o\43-cdb.txt" | Select-String '^T ' | Select-Object -Last 3
+          exit 0
       - name: G3/G4/G16 - fixed runtime, 1000 fresh-environment ceremonies (restart on crash)
+        if: ${{ !contains(github.event.head_commit.message, '[cdb]') }}
         continue-on-error: true
         timeout-minutes: 100
         run: |
