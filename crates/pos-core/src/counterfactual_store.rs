@@ -967,9 +967,12 @@ impl CounterfactualGenerationReceiptV1 {
     ///
     /// The receipt was built from a command whose `SIV1` was verified to
     /// bind this receipt's Fork, generation (`new_generation`), frontier
-    /// digest, and first Tick (`commit_tick`), with `first_tick_head`
-    /// greater than `commit_seq`. Equal invalidation digests therefore imply
-    /// every one of those bindings.
+    /// digest, plan digest, and first Tick (`commit_tick`). Equal
+    /// invalidation digests imply only those `SIV1`-carried bindings: the
+    /// receipt's `first_tick_head` and published facts are attested by the
+    /// adapter that committed it, and a match proves the receipt was built
+    /// from this `SIV1`, not that it was committed. Read the `SIV1` at the
+    /// receipt's generation through the port to prove the commit.
     #[must_use]
     pub fn matches_invalidation(&self, invalidation: &SuffixInvalidationBytesV1) -> bool {
         self.invalidation_digest == invalidation.digest()
@@ -1022,6 +1025,9 @@ pub trait CounterfactualStorePortV1 {
     ///
     /// The first publication starts the Fork at generation 0. A later one
     /// replaces only the facts; the committed generation and artifacts stay.
+    /// Republishing a different plan or dependency-graph digest without a
+    /// new generation makes every in-flight basis `Stale` with
+    /// `PlanDigest` or `DependencyGraphDigest`.
     /// This is a host operation; the coordinator never calls it.
     ///
     /// # Errors
