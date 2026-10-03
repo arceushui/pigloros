@@ -216,11 +216,13 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn oci_digest(bytes: &[u8]) -> String {
-    let hex = sha256(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sha256:{hex}")
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut digest = String::from("sha256:");
+    for byte in sha256(bytes) {
+        digest.push(char::from(HEX[usize::from(byte >> 4)]));
+        digest.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    digest
 }
 
 /// `BLAKE3(domain || u64be(len) || bytes)`.
