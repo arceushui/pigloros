@@ -5,6 +5,7 @@ use pos_core::{
     ManifestSlotBindingRowV1, ManifestSlotBindingV1, PluginId, WorldArtifactErrorV1,
     WorldArtifactKindV1, WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldClosureReadLimitsV1,
     WorldDependencyBranchV1, WorldDependencyDirectoryErrorV1, WorldDependencyDirectoryV1,
+    MAX_WORLD_DEPENDENCY_DIRECTORY_BYTES_V1,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -265,6 +266,14 @@ fn full_admitted_roster_packs_512_seed_memberships_into_exact_branches() -> Test
     assert_eq!(directory.leaves().len(), 512);
     assert_eq!(directory.leaves()[0], seeds[255].eop1_leaf);
     assert_eq!(directory.leaves()[511], seeds[0].opc1_leaf);
+
+    // The packer skips the node-size check, so every packed node, including
+    // the root, must fit the WDB1 cap and round-trip through the public decoder.
+    for branch in directory.branches() {
+        let encoded = branch.encode();
+        assert!(encoded.as_slice().len() <= MAX_WORLD_DEPENDENCY_DIRECTORY_BYTES_V1);
+        assert_eq!(&WorldDependencyBranchV1::decode(&encoded)?, branch);
+    }
     Ok(())
 }
 
@@ -273,6 +282,15 @@ fn recorded_visit_byte_and_depth_limits_reject_the_full_roster() -> TestResult {
     let seeds = seed_range(0..256)?;
     let binding = binding_for(&seeds)?;
     let native_bytes = 256 * 300 + 2 * (255 * 256 / 2);
+    // Each axis is accepted exactly at its limit and rejected one over it.
+    let at_limit = WorldDependencyDirectoryV1::pack_with_manifest_policy_seeds(
+        &binding,
+        &seeds,
+        expectation(),
+        Vec::new(),
+        limits(515, native_bytes, 3),
+    )?;
+    assert_eq!(at_limit.height(), 2);
     for exceeded in [
         limits(514, native_bytes, 3),
         limits(515, native_bytes - 1, 3),
@@ -314,12 +332,12 @@ fn zero_output_plugin_and_duplicate_producer_seed_pack_after_row_checks() -> Tes
     let reducer = leaf(WorldArtifactKindV1::ReducerImplementation, hash(0x31), 5)?;
     // WCS1 lists only the first Plugin; the second is reducer-only and
     // zero-output, but its Required policy leaves still enter the directory.
-    let other_seeds = vec![seeds[0].eop1_leaf.clone(), reducer.clone()];
+    let additional_seeds = vec![seeds[0].eop1_leaf.clone(), reducer.clone()];
     let directory = WorldDependencyDirectoryV1::pack_with_manifest_policy_seeds(
         &binding,
         &seeds,
         expectation(),
-        other_seeds,
+        additional_seeds,
         generous(),
     )?;
 
@@ -459,7 +477,7 @@ fn omitted_duplicate_or_extra_policy_membership_rejects() -> TestResult {
         ),
         (
             vec![seeds[0].clone(), seeds[0].clone(), seeds[1].clone()],
-            WorldDependencyDirectoryErrorV1::UnexpectedPolicyLeaf,
+            WorldDependencyDirectoryErrorV1::DuplicatePolicySeed,
         ),
         (
             seeds.clone(),
@@ -530,6 +548,7 @@ fn every_closed_directory_error_has_a_message() {
         WorldDependencyDirectoryErrorV1::LimitExceeded,
         WorldDependencyDirectoryErrorV1::MissingPolicyLeaf,
         WorldDependencyDirectoryErrorV1::UnexpectedPolicyLeaf,
+        WorldDependencyDirectoryErrorV1::DuplicatePolicySeed,
         WorldDependencyDirectoryErrorV1::WrongKind,
         WorldDependencyDirectoryErrorV1::WrongLease,
         WorldDependencyDirectoryErrorV1::WrongOwner,

@@ -101,6 +101,10 @@ impl WorldDependencyKeyV1 {
     }
 
     /// Key of a structurally validated WAL1 leaf, whose digest is nonzero.
+    ///
+    /// Crate-private: callers must pass the kind and native digest of a leaf
+    /// that `WorldArtifactLeafV1::new` already accepted, so [`Self::new`]'s
+    /// zero-digest check cannot fail and is skipped.
     pub(crate) const fn for_validated_leaf(kind: WorldArtifactKindV1, native_digest: Hash) -> Self {
         Self {
             kind,
@@ -175,6 +179,10 @@ impl WorldDependencyBranchChildV1 {
     }
 
     /// Summary of one node produced by the canonical directory packer.
+    ///
+    /// Crate-private: the packer passes ordered endpoints, a positive leaf
+    /// count and a nonzero digest of a WAL1 leaf or packed WDB1 branch, so the
+    /// range checks of [`Self::new`] cannot fail and are skipped.
     pub(crate) const fn packed(
         first_key: WorldDependencyKeyV1,
         last_key: WorldDependencyKeyV1,
@@ -281,9 +289,15 @@ impl WorldDependencyBranchV1 {
 
     /// Branch over one nonempty, ordered, canonically packed child chunk.
     ///
-    /// The packer supplies at most 256 strictly ordered children whose
-    /// non-final members are full for this height; public decoding of the
-    /// encoded node revalidates those invariants through [`Self::new`].
+    /// Crate-private: `children` must be non-empty, because the first and
+    /// last endpoints index it directly. The packer supplies at most 256
+    /// strictly ordered children whose non-final members are full for this
+    /// height; public decoding of the encoded node revalidates those
+    /// invariants through [`Self::new`].
+    ///
+    /// The 65,536-byte node cap is not rechecked here: each encoded child takes
+    /// at most 118 bytes and the fixed fields at most 129, so a full 256-child
+    /// node encodes to at most 30,337 bytes.
     pub(crate) fn packed(
         scope: Hash,
         height: u8,

@@ -36,6 +36,9 @@ pub enum WorldDependencyDirectoryErrorV1 {
     /// A policy seed or policy-kind leaf belongs to no admitted MSB1 row.
     #[error("policy leaf is not admitted by the selected binding")]
     UnexpectedPolicyLeaf,
+    /// More than one EOP1/OPC1 seed pair was supplied for one admitted MSB1 row.
+    #[error("admitted policy row has more than one Required seed pair")]
+    DuplicatePolicySeed,
     /// A policy seed leaf has the wrong ADR-081 artifact kind.
     #[error("policy seed leaf has the wrong artifact kind")]
     WrongKind,
@@ -163,10 +166,11 @@ impl WorldDependencyDirectoryV1 {
         Ok(build(scope, leaves))
     }
 
-    /// Check every MSB1 policy seed, then pack it with the other ADR-081 seeds.
+    /// Check every MSB1 policy seed, then pack it with the additional ADR-081 seeds.
     ///
-    /// Row membership is proved before deduplication. Any other kind-0 or
-    /// kind-14 seed must equal an admitted row leaf; it then deduplicates.
+    /// Row membership is proved before deduplication. The `additional_seeds`
+    /// are every non-MSB1-row ADR-081 seed of the scope; any kind-0 or kind-14
+    /// leaf among them must equal an admitted row leaf, and then deduplicates.
     ///
     /// # Errors
     /// Returns any [`check_manifest_policy_seeds_v1`] failure, rejects an
@@ -175,18 +179,18 @@ impl WorldDependencyDirectoryV1 {
         binding: &ManifestSlotBindingV1,
         policy_seeds: &[ManifestPolicySeedV1],
         expectation: ManifestPolicyLeafExpectationV1,
-        other_seeds: Vec<WorldArtifactLeafV1>,
+        additional_seeds: Vec<WorldArtifactLeafV1>,
         limits: WorldClosureReadLimitsV1,
     ) -> Result<Self, WorldDependencyDirectoryErrorV1> {
         let mut leaves = check_manifest_policy_seeds_v1(binding, policy_seeds, expectation)?;
         let admitted: BTreeSet<Hash> = leaves.iter().map(WorldArtifactLeafV1::digest).collect();
-        if other_seeds
+        if additional_seeds
             .iter()
             .any(|seed| is_policy_kind(seed) && !admitted.contains(&seed.digest()))
         {
             return Err(WorldDependencyDirectoryErrorV1::UnexpectedPolicyLeaf);
         }
-        leaves.extend(other_seeds);
+        leaves.extend(additional_seeds);
         Self::pack(binding.as_input().scope, leaves, limits)
     }
 
@@ -246,7 +250,7 @@ fn row_seed<'a>(
         .get(&plugin_id)
         .copied()
         .ok_or(WorldDependencyDirectoryErrorV1::MissingPolicyLeaf)?
-        .ok_or(WorldDependencyDirectoryErrorV1::UnexpectedPolicyLeaf)
+        .ok_or(WorldDependencyDirectoryErrorV1::DuplicatePolicySeed)
 }
 
 fn check_policy_leaf(
@@ -321,6 +325,8 @@ fn check_limits(
     });
     let max_node_visits = limits.max_node_visits;
     let max_native_bytes = limits.max_native_bytes;
+    // A 256-way fanout over u64 leaf counts stays at depth 9 (height 8), far
+    // below MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1, so only this depth binds.
     let max_depth = limits.max_combined_depth;
     if node_visits > max_node_visits || native_bytes > max_native_bytes || depth > max_depth {
         Err(WorldDependencyDirectoryErrorV1::LimitExceeded)
