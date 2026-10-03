@@ -40,14 +40,19 @@ fn producer(tick: u64, scheduler_position: u32, owner_id: &str) -> DependencyNod
     }
 }
 
-/// An invalid artifact carries its producer's schema and the record's reason.
-fn artifact(artifact_class: &str, producer: DependencyNodeV1) -> InvalidArtifactV1 {
+/// An invalid artifact carries its producer's schema and the record's reason
+/// and prior generation.
+fn artifact(
+    artifact_class: &str,
+    producer: DependencyNodeV1,
+    prior_generation: u64,
+) -> InvalidArtifactV1 {
     InvalidArtifactV1 {
         artifact_class: artifact_class.to_owned(),
         schema_id: producer.schema_id,
         artifact_digest: [11; 32],
         producer,
-        prior_generation: 300,
+        prior_generation,
         reason: INVALIDATION_REASON,
     }
 }
@@ -106,9 +111,9 @@ fn invalidation(
         invalid_start: node(5, 0, "agent-a"),
         invalid_end: node(4_294_967_296, 0, long_owner),
         invalid_artifacts: vec![
-            artifact("event", producer(5, 0, "agent-a")),
-            artifact("projection", producer(5, 0, "agent-a")),
-            artifact("event", producer(6, 1, long_owner)),
+            artifact("event", producer(5, 0, "agent-a"), prior_generation),
+            artifact("projection", producer(5, 0, "agent-a"), prior_generation),
+            artifact("event", producer(6, 1, long_owner), prior_generation),
         ],
         invalid_checkpoint_digests: vec![[5; 32], [6; 32]],
         invalid_projection_digests: vec![[7; 32]],
