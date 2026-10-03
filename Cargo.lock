@@ -4696,6 +4696,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-plugin-release"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.5",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "pos-plugin-rule-agent"
 version = "0.1.0"
 dependencies = [
@@ -4753,16 +4763,6 @@ version = "0.1.0"
 dependencies = [
  "pos-core",
  "pos-store",
-]
-
-[[package]]
-name = "pos-plugin-release"
-version = "0.1.0"
-dependencies = [
- "rustix 1.1.5",
- "serde_json",
- "sha2",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -7035,9 +7035,9 @@ dependencies = [
 
 [[package]]
 name = "zbus_systemd"
-version = "0.26100.0"
+version = "0.26200.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4508893b3fc7829cbd654a318942b0716fb08da8a272a646a970f382cfb7d27e"
+checksum = "e0b9e5661e7491cf89fbd8402c1c61320f655c5cf69eaae22c6bd350298b065d"
 dependencies = [
  "serde",
  "zbus",

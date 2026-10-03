@@ -16,7 +16,7 @@ rustix = { version = "1.1.4", default-features = false, features = [
 ] }
 thiserror = { workspace = true }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
-zbus_systemd = { version = "=0.26100.0", default-features = false, features = [
+zbus_systemd = { version = "=0.26200.0", default-features = false, features = [
   "systemd1",
   "zbus-async-tokio",
 ] }
