@@ -21,8 +21,8 @@
 //!    every later Tick ends with one checkpoint Event whose payload is that
 //!    Tick's exact `RCP1` bytes. Every later `RCP1` is re-derived from the
 //!    committed Events, chained through the first Tick's state, and must
-//!    match byte for byte, so a missing first-Tick Event and any foreign,
-//!    unmarked, or altered Event after the first Tick is a
+//!    match byte for byte, so a missing first-Tick Event, and any foreign,
+//!    unmarked, or altered Event after the first Tick, are each a
 //!    [`CounterfactualSuffixErrorV1::RecoveryMismatch`];
 //! 4. commits each remaining Tick through the horizon: it stages the Tick
 //!    through the same [`CounterfactualTickStagerV1`] seam and staged inputs
@@ -119,6 +119,9 @@
 //!   is committed, nothing committed binds the attested revocation and
 //!   erasure epochs, so a host that attests its new epochs after a
 //!   revocation or erasure change can still recompute that stale generation.
+//!   The first later Tick then embeds those attested epochs in the chained
+//!   `RCP1` state for good, so a wrong first attestation is locked in and
+//!   later calls with the true epochs fail with `RecoveryMismatch`.
 //!   Closing this needs the port to expose the epochs persisted at
 //!   admission (or the receipt to carry them).
 //! - **First-Tick Event content.** No committed artifact records the first
