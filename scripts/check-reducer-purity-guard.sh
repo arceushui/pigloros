@@ -44,6 +44,11 @@ while IFS= read -r threshold; do
 done < <(grep -E '^[a-z-]+-threshold = ' clippy.toml | tr -d ' ')
 
 header="$(forbid_header plugins/agent/src/reducer.rs)"
+if [[ -z "$header" ]]; then
+  printf 'reducer purity guard: %s\n' \
+    "plugins/agent/src/reducer.rs has no #![forbid(...)] header to copy" >&2
+  exit 1
+fi
 for lint in disallowed_methods disallowed_types disallowed_macros print_stdout print_stderr \
   dbg_macro exit; do
   if ! grep -qE -- "^    clippy::${lint},?$" <<<"$header"; then
@@ -136,6 +141,12 @@ expect_fails "process exit" 'disallowed method `std::process::exit`' "$plain_lib
 pub fn effect() {
     std::process::exit(0);
 }"
+expect_fails "thread sleep" 'disallowed method `std::thread::sleep`' "$plain_lib" "$clean_reducer
+pub fn effect() {
+    std::thread::sleep(std::time::Duration::ZERO);
+}"
+expect_fails "atomic u8" 'disallowed type `std::sync::atomic::AtomicU8`' "$plain_lib" "$clean_reducer
+pub static FLAG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);"
 expect_fails "once lock" 'disallowed type `std::sync::OnceLock`' "$plain_lib" "$clean_reducer
 pub static CELL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();"
 expect_fails "thread local" 'disallowed macro `std::thread_local`' "$plain_lib" "$clean_reducer

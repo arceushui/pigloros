@@ -87,6 +87,14 @@ struct CandidateSlotV1 {
 /// Its reducer instances are never exposed; only bounded State reads are.
 /// A provider assembles it with [`Self::from_reducers`] from one freshly
 /// built reducer per recorded consumer; [`Default`] is the empty candidate.
+///
+/// # Trust boundary
+/// [`Self::from_reducers`] and [`Default`] are public construction paths for
+/// trusted providers only. Neither is an admission path: they check no
+/// review, conformance evidence or reducer identity. Admission happens only
+/// in the host catalogue provider (`pos_runtime::HostProjectionProviderV1`),
+/// and protected work must take its candidates from a
+/// [`ProtectedProjectionProviderV1`], never build one directly.
 #[derive(Default)]
 pub struct DetachedProjectionCandidateV1 {
     slots: Vec<CandidateSlotV1>,
@@ -95,6 +103,12 @@ pub struct DetachedProjectionCandidateV1 {
 impl DetachedProjectionCandidateV1 {
     /// Assemble a candidate from one freshly built reducer per recorded
     /// consumer, in recorded order.
+    ///
+    /// For trusted providers only; this is not an admission path. The caller
+    /// vouches that every reducer was freshly built from an admitted entry
+    /// whose identity matches its consumer; admission is
+    /// `pos_runtime::HostProjectionProviderV1`. See the type-level trust
+    /// boundary.
     ///
     /// # Errors
     /// Returns [`ProjectionCandidateErrorV1::ConsumerSetMismatch`] when two

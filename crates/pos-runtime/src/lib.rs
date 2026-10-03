@@ -70,6 +70,9 @@ pub use pos_state::{
     RecordedConsumerV1,
 };
 pub use recorder::{RecordedOutput, Recorder, RunMode};
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use registry::is_reviewed_staged_factory;
 pub use registry::{
     fold_detached_candidate_v1, recover_local_cut_owner_retry_v1,
     recover_manifest_owner_admission_retry_v1, AuthorizedDriverViewV1, AuthorizedViewAuthorityV1,

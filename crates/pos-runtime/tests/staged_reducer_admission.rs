@@ -16,9 +16,9 @@ use pos_core::{
     EVENT_TYPE_CONSENT_REVOKED_V1, GEOGRAPHIC_EVENT_TYPE, HOST_CONSENT_CLOSED_EVENT_TYPE,
 };
 use pos_runtime::{
-    fold_detached_candidate_v1, HostProjectionProviderV1, InstalledPluginFactoryV1,
-    InstalledPluginProductV1, NoActionApproverV1, PluginRegistry, StagedReducerAdmissionErrorV1,
-    MAX_STAGED_CALLBACK_BOUND_V1,
+    fold_detached_candidate_v1, is_reviewed_staged_factory, HostProjectionProviderV1,
+    InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1, PluginRegistry,
+    StagedReducerAdmissionErrorV1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
 use pos_state::{
     EntityStateProjection, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1,
@@ -247,6 +247,9 @@ fn reviewed_admission_rejects_unreviewed_factories_before_any_build() {
         Err(StagedReducerAdmissionErrorV1::NotReviewed)
     );
     assert_eq!(configuration.builds(), 0);
+    let counting = std::any::type_name::<CountingPlugin>();
+    assert!(!is_reviewed_staged_factory(counting));
+    assert!(is_reviewed_staged_factory("pos_plugin_world::WorldPlugin"));
 }
 
 #[test]

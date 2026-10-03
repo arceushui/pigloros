@@ -1,15 +1,15 @@
-//! The reviewed staged-catalogue name of this Plugin's factory.
+//! This Plugin's factory is on the reviewed staged-catalogue list.
 //!
-//! `pos-runtime` admits a reviewed staged Reducer factory by comparing
-//! `std::any::type_name` of the real factory type with a fixed list of
-//! reviewed names. `type_name` output is not stable across compiler
-//! versions, so the comparison only holds within one compiler build; this
-//! test pins the name that build produces for this crate's factory.
+//! `pos-runtime` recognises a reviewed staged Reducer factory by
+//! `std::any::type_name` of the real factory type. That output is not stable
+//! across compiler versions, so recognition only holds within one compiler
+//! build; this test checks the name this build produces against the actual
+//! reviewed list. The recorded reducer identity hashes the list's stable
+//! reviewed identifier instead, so it does not depend on the compiler.
 
 #[test]
-fn reviewed_staged_factory_name_is_the_real_type_name() {
-    assert_eq!(
-        std::any::type_name::<pos_plugin_eval::EvalPlugin>(),
-        "pos_plugin_eval::EvalPlugin"
-    );
+fn factory_type_name_is_on_the_reviewed_staged_list() {
+    assert!(pos_runtime::is_reviewed_staged_factory(
+        std::any::type_name::<pos_plugin_eval::EvalPlugin>()
+    ));
 }

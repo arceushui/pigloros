@@ -21,24 +21,72 @@ use super::InstalledPluginFactoryV1;
 /// Largest per-callback bound a staged Reducer may be admitted with.
 pub const MAX_STAGED_CALLBACK_BOUND_V1: Duration = Duration::from_millis(250);
 
-/// Factory types of the eight audited Plugin reducers. Each factory is
-/// implemented on its Plugin type in the owning Plugin crate.
-///
-/// Membership and the identity hash use `std::any::type_name`, whose output
-/// is not stable across compiler versions, so these names are only compared
-/// within one compiler build: the host and every Plugin crate it admits are
-/// compiled together. Each Plugin crate's `staged_factory_type_name` test
-/// pins its entry to `type_name` of the real factory type in that build.
-const REVIEWED_STAGED_FACTORIES_V1: [&str; 8] = [
-    "pos_plugin_agent::AgentPlugin",
-    "pos_plugin_bridges::BridgePlugin",
-    "pos_plugin_eval::EvalPlugin",
-    "pos_plugin_persona::PersonaPlugin",
-    "pos_plugin_rule_agent::RuleAgentPlugin",
-    "pos_plugin_society::SocietyPlugin",
-    "pos_plugin_synthetic_obs::SyntheticObsPlugin",
-    "pos_plugin_world::WorldPlugin",
+/// One reviewed staged Reducer factory.
+struct ReviewedStagedFactoryV1 {
+    /// Reviewed stable identifier. It is the only factory name hashed into
+    /// the recorded reducer identity, so that identity does not depend on
+    /// the compiler.
+    id: &'static str,
+    /// `std::any::type_name` of the factory type. Its output is not stable
+    /// across compiler versions, so it is used only to recognise the factory
+    /// within one build: the host and every Plugin crate it admits are
+    /// compiled together. Each Plugin crate's `staged_factory_type_name`
+    /// test checks its real factory type against this list in that build.
+    type_name: &'static str,
+}
+
+/// The eight audited Plugin reducer factories. Each factory is implemented
+/// on its Plugin type in the owning Plugin crate.
+const REVIEWED_STAGED_FACTORIES_V1: [ReviewedStagedFactoryV1; 8] = [
+    ReviewedStagedFactoryV1 {
+        id: "pigloros/staged-factory/agent/v1",
+        type_name: "pos_plugin_agent::AgentPlugin",
+    },
+    ReviewedStagedFactoryV1 {
+        id: "pigloros/staged-factory/bridges/v1",
+        type_name: "pos_plugin_bridges::BridgePlugin",
+    },
+    ReviewedStagedFactoryV1 {
+        id: "pigloros/staged-factory/eval/v1",
+        type_name: "pos_plugin_eval::EvalPlugin",
+    },
+    ReviewedStagedFactoryV1 {
+        id: "pigloros/staged-factory/persona/v1",
+        type_name: "pos_plugin_persona::PersonaPlugin",
+    },
+    ReviewedStagedFactoryV1 {
+        id: "pigloros/staged-factory/rule-agent/v1",
+        type_name: "pos_plugin_rule_agent::RuleAgentPlugin",
+    },
+    // The Society factory is compiled only with the `installed-factory`
+    // feature of `pos-plugin-society`; without it there is nothing to admit.
+    ReviewedStagedFactoryV1 {
+        id: "pigloros/staged-factory/society/v1",
+        type_name: "pos_plugin_society::SocietyPlugin",
+    },
+    ReviewedStagedFactoryV1 {
+        id: "pigloros/staged-factory/synthetic-obs/v1",
+        type_name: "pos_plugin_synthetic_obs::SyntheticObsPlugin",
+    },
+    ReviewedStagedFactoryV1 {
+        id: "pigloros/staged-factory/world/v1",
+        type_name: "pos_plugin_world::WorldPlugin",
+    },
 ];
+
+/// Whether `factory_type_name`, the `std::any::type_name` of a factory in
+/// this build, is on the reviewed staged Reducer factory list.
+///
+/// Each Plugin crate's `staged_factory_type_name` test uses it to check its
+/// real factory type against the actual reviewed list.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn is_reviewed_staged_factory(factory_type_name: &str) -> bool {
+    REVIEWED_STAGED_FACTORIES_V1
+        .iter()
+        .any(|entry| entry.type_name == factory_type_name)
+}
 
 /// Declared bound on the State growth of one `apply`:
 /// `per_payload_byte * payload_bytes + constant_bytes` (ADR-113 §4 E5).
@@ -119,45 +167,54 @@ enum StagedEvidenceV1 {
     Fixture,
 }
 
+/// The admission record of one entry and the factory identifier hashed into
+/// its reducer identity.
+type StagedEvidenceRecordV1 = (StagedReducerAdmissionV1, &'static str);
+
 impl StagedEvidenceV1 {
     fn admission<F: InstalledPluginFactoryV1>(
         self,
-    ) -> Result<StagedReducerAdmissionV1, StagedReducerAdmissionErrorV1> {
+    ) -> Result<StagedEvidenceRecordV1, StagedReducerAdmissionErrorV1> {
         match self {
             Self::Reviewed => reviewed_admission::<F>(),
+            // A fixture has no reviewed identifier; its identity is bound to
+            // the type name and is meaningful only within one build.
             #[cfg(any(test, feature = "test-support"))]
-            Self::Fixture => Ok(PENDING_CONFORMANCE_ADMISSION_V1),
+            Self::Fixture => Ok((PENDING_CONFORMANCE_ADMISSION_V1, type_name::<F>())),
         }
     }
 }
 
-/// Resolve the reviewed record of `F`, which must be implemented on its own
-/// reviewed Plugin type.
-fn reviewed_admission<F>() -> Result<StagedReducerAdmissionV1, StagedReducerAdmissionErrorV1>
+/// Resolve the reviewed record and stable identifier of `F`, which must be
+/// implemented on its own reviewed Plugin type.
+fn reviewed_admission<F>() -> Result<StagedEvidenceRecordV1, StagedReducerAdmissionErrorV1>
 where
     F: InstalledPluginFactoryV1,
 {
     let factory = type_name::<F>();
-    if !REVIEWED_STAGED_FACTORIES_V1.contains(&factory) || type_name::<F::Plugin>() != factory {
-        return Err(StagedReducerAdmissionErrorV1::NotReviewed);
-    }
+    let reviewed = REVIEWED_STAGED_FACTORIES_V1
+        .iter()
+        .find(|entry| entry.type_name == factory && type_name::<F::Plugin>() == factory)
+        .ok_or(StagedReducerAdmissionErrorV1::NotReviewed)?;
     let admission = PENDING_CONFORMANCE_ADMISSION_V1;
     admission
         .conformance_digest
+        .and(Some((admission, reviewed.id)))
         .ok_or(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
-        .and(Ok(admission))
 }
 
-/// Identity of one admitted entry: factory, Plugin name and version, frozen
-/// configuration and admission record. It excludes the per-build `PluginId`.
-fn staged_reducer_identity<F: InstalledPluginFactoryV1>(
-    plugin: &F::Plugin,
+/// Identity of one admitted entry: the factory identifier, Plugin name and
+/// version, frozen configuration and admission record. It excludes the
+/// per-build `PluginId`.
+fn staged_reducer_identity<P: Plugin>(
+    factory_id: &str,
+    plugin: &P,
     configuration_details: &[u8],
     admission: &StagedReducerAdmissionV1,
 ) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/staged-reducer-identity/v1");
-    super::hash_framed(&mut hasher, type_name::<F>().as_bytes());
+    super::hash_framed(&mut hasher, factory_id.as_bytes());
     super::hash_framed(&mut hasher, plugin.name().as_bytes());
     super::hash_framed(&mut hasher, plugin.version().as_bytes());
     super::hash_framed(&mut hasher, configuration_details);
@@ -180,9 +237,11 @@ struct AdmittedStagedReducerV1 {
 /// Host catalogue implementation of [`ProtectedProjectionProviderV1`].
 ///
 /// It holds only admitted entries, each with its frozen configuration behind
-/// an `Arc`; [`Default`] creates it empty. Consumers registered any other way, such as through
-/// `PluginRegistry::register_*` or `ProjectionRegistry::register`, are never
-/// admitted, and a plan naming one is rejected before any build.
+/// an `Arc`; [`Default`] creates it empty. Consumers registered any other
+/// way, such as through `PluginRegistry::register_*` or
+/// `ProjectionRegistry::register`, are never admitted, and a plan naming one
+/// is rejected before any build. This provider is the only admission path
+/// for detached projection candidates.
 #[derive(Default)]
 pub struct HostProjectionProviderV1 {
     entries: Vec<AdmittedStagedReducerV1>,
@@ -243,12 +302,12 @@ impl HostProjectionProviderV1 {
         F: InstalledPluginFactoryV1 + 'static,
         F::Configuration: Send + Sync + 'static,
     {
-        let admission = evidence.admission::<F>()?;
+        let (admission, factory_id) = evidence.admission::<F>()?;
         let product = F::build(&frozen_configuration);
         let details = F::configuration_details(&frozen_configuration);
         let consumer = RecordedConsumerV1::new(
             product.plugin.id(),
-            staged_reducer_identity::<F>(&product.plugin, &details, &admission),
+            staged_reducer_identity(factory_id, &product.plugin, &details, &admission),
         );
         if product.reducer.is_none() {
             return Err(StagedReducerAdmissionErrorV1::MissingReducer);

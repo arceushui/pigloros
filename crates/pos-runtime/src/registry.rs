@@ -77,6 +77,8 @@ pub use human_admission::{
 };
 pub use profile_composition::{ScheduledDriverBindingV1, ScheduledProfileErrorV1};
 pub use scheduled_admission::ScheduledPassAdmissionV1;
+#[cfg(any(test, feature = "test-support"))]
+pub use staged_catalogue::is_reviewed_staged_factory;
 pub use staged_catalogue::{
     fold_detached_candidate_v1, HostProjectionProviderV1, StagedGrowthBoundV1,
     StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1, MAX_STAGED_CALLBACK_BOUND_V1,
