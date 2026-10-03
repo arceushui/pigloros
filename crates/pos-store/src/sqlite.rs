@@ -1053,7 +1053,9 @@ fn sqlite_schema_ddl(tables: &[SqliteSchemaTable]) -> String {
         .join("\n")
 }
 
-fn normalize_schema_sql(sql: &str) -> String {
+/// Lowercase `sql` and drop all whitespace, so two `CREATE` statements
+/// compare equal only when they differ in case and layout alone.
+pub(crate) fn normalize_schema_sql(sql: &str) -> String {
     sql.to_ascii_lowercase()
         .chars()
         .filter(|character| !character.is_whitespace())

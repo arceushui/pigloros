@@ -18,7 +18,7 @@ use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, Hash,
     PrincipalRefV1, TimelineId, WallTime,
 };
-use pos_store::trusted_clock::MemoryTrustedClockAuthorityV1;
+use pos_store::MemoryTrustedClockAuthorityV1;
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
 

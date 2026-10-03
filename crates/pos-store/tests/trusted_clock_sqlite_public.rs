@@ -18,7 +18,8 @@ use pos_core::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, CoreError,
     Hash, PrincipalRefV1, TimelineId, WallTime,
 };
-use pos_store::trusted_clock::SqliteTrustedClockAuthorityV1;
+use pos_store::sqlite::SqliteStore;
+use pos_store::SqliteTrustedClockAuthorityV1;
 use rusqlite::Connection;
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
@@ -40,6 +41,11 @@ const LATCHED_SQL: &str = "SELECT latched FROM trusted_clock_overrun_latch";
 const ACK_SQL: &str = "SELECT ack_seq FROM trusted_clock_overrun_acknowledgements";
 const ACK_INSERT: &str = "INSERT INTO trusted_clock_overrun_acknowledgements VALUES
     (1, 1, zeroblob(32), zeroblob(32), zeroblob(32), 0, 1)";
+const CATALOG_INSERT: &str = "INSERT INTO artifact_registrations
+    (owner_id, registration_address, artifact_class, artifact_digest, artifact_bytes,
+     registration_cbor)
+    VALUES ('owner', zeroblob(32), 0, zeroblob(32), x'00', x'00')";
+const TABLE_SQL: &str = "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1";
 
 fn ok<T, Error: Debug>(value: Result<T, Error>) -> T {
     value.unwrap_or_else(|error| {
@@ -55,6 +61,17 @@ fn authority_path(directory: &TempDir) -> String {
         .join("authority.db")
         .to_string_lossy()
         .into_owned()
+}
+
+/// The authority path after `SqliteStore` has initialized its schema there.
+fn store_backed(directory: &TempDir) -> String {
+    let path = authority_path(directory);
+    drop(ok(SqliteStore::open(&path)));
+    path
+}
+
+fn table_exists(connection: &Connection, name: &str) -> bool {
+    ok(connection.query_row(TABLE_SQL, [name], |row| row.get::<_, i64>(0))) == 1
 }
 
 fn lease(deadline: u64) -> WorldRetentionLeaseV1 {
@@ -146,7 +163,7 @@ fn integer(connection: &Connection, sql: &str) -> i64 {
 }
 
 fn initialized(directory: &TempDir) -> SqliteTrustedClockAuthorityV1 {
-    let path = authority_path(directory);
+    let path = store_backed(directory);
     let mut authority = ok(SqliteTrustedClockAuthorityV1::open(&path));
     let _reservation = ok(reserve(&mut authority, T0));
     authority
@@ -155,7 +172,7 @@ fn initialized(directory: &TempDir) -> SqliteTrustedClockAuthorityV1 {
 #[test]
 fn reservations_persist_with_full_durability_across_reopen() -> TestResult {
     let directory = TempDir::new()?;
-    let path = authority_path(&directory);
+    let path = store_backed(&directory);
     let mut authority = SqliteTrustedClockAuthorityV1::open(&path)?;
     let reservation = reserve(&mut authority, T0)?;
     assert_eq!(reservation.reservation_seq(), 1);
@@ -180,7 +197,7 @@ fn reservations_persist_with_full_durability_across_reopen() -> TestResult {
 #[test]
 fn separate_connections_on_one_file_serialize_reservations() -> TestResult {
     let directory = TempDir::new()?;
-    let path = authority_path(&directory);
+    let path = store_backed(&directory);
     let mut first = SqliteTrustedClockAuthorityV1::open(&path)?;
     let mut second = SqliteTrustedClockAuthorityV1::open(&path)?;
     let earlier = reserve(&mut first, T0)?;
@@ -239,6 +256,11 @@ fn a_nested_begin_is_a_storage_error() {
 fn shared_memory_authority_fails_the_durability_read_back() -> TestResult {
     let process = std::process::id();
     let path = format!("file:trusted-clock-{process}?mode=memory&cache=shared");
+    // The shared-memory file lives while this connection does; the catalog
+    // table makes it pass the store-file check so the durability read-back
+    // is what refuses it.
+    let store = Connection::open(&path)?;
+    store.execute_batch("CREATE TABLE artifact_registrations (owner_id TEXT)")?;
     let mut authority = SqliteTrustedClockAuthorityV1::open(&path)?;
     let refused = reserve(&mut authority, T0).err();
     assert_eq!(refused, Some(Fence::DurabilityUnavailable));
@@ -293,7 +315,7 @@ fn unreadable_or_mistyped_rows_fail_closed() -> TestResult {
 #[test]
 fn acknowledgement_rows_are_append_only() -> TestResult {
     let directory = TempDir::new()?;
-    let path = authority_path(&directory);
+    let path = store_backed(&directory);
     let _authority = SqliteTrustedClockAuthorityV1::open(&path)?;
     let raw = Connection::open(&path)?;
     raw.execute_batch(ACK_INSERT)?;
@@ -329,7 +351,7 @@ fn acknowledgement_rows_are_append_only() -> TestResult {
 #[test]
 fn a_weakened_acknowledgement_trigger_fails_reopen_closed() -> TestResult {
     let directory = TempDir::new()?;
-    let path = authority_path(&directory);
+    let path = store_backed(&directory);
     drop(SqliteTrustedClockAuthorityV1::open(&path)?);
     let raw = Connection::open(&path)?;
     raw.execute_batch(
@@ -371,7 +393,7 @@ fn a_swapped_or_regressed_authority_is_detected_in_the_guard() -> TestResult {
 #[test]
 fn overrun_latch_and_acknowledgement_are_durable() -> TestResult {
     let directory = TempDir::new()?;
-    let path = authority_path(&directory);
+    let path = store_backed(&directory);
     let mut authority = SqliteTrustedClockAuthorityV1::open(&path)?;
     let mut scripted = mono(&[ZERO; 5]);
     scripted.push(Duration::from_secs(33));
@@ -403,5 +425,89 @@ fn overrun_latch_and_acknowledgement_are_durable() -> TestResult {
     let reservation = reserve(&mut authority, T0)?;
     let released = release(&mut authority, reservation, T0)?;
     assert_eq!(released.overrun_signal(), None);
+    Ok(())
+}
+
+#[test]
+fn an_authority_opened_before_its_store_fails_closed() -> TestResult {
+    let directory = TempDir::new()?;
+    let path = authority_path(&directory);
+    let refused = SqliteTrustedClockAuthorityV1::open(&path).err();
+    assert!(matches!(refused, Some(CoreError::Storage(_))));
+    let raw = Connection::open(&path)?;
+    assert!(!table_exists(&raw, "trusted_clock_high_water"));
+    drop(SqliteStore::open(&path)?);
+    assert!(table_exists(&raw, "events"));
+    let mut authority = SqliteTrustedClockAuthorityV1::open(&path)?;
+    assert!(table_exists(&raw, "trusted_clock_high_water"));
+    let reservation = reserve(&mut authority, T0)?;
+    assert_eq!(reservation.reservation_seq(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_held_writer_lock_bounds_opening_the_schema() -> TestResult {
+    let directory = TempDir::new()?;
+    let path = store_backed(&directory);
+    let raw = Connection::open(&path)?;
+    raw.execute_batch("BEGIN IMMEDIATE")?;
+    let refused = SqliteTrustedClockAuthorityV1::open(&path).err();
+    assert!(matches!(refused, Some(CoreError::Storage(_))));
+    raw.execute_batch("ROLLBACK")?;
+    assert!(SqliteTrustedClockAuthorityV1::open(&path).is_ok());
+    Ok(())
+}
+
+#[test]
+fn missing_rows_migrate_only_while_the_artifact_catalog_is_empty() -> TestResult {
+    let directory = TempDir::new()?;
+    let path = store_backed(&directory);
+    let mut authority = SqliteTrustedClockAuthorityV1::open(&path)?;
+    assert_eq!(reserve(&mut authority, T0)?.reservation_seq(), 1);
+    let raw = Connection::open(&path)?;
+    raw.execute_batch("DELETE FROM trusted_clock_high_water")?;
+    let migrated = reserve(&mut authority, T0 + SECOND)?;
+    assert_eq!(migrated.reservation_seq(), 1);
+    raw.execute_batch(CATALOG_INSERT)?;
+    assert_eq!(authority.begin_immediate(ZERO), Ok(()));
+    assert_eq!(authority.authoritative_catalog_entries(), Ok(1));
+    authority.rollback();
+    raw.execute_batch("DELETE FROM trusted_clock_high_water")?;
+    let refused = reserve(&mut authority, T0 + 2 * SECOND).err();
+    assert_eq!(refused, Some(Fence::HighWaterMissing));
+    assert_eq!(
+        integer(&raw, "SELECT count(*) FROM trusted_clock_high_water"),
+        0
+    );
+    raw.execute_batch("DROP TABLE artifact_registrations")?;
+    assert_eq!(authority.begin_immediate(ZERO), Ok(()));
+    let unreadable = authority.authoritative_catalog_entries();
+    assert_eq!(unreadable, Err(TrustedClockPortErrorV1::Storage));
+    authority.rollback();
+    Ok(())
+}
+
+#[test]
+fn a_weakened_row_table_fails_reopen_closed() -> TestResult {
+    let weakened = [
+        "DROP TABLE trusted_clock_high_water;
+         CREATE TABLE trusted_clock_high_water (singleton INTEGER PRIMARY KEY,
+             format_version INTEGER, clock_domain BLOB, high_water_micros INTEGER,
+             reserved_until_micros INTEGER, reservation_seq INTEGER)",
+        "DROP TABLE trusted_clock_overrun_latch;
+         CREATE TABLE trusted_clock_overrun_latch (singleton INTEGER PRIMARY KEY,
+             format_version INTEGER, latched INTEGER, overrun_count INTEGER,
+             last_overrun_reservation INTEGER, last_overrun_kind INTEGER,
+             last_overrun_at_micros INTEGER)",
+    ];
+    for edit in weakened {
+        let directory = TempDir::new()?;
+        let path = store_backed(&directory);
+        drop(SqliteTrustedClockAuthorityV1::open(&path)?);
+        let raw = Connection::open(&path)?;
+        raw.execute_batch(edit)?;
+        let reopened = SqliteTrustedClockAuthorityV1::open(&path).err();
+        assert!(matches!(reopened, Some(CoreError::Storage(_))), "{edit}");
+    }
     Ok(())
 }

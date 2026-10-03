@@ -4,19 +4,19 @@
 //! `pos_core::trusted_clock`. They report rows and lock state only; every
 //! fence decision is made in `pos-core`.
 //!
-//! No ARD1 artifact catalog exists in these stores yet, so both adapters
-//! report zero authoritative catalog entries and the one-time migration may
-//! create missing rows. The catalog owner (#432) must report its real count.
+//! The `SQLite` adapter reports the real ARD1 catalog count of its
+//! `SqliteStore` authority file, so the one-time migration creates missing
+//! rows only while that catalog is empty. The memory adapter is a standalone
+//! test/dev authority not linked to a `MemoryStore` catalog and always
+//! reports zero entries; linking it is #509.
 //!
-//! [`MemoryTrustedClockAuthorityV1`] is a production `MemoryStore` authority
+//! [`MemoryTrustedClockAuthorityV1`] is a `MemoryStore`-style authority
 //! with real cross-thread lock semantics shared across handles; `pos_core`'s
 //! `TrustedClockFixtureV1` is a single-threaded `test-support` fixture that
 //! injects one-shot port faults. Both exist because the fence must be proven
 //! against a truthful adapter and against every port failure path.
 //!
-//! Coverage rule for both adapters: an error that tests cannot provoke is
-//! mapped with `.or(Err(..))` rather than `.map_err(|_| ..)`, because the
-//! closure would be a region that never runs.
+//! Errors tests cannot provoke use `.or(Err(..))`, not a never-run closure.
 
 use pos_core::trusted_clock::{
     ReleaseGuardPortV1, TrustedClockAcknowledgementRowV1, TrustedClockHighWaterRowV1,
@@ -59,7 +59,8 @@ struct MemoryTransactionV1 {
     acknowledgements: Vec<TrustedClockAcknowledgementRowV1>,
 }
 
-/// One `MemoryStore` trusted-clock authority identity.
+/// One standalone in-memory trusted-clock authority identity (test/dev; not
+/// linked to a `MemoryStore` catalogue until #509).
 ///
 /// Every handle from [`Self::handle`] shares one authority lock and one set of
 /// rows, so reservations and guards on different handles serialize exactly as
@@ -165,6 +166,9 @@ impl TrustedClockStorePortV1 for MemoryTrustedClockAuthorityV1 {
         Ok(())
     }
 
+    /// Always 0: a standalone memory authority, not linked to a
+    /// `MemoryStore` catalogue, so the migration may always create missing
+    /// rows. Test/dev only; linking it to the catalogue is #509.
     fn authoritative_catalog_entries(&mut self) -> Result<u64, TrustedClockPortErrorV1> {
         Ok(0)
     }

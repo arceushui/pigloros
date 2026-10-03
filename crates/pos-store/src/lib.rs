@@ -65,6 +65,9 @@ pub use fork_manifest_publication::{
 pub use timeline_range::{
     verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1, TimelineSignedRangeReportV1,
 };
+pub use trusted_clock::MemoryTrustedClockAuthorityV1;
+#[cfg(feature = "sqlite")]
+pub use trusted_clock::SqliteTrustedClockAuthorityV1;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
