@@ -28,8 +28,9 @@ use pos_runtime::{
     STAGED_FOLD_WORKER_NAME_V1,
 };
 use pos_state::{
-    InitialStateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1, RecordedConsumerV1,
-    StagedProjectionV1, MAX_STAGED_ENTITIES_PER_CONSUMER_V1, MAX_STAGED_OUTPUT_BYTES_V1,
+    CandidateBuildV1, InitialStateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1,
+    RecordedConsumerV1, StagedProjectionV1, MAX_STAGED_ENTITIES_PER_CONSUMER_V1,
+    MAX_STAGED_OUTPUT_BYTES_V1,
 };
 use std::{
     fmt::Debug,
@@ -354,6 +355,17 @@ fn fold_in(
     source: ProjectionSourceV1,
     clocks: Clocks,
 ) -> Result<StagedProjectionV1, StagedFoldErrorV1> {
+    let provider: Arc<dyn ProtectedProjectionProviderV1 + Send + Sync> = provider.clone();
+    fold_through(provider, consumers, events, source, clocks)
+}
+
+fn fold_through(
+    provider: Arc<dyn ProtectedProjectionProviderV1 + Send + Sync>,
+    consumers: &[RecordedConsumerV1],
+    events: Vec<Event>,
+    source: ProjectionSourceV1,
+    clocks: Clocks,
+) -> Result<StagedProjectionV1, StagedFoldErrorV1> {
     let executor = test_ok(StagedFoldExecutorV1::acquire());
     let mut port = TrustedClockFixtureV1::new();
     let guard = guarded(&mut port);
@@ -368,7 +380,6 @@ fn fold_in(
         Some(at) => Box::new(ScriptedGuardMonotonicSourceV1::new([at])),
         None => Box::new(SystemGuardMonotonicSourceV1),
     };
-    let provider: Arc<dyn ProtectedProjectionProviderV1 + Send + Sync> = provider.clone();
     let outcome = executor.fold(&window, guard_clock.as_mut(), provider, plan);
     assert!(!window.is_cancelled());
     outcome
@@ -509,6 +520,62 @@ fn candidate_open_failures_are_closed_errors() {
     assert_ready();
 }
 
+/// E2: an unbound or mixed source is refused on the guard thread before any
+/// factory runs, so it never reaches the worker.
+#[test]
+fn unbound_or_mixed_sources_are_refused_before_any_build() {
+    let _serial = serial();
+    let builds = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&builds);
+    let (provider, consumer) = admitted_reducer(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Box::new(CountingReducer)
+    });
+    let events = [counted(EntityId::new(), 1)];
+
+    for source in [ProjectionSourceV1::default(), ProjectionSourceV1::mixed()] {
+        let refused = fold_in(
+            &provider,
+            &[consumer],
+            events.to_vec(),
+            source,
+            Clocks::default(),
+        );
+        assert_eq!(test_err(refused), StagedFoldErrorV1::SourceMismatch);
+    }
+    // Only the admission build ran.
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+    assert_ready();
+}
+
+/// A provider that refuses the source while resolving the recorded set.
+struct SourceRefusingProvider;
+
+impl ProtectedProjectionProviderV1 for SourceRefusingProvider {
+    fn candidate_builds(
+        &self,
+        _recorded_consumers: &[RecordedConsumerV1],
+    ) -> Result<Vec<CandidateBuildV1<'_>>, ProjectionCandidateErrorV1> {
+        Err(ProjectionCandidateErrorV1::SourceMismatch)
+    }
+}
+
+/// A provider's own source refusal maps to the closed source error.
+#[test]
+fn a_provider_source_refusal_is_a_closed_error() {
+    let _serial = serial();
+    let consumer = RecordedConsumerV1::new(PluginId::new(), Hash::from_bytes([3; 32]));
+    let refused = fold_through(
+        Arc::new(SourceRefusingProvider),
+        &[consumer],
+        vec![counted(EntityId::new(), 1)],
+        source(),
+        Clocks::default(),
+    );
+    assert_eq!(test_err(refused), StagedFoldErrorV1::SourceMismatch);
+    assert_ready();
+}
+
 /// Every candidate open re-checks that the built Plugin is the recorded one.
 #[test]
 fn a_rebuilt_plugin_other_than_the_recorded_one_is_refused() {
@@ -568,16 +635,6 @@ fn panics_in_every_callback_are_contained() {
         test_err(fold(&provider, consumer, &events)),
         panicked(0, u32::MAX)
     );
-    // A candidate that fails to assemble drops its built reducers under the
-    // same containment.
-    let unbound = fold_in(
-        &provider,
-        &[consumer],
-        events,
-        ProjectionSourceV1::default(),
-        Clocks::default(),
-    );
-    assert_eq!(test_err(unbound), panicked(0, u32::MAX));
     assert_ready();
 }
 

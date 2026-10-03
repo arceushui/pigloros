@@ -128,8 +128,8 @@ pub enum StagedFoldErrorV1 {
     /// An entity grew by more than its declared growth bounds.
     GrowthBoundExceeded,
     /// A callback panicked. A `build` reports its consumer ordinal and event
-    /// ordinal `0`; dropping the reducers reports consumer ordinal `0` and
-    /// event ordinal `u32::MAX`.
+    /// ordinal `0`; dropping or assembling the candidate reducers reports
+    /// consumer ordinal `0` and event ordinal `u32::MAX`.
     ReducerPanicked {
         /// Recorded position of the consumer.
         consumer_ordinal: u16,
@@ -380,8 +380,8 @@ impl StagedFoldExecutorV1 {
     }
 }
 
-/// E2: check the plan on the guard thread and return the wait until
-/// `g0 + 27 s`.
+/// E2: check the plan on the guard thread, including that its source is
+/// bound to one Timeline, and return the wait until `g0 + 27 s`.
 fn admit_plan(
     window: &GuardedFoldWindowV1<'_>,
     guard_clock: &mut dyn GuardMonotonicSourceV1,
@@ -389,6 +389,11 @@ fn admit_plan(
 ) -> Result<Duration, StagedFoldErrorV1> {
     if plan.consumers.is_empty() || plan.consumers.len() > MAX_STAGED_CONSUMERS_V1 {
         return Err(StagedFoldErrorV1::ConsumerSetMismatch);
+    }
+    // An unbound or mixed source can never assemble a candidate, so it is
+    // refused here, before any factory code runs on the worker.
+    if plan.source.timeline().is_none() {
+        return Err(StagedFoldErrorV1::SourceMismatch);
     }
     let input = plan
         .events
@@ -490,7 +495,7 @@ fn drop_guarded<T>(value: T) {
 
 type StagedReplyV1 = Result<StagedProjectionV1, StagedFoldErrorV1>;
 
-/// A panic while dropping candidate reducers.
+/// A panic while dropping or assembling candidate reducers.
 const TEARDOWN_PANICKED: StagedFoldErrorV1 = StagedFoldErrorV1::ReducerPanicked {
     consumer_ordinal: 0,
     event_ordinal: u32::MAX,
@@ -604,8 +609,8 @@ fn fold_on_worker(
 
 /// Open the candidate: resolve the recorded set in host code, run each
 /// consumer's `build` as its own callback, then assemble the candidate.
-/// Reducers built before a failure, and those a failed assembly drops, are
-/// dropped under callback containment.
+/// Reducers built before a failure, and those a panicking assembly drops,
+/// are dropped under callback containment.
 fn open_on_worker(
     gate: &mut WorkerGateV1<'_>,
     provider: &dyn ProtectedProjectionProviderV1,
@@ -626,11 +631,21 @@ fn open_on_worker(
         drop_guarded(reducers);
         return Err(error);
     }
+    // `admit_plan` refused every source that cannot assemble, and the
+    // provider refused repeated consumers, so assembly can only fail by
+    // panicking, in which case the reducers are dropped under containment.
     run_callback(move || {
         DetachedProjectionCandidateV1::from_reducers(reducers, InitialStateV1::Empty, source)
     })
-    .ok_or(TEARDOWN_PANICKED)?
-    .map_err(candidate_error)
+    .map_or(Err(TEARDOWN_PANICKED), |assembled| {
+        assembled.map_err(candidate_error)
+    })
+}
+
+/// A consumer's recorded position as a reported ordinal. Plans hold at most
+/// [`MAX_STAGED_CONSUMERS_V1`] consumers, so it never saturates.
+fn consumer_ordinal(ordinal: usize) -> u16 {
+    u16::try_from(ordinal).unwrap_or(u16::MAX)
 }
 
 /// One consumer's `build` as one callback, under E3, `catch_unwind` and E4
@@ -640,7 +655,7 @@ fn build_on_worker(
     build: CandidateBuildV1<'_>,
     ordinal: usize,
 ) -> Result<CandidateReducerV1, StagedFoldErrorV1> {
-    let consumer_ordinal = u16::try_from(ordinal).unwrap_or(u16::MAX);
+    let consumer_ordinal = consumer_ordinal(ordinal);
     let bound = build.bounds().callback_bound;
     let started = gate.before(bound)?;
     let reducer = run_callback(move || build.build())
@@ -708,7 +723,7 @@ fn fold_turn(
     turn: &mut CandidateTurnV1<'_>,
     event_ordinal: u32,
 ) -> Result<(), StagedFoldErrorV1> {
-    let consumer_ordinal = u16::try_from(turn.ordinal()).unwrap_or(u16::MAX);
+    let consumer_ordinal = consumer_ordinal(turn.ordinal());
     let bound = turn.bounds().callback_bound;
     let started = gate.before(bound)?;
     run_callback(|| turn.apply()).ok_or(StagedFoldErrorV1::ReducerPanicked {

@@ -1,11 +1,33 @@
 //! Staged protected projection results and their install checks (ADR-113 §2).
 
 use pos_core::{
-    staged_install::ProjectionSourceV1, ConsentRevokedV1, EntityId, Event, State,
-    EVENT_TYPE_CONSENT_REVOKED_V1,
+    staged_install::ProjectionSourceV1, ConsentRevokedV1, EntityId, Event, PluginId, State,
+    StateRegistry, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 
-use crate::{ProjectionCandidateErrorV1, RecordedConsumerV1, StagedProjectionV1};
+use crate::{ProjectionCandidateErrorV1, ProjectionObservationPolicyV1, RecordedConsumerV1};
+
+/// The complete result of one staged fold.
+///
+/// It holds no reducer instance and exposes no State; its maps reach a
+/// visible registry only through
+/// [`crate::ProjectionRegistry::prepare_install`] and ADR-112's checked
+/// handoff. It cannot be cloned. Only a
+/// [`crate::DetachedProjectionCandidateV1`] in this crate assembles one.
+pub struct StagedProjectionV1 {
+    pub(super) consumers: Vec<RecordedConsumerV1>,
+    pub(super) source: ProjectionSourceV1,
+    pub(super) slots: Vec<StagedSlotV1>,
+    pub(super) revocations: Vec<EntityId>,
+}
+
+/// One staged consumer's private State map and the identity it must match.
+pub(super) struct StagedSlotV1 {
+    pub(super) plugin_id: PluginId,
+    pub(super) name: &'static str,
+    pub(super) observation_policy: Option<ProjectionObservationPolicyV1>,
+    pub(super) registry: StateRegistry,
+}
 
 /// Closed failures of [`crate::ProjectionRegistry::prepare_install`]. The
 /// visible registry is unchanged on every failure.

@@ -20,7 +20,10 @@ use pos_core::{
     StateRegistry,
 };
 
-use crate::{ProjectionObservationPolicyV1, StagedProjectionV1, StagedSlotV1};
+use crate::{
+    staged::{StagedProjectionV1, StagedSlotV1},
+    ProjectionObservationPolicyV1,
+};
 
 /// Largest staged output of one fold, in staged-size bytes (ADR-093).
 pub const MAX_STAGED_OUTPUT_BYTES_V1: u64 = 64 * 1024 * 1024;
@@ -83,6 +86,10 @@ pub enum ProjectionCandidateErrorV1 {
 }
 
 /// The State a candidate starts from.
+///
+/// It has one variant today, but ADR-113 §1 and §3 give `open_candidate` an
+/// `initial_state` input: a future PSS1-seeded candidate (#502) enters
+/// through it, so the provider contract does not change when it lands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InitialStateV1 {
     /// Every consumer starts with no entity State.
@@ -100,6 +107,12 @@ pub trait ProtectedProjectionProviderV1 {
     ///
     /// The staged executor runs each build as its own callback under that
     /// consumer's admitted callback bound (ADR-113 §4 E3 and E4).
+    ///
+    /// This method is host code: the staged executor calls it outside its
+    /// per-callback containment, with no deadline or panic check around it.
+    /// It must only resolve the recorded set and must never run a factory
+    /// or a reducer callback; every such call belongs in a returned
+    /// [`CandidateBuildV1`].
     ///
     /// # Errors
     /// Returns [`ProjectionCandidateErrorV1::NotAdmitted`] or
@@ -163,13 +176,16 @@ impl<'p> CandidateBuildV1<'p> {
         self.bounds
     }
 
-    /// Run the build.
+    /// Run the build. The built reducer carries this build's admitted
+    /// bounds, so the E4 check of the build and every later turn use one
+    /// value.
     ///
     /// # Errors
     /// Returns [`ProjectionCandidateErrorV1::PluginMismatch`] when the
     /// factory builds no reducer or a Plugin other than the recorded one.
     pub fn build(self) -> Result<CandidateReducerV1, ProjectionCandidateErrorV1> {
-        (self.build)()
+        let Self { bounds, build } = self;
+        build().map(|reducer| CandidateReducerV1 { bounds, ..reducer })
     }
 }
 
@@ -201,7 +217,8 @@ pub struct CandidateReducerV1 {
     pub name: &'static str,
     /// The freshly built reducer instance.
     pub reducer: Box<dyn Reducer>,
-    /// The consumer's admitted bounds.
+    /// The consumer's admitted bounds. [`CandidateBuildV1::build`] sets them
+    /// to the build's own bounds, whatever its builder returned.
     pub bounds: CandidateBoundsV1,
     /// The observation policy copied at open, matched against the visible slot.
     pub observation_policy: Option<ProjectionObservationPolicyV1>,

@@ -37,7 +37,7 @@ pub use candidate::{
     ProtectedProjectionProviderV1, RecordedConsumerV1, StagedAccountingV1, StagedLimitErrorV1,
     MAX_STAGED_CONSUMERS_V1, MAX_STAGED_ENTITIES_PER_CONSUMER_V1, MAX_STAGED_OUTPUT_BYTES_V1,
 };
-pub use staged::{InstallErrorV1, RevokedSubjectsV1};
+pub use staged::{InstallErrorV1, RevokedSubjectsV1, StagedProjectionV1};
 
 // ---------------------------------------------------------------------------
 // EntityStateProjection
@@ -97,27 +97,6 @@ impl Slot {
     fn fold(&mut self, event: &Event) {
         self.registry.apply(self.reducer.as_ref(), event);
     }
-}
-
-/// The complete result of one staged fold.
-///
-/// It holds no reducer instance and exposes no State; its maps reach a
-/// visible registry only through [`ProjectionRegistry::prepare_install`] and
-/// ADR-112's checked handoff. It cannot be cloned. Only a
-/// [`DetachedProjectionCandidateV1`] in this crate assembles one.
-pub struct StagedProjectionV1 {
-    consumers: Vec<RecordedConsumerV1>,
-    source: ProjectionSourceV1,
-    slots: Vec<StagedSlotV1>,
-    revocations: Vec<EntityId>,
-}
-
-/// One staged consumer's private State map and the identity it must match.
-struct StagedSlotV1 {
-    plugin_id: PluginId,
-    name: &'static str,
-    observation_policy: Option<ProjectionObservationPolicyV1>,
-    registry: StateRegistry,
 }
 
 /// Fold one Event into ordered reducer slots: the single live fold step

@@ -408,6 +408,18 @@ fn exact_passes_stay_within_their_bound_for_one_growing_entity() {
     assert_eq!(candidate.accounting().exact_passes(), 1);
 }
 
+/// A build's admitted bounds are the only bounds its reducer folds under,
+/// whatever bounds the builder itself returned.
+#[test]
+fn a_build_stamps_its_own_bounds_on_the_reducer() {
+    let admitted = bounds(64);
+    let build = CandidateBuildV1::new(admitted, || {
+        Ok(built_with(consumer(9), CountingReducer, bounds(4096)))
+    });
+    assert_eq!(build.bounds(), admitted);
+    assert_eq!(test_ok(build.build()).bounds, admitted);
+}
+
 /// A provider is object-safe and is held as a shared trait object.
 struct EmptyProvider;
 
