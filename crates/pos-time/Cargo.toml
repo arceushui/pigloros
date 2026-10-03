@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 # Linux-only: ADR-064 counterfactual algorithms consume the pos-conformance
 # wire contracts, which only build on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
+blake3 = { workspace = true }
 pos-conformance = { path = "../pos-conformance" }
 
 [dev-dependencies]
