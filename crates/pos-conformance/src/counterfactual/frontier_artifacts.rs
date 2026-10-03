@@ -12,8 +12,10 @@
 //! Intervention seed, one affected node, and one owner frontier. The nested
 //! evidence verifier also admits a no-Intervention baseline frontier whose
 //! lists are empty; such a baseline frontier is not an exportable `RCF1` and
-//! is rejected here. Both validators reject all-zero digests the same way, so
-//! a standalone-valid record never fails the nested digest rules.
+//! is rejected here. The standalone validator rejects every all-zero digest
+//! the nested verifier rejects, and additionally a zero missing-source digest
+//! (an unknown source is `null`), so a standalone-valid record never fails the
+//! nested digest rules.
 //!
 //! Every list count is checked before any per-item rule, digest, or encoding,
 //! so an oversized list is rejected without encoding any CBOR.
@@ -809,7 +811,10 @@ fn array_items(value: &Value) -> Result<&[Value], FrontierArtifactErrorV1> {
     }
 }
 
-fn exact_length(values: &[Value], length: usize) -> Result<&[Value], FrontierArtifactErrorV1> {
+const fn exact_length(
+    values: &[Value],
+    length: usize,
+) -> Result<&[Value], FrontierArtifactErrorV1> {
     if values.len() == length {
         Ok(values)
     } else {
