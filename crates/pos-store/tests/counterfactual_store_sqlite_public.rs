@@ -529,7 +529,7 @@ fn injected_faults_roll_back_everything_and_recover_after_reopen() {
 }
 
 #[test]
-fn the_database_never_decreases_a_generation_or_reactivates_quarantine() {
+fn the_database_never_decreases_a_generation_or_rewrites_recorded_state() {
     let fixture = fixture();
     let fork = fixture.fork;
     let mut store = open(&fixture.path);
@@ -544,6 +544,10 @@ fn the_database_never_decreases_a_generation_or_reactivates_quarantine() {
         "DELETE FROM counterfactual_forks",
         "DELETE FROM counterfactual_quarantine",
         "UPDATE counterfactual_quarantine SET artifact_digest = zeroblob(32)",
+        "DELETE FROM counterfactual_generations",
+        "UPDATE counterfactual_generations SET frontier_bytes = X'00'",
+        "DELETE FROM counterfactual_artifacts",
+        "UPDATE counterfactual_artifacts SET artifact_bytes = X'00'",
     ] {
         assert!(execute(&fixture.path, rollback).is_err(), "{rollback}");
     }
@@ -557,6 +561,12 @@ fn the_database_never_decreases_a_generation_or_reactivates_quarantine() {
     assert_eq!(
         reopened.read_generation_artifact(at(fork, 1), hash(10)),
         Err(StoreError::InvalidArtifactReuse)
+    );
+    // The recorded bytes are unchanged by the refused rewrites.
+    let command = Spec::new(fork).command();
+    assert_eq!(
+        reopened.read_generation_artifact(at(fork, 1), command.frontier().digest()),
+        Ok(Some(command.frontier().as_bytes().to_vec()))
     );
     assert_eq!(
         reopened.publish_counterfactual_facts(fork, facts()),
@@ -692,8 +702,9 @@ fn containment_and_admitted_forks_fail_closed() {
     let fork = fixture.fork;
     let command = Spec::new(fork).command();
 
-    // Without the host erasure gate the appending commit is refused, while
-    // publication and reads touch no Timeline Event.
+    // Without the host erasure gate the appending commit and the
+    // Timeline-derived reads are refused, while publication touches only
+    // host-owned facts.
     let mut ungated = ok(SqliteStore::open(fixture.path.to_str().unwrap_or_default()));
     assert_eq!(
         ungated.commit_counterfactual_invalidation(&command),
@@ -703,10 +714,13 @@ fn containment_and_admitted_forks_fail_closed() {
         ungated.publish_counterfactual_facts(fork, facts()),
         Ok(at(fork, 0))
     );
-    assert_eq!(ungated.current_fork_generation(fork), Ok(at(fork, 0)));
+    assert_eq!(
+        ungated.current_fork_generation(fork),
+        Err(StoreError::StorageFailure)
+    );
     assert_eq!(
         ungated.read_generation_artifact(at(fork, 0), hash(1)),
-        Ok(None)
+        Err(StoreError::StorageFailure)
     );
     drop(ungated);
     assert_eq!(written_rows(&fixture.path, fork), [0; 4]);
@@ -722,6 +736,37 @@ fn containment_and_admitted_forks_fail_closed() {
         Err(StoreError::StorageFailure)
     );
     assert_eq!(generation(&admitted, fork), 0);
+    assert_eq!(written_rows(&fixture.path, fork), [0; 4]);
+}
+
+#[test]
+fn a_geographic_evidence_protected_fork_is_not_found() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    ok(execute(
+        &fixture.path,
+        &format!(
+            "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES ('{root}', 1);",
+            root = fixture.root
+        ),
+    ));
+    let mut store = open(&fixture.path);
+    assert_eq!(
+        store.current_fork_generation(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.read_generation_artifact(at(fork, 0), hash(1)),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.publish_counterfactual_facts(fork, facts()),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.commit_counterfactual_invalidation(&Spec::new(fork).command()),
+        Err(StoreError::ForkNotFound)
+    );
     assert_eq!(written_rows(&fixture.path, fork), [0; 4]);
 }
 
@@ -792,7 +837,8 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
     assert_eq!(open_writable(), "");
     assert_eq!(open_writable(), "");
     assert_eq!(open_read_only(), "");
-    let read_only = ok(SqliteStore::open_read_only(path_text));
+    let mut read_only = ok(SqliteStore::open_read_only(path_text));
+    ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
     assert_eq!(read_only.current_fork_generation(fork), Ok(at(fork, 0)));
     drop(read_only);
 
@@ -844,6 +890,26 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
             "TRIGGER",
             "counterfactual_quarantine_immutable",
             "BEFORE UPDATE ON counterfactual_quarantine BEGIN SELECT 1; END",
+        ),
+        (
+            "TRIGGER",
+            "counterfactual_generations_retained",
+            "BEFORE DELETE ON counterfactual_generations BEGIN SELECT 1; END",
+        ),
+        (
+            "TRIGGER",
+            "counterfactual_generations_immutable",
+            "BEFORE UPDATE ON counterfactual_generations BEGIN SELECT 1; END",
+        ),
+        (
+            "TRIGGER",
+            "counterfactual_artifacts_retained",
+            "BEFORE DELETE ON counterfactual_artifacts BEGIN SELECT 1; END",
+        ),
+        (
+            "TRIGGER",
+            "counterfactual_artifacts_immutable",
+            "BEFORE UPDATE ON counterfactual_artifacts BEGIN SELECT 1; END",
         ),
     ] {
         ok(execute(&fixture.path, &format!("DROP {kind} {name};")));
