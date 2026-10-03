@@ -84,6 +84,14 @@ pub struct DependencyTickRangeV1 {
     pub last_tick: u64,
 }
 
+impl DependencyTickRangeV1 {
+    /// Whether the inclusive range contains both `source_tick` and
+    /// `consumer_tick`.
+    const fn covers(&self, source_tick: u64, consumer_tick: u64) -> bool {
+        self.first_tick <= source_tick && consumer_tick <= self.last_tick
+    }
+}
+
 /// Exact classification rule identity that assigned the dependency class.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DependencyClassificationRuleV1 {
@@ -155,8 +163,7 @@ impl InputDependencyV1 {
     pub fn validate(&self) -> Result<(), InputDependencyContractErrorV1> {
         if !valid_node(&self.consumer)
             || !valid_node(&self.source)
-            || self.tick_range.first_tick > self.source.tick
-            || self.tick_range.last_tick < self.consumer.tick
+            || !self.tick_range.covers(self.source.tick, self.consumer.tick)
             || !nonzero(&self.authorization_digest)
             || !valid_rule(&self.classification_rule)
             || !nonzero(&self.provenance_digest)
