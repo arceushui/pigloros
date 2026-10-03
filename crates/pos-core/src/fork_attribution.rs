@@ -3,8 +3,45 @@
 //! These codecs establish neither host admission nor publication authority.
 //! In particular, a valid `FSM1` is only a mathematical signature until the
 //! local publication authority has committed and read it.
+//!
+//! The ADR-105 `FAE1` authority-import envelope and its nested records live in
+//! private submodules and are re-exported here. They carry the ADR-099
+//! records as exact opaque bytes, so authority-origin code 2 stays fail
+//! closed in every decoder in this module.
 
 use crate::{Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey, Signature, TimelineId};
+
+mod authority_admission;
+mod authority_envelope;
+mod authority_evidence;
+mod authority_issuer;
+mod authority_wire;
+
+pub use authority_admission::{
+    ImportedForkAttributionAdmissionInputV1, ImportedForkAttributionAdmissionV1,
+    MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1,
+};
+pub use authority_envelope::{
+    fork_attribution_authority_origin_digest_v1, fork_attribution_closure_leaf_v1,
+    ForkAttributionAuthorityEnvelopeInputV1, ForkAttributionAuthorityEnvelopeV1,
+    ForkAttributionAuthorityRecordsV1, ForkAttributionAuthorityUnsignedEnvelopeV1,
+    ForkAttributionClassifierRecordsV1, ForkAttributionClosureLeafTypeV1,
+    MAX_FORK_ATTRIBUTION_AUTHORITY_ENVELOPE_BYTES_V1, MAX_FORK_ATTRIBUTION_AUTHORITY_EVENTS_V1,
+    MAX_FORK_ATTRIBUTION_AUTHORITY_INTERVENTIONS_V1,
+    MAX_FORK_ATTRIBUTION_AUTHORITY_PAYLOAD_BYTES_V1, MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1,
+};
+pub use authority_evidence::{
+    ForkEventEvidenceV1, ForkTimelineImportInputV1, ForkTimelineImportV1, ImportedKeyRecordV1,
+    ImportedKeyTombstoneV1, MAX_FORK_EVENT_EVIDENCE_BYTES_V1, MAX_FORK_TIMELINE_IMPORT_BYTES_V1,
+    MAX_FORK_TIMELINE_IMPORT_NAME_BYTES_V1, MAX_IMPORTED_KEY_RECORD_BYTES_V1,
+    MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
+};
+pub use authority_issuer::{
+    ForkAttributionIssuerPolicyEntryV1, ForkAttributionIssuerPolicyInputV1,
+    ForkAttributionIssuerPolicyV1, ForkAttributionIssuerStateV1, ForkAttributionIssuerV1,
+    MAX_FORK_ATTRIBUTION_ISSUER_BYTES_V1, MAX_FORK_ATTRIBUTION_ISSUER_ID_BYTES_V1,
+    MAX_FORK_ATTRIBUTION_ISSUER_POLICY_BYTES_V1, MAX_FORK_ATTRIBUTION_ISSUER_POLICY_ENTRIES_V1,
+};
 
 /// Maximum accepted `FAR1` bytes.
 pub const MAX_FORK_ADMISSION_RECORD_BYTES_V1: usize = 768;
