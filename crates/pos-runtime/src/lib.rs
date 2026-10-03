@@ -26,6 +26,8 @@
 
 pub mod authorization_cache;
 pub mod composition;
+#[cfg(target_os = "linux")]
+pub mod counterfactual;
 pub mod driver;
 pub mod erasure_host;
 pub mod error;
