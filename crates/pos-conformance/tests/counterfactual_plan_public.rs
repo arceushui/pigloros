@@ -34,7 +34,7 @@ const FIELD_PREVIOUS: usize = 23;
 const FIELD_PLAN_DIGEST: usize = 24;
 
 fn intervention(effective_tick: u64, ordinal: u32, id_seed: u32) -> InterventionV1 {
-    let mut intervention_id = [0; 16];
+    let mut intervention_id = [0xff; 16];
     intervention_id[..4].copy_from_slice(&id_seed.to_be_bytes());
     InterventionV1 {
         intervention_id,
@@ -686,7 +686,7 @@ fn descriptors_are_strictly_ordered_and_classified_once() -> TestResult {
             Ok(()),
         ),
         (
-            |plan| plan.fixed_policy_descriptors = vec![descriptor(1, 0x50), descriptor(9, 0)],
+            |plan| plan.fixed_policy_descriptors = vec![descriptor(1, 0x50), descriptor(9, 0x01)],
             Err(PlanError::DuplicateIdentity),
         ),
     ];
