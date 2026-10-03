@@ -39,7 +39,7 @@ fn planned(effective_tick: u64, ordinal: u32, id_seed: u32) -> InterventionV1 {
     let mut record = intervention();
     record.effective_tick = effective_tick;
     record.ordinal = ordinal;
-    record.intervention_id = [0; 16];
+    record.intervention_id = [0xff; 16];
     record.intervention_id[..4].copy_from_slice(&id_seed.to_be_bytes());
     record
 }
@@ -201,6 +201,57 @@ fn text_fields_enforce_exact_byte_bounds_and_reject_control_characters() -> Test
         decode_error(&oversized)?,
         InterventionError::FieldOutOfBounds
     );
+    Ok(())
+}
+
+#[test]
+fn zero_identities_and_digests_are_rejected() -> TestResult {
+    let zeroed: [fn(&mut InterventionV1); 5] = [
+        |value| value.intervention_id = [0; 16],
+        |value| value.target_schema_id = 0,
+        |value| value.value_digest = [0; 32],
+        |value| value.consent_decision_digest = [0; 32],
+        |value| value.provenance_digest = [0; 32],
+    ];
+    for zero in zeroed {
+        let mut candidate = intervention();
+        zero(&mut candidate);
+        assert_eq!(
+            candidate.validate(),
+            Err(InterventionError::FieldOutOfBounds)
+        );
+        assert_eq!(
+            candidate.to_canonical_cbor(),
+            Err(InterventionError::FieldOutOfBounds)
+        );
+    }
+    let mut minimal = intervention();
+    minimal.intervention_id = [0; 16];
+    minimal.intervention_id[15] = 1;
+    minimal.target_schema_id = 1;
+    for digest in [
+        &mut minimal.value_digest,
+        &mut minimal.consent_decision_digest,
+        &mut minimal.provenance_digest,
+    ] {
+        *digest = [0; 32];
+        digest[31] = 1;
+    }
+    minimal.validate()?;
+    let bytes = minimal.to_canonical_cbor()?;
+    assert_eq!(InterventionV1::from_canonical_cbor(&bytes)?, minimal);
+    for (index, value) in [
+        (2, Value::Bytes(vec![0; 16])),
+        (FIELD_SCHEMA, Value::Integer(0_u64.into())),
+        (7, Value::Bytes(vec![0; 32])),
+        (13, Value::Bytes(vec![0; 32])),
+        (15, Value::Bytes(vec![0; 32])),
+    ] {
+        assert_eq!(
+            decode_error(&bytes_with_field(index, value)?)?,
+            InterventionError::FieldOutOfBounds
+        );
+    }
     Ok(())
 }
 
