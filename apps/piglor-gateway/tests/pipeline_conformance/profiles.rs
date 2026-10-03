@@ -2,9 +2,10 @@
 //!
 //! No production host composes a participant-bound Driver yet (the Scenario
 //! Room host is planned for Wave 9). These runners act as the test host the
-//! amendment names: they stage a participant-authorized pass through the
-//! #481 seam and an anchored non-participant pass through the #480 seam,
-//! and offer both to a recording admission port.
+//! amendment names: they compose each Driver's profile from its Participant
+//! binding (#504), stage a participant-authorized pass through the #481 seam
+//! and an anchored non-participant pass through the #480 seam, and offer both
+//! to a recording admission port.
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -29,7 +30,7 @@ use pos_core::{
 };
 use pos_runtime::{
     AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, Driver, ObservationView, PluginRegistry,
-    ProjectionKey, RuntimeError, ScheduledPassAdmissionV1, StepOutput,
+    ProjectionKey, RuntimeError, ScheduledDriverBindingV1, ScheduledPassAdmissionV1, StepOutput,
 };
 use pos_state::{
     AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
@@ -393,13 +394,35 @@ impl Driver for PlannedDriver {
     }
 }
 
+/// One participant Driver composed bound to its view's Participant.
 fn participant_registry(
     participant: &Participant,
     ambient: bool,
 ) -> (PluginRegistry, Arc<AtomicUsize>) {
     let mut registry = gated_registry(None);
     let (aborts, _) = register_participant(&mut registry, participant, PLANNED, ambient);
+    bind_participants(&mut registry, &[participant]);
     (registry, aborts)
+}
+
+/// The same Driver in a host that composes it non-participant instead.
+fn non_participant_registry(participant: &Participant) -> (PluginRegistry, Arc<AtomicUsize>) {
+    let mut registry = gated_registry(None);
+    let (aborts, _) = register_participant(&mut registry, participant, PLANNED, false);
+    registry.compose_non_participant_drivers().test_ok();
+    (registry, aborts)
+}
+
+/// Bind each participant's Driver to its view's ADR-059 Participant.
+fn bind_participants(registry: &mut PluginRegistry, participants: &[&Participant]) {
+    let bindings: Vec<(PluginId, ScheduledDriverBindingV1)> = participants
+        .iter()
+        .map(|participant| {
+            let id = participant.knowledge.participant_id();
+            (participant.plugin_id, ScheduledDriverBindingV1::Participant(id))
+        })
+        .collect();
+    registry.compose_scheduled_profiles(&bindings).test_ok();
 }
 
 /// Register one participant Driver owning `event_type`; returns its abort
@@ -511,13 +534,12 @@ pub fn participant_pass_needs_its_fence() -> Capture {
 ///
 /// An authorized stage while an anchored pass is pending, the authorized
 /// admission of an anchored pass, and a subscription-scoped Driver offered to
-/// the authorized
-/// path all fail closed before anything reaches the store.
+/// the authorized path all fail closed before anything reaches the store.
 #[must_use]
 pub fn one_pass_one_profile() -> Capture {
     let mut capture = Capture::default();
     let participant = participant();
-    let (mut registry, aborts) = participant_registry(&participant, false);
+    let (mut registry, aborts) = non_participant_registry(&participant);
     let mut port = RecordingPort::default();
     let anchored = registry
         .step_all_anchored(participant.timeline_id, Seq::from_u64(CUT))
@@ -556,14 +578,15 @@ fn anchored_digest(timeline: TimelineId, cut: u64) -> Hash {
 pub fn digest_domain_separation() -> Capture {
     let mut capture = Capture::default();
     let participant = participant();
-    let (mut registry, _) = participant_registry(&participant, false);
+    let (mut anchored, _) = non_participant_registry(&participant);
+    let (mut authorized, _) = participant_registry(&participant, false);
     let mut port = RecordingPort::default();
-    registry
+    anchored
         .step_all_anchored(participant.timeline_id, Seq::from_u64(CUT))
         .test_ok();
-    let anchored_refusal = expect_err(registry.admit_scheduled_pass(&mut port, &admission()));
-    stage_authorized(&mut registry, &participant).test_ok();
-    let authorized_refusal = admit_authorized(&mut registry, &participant, &mut port);
+    let anchored_refusal = expect_err(anchored.admit_scheduled_pass(&mut port, &admission()));
+    stage_authorized(&mut authorized, &participant).test_ok();
+    let authorized_refusal = admit_authorized(&mut authorized, &participant, &mut port);
     let digests: Vec<Hash> = port
         .offered
         .iter()
@@ -616,6 +639,7 @@ fn participant_pass(
         register_participant(&mut registry, first, "participant.planned.1", false);
     let (second_aborts, second_observed) =
         register_participant(&mut registry, second, "participant.planned.2", false);
+    bind_participants(&mut registry, &[first, second]);
     ParticipantPass {
         registry,
         aborts: [first_aborts, second_aborts],

@@ -12,6 +12,12 @@
 //! `local-admission-host` feature; see the parent module for why that is not
 //! a security boundary against in-process code.
 //!
+//! The local host is a non-participant host under ADR-021 Revision 3: it
+//! admits only anchored passes, and an anchored pass stages only after the
+//! host composed every Driver non-participant
+//! ([`PluginRegistry::compose_non_participant_drivers`]). A participant-bound
+//! Driver is refused before it runs.
+//!
 //! The authority, delegation, and erasure revisions are always read from
 //! persisted state, so a revocation persisted in the session store moves the
 //! fence. The consent, capability, policy, and execution-profile revisions

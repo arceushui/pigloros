@@ -749,6 +749,7 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
         None,
         Some(Box::new(FixtureDriver)),
     )?;
+    admitted.compose_non_participant_drivers()?;
     assert!(matches!(
         admitted.step_all_anchored(timeline, pos_core::Seq::ZERO),
         Ok(drafts) if drafts.len() == 1
@@ -764,6 +765,7 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
         None,
         Some(Box::new(FixtureDriver)),
     )?;
+    generated.compose_non_participant_drivers()?;
     assert!(matches!(
         generated.step_all_anchored(timeline, pos_core::Seq::ZERO),
         Ok(drafts) if drafts.len() == 1
@@ -1157,6 +1159,7 @@ fn registered_with_sized_output(
             payload_bytes,
         })),
     )?;
+    registry.compose_non_participant_drivers()?;
     Ok((registry, limit))
 }
 
@@ -1282,6 +1285,7 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
             stepped: false,
         })),
     )?;
+    registry.compose_non_participant_drivers()?;
     let mut store = gated_store()?;
     let timeline = store.create_timeline("output-admission-mixed-batch")?.id();
 

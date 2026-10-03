@@ -4087,6 +4087,7 @@ mod tests {
         driver: Box<dyn Driver>,
     ) {
         try_register_output_driver(registry, event_types, driver).test_ok();
+        registry.compose_non_participant_drivers().test_ok();
     }
 
     fn try_register_output_driver(
@@ -6303,6 +6304,7 @@ mod tests {
         registry
             .register_generated(&plugin, None, Some(Box::new(PanickingDriver)))
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
 
         let error = registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
@@ -6378,6 +6380,7 @@ mod tests {
         registry
             .register_generated(&plugin, None, Some(Box::new(AbortPanickingDriver)))
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_ok();
@@ -6450,6 +6453,7 @@ mod tests {
             interval: Duration::from_nanos(100),
             fail: false,
         }));
+        registry.compose_non_participant_drivers().test_ok();
 
         assert!(matches!(
             registry.step_all(timeline),
@@ -6514,6 +6518,7 @@ mod tests {
             interval: Duration::from_nanos(1),
             fail: false,
         }));
+        registry.compose_non_participant_drivers().test_ok();
 
         registry
             .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
@@ -6606,6 +6611,7 @@ mod tests {
 
         let mut registry = gated_registry();
         registry.register_test_driver(Box::new(StepCommitPanickingDriver));
+        registry.compose_non_participant_drivers().test_ok();
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_ok();
@@ -6726,6 +6732,7 @@ mod tests {
             interval: Duration::from_nanos(1),
             fail: true,
         }));
+        registry.compose_non_participant_drivers().test_ok();
 
         assert!(registry.step_all_anchored(timeline, Seq::ZERO).is_err());
         let first = first.lock().test_ok();
@@ -6748,6 +6755,7 @@ mod tests {
             interval: Duration::from_nanos(100),
             fail: false,
         }));
+        registry.compose_non_participant_drivers().test_ok();
 
         assert!(registry
             .tick_cadenced_anchored_with_events(timeline, 0, Seq::ZERO, &[])
@@ -7079,6 +7087,7 @@ mod tests {
         reg.register_generated(&p, None, Some(Box::new(driver)))
             .test_ok();
         assert_eq!(reg.driver_count(), 1);
+        reg.compose_non_participant_drivers().test_ok();
 
         let drafts = reg.step_all(tl.id()).test_ok();
         assert_eq!(drafts.len(), 1);
@@ -7752,6 +7761,7 @@ mod tests {
         let mut reg = gated_registry().with_consent_authority(authority);
         reg.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
+        reg.compose_non_participant_drivers().test_ok();
 
         let drafts = reg
             .tick_cadenced_anchored_protected(timeline.id(), 0, Seq::ZERO, token, 0, &[])
@@ -7975,6 +7985,7 @@ mod tests {
             interval: Duration::from_nanos(2),
             steps: Arc::new(AtomicUsize::new(0)),
         }));
+        anchored.compose_non_participant_drivers().test_ok();
         anchored
             .tick_cadenced_anchored(timeline, u128::MAX - 1, Seq::ZERO)
             .test_ok();
@@ -8154,6 +8165,7 @@ mod tests {
             key: shared_key,
             observed: observed.clone(),
         }));
+        reg.compose_non_participant_drivers().test_ok();
 
         let drafts = reg
             .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
@@ -8860,6 +8872,7 @@ mod coverage_public_error_paths {
         mismatch.register_test_driver(Box::new(MismatchedSensitiveDriver {
             entity: EntityId::new(),
         }));
+        assert!(mismatch.compose_non_participant_drivers().is_ok());
         assert!(mismatch
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_err());
@@ -8874,6 +8887,7 @@ mod coverage_public_error_paths {
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
         let mut commit = gated_registry().with_consent_authority(authority.clone());
         commit.register_test_driver(Box::new(EmptyDriver));
+        assert!(commit.compose_non_participant_drivers().is_ok());
         assert!(commit
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_ok());

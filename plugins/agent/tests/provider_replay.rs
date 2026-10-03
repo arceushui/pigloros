@@ -1063,6 +1063,7 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
     registry
         .register_test_driver_with_verified_output_policy(host.plugin, binding, Box::new(driver))
         .test_ok();
+    registry.compose_non_participant_drivers().test_ok();
     let segments = [TimelineHistorySegment::new(host.timeline, Seq::from_u64(2))];
 
     registry.restore_driver_state(&segments, &events).test_ok();
@@ -1259,6 +1260,7 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
     registry
         .register_test_driver_with_verified_output_policy(host.plugin, binding, Box::new(driver))
         .test_ok();
+    registry.compose_non_participant_drivers().test_ok();
     let drafts = registry
         .step_all_anchored(host.timeline, Seq::ZERO)
         .test_ok();

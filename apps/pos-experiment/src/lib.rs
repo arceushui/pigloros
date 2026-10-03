@@ -5658,6 +5658,7 @@ pub mod tests {
                 Some(Box::new(CaptureFailDriver)),
             )
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
         assert!(append_driver_drafts(
             &mut driver_store,
             driver_timeline.id(),
@@ -5747,6 +5748,7 @@ pub mod tests {
                 )
                 .test_ok();
         }
+        registry.compose_non_participant_drivers().test_ok();
         registry
     }
 
@@ -7583,6 +7585,9 @@ mod coverage_entrypoints {
                 Box::new(UnknownDraftDriver),
             )
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        registry
+            .compose_non_participant_drivers()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
     }
 
     fn register_owned_schema_failure_driver(registry: &mut PluginRegistry) {
@@ -7601,6 +7606,9 @@ mod coverage_entrypoints {
                 binding,
                 Box::new(OwnedUnknownDraftDriver),
             )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        registry
+            .compose_non_participant_drivers()
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
     }
 

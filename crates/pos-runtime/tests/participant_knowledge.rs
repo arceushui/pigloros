@@ -22,7 +22,8 @@ use pos_core::{
 };
 use pos_runtime::{
     AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, Driver, ObservationView, PluginRegistry,
-    RuntimeError, ScheduledAdmissionStoreV1, ScheduledPassAdmissionV1, StepOutput,
+    RuntimeError, ScheduledAdmissionStoreV1, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
+    StepOutput,
 };
 use pos_state::{
     AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
@@ -604,6 +605,18 @@ fn registry_with_event_type(
     mut registry: PluginRegistry,
     event_type: &'static str,
 ) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
+    let state = register_driver(&mut registry, fixture, ambient, event_type);
+    bind_participant(&mut registry, fixture);
+    (registry, state)
+}
+
+/// Register one participant Driver for `fixture` without composing it.
+fn register_driver(
+    registry: &mut PluginRegistry,
+    fixture: &Fixture,
+    ambient: bool,
+    event_type: &'static str,
+) -> Arc<Mutex<DriverState>> {
     let state = Arc::new(Mutex::new(DriverState::default()));
     let driver = ParticipantDriver {
         state: Arc::clone(&state),
@@ -621,11 +634,28 @@ fn registry_with_event_type(
             Some(Box::new(driver)),
         )
         .test_ok();
-    (registry, state)
+    state
+}
+
+/// Bind `fixture`'s Driver to the fixture's ADR-059 Participant at host
+/// composition.
+fn bind_participant(registry: &mut PluginRegistry, fixture: &Fixture) {
+    let binding = ScheduledDriverBindingV1::Participant(fixture.knowledge.participant_id());
+    registry
+        .compose_scheduled_profiles(&[(fixture.plugin_id, binding)])
+        .test_ok();
 }
 
 fn registry(fixture: &Fixture, ambient: bool) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
     registry_with_mode(fixture, ambient, gated_registry())
+}
+
+/// The fixture's Driver in a host that composes it non-participant instead.
+fn non_participant_registry(fixture: &Fixture) -> (PluginRegistry, Arc<Mutex<DriverState>>) {
+    let mut registry = gated_registry();
+    let state = register_driver(&mut registry, fixture, false, "participant.planned");
+    registry.compose_non_participant_drivers().test_ok();
+    (registry, state)
 }
 
 fn current_authority(fixture: &Fixture) -> PersistedAuthorityV1 {
@@ -1430,6 +1460,7 @@ fn authorized_staging_aborts_driver_and_host_owned_draft_failures() {
                 Some(Box::new(driver)),
             )
             .test_ok();
+        bind_participant(&mut registry, &fixture);
 
         let error = error_text(stage_view(
             &mut registry,
@@ -1482,6 +1513,7 @@ fn authorized_driver_cannot_emit_another_plugins_registered_event_type() {
             None,
         )
         .test_ok();
+    bind_participant(&mut registry, &fixture);
 
     assert_eq!(
         authority_error(stage_view(
@@ -1527,7 +1559,7 @@ fn authorized_driver_accepts_its_exact_resource_limit() {
 #[test]
 fn authorized_commit_rejects_a_legacy_pending_step() {
     let fixture = fixture();
-    let (mut registry, state) = registry(&fixture, false);
+    let (mut registry, state) = non_participant_registry(&fixture);
     registry
         .step_all_anchored(fixture.timeline_id, Seq::from_u64(12))
         .test_ok();
@@ -1936,6 +1968,7 @@ fn authorized_pass_rejects_another_plugins_event_type_and_commits_nothing() {
                 None,
             )
             .test_ok();
+        bind_participant(&mut registry, &second);
         let first_evaluation = observation_evaluation(&first.observation);
         let second_evaluation = observation_evaluation(&second.observation);
         let first_authority = current_authority(&first);
@@ -1970,5 +2003,51 @@ fn authorized_pass_rejects_another_plugins_event_type_and_commits_nothing() {
             let state = observed(state);
             assert_eq!((state.aborts, state.commits), (1, 0), "{name}");
         }
+    }
+}
+
+/// ADR-021 Revision 3 Decision 2: the participant-authorized path stages only
+/// Drivers the host composed participant-bound, each observing only its own
+/// bound Participant's view. Every refusal happens before any Driver runs.
+#[test]
+fn authorized_staging_requires_each_driver_bound_to_its_views_participant() {
+    let fixture = fixture();
+    let other = fixture_with_timeline(fixture.timeline_id);
+    let evaluation = observation_evaluation(&fixture.observation);
+    let authority = current_authority(&fixture);
+    let stage = |registry: &mut PluginRegistry| {
+        error_text(stage_view(
+            registry,
+            fixture.timeline_id,
+            driver_view(&fixture),
+            view_authority(&fixture, &evaluation, &authority),
+        ))
+    };
+
+    let (mut unassigned, bound_state) =
+        registry_with_event_type(&other, false, gated_registry(), "participant.other");
+    let unassigned_state = register_driver(&mut unassigned, &fixture, false, "participant.planned");
+    assert!(stage(&mut unassigned).contains("has no observation profile assignment"));
+
+    let (mut non_participant, non_participant_state) = non_participant_registry(&fixture);
+    assert!(stage(&mut non_participant)
+        .contains("is not composed for the ParticipantBound profile"));
+
+    let mut foreign = gated_registry();
+    let foreign_state = register_driver(&mut foreign, &fixture, false, "participant.planned");
+    let binding = ScheduledDriverBindingV1::Participant(other.knowledge.participant_id());
+    foreign
+        .compose_scheduled_profiles(&[(fixture.plugin_id, binding)])
+        .test_ok();
+    assert_eq!(foreign.scheduled_binding(fixture.plugin_id), Some(binding));
+    assert!(stage(&mut foreign).contains("authority source is unauthorized"));
+
+    for state in [
+        &bound_state,
+        &unassigned_state,
+        &non_participant_state,
+        &foreign_state,
+    ] {
+        assert_eq!(observed(state).observed_digest, None);
     }
 }

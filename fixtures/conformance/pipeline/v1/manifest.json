@@ -5,27 +5,13 @@
   "sources": [
     "#488",
     "#321",
+    "#504",
     "ADR-021 R3",
     "ADR-024 R1",
     "ADR-024 R2",
     "ADR-062"
   ],
   "exclusions": [
-    {
-      "id": "R3-COMPOSITION-UNASSIGNED-DRIVER",
-      "reason": "ADR-021 Revision 3 Decision 2 composition-time profile assignment is not implemented, so no host can reject an unassigned Driver yet",
-      "owner": "#504"
-    },
-    {
-      "id": "R3-COMPOSITION-ANCHORED-PATH",
-      "reason": "Rejecting a participant-bound Driver before anchored staging needs the same assignment; PCF-R3-001 covers only the AuthorityFenceRequired backstop",
-      "owner": "#504"
-    },
-    {
-      "id": "R3-COMPOSITION-MIXED-PASS",
-      "reason": "Rejecting a mixed-profile host at composition needs the same assignment; PCF-R3-002 covers the runtime rule that one pass is one profile",
-      "owner": "#504"
-    },
     {
       "id": "R3-PARTICIPANT-COMMIT-RECOVERY",
       "reason": "Recovery and duplicate-receipt of a committed participant-authorized pass need a published participant authority fence in a store; the test host offers participant passes to a recording port only",
@@ -538,6 +524,83 @@
         "erasure.staged": "2",
         "erasure.refused": "true",
         "erasure.aborted": "1,1"
+      }
+    },
+    {
+      "id": "PCF-R3-009",
+      "title": "An unassigned scheduled Driver is rejected at composition and before any scheduled staging",
+      "sources": [
+        "#504",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "composition": "scheduled Driver 'second' has no observation profile assignment",
+        "first.binding": "unassigned",
+        "anchored": "scheduled Driver 'first' has no observation profile assignment",
+        "authorized": "scheduled Driver 'first' has no observation profile assignment",
+        "driver.steps/aborts": "0/0",
+        "committed": "0"
+      }
+    },
+    {
+      "id": "PCF-R3-010",
+      "title": "A participant-bound Driver is rejected before staging on every anchored path, not only by the AuthorityFenceRequired backstop",
+      "sources": [
+        "#504",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "binding": "ParticipantBound",
+        "anchored": "scheduled Driver 'participant' is not composed for the NonParticipant profile",
+        "cadenced": "scheduled Driver 'participant' is not composed for the NonParticipant profile",
+        "local-host": "scheduled Driver 'participant' is not composed for the NonParticipant profile",
+        "unanchored": "scheduled Driver 'participant' is not composed for the NonParticipant profile",
+        "driver.steps/aborts": "0/0",
+        "committed": "0"
+      }
+    },
+    {
+      "id": "PCF-R3-011",
+      "title": "A composition mixing participant-bound and non-participant Drivers is rejected and stages nothing",
+      "sources": [
+        "#504",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "mixed": "one composition cannot mix participant-bound and non-participant Drivers",
+        "bindings-after-refusal": "unassigned,unassigned",
+        "late-non-participant": "one composition cannot mix participant-bound and non-participant Drivers",
+        "late.anchored": "scheduled Driver 'participant' is not composed for the NonParticipant profile",
+        "late.authorized": "scheduled Driver 'world' has no observation profile assignment",
+        "driver.steps/aborts": "0/0",
+        "committed": "0"
       }
     },
     {

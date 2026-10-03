@@ -178,15 +178,21 @@ pub fn of_type<'a>(events: &'a [Event], event_type: &str) -> Vec<&'a Event> {
 /// Stage one anchored pass over the complete committed prefix, protected
 /// by `token` when one is given.
 ///
+/// These runners are a host without Participants: before staging, it
+/// explicitly composes every Driver it registered as non-participant
+/// (ADR-021 Revision 3 Decision 2).
+///
 /// # Errors
 ///
-/// Returns the runtime error that discarded the staged pass.
+/// Returns the composition error that refused the pass, or the runtime error
+/// that discarded the staged pass.
 pub fn stage(
     registry: &mut PluginRegistry,
     store: &dyn ScheduledAdmissionStoreV1,
     timeline: TimelineId,
     token: Option<&ConsentCapabilityToken>,
 ) -> Result<(Seq, Vec<EventDraft>), RuntimeError> {
+    registry.compose_non_participant_drivers()?;
     let head = store.logical_head(timeline).test_ok();
     let prefix = store.read(timeline, SeqRange::all()).test_ok();
     if let Some(token) = token {

@@ -123,6 +123,7 @@ fn register_output_driver(
         "deterministic-local-v1",
     ));
     test_ok(registry.register_test_driver_with_verified_output_policy(plugin_id, binding, driver));
+    test_ok(registry.compose_non_participant_drivers());
 }
 
 /// Bind the host-owned erasure gate for all ordinary live-registry fixtures.
@@ -966,6 +967,7 @@ fn ordinary_step_and_tick_enforce_projection_and_draft_boundaries() {
     protected_with_projection.register_test_driver(Box::new(SubscribedDriver {
         key: pos_runtime::ProjectionKey::new(subject),
     }));
+    test_ok(protected_with_projection.compose_non_participant_drivers());
     assert!(protected_with_projection
         .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
         .is_ok());
@@ -1026,6 +1028,7 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
     let timeline = TimelineId::new();
     let mut registry = PluginRegistry::new();
     registry.register_test_driver(Box::new(EmptyDriver));
+    test_ok(registry.compose_non_participant_drivers());
 
     let event = Event {
         id: EventId::new(),
@@ -1054,6 +1057,7 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
     projection_registry.register_test_driver(Box::new(SubscribedDriver {
         key: pos_runtime::ProjectionKey::new(EntityId::new()),
     }));
+    test_ok(projection_registry.compose_non_participant_drivers());
     assert!(matches!(
         test_err(projection_registry.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -1167,6 +1171,7 @@ fn public_registry_requires_consent_for_subscribed_projections() {
     subscribed_anchored.register_test_driver(Box::new(SubscribedDriver {
         key: pos_runtime::ProjectionKey::new(EntityId::new()),
     }));
+    test_ok(subscribed_anchored.compose_non_participant_drivers());
     assert!(matches!(
         test_err(subscribed_anchored.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -1286,6 +1291,7 @@ fn public_registry_reports_abort_and_commit_panics() {
     let timeline = TimelineId::new();
     let mut aborting = PluginRegistry::new();
     aborting.register_test_driver(Box::new(PanickingAbortDriver));
+    test_ok(aborting.compose_non_participant_drivers());
     assert!(matches!(
         test_err(aborting.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::GeographicDraft { .. }
@@ -1301,6 +1307,7 @@ fn public_registry_reports_a_cadenced_commit_panic() {
     let timeline = TimelineId::new();
     let mut committing = PluginRegistry::new();
     committing.register_test_driver(Box::new(PanickingCommitDriver));
+    test_ok(committing.compose_non_participant_drivers());
     test_ok(committing.step_all_anchored(timeline, Seq::ZERO));
     test_ok(committing.commit_step_at(Seq::ZERO, 0));
     assert!(matches!(
@@ -1362,6 +1369,7 @@ fn public_registry_deduplicates_subscriptions_before_authorization() {
         key: duplicate_key.clone(),
     }));
     duplicate_subscriptions.register_test_driver(Box::new(SubscribedDriver { key: duplicate_key }));
+    test_ok(duplicate_subscriptions.compose_non_participant_drivers());
     assert!(matches!(
         test_err(duplicate_subscriptions.step_all_anchored(timeline, Seq::ZERO)),
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -1646,6 +1654,7 @@ fn protected_projection_seams_reject_foreign_subjects_and_missing_or_foreign_gat
     foreign_projection.register_test_driver(Box::new(SubscribedDriver {
         key: pos_runtime::ProjectionKey::new(foreign_subject),
     }));
+    test_ok(foreign_projection.compose_non_participant_drivers());
     assert!(matches!(
         test_err(foreign_projection.step_all_anchored_protected(
             timeline,
