@@ -394,6 +394,12 @@ impl<'a> FieldReader<'a> {
         self.read_array(fixed_bytes_field::<LENGTH>)
     }
 
+    /// Read a variable-length array of byte strings of any length, such as
+    /// embedded canonical records that their own contract decodes.
+    pub(super) fn read_byte_string_list(&mut self) -> Vec<Vec<u8>> {
+        self.read_array(byte_string_field)
+    }
+
     /// Read a node coordinate encoded by [`node_value`] as a nested array.
     pub(super) fn read_node(&mut self) -> DependencyNodeV1 {
         self.read_nested(NODE_FIELD_COUNT, Self::node_fields)
@@ -458,6 +464,13 @@ fn u64_field(value: &Value) -> Result<u64, WireError> {
 
 fn u32_field(value: &Value) -> Result<u32, WireError> {
     u64_field(value).and_then(|integer| u32::try_from(integer).or(Err(WireError::FieldOutOfBounds)))
+}
+
+fn byte_string_field(value: &Value) -> Result<Vec<u8>, WireError> {
+    match value {
+        Value::Bytes(bytes) => Ok(bytes.clone()),
+        _ => Err(WireError::InvalidEncoding),
+    }
 }
 
 fn fixed_bytes_field<const LENGTH: usize>(value: &Value) -> Result<[u8; LENGTH], WireError> {
