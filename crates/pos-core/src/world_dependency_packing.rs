@@ -275,12 +275,13 @@ fn deduplicate(
 ) -> Result<Vec<WorldArtifactLeafV1>, WorldDependencyDirectoryErrorV1> {
     let mut unique: Vec<WorldArtifactLeafV1> = Vec::with_capacity(sorted.len());
     for leaf in sorted {
-        let same_key = unique
+        let identical = unique
             .last()
-            .filter(|previous| leaf_order(previous) == leaf_order(&leaf));
-        match same_key {
-            Some(previous) if *previous == leaf => {}
-            Some(_) => return Err(WorldDependencyDirectoryErrorV1::ConflictingRegistration),
+            .filter(|previous| leaf_order(previous) == leaf_order(&leaf))
+            .map(|previous| *previous == leaf);
+        match identical {
+            Some(true) => {}
+            Some(false) => return Err(WorldDependencyDirectoryErrorV1::ConflictingRegistration),
             None => unique.push(leaf),
         }
     }
