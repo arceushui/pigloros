@@ -613,8 +613,7 @@ fn sqlite_local_cut_owner_cut_by_id(
             recordings,
         },
     };
-    sqlite_validate_local_cut_owner_cut(owner_id, cut_id, &cut)
-        .map(|()| Some(cut))
+    sqlite_validate_local_cut_owner_cut(owner_id, cut_id, &cut).map(|()| Some(cut))
 }
 
 /// Read one cut's WCB1/WCR1 rows and their kind-4/kind-5 rows in Timeline order.
@@ -1067,8 +1066,7 @@ fn sqlite_insert_local_cut_owner_cut(
             ],
         )
         .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
-    sqlite_insert_local_cut_world_recordings(connection, batch)
-        .map(|()| result)
+    sqlite_insert_local_cut_world_recordings(connection, batch).map(|()| result)
 }
 
 fn sqlite_write_local_cut_owner_state(

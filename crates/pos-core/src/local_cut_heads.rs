@@ -202,11 +202,12 @@ fn pack(
         }
         level = parents;
     }
-    LocalCutTableRefV1::new(rows.len() as u64, level.first().map(|root| root.node_hash))
-        .map(|reference| LocalCutHeadsTableV1 {
+    LocalCutTableRefV1::new(rows.len() as u64, level.first().map(|root| root.node_hash)).map(
+        |reference| LocalCutHeadsTableV1 {
             reference,
             node_records,
-        })
+        },
+    )
 }
 
 fn encode_page(kind: u64, tree_scope: Hash, first_ordinal: u64, rows: &[Vec<u8>]) -> Vec<u8> {

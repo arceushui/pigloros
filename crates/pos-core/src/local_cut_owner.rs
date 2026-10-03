@@ -692,8 +692,7 @@ pub fn validate_local_cut_owner_successor_v1(
 }
 
 fn validate_request(request: &LocalCutOwnerRequestV1) -> Result<(), LocalCutOwnerErrorV1> {
-    validate_request_shape(request)
-        .and_then(|()| validate_head_tables(request))
+    validate_request_shape(request).and_then(|()| validate_head_tables(request))
 }
 
 /// Prove that the kind-4 rows pack to the seal's expected-heads reference and

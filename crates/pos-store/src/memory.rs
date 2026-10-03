@@ -11703,8 +11703,7 @@ fn memory_linked_local_cut_operation(
     if operation.request.seal.as_input().cut_id != cut_id {
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
-    validate_memory_world_recordings(store, owner_id, cut_id, operation)
-        .map(|()| operation)
+    validate_memory_world_recordings(store, owner_id, cut_id, operation).map(|()| operation)
 }
 
 /// Require one visible cut's stored WCB1/WCR1 rows to be exactly its result's.
