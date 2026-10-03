@@ -122,9 +122,16 @@
 //!   outputs were rendered from state this generation invalidates, so ADR-064
 //!   forbids exposing them as Fork state, cache hits, or export members; they
 //!   are not part of the suffix claim, so they are quarantined through the
-//!   index rather than listed in `SIV1`. They are artifacts, not caches or
-//!   checkpoints, so they do not join the eviction set, whose bound is the
-//!   sum of the `SIV1` checkpoint and Projection/snapshot limits.
+//!   index rather than listed in `SIV1`. This range covers every output of
+//!   `pos-time`'s `affected_presentation_outputs_v1`: an IDP1 edge's source
+//!   coordinate is strictly below its consumer's, so a presentation output
+//!   that consumes an affected node lies after the global frontier and is a
+//!   provisional output, and the fallback set is every provisional
+//!   presentation output, all at or after `(first_tick, 0)`. The frontier
+//!   source must therefore report every provisional output. They are
+//!   artifacts, not caches or checkpoints, so they do not join the eviction
+//!   set, whose bound is the sum of the `SIV1` checkpoint and
+//!   Projection/snapshot limits.
 //! - **Staged inputs.** The stager receives only an immutable
 //!   [`CounterfactualTickInputsV1`]: the new generation coordinate, the Tick,
 //!   the Interventions effective at that Tick, and the plan's frozen
