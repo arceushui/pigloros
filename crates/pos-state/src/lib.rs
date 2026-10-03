@@ -81,6 +81,11 @@ struct Slot {
 ///
 /// Plugins register reducers during Wave 3 initialisation; the registry then
 /// applies every incoming event to every registered reducer in insertion order.
+///
+/// A host serving a Fork must bind its chain from [`pos_core::fork_ancestry`]
+/// through [`Self::bind_fork_ancestry`], [`Self::refold_events`],
+/// [`Self::restore_from_snapshot`] or [`Self::adopt_committed_fork`]; state
+/// folded only through [`Self::fold_events`] fences the source Timeline alone.
 pub struct ProjectionRegistry {
     /// Ordered list so iteration is deterministic.
     slots: Vec<(String, Slot)>,
@@ -500,13 +505,15 @@ impl ProjectionRegistry {
                     .ok_or(AuthorityErrorV1::SourceUnavailable)
             })
             .and_then(|gate| {
+                let mut applied = false;
                 let mut bind = || {
                     self.source_timeline = Some(child);
                     self.source_generation = gate.inventory_generation().ok();
-                    self.record_source_ancestry(child, ancestry);
+                    applied = true;
                 };
                 gate.with_fence(child, ErasureProtectedOperationV1::Fork, &mut bind)
                     .map_err(|_| AuthorityErrorV1::SourceUnavailable)
+                    .and_then(|()| self.record_applied_ancestry(applied, child, ancestry))
             })
     }
 
