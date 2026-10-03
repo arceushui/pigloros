@@ -2102,7 +2102,7 @@ mod tests {
             registry.with_decryption_authorization(
                 descriptor.identity(),
                 ABSENT_MATERIAL_DIGEST,
-                mark
+                mark,
             ),
             Err(KeyRegistryErrorV1::EncryptionKeyMismatch)
         );

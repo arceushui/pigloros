@@ -309,6 +309,16 @@ fn recipient_decryption_public_contract_reports_missing_or_corrupt_material_unav
     Ok(())
 }
 
+/// Count the durable recipient custody directory claims.
+fn directory_claims(temporary: &tempfile::TempDir) -> TestResult<i64> {
+    let connection = rusqlite::Connection::open(database(temporary))?;
+    Ok(connection.query_row(
+        "SELECT count(*) FROM recipient_custody_directory_claims_v1",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 #[test]
 fn recipient_decryption_public_contract_rolls_back_a_first_use_directory_claim() -> TestResult {
     let grantee = EntityId::new();
@@ -319,17 +329,15 @@ fn recipient_decryption_public_contract_rolls_back_a_first_use_directory_claim()
     // then finds no bound file there; the claim must not survive the call.
     let fresh = private_directory(temporary.path(), "fresh-private")?;
     let first_use = RecipientKeyOwnerV1::open(fresh.clone(), grantee)?;
+    let claims_before = directory_claims(&temporary)?;
     assert_eq!(
         denied(&store, &first_use, &encoded, EXPORT_ID, descriptor),
         Some(RecipientExportDecryptionErrorV1::MaterialUnavailable)
     );
-    let connection = rusqlite::Connection::open(database(&temporary))?;
-    let claims: i64 = connection.query_row(
-        "SELECT count(*) FROM recipient_custody_directory_claims_v1",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(claims, 1);
+    // The only durable claim, before and after, is the enrolled directory's
+    // own; the fresh directory's first-use claim was rolled back.
+    assert_eq!(claims_before, 1);
+    assert_eq!(directory_claims(&temporary)?, claims_before);
     // A persisted claim for the first grantee would refuse this enrollment.
     let other_grantee = EntityId::new();
     let other = RecipientKeyOwnerV1::open(fresh, other_grantee)?;
