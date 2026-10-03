@@ -2076,11 +2076,8 @@ mod tests {
         ]
     }
 
-    /// `source`'s entry in `policy_sources`. The match has no wildcard, so a
-    /// new variant fails to compile until it is given an arm here; a constant
-    /// index past the array's length is a compile error (`unconditional_panic`),
-    /// so that arm compiles only once `policy_sources` lists one more entry,
-    /// and `policy_sources_list_every_variant_in_order` checks the position.
+    /// `source`'s entry in `policy_sources`. The wildcard-free match and the
+    /// constant indexes make an unlisted variant a compile error.
     const fn listed_policy_source(source: OutputPolicySourceV1) -> OutputPolicySourceV1 {
         let sources = policy_sources();
         match source {
