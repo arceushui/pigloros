@@ -172,7 +172,7 @@ impl DriverRecoveryEvidence {
 }
 
 use crate::error::RuntimeError;
-use std::collections::{hash_map::Entry, HashSet};
+use std::collections::hash_map::Entry;
 
 /// The output of a single driver step.
 #[derive(Debug, Default)]
@@ -204,7 +204,10 @@ impl ProjectionKey {
 ///
 /// The scheduler creates one snapshot before it steps any driver. Its views own
 /// cloned state, so every driver observes the same committed projection state
-/// even if later tick work changes the live registry.
+/// even if later tick work changes the live registry. The snapshot holds the
+/// union of every stepped Driver's subscriptions; each [`ObservationView`] is
+/// scoped to its own Driver's subscriptions, so no Driver reads a Projection
+/// that only another Driver subscribed to.
 #[derive(Default)]
 pub(crate) struct ObservationSnapshot {
     anchor: Option<SnapshotAnchor>,
@@ -326,11 +329,10 @@ impl ObservationSnapshot {
         event_subscriptions: &[Kind],
         after_seq: Seq,
     ) -> ObservationView<'a> {
-        let mut unique = 0usize;
-        let mut seen = HashSet::with_capacity(subscriptions.len());
+        let mut scope: Vec<ProjectionKey> = Vec::with_capacity(subscriptions.len());
         for key in subscriptions {
-            if seen.insert(key.clone()) {
-                unique += 1;
+            if !scope.contains(key) {
+                scope.push(key.clone());
             }
         }
         ObservationView {
@@ -338,7 +340,8 @@ impl ObservationSnapshot {
             authorized_snapshot: None,
             authorized_knowledge: None,
             direct_anchor: None,
-            len: unique,
+            len: scope.len(),
+            scope,
             events: if event_subscriptions.is_empty() {
                 Cow::Borrowed(&[])
             } else {
@@ -376,9 +379,9 @@ fn canonical_state(state: &State) -> Vec<u8> {
 ///
 /// This view contains the distinct keys declared by a driver's subscriptions.
 /// Repeated subscription keys are coalesced because lookup is keyed by
-/// [`ProjectionKey`]. Missing projection state is represented by `None`, allowing
-/// a driver to distinguish a subscribed-but-unseen entity from an undeclared
-/// dependency.
+/// [`ProjectionKey`]. Missing projection state is represented by `None`. A key
+/// outside the Driver's own subscriptions is never visible, even when another
+/// Driver stepped from the same shared snapshot subscribed to it.
 ///
 /// The view also carries any committed [`Event`]s that the runtime chose to
 /// forward (e.g. action events for physics drivers). Events are in Timeline
@@ -418,6 +421,8 @@ pub struct ObservationView<'a> {
     authorized_knowledge: Option<&'a KnowledgeSnapshotV1>,
     direct_anchor: Option<SnapshotAnchor>,
     len: usize,
+    /// The distinct subscriptions of the Driver this view was built for.
+    scope: Vec<ProjectionKey>,
     events: Cow<'a, [Event]>,
     verified_prefix_events: Option<Vec<Event>>,
 }
@@ -431,6 +436,7 @@ impl ObservationView<'_> {
             authorized_knowledge: None,
             direct_anchor: None,
             len: 0,
+            scope: Vec::new(),
             events: Cow::Borrowed(&[]),
             verified_prefix_events: None,
         }
@@ -448,14 +454,25 @@ impl ObservationView<'_> {
             authorized_knowledge: None,
             direct_anchor: Some(anchor),
             len: 0,
+            scope: Vec::new(),
             events: Cow::Borrowed(&[]),
             verified_prefix_events: None,
         }
     }
 
+    /// Return the captured state of one of this Driver's own subscriptions.
+    ///
+    /// A key outside this Driver's subscriptions returns `None`, even when the
+    /// shared pass snapshot holds it for another Driver.
     #[must_use]
     pub fn state_for(&self, key: &ProjectionKey) -> Option<&State> {
-        self.snapshot.and_then(|snapshot| snapshot.states.get(key))
+        self.scoped_snapshot(key)
+            .and_then(|snapshot| snapshot.states.get(key))
+    }
+
+    /// The shared snapshot, only for a key inside this Driver's subscriptions.
+    fn scoped_snapshot(&self, key: &ProjectionKey) -> Option<&ObservationSnapshot> {
+        self.snapshot.filter(|_| self.scope.contains(key))
     }
 
     /// Return the host-authorized, participant-specific snapshot for this step.
@@ -528,6 +545,7 @@ impl<'a> ObservationView<'a> {
             authorized_knowledge: None,
             direct_anchor: None,
             len: 0,
+            scope: Vec::new(),
             events: Cow::Borrowed(events),
             verified_prefix_events: None,
         }
@@ -546,6 +564,7 @@ impl<'a> ObservationView<'a> {
                 snapshot.observed_through(),
             )),
             len: snapshot.records().len(),
+            scope: Vec::new(),
             events: Cow::Borrowed(&[]),
             verified_prefix_events: None,
         }
