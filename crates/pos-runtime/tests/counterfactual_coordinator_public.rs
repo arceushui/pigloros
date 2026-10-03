@@ -174,11 +174,20 @@ impl Backend for SqliteStore {
     }
 }
 
-/// A `MemoryStore` whose one commit call reports a fixed outcome: a conflict
-/// when `CONFLICT`, otherwise a storage failure.
-struct Rigged<const CONFLICT: bool>(MemoryStore);
+/// [`Rigged`] mode: the one commit call fails with a storage failure.
+const COMMIT_FAILS: u8 = 0;
+/// [`Rigged`] mode: the one commit call reports a Logical Head conflict.
+const COMMIT_CONFLICTS: u8 = 1;
+/// [`Rigged`] mode: every Timeline read fails.
+const TIMELINE_FAILS: u8 = 2;
+/// [`Rigged`] mode: every Logical Head read fails.
+const HEAD_FAILS: u8 = 3;
 
-impl<const CONFLICT: bool> EventStore for Rigged<CONFLICT> {
+/// A `MemoryStore` with one rigged operation, chosen by `MODE`; every other
+/// call is delegated.
+struct Rigged<const MODE: u8>(MemoryStore);
+
+impl<const MODE: u8> EventStore for Rigged<MODE> {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         self.0.create_timeline(name)
     }
@@ -204,20 +213,28 @@ impl<const CONFLICT: bool> EventStore for Rigged<CONFLICT> {
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
-        self.0.get_timeline(id)
+        if MODE == TIMELINE_FAILS {
+            Err(CoreError::ArtifactUnavailable)
+        } else {
+            self.0.get_timeline(id)
+        }
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
-        self.0.logical_head(id)
+        if MODE == HEAD_FAILS {
+            Err(CoreError::ArtifactUnavailable)
+        } else {
+            self.0.logical_head(id)
+        }
     }
 }
 
-impl<const CONFLICT: bool> CounterfactualStorePortV1 for Rigged<CONFLICT> {
+impl<const MODE: u8> CounterfactualStorePortV1 for Rigged<MODE> {
     fn commit_counterfactual_invalidation(
         &mut self,
         _command: &CounterfactualInvalidationCommandV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
-        if CONFLICT {
+        if MODE == COMMIT_CONFLICTS {
             Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
                 InvalidationConflictV1::LogicalHead,
             ))
@@ -242,7 +259,7 @@ impl<const CONFLICT: bool> CounterfactualStorePortV1 for Rigged<CONFLICT> {
     }
 }
 
-impl<const CONFLICT: bool> Backend for Rigged<CONFLICT> {
+impl<const MODE: u8> Backend for Rigged<MODE> {
     fn open() -> TestResult<Self> {
         <MemoryStore as Backend>::open().map(Self)
     }
@@ -364,13 +381,19 @@ fn endogenous(tick: u64, owner_id: &str, seed: u8) -> Node {
     )
 }
 
+/// Every node of the base graph. An Intervention the plan does not hold
+/// gets a placeholder digest; its node lies after a shortened horizon and is
+/// dropped with it.
 fn nodes(plan: &CounterfactualPlanV1) -> TestResult<Vec<Node>> {
-    let intervention_node = |position: usize| -> TestResult<Node> {
-        let intervention = &plan.interventions[position];
+    let intervention_node = |position: usize, tick: u64| -> TestResult<Node> {
+        let digest = plan
+            .interventions
+            .get(position)
+            .map_or(Ok([0xee; 32]), InterventionV1::digest)?;
         Ok(node(
-            intervention.effective_tick,
+            tick,
             "intervention",
-            intervention.digest()?,
+            digest,
             DependencyClassV1::InterventionAssigned,
         ))
     };
@@ -379,10 +402,10 @@ fn nodes(plan: &CounterfactualPlanV1) -> TestResult<Vec<Node>> {
         endogenous(9, "world", 1),
         node(10, "policy", [0x30; 32], DependencyClassV1::FixedPolicy),
         endogenous(10, "world", 2),
-        intervention_node(0)?,
+        intervention_node(0, 11)?,
         endogenous(11, "world", 3),
         endogenous(12, "world", 4),
-        intervention_node(1)?,
+        intervention_node(1, 13)?,
         endogenous(14, "agent", 5),
         node(
             15,
@@ -451,10 +474,14 @@ struct Source {
     edges: Vec<InputDependencyV1>,
     policy: UnknownEdgePolicyV1,
     tamper: fn(&mut RecomputationFrontierV1),
+    /// Provisional outputs reported in addition to the graph's.
+    extra_outputs: Vec<CounterfactualProvisionalOutputV1>,
     calls: usize,
 }
 
 impl Source {
+    /// The base graph through the plan horizon: nodes after the horizon and
+    /// their edges are dropped.
     fn new(
         plan: &CounterfactualPlanV1,
         policy: UnknownEdgePolicyV1,
@@ -470,9 +497,10 @@ impl Source {
         }
         let mut edges: Vec<_> = EDGE_SPECS
             .iter()
-            .filter(|spec| !omitted.contains(spec))
+            .filter(|spec| !omitted.contains(spec) && nodes[spec.0].node.tick <= plan.horizon_tick)
             .map(|&(consumer, source)| edge(&nodes[consumer], &nodes[source]))
             .collect();
+        nodes.retain(|node| node.node.tick <= plan.horizon_tick);
         edges.sort_by_key(|edge| {
             (
                 edge.consumer.tick,
@@ -487,6 +515,7 @@ impl Source {
             edges,
             policy,
             tamper: untampered,
+            extra_outputs: Vec::new(),
             calls: 0,
         })
     }
@@ -533,6 +562,7 @@ impl CounterfactualFrontierSourceV1 for Source {
                 node: node.node.clone(),
                 class: node.class,
             })
+            .chain(self.extra_outputs.iter().cloned())
             .collect();
         Ok(CounterfactualFrontierDerivationV1 {
             frontier,
@@ -808,11 +838,9 @@ fn expected_invalidation<B>(
         prior_generation: 0,
         new_generation: 1,
         frontier_digest: frontier.frontier_digest,
+        // The lowest affected node and the highest invalidated producer.
         invalid_start: nodes[INTERVENTION_A].node.clone(),
-        invalid_end: DependencyNodeV1 {
-            tick: HORIZON_TICK,
-            ..nodes[AGENT_14].node.clone()
-        },
+        invalid_end: nodes[WEATHER_16].node.clone(),
         invalid_artifacts: [WORLD_11, WORLD_12, AGENT_14, WEATHER_16]
             .into_iter()
             .map(|position| invalid_artifact(nodes, position, 0, reason))
@@ -958,13 +986,9 @@ fn unknown_edge_fallback_recomputes_from_the_cut<B: Backend>() -> TestResult {
     let nodes = &setup.source.nodes;
     assert_eq!(invalidation.reason, reason);
     assert_eq!(invalidation.commit_tick, FIRST_TICK);
-    assert_eq!(
-        invalidation.invalid_start,
-        DependencyNodeV1 {
-            tick: FIRST_TICK,
-            ..nodes[INTERVENTION_A].node.clone()
-        }
-    );
+    // The lowest invalidated producer and the highest one.
+    assert_eq!(invalidation.invalid_start, nodes[WORLD_10].node);
+    assert_eq!(invalidation.invalid_end, nodes[WEATHER_16].node);
     assert_eq!(
         invalidation.invalid_artifacts,
         [WORLD_10, WORLD_11, WORLD_12, AGENT_14, WEATHER_16]
@@ -1264,6 +1288,126 @@ fn derived_frontier_is_revalidated_and_bound<B: Backend>() -> TestResult {
 }
 both_backends!(derived_frontier_is_revalidated_and_bound);
 
+fn derived_frontier_range_is_enforced<B: Backend>() -> TestResult {
+    let cases: [fn(&mut RecomputationFrontierV1); 2] = [
+        // An affected node before the global frontier.
+        |frontier| {
+            if let Some(first) = frontier.affected_nodes.first().cloned() {
+                frontier.affected_nodes.insert(
+                    0,
+                    DependencyNodeV1 {
+                        tick: FIRST_TICK,
+                        ..first
+                    },
+                );
+            }
+            reseal(frontier);
+        },
+        // An affected node after the endogenous suffix end.
+        |frontier| {
+            if let Some(last) = frontier.affected_nodes.last().cloned() {
+                frontier.affected_nodes.push(DependencyNodeV1 {
+                    tick: HORIZON_TICK + 1,
+                    ..last
+                });
+            }
+            reseal(frontier);
+        },
+    ];
+    for tamper in cases {
+        let mut setup = setup::<B>(&BASE)?;
+        setup.source.tamper = tamper;
+        let outcome = admit(&mut setup);
+        assert_rejected(&setup, &outcome, &AdmissionError::FrontierOutOfRange, 0)?;
+    }
+
+    // A provisional output after the endogenous suffix end: the suffix runs
+    // through the horizon only.
+    let mut setup = setup::<B>(&BASE)?;
+    let beyond = DependencyNodeV1 {
+        tick: HORIZON_TICK + 1,
+        ..setup.source.nodes[WEATHER_16].node.clone()
+    };
+    setup.source.extra_outputs = vec![CounterfactualProvisionalOutputV1 {
+        node: beyond,
+        class: DependencyClassV1::EndogenousRecomputed,
+    }];
+    let outcome = admit(&mut setup);
+    assert_rejected(&setup, &outcome, &AdmissionError::FrontierOutOfRange, 0)?;
+    assert_eq!(setup.source.calls, 1);
+    Ok(())
+}
+both_backends!(derived_frontier_range_is_enforced);
+
+fn fallback_frontier_is_exactly_the_first_tick<B: Backend>() -> TestResult {
+    let cases: [fn(&mut RecomputationFrontierV1); 2] = [
+        // A later scheduler position of the first Tick.
+        |frontier| {
+            frontier.global_frontier_scheduler_position = 1;
+            reseal(frontier);
+        },
+        // A later Tick, which `Reject` would admit.
+        |frontier| {
+            frontier.global_frontier_tick = FIRST_TICK + 1;
+            reseal(frontier);
+        },
+    ];
+    for tamper in cases {
+        let mut setup = setup::<B>(&Spec {
+            policy: UnknownEdgePolicyV1::FullSuffixFromCut,
+            omitted: WEATHER_EDGE,
+            ..BASE
+        })?;
+        setup.source.tamper = tamper;
+        let outcome = admit(&mut setup);
+        assert_rejected(&setup, &outcome, &AdmissionError::FrontierOutOfRange, 0)?;
+        assert_eq!(setup.source.calls, 1);
+    }
+    Ok(())
+}
+both_backends!(fallback_frontier_is_exactly_the_first_tick);
+
+fn suffix_ending_on_the_frontier_tick_has_a_valid_range<B: Backend>() -> TestResult {
+    let mut setup = setup::<B>(&Spec {
+        plan: |plan| {
+            plan.horizon_tick = 11;
+            plan.interventions.truncate(1);
+        },
+        ..BASE
+    })?;
+    let receipt = admit(&mut setup).0?;
+    assert_eq!(receipt.first_tick(), 11);
+    let invalidation =
+        read_invalidation(&setup, receipt.generation(), receipt.invalidation_digest())?;
+    // The graph ends at Tick 11: the Intervention seed and the endogenous
+    // output after it on the same Tick bound the range.
+    let nodes = &setup.source.nodes;
+    let seed = nodes
+        .iter()
+        .find(|node| node.class == DependencyClassV1::InterventionAssigned)
+        .ok_or("missing seed")?;
+    let world = nodes
+        .iter()
+        .find(|node| node.node.tick == 11 && node.node.owner_id == "world")
+        .ok_or("missing output")?;
+    assert_eq!(invalidation.commit_tick, 11);
+    assert_eq!(invalidation.invalid_start, seed.node);
+    assert_eq!(invalidation.invalid_end, world.node);
+    assert_eq!(
+        invalidation.invalid_artifacts,
+        vec![InvalidArtifactV1 {
+            artifact_class: ENDOGENOUS_ARTIFACT_CLASS_V1.to_owned(),
+            schema_id: 40,
+            artifact_digest: world.node.artifact_digest,
+            producer: world.node.clone(),
+            prior_generation: 0,
+            reason: SuffixInvalidationReasonV1::NewIntervention,
+        }]
+    );
+    Ok(())
+}
+both_backends!(suffix_ending_on_the_frontier_tick_has_a_valid_range);
+
 fn invalidation_contract_violations_are_rejected<B: Backend>() -> TestResult {
     let mut setup = setup::<B>(&BASE)?;
     let unordered = [[0xc3; 32], [0xc1; 32]];
@@ -1382,7 +1526,7 @@ both_backends!(changed_persisted_facts_conflict_atomically);
 
 #[test]
 fn store_outcomes_without_a_commit_map_to_closed_errors() -> TestResult {
-    let mut failing = setup::<Rigged<false>>(&BASE)?;
+    let mut failing = setup::<Rigged<COMMIT_FAILS>>(&BASE)?;
     let outcome = admit(&mut failing);
     assert_rejected(
         &failing,
@@ -1390,7 +1534,7 @@ fn store_outcomes_without_a_commit_map_to_closed_errors() -> TestResult {
         &AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
         1,
     )?;
-    let mut conflicting = setup::<Rigged<true>>(&BASE)?;
+    let mut conflicting = setup::<Rigged<COMMIT_CONFLICTS>>(&BASE)?;
     let outcome = admit(&mut conflicting);
     assert_rejected(
         &conflicting,
@@ -1398,6 +1542,31 @@ fn store_outcomes_without_a_commit_map_to_closed_errors() -> TestResult {
         &AdmissionError::InvalidationConflict(InvalidationConflictV1::LogicalHead),
         1,
     )
+}
+
+#[test]
+fn failed_fork_reads_map_to_a_storage_failure() -> TestResult {
+    let storage_failure = AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure);
+    let mut timeline = setup::<Rigged<TIMELINE_FAILS>>(&BASE)?;
+    let outcome = admit(&mut timeline);
+    assert_rejected(&timeline, &outcome, &storage_failure, 0)?;
+    assert_eq!(timeline.source.calls, 0);
+
+    // The Logical Head read fails after the parent cut matched; the rigged
+    // store cannot read its head back, so the generation proves no commit.
+    let mut head = setup::<Rigged<HEAD_FAILS>>(&BASE)?;
+    let (result, stager) = admit(&mut head);
+    assert_eq!(result.err(), Some(storage_failure));
+    assert!(stager.seen.is_empty());
+    assert_eq!(head.source.calls, 0);
+    assert_eq!(
+        head.coordinator
+            .store()
+            .current_fork_generation(head.fixture.fork)?
+            .generation,
+        0
+    );
+    Ok(())
 }
 
 #[test]
