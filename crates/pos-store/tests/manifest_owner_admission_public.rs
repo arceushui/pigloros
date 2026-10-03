@@ -1472,6 +1472,7 @@ fn preparation_checks_read_limits_and_the_retained_byte_budget() -> TestResult {
     let invalid = Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
     for (limits, expected) in [
         (read_limits(0, retained, 32), invalid),
+        (read_limits(1, 0, 1), invalid),
         (read_limits(1, retained, 0), invalid),
         (read_limits(1, retained, 33), invalid),
         (
@@ -1505,9 +1506,15 @@ fn intent_digest_binds_read_limits_lease_and_member_bytes() -> TestResult {
     lease.timelines[0].members.rls1_bytes.push(0);
     let mut bytes = valid.clone();
     bytes.timelines[0].members.leaves[0].native_bytes.push(0);
+    let mut native_cap = valid.clone();
+    native_cap.read_limits.max_native_bytes += 1;
+    let mut depth = valid.clone();
+    depth.read_limits.max_combined_depth -= 1;
+    let mut policy = valid.clone();
+    policy.timelines[0].members.rtp1_bytes.push(0);
     let mut leaves = valid;
     leaves.timelines[0].members.leaves.pop();
-    for changed in [limits, lease, bytes, leaves] {
+    for changed in [limits, native_cap, depth, lease, policy, bytes, leaves] {
         assert_ne!(manifest_owner_admission_intent_digest_v1(&changed)?, digest);
     }
     Ok(())

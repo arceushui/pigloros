@@ -114,6 +114,9 @@ pub struct ManifestOwnerScopeMembersV1 {
 }
 
 /// Native digests behind one WCS1 consumer's kind7/8/9 reference leaves.
+///
+/// These are native digests; the WCS1 consumer row carries the WAL1 leaf
+/// addresses of the reference leaves built from them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ManifestOwnerConsumerReferenceV1 {
     /// Native schema digest (artifact kind7).
@@ -235,13 +238,16 @@ fn recorded_lease(members: &ManifestOwnerScopeMembersV1) -> Option<WorldRetentio
 
 /// Check read limits and every scope's aggregate retained native bytes.
 ///
-/// The aggregate covers member leaves and EOP1/OPC1 copies, so it also bounds
-/// each single retained member by `max_native_bytes`.
+/// Every read limit must be nonzero. The aggregate covers member leaves and
+/// every EOP1/OPC1 copy, so it also bounds each single retained member by
+/// `max_native_bytes`; OPC1 bytes embed their members, which therefore count
+/// toward the aggregate more than once.
 pub(crate) fn validate_scope_budgets<'a>(
     limits: WorldClosureReadLimitsV1,
     scopes: impl IntoIterator<Item = ScopeBytes<'a>>,
 ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
     if limits.max_node_visits == 0
+        || limits.max_native_bytes == 0
         || !(1..=MAX_COMBINED_DEPTH_V1).contains(&limits.max_combined_depth)
     {
         return Err(AdmissionError::InvalidBatch);
