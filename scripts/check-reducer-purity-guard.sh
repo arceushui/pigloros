@@ -15,16 +15,17 @@ set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "$root"
 
-crates=(
-  plugins/agent
-  plugins/bridges
-  plugins/entities/rule-agent
-  plugins/eval
-  plugins/observations/synthetic
-  plugins/persona
-  plugins/society
-  plugins/world
-)
+# The guarded crates are the Plugin crates that hold a src/reducer.rs. They
+# must be exactly the crates whose staged-factory type-name test exists.
+crate_roots() {
+  local file
+  while IFS= read -r file; do
+    dirname -- "$(dirname -- "$file")"
+  done < <(git ls-files -- "$1") | LC_ALL=C sort -u
+}
+mapfile -t crates < <(crate_roots 'plugins/**/src/reducer.rs')
+mapfile -t factory_crates < <(crate_roots 'plugins/**/tests/staged_factory_type_name.rs')
+expected_crates=8
 canonical="plugins/agent/clippy.toml"
 failures=0
 
@@ -32,6 +33,14 @@ fail() {
   printf 'reducer purity guard: %s\n' "$1" >&2
   failures=$((failures + 1))
 }
+
+if ((${#crates[@]} != expected_crates)); then
+  fail "found ${#crates[@]} Plugin crates with src/reducer.rs, expected ${expected_crates}"
+fi
+if [[ "${crates[*]}" != "${factory_crates[*]}" ]]; then
+  fail "Plugin crates with src/reducer.rs (${crates[*]}) differ from those with \
+tests/staged_factory_type_name.rs (${factory_crates[*]})"
+fi
 
 forbid_header() {
   sed -n '/^#!\[forbid($/,/^)\]$/p' "$1"
@@ -144,6 +153,22 @@ pub fn effect() {
 expect_fails "thread sleep" 'disallowed method `std::thread::sleep`' "$plain_lib" "$clean_reducer
 pub fn effect() {
     std::thread::sleep(std::time::Duration::ZERO);
+}"
+expect_fails "path exists" 'disallowed method `std::path::Path::exists`' "$plain_lib" "$clean_reducer
+pub fn effect() -> bool {
+    std::path::Path::new(\"guard\").exists()
+}"
+expect_fails "instant elapsed" 'disallowed method `std::time::Instant::elapsed`' "$plain_lib" "$clean_reducer
+pub fn effect(start: std::time::Instant) -> std::time::Duration {
+    start.elapsed()
+}"
+expect_fails "hash map" 'disallowed type `std::collections::HashMap`' "$plain_lib" "$clean_reducer
+pub fn effect() -> std::collections::HashMap<u8, u8> {
+    std::collections::HashMap::new()
+}"
+expect_fails "random state" 'disallowed type `std::collections::hash_map::RandomState`' "$plain_lib" "$clean_reducer
+pub fn effect() -> std::collections::hash_map::RandomState {
+    std::collections::hash_map::RandomState::new()
 }"
 expect_fails "atomic u8" 'disallowed type `std::sync::atomic::AtomicU8`' "$plain_lib" "$clean_reducer
 pub static FLAG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);"

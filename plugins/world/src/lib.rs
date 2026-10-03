@@ -23,7 +23,6 @@ use pos_runtime::{
     RecoveryEvent, RecoveryEventHeader, RuntimeError, StepOutput, WorldInstallationErrorV1,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 mod reducer;
 
@@ -1001,7 +1000,12 @@ pub struct WorldPlugin {
     id: PluginId,
     allowed_action_kinds: Vec<String>,
     catalogue_version: u32,
-    known_bodies: HashSet<EntityId>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
+                  body membership tests need no iteration order"
+    )]
+    known_bodies: std::collections::HashSet<EntityId>,
 }
 
 impl Default for WorldPlugin {
@@ -1013,12 +1017,17 @@ impl Default for WorldPlugin {
 impl WorldPlugin {
     /// Create a new world plugin with default actuator allow-list (`["impulse", "target_velocity"]`).
     #[must_use]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
+                  body membership tests need no iteration order"
+    )]
     pub fn new() -> Self {
         Self {
             id: PluginId::new(),
             allowed_action_kinds: vec!["impulse".to_owned(), "target_velocity".to_owned()],
             catalogue_version: 1,
-            known_bodies: HashSet::new(),
+            known_bodies: std::collections::HashSet::new(),
         }
     }
 

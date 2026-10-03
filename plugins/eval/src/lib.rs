@@ -526,6 +526,11 @@ fn report_from_events(events: &[Event]) -> Result<CalibrationReport, EvalError> 
 
     // Lift vs personal base rate: per-entity historical outcome rate as baseline.
     // Uses leave-one-out: each prediction is scored against the entity's other outcomes.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
+                  per-entity lookups need no iteration order"
+    )]
     let mut entity_outcomes: std::collections::HashMap<String, Vec<f64>> =
         std::collections::HashMap::new();
     for r in &resolved {
