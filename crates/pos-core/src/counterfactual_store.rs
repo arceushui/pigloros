@@ -49,7 +49,7 @@
 //!   (#338) validates the `CFP1` parent cut against the Fork's recorded
 //!   parent cut before it calls this port. The port therefore rechecks the
 //!   one head that can still move: the Fork Timeline's committed head. That
-//!   recheck is the concurrency guard for the atomic first-Tick append.
+//!   recheck is the concurrency guard for every atomic Tick append.
 //! - **Commit coordinate.** The `SIV1` commit coordinate
 //!   `[timeline_id, seq, tick]` names the Tick Boundary the transaction
 //!   commits at: the Fork Timeline, the expected committed Fork head (the last
@@ -62,6 +62,20 @@
 //! - **First recomputation Tick.** Its drafts reuse the bounded, ordered,
 //!   non-empty [`PipelineDraftBatchV1`]; a Tick Boundary always commits at
 //!   least one Event.
+//! - **Later recomputation Ticks.** Each later Tick is appended with
+//!   [`CounterfactualStorePortV1::append_counterfactual_tick`] under the
+//!   whole [`CounterfactualBasisV1`] the suffix expects (built with
+//!   [`CounterfactualGenerationReceiptV1::tick_basis`]), so a newer
+//!   generation, a moved Fork head, or changed published facts make the Tick
+//!   stale and commit nothing. The epoch recheck "immediately before commit"
+//!   is therefore performed inside the commit itself.
+//! - **Persisted basis.** Callers read the Fork's committed head,
+//!   generation, and published facts with
+//!   [`CounterfactualStorePortV1::current_counterfactual_basis`] instead of
+//!   trusting host-attested epochs; the write paths still recheck atomically.
+//! - **Head that did not advance.** A first or later Tick whose staged head
+//!   is not strictly greater than the expected head is `CorruptState` in
+//!   every adapter, and nothing commits.
 
 use std::cmp::Ordering;
 
@@ -474,29 +488,19 @@ pub enum InvalidationConflictV1 {
     ErasureEpoch,
 }
 
-/// The persisted facts an invalidation was derived against.
+/// The host-published facts of one Fork that every counterfactual write is
+/// rechecked against.
 ///
-/// The coordinator's expected basis comes from
-/// [`CounterfactualInvalidationCommandV1::expected_basis`]; an adapter reads
-/// the persisted basis inside its transaction and commits only when
-/// [`Self::first_conflict`] returns `None`.
-///
-/// The Logical Head here is the Fork Timeline's moving committed head, not
-/// ADR-064's "parent Logical Head": a Fork's parent cut is immutable once the
-/// Fork is created, and the coordinator (#338) validates the `CFP1` parent
-/// cut against the Fork's recorded parent cut before calling the port. The
-/// port rechecks the moving Fork head, which guards the atomic first-Tick
-/// append against concurrent writers.
+/// The host publishes them with
+/// [`CounterfactualStorePortV1::publish_counterfactual_facts`]; adapters
+/// persist them per Fork and return them inside
+/// [`CounterfactualStorePortV1::current_counterfactual_basis`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CounterfactualBasisV1 {
-    /// Committed Logical Head of the Fork Timeline the new generation follows.
-    pub fork_logical_head: Seq,
+pub struct CounterfactualFactsV1 {
     /// Admitted counterfactual plan digest.
     pub plan_digest: Hash,
-    /// Committed dependency-graph digest the frontier was derived from.
+    /// Committed dependency-graph digest frontiers are derived from.
     pub dependency_graph_digest: Hash,
-    /// Committed Fork generation.
-    pub generation: u64,
     /// Trust-policy epoch.
     pub trust_epoch: u64,
     /// Authority revocation epoch.
@@ -505,43 +509,128 @@ pub struct CounterfactualBasisV1 {
     pub erasure_epoch: u64,
 }
 
+impl CounterfactualFactsV1 {
+    /// Return the first epoch of `current` that differs from these facts, in
+    /// canonical order: trust, revocation, erasure.
+    ///
+    /// This is the only place epochs are compared;
+    /// [`CounterfactualBasisV1::first_conflict`] delegates to it.
+    #[must_use]
+    pub fn first_epoch_change(&self, current: &Self) -> Option<InvalidationConflictV1> {
+        first_difference([
+            (
+                self.trust_epoch == current.trust_epoch,
+                InvalidationConflictV1::TrustEpoch,
+            ),
+            (
+                self.revocation_epoch == current.revocation_epoch,
+                InvalidationConflictV1::RevocationEpoch,
+            ),
+            (
+                self.erasure_epoch == current.erasure_epoch,
+                InvalidationConflictV1::ErasureEpoch,
+            ),
+        ])
+    }
+}
+
+/// Return the conflict of the first check whose facts differ.
+fn first_difference<const N: usize>(
+    checks: [(bool, InvalidationConflictV1); N],
+) -> Option<InvalidationConflictV1> {
+    checks
+        .into_iter()
+        .find_map(|(same, conflict)| (!same).then_some(conflict))
+}
+
+/// The persisted state of one Fork a counterfactual write is derived against.
+///
+/// The coordinator's expected basis comes from
+/// [`CounterfactualInvalidationCommandV1::expected_basis`], and the suffix
+/// loop's from [`CounterfactualGenerationReceiptV1::tick_basis`]; an adapter
+/// reads the persisted basis inside its transaction and commits only when
+/// [`Self::first_conflict`] returns `None`.
+///
+/// The Logical Head here is the Fork Timeline's moving committed head, not
+/// ADR-064's "parent Logical Head": a Fork's parent cut is immutable once the
+/// Fork is created, and the coordinator (#338) validates the `CFP1` parent
+/// cut against the Fork's recorded parent cut before calling the port. The
+/// port rechecks the moving Fork head, which guards every atomic Tick append
+/// against concurrent writers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CounterfactualBasisV1 {
+    /// Committed Logical Head of the Fork Timeline.
+    pub fork_logical_head: Seq,
+    /// Committed Fork generation.
+    pub generation: u64,
+    /// Host-published facts of the Fork.
+    pub facts: CounterfactualFactsV1,
+}
+
 impl CounterfactualBasisV1 {
-    /// Return the first persisted fact that differs from this expected basis.
+    /// Return the first persisted fact that differs from this expected basis,
+    /// in canonical order: Logical Head, plan digest, dependency-graph
+    /// digest, generation, then the epochs of
+    /// [`CounterfactualFactsV1::first_epoch_change`].
     #[must_use]
     pub fn first_conflict(&self, persisted: &Self) -> Option<InvalidationConflictV1> {
-        [
+        first_difference([
             (
                 self.fork_logical_head == persisted.fork_logical_head,
                 InvalidationConflictV1::LogicalHead,
             ),
             (
-                self.plan_digest == persisted.plan_digest,
+                self.facts.plan_digest == persisted.facts.plan_digest,
                 InvalidationConflictV1::PlanDigest,
             ),
             (
-                self.dependency_graph_digest == persisted.dependency_graph_digest,
+                self.facts.dependency_graph_digest == persisted.facts.dependency_graph_digest,
                 InvalidationConflictV1::DependencyGraphDigest,
             ),
             (
                 self.generation == persisted.generation,
                 InvalidationConflictV1::PriorGeneration,
             ),
-            (
-                self.trust_epoch == persisted.trust_epoch,
-                InvalidationConflictV1::TrustEpoch,
-            ),
-            (
-                self.revocation_epoch == persisted.revocation_epoch,
-                InvalidationConflictV1::RevocationEpoch,
-            ),
-            (
-                self.erasure_epoch == persisted.erasure_epoch,
-                InvalidationConflictV1::ErasureEpoch,
-            ),
-        ]
-        .into_iter()
-        .find_map(|(same, conflict)| (!same).then_some(conflict))
+        ])
+        .or_else(|| self.facts.first_epoch_change(&persisted.facts))
     }
+
+    /// Build the outcome of a later Tick committed on this basis.
+    ///
+    /// This is the adapter-only constructor of
+    /// [`CounterfactualTickOutcomeV1::Committed`]: only a
+    /// [`CounterfactualStorePortV1`] adapter calls it, inside
+    /// [`CounterfactualStorePortV1::append_counterfactual_tick`], before it
+    /// installs the Tick. `head` is the Fork Logical Head after the Tick's
+    /// Events; a Tick commits at least one Event, so it must be strictly
+    /// greater than this basis's head.
+    ///
+    /// # Errors
+    /// Returns `CorruptState` unless `head` is greater than
+    /// [`Self::fork_logical_head`]; the adapter then commits nothing.
+    pub const fn committed_tick(
+        &self,
+        head: Seq,
+    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
+        if head.as_u64() > self.fork_logical_head.as_u64() {
+            Ok(CounterfactualTickOutcomeV1::Committed { head })
+        } else {
+            Err(CounterfactualStoreErrorV1::CorruptState)
+        }
+    }
+}
+
+/// Outcome of one later recomputation Tick append; there is no partial variant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CounterfactualTickOutcomeV1 {
+    /// Every Event of the Tick committed; `head` is the Fork Logical Head
+    /// after them.
+    Committed {
+        /// Fork Logical Head after the Tick's Events.
+        head: Seq,
+    },
+    /// A persisted fact differed from the expected basis; nothing committed.
+    Stale(InvalidationConflictV1),
 }
 
 /// Caller-supplied parts of one counterfactual invalidation transaction.
@@ -646,12 +735,14 @@ impl CounterfactualInvalidationCommandV1 {
     pub const fn expected_basis(&self) -> CounterfactualBasisV1 {
         CounterfactualBasisV1 {
             fork_logical_head: self.input.fork_logical_head,
-            plan_digest: self.input.frontier.plan_digest(),
-            dependency_graph_digest: self.input.frontier.dependency_graph_digest(),
             generation: self.input.invalidation.prior_generation(),
-            trust_epoch: self.input.trust_epoch,
-            revocation_epoch: self.input.revocation_epoch,
-            erasure_epoch: self.input.erasure_epoch,
+            facts: CounterfactualFactsV1 {
+                plan_digest: self.input.frontier.plan_digest(),
+                dependency_graph_digest: self.input.frontier.dependency_graph_digest(),
+                trust_epoch: self.input.trust_epoch,
+                revocation_epoch: self.input.revocation_epoch,
+                erasure_epoch: self.input.erasure_epoch,
+            },
         }
     }
 
@@ -711,11 +802,14 @@ impl CounterfactualInvalidationCommandV1 {
     ///
     /// `first_tick_head` is the Fork Logical Head after the first Tick's
     /// Events. A Tick Boundary commits at least one Event, so it must be
-    /// strictly greater than the expected head.
+    /// strictly greater than the expected head. Adapters build the receipt
+    /// from the staged head before installing anything, so this rejection
+    /// commits nothing.
     ///
     /// # Errors
     /// Returns `CorruptState` unless `first_tick_head` is greater than the
-    /// command's expected Fork head.
+    /// command's expected Fork head. This is the single error every adapter
+    /// reports for a first Tick whose head did not advance.
     pub const fn committed_receipt(
         &self,
         first_tick_head: Seq,
@@ -729,6 +823,7 @@ impl CounterfactualInvalidationCommandV1 {
             invalidation_digest: self.input.invalidation.digest(),
             first_tick: self.input.first_tick,
             first_tick_head,
+            facts: self.expected_basis().facts,
         })
     }
 }
@@ -803,6 +898,13 @@ pub enum StoredCounterfactualArtifactV1 {
 }
 
 /// Receipt of one fully committed invalidation transaction.
+///
+/// Only [`CounterfactualInvalidationCommandV1::committed_receipt`] builds a
+/// receipt, from a command whose `SIV1` binds the Fork, the new generation,
+/// the `RCF1` digest, and the Tick Boundary commit coordinate. A receipt
+/// therefore matches exactly one `SIV1`; holders verify that the receipt's
+/// generation actually committed by reading that `SIV1` at
+/// [`Self::generation`] and checking [`Self::matches_invalidation`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CounterfactualGenerationReceiptV1 {
     generation: ForkGenerationV1,
@@ -810,6 +912,7 @@ pub struct CounterfactualGenerationReceiptV1 {
     invalidation_digest: Hash,
     first_tick: u64,
     first_tick_head: Seq,
+    facts: CounterfactualFactsV1,
 }
 
 impl CounterfactualGenerationReceiptV1 {
@@ -842,6 +945,35 @@ impl CounterfactualGenerationReceiptV1 {
     pub const fn first_tick_head(&self) -> Seq {
         self.first_tick_head
     }
+
+    /// Return the host-published facts the generation was committed under.
+    #[must_use]
+    pub const fn facts(&self) -> CounterfactualFactsV1 {
+        self.facts
+    }
+
+    /// Return the basis a later Tick of this generation is appended on, with
+    /// the Fork Logical Head `fork_logical_head` before that Tick.
+    #[must_use]
+    pub const fn tick_basis(&self, fork_logical_head: Seq) -> CounterfactualBasisV1 {
+        CounterfactualBasisV1 {
+            fork_logical_head,
+            generation: self.generation.generation,
+            facts: self.facts,
+        }
+    }
+
+    /// Whether `invalidation` is the `SIV1` this receipt committed.
+    ///
+    /// The receipt was built from a command whose `SIV1` was verified to
+    /// bind this receipt's Fork, generation (`new_generation`), frontier
+    /// digest, and first Tick (`commit_tick`), with `first_tick_head`
+    /// greater than `commit_seq`. Equal invalidation digests therefore imply
+    /// every one of those bindings.
+    #[must_use]
+    pub fn matches_invalidation(&self, invalidation: &SuffixInvalidationBytesV1) -> bool {
+        self.invalidation_digest == invalidation.digest()
+    }
 }
 
 /// Outcome of one invalidation transaction; there is no partial variant.
@@ -861,21 +993,50 @@ pub enum CounterfactualInvalidationOutcomeV1 {
 ///
 /// # Adapter obligations
 ///
-/// - Persist, per Fork, the published plan digest, dependency-graph digest,
-///   and trust, revocation, and erasure epochs, so the basis recheck compares
-///   committed facts rather than caller input.
+/// - Persist, per Fork, the [`CounterfactualFactsV1`] published with
+///   [`Self::publish_counterfactual_facts`] and the committed generation, so
+///   every basis recheck compares committed facts rather than caller input.
+/// - Compare an expected basis with the persisted one only through
+///   [`CounterfactualBasisV1::first_conflict`], inside the same
+///   serialization point as the write it guards.
+/// - Admit the Events of the first and every later recomputation Tick under
+///   the same rules as a generic append of those drafts on the Fork,
+///   including the non-geographic/consent Event guard (`pos-store`'s
+///   `ensure_non_geographic_drafts`), whose rejection is concealed as
+///   `ForkNotFound`, and inside the Fork's erasure write fence.
+/// - Serve [`Self::current_fork_generation`],
+///   [`Self::current_counterfactual_basis`], and
+///   [`Self::read_generation_artifact`] through the Fork's erasure read
+///   fence.
 /// - Route every artifact read through [`ForkGenerationV1::resolve_read`].
 /// - Build receipts only with
-///   [`CounterfactualInvalidationCommandV1::committed_receipt`] after the
-///   whole transaction committed.
+///   [`CounterfactualInvalidationCommandV1::committed_receipt`] and later
+///   Tick outcomes only with [`CounterfactualBasisV1::committed_tick`], from
+///   the staged head and before installing anything. A head that did not
+///   advance is reported as `CorruptState` and commits nothing.
 ///
 /// Epoch monotonicity of those published facts is a host obligation; the
 /// port compares them for equality only.
 pub trait CounterfactualStorePortV1 {
+    /// Publish the host-owned counterfactual facts of one Fork.
+    ///
+    /// The first publication starts the Fork at generation 0. A later one
+    /// replaces only the facts; the committed generation and artifacts stay.
+    /// This is a host operation; the coordinator never calls it.
+    ///
+    /// # Errors
+    /// Returns `ForkNotFound` unless `fork` is a visible Fork Timeline, and
+    /// `CorruptState` or `StorageFailure`; every error publishes nothing.
+    fn publish_counterfactual_facts(
+        &mut self,
+        fork: TimelineId,
+        facts: CounterfactualFactsV1,
+    ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1>;
+
     /// Atomically recheck the expected basis and commit the whole command.
     ///
     /// Inside one serialization point the adapter reads the persisted
-    /// [`CounterfactualBasisV1`], returns
+    /// [`CounterfactualBasisV1`] of the command's Fork, returns
     /// [`CounterfactualInvalidationOutcomeV1::InvalidationConflict`] with the
     /// first conflict when it differs, and otherwise commits `RCF1`, `SIV1`,
     /// the generation increment, the invalid-artifact index, the eviction
@@ -890,6 +1051,27 @@ pub trait CounterfactualStorePortV1 {
         command: &CounterfactualInvalidationCommandV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1>;
 
+    /// Atomically recheck `expected` and append one later recomputation Tick.
+    ///
+    /// Inside one serialization point the adapter reads the persisted
+    /// [`CounterfactualBasisV1`] of `fork`, returns
+    /// [`CounterfactualTickOutcomeV1::Stale`] with the first conflict when it
+    /// differs from `expected` (another generation, a moved Fork head, or
+    /// changed facts), and otherwise appends `drafts` as one Tick and returns
+    /// [`CounterfactualBasisV1::committed_tick`] of the new head.
+    ///
+    /// # Errors
+    /// Returns `ForkNotFound` (also for a draft the generic append guard
+    /// rejects), `CorruptState`, or `StorageFailure`. Every error and every
+    /// stale outcome commits nothing; `StorageFailure` may also mean the
+    /// outcome is unknown.
+    fn append_counterfactual_tick(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1>;
+
     /// Return the Fork's committed generation coordinate.
     ///
     /// # Errors
@@ -898,6 +1080,17 @@ pub trait CounterfactualStorePortV1 {
         &self,
         fork: TimelineId,
     ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1>;
+
+    /// Return the Fork's persisted basis: its committed Logical Head and
+    /// generation and its published facts, read at one consistent point.
+    ///
+    /// # Errors
+    /// Returns `ForkNotFound` (also before any facts were published),
+    /// `CorruptState`, or `StorageFailure`.
+    fn current_counterfactual_basis(
+        &self,
+        fork: TimelineId,
+    ) -> Result<CounterfactualBasisV1, CounterfactualStoreErrorV1>;
 
     /// Read one artifact by digest at an exact Fork generation.
     ///
