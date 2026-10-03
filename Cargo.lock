@@ -4865,6 +4865,7 @@ dependencies = [
 name = "pos-time"
 version = "0.1.0"
 dependencies = [
+ "pos-conformance",
  "pos-core",
  "pos-plugin-world",
  "pos-runtime",
