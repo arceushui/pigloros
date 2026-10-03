@@ -5878,12 +5878,16 @@ impl EventStore for SqliteStore {
             return Err(CoreError::ReadTimeTooLarge { elapsed_micros: 0 });
         }
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
+            // The bounded walk enforces depth, cycle and time limits before the
+            // inherited scopes are authorized over the same chain.
             store
                 .ensure_generic_timeline_visibility(timeline)
-                .and_then(|()| {
-                    store.authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
-                })
                 .and_then(|()| store.read_logical_bounded(timeline, range, bounds, started))
+                .and_then(|events| {
+                    store
+                        .authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
+                        .map(|()| events)
+                })
         })
     }
 
