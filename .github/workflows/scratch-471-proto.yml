@@ -196,7 +196,18 @@ jobs:
             $t3 = Measure-Command { $null = Get-FileHash "$root\msedge.dll" }; "msedge.dll alone ms=$([int]$t3.TotalMilliseconds)"
           } 2>&1 | Tee-Object "$o\20-g10-g15-runtime.txt"
           exit 0
+      - name: enable WER local dumps for the probe
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\dumps" | Out-Null
+          $k = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\wv2probe.exe'
+          New-Item -Path $k -Force | Out-Null
+          New-ItemProperty -Path $k -Name DumpFolder -Value "$env:RUNNER_TEMP\dumps" -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $k -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $k -Name DumpCount -Value 5 -PropertyType DWord -Force | Out-Null
+          exit 0
       - name: native Windows build (toolchain 1.97.1) of r6-deps and the probe
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
         run: |
           $o = "$env:RUNNER_TEMP\out"
           python scratch-proto/add_members.py . scratch-proto/r6-deps scratch-proto/wv2probe
@@ -227,6 +238,7 @@ jobs:
         env:
           PROBE_RUNS: "5"
           PROBE_HANDOFFS: "1000000"
+          PROBE_TRACE: "1"
         shell: cmd
         run: |
           set PROBE_RUNTIME=%RUNTIME_ROOT%
@@ -237,21 +249,38 @@ jobs:
           type "%RUNNER_TEMP%\out\41-fixed-smoke.txt"
           echo probe exit code %RC%
           echo probe exit code %RC% >> "%RUNNER_TEMP%\out\41-fixed-smoke.txt"
-      - name: G3/G4/G16 - fixed runtime, 1000 fresh-environment ceremonies
+      - name: G3/G4/G16 - fixed runtime, 1000 fresh-environment ceremonies (restart on crash)
         continue-on-error: true
-        timeout-minutes: 90
-        env:
-          PROBE_RUNS: "1000"
-        shell: cmd
+        timeout-minutes: 100
         run: |
-          set PROBE_RUNTIME=%RUNTIME_ROOT%
-          set PROBE_CSV=%RUNNER_TEMP%\out\42-fixed-1000.csv
-          set PROBE_UDF_ROOT=%RUNNER_TEMP%\udf-g
-          target\release\wv2probe.exe > "%RUNNER_TEMP%\out\42-fixed-1000.txt" 2>&1
-          set RC=%ERRORLEVEL%
-          type "%RUNNER_TEMP%\out\42-fixed-1000.txt"
-          echo probe exit code %RC%
-          echo probe exit code %RC% >> "%RUNNER_TEMP%\out\42-fixed-1000.txt"
+          $o = "$env:RUNNER_TEMP\out"; $done = 0; $i = 0; $crashes = @()
+          $env:PROBE_RUNTIME = $env:RUNTIME_ROOT; $env:PROBE_TRACE = "1"; $env:PROBE_UDF_ROOT = "$env:RUNNER_TEMP\udf-g"
+          while ($done -lt 1000 -and $i -lt 40) {
+            $env:PROBE_RUN_OFFSET = "$done"; $env:PROBE_RUNS = "$(1000 - $done)"; $env:PROBE_CSV = "$o\42-part$i.csv"
+            $p = Start-Process -FilePath ".\target\release\wv2probe.exe" -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$o\42-part$i.txt" -RedirectStandardError "$o\42-part$i.err"
+            $ok = @(Select-String -Path "$o\42-part$i.txt" -Pattern '^T \d+ done').Count
+            $last = (Get-Content "$o\42-part$i.txt" | Select-String '^T ' | Select-Object -Last 1)
+            "part=$i offset=$done exit=$($p.ExitCode) completed_in_part=$ok last_trace='$last'"
+            if ($p.ExitCode -ne 0) { $crashes += "part=$i exit=$($p.ExitCode) last='$last'"; $done += $ok + 1 } else { $done += $ok; if ($ok -eq 0) { break } }
+            $i++
+          }
+          "TOTAL attempted=$done processes=$i crashes=$($crashes.Count)"; $crashes
+          exit 0
+      - name: crash dump analysis (cdb)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          $o = "$env:RUNNER_TEMP\out"
+          $dumps = Get-ChildItem "$env:RUNNER_TEMP\dumps" -Filter *.dmp -ErrorAction SilentlyContinue | Select-Object -First 3
+          "dumps: $($dumps.Count)"
+          $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe' -ErrorAction SilentlyContinue
+          "cdb: $cdb"
+          foreach ($d in $dumps) {
+            & $cdb.FullName -z $d.FullName -y "srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols;$pwd\target\release" -c ".ecxr;kn 40;!analyze -v;q" 2>&1 | Out-File "$o\cdb-$($d.BaseName).txt"
+            Get-Content "$o\cdb-$($d.BaseName).txt" | Select-String -Pattern 'ExceptionCode|FAULTING|STACK_TEXT|wv2probe!|EXCEPTION_RECORD|Attempt to|SYMBOL_NAME|MODULE_NAME|IMAGE_NAME|^[0-9a-f]{2} [0-9a-f`]+ ' | Select-Object -First 80
+          }
+          exit 0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

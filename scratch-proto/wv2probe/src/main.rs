@@ -770,6 +770,12 @@ mod probe {
 
     // ---------------------------------------------------------------- runs
 
+    fn tr(run: u32, stage: &str) {
+        if std::env::var_os("PROBE_TRACE").is_some() {
+            println!("T {run} {stage}");
+        }
+    }
+
     #[derive(Default)]
     struct Row {
         run: u32,
@@ -803,6 +809,7 @@ mod probe {
             return row;
         }
         let gen = run + 1;
+        tr(run, "open");
         let s = match open_surface(runtime, udf_root, &format!("r{run:05}-{}", hex(&id[..4]))) {
             Ok(s) => s,
             Err(e) => {
@@ -818,6 +825,7 @@ mod probe {
         }
         let served0 = SERVED.load(Ordering::SeqCst);
         let t0 = Instant::now();
+        tr(run, "navigate");
         if let Err(e) = navigate(&s) {
             row.error = e;
             let r = close_surface(s);
@@ -838,6 +846,7 @@ mod probe {
         row.ready_ms = d.get().map(|(_, t)| t.duration_since(t0).as_millis());
 
         let res = (|| -> Result<(), String> {
+            tr(run, "buffers");
             let (req, rp, a1) = new_buffer(&s.env, 4096)?;
             let (rep, pp, a2) = new_buffer(&s.env, 8192)?;
             row.aligned = a1 && a2;
@@ -846,6 +855,7 @@ mod probe {
             write_header(rp, 0, 1, gen, &id, 4096, 32, 2);
             write_header(pp, 1, 1, gen, &id, 8192, 0, 0);
             fence(Ordering::SeqCst);
+            tr(run, "post");
             post(&s, &req, false, r#"{"role":"request"}"#)?;
             post(&s, &rep, true, r#"{"role":"reply"}"#)?;
             row.posted = true;
@@ -866,6 +876,7 @@ mod probe {
                 return Err(format!("reply not READY in 10 s (lost event?) state={}", state()));
             }
             row.reply_ready_ms = Some(tp.elapsed().as_millis());
+            tr(run, "consume");
             if words(pp, 10)
                 .compare_exchange(2, 3, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
@@ -886,9 +897,11 @@ mod probe {
                 && bytes[12..16] == gen.to_le_bytes()
                 && bytes[16..32] == id;
             words(pp, 10).store(4, Ordering::SeqCst);
-            let tr = Instant::now();
+            tr(run, "release");
+            let t_rel = Instant::now();
             row.released = pump_until(Duration::from_secs(2), || state() == 5);
-            row.release_ms = Some(tr.elapsed().as_millis());
+            row.release_ms = Some(t_rel.elapsed().as_millis());
+            tr(run, "close-buffers");
             zero_fill(rp, 4096);
             zero_fill(pp, 8192);
             unsafe {
@@ -904,7 +917,9 @@ mod probe {
             row.title = title(&s);
         }
         row.process_failed = s.process_failed.borrow().join(";");
+        tr(run, "close-surface");
         let (lat, kind, pidm, removed) = close_surface(s);
+        tr(run, "done");
         row.exit_ms = lat;
         row.exit_kind = kind;
         row.pid_match = pidm;
@@ -992,6 +1007,7 @@ mod probe {
         let runs: u32 = std::env::var("PROBE_RUNS").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
         let handoffs: u32 = std::env::var("PROBE_HANDOFFS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
         let csv = std::env::var("PROBE_CSV").unwrap_or_else(|_| "probe.csv".into());
+        let offset: u32 = std::env::var("PROBE_RUN_OFFSET").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
         let udf_root = std::path::PathBuf::from(
             std::env::var("PROBE_UDF_ROOT").unwrap_or_else(|_| std::env::temp_dir().join("wv2udf").display().to_string()),
         );
@@ -1048,8 +1064,9 @@ mod probe {
         let mut ready_timeouts = 0u32;
         let mut not_served_once = 0u32;
         let t_all = Instant::now();
-        for run in 0..runs {
-            let r = ceremony(runtime.as_deref(), &udf_root, run, run == 0);
+        let _ = std::fs::write(&csv, &f);
+        for run in offset..offset + runs {
+            let r = ceremony(runtime.as_deref(), &udf_root, run, run == offset);
             if r.ok {
                 ok += 1;
                 consecutive_fail = 0;
@@ -1078,16 +1095,19 @@ mod probe {
                 o(r.release_ms), r.aligned, o(r.exit_ms), r.exit_kind, r.pid_match, r.udf_removed,
                 r.settings_ok, r.process_failed, r.title.replace('"', "'")
             );
+            if let Some(line) = f.lines().last() {
+                if let Ok(mut fh) = std::fs::OpenOptions::new().append(true).open(&csv) {
+                    let _ = writeln!(fh, "{line}");
+                }
+            }
             if (run + 1) % 50 == 0 {
                 println!("PROBE progress run={} ok={} elapsed_s={}", run + 1, ok, t_all.elapsed().as_secs());
-                let _ = std::fs::write(&csv, &f);
             }
             if consecutive_fail >= 5 && ok == 0 {
                 println!("PROBE abort=five-consecutive-failures-with-no-success");
                 break;
             }
         }
-        let _ = std::fs::write(&csv, &f);
         exits.sort_unstable();
         let pct = |p: f64| -> String {
             if exits.is_empty() {
