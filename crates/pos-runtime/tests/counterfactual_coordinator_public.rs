@@ -448,6 +448,11 @@ fn reseal(frontier: &mut RecomputationFrontierV1) {
     }
 }
 
+/// One frontier tamper and the admission error it must produce.
+type FrontierCase = (fn(&mut RecomputationFrontierV1), AdmissionError);
+/// One published-facts change and the conflict it must produce.
+type FactsCase = (fn(&mut CounterfactualFactsV1), InvalidationConflictV1);
+
 const fn untampered(_: &mut RecomputationFrontierV1) {}
 
 fn graph_error(error: DependencyGraphErrorV1) -> AdmissionError {
@@ -709,7 +714,7 @@ fn setup<B: Backend>(spec: &Spec) -> TestResult<Setup<B>> {
     })
 }
 
-fn request(fixture: &Fixture) -> CounterfactualAdmissionRequestV1<'_> {
+const fn request(fixture: &Fixture) -> CounterfactualAdmissionRequestV1<'_> {
     CounterfactualAdmissionRequestV1 {
         plan: &fixture.plan,
         fork: fixture.fork,
@@ -1223,7 +1228,7 @@ fn incomplete_dependency_graph_is_rejected<B: Backend>() -> TestResult {
 both_backends!(incomplete_dependency_graph_is_rejected);
 
 fn derived_frontier_is_revalidated_and_bound<B: Backend>() -> TestResult {
-    let cases: [(fn(&mut RecomputationFrontierV1), AdmissionError); 9] = [
+    let cases: [FrontierCase; 9] = [
         (
             |frontier| frontier.frontier_id = [1; 16],
             AdmissionError::Frontier(FrontierArtifactErrorV1::DigestMismatch),
@@ -1561,7 +1566,7 @@ fn failed_or_empty_staging_commits_nothing<B: Backend>() -> TestResult {
 both_backends!(failed_or_empty_staging_commits_nothing);
 
 fn changed_persisted_facts_conflict_atomically<B: Backend>() -> TestResult {
-    let cases: [(fn(&mut CounterfactualFactsV1), InvalidationConflictV1); 5] = [
+    let cases: [FactsCase; 5] = [
         (
             |facts| facts.plan_digest = Hash::from_bytes([1; 32]),
             InvalidationConflictV1::PlanDigest,
