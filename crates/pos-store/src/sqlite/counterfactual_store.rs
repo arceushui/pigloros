@@ -13,13 +13,15 @@
 //!
 //! Four additive tables (`counterfactual_forks`, `counterfactual_generations`,
 //! `counterfactual_quarantine`, `counterfactual_artifacts`), one lookup index,
-//! and four guard triggers are created with `IF NOT EXISTS` by every writable
+//! and eight guard triggers are created with `IF NOT EXISTS` by every writable
 //! open, so migration is additive and idempotent. Every open, including a
 //! read-only one, validates the exact table shapes, the index, and the trigger
 //! bodies, and fails closed with a storage error on any drift. The triggers
 //! make the database itself refuse to decrease a Fork generation, delete a
-//! Fork's counterfactual state, or delete or rewrite a quarantine row, so a
-//! rolled-back coordinator version cannot reactivate an invalidated artifact.
+//! Fork's counterfactual state, delete or rewrite a quarantine row, or delete
+//! or rewrite a recorded generation or artifact, so a rolled-back coordinator
+//! version cannot reactivate an invalidated artifact and the prior `RCF1`,
+//! `SIV1`, and artifact bytes stay immutable for audit.
 //!
 //! # ADR gap decisions
 //!
@@ -41,15 +43,33 @@
 //!   cache/checkpoint eviction set (kind `1`) are both stored exactly, per
 //!   generation, and every member is quarantined permanently: a read reports
 //!   it as [`StoredCounterfactualArtifactV1::Quarantined`] even when this
-//!   store holds its bytes, which stay retained for audit only.
+//!   store holds its bytes, which stay retained for audit only. An artifact
+//!   digest recorded again by a later generation keeps its first row
+//!   (`INSERT OR IGNORE`), so its `generation` column names the generation
+//!   that first recorded it; the column is informational and no read depends
+//!   on it.
+//! - **Epoch monotonicity.** The store does not require a republished trust,
+//!   revocation, or erasure epoch to be at least the previously published
+//!   one; keeping the published epochs monotonic is a host obligation.
 //! - **Containment.** The commit appends Events, so it runs under the ADR-060
 //!   erasure write fence and, like every generic Fork append, is rejected on an
 //!   ADR-099 admitted Fork whose appends are reserved for the classified append
-//!   authority. Publishing facts and reads touch no Timeline Events and are
-//!   not fenced.
+//!   authority. The generation and artifact reads are derived from the Fork
+//!   Timeline, so they run under the ADR-060 erasure read fence like every
+//!   other `SQLite` Timeline read, and fail closed without a bound erasure gate.
+//!   Publishing facts writes host-owned facts only, touches no Timeline Event
+//!   or derived artifact, and is not fenced.
+//! - **Concurrency.** A read checks Fork visibility and then reads the
+//!   counterfactual state outside a transaction; like the other `SQLite`
+//!   reads, it relies on the single-writer `SqliteStore` handle, so no
+//!   commit can interleave between the visibility check and the state read.
 //! - **Timeline deletion.** Deleting a Fork Timeline keeps its counterfactual
 //!   rows, which the triggers protect; a Timeline later created with the same
-//!   ID continues at the retained generation rather than resetting it.
+//!   ID continues at the retained generation rather than resetting it. The
+//!   retained bytes are unreadable through the port, because every read of a
+//!   deleted Fork is `ForkNotFound`, matching the `MemoryStore` adapter.
+//!   Purging them under an ADR-060 erasure is a deferred follow-up: this
+//!   adapter has no erasure purge path yet.
 //! - **Errors.** A missing, deleted, non-Fork, unpublished, or protected
 //!   Timeline is `ForkNotFound`; every other backend failure, including a
 //!   containment denial, is `StorageFailure`. Unlike the in-memory adapter,
@@ -273,7 +293,7 @@ struct CounterfactualSchemaObjectV1 {
 }
 
 /// The quarantine lookup index and the guards that keep generations
-/// monotonic and quarantine permanent.
+/// monotonic, quarantine permanent, and recorded bytes immutable.
 const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
     CounterfactualSchemaObjectV1 {
         kind: "index",
@@ -304,6 +324,30 @@ const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
         name: "counterfactual_quarantine_immutable",
         body: "BEFORE UPDATE ON counterfactual_quarantine
                BEGIN SELECT RAISE(ABORT, 'quarantined artifact cannot be reactivated'); END",
+    },
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_generations_retained",
+        body: "BEFORE DELETE ON counterfactual_generations
+               BEGIN SELECT RAISE(ABORT, 'counterfactual generation record is retained'); END",
+    },
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_generations_immutable",
+        body: "BEFORE UPDATE ON counterfactual_generations
+               BEGIN SELECT RAISE(ABORT, 'counterfactual generation record is immutable'); END",
+    },
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_artifacts_retained",
+        body: "BEFORE DELETE ON counterfactual_artifacts
+               BEGIN SELECT RAISE(ABORT, 'counterfactual artifact is retained'); END",
+    },
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_artifacts_immutable",
+        body: "BEFORE UPDATE ON counterfactual_artifacts
+               BEGIN SELECT RAISE(ABORT, 'counterfactual artifact is immutable'); END",
     },
 ];
 
@@ -779,18 +823,29 @@ impl CounterfactualStorePortV1 for SqliteStore {
             self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
                 store.in_counterfactual_scope(|store| {
                     then_staged(store.persisted_counterfactual_basis(fork), |persisted| {
-                        match command.expected_basis().first_conflict(&persisted) {
-                            Some(conflict) => Ok(Ok(
-                                CounterfactualInvalidationOutcomeV1::InvalidationConflict(conflict),
-                            )),
-                            None => store
-                                .write_counterfactual_generation(command, generation, first_tick)
-                                .map(|head| {
-                                    Ok(CounterfactualInvalidationOutcomeV1::Committed(
-                                        command.committed_receipt(head),
+                        command
+                            .expected_basis()
+                            .first_conflict(&persisted)
+                            .map_or_else(
+                                || {
+                                    store
+                                        .write_counterfactual_generation(
+                                            command, generation, first_tick,
+                                        )
+                                        .map(|head| {
+                                            Ok(CounterfactualInvalidationOutcomeV1::Committed(
+                                                command.committed_receipt(head),
+                                            ))
+                                        })
+                                },
+                                |conflict| {
+                                    Ok(Ok(
+                                        CounterfactualInvalidationOutcomeV1::InvalidationConflict(
+                                            conflict,
+                                        ),
                                     ))
-                                }),
-                        }
+                                },
+                            )
                     })
                 })
             }),
@@ -798,9 +853,13 @@ impl CounterfactualStorePortV1 for SqliteStore {
     }
 
     fn current_fork_generation(&self, fork: TimelineId) -> Result<ForkGenerationV1, StoreError> {
-        settle(then_staged(self.visible_counterfactual_fork(fork), |()| {
-            read_fork_state(&self.conn, fork)
-        }))
+        settle(
+            self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
+                then_staged(store.visible_counterfactual_fork(fork), |()| {
+                    read_fork_state(&store.conn, fork)
+                })
+            }),
+        )
         .map(|state| ForkGenerationV1 {
             fork,
             generation: state.generation,
@@ -812,10 +871,14 @@ impl CounterfactualStorePortV1 for SqliteStore {
         at: ForkGenerationV1,
         artifact_digest: Hash,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        settle(then_staged(
-            self.visible_counterfactual_fork(at.fork),
-            |()| read_artifact_state(&self.conn, at.fork, artifact_digest),
-        ))
+        let fork = at.fork;
+        settle(
+            self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
+                then_staged(store.visible_counterfactual_fork(fork), |()| {
+                    read_artifact_state(&store.conn, fork, artifact_digest)
+                })
+            }),
+        )
         .and_then(|(current, stored)| at.resolve_read(current, stored))
     }
 }
