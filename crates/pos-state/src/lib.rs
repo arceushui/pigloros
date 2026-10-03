@@ -194,9 +194,10 @@ impl ProjectionRegistry {
         result
     }
 
-    /// Bind `timeline`'s host-supplied Fork ancestry, from
-    /// [`pos_core::fork_ancestry`], so every later Snapshot fence of that
-    /// Timeline also authorizes each inherited scope.
+    /// Bind `timeline`'s host-supplied Fork ancestry.
+    ///
+    /// The chain comes from [`pos_core::fork_ancestry`], so every later
+    /// Snapshot fence of that Timeline also authorizes each inherited scope.
     ///
     /// # Errors
     /// Returns a closed source error for an empty, wrongly rooted, or

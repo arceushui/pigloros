@@ -201,9 +201,10 @@ pub fn frozen_ancestor_fails_pass_and_read() -> Capture {
     capture
 }
 
-/// PCF-R4-007: after the ancestor's request completes, inherited reads
-/// follow its persisted state exactly as a direct read does, and an
-/// unrelated Fork reads normally.
+/// PCF-R4-007: inherited reads follow a completed ancestor's persisted state.
+///
+/// They behave exactly as a direct read does, and an unrelated Fork reads
+/// normally.
 #[must_use]
 pub fn completed_ancestor_follows_persisted_state() -> Capture {
     let mut capture = Capture::default();

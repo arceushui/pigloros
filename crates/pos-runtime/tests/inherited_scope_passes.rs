@@ -1,6 +1,8 @@
-//! ADR-021 Revision 4 Decision 3: every runtime `PluginInput` pass entry
-//! point fences the host-supplied Fork ancestry, and the host read seam
-//! fences stitched effects over the same chain (#499).
+//! ADR-021 Revision 4 Decision 3 runtime pass fencing (#499).
+//!
+//! Every runtime `PluginInput` pass entry point fences the host-supplied Fork
+//! ancestry, and the host read seam fences stitched effects over the same
+//! chain.
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
