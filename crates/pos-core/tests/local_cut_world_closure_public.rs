@@ -20,8 +20,8 @@ use pos_core::{
     ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionRequestV1,
     ManifestOwnerAdmissionSnapshotV1, ManifestOwnerAdmissionVerifierV1,
-    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
-    ManifestOwnerMemberLeafClassV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1,
+    ManifestOwnerClassifiedLeafV1, ManifestOwnerConsumerReferenceV1,
+    ManifestOwnerLeafClassificationV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1,
     ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1,
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
     ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId,
@@ -122,11 +122,11 @@ impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
         _timeline_id: TimelineId,
         _scope: Hash,
         members: &ManifestOwnerScopeMembersV1,
-    ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
         Ok(members
             .leaves
             .iter()
-            .map(|member| ManifestOwnerMemberLeafClassV1::of_leaf(&member.leaf))
+            .map(|member| ManifestOwnerClassifiedLeafV1::of_leaf(&member.leaf))
             .collect())
     }
 }
