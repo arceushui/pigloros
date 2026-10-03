@@ -191,6 +191,10 @@ pub fn check_handoff_reserve(
 
 /// P2: the payload-free [`GUARD_RELEASE_LATE_SIGNAL`] when teardown is
 /// predicted to end after `g0 + 30 s`. Teardown runs regardless.
+///
+/// On a refused handoff it is also a post-hoc measurement: the handoff has
+/// already rolled back and released the guard, so P2 is evaluated after
+/// that teardown (conservative: it can only over-signal; #515).
 #[must_use]
 pub fn teardown_signal(
     clock: &mut dyn GuardMonotonicSourceV1,

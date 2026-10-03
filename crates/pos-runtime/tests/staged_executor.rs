@@ -110,6 +110,8 @@ fn blob(entity: EntityId, staged_bytes: u64, seq: u64) -> Event {
 /// entity holds at most 4160 staged bytes. The last entity takes the rest,
 /// which must be at least the 19-byte minimum.
 fn blobs_totalling(total: u64) -> Vec<Event> {
+    // Mirrors the private `PENDING_CONFORMANCE_ADMISSION_V1` growth bound
+    // (`per_payload_byte` 6, `constant_bytes` 4096) in `registry/staged_catalogue.rs`.
     const PER_ENTITY: u64 = 16 + 6 * 8 + 4096;
     let full = total / PER_ENTITY;
     let rest = total - full * PER_ENTITY;

@@ -89,6 +89,9 @@ impl StateRegistry {
 
     /// [`Self::apply`], first showing `observe` the `initial()` State of an
     /// entity this Event creates, before `apply` runs on it.
+    ///
+    /// Host-internal: used by `pos-state`'s staged candidate accounting
+    /// (ADR-113 §4 E5); not a Plugin API.
     pub fn apply_observing_initial(
         &mut self,
         reducer: &dyn Reducer,

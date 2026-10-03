@@ -29,8 +29,9 @@
 use std::{cell::Cell, sync::Arc};
 
 use pos_core::trusted_clock::{
-    ApplicableExpiriesV1, ProtectedHandoffTargetV1, ReleaseGuardV1, StagedProtectedOutputV1,
-    SystemGuardMonotonicSourceV1, TrustedClockOverrunKindV1,
+    ApplicableExpiriesV1, GuardMonotonicSourceV1, MonotonicMarkV1, ProtectedHandoffTargetV1,
+    ReleaseGuardV1, StagedProtectedOutputV1, SystemGuardMonotonicSourceV1,
+    TrustedClockOverrunKindV1,
 };
 use pos_core::{staged_install::ProjectionSourceV1, ErasureReferenceV1, Event};
 use pos_runtime::{
@@ -161,18 +162,46 @@ fn handoff_reserve(guard: &ReleaseGuardV1<'_>) -> Result<(), pos_core::CoreError
         .map_err(unavailable)
 }
 
-/// The ADR-112 handoff of one staged install, then the health signals.
-///
-/// On success the overrun signal is recorded and the committed value (the
-/// displaced maps) is dropped after the handoff returns. On failure,
-/// `handoff_checked` has already rolled back and released the guard; P2 is
-/// then evaluated against the guard's `g0`, after that internal rollback, and
-/// the payload-free late signal is recorded before the failure is reported.
+/// P2: record the payload-free late signal when teardown, measured on
+/// `clock`, is predicted to end after `g0 + 30 s`.
+fn record_p2(
+    health: &ReleaseHealthV1,
+    clock: &mut dyn GuardMonotonicSourceV1,
+    g0: MonotonicMarkV1,
+) {
+    health.record_guard_release_late(pos_runtime::teardown_signal(clock, g0));
+}
+
+/// The ADR-112 handoff of one staged install, then the health signals, with
+/// P2 measured on the production monotonic source.
 fn handoff_with_p2<T: ProtectedHandoffTargetV1>(
     guard: ReleaseGuardV1<'_>,
     expiries: &ApplicableExpiriesV1,
     staged: StagedProtectedOutputV1<T>,
     health: &ReleaseHealthV1,
+) -> Result<(), pos_core::CoreError> {
+    handoff_with_p2_on(
+        guard,
+        expiries,
+        staged,
+        health,
+        &mut SystemGuardMonotonicSourceV1,
+    )
+}
+
+/// [`handoff_with_p2`] with P2 measured on `p2_clock`.
+///
+/// On success the overrun signal is recorded and the committed value (the
+/// displaced maps) is dropped after the handoff returns. On failure,
+/// `handoff_checked` has already rolled back and released the guard; P2 is
+/// then evaluated against the guard's `g0` and the payload-free late signal
+/// is recorded before the failure is reported.
+fn handoff_with_p2_on<T: ProtectedHandoffTargetV1>(
+    guard: ReleaseGuardV1<'_>,
+    expiries: &ApplicableExpiriesV1,
+    staged: StagedProtectedOutputV1<T>,
+    health: &ReleaseHealthV1,
+    p2_clock: &mut dyn GuardMonotonicSourceV1,
 ) -> Result<(), pos_core::CoreError> {
     let g0 = guard.guard_started_at();
     match pos_runtime::handoff(guard, expiries, staged) {
@@ -181,10 +210,11 @@ fn handoff_with_p2<T: ProtectedHandoffTargetV1>(
             Ok(())
         }
         Err(error) => {
-            health.record_guard_release_late(pos_runtime::teardown_signal(
-                &mut SystemGuardMonotonicSourceV1,
-                g0,
-            ));
+            // ADR-113 §4/§9 order this as "P2, then teardown", but
+            // `handoff_checked` (#503) rolls back and drops the guard
+            // internally on `Err`, so P2 is evaluated after that teardown.
+            // That is conservative (it can only over-signal); see #515.
+            record_p2(health, p2_clock, g0);
             Err(unavailable(error))
         }
     }
@@ -196,10 +226,11 @@ fn handoff_with_p2<T: ProtectedHandoffTargetV1>(
 /// A guard the handoff consumed has nothing left to tear down.
 fn teardown(guard: Option<ReleaseGuardV1<'_>>, health: &ReleaseHealthV1) {
     if let Some(guard) = guard {
-        health.record_guard_release_late(pos_runtime::teardown_signal(
+        record_p2(
+            health,
             &mut SystemGuardMonotonicSourceV1,
             guard.guard_started_at(),
-        ));
+        );
         drop(guard);
     }
 }
@@ -719,13 +750,41 @@ pub mod test_support {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{host_error_to_core, observed_world_replay_use, read_complete_world_replay};
+    use super::{
+        handoff_with_p2_on, host_error_to_core, observed_world_replay_use,
+        read_complete_world_replay, ReleaseHealthV1,
+    };
+    use pos_core::trusted_clock::{
+        ScriptedGuardMonotonicSourceV1, StagedArtifactBytesV1, StagedProtectedOutputV1,
+    };
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         store::{EventReadBounds, SeqRange},
         CoreError, EntityId, ErasureHostErrorV1, ErasureProtectedOperationV1, Seq, TimelineId,
     };
-    use pos_runtime::WorldReplayUseV1;
+    use pos_runtime::{WorldReplayUseV1, GUARD_RELEASE_LATE_SIGNAL};
+    use std::time::Duration;
+
+    /// A refused handoff whose P2 measurement lands past `g0 + 30 s` records
+    /// the late signal; nothing is handed over and no overrun is recorded.
+    #[test]
+    fn a_late_refused_handoff_records_the_guard_release_late_signal() {
+        let health = ReleaseHealthV1::new();
+        let refused = crate::test_support::with_mismatched_release_health(&health, |release| {
+            let mut late = ScriptedGuardMonotonicSourceV1::new([Duration::from_secs(3_600)]);
+            let staged = StagedProtectedOutputV1::stage(StagedArtifactBytesV1::new(vec![7]));
+            handoff_with_p2_on(
+                release.guard,
+                &release.expiries,
+                staged,
+                release.health,
+                &mut late,
+            )
+        });
+        assert!(matches!(refused, Err(CoreError::ArtifactUnavailable)));
+        assert_eq!(health.overrun_signal(), None);
+        assert_eq!(health.guard_release_late(), Some(GUARD_RELEASE_LATE_SIGNAL));
+    }
 
     fn use_at(timeline: TimelineId, range: SeqRange, head: u64) -> WorldReplayUseV1 {
         crate::test_support::test_ok(WorldReplayUseV1::new(
