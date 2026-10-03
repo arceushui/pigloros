@@ -466,7 +466,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             fork: request.fork,
             generation: next_generation(&basis),
         };
-        let drafts = stage_first_tick(stager, plan, generation, tick)?;
+        let drafts = stage_tick(stager, plan, generation, tick)?;
         // Both records were validated above, so only the command's own
         // bindings can fail here; every store error maps once.
         let command = RecomputationFrontierBytesV1::try_from_canonical(frontier)
@@ -714,6 +714,16 @@ fn check_provisional_outputs(
 }
 
 /// Build and seal `SIV1`, and derive its index and eviction set.
+///
+/// The invalid-artifact index holds the digest of every invalidated
+/// artifact plus every `PresentationOnly` suffix output, deduplicated. It is
+/// bounded by [`MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1`] in
+/// [`CounterfactualInvalidationCommandV1::try_new`]: a larger index is
+/// rejected before any store write as
+/// `Store(CounterfactualStoreErrorV1::FieldOutOfBounds)`, so the admission
+/// fails closed and nothing is committed.
+///
+/// [`MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1`]: pos_core::MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1
 fn invalidation_parts(
     request: &CounterfactualAdmissionRequestV1<'_>,
     basis: &CounterfactualBasisV1,
@@ -892,10 +902,11 @@ fn digest_set(digests: impl Iterator<Item = [u8; 32]>) -> Vec<Hash> {
 
 /// Stage one recomputation Tick from staged inputs only.
 ///
-/// This is the shared staging seam of the first Tick and every later one:
+/// This is the shared staging seam of every recomputation Tick, the first
+/// one and every later one alike:
 /// it bounds the drafts as one [`PipelineDraftBatchV1`] and then rejects any
 /// draft of the reserved [`COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1`].
-pub(crate) fn stage_first_tick(
+pub(crate) fn stage_tick(
     stager: &mut impl CounterfactualTickStagerV1,
     plan: &CounterfactualPlanV1,
     generation: ForkGenerationV1,
