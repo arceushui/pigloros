@@ -167,7 +167,7 @@ mod tests {
         // generation, digest, or scope check can reject it.
         for tampered in [
             (moved.digest(), moved),
-            (Hash::from_bytes([0; 32]), first.clone()),
+            (Hash::from_bytes([0; 32]), first),
             (rescoped.digest(), rescoped),
         ] {
             let (mut store, first) = installed_store()?;
