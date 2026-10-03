@@ -2501,19 +2501,107 @@ fn local_cut_preparation_rejects_unbound_manifest_rows() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn local_cut_preparation_rejects_partial_composition_and_recording_rows() -> TestResult {
-    let fixture = local_cut_fixture(hash(158), CutVerifierBinding::Installed)?;
+fn with_composition_rows(
+    request: &pos_core::LocalCutOwnerRequestV1,
+    rows: Vec<pos_core::LocalCutCompositionBindingRowV1>,
+) -> Result<pos_core::LocalCutOwnerRequestV1, Box<dyn Error>> {
+    let mut rebound = request.clone();
+    let mut seal = *rebound.seal.as_input();
+    seal.composition_table = local_cut_table(u64::try_from(rows.len())?, 92)?;
+    rebound.seal = pos_core::LocalCutSealV2::new(seal)?;
+    rebound.composition_rows = rows;
+    Ok(rebound)
+}
 
-    let mut partial_composition = fixture.request.clone();
-    partial_composition.composition_rows.pop();
-    let mut seal = *partial_composition.seal.as_input();
-    seal.composition_table = local_cut_table(1, 92)?;
-    partial_composition.seal = pos_core::LocalCutSealV2::new(seal)?;
+fn reducer_only_plugin_id(
+    snapshot: &pos_core::ManifestOwnerAdmissionSnapshotV1,
+) -> Result<PluginId, Box<dyn Error>> {
+    let producers = snapshot.timeline.wcs1.producers();
+    let reducer_only = snapshot
+        .catalog
+        .as_input()
+        .rows
+        .iter()
+        .map(|row| row.plugin_id)
+        .find(|plugin_id| {
+            producers
+                .iter()
+                .all(|producer| producer.plugin_id() != *plugin_id)
+        })
+        .ok_or("fixture has no reducer-only Plugin")?;
+    Ok(reducer_only)
+}
+
+#[test]
+fn local_cut_commits_without_kind_one_row_for_reducer_only_plugin() -> TestResult {
+    let fixture = local_cut_fixture(hash(164), CutVerifierBinding::Installed)?;
+    let reducer_only = reducer_only_plugin_id(&fixture.snapshot)?;
+    assert!(fixture
+        .snapshot
+        .timeline
+        .binding
+        .as_input()
+        .rows
+        .iter()
+        .any(|row| row.plugin_id == reducer_only));
+
+    let mut unknown_row = fixture.request.composition_rows[0].clone();
+    unknown_row.plugin_id = unknown_plugin_id(
+        &fixture
+            .registry
+            .admitted_manifest_policy_sources(&fixture.admitted)?,
+    );
+    let mut unknown_rows = fixture.request.composition_rows.clone();
+    unknown_rows.push(unknown_row);
+    unknown_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
+    let unknown_plugin = with_composition_rows(&fixture.request, unknown_rows)?;
+    let mut store = fixture.store;
     assert_eq!(
-        prepare_request(&fixture, partial_composition, None),
+        fixture.registry.commit_admitted_local_cut_owner_v1(
+            &fixture.admitted,
+            unknown_plugin,
+            &mut store
+        ),
         Err(LocalCutOwnerErrorV1::InvalidBatch)
     );
+
+    let producer_rows = fixture
+        .request
+        .composition_rows
+        .iter()
+        .filter(|row| row.plugin_id != reducer_only)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        producer_rows.len() + 1,
+        fixture.request.composition_rows.len()
+    );
+    let reducer_omitted = with_composition_rows(&fixture.request, producer_rows)?;
+    let applied = fixture.registry.commit_admitted_local_cut_owner_v1(
+        &fixture.admitted,
+        reducer_omitted.clone(),
+        &mut store,
+    )?;
+    assert_eq!(applied.kind, LocalCutOwnerCommitKindV1::Applied);
+    assert_eq!(
+        applied.seal.as_input().composition_table.row_count(),
+        u64::try_from(reducer_omitted.composition_rows.len())?
+    );
+    let persisted = store
+        .read_local_cut_owner_commit_v1(fixture.state.owner_id, 1)?
+        .ok_or("missing reducer-only local-cut record")?;
+    assert_eq!(persisted, applied);
+    Ok(())
+}
+
+#[test]
+fn local_cut_preparation_rejects_unknown_composition_and_partial_recording_rows() -> TestResult {
+    let fixture = local_cut_fixture(hash(158), CutVerifierBinding::Installed)?;
+
+    let mut omitted_rows = fixture.request.composition_rows.clone();
+    omitted_rows.pop();
+    let omitted_composition = with_composition_rows(&fixture.request, omitted_rows)?;
+    assert!(prepare_request(&fixture, omitted_composition, None).is_ok());
 
     let mut unknown_plugin = fixture.request.clone();
     unknown_plugin.composition_rows[0].plugin_id = PluginId::new();

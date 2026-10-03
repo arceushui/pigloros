@@ -130,7 +130,8 @@ pub struct LocalCutOwnerRequestV1 {
     pub manifest_hash: Hash,
     /// Complete canonical kind-14 manifest bindings for the selected cut.
     pub manifest_binding_table: LocalCutManifestBindingTableV1,
-    /// Complete canonical kind-1 composition binding set.
+    /// Canonical kind-1 composition bindings; each names an MCA1 Plugin and an
+    /// owned Timeline, and a reducer-only Plugin may have no row.
     pub composition_rows: Vec<LocalCutCompositionBindingRowV1>,
     /// Complete canonical kind-8 recording-context set.
     pub recording_context_rows: Vec<LocalCutRecordingContextRowV1>,
@@ -450,10 +451,11 @@ pub fn local_cut_owner_intent_digest_v1(
 /// Verify a complete admitted selection, build LCC1, and obtain its LCQ1 receipt.
 ///
 /// # Errors
-/// Rejects partial or stale admission, missing kind-1/kind-8/kind-14 rows,
-/// substituted static Plugin pins, duplicate cut identity, wrong owner state,
-/// unverified result inventory, or any signer/key-role mismatch. The request
-/// cannot supply authority, evidence, or a signature.
+/// Rejects partial or stale admission, missing kind-8/kind-14 rows, extra or
+/// unadmitted kind-1 rows, substituted static Plugin pins, duplicate cut
+/// identity, wrong owner state, unverified result inventory, or any
+/// signer/key-role mismatch. The request cannot supply authority, evidence, or
+/// a signature.
 pub fn prepare_local_cut_owner_commit_v1(
     request: LocalCutOwnerRequestV1,
     current_state: Option<&LocalCutOwnerStateV1>,
@@ -767,16 +769,17 @@ fn validate_manifest_binding(
     Ok(())
 }
 
+/// Compare every kind-1 static binding with MCA1 at the sealed generation.
+///
+/// ADR-089 rejects extra, unadmitted, or changed static bindings but lets a
+/// reducer-only Plugin have no kind-1 row, so the table need not cover every
+/// catalog Plugin on every owned Timeline. Request shape already enforced
+/// strict, unique `(PluginId, TimelineId)` order and the per-table row cap.
 fn validate_composition_bindings(
     rows: &[LocalCutCompositionBindingRowV1],
     admission_state: &ManifestOwnerAdmissionOwnerStateV1,
     catalog: &ManifestAdmissionCatalogV1,
 ) -> Result<(), LocalCutOwnerErrorV1> {
-    // At most 256 catalog rows times 1,048,576 Timelines cannot overflow.
-    let expected = catalog.as_input().rows.len() * admission_state.timelines.len();
-    if rows.len() != expected {
-        return Err(LocalCutOwnerErrorV1::InvalidBatch);
-    }
     let catalog_rows = catalog
         .as_input()
         .rows
