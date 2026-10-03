@@ -19,6 +19,7 @@ extern crate self as pos_core;
 
 pub mod clock;
 pub mod consent;
+pub mod counterfactual_store;
 pub mod crypto;
 pub mod entity;
 pub mod erasure;
@@ -337,6 +338,15 @@ pub use consent::{
     ConsentRevokedV1, FieldStateV1, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
     HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_CONSENT_HISTORY_EVENTS, MODALITY_EXPORT, MODALITY_LOCATION,
     MODALITY_MODEL_FIT, MODALITY_PERSONA,
+};
+pub use counterfactual_store::{
+    CounterfactualBasisV1, CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
+    CounterfactualStoreErrorV1, CounterfactualStorePortV1, ForkGenerationV1,
+    InvalidationConflictV1, RecomputationFrontierBytesV1, StoredCounterfactualArtifactV1,
+    SuffixInvalidationBytesV1, MAX_COUNTERFACTUAL_EVICTIONS_V1,
+    MAX_COUNTERFACTUAL_FRONTIER_BYTES_V1, MAX_COUNTERFACTUAL_INVALIDATION_BYTES_V1,
+    MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1,
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
