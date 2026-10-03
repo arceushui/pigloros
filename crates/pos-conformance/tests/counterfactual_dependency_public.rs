@@ -562,7 +562,10 @@ fn edge_lists_follow_the_canonical_consumer_and_source_order() {
         }),
     ];
     assert_eq!(validate_input_dependency_order_v1(&[]), Ok(()));
-    assert_eq!(validate_input_dependency_order_v1(&[base.clone()]), Ok(()));
+    assert_eq!(
+        validate_input_dependency_order_v1(std::slice::from_ref(&base)),
+        Ok(())
+    );
     for edge in &later {
         let ordered = [base.clone(), edge.clone()];
         let reversed = [edge.clone(), base.clone()];
