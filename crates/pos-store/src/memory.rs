@@ -261,7 +261,7 @@ pub struct MemoryStore {
     fork_classifier_sources: HashMap<(Hash, String), ForkClassifierSourceV1>,
     fork_classifier_tables: HashMap<TimelineId, ForkClassifierTableV1>,
     fork_classifier_registrations: HashMap<Hash, ForkClassifierRegistrationV1>,
-    fork_append_operations: HashMap<Hash, (ForkAppendOperationV1, Event)>,
+    fork_append_operations: HashMap<Hash, ForkAppendOperationV1>,
     fork_event_origins: HashMap<EventId, EventOriginRecordV1>,
     fork_intervention_admissions: HashMap<EventId, ForkInterventionAdmissionV1>,
     fork_publication_operations: HashMap<Hash, ForkPublicationOperationV1>,
@@ -2082,34 +2082,40 @@ impl MemoryStore {
 
     /// Read the logical Timeline Event one FOP1 binds, as `SQLite` reads its row.
     ///
-    /// ADR-105 r6 R6.9: the committed Timeline Event, never the copy kept
-    /// beside the FOP1, is what every adapter validates and returns.
+    /// ADR-105 r6 R6.9: the committed Timeline Event is what every adapter
+    /// validates and returns; an Event with another id is corrupt authority.
     fn committed_classified_event(
         &self,
         operation: &ForkAppendOperationV1,
     ) -> Result<Event, ForkEventAuthorityErrorV1> {
         let input = operation.input();
-        self.timelines
-            .get(&input.child_timeline_id)
-            .and_then(|state| {
-                let prefix = state
-                    .timeline
-                    .meta
-                    .fork_point
-                    .map_or(0, |(_, fork)| fork.as_u64());
-                input
-                    .logical_seq
-                    .checked_sub(prefix)
-                    .and_then(|local_seq| {
-                        state
-                            .events
-                            .binary_search_by_key(&local_seq, |event| event.seq.as_u64())
-                            .ok()
-                    })
-                    .and_then(|index| state.events.get(index))
-                    .and_then(|event| Self::logical_event(prefix, event.clone()).ok())
-            })
+        self.committed_logical_event(input.child_timeline_id, input.logical_seq)
+            .filter(|event| event.id == input.event_id)
             .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+    }
+
+    /// The child's committed Event at one logical sequence, in logical form.
+    ///
+    /// A sequence inside the inherited prefix saturates to local sequence 0,
+    /// which no committed child Event carries.
+    fn committed_logical_event(
+        &self,
+        child_timeline_id: TimelineId,
+        logical_seq: u64,
+    ) -> Option<Event> {
+        let state = self.timelines.get(&child_timeline_id)?;
+        let prefix = state
+            .timeline
+            .meta
+            .fork_point
+            .map_or(0, |(_, fork)| fork.as_u64());
+        let local_seq = logical_seq.saturating_sub(prefix);
+        let event = state
+            .events
+            .binary_search_by_key(&local_seq, |event| event.seq.as_u64())
+            .ok()
+            .and_then(|index| state.events.get(index))?;
+        Self::logical_event(prefix, event.clone()).ok()
     }
 
     fn validate_classified_provenance(
@@ -2117,16 +2123,19 @@ impl MemoryStore {
         operation: &ForkAppendOperationV1,
     ) -> Result<Event, ForkEventAuthorityErrorV1> {
         let input = operation.input();
-        self.committed_classified_event(operation)
-            .and_then(|event| {
-                self.validate_classified_authority_graph(
-                    input.child_timeline_id,
-                    input.fork_admission_digest,
-                    input.classifier_revision_digest,
-                )
-                .and_then(|(_, table)| self.validate_classified_records(operation, &event, &table))
+        self.validate_classified_authority_graph(
+            input.child_timeline_id,
+            input.fork_admission_digest,
+            input.classifier_revision_digest,
+        )
+        .and_then(|(_, table)| {
+            self.committed_classified_event(operation)
+                .map(|event| (table, event))
+        })
+        .and_then(|(table, event)| {
+            self.validate_classified_records(operation, &event, &table)
                 .map(|_| event)
-            })
+        })
     }
 
     /// Require the logical Event, EOR1, and FIA1 exactly bound by one FOP1.
@@ -2286,7 +2295,7 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
         }
         let request = fork_append_request(operation_id, child_timeline_id, source, &draft)?;
         let table = self.validate_classified_permit(permit)?;
-        if let Some((operation, _)) = self.fork_append_operations.get(&operation_id) {
+        if let Some(operation) = self.fork_append_operations.get(&operation_id) {
             if operation.input().request_digest != request.digest() {
                 return Err(ForkEventAuthorityErrorV1::Conflict);
             }
@@ -2345,7 +2354,7 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
                 .insert(event.id, intervention);
         }
         self.fork_append_operations
-            .insert(operation_id, (provenance.operation.clone(), event.clone()));
+            .insert(operation_id, provenance.operation.clone());
         Ok(ForkClassifiedAppendReceiptV1 {
             event,
             operation: provenance.operation,
@@ -2368,7 +2377,7 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
             return Err(ForkEventAuthorityErrorV1::Unauthenticated);
         }
         self.validate_classified_permit(permit)?;
-        let Some((operation, _)) = self.fork_append_operations.get(&operation_id) else {
+        let Some(operation) = self.fork_append_operations.get(&operation_id) else {
             return Ok(None);
         };
         let request = fork_append_request(operation_id, child_timeline_id, source, draft)?;
@@ -2409,7 +2418,7 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
             .collect::<HashMap<_, _>>();
         let anchored =
             |event_id: EventId, logical_seq: u64| logical_seqs.get(&event_id) == Some(&logical_seq);
-        let orphaned_operation = self.fork_append_operations.values().any(|(operation, _)| {
+        let orphaned_operation = self.fork_append_operations.values().any(|operation| {
             operation.input().child_timeline_id == child_timeline_id
                 && !anchored(operation.input().event_id, operation.input().logical_seq)
         });
@@ -2428,10 +2437,10 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
             return Ok(Vec::new());
         }
         let mut operations = HashMap::with_capacity(logical_seqs.len());
-        for (operation, stored_event) in self.fork_append_operations.values() {
+        for operation in self.fork_append_operations.values() {
             if logical_seqs.contains_key(&operation.input().event_id)
                 && operations
-                    .insert(operation.input().event_id, (operation, stored_event))
+                    .insert(operation.input().event_id, operation)
                     .is_some()
             {
                 return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
@@ -2447,19 +2456,21 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
                     .map(|logical_seq| (event, logical_seq))
             })
             .map(|(event, logical_seq)| {
-                let (operation, stored_event) = operations
+                let operation = operations
                     .get(&event.id)
                     .copied()
                     .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-                if stored_event.id != event.id
-                    || operation.input().logical_seq != logical_seq
+                if operation.input().logical_seq != logical_seq
                     || operation.input().fork_admission_digest != admission.digest()
                     || operation.input().classifier_revision_digest != table.digest()
                 {
                     return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
                 }
-                self.committed_classified_event(operation)
-                    .and_then(|event| self.validate_classified_records(operation, &event, &table))
+                let committed = Event {
+                    seq: Seq::from_u64(logical_seq),
+                    ..event.clone()
+                };
+                self.validate_classified_records(operation, &committed, &table)
                     .map(|(origin, intervention)| (origin, intervention, operation.clone()))
             })
             .collect()
@@ -5526,7 +5537,7 @@ impl MemoryStore {
             .remove(&(room, registrar.to_owned()));
     }
 
-    /// Tamper one classified Timeline Event, leaving the copy beside its FOP1 intact.
+    /// Tamper the committed Timeline Event that one classified FOP1 binds.
     pub(crate) fn test_tamper_classified_event(
         &mut self,
         operation_id: Hash,
@@ -5535,7 +5546,7 @@ impl MemoryStore {
         let event_id = self
             .fork_append_operations
             .get(&operation_id)
-            .map(|(operation, _)| operation.input().event_id);
+            .map(|operation| operation.input().event_id);
         self.timelines
             .values_mut()
             .flat_map(|state| state.events.iter_mut())
@@ -6726,7 +6737,7 @@ mod tests {
         store.fork_event_origins.insert(event.id, origin);
         store.fork_append_operations.insert(
             suffix_operation.input().operation_id,
-            (suffix_operation.clone(), event.clone()),
+            suffix_operation.clone(),
         );
         assert_eq!(store.read_fork_event_suffix(child_timeline_id, 1)?.len(), 1);
         Ok((store, child_timeline_id, suffix_operation, event))
@@ -6735,7 +6746,7 @@ mod tests {
     #[test]
     fn classified_suffix_rejects_missing_and_duplicate_operations(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut store, child_timeline_id, suffix_operation, event) = classified_suffix_store()?;
+        let (mut store, child_timeline_id, suffix_operation, _) = classified_suffix_store()?;
         let missing_event_operation = ForkAppendOperationV1::new(ForkAppendOperationInputV1 {
             operation_id: Hash::from_bytes([69; 32]),
             event_id: EventId::new(),
@@ -6743,7 +6754,7 @@ mod tests {
         })?;
         store.fork_append_operations.insert(
             missing_event_operation.input().operation_id,
-            (missing_event_operation.clone(), event.clone()),
+            missing_event_operation.clone(),
         );
         assert_eq!(
             store.read_fork_event_suffix(child_timeline_id, 1),
@@ -6759,7 +6770,7 @@ mod tests {
         })?;
         store.fork_append_operations.insert(
             duplicate_operation.input().operation_id,
-            (duplicate_operation.clone(), event),
+            duplicate_operation.clone(),
         );
         assert_eq!(
             store.read_fork_event_suffix(child_timeline_id, 1),
@@ -6768,14 +6779,34 @@ mod tests {
         store
             .fork_append_operations
             .remove(&duplicate_operation.input().operation_id);
+        Ok(())
+    }
 
-        let (_, stored_event) = store
-            .fork_append_operations
-            .get_mut(&suffix_operation.input().operation_id)
-            .ok_or_else(|| std::io::Error::other("missing append operation fixture"))?;
-        stored_event.id = EventId::new();
+    /// ADR-105 r6 R6.9: replay and recovery validate the committed Timeline
+    /// Event the FOP1 names, and nothing else.
+    #[test]
+    fn committed_classified_event_requires_the_bound_timeline_event(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, child_timeline_id, operation, event) = classified_suffix_store()?;
+        assert_eq!(store.committed_classified_event(&operation), Ok(event));
+        for input in [
+            ForkAppendOperationInputV1 {
+                logical_seq: 999,
+                ..operation.input().clone()
+            },
+            ForkAppendOperationInputV1 {
+                event_id: EventId::new(),
+                ..operation.input().clone()
+            },
+        ] {
+            assert_eq!(
+                store.committed_classified_event(&ForkAppendOperationV1::new(input)?),
+                Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+            );
+        }
+        store.test_remove_timeline(child_timeline_id);
         assert_eq!(
-            store.read_fork_event_suffix(child_timeline_id, 1),
+            store.committed_classified_event(&operation),
             Err(ForkEventAuthorityErrorV1::CorruptAuthority)
         );
         Ok(())
