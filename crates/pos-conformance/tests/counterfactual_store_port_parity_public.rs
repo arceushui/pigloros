@@ -18,6 +18,9 @@ use pos_core::{
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+const INVALIDATION_REASON: SuffixInvalidationReasonV1 =
+    SuffixInvalidationReasonV1::TrustOrErasureChange;
+
 fn node(tick: u64, scheduler_position: u32, owner_id: &str) -> DependencyNodeV1 {
     DependencyNodeV1 {
         tick,
@@ -29,19 +32,28 @@ fn node(tick: u64, scheduler_position: u32, owner_id: &str) -> DependencyNodeV1 
     }
 }
 
+/// A producer whose schema needs a multi-byte CBOR unsigned integer.
+fn producer(tick: u64, scheduler_position: u32, owner_id: &str) -> DependencyNodeV1 {
+    DependencyNodeV1 {
+        schema_id: 70_000,
+        ..node(tick, scheduler_position, owner_id)
+    }
+}
+
+/// An invalid artifact carries its producer's schema and the record's reason.
 fn artifact(artifact_class: &str, producer: DependencyNodeV1) -> InvalidArtifactV1 {
     InvalidArtifactV1 {
         artifact_class: artifact_class.to_owned(),
-        schema_id: 70_000,
+        schema_id: producer.schema_id,
         artifact_digest: [11; 32],
         producer,
         prior_generation: 300,
-        reason: SuffixInvalidationReasonV1::NewIntervention,
+        reason: INVALIDATION_REASON,
     }
 }
 
 fn frontier() -> TestResult<RecomputationFrontierV1> {
-    let mut frontier = RecomputationFrontierV1 {
+    RecomputationFrontierV1 {
         frontier_id: [1; 16],
         plan_digest: [2; 32],
         parent_cut_digest: [3; 32],
@@ -72,9 +84,9 @@ fn frontier() -> TestResult<RecomputationFrontierV1> {
         classification_bundle_digest: [5; 32],
         provenance_digest: [6; 32],
         frontier_digest: [0; 32],
-    };
-    frontier.frontier_digest = frontier.digest()?;
-    Ok(frontier)
+    }
+    .seal()
+    .map_err(Into::into)
 }
 
 fn invalidation(
@@ -84,7 +96,7 @@ fn invalidation(
     commit_tick: u64,
 ) -> TestResult<SuffixInvalidationV1> {
     let long_owner = "an-owner-identifier-longer-than-twenty-four-bytes";
-    let mut invalidation = SuffixInvalidationV1 {
+    SuffixInvalidationV1 {
         invalidation_id: [1; 16],
         plan_digest: frontier.plan_digest,
         fork_id: [3; 16],
@@ -94,22 +106,22 @@ fn invalidation(
         invalid_start: node(5, 0, "agent-a"),
         invalid_end: node(4_294_967_296, 0, long_owner),
         invalid_artifacts: vec![
-            artifact("event", node(5, 0, "agent-a")),
-            artifact("projection", node(5, 0, "agent-a")),
-            artifact("event", node(6, 1, long_owner)),
+            artifact("event", producer(5, 0, "agent-a")),
+            artifact("projection", producer(5, 0, "agent-a")),
+            artifact("event", producer(6, 1, long_owner)),
         ],
         invalid_checkpoint_digests: vec![[5; 32], [6; 32]],
         invalid_projection_digests: vec![[7; 32]],
         retained_exogenous_digests: vec![[8; 32]],
-        reason: SuffixInvalidationReasonV1::TrustOrErasureChange,
+        reason: INVALIDATION_REASON,
         commit_timeline_id: [3; 16],
         commit_seq,
         commit_tick,
         provenance_digest: [13; 32],
         invalidation_digest: [0; 32],
-    };
-    invalidation.invalidation_digest = invalidation.digest()?;
-    Ok(invalidation)
+    }
+    .seal()
+    .map_err(Into::into)
 }
 
 #[test]
