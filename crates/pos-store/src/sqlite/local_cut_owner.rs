@@ -715,7 +715,10 @@ fn sqlite_local_cut_owner_cut_ids(
                 .query_map(params![owner_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         })
-        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)
+        .map_err(|error| match error {
+            rusqlite::Error::InvalidColumnType(..) => LocalCutOwnerErrorV1::CorruptState,
+            _ => LocalCutOwnerErrorV1::StorageFailure,
+        })
 }
 
 /// Fully validate the owner state and every retained cut, oldest first.
@@ -1013,7 +1016,8 @@ impl SqliteStore {
     /// Owner-state reads, retries, and commits decode only the current visible
     /// cut and any cut they return. This integrity pass decodes every retained
     /// cut as well, and every read-write open runs it for each owner with
-    /// local-cut rows.
+    /// local-cut rows. A read-only open does not run it; callers of a read-only
+    /// store invoke this method explicitly.
     ///
     /// # Errors
     /// Returns `CorruptState` for an invalid owner state or any invalid retained
@@ -2650,7 +2654,7 @@ mod local_cut_owner_coverage {
             )
         };
         for (assignment, expected) in [
-            ("cut_id = 4", LocalError::StorageFailure),
+            ("cut_id = 4", LocalError::CorruptState),
             ("cut_id = X'00'", LocalError::CorruptState),
             ("receipt_cbor = X'01'", LocalError::CorruptState),
         ] {
