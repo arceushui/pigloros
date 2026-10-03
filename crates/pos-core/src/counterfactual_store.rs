@@ -980,10 +980,11 @@ impl CounterfactualGenerationReceiptV1 {
 }
 
 /// Outcome of one invalidation transaction; there is no partial variant.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CounterfactualInvalidationOutcomeV1 {
-    /// Every part of the command committed under the new generation.
-    Committed(CounterfactualGenerationReceiptV1),
+    /// Every part of the command committed under the new generation. The
+    /// receipt is boxed so a conflict outcome stays small.
+    Committed(Box<CounterfactualGenerationReceiptV1>),
     /// A persisted fact differed from the expected basis; nothing committed.
     InvalidationConflict(InvalidationConflictV1),
 }

@@ -1016,7 +1016,9 @@ impl CounterfactualStorePortV1 for FakeStore {
         self.head = receipt.first_tick_head();
         self.quarantined
             .extend_from_slice(command.invalid_artifacts());
-        Ok(CounterfactualInvalidationOutcomeV1::Committed(receipt))
+        Ok(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
+            receipt,
+        )))
     }
 
     fn append_counterfactual_tick(
@@ -1125,9 +1127,9 @@ fn port_commits_whole_generation_or_reports_conflict() {
     ok(store.publish_counterfactual_facts(fork(), facts()));
     assert_eq!(
         ok(store.commit_counterfactual_invalidation(&command)),
-        CounterfactualInvalidationOutcomeV1::Committed(ok(
+        CounterfactualInvalidationOutcomeV1::Committed(Box::new(ok(
             command.committed_receipt(Seq::from_u64(42))
-        ))
+        )))
     );
     let current = ok(store.current_fork_generation(fork()));
     assert_eq!(current, command.new_generation());
