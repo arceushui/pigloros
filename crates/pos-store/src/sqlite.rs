@@ -127,6 +127,7 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+mod fork_attribution_issuer_policy;
 mod local_cut_owner;
 mod pipeline_admission;
 
@@ -999,6 +1000,72 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             "CHECK (length(operation_id) = 32)",
             "UNIQUE (operation_id)",
             "UNIQUE (fpa1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_attribution_issuer_policies",
+        columns_query: "PRAGMA table_info(fork_attribution_issuer_policies)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "policy_digest",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "generation",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fip1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(policy_digest) = 32)",
+            "CHECK (generation BETWEEN 1 AND 96)",
+            "CHECK (length(fip1_cbor) BETWEEN 1 AND 20480)",
+            "UNIQUE (generation)",
+            "UNIQUE (fip1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_attribution_issuer_policy_floor",
+        columns_query: "PRAGMA table_info(fork_attribution_issuer_policy_floor)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "singleton",
+                kind: "INTEGER",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "scope",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "generation",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "policy_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (singleton = 1)",
+            "CHECK (generation BETWEEN 1 AND 96)",
+            "CHECK (length(policy_digest) = 32)",
         ],
     },
 ];

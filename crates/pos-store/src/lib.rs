@@ -36,6 +36,7 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod fork_admission_authority;
+pub mod fork_attribution_issuer_policy;
 pub mod fork_delivery_journal;
 pub mod fork_event_authority;
 pub mod fork_manifest_publication;
@@ -46,6 +47,13 @@ mod timeline_range;
 pub use fork_admission_authority::{
     ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
     ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
+};
+pub use fork_attribution_issuer_policy::{
+    AuthenticatedOperatorPolicyPinV1, ForkAttributionIssuerAdmissionBasisV1,
+    ForkAttributionIssuerAdmissionQueryV1, ForkAttributionIssuerAdmissionV1,
+    ForkAttributionIssuerPolicyErrorV1, ForkAttributionIssuerPolicyInstallationPortV1,
+    IssuerPolicyFloorV1, IssuerPolicyInstallOutcomeV1, IssuerPolicyInstallReceiptV1,
+    MAX_FORK_ATTRIBUTION_ISSUER_POLICY_HISTORY_V1,
 };
 pub use fork_delivery_journal::{
     ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
