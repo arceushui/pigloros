@@ -1,18 +1,25 @@
 //! ADR-103 release-query tests.
 //!
-//! Manifest projections come from the `test-support` fixture because only
-//! #401's PMF1 parser may construct a real one, so this target declares
+//! Most manifest projections come from the `test-support` fixture, which
+//! models a caller-fabricated projection, so this target declares
 //! `required-features = ["test-support"]` in `Cargo.toml` (the hosted test,
-//! Clippy, and coverage gates run with `--all-features`). Tests that need no
-//! fixture stay in `plugin_trust_public.rs` and always run.
+//! Clippy, and coverage gates run with `--all-features`). The golden tests
+//! compare the real `from_verified_bundle` projection of the independently
+//! generated golden closure with a fixture holding the generator's facts.
+//! Tests that need no fixture stay in `plugin_trust_public.rs` and
+//! `plugin_manifest_public.rs` and always run.
+
+use std::collections::BTreeMap;
 
 use pos_core::OwnerIdV1;
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginManifestProjectionFixtureV1, PluginTrustErrorV1,
     TrustedPluginRootAnchorV1, ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
+use pos_plugin_release::{verify_oci_closure_v1, BundleAddressV1, VerifiedReleaseBundleV1};
 
 include!("support/plugin_trust_records.rs");
+include!("support/pmf1_golden_vectors.rs");
 
 const PMF1_DIGEST: [u8; 32] = [0x11; 32];
 const RELEASE_DIGEST: [u8; 32] = [0x22; 32];
@@ -333,5 +340,113 @@ fn full_future_effective_key_collection_exhausts_release_capacity() -> TestResul
         authorize(&evidence, manifest()?),
         Err(PluginTrustErrorV1::RevocationCapacityExhausted)
     );
+    Ok(())
+}
+
+fn golden_digest(hex: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    Ok(hex_bytes(hex)?.as_slice().try_into()?)
+}
+
+/// The generator's golden closure, verified by the ADR-102 transport verifier.
+fn golden_bundle() -> Result<VerifiedReleaseBundleV1, Box<dyn std::error::Error>> {
+    let manifest = GOLDEN_OCI_MANIFEST.as_bytes().to_vec();
+    let address = BundleAddressV1::new(
+        GOLDEN_OCI_MANIFEST_DIGEST.to_owned(),
+        u64::try_from(manifest.len())?,
+    )?;
+    let mut blobs = BTreeMap::new();
+    for (oci_digest, hex) in GOLDEN_BLOBS_HEX {
+        blobs.insert(oci_digest.to_owned(), hex_bytes(hex)?);
+    }
+    Ok(verify_oci_closure_v1(address, manifest, blobs)?)
+}
+
+/// Every projection fact of the golden PMF1, as computed by the generator.
+fn golden_fixture() -> Result<PluginManifestProjectionFixtureV1, Box<dyn std::error::Error>> {
+    Ok(PluginManifestProjectionFixtureV1 {
+        pmf1_digest: golden_digest(GOLDEN_PMF1_DIGEST_HEX)?,
+        plugin_id: "alpha/plugin".to_owned(),
+        owner: OwnerIdV1::new("publisher")?,
+        role: 3,
+        epoch: 9,
+        not_before: -100,
+        not_after: 100,
+        release_digest: golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?,
+        descriptor_digests: GOLDEN_DESCRIPTOR_DIGESTS_HEX
+            .iter()
+            .map(|hex| golden_digest(hex))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+#[test]
+fn golden_closure_projects_exactly_the_independent_golden_facts() -> TestResult {
+    let bundle = golden_bundle()?;
+    let pmf1 = hex_bytes(GOLDEN_PMF1_HEX)?;
+    let pmf1_member = bundle.members().first().ok_or("no PMF1 member")?;
+    assert_eq!(pmf1_member.size(), u64::try_from(pmf1.len())?);
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    let golden = golden_fixture()?;
+    assert_eq!(digest(&pmf1), golden.pmf1_digest);
+    assert_eq!(
+        projection,
+        ValidatedPluginManifestProjectionV1::from(golden.clone())
+    );
+    for carried in [
+        GOLDEN_UNSIGNED_MANIFEST_DIGEST_HEX,
+        GOLDEN_PREVIOUS_RELEASE_HEX,
+    ] {
+        let carried = golden_digest(carried)?;
+        assert!(pmf1.windows(32).any(|window| window == carried.as_slice()));
+        assert!(!golden.descriptor_digests.contains(&carried));
+    }
+    let ptr1 = hex_bytes(PTR1_HEX)?;
+    let prv1 = hex_bytes(PRV1_HEX)?;
+    let anchor = TrustedPluginRootAnchorV1::new("trust.example", digest(&ptr1))?;
+    let evidence = verify_plugin_trust_v1(&anchor, &[&ptr1], &[&prv1], 0, 9)?;
+    let fact = evidence.authorize_release(&projection)?;
+    assert_eq!(fact.pmf1_digest(), golden.pmf1_digest);
+    let fixture_key = authorize(&evidence, golden);
+    assert_eq!(Ok(fact.resolved_public_key()), fixture_key);
+    Ok(())
+}
+
+#[test]
+fn golden_digests_deny_the_real_but_not_a_fabricated_partial_projection() -> TestResult {
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&golden_bundle()?)?;
+    let ptr1 = signed_record(
+        root_fields(
+            1,
+            None,
+            vec![publisher_entry("publisher", 9, publisher_public())],
+            vec![grant("alpha/plugin", "publisher")],
+        ),
+        ROOT_SIGNATURE_DOMAIN,
+        &signer(),
+    )?;
+    let anchor = TrustedPluginRootAnchorV1::new("scope", digest(&ptr1))?;
+    for (index, hex) in GOLDEN_DESCRIPTOR_DIGESTS_HEX.iter().enumerate() {
+        let prv1 = signed_record(
+            revocation_fields(
+                digest(&ptr1),
+                1,
+                None,
+                5,
+                Vec::new(),
+                vec![revoked_artifact(golden_digest(hex)?, 5)],
+            ),
+            REVOCATION_SIGNATURE_DOMAIN,
+            &signer(),
+        )?;
+        let evidence = verify_plugin_trust_v1(&anchor, &[&ptr1], &[&prv1], 50, 5)?;
+        assert_eq!(
+            evidence.authorize_release(&projection).err(),
+            Some(PluginTrustErrorV1::ArtifactRevoked)
+        );
+        let mut partial = golden_fixture()?;
+        let removed = partial.descriptor_digests.remove(index);
+        assert_eq!(removed, golden_digest(hex)?);
+        assert_eq!(authorize(&evidence, partial), Ok(publisher_public()));
+    }
     Ok(())
 }
