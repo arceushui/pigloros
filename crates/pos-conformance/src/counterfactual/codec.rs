@@ -223,6 +223,13 @@ impl<'a> FieldReader<'a> {
             _ => length,
         };
         let mut reader = Self::new(value, count);
+        // A record too short to carry its magic and version is malformed as
+        // a whole, not at its magic field.
+        if count < 2 {
+            reader.failure = reader
+                .failure
+                .or_else(|| Some(FieldFailure::at(WireError::InvalidEncoding, 0)));
+        }
         let magic_slot = reader.slot;
         let read_magic = reader.read_text();
         let read_version = reader.read_u64();
