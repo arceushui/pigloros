@@ -351,9 +351,9 @@ fn commit_persists_the_whole_generation_atomically() {
     let mut store = open(&fixture.path);
     assert_eq!(
         store.commit_counterfactual_invalidation(&command),
-        Ok(Outcome::Committed(ok(
+        Ok(Outcome::Committed(Box::new(ok(
             command.committed_receipt(Seq::from_u64(4))
-        )))
+        ))))
     );
     assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 1)));
     assert_eq!(ok(store.logical_head(fork)), Seq::from_u64(4));
@@ -440,9 +440,9 @@ fn a_later_generation_quarantines_stored_bytes_permanently() {
     let second = spec.command();
     assert_eq!(
         store.commit_counterfactual_invalidation(&second),
-        Ok(Outcome::Committed(ok(
+        Ok(Outcome::Committed(Box::new(ok(
             second.committed_receipt(Seq::from_u64(6))
-        )))
+        ))))
     );
     assert_eq!(generation(&store, fork), 2);
     let current = at(fork, 2);
@@ -598,9 +598,9 @@ fn injected_faults_roll_back_everything_and_recover_after_reopen() {
     let mut recovered = open(&fixture.path);
     assert_eq!(
         recovered.commit_counterfactual_invalidation(&command),
-        Ok(Outcome::Committed(ok(
+        Ok(Outcome::Committed(Box::new(ok(
             command.committed_receipt(Seq::from_u64(4))
-        )))
+        ))))
     );
     drop(recovered);
     let reopened = open(&fixture.path);
@@ -1104,7 +1104,7 @@ const fn basis(head: u64, generation: u64, facts: CounterfactualFactsV1) -> Coun
 /// Commit the default command and return its receipt.
 fn commit_default(store: &mut SqliteStore, fork: TimelineId) -> CounterfactualGenerationReceiptV1 {
     match ok(store.commit_counterfactual_invalidation(&Spec::new(fork).command())) {
-        Outcome::Committed(receipt) => receipt,
+        Outcome::Committed(receipt) => *receipt,
         other @ Outcome::InvalidationConflict(_) => {
             std::panic::resume_unwind(Box::new(format!("expected a commit, got {other:?}")))
         }

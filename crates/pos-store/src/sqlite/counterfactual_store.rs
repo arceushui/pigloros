@@ -882,7 +882,11 @@ impl SqliteStore {
                         command.evictions(),
                     )
                 })
-                .map(|()| Ok(CounterfactualInvalidationOutcomeV1::Committed(receipt)))
+                .map(|()| {
+                    Ok(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
+                        receipt,
+                    )))
+                })
         })
     }
 }
