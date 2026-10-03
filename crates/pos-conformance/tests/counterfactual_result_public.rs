@@ -336,6 +336,71 @@ fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
     Ok(())
 }
 
+const ZERO_IDENTITY_EDITS: [Edit; 11] = [
+    |result| result.result_id = [0; 16],
+    |result| result.plan_digest = [0; 32],
+    |result| result.fork_id = [0; 16],
+    |result| result.checkpoints[0].checkpoint_digest = [0; 32],
+    |result| result.suffix_digest = [0; 32],
+    |result| result.dependency_root = [0; 32],
+    |result| result.provenance_root = [0; 32],
+    |result| result.execution_profile_digest = [0; 32],
+    |result| result.trust_policy_snapshot_digest = [0; 32],
+    |result| result.evaluator_identity_digest = [0; 32],
+    |result| {
+        if let Some(error) = result.terminal_error.as_mut() {
+            error.safe_digest = Some([0; 32]);
+        }
+    },
+];
+
+fn minimal_nonzero<const LENGTH: usize>() -> [u8; LENGTH] {
+    let mut value = [0; LENGTH];
+    value[LENGTH - 1] = 1;
+    value
+}
+
+#[test]
+fn zero_identities_and_digests_are_rejected() -> TestResult {
+    let base = failed()?;
+    for edit in ZERO_IDENTITY_EDITS {
+        let mut result = base.clone();
+        edit(&mut result);
+        assert_eq!(result.validate(), Err(ResultError::FieldOutOfBounds));
+        let resealed = sealed(result)?;
+        assert_eq!(resealed.validate(), Err(ResultError::FieldOutOfBounds));
+        assert_eq!(
+            resealed.to_canonical_cbor(),
+            Err(ResultError::FieldOutOfBounds)
+        );
+    }
+    let bytes = with_field(&base.to_canonical_cbor()?, 2, Value::Bytes(vec![0; 16]))?;
+    assert_eq!(decoded(&bytes), Err(ResultError::FieldOutOfBounds));
+
+    let mut minimal = base;
+    minimal.result_id = minimal_nonzero();
+    minimal.fork_id = minimal_nonzero();
+    minimal.checkpoints[0].checkpoint_digest = minimal_nonzero();
+    for digest in [
+        &mut minimal.plan_digest,
+        &mut minimal.suffix_digest,
+        &mut minimal.dependency_root,
+        &mut minimal.provenance_root,
+        &mut minimal.execution_profile_digest,
+        &mut minimal.trust_policy_snapshot_digest,
+        &mut minimal.evaluator_identity_digest,
+    ] {
+        *digest = minimal_nonzero();
+    }
+    if let Some(error) = minimal.terminal_error.as_mut() {
+        error.safe_digest = Some(minimal_nonzero());
+    }
+    let minimal = sealed(minimal)?;
+    minimal.validate()?;
+    assert_eq!(decoded(&minimal.to_canonical_cbor()?)?, minimal);
+    Ok(())
+}
+
 #[test]
 fn range_bounds_are_enforced_at_each_edge() -> TestResult {
     let base = completed()?;
@@ -598,6 +663,10 @@ fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
     short.pop();
     let mut long = fields_of(&valid)?;
     long.push(Value::Null);
+    let mut future_magic = short.clone();
+    future_magic[0] = Value::Text("CFR2".to_owned());
+    let mut future_version = short.clone();
+    future_version[1] = uint(2);
     // Field 5 (fork generation 2) re-encoded with a one-byte length prefix.
     let generation_offset = 1 + 5 + 1 + 17 + 34 + 17;
     assert_eq!(valid[generation_offset], 0x02);
@@ -612,6 +681,14 @@ fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
     for (bytes, expected) in [
         (trailing, ResultError::InvalidEncoding),
         (encode(&Value::Array(short))?, ResultError::InvalidEncoding),
+        (
+            encode(&Value::Array(future_magic))?,
+            ResultError::UnsupportedVersion,
+        ),
+        (
+            encode(&Value::Array(future_version))?,
+            ResultError::UnsupportedVersion,
+        ),
         (encode(&Value::Array(long))?, ResultError::InvalidEncoding),
         (noncanonical, ResultError::InvalidEncoding),
         (invalid_utf8, ResultError::InvalidEncoding),
