@@ -115,7 +115,7 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
-pub mod counterfactual_store;
+mod counterfactual_store;
 mod pipeline_admission;
 
 #[cfg(test)]

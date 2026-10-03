@@ -4,18 +4,23 @@
 use std::sync::Arc;
 
 use pos_core::{
-    CanonicalBytes, CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
-    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    EntityId, ErasureContainmentGateV1, EventDraft, ForkGenerationV1, Hash, InvalidationConflictV1,
-    Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, Seq, SeqRange,
-    SuffixInvalidationBytesV1, TimelineId,
+    CanonicalBytes, CounterfactualBasisV1, CounterfactualFactsV1,
+    CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
+    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
+    ErasureContainmentGateV1, EventDraft, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
+    PipelineDraftBatchV1, RecomputationFrontierBytesV1, Seq, SeqRange, SuffixInvalidationBytesV1,
+    TimelineId,
 };
-use pos_store::{
-    memory::{counterfactual_store::MemoryCounterfactualFactsV1, MemoryStore},
-    EventStore,
-};
+use pos_store::{memory::MemoryStore, EventStore};
 
 type StoreError = CounterfactualStoreErrorV1;
+
+/// One stale-basis case: how the expectation is altered and the conflict.
+type StaleCase<T> = (fn(&mut T), InvalidationConflictV1);
+
+/// Event types the generic append guard conceals as an absent Fork.
+const GUARDED_KINDS: [&str; 3] = ["geo.location", "geo.cell", "consent.granted.v1"];
 
 /// Tick number of every test command's first recomputation Tick.
 const FIRST_TICK: u64 = 17;
@@ -31,11 +36,25 @@ const fn hash(value: u8) -> Hash {
 }
 
 fn draft(value: u8) -> EventDraft {
+    typed_draft("counterfactual.tick", value)
+}
+
+fn typed_draft(kind: &str, value: u8) -> EventDraft {
     EventDraft::new(
         EntityId::new(),
-        Kind::new("counterfactual.tick"),
+        Kind::new(kind),
         CanonicalBytes::from_vec(vec![value]),
     )
+}
+
+/// One later Tick of ordinary drafts, optionally ending with a `guarded` one.
+fn tick_drafts(count: u8, guarded: Option<&str>) -> PipelineDraftBatchV1 {
+    ok(PipelineDraftBatchV1::try_new(
+        (0..count)
+            .map(draft)
+            .chain(guarded.map(|kind| typed_draft(kind, 0)))
+            .collect(),
+    ))
 }
 
 fn id_field(value: [u8; 16]) -> Vec<u8> {
@@ -108,9 +127,9 @@ fn invalidation_middle() -> Vec<u8> {
 }
 
 /// Frame fields after the version as one self-digested record.
-fn frame(heads: (u8, u8), magic: &[u8; 4], domain: &[u8], fields: &[u8]) -> Vec<u8> {
+fn frame(heads: (u8, u8), magic: [u8; 4], domain: &[u8], fields: &[u8]) -> Vec<u8> {
     let mut bytes = vec![heads.0, 0x64];
-    bytes.extend_from_slice(magic);
+    bytes.extend_from_slice(&magic);
     bytes.push(0x01);
     bytes.extend_from_slice(fields);
     let mut hasher = blake3::Hasher::new();
@@ -122,8 +141,8 @@ fn frame(heads: (u8, u8), magic: &[u8; 4], domain: &[u8], fields: &[u8]) -> Vec<
     bytes
 }
 
-const fn facts() -> MemoryCounterfactualFactsV1 {
-    MemoryCounterfactualFactsV1 {
+const fn facts() -> CounterfactualFactsV1 {
+    CounterfactualFactsV1 {
         plan_digest: hash(5),
         dependency_graph_digest: hash(3),
         trust_epoch: 6,
@@ -146,6 +165,7 @@ struct Spec {
     invalid_artifacts: Vec<Hash>,
     evictions: Vec<Hash>,
     drafts: u8,
+    guarded: Option<&'static str>,
 }
 
 impl Spec {
@@ -163,13 +183,14 @@ impl Spec {
             invalid_artifacts: vec![hash(10), hash(11)],
             evictions: vec![hash(12)],
             drafts: 2,
+            guarded: None,
         }
     }
 
     fn command(&self) -> CounterfactualInvalidationCommandV1 {
         let frontier = ok(RecomputationFrontierBytesV1::try_from_canonical(frame(
             (0x91, 0x90),
-            b"RCF1",
+            *b"RCF1",
             b"PiglorOS.RecomputationFrontier.v1",
             &[
                 id_field([self.record_id; 16]),
@@ -182,7 +203,7 @@ impl Spec {
         )));
         let invalidation = ok(SuffixInvalidationBytesV1::try_from_canonical(frame(
             (0x92, 0x91),
-            b"SIV1",
+            *b"SIV1",
             b"PiglorOS.SuffixInvalidation.v1",
             &[
                 id_field([self.record_id; 16]),
@@ -212,9 +233,7 @@ impl Spec {
                 invalid_artifacts: self.invalid_artifacts.clone(),
                 evictions: self.evictions.clone(),
                 first_tick: FIRST_TICK,
-                first_tick_drafts: ok(PipelineDraftBatchV1::try_new(
-                    (0..self.drafts).map(draft).collect(),
-                )),
+                first_tick_drafts: tick_drafts(self.drafts, self.guarded),
             },
         ))
     }
@@ -267,7 +286,7 @@ fn seqs(store: &MemoryStore, timeline: TimelineId) -> Vec<u64> {
 fn committed(
     store: &mut MemoryStore,
     command: &CounterfactualInvalidationCommandV1,
-) -> pos_core::CounterfactualGenerationReceiptV1 {
+) -> CounterfactualGenerationReceiptV1 {
     match ok(store.commit_counterfactual_invalidation(command)) {
         CounterfactualInvalidationOutcomeV1::Committed(receipt) => receipt,
         other @ CounterfactualInvalidationOutcomeV1::InvalidationConflict(_) => {
@@ -403,7 +422,7 @@ fn later_generation_quarantines_prior_artifacts_and_keeps_its_generation() {
 
 #[test]
 fn every_stale_basis_fact_conflicts_and_commits_nothing() {
-    let cases: [(fn(&mut Spec), InvalidationConflictV1); 7] = [
+    let cases: [StaleCase<Spec>; 7] = [
         (|spec| spec.head = 2, InvalidationConflictV1::LogicalHead),
         (
             |spec| spec.plan = hash(50),
@@ -464,7 +483,7 @@ fn every_stale_basis_fact_conflicts_and_commits_nothing() {
 fn republished_facts_are_the_recheck_basis() {
     let mut fixture = published();
     let fork = fixture.fork;
-    let republished = MemoryCounterfactualFactsV1 {
+    let republished = CounterfactualFactsV1 {
         revocation_epoch: 9,
         ..facts()
     };
@@ -550,6 +569,14 @@ fn unpublished_root_and_deleted_forks_are_not_found() {
         store.publish_counterfactual_facts(fork, facts()),
         Err(StoreError::ForkNotFound)
     );
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.append_counterfactual_tick(fork, &basis(3, 1, facts()), &tick_drafts(1, None)),
+        Err(StoreError::ForkNotFound)
+    );
 }
 
 #[test]
@@ -563,9 +590,22 @@ fn contained_fork_fails_closed_without_committing() {
         fixture.store.commit_counterfactual_invalidation(&command),
         Err(StoreError::StorageFailure)
     );
-    // The generation and artifact reads are fenced like every Timeline read.
+    assert_eq!(
+        fixture.store.append_counterfactual_tick(
+            fork,
+            &command.expected_basis(),
+            &tick_drafts(1, None)
+        ),
+        Err(StoreError::StorageFailure)
+    );
+    // The generation, basis, and artifact reads are fenced like every
+    // Timeline read.
     assert_eq!(
         fixture.store.current_fork_generation(fork),
+        Err(StoreError::StorageFailure)
+    );
+    assert_eq!(
+        fixture.store.current_counterfactual_basis(fork),
         Err(StoreError::StorageFailure)
     );
     assert_eq!(
@@ -596,6 +636,10 @@ fn ungated_store_fails_closed_except_publication() {
         Err(StoreError::StorageFailure)
     );
     assert_eq!(
+        ungated.append_counterfactual_tick(fork, &command.expected_basis(), &tick_drafts(1, None)),
+        Err(StoreError::StorageFailure)
+    );
+    assert_eq!(
         ungated.publish_counterfactual_facts(fork, facts()),
         Ok(at(fork, 0))
     );
@@ -604,7 +648,241 @@ fn ungated_store_fails_closed_except_publication() {
         Err(StoreError::StorageFailure)
     );
     assert_eq!(
+        ungated.current_counterfactual_basis(fork),
+        Err(StoreError::StorageFailure)
+    );
+    assert_eq!(
         ungated.read_generation_artifact(at(fork, 0), hash(1)),
         Err(StoreError::StorageFailure)
     );
+}
+
+const fn basis(head: u64, generation: u64, facts: CounterfactualFactsV1) -> CounterfactualBasisV1 {
+    CounterfactualBasisV1 {
+        fork_logical_head: Seq::from_u64(head),
+        generation,
+        facts,
+    }
+}
+
+/// A published fixture with the default command committed at generation 1.
+fn generation_one() -> (Fixture, CounterfactualGenerationReceiptV1) {
+    let mut fixture = published();
+    let receipt = committed(&mut fixture.store, &Spec::new(fixture.fork).command());
+    (fixture, receipt)
+}
+
+#[test]
+fn basis_reads_the_persisted_head_generation_and_facts() {
+    let mut fixture = fixture();
+    let fork = fixture.fork;
+    let store = &mut fixture.store;
+
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.current_counterfactual_basis(fixture.root),
+        Err(StoreError::ForkNotFound)
+    );
+    ok(store.publish_counterfactual_facts(fork, facts()));
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Ok(basis(1, 0, facts()))
+    );
+
+    let receipt = committed(store, &Spec::new(fork).command());
+    assert_eq!(receipt.facts(), facts());
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Ok(receipt.tick_basis(Seq::from_u64(3)))
+    );
+
+    let republished = CounterfactualFactsV1 {
+        erasure_epoch: 81,
+        ..facts()
+    };
+    ok(store.publish_counterfactual_facts(fork, republished));
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Ok(basis(3, 1, republished))
+    );
+}
+
+#[test]
+fn later_ticks_commit_on_the_receipt_basis() {
+    let (mut fixture, receipt) = generation_one();
+    let fork = fixture.fork;
+    let store = &mut fixture.store;
+    let first = receipt.tick_basis(receipt.first_tick_head());
+
+    assert_eq!(
+        store.append_counterfactual_tick(fork, &first, &tick_drafts(2, None)),
+        Ok(CounterfactualTickOutcomeV1::Committed {
+            head: Seq::from_u64(5)
+        })
+    );
+    assert_eq!(seqs(store, fork), vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        store.append_counterfactual_tick(
+            fork,
+            &receipt.tick_basis(Seq::from_u64(5)),
+            &tick_drafts(1, None)
+        ),
+        Ok(CounterfactualTickOutcomeV1::Committed {
+            head: Seq::from_u64(6)
+        })
+    );
+    // Replaying the first Tick on its old basis is stale and commits nothing.
+    assert_eq!(
+        store.append_counterfactual_tick(fork, &first, &tick_drafts(2, None)),
+        Ok(CounterfactualTickOutcomeV1::Stale(
+            InvalidationConflictV1::LogicalHead
+        ))
+    );
+    assert_eq!(seqs(store, fork), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(seqs(store, fixture.root), vec![1, 2]);
+    assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 1)));
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Ok(receipt.tick_basis(Seq::from_u64(6)))
+    );
+}
+
+#[test]
+fn every_stale_tick_basis_fact_is_stale_and_commits_nothing() {
+    let cases: [StaleCase<CounterfactualBasisV1>; 7] = [
+        (
+            |basis| basis.fork_logical_head = Seq::from_u64(2),
+            InvalidationConflictV1::LogicalHead,
+        ),
+        (
+            |basis| basis.facts.plan_digest = hash(50),
+            InvalidationConflictV1::PlanDigest,
+        ),
+        (
+            |basis| basis.facts.dependency_graph_digest = hash(30),
+            InvalidationConflictV1::DependencyGraphDigest,
+        ),
+        (
+            |basis| basis.generation = 0,
+            InvalidationConflictV1::PriorGeneration,
+        ),
+        (
+            |basis| basis.facts.trust_epoch = 60,
+            InvalidationConflictV1::TrustEpoch,
+        ),
+        (
+            |basis| basis.facts.revocation_epoch = 70,
+            InvalidationConflictV1::RevocationEpoch,
+        ),
+        (
+            |basis| basis.facts.erasure_epoch = 80,
+            InvalidationConflictV1::ErasureEpoch,
+        ),
+    ];
+    for (mutate, conflict) in cases {
+        let (mut fixture, receipt) = generation_one();
+        let fork = fixture.fork;
+        let mut expected = receipt.tick_basis(receipt.first_tick_head());
+        mutate(&mut expected);
+
+        assert_eq!(
+            fixture
+                .store
+                .append_counterfactual_tick(fork, &expected, &tick_drafts(1, None)),
+            Ok(CounterfactualTickOutcomeV1::Stale(conflict))
+        );
+        assert_eq!(seqs(&fixture.store, fork), vec![1, 2, 3]);
+        assert_eq!(
+            fixture.store.current_counterfactual_basis(fork),
+            Ok(receipt.tick_basis(Seq::from_u64(3)))
+        );
+    }
+}
+
+#[test]
+fn guarded_first_tick_drafts_are_not_found_and_commit_nothing() {
+    for kind in GUARDED_KINDS {
+        let mut fixture = published();
+        let fork = fixture.fork;
+        let command = Spec {
+            guarded: Some(kind),
+            ..Spec::new(fork)
+        }
+        .command();
+
+        assert_eq!(
+            fixture.store.commit_counterfactual_invalidation(&command),
+            Err(StoreError::ForkNotFound)
+        );
+        assert_eq!(
+            fixture.store.current_counterfactual_basis(fork),
+            Ok(basis(1, 0, facts()))
+        );
+        assert_eq!(seqs(&fixture.store, fork), vec![1]);
+        assert_eq!(
+            fixture
+                .store
+                .read_generation_artifact(at(fork, 0), command.frontier().digest()),
+            Ok(None)
+        );
+        // The basis is rechecked first, so a stale command still conflicts.
+        let stale = Spec {
+            guarded: Some(kind),
+            trust_epoch: 60,
+            ..Spec::new(fork)
+        }
+        .command();
+        assert_eq!(
+            fixture.store.commit_counterfactual_invalidation(&stale),
+            Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
+                InvalidationConflictV1::TrustEpoch
+            ))
+        );
+    }
+}
+
+#[test]
+fn guarded_later_tick_drafts_are_not_found_and_commit_nothing() {
+    for kind in GUARDED_KINDS {
+        let (mut fixture, receipt) = generation_one();
+        let fork = fixture.fork;
+        let expected = receipt.tick_basis(receipt.first_tick_head());
+
+        assert_eq!(
+            fixture
+                .store
+                .append_counterfactual_tick(fork, &expected, &tick_drafts(2, Some(kind))),
+            Err(StoreError::ForkNotFound)
+        );
+        assert_eq!(seqs(&fixture.store, fork), vec![1, 2, 3]);
+        assert_eq!(
+            fixture.store.current_counterfactual_basis(fork),
+            Ok(expected)
+        );
+    }
+}
+
+#[test]
+fn ticks_require_a_visible_published_fork() {
+    let mut fixture = fixture();
+    let fork = fixture.fork;
+    let expected = basis(1, 0, facts());
+
+    assert_eq!(
+        fixture
+            .store
+            .append_counterfactual_tick(fork, &expected, &tick_drafts(1, None)),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .append_counterfactual_tick(fixture.root, &expected, &tick_drafts(1, None)),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(seqs(&fixture.store, fork), vec![1]);
+    assert_eq!(seqs(&fixture.store, fixture.root), vec![1, 2]);
 }
