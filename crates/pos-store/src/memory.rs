@@ -115,6 +115,7 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+pub mod counterfactual_store;
 mod pipeline_admission;
 
 #[cfg(test)]
@@ -251,6 +252,8 @@ pub struct MemoryStore {
     authority_state: AuthorityPersistenceStateV1,
     /// Host-published ADR-021 admission fences keyed by Timeline.
     pipeline_admission_fences: HashMap<TimelineId, pos_core::PipelineAdmissionFenceV1>,
+    /// ADR-064 per-Fork counterfactual facts, generation, and artifacts.
+    counterfactual_forks: HashMap<TimelineId, counterfactual_store::CounterfactualForkStateV1>,
     /// Retained ADR-021 admitted-batch receipts keyed by opaque idempotency key.
     pipeline_admission_receipts:
         HashMap<AppendDedupKey, pipeline_admission::PipelineReceiptRecordV1>,
@@ -687,6 +690,7 @@ impl MemoryStore {
             key_registry: None,
             authority_state: AuthorityPersistenceStateV1::new(),
             pipeline_admission_fences: HashMap::new(),
+            counterfactual_forks: HashMap::new(),
             pipeline_admission_receipts: HashMap::new(),
             authority_persistence_binding: None,
             fork_admission_authority: ForkAdmissionAuthorityStateV1::default(),
