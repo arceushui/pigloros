@@ -34,6 +34,14 @@ pub const INPUT_DEPENDENCY_MAGIC_V1: &str = "IDP1";
 pub const MAX_INPUT_DEPENDENCY_BYTES_V1: usize = 16 * 1024;
 
 const FIELD_COUNT: usize = 9;
+/// Closed dependency classes indexed by their IDP1 wire code.
+const CLASSES: [DependencyClassV1; 5] = [
+    DependencyClassV1::ExogenousFrozen,
+    DependencyClassV1::InterventionAssigned,
+    DependencyClassV1::EndogenousRecomputed,
+    DependencyClassV1::FixedPolicy,
+    DependencyClassV1::PresentationOnly,
+];
 const LIMITS: CborLimits = CborLimits {
     maximum_bytes: MAX_INPUT_DEPENDENCY_BYTES_V1,
     maximum_depth: 2,
@@ -312,22 +320,11 @@ const fn class_code(class: DependencyClassV1) -> u64 {
     }
 }
 
-const fn class_from_code(code: u64) -> Result<DependencyClassV1, InputDependencyContractErrorV1> {
-    match code {
-        0 => Ok(DependencyClassV1::ExogenousFrozen),
-        1 => Ok(DependencyClassV1::InterventionAssigned),
-        2 => Ok(DependencyClassV1::EndogenousRecomputed),
-        3 => Ok(DependencyClassV1::FixedPolicy),
-        4 => Ok(DependencyClassV1::PresentationOnly),
-        _ => Err(InputDependencyContractErrorV1::UnknownEnum),
-    }
-}
-
 fn decode_dependency(value: &Value) -> Result<InputDependencyV1, InputDependencyContractErrorV1> {
     let mut fields = FieldReader::with_header(value, FIELD_COUNT, INPUT_DEPENDENCY_MAGIC_V1, 1);
     let consumer = fields.read_node();
     let source = fields.read_node();
-    let class = fields.read_u64();
+    let dependency_class = fields.read_enum(&CLASSES, DependencyClassV1::ExogenousFrozen);
     let tick_range = fields.read_with(
         tick_range_field,
         DependencyTickRangeV1 {
@@ -346,9 +343,7 @@ fn decode_dependency(value: &Value) -> Result<InputDependencyV1, InputDependency
     let provenance_digest = fields.read_bytes::<32>();
     fields
         .finish()
-        .map_err(contract_error)
-        .and_then(|()| class_from_code(class))
-        .map(|dependency_class| InputDependencyV1 {
+        .map(|()| InputDependencyV1 {
             consumer,
             source,
             dependency_class,
@@ -357,6 +352,7 @@ fn decode_dependency(value: &Value) -> Result<InputDependencyV1, InputDependency
             classification_rule,
             provenance_digest,
         })
+        .map_err(contract_error)
 }
 
 fn tick_range_field(value: &Value) -> Result<DependencyTickRangeV1, WireError> {
@@ -384,5 +380,6 @@ const fn contract_error(error: WireError) -> InputDependencyContractErrorV1 {
         WireError::InvalidEncoding => InputDependencyContractErrorV1::InvalidEncoding,
         WireError::FieldOutOfBounds => InputDependencyContractErrorV1::FieldOutOfBounds,
         WireError::UnsupportedVersion => InputDependencyContractErrorV1::UnsupportedVersion,
+        WireError::UnknownEnum => InputDependencyContractErrorV1::UnknownEnum,
     }
 }

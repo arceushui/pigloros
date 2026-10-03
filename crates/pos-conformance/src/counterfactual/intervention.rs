@@ -30,6 +30,11 @@ const LIMITS: CborLimits = CborLimits {
     maximum_items: 16,
     allow_simple_values: false,
 };
+/// Closed operations indexed by their INT1 wire code.
+const OPERATIONS: [InterventionOperationV1; 2] = [
+    InterventionOperationV1::AssignValue,
+    InterventionOperationV1::AssignArtifact,
+];
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_RATIONALE_BYTES: usize = 4_096;
 const DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.Intervention.v1";
@@ -83,14 +88,6 @@ impl InterventionOperationV1 {
         match self {
             Self::AssignValue => 0,
             Self::AssignArtifact => 1,
-        }
-    }
-
-    const fn from_code(code: u64) -> Result<Self, InterventionContractErrorV1> {
-        match code {
-            0 => Ok(Self::AssignValue),
-            1 => Ok(Self::AssignArtifact),
-            _ => Err(InterventionContractErrorV1::UnknownEnum),
         }
     }
 }
@@ -350,7 +347,7 @@ fn decode_intervention(value: &Value) -> Result<InterventionV1, InterventionCont
     let target_schema_id = fields.read_u32();
     let target_entity_id = fields.read_text();
     let target_field = fields.read_text();
-    let operation_code = fields.read_u64();
+    let operation = fields.read_enum(&OPERATIONS, InterventionOperationV1::AssignValue);
     let value_digest = fields.read_bytes::<32>();
     let effective_tick = fields.read_u64();
     let ordinal = fields.read_u32();
@@ -363,8 +360,7 @@ fn decode_intervention(value: &Value) -> Result<InterventionV1, InterventionCont
     fields
         .finish()
         .map_err(contract_error)
-        .and_then(|()| InterventionOperationV1::from_code(operation_code))
-        .map(|operation| InterventionV1 {
+        .map(|()| InterventionV1 {
             intervention_id,
             target_schema_id,
             target_entity_id,
@@ -387,5 +383,6 @@ const fn contract_error(error: WireError) -> InterventionContractErrorV1 {
         WireError::InvalidEncoding => InterventionContractErrorV1::InvalidEncoding,
         WireError::FieldOutOfBounds => InterventionContractErrorV1::FieldOutOfBounds,
         WireError::UnsupportedVersion => InterventionContractErrorV1::UnsupportedVersion,
+        WireError::UnknownEnum => InterventionContractErrorV1::UnknownEnum,
     }
 }
