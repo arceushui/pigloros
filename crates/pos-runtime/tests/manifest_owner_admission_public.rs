@@ -815,6 +815,10 @@ fn registry_commits_local_cut_owner_and_recovers_without_authority() -> TestResu
         local_state.inventory_generation,
         local_cut.result_inventory_generation
     );
+    assert_eq!(
+        store.verify_local_cut_owner_history_v1(owner_id)?.as_ref(),
+        Some(&local_state)
+    );
     let current_admission = store
         .read_manifest_owner_state_v1(owner_id)?
         .ok_or("missing synchronized admitted owner state")?;
@@ -894,6 +898,13 @@ fn sqlite_local_cut_owner_retry_survives_reopen_without_registry_authority() -> 
     drop(store);
 
     let mut reopened = pos_store::sqlite::SqliteStore::open(database)?;
+    let verified = reopened
+        .verify_local_cut_owner_history_v1(owner_id)?
+        .ok_or("SQLite local-cut owner history was not retained")?;
+    assert_eq!(
+        verified.previous_visible_lcq1_hash,
+        Some(applied.receipt.digest())
+    );
     let retry = recover_local_cut_owner_retry_v1(&local_cut, &reopened)?
         .ok_or("SQLite local-cut owner operation was not recovered")?;
     assert_eq!(retry.kind, LocalCutOwnerCommitKindV1::ExactRetry);
