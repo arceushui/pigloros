@@ -469,7 +469,6 @@ fn authorize(
         .map(|fact| fact.resolved_public_key()))
 }
 
-
 /// Project raw PMF1 bytes published with the default closure members.
 fn project_raw(pmf1: Vec<u8>) -> BoxResult<Projection> {
     project_bytes(pmf1, &Release::new()?.members)
