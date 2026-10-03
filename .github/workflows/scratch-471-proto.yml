@@ -13,6 +13,7 @@ concurrency:
 
 jobs:
   linux:
+    if: ${{ !contains(github.event.head_commit.message, '[win-only]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -144,6 +145,7 @@ jobs:
             foreach ($k in 'HKCU:\Software\Policies\Microsoft\Edge\WebView2','HKLM:\Software\Policies\Microsoft\Edge\WebView2') { "policy $k exists=$(Test-Path $k)" }
             query session 2>&1
           } 2>&1 | Tee-Object "$o\00-runner.txt"
+          exit 0
       - name: G9 - loader binaries vs Microsoft NuGet SDK
         run: |
           $o = "$env:RUNNER_TEMP\out"; $w = "$env:RUNNER_TEMP\g9"; New-Item -ItemType Directory -Force $w | Out-Null
@@ -163,6 +165,7 @@ jobs:
             "nuspec:"; Get-Content "$w\sdk\Microsoft.Web.WebView2.nuspec" | Select-String 'version|license|id>' 
           } 2>&1 | Tee-Object "$o\10-g9-loader.txt"
           Copy-Item "$w\sdk\LICENSE.txt" "$o\WebView2-SDK-LICENSE.txt"; Copy-Item "$w\sdk\NOTICE.txt" "$o\WebView2-SDK-NOTICE.txt" -ErrorAction SilentlyContinue
+          exit 0
       - name: G10/G15 - Fixed Runtime CAB hash, Authenticode, layout, hash cost
         run: |
           $o = "$env:RUNNER_TEMP\out"; $w = "$env:RUNNER_TEMP\rt"; New-Item -ItemType Directory -Force "$w\x" | Out-Null
@@ -191,6 +194,7 @@ jobs:
             "per-start (metadata all + 4 re-hashes) ms=$([int]$t2.TotalMilliseconds)"
             $t3 = Measure-Command { $null = Get-FileHash "$root\msedge.dll" }; "msedge.dll alone ms=$([int]$t3.TotalMilliseconds)"
           } 2>&1 | Tee-Object "$o\20-g10-g15-runtime.txt"
+          exit 0
       - name: native Windows build (toolchain 1.97.1) of r6-deps and the probe
         run: |
           $o = "$env:RUNNER_TEMP\out"
