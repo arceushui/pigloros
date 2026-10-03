@@ -1,0 +1,38 @@
+# THROWAWAY WebView2 probe for #471 (ADR-110 r6 gates G1-G4, G6, G11, G12, G16
+# on windows-latest). Never merged.
+[package]
+name = "wv2probe"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+sha2 = "0.11"
+base64 = { version = "=0.22.1", default-features = false }
+httparse = { version = "=1.10.1", default-features = false }
+getrandom = "=0.4.3"
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "=0.39.1"
+windows = { version = "=0.62.2", default-features = false, features = [
+  "std",
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Networking_WinSock",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Com",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Globalization",
+  "Win32_System_Ole",
+  "Win32_System_Variant",
+  "Win32_System_WinRT",
+  # NOT in the r6 §3 list; needed for SetProcessDpiAwarenessContext (§1a/§2 item 12).
+  "Win32_UI_HiDpi",
+] }
+
+[workspace]

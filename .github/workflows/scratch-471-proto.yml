@@ -1,0 +1,237 @@
+# THROWAWAY prototype workflow for Redmine #471 (ADR-110 r6 gates). Lives only
+# on scratch/471-owner-bridge-prototype and is deleted with the branch.
+name: scratch-471-proto
+on:
+  push:
+    branches: [scratch/471-owner-bridge-prototype]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: scratch-471-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      OUT: ${{ github.workspace }}/../out
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+          components: llvm-tools-preview, clippy
+          targets: x86_64-pc-windows-msvc, x86_64-unknown-none
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-deny,cargo-audit,cargo-shear,cargo-llvm-cov,covgate@0.2.0
+      - name: tool versions
+        run: |
+          mkdir -p "$OUT"
+          { rustc -Vv; cargo -V; cargo deny --version; cargo audit --version; cargo shear --version; cargo llvm-cov --version; covgate --version; } 2>&1 | tee "$OUT/00-versions.txt"
+      - name: r6 deny.toml variant (Windows target + openssl-src ban)
+        run: |
+          python3 - <<'PY'
+          s = open("deny.toml").read()
+          s = s.replace('targets = [{ triple = "x86_64-unknown-linux-gnu" }]',
+                        'targets = [{ triple = "x86_64-unknown-linux-gnu" }, { triple = "x86_64-pc-windows-msvc" }]')
+          s = s.replace('  { crate = "openssl-sys", use-instead = "rustls" },\n',
+                        '  { crate = "openssl-sys", use-instead = "rustls" },\n  { crate = "openssl-src", use-instead = "rustls" },\n')
+          open("../r6-deny.toml", "w").write(s)
+          PY
+          diff deny.toml ../r6-deny.toml | tee "$OUT/01-r6-deny-toml.diff" || true
+          cp Cargo.lock "$OUT/Cargo.lock.main"
+      - name: G8 baseline - cargo deny on current main
+        run: |
+          set +e
+          cargo deny --locked --target x86_64-pc-windows-msvc check > "$OUT/10-deny-main-windows-cli.txt" 2>&1; echo "exit=$?" >> "$OUT/10-deny-main-windows-cli.txt"
+          cargo deny --locked --target x86_64-pc-windows-msvc --format json check > "$OUT/10-deny-main-windows-cli.json" 2>&1
+          cargo deny --locked --config ../r6-deny.toml check > "$OUT/11-deny-main-r6config.txt" 2>&1; echo "exit=$?" >> "$OUT/11-deny-main-r6config.txt"
+          cargo deny --locked check > "$OUT/12-deny-main-linux.txt" 2>&1; echo "exit=$?" >> "$OUT/12-deny-main-linux.txt"
+          tail -n 5 "$OUT"/1*.txt
+      - name: baseline - cargo shear and audit on main
+        run: |
+          set +e
+          cargo shear --deny-warnings > "$OUT/13-shear-main.txt" 2>&1; echo "exit=$?" >> "$OUT/13-shear-main.txt"
+          cargo audit > "$OUT/14-audit-main.txt" 2>&1; echo "exit=$?" >> "$OUT/14-audit-main.txt"
+          tail -n 3 "$OUT/13-shear-main.txt" "$OUT/14-audit-main.txt"
+      - name: add r6 prototype crates (runner only) and resolve
+        run: |
+          python3 scratch-proto/add_members.py . scratch-proto/r6-deps scratch-proto/wv2probe
+          cargo metadata --format-version 1 > /dev/null 2> "$OUT/20-resolve.txt"; echo "exit=$?" >> "$OUT/20-resolve.txt"
+          cat "$OUT/20-resolve.txt"
+          cp Cargo.lock "$OUT/Cargo.lock.r6"
+          git diff --no-color Cargo.lock > "$OUT/21-Cargo.lock.diff" || true
+          python3 scratch-proto/check_lock.py "$OUT/Cargo.lock.main" Cargo.lock 2>&1 | tee "$OUT/22-lock-check.txt"
+      - name: G8 dependency trees, openssl search, SBOM
+        run: |
+          set +e
+          for t in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
+            cargo tree --locked -p r6-deps --target $t -e normal,build > "$OUT/30-tree-r6-$t.txt" 2>&1
+            cargo tree --locked -p wv2probe --target $t -e normal,build > "$OUT/31-tree-probe-$t.txt" 2>&1
+            cargo metadata --locked --format-version 1 --filter-platform $t > "$OUT/sbom-metadata-$t.json" 2>/dev/null
+          done
+          for c in openssl openssl-sys openssl-src tauri wry; do
+            echo "== cargo tree -i $c --target all"; cargo tree --locked --workspace --target all -i $c 2>&1 | head -5
+          done > "$OUT/32-banned-search.txt"
+          cargo tree --locked --workspace --target all -d -e normal,build > "$OUT/33-duplicates-all-targets.txt" 2>&1
+          cat "$OUT/32-banned-search.txt"; cat "$OUT/30-tree-r6-x86_64-pc-windows-msvc.txt"
+      - name: G8 - cargo deny / audit / shear with the r6 set
+        run: |
+          set +e
+          cargo deny --locked --target x86_64-pc-windows-msvc check > "$OUT/40-deny-r6-windows-cli.txt" 2>&1; echo "exit=$?" >> "$OUT/40-deny-r6-windows-cli.txt"
+          cargo deny --locked --target x86_64-pc-windows-msvc --format json check > "$OUT/40-deny-r6-windows-cli.json" 2>&1
+          cargo deny --locked --config ../r6-deny.toml check > "$OUT/41-deny-r6-r6config.txt" 2>&1; echo "exit=$?" >> "$OUT/41-deny-r6-r6config.txt"
+          cargo deny --locked --config ../r6-deny.toml --format json check > "$OUT/41-deny-r6-r6config.json" 2>&1
+          cargo audit > "$OUT/42-audit-r6.txt" 2>&1; echo "exit=$?" >> "$OUT/42-audit-r6.txt"
+          cargo shear --deny-warnings > "$OUT/43-shear-r6.txt" 2>&1; echo "exit=$?" >> "$OUT/43-shear-r6.txt"
+          tail -n 5 "$OUT"/4*.txt
+      - name: MSRV/toolchain 1.97.1 - check on Linux and cross-check for Windows (no linker)
+        run: |
+          set +e
+          cargo check --locked -p r6-deps > "$OUT/50-check-linux.txt" 2>&1; echo "exit=$?" >> "$OUT/50-check-linux.txt"
+          cargo check --locked -p r6-deps -p wv2probe --target x86_64-pc-windows-msvc > "$OUT/51-check-cross-windows.txt" 2>&1; echo "exit=$?" >> "$OUT/51-check-cross-windows.txt"
+          cargo clippy --locked -p wv2probe --target x86_64-pc-windows-msvc --all-targets > "$OUT/52-clippy-cross-windows.txt" 2>&1; echo "exit=$?" >> "$OUT/52-clippy-cross-windows.txt"
+          tail -n 3 "$OUT"/5*.txt
+      - name: codec API / no_std variants (adds codec-nostd after the G8 snapshot)
+        run: |
+          set +e
+          python3 scratch-proto/add_members.py . scratch-proto/codec-nostd
+          cargo metadata --format-version 1 > /dev/null 2>&1
+          for v in "" "api-key-sec1" "api-sig-der" "api-key-sec1,api-sig-der,der-direct" "api-key-sec1,api-sig-der,p256-pkcs8"; do
+            f="$OUT/60-codec-nostd-[${v:-base}].txt"
+            cargo build -p codec-nostd --target x86_64-unknown-none --features "$v" > "$f" 2>&1; echo "exit=$?" >> "$f"
+            echo "== features=[${v}] $(tail -n1 "$f")"
+            cargo tree -p codec-nostd --target x86_64-unknown-none --features "$v" -e normal >> "$f" 2>&1
+          done
+      - name: covgate 0.2.0 behaviour (list form, exclude, nested selection)
+        run: bash scratch-proto/covgate_probe.sh 2>&1 | tee "$OUT/70-covgate.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: linux-out
+          path: ${{ github.workspace }}/../out
+          retention-days: 3
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - name: runner facts (OS build, session, WebView2 evergreen, overrides)
+        run: |
+          $o = "$env:RUNNER_TEMP\out"; New-Item -ItemType Directory -Force $o | Out-Null
+          & {
+            $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+            "OS: $($cv.ProductName) $($cv.DisplayVersion) build $($cv.CurrentBuild).$($cv.UBR) edition $($cv.EditionID)"
+            "UserInteractive=$([Environment]::UserInteractive) SessionId=$((Get-Process -Id $PID).SessionId) User=$(whoami)"
+            "CPU: $((Get-CimInstance Win32_Processor).Name) cores=$([Environment]::ProcessorCount)"
+            foreach ($k in 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}','HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}','HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}') {
+              if (Test-Path $k) { "WebView2 evergreen ($k): pv=$((Get-ItemProperty $k).pv)" } else { "absent: $k" } }
+            "Edge: $((Get-Item 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe' -ErrorAction SilentlyContinue).VersionInfo.ProductVersion)"
+            "WEBVIEW2_* env: $((Get-ChildItem env: | Where-Object Name -like 'WEBVIEW2_*' | ForEach-Object { $_.Name }) -join ',')"
+            foreach ($k in 'HKCU:\Software\Policies\Microsoft\Edge\WebView2','HKLM:\Software\Policies\Microsoft\Edge\WebView2') { "policy $k exists=$(Test-Path $k)" }
+            query session 2>&1
+          } 2>&1 | Tee-Object "$o\00-runner.txt"
+      - name: G9 - loader binaries vs Microsoft NuGet SDK
+        run: |
+          $o = "$env:RUNNER_TEMP\out"; $w = "$env:RUNNER_TEMP\g9"; New-Item -ItemType Directory -Force $w | Out-Null
+          & {
+            Invoke-WebRequest https://static.crates.io/crates/webview2-com-sys/webview2-com-sys-0.39.1.crate -OutFile "$w\sys.crate"
+            "crate sha256: $((Get-FileHash "$w\sys.crate").Hash)"
+            tar -xzf "$w\sys.crate" -C $w
+            Invoke-WebRequest https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg -OutFile "$w\sdk.zip"
+            "nupkg sha256: $((Get-FileHash "$w\sdk.zip").Hash)"
+            Expand-Archive "$w\sdk.zip" "$w\sdk" -Force
+            foreach ($f in 'WebView2LoaderStatic.lib','WebView2Loader.dll','WebView2Loader.dll.lib') {
+              $a = (Get-FileHash "$w\webview2-com-sys-0.39.1\x64\$f").Hash; $b = (Get-FileHash "$w\sdk\build\native\x64\$f").Hash
+              "x64/$f crate=$a nuget=$b equal=$($a -eq $b)" }
+            foreach ($f in "$w\webview2-com-sys-0.39.1\x64\WebView2Loader.dll","$w\sdk\build\native\x64\WebView2Loader.dll") {
+              $s = Get-AuthenticodeSignature $f; "authenticode $f : $($s.Status) $($s.SignerCertificate.Subject) thumb=$($s.SignerCertificate.Thumbprint) ts=$($s.TimeStamperCertificate.Subject)" }
+            Copy-Item "$w\sdk.zip" "$w\sdk.nupkg"; dotnet nuget verify --all "$w\sdk.nupkg" -v n 2>&1
+            "nuspec:"; Get-Content "$w\sdk\Microsoft.Web.WebView2.nuspec" | Select-String 'version|license|id>' 
+          } 2>&1 | Tee-Object "$o\10-g9-loader.txt"
+          Copy-Item "$w\sdk\LICENSE.txt" "$o\WebView2-SDK-LICENSE.txt"; Copy-Item "$w\sdk\NOTICE.txt" "$o\WebView2-SDK-NOTICE.txt" -ErrorAction SilentlyContinue
+      - name: G10/G15 - Fixed Runtime CAB hash, Authenticode, layout, hash cost
+        run: |
+          $o = "$env:RUNNER_TEMP\out"; $w = "$env:RUNNER_TEMP\rt"; New-Item -ItemType Directory -Force "$w\x" | Out-Null
+          & {
+            $u = 'https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/08cd33ee-d109-49b8-9301-9f0bea43c575/Microsoft.WebView2.FixedVersionRuntime.153.0.4234.48.x64.cab'
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest $u -OutFile "$w\rt.cab"
+            $h = (Get-FileHash "$w\rt.cab").Hash.ToLower()
+            "CAB size=$((Get-Item "$w\rt.cab").Length) sha256=$h expected=11e8240cb0bc56dcd3e4498907203c251346f65107fe35a3a13e152c7d51c79e match=$($h -eq '11e8240cb0bc56dcd3e4498907203c251346f65107fe35a3a13e152c7d51c79e')"
+            function sig($f) { $s = Get-AuthenticodeSignature $f; $c = $s.SignerCertificate
+              $ch = New-Object System.Security.Cryptography.X509Certificates.X509Chain; $null = $ch.Build($c)
+              "  $f`n    Status=$($s.Status) Subject=$($c.Subject)`n    SHA1=$($c.Thumbprint) NotAfter=$($c.NotAfter)`n    TimeStamper=$($s.TimeStamperCertificate.Subject)`n    Chain=$(($ch.ChainElements | ForEach-Object { $_.Certificate.Subject }) -join ' <- ')" }
+            "== Authenticode"; sig "$w\rt.cab"
+            expand.exe "$w\rt.cab" -F:* "$w\x" | Select-Object -Last 2
+            $exe = Get-ChildItem "$w\x" -Recurse -Filter msedgewebview2.exe | Select-Object -First 1
+            $root = $exe.Directory.FullName; "runtime root: $root"; "RUNTIME_ROOT=$root" | Out-File -Append $env:GITHUB_ENV
+            foreach ($n in 'msedgewebview2.exe','msedge.dll','msedge_elf.dll','EmbeddedBrowserWebView.dll') {
+              Get-ChildItem $root -Recurse -Filter $n | ForEach-Object { "per-start candidate: $($_.FullName.Substring($root.Length+1)) size=$($_.Length)"; sig $_.FullName } }
+            $files = Get-ChildItem $root -Recurse -File | Sort-Object FullName
+            "files=$($files.Count) total_bytes=$(($files | Measure-Object Length -Sum).Sum)"
+            $t = Measure-Command { $script:man = $files | ForEach-Object { "{0}  {1}  {2}" -f (Get-FileHash $_.FullName).Hash.ToLower(), $_.Length, $_.FullName.Substring($root.Length+1) } }
+            $man | Out-File "$o\runtime-manifest.txt" -Encoding utf8
+            "full-hash (PowerShell Get-FileHash, warm cache) ms=$([int]$t.TotalMilliseconds)"
+            $per = @('msedgewebview2.exe','msedge.dll','msedge_elf.dll','EBWebView\x64\EmbeddedBrowserWebView.dll')
+            $t2 = Measure-Command { $null = $files | ForEach-Object { $_.Length; $_.LastWriteTimeUtc }; foreach ($p in $per) { if (Test-Path "$root\$p") { $null = Get-FileHash "$root\$p" } else { "MISSING per-start path: $p" | Out-Host } } }
+            "per-start (metadata all + 4 re-hashes) ms=$([int]$t2.TotalMilliseconds)"
+            $t3 = Measure-Command { $null = Get-FileHash "$root\msedge.dll" }; "msedge.dll alone ms=$([int]$t3.TotalMilliseconds)"
+          } 2>&1 | Tee-Object "$o\20-g10-g15-runtime.txt"
+      - name: native Windows build (toolchain 1.97.1) of r6-deps and the probe
+        run: |
+          $o = "$env:RUNNER_TEMP\out"
+          python scratch-proto/add_members.py . scratch-proto/r6-deps scratch-proto/wv2probe
+          cargo check -p r6-deps 2>&1 | Tee-Object "$o\30-check-native.txt"
+          "exit=$LASTEXITCODE" | Tee-Object -Append "$o\30-check-native.txt"
+          cargo build --release -p wv2probe 2>&1 | Tee-Object "$o\31-build-probe.txt"
+          "exit=$LASTEXITCODE" | Tee-Object -Append "$o\31-build-probe.txt"
+          Copy-Item Cargo.lock "$o\Cargo.lock.windows-r6"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: G11 - evergreen runtime smoke (3 runs)
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          PROBE_RUNTIME: evergreen
+          PROBE_RUNS: "3"
+        run: |
+          $env:PROBE_CSV = "$env:RUNNER_TEMP\out\40-evergreen.csv"; $env:PROBE_UDF_ROOT = "$env:RUNNER_TEMP\udf-e"
+          .\target\release\wv2probe.exe 2>&1 | Tee-Object "$env:RUNNER_TEMP\out\40-evergreen.txt"
+      - name: G11/G1/G2/G6/G12 - fixed runtime 153.0.4234.48 smoke + 10^6 Atomics handoffs
+        continue-on-error: true
+        timeout-minutes: 25
+        env:
+          PROBE_RUNS: "5"
+          PROBE_HANDOFFS: "1000000"
+        run: |
+          $env:PROBE_RUNTIME = $env:RUNTIME_ROOT
+          $env:PROBE_CSV = "$env:RUNNER_TEMP\out\41-fixed-smoke.csv"; $env:PROBE_UDF_ROOT = "$env:RUNNER_TEMP\udf-f"
+          .\target\release\wv2probe.exe 2>&1 | Tee-Object "$env:RUNNER_TEMP\out\41-fixed-smoke.txt"
+      - name: G3/G4/G16 - fixed runtime, 1000 fresh-environment ceremonies
+        continue-on-error: true
+        timeout-minutes: 90
+        env:
+          PROBE_RUNS: "1000"
+        run: |
+          $env:PROBE_RUNTIME = $env:RUNTIME_ROOT
+          $env:PROBE_CSV = "$env:RUNNER_TEMP\out\42-fixed-1000.csv"; $env:PROBE_UDF_ROOT = "$env:RUNNER_TEMP\udf-g"
+          .\target\release\wv2probe.exe 2>&1 | Tee-Object "$env:RUNNER_TEMP\out\42-fixed-1000.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: windows-out
+          path: ${{ runner.temp }}/out
+          retention-days: 3

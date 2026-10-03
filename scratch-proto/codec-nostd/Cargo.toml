@@ -1,0 +1,26 @@
+# THROWAWAY prototype for #471: does the ADR-110 r6 §2 codec API list compile
+# no_std / no-alloc with the exact §3 feature set?
+[package]
+name = "codec-nostd"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
+sha2 = "0.11"
+httparse = { version = "=1.10.1", default-features = false }
+base64 = { version = "=0.22.1", default-features = false }
+ecdsa = { version = "=0.17.0", default-features = false, optional = true }
+
+[features]
+# Variant V1: add ecdsa's `der` feature directly.
+der-direct = ["dep:ecdsa", "ecdsa/der"]
+# Variant V2: enable p256's `pkcs8` feature (pulls ecdsa-core/pkcs8 -> der, sec1).
+p256-pkcs8 = ["p256/pkcs8"]
+# Variant V3: sec1-encoded key construction only (no DER signatures).
+api-sig-der = []
+api-key-sec1 = []
+
+[workspace]

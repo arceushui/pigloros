@@ -1,0 +1,41 @@
+# THROWAWAY prototype for Redmine #471 / ADR-110 r6 gate G8. Never merged.
+# Declares exactly the ADR-110 r6 §3 dependency rows (all PRs + #399 combined).
+[package]
+name = "r6-deps"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
+sha2 = "0.11"
+httparse = { version = "=1.10.1", default-features = false }
+base64 = { version = "=0.22.1", default-features = false }
+getrandom = "=0.4.3"
+zeroize = "1.9"
+thiserror = "2"
+aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "zeroize"] }
+hkdf = "=0.13.0"
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "=0.39.1"
+windows = { version = "=0.62.2", default-features = false, features = [
+  "std",
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Networking_WinSock",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Com",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Globalization",
+  "Win32_System_Ole",
+  "Win32_System_Variant",
+  "Win32_System_WinRT",
+] }
+
+[workspace]
