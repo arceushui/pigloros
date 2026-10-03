@@ -954,6 +954,10 @@ pub struct InputDependencyV1 {
 }
 
 /// One ordered user Intervention admitted at a Tick Boundary.
+///
+/// This is proof-local evidence, not a public wire schema. The ADR-064 INT1
+/// contract is [`counterfactual::InterventionV1`], which converts from this
+/// record through [`counterfactual::InterventionV1::from_proof_evidence_v1`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InterventionV1 {
