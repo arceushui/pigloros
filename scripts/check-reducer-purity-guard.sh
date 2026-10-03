@@ -25,6 +25,8 @@ crate_roots() {
 }
 mapfile -t crates < <(crate_roots 'plugins/**/src/reducer.rs')
 mapfile -t factory_crates < <(crate_roots 'plugins/**/tests/staged_factory_type_name.rs')
+# ADR-113 §7 admits eight reviewed Plugin crates: bump this deliberately when
+# a new Plugin joins the reviewed staged-factory list.
 expected_crates=8
 canonical="plugins/agent/clippy.toml"
 failures=0
