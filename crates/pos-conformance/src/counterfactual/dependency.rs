@@ -12,6 +12,13 @@
 //! `[first_tick, last_tick]`, authorization digest, `[rule_id, rule_version]`,
 //! and provenance digest. Graph completeness, reachability, and frontier
 //! derivation are owned by later ADR-064 contracts and are not decided here.
+//!
+//! Two rules are contract choices where ADR-064 is silent. The source must
+//! strictly precede the consumer in `(tick, scheduler_position, owner_id,
+//! output_ordinal)`, which rules out self-loops and same-slot edges. The Tick
+//! range must cover both endpoints but may be wider, so an edge that holds
+//! across several Ticks is expressible; the proof-evidence conversion always
+//! uses the exact `[source.tick, consumer.tick]` span.
 
 use crate::{domain_digest, DependencyClassV1, DependencyNodeV1};
 use ciborium::value::Value;
@@ -23,6 +30,7 @@ pub const INPUT_DEPENDENCY_MAGIC_V1: &str = "IDP1";
 pub const MAX_INPUT_DEPENDENCY_BYTES_V1: usize = 16 * 1024;
 
 const FIELD_COUNT: usize = 9;
+const MAX_FIELD_ITEMS: u64 = 9;
 const NODE_FIELD_COUNT: usize = 6;
 const MAX_OWNER_ID_BYTES: usize = 128;
 const MAX_RULE_ID_BYTES: usize = 128;
@@ -70,7 +78,9 @@ impl std::error::Error for InputDependencyContractErrorV1 {}
 /// `consumer.tick <= last_tick`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DependencyTickRangeV1 {
+    /// First Tick, inclusive, at which the edge holds.
     pub first_tick: u64,
+    /// Last Tick, inclusive, at which the edge holds.
     pub last_tick: u64,
 }
 
@@ -91,12 +101,19 @@ pub struct DependencyClassificationRuleV1 {
 /// order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputDependencyV1 {
+    /// Node that consumed the input.
     pub consumer: DependencyNodeV1,
+    /// Node that produced the input.
     pub source: DependencyNodeV1,
+    /// Closed ADR-064 class of the edge.
     pub dependency_class: DependencyClassV1,
+    /// Inclusive Tick range covering both endpoints.
     pub tick_range: DependencyTickRangeV1,
+    /// Digest of the authorization decision that admitted the edge.
     pub authorization_digest: [u8; 32],
+    /// Rule and version that assigned the class.
     pub classification_rule: DependencyClassificationRuleV1,
+    /// Digest of the edge's provenance.
     pub provenance_digest: [u8; 32],
 }
 
@@ -365,24 +382,25 @@ fn decode_rule(
 fn encode_value(value: &Value) -> Result<Vec<u8>, InputDependencyContractErrorV1> {
     let mut encoded = Vec::new();
     ciborium::into_writer(value, &mut encoded)
-        .ok()
         .map(|()| encoded)
-        .ok_or(InputDependencyContractErrorV1::InvalidEncoding)
+        .or(Err(InputDependencyContractErrorV1::InvalidEncoding))
 }
 
 fn decode_value(encoded: &[u8]) -> Result<Value, InputDependencyContractErrorV1> {
     preflight_cbor(encoded)?;
     let value = ciborium::from_reader::<Value, _>(encoded)
         .map_err(|_| InputDependencyContractErrorV1::InvalidEncoding)?;
-    if encode_value(&value)? == encoded {
-        Ok(value)
-    } else {
-        Err(InputDependencyContractErrorV1::InvalidEncoding)
-    }
+    encode_value(&value).and_then(|canonical| {
+        if canonical == encoded {
+            Ok(value)
+        } else {
+            Err(InputDependencyContractErrorV1::InvalidEncoding)
+        }
+    })
 }
 
 fn preflight_cbor(encoded: &[u8]) -> Result<(), InputDependencyContractErrorV1> {
-    crate::preflight_array_cbor(encoded, MAX_NESTING_DEPTH, FIELD_COUNT as u64, false).map_err(
+    crate::preflight_array_cbor(encoded, MAX_NESTING_DEPTH, MAX_FIELD_ITEMS, false).map_err(
         |error| match error {
             crate::CborPreflightError::InvalidEncoding => {
                 InputDependencyContractErrorV1::InvalidEncoding
