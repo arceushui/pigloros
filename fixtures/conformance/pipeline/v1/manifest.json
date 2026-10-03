@@ -6,7 +6,9 @@
     "#488",
     "#321",
     "#504",
+    "#494",
     "ADR-021 R3",
+    "ADR-021 R4",
     "ADR-024 R1",
     "ADR-024 R2",
     "ADR-062"
@@ -639,6 +641,245 @@
         "late.authorized": "scheduled Driver 'world' has no observation profile assignment",
         "driver.steps/aborts": "0/0",
         "committed": "0"
+      }
+    },
+    {
+      "id": "PCF-R4-001",
+      "title": "A cursor-based Driver subscribing to an ADR-039 modality type is rejected at registration on every path and leaves the registry unchanged",
+      "sources": [
+        "#494",
+        "ADR-021 R4",
+        "ADR-039"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "persona.generated": "cursor-based Driver subscribes to consent-sensitive Event type 'persona.prediction'",
+        "persona.generated.unchanged": "true",
+        "persona.generated.verified-prefix": "registered",
+        "persona.generated-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'persona.prediction'",
+        "persona.generated-with-approver.unchanged": "true",
+        "persona.generated-with-approver.verified-prefix": "registered",
+        "persona.local": "cursor-based Driver subscribes to consent-sensitive Event type 'persona.prediction'",
+        "persona.local.unchanged": "true",
+        "persona.local.verified-prefix": "registered",
+        "persona.pinned": "cursor-based Driver subscribes to consent-sensitive Event type 'persona.prediction'",
+        "persona.pinned.unchanged": "true",
+        "persona.pinned.verified-prefix": "registered",
+        "persona.pinned-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'persona.prediction'",
+        "persona.pinned-with-approver.unchanged": "true",
+        "persona.pinned-with-approver.verified-prefix": "registered",
+        "persona.verified": "cursor-based Driver subscribes to consent-sensitive Event type 'persona.prediction'",
+        "persona.verified.unchanged": "true",
+        "persona.verified.verified-prefix": "registered",
+        "persona.verified-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'persona.prediction'",
+        "persona.verified-with-approver.unchanged": "true",
+        "persona.verified-with-approver.verified-prefix": "registered",
+        "persona.test-driver": "cursor-based Driver subscribes to consent-sensitive Event type 'persona.prediction'",
+        "persona.test-driver.unchanged": "true",
+        "persona.test-driver.verified-prefix": "registered",
+        "persona.undeclared-driver": "cursor-based Driver subscribes to consent-sensitive Event type 'persona.prediction'",
+        "persona.undeclared-driver.unchanged": "true",
+        "persona.undeclared-driver.verified-prefix": "registered",
+        "persona.installed": "fails-closed:EPF1",
+        "persona.installed.unchanged": "true",
+        "persona.installed.verified-prefix": "fails-closed:EPF1",
+        "persona.manifest-slot": "fails-closed:EPF1",
+        "persona.manifest-slot.unchanged": "true",
+        "persona.manifest-slot.verified-prefix": "fails-closed:EPF1",
+        "geo.generated": "cursor-based Driver subscribes to consent-sensitive Event type 'geo.location.v1'",
+        "geo.generated.unchanged": "true",
+        "geo.generated.verified-prefix": "registered",
+        "geo.generated-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'geo.location.v1'",
+        "geo.generated-with-approver.unchanged": "true",
+        "geo.generated-with-approver.verified-prefix": "registered",
+        "geo.local": "cursor-based Driver subscribes to consent-sensitive Event type 'geo.location.v1'",
+        "geo.local.unchanged": "true",
+        "geo.local.verified-prefix": "registered",
+        "geo.pinned": "cursor-based Driver subscribes to consent-sensitive Event type 'geo.location.v1'",
+        "geo.pinned.unchanged": "true",
+        "geo.pinned.verified-prefix": "registered",
+        "geo.pinned-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'geo.location.v1'",
+        "geo.pinned-with-approver.unchanged": "true",
+        "geo.pinned-with-approver.verified-prefix": "registered",
+        "geo.verified": "cursor-based Driver subscribes to consent-sensitive Event type 'geo.location.v1'",
+        "geo.verified.unchanged": "true",
+        "geo.verified.verified-prefix": "registered",
+        "geo.verified-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'geo.location.v1'",
+        "geo.verified-with-approver.unchanged": "true",
+        "geo.verified-with-approver.verified-prefix": "registered",
+        "geo.test-driver": "cursor-based Driver subscribes to consent-sensitive Event type 'geo.location.v1'",
+        "geo.test-driver.unchanged": "true",
+        "geo.test-driver.verified-prefix": "registered",
+        "geo.undeclared-driver": "cursor-based Driver subscribes to consent-sensitive Event type 'geo.location.v1'",
+        "geo.undeclared-driver.unchanged": "true",
+        "geo.undeclared-driver.verified-prefix": "registered",
+        "geo.installed": "fails-closed:EPF1",
+        "geo.installed.unchanged": "true",
+        "geo.installed.verified-prefix": "fails-closed:EPF1",
+        "geo.manifest-slot": "fails-closed:EPF1",
+        "geo.manifest-slot.unchanged": "true",
+        "geo.manifest-slot.verified-prefix": "fails-closed:EPF1"
+      }
+    },
+    {
+      "id": "PCF-R4-002",
+      "title": "A cursor-based Driver subscribing to a Fork request or retention type is rejected at registration on every path",
+      "sources": [
+        "#494",
+        "ADR-021 R4",
+        "ADR-039"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "fork.generated": "cursor-based Driver subscribes to consent-sensitive Event type 'timeline.fork.requested'",
+        "fork.generated.unchanged": "true",
+        "fork.generated.verified-prefix": "registered",
+        "fork.generated-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'timeline.fork.requested'",
+        "fork.generated-with-approver.unchanged": "true",
+        "fork.generated-with-approver.verified-prefix": "registered",
+        "fork.local": "cursor-based Driver subscribes to consent-sensitive Event type 'timeline.fork.requested'",
+        "fork.local.unchanged": "true",
+        "fork.local.verified-prefix": "registered",
+        "fork.pinned": "cursor-based Driver subscribes to consent-sensitive Event type 'timeline.fork.requested'",
+        "fork.pinned.unchanged": "true",
+        "fork.pinned.verified-prefix": "registered",
+        "fork.pinned-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'timeline.fork.requested'",
+        "fork.pinned-with-approver.unchanged": "true",
+        "fork.pinned-with-approver.verified-prefix": "registered",
+        "fork.verified": "cursor-based Driver subscribes to consent-sensitive Event type 'timeline.fork.requested'",
+        "fork.verified.unchanged": "true",
+        "fork.verified.verified-prefix": "registered",
+        "fork.verified-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'timeline.fork.requested'",
+        "fork.verified-with-approver.unchanged": "true",
+        "fork.verified-with-approver.verified-prefix": "registered",
+        "fork.test-driver": "cursor-based Driver subscribes to consent-sensitive Event type 'timeline.fork.requested'",
+        "fork.test-driver.unchanged": "true",
+        "fork.test-driver.verified-prefix": "registered",
+        "fork.undeclared-driver": "cursor-based Driver subscribes to consent-sensitive Event type 'timeline.fork.requested'",
+        "fork.undeclared-driver.unchanged": "true",
+        "fork.undeclared-driver.verified-prefix": "registered",
+        "fork.installed": "fails-closed:EPF1",
+        "fork.installed.unchanged": "true",
+        "fork.installed.verified-prefix": "fails-closed:EPF1",
+        "fork.manifest-slot": "fails-closed:EPF1",
+        "fork.manifest-slot.unchanged": "true",
+        "fork.manifest-slot.verified-prefix": "fails-closed:EPF1",
+        "retention.generated": "cursor-based Driver subscribes to consent-sensitive Event type 'retention.extended'",
+        "retention.generated.unchanged": "true",
+        "retention.generated.verified-prefix": "registered",
+        "retention.generated-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'retention.extended'",
+        "retention.generated-with-approver.unchanged": "true",
+        "retention.generated-with-approver.verified-prefix": "registered",
+        "retention.local": "cursor-based Driver subscribes to consent-sensitive Event type 'retention.extended'",
+        "retention.local.unchanged": "true",
+        "retention.local.verified-prefix": "registered",
+        "retention.pinned": "cursor-based Driver subscribes to consent-sensitive Event type 'retention.extended'",
+        "retention.pinned.unchanged": "true",
+        "retention.pinned.verified-prefix": "registered",
+        "retention.pinned-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'retention.extended'",
+        "retention.pinned-with-approver.unchanged": "true",
+        "retention.pinned-with-approver.verified-prefix": "registered",
+        "retention.verified": "cursor-based Driver subscribes to consent-sensitive Event type 'retention.extended'",
+        "retention.verified.unchanged": "true",
+        "retention.verified.verified-prefix": "registered",
+        "retention.verified-with-approver": "cursor-based Driver subscribes to consent-sensitive Event type 'retention.extended'",
+        "retention.verified-with-approver.unchanged": "true",
+        "retention.verified-with-approver.verified-prefix": "registered",
+        "retention.test-driver": "cursor-based Driver subscribes to consent-sensitive Event type 'retention.extended'",
+        "retention.test-driver.unchanged": "true",
+        "retention.test-driver.verified-prefix": "registered",
+        "retention.undeclared-driver": "cursor-based Driver subscribes to consent-sensitive Event type 'retention.extended'",
+        "retention.undeclared-driver.unchanged": "true",
+        "retention.undeclared-driver.verified-prefix": "registered",
+        "retention.installed": "fails-closed:EPF1",
+        "retention.installed.unchanged": "true",
+        "retention.installed.verified-prefix": "fails-closed:EPF1",
+        "retention.manifest-slot": "fails-closed:EPF1",
+        "retention.manifest-slot.unchanged": "true",
+        "retention.manifest-slot.verified-prefix": "fails-closed:EPF1"
+      }
+    },
+    {
+      "id": "PCF-R4-003",
+      "title": "A verified-prefix Driver never observes a sensitive Event without consent and loses none after a later grant",
+      "sources": [
+        "#494",
+        "ADR-021 R4",
+        "ADR-039"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "public": "ordinary.event@other",
+        "protected-without-modality": "ordinary.event@other",
+        "after-grant": "persona.prediction@subject,ordinary.event@other,persona.prediction@subject",
+        "committed": "4"
+      }
+    },
+    {
+      "id": "PCF-R4-004",
+      "title": "A cursor-based Driver subscribing only to non-sensitive types registers and keeps cursor delivery",
+      "sources": [
+        "#494",
+        "ADR-021 R4"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "first-pass": "ordinary.event@subject,later.event@subject",
+        "protected-pass": "ordinary.event@subject",
+        "idle-pass": "none"
+      }
+    },
+    {
+      "id": "PCF-R4-005",
+      "title": "The registration snapshot governs a Driver whose declarations change after registration",
+      "sources": [
+        "#494",
+        "ADR-021 R4"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "public.cursor": "ordinary.event@other",
+        "public.verified": "ordinary.event@other",
+        "granted.verified": "persona.prediction@subject,ordinary.event@other",
+        "granted.cursor": "none"
       }
     },
     {

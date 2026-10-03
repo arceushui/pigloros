@@ -269,13 +269,13 @@ fn current_now_secs() -> u64 {
     WallTime::now().as_micros() / 1_000_000
 }
 
+/// Whether an Event type may leave the experiment host.
+///
+/// A public type is not subject-controlled (ADR-021 Revision 4 Decision 2)
+/// and is not the experiment's own consent-closed marker.
 fn is_public_event_type(event_type: &Kind) -> bool {
-    !pos_core::is_consent_event_type(event_type)
+    !pos_core::is_subject_controlled_event_type(event_type)
         && event_type.as_str() != EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
-        && !pos_core::is_geographic_event_type(event_type)
-        && pos_core::required_modality_for_event(event_type) == 0
-        && !event_type.as_str().starts_with("timeline.fork.")
-        && !event_type.as_str().starts_with("retention.")
 }
 
 /// Keep only the public Events of a read, in Timeline Order.
