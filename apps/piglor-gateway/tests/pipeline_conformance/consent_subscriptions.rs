@@ -29,8 +29,8 @@ use pos_runtime::{
 use super::{
     harness::Capture,
     support::{
-        draft, events, gated_registry, pass, persona_token, stores, CountingApprover, FixturePlugin,
-        TestOk,
+        draft, events, gated_registry, pass, persona_token, stores, CountingApprover,
+        FixturePlugin, TestOk,
     },
 };
 
@@ -177,9 +177,7 @@ fn register(
         "generated-with-approver" => {
             registry.register_generated_with_approver(plugin, None, Some(driver), approver(), owned)
         }
-        "local" => {
-            registry.register_local(plugin, vec!["r4-local".to_owned()], None, Some(driver))
-        }
+        "local" => registry.register_local(plugin, vec!["r4-local".to_owned()], None, Some(driver)),
         "pinned" => registry.register_pinned_generated(plugin, registration(1), None, Some(driver)),
         "pinned-with-approver" => registry.register_pinned_generated_with_approver(
             plugin,
