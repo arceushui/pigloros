@@ -133,6 +133,7 @@ fn fixture(
         verified_prefix,
         seen: Arc::clone(&seen),
     }));
+    registry.compose_non_participant_drivers().test_ok();
     Fixture {
         registry,
         seen,

@@ -143,6 +143,9 @@ pub enum RuntimeError {
     #[error("participant-authorized Driver work requires a fresh authority fence")]
     AuthorityFenceRequired,
 
+    #[error(transparent)]
+    ScheduledProfile(#[from] crate::ScheduledProfileErrorV1),
+
     #[error("scheduled admission authority persistence failed closed: {0}")]
     AuthorityPersistence(pos_core::AuthorityPersistenceErrorV1),
 

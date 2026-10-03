@@ -158,6 +158,7 @@ fn stage(
 ) -> Result<(Seq, Vec<EventDraft>), RuntimeError> {
     let head = store.logical_head(timeline).test_ok();
     let prefix = store.read(timeline, SeqRange::all()).test_ok();
+    registry.compose_non_participant_drivers().test_ok();
     registry
         .step_all_anchored_protected(timeline, head, token.clone(), 0, &prefix)
         .map(|drafts| (head, drafts))

@@ -4,7 +4,8 @@
 //! every case of the first-party and in-process profile: human and AI
 //! ingress through atomic host admission (#316, #318, #319), failure
 //! precedence, recovery, Replay and evaluation non-authority (#320), the
-//! ADR-021 Revision 3 observation profiles, draft and exclusive Event-type
+//! ADR-021 Revision 3 observation profiles and their composition-time
+//! assignment (#504), draft and exclusive Event-type
 //! ownership (#484, #486, ADR-024 Revision 1), source quarantine (#493,
 //! ADR-024 Revision 2) and revocation persistence
 //! (#483). Each case runs only through public seams, on `MemoryStore` and
@@ -16,6 +17,7 @@
 //! a diverging value, or evidence whose observation profile differs from the
 //! declared tag is a failure. Community Plugin-host cases are #489.
 
+pub mod composition;
 pub mod eval_seam;
 pub mod gateway;
 pub mod harness;
@@ -37,10 +39,10 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "3650a409f44df686d270f03cc4e4d7f39b8b63da52be4947addcf5b73760cfec";
+const MANIFEST_SHA256: &str = "c8b4317bd9cae975b0c0a5b3eaf87bb7a4056a58a790a6a359cc57b3e6f5da32";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 45] = [
+const RUNNERS: [(&str, Runner); 48] = [
     ("PCF-ING-001", ingress::ingress_parity),
     ("PCF-ING-002", ingress::human_admission_receipt),
     ("PCF-ING-003", gateway::first_party_has_no_privileged_route),
@@ -69,6 +71,12 @@ const RUNNERS: [(&str, Runner); 45] = [
         "PCF-R3-008",
         nonparticipant::late_revocation_or_freeze_aborts_the_pass,
     ),
+    ("PCF-R3-009", composition::unassigned_driver_is_rejected),
+    (
+        "PCF-R3-010",
+        composition::participant_bound_driver_never_stages_anchored,
+    ),
+    ("PCF-R3-011", composition::mixed_composition_is_rejected),
     ("PCF-REG-001", ownership::second_claimant_rejected),
     ("PCF-REG-002", ownership::duplicate_declaration_rejected),
     ("PCF-REG-003", ownership::host_type_not_claimable),
@@ -135,7 +143,7 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
         .map(|case| case.id.clone())
         .collect();
     assert_eq!(report.not_applicable, inapplicable);
-    assert_eq!(manifest.cases.len(), 46);
+    assert_eq!(manifest.cases.len(), 49);
     assert_eq!(
         report.passed.len() + report.not_applicable.len(),
         manifest.cases.len()
@@ -144,7 +152,7 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
         .cases
         .iter()
         .all(|case| case.mandatory && !case.id.is_empty()));
-    assert_eq!(manifest.exclusions.len(), 6);
+    assert_eq!(manifest.exclusions.len(), 3);
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────

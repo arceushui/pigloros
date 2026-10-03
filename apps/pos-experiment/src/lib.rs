@@ -769,6 +769,17 @@ pub enum ExperimentError {
     },
 }
 
+/// Compose a fresh Driver registry for the experiment host, which has no
+/// Participants: every Driver is explicitly non-participant (ADR-021
+/// Revision 3), and a participant-bound Driver is rejected here.
+fn compose_non_participant(
+    mut registry: PluginRegistry,
+) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    registry
+        .compose_non_participant_drivers()
+        .map(|()| registry)
+}
+
 fn map_runtime_error(error: pos_runtime::RuntimeError) -> ExperimentError {
     match error {
         pos_runtime::RuntimeError::Store(error) => ExperimentError::Store(error),
@@ -1266,6 +1277,34 @@ fn restore_inherited_eval_events(
         })
 }
 
+/// Build the train-phase registry, compose its Drivers non-participant, and
+/// create the train Timeline.
+fn begin_backtest_train(
+    registry_factory: &dyn Fn() -> PluginRegistry,
+    store: &mut dyn pos_core::store::EventStore,
+    runtime_gate: Arc<dyn ErasureGate>,
+    name: &str,
+) -> Result<(PluginRegistry, Arc<dyn ErasureGate>, Timeline), ExperimentError> {
+    let mut registry = compose_non_participant(registry_factory())?;
+    let (gate, timeline) = start_backtest_train(store, &mut registry, runtime_gate, name)?;
+    Ok((registry, gate, timeline))
+}
+
+/// Build the eval-phase registry, compose its Drivers non-participant, and
+/// restore the inherited train history into it.
+fn begin_backtest_eval(
+    registry_factory: &dyn Fn() -> PluginRegistry,
+    store: &dyn pos_core::store::EventStore,
+    timeline: pos_core::ids::TimelineId,
+    train_head: pos_core::clock::Seq,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<(PluginRegistry, Vec<pos_core::Event>), ExperimentError> {
+    let mut registry = compose_non_participant(registry_factory())?;
+    let inherited =
+        prepare_backtest_eval_registry(store, timeline, train_head, &mut registry, gate)?;
+    Ok((registry, inherited))
+}
+
 fn prepare_backtest_eval_registry(
     store: &dyn pos_core::store::EventStore,
     timeline: pos_core::ids::TimelineId,
@@ -1354,7 +1393,8 @@ impl Experiment {
         mut self,
         factory: impl Fn() -> Result<PluginRegistry, pos_runtime::RuntimeError> + Send + Sync + 'static,
     ) -> Self {
-        self.fork_registry_factory = Some(Arc::new(factory));
+        let composed = move || factory().and_then(compose_non_participant);
+        self.fork_registry_factory = Some(Arc::new(composed));
         self
     }
 
@@ -1400,7 +1440,9 @@ impl Experiment {
         reducer: Option<Box<dyn pos_core::Reducer>>,
         driver: Option<Box<dyn pos_runtime::Driver>>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register_generated(plugin, reducer, driver)
+        self.registry
+            .register_generated(plugin, reducer, driver)
+            .and_then(|()| self.registry.compose_non_participant_drivers())
     }
 
     /// Register a Plugin with a complete host-authorized output binding.
@@ -1417,6 +1459,7 @@ impl Experiment {
     ) -> Result<(), pos_runtime::RuntimeError> {
         self.registry
             .register_with_verified_output_policy(plugin, binding, reducer, driver)
+            .and_then(|()| self.registry.compose_non_participant_drivers())
     }
 
     /// Register a Plugin with an authorized binding and optional action approver.
@@ -1442,6 +1485,7 @@ impl Experiment {
                 approver,
                 approver_event_types,
             )
+            .and_then(|()| self.registry.compose_non_participant_drivers())
     }
 
     /// Register a plugin with an optional action approver.
@@ -1457,13 +1501,15 @@ impl Experiment {
         approver: Option<Box<dyn pos_core::ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register_generated_with_approver(
-            plugin,
-            reducer,
-            driver,
-            approver,
-            approver_event_types,
-        )
+        self.registry
+            .register_generated_with_approver(
+                plugin,
+                reducer,
+                driver,
+                approver,
+                approver_event_types,
+            )
+            .and_then(|()| self.registry.compose_non_participant_drivers())
     }
 
     /// Create the experiment Timeline and retain the live runtime resources.
@@ -3142,9 +3188,8 @@ impl BacktestRunner {
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
-        let mut train_registry = (self.registry_factory)();
-        let (erasure_gate, train_tl) =
-            start_backtest_train(store, &mut train_registry, runtime_gate, &train_name)?;
+        let (mut train_registry, erasure_gate, train_tl) =
+            begin_backtest_train(&*self.registry_factory, store, runtime_gate, &train_name)?;
         let train_tl_id = train_tl.id();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
@@ -3163,12 +3208,11 @@ impl BacktestRunner {
         let eval_tl_id = eval_tl.id();
 
         // --- Eval phase (same store, forked timeline) ---
-        let mut eval_registry = (self.registry_factory)();
-        let inherited = prepare_backtest_eval_registry(
+        let (mut eval_registry, inherited) = begin_backtest_eval(
+            &*self.registry_factory,
             store,
             eval_tl_id,
             train_head_seq,
-            &mut eval_registry,
             erasure_gate,
         )?;
         hydrate_projections(&mut eval_registry, eval_tl_id, &inherited);
@@ -5640,6 +5684,7 @@ pub mod tests {
                 Some(Box::new(CaptureFailDriver)),
             )
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
         assert!(append_driver_drafts(
             &mut driver_store,
             driver_timeline.id(),
@@ -5729,6 +5774,7 @@ pub mod tests {
                 )
                 .test_ok();
         }
+        registry.compose_non_participant_drivers().test_ok();
         registry
     }
 
@@ -7565,6 +7611,9 @@ mod coverage_entrypoints {
                 Box::new(UnknownDraftDriver),
             )
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        registry
+            .compose_non_participant_drivers()
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
     }
 
     fn register_owned_schema_failure_driver(registry: &mut PluginRegistry) {
@@ -7583,6 +7632,9 @@ mod coverage_entrypoints {
                 binding,
                 Box::new(OwnedUnknownDraftDriver),
             )
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
+        registry
+            .compose_non_participant_drivers()
             .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)));
     }
 
