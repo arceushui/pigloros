@@ -211,7 +211,7 @@ fn plan_roundtrips_exact_wire_fields_and_domain_digest() -> TestResult {
     assert_eq!(fields_of(&bytes)?, expected);
     assert_eq!(text(COUNTERFACTUAL_PLAN_MAGIC_V1), expected[0]);
 
-    let mut first_plan = plan.clone();
+    let mut first_plan = plan;
     first_plan.previous_plan_digest = None;
     first_plan.exogenous_descriptors.clear();
     first_plan.fixed_policy_descriptors.clear();
@@ -779,11 +779,8 @@ fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
 }
 
 #[test]
-fn decoder_rejects_malformed_field_types() -> TestResult {
+fn decoder_rejects_malformed_scalar_and_list_fields() -> TestResult {
     let valid = plan()?.to_canonical_cbor()?;
-    let profile =
-        |fields: Vec<Value>| with_field(&valid, FIELD_EXECUTION_PROFILE, Value::Array(fields));
-    let policy = |fields: Vec<Value>| with_field(&valid, FIELD_TRUST_POLICY, Value::Array(fields));
     let one_descriptor = |fields: Vec<Value>| {
         with_field(
             &valid,
@@ -853,6 +850,19 @@ fn decoder_rejects_malformed_field_types() -> TestResult {
             ])?,
             PlanError::InvalidEncoding,
         ),
+    ] {
+        assert_eq!(decoded(&bytes), Err(expected));
+    }
+    Ok(())
+}
+
+#[test]
+fn decoder_rejects_malformed_reference_and_trailing_fields() -> TestResult {
+    let valid = plan()?.to_canonical_cbor()?;
+    let profile =
+        |fields: Vec<Value>| with_field(&valid, FIELD_EXECUTION_PROFILE, Value::Array(fields));
+    let policy = |fields: Vec<Value>| with_field(&valid, FIELD_TRUST_POLICY, Value::Array(fields));
+    for (bytes, expected) in [
         (
             with_field(&valid, FIELD_EXECUTION_PROFILE, uint(0))?,
             PlanError::InvalidEncoding,
