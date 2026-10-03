@@ -20,6 +20,10 @@
 //! across several Ticks is expressible; the proof-evidence conversion always
 //! uses the exact `[source.tick, consumer.tick]` span.
 
+use super::codec::{
+    bytes_value, decode_canonical, encode_value, node_value, text_value, uint_value, CborLimits,
+    FieldReader, WireError,
+};
 use crate::{domain_digest, DependencyClassV1, DependencyNodeV1};
 use ciborium::value::Value;
 use std::cmp::Ordering;
@@ -30,11 +34,14 @@ pub const INPUT_DEPENDENCY_MAGIC_V1: &str = "IDP1";
 pub const MAX_INPUT_DEPENDENCY_BYTES_V1: usize = 16 * 1024;
 
 const FIELD_COUNT: usize = 9;
-const MAX_FIELD_ITEMS: u64 = 9;
-const NODE_FIELD_COUNT: usize = 6;
+const LIMITS: CborLimits = CborLimits {
+    maximum_bytes: MAX_INPUT_DEPENDENCY_BYTES_V1,
+    maximum_depth: 2,
+    maximum_items: 9,
+    allow_simple_values: false,
+};
 const MAX_OWNER_ID_BYTES: usize = 128;
 const MAX_RULE_ID_BYTES: usize = 128;
-const MAX_NESTING_DEPTH: u8 = 2;
 const DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.InputDependency.v1";
 
 /// Closed safe errors exposed by the IDP1 contract.
@@ -183,7 +190,7 @@ impl InputDependencyV1 {
     /// Returns a closed safe error when validation fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, InputDependencyContractErrorV1> {
         self.validate()
-            .and_then(|()| encode_value(&encode_dependency(self)))
+            .and_then(|()| encode_value(&encode_dependency(self)).map_err(contract_error))
     }
 
     /// Decode and validate exact canonical IDP1 bytes.
@@ -193,13 +200,10 @@ impl InputDependencyV1 {
     /// Returns a closed safe error for malformed, noncanonical, oversized, or
     /// invalid IDP1 records.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, InputDependencyContractErrorV1> {
-        if bytes.len() > MAX_INPUT_DEPENDENCY_BYTES_V1 {
-            Err(InputDependencyContractErrorV1::FieldOutOfBounds)
-        } else {
-            decode_value(bytes)
-                .and_then(|value| decode_dependency(&value))
-                .and_then(|dependency| dependency.validate().map(|()| dependency))
-        }
+        decode_canonical(bytes, LIMITS)
+            .map_err(contract_error)
+            .and_then(|value| decode_dependency(&value))
+            .and_then(|dependency| dependency.validate().map(|()| dependency))
     }
 
     /// Compute the domain-separated BLAKE3 digest of the canonical IDP1 bytes
@@ -280,32 +284,21 @@ fn nonzero(digest: &[u8; 32]) -> bool {
 
 fn encode_dependency(dependency: &InputDependencyV1) -> Value {
     Value::Array(vec![
-        text(INPUT_DEPENDENCY_MAGIC_V1),
-        uint(1),
-        encode_node(&dependency.consumer),
-        encode_node(&dependency.source),
-        uint(class_code(dependency.dependency_class)),
+        text_value(INPUT_DEPENDENCY_MAGIC_V1),
+        uint_value(1),
+        node_value(&dependency.consumer),
+        node_value(&dependency.source),
+        uint_value(class_code(dependency.dependency_class)),
         Value::Array(vec![
-            uint(dependency.tick_range.first_tick),
-            uint(dependency.tick_range.last_tick),
+            uint_value(dependency.tick_range.first_tick),
+            uint_value(dependency.tick_range.last_tick),
         ]),
-        bytes(&dependency.authorization_digest),
+        bytes_value(&dependency.authorization_digest),
         Value::Array(vec![
-            text(&dependency.classification_rule.rule_id),
-            uint(u64::from(dependency.classification_rule.rule_version)),
+            text_value(&dependency.classification_rule.rule_id),
+            uint_value(dependency.classification_rule.rule_version.into()),
         ]),
-        bytes(&dependency.provenance_digest),
-    ])
-}
-
-fn encode_node(node: &DependencyNodeV1) -> Value {
-    Value::Array(vec![
-        uint(node.tick),
-        uint(u64::from(node.scheduler_position)),
-        text(&node.owner_id),
-        uint(u64::from(node.output_ordinal)),
-        uint(u64::from(node.schema_id)),
-        bytes(&node.artifact_digest),
+        bytes_value(&dependency.provenance_digest),
     ])
 }
 
@@ -319,153 +312,77 @@ const fn class_code(class: DependencyClassV1) -> u64 {
     }
 }
 
-fn decode_dependency(value: &Value) -> Result<InputDependencyV1, InputDependencyContractErrorV1> {
-    let fields = array(value, FIELD_COUNT)?;
-    decode_header(&fields[0], &fields[1])?;
-    Ok(InputDependencyV1 {
-        consumer: decode_node(&fields[2])?,
-        source: decode_node(&fields[3])?,
-        dependency_class: decode_class(&fields[4])?,
-        tick_range: decode_tick_range(&fields[5])?,
-        authorization_digest: digest_value(&fields[6])?,
-        classification_rule: decode_rule(&fields[7])?,
-        provenance_digest: digest_value(&fields[8])?,
-    })
-}
-
-fn decode_header(magic: &Value, version: &Value) -> Result<(), InputDependencyContractErrorV1> {
-    let magic = text_value(magic)?;
-    let version = uint_value(version)?;
-    if magic == INPUT_DEPENDENCY_MAGIC_V1 && version == 1 {
-        Ok(())
-    } else {
-        Err(InputDependencyContractErrorV1::UnsupportedVersion)
-    }
-}
-
-fn decode_node(value: &Value) -> Result<DependencyNodeV1, InputDependencyContractErrorV1> {
-    let fields = array(value, NODE_FIELD_COUNT)?;
-    Ok(DependencyNodeV1 {
-        tick: uint_value(&fields[0])?,
-        scheduler_position: u32_value(&fields[1])?,
-        owner_id: text_value(&fields[2])?,
-        output_ordinal: u32_value(&fields[3])?,
-        schema_id: u32_value(&fields[4])?,
-        artifact_digest: digest_value(&fields[5])?,
-    })
-}
-
-fn decode_class(value: &Value) -> Result<DependencyClassV1, InputDependencyContractErrorV1> {
-    uint_value(value).and_then(|code| match code {
+const fn class_from_code(code: u64) -> Result<DependencyClassV1, InputDependencyContractErrorV1> {
+    match code {
         0 => Ok(DependencyClassV1::ExogenousFrozen),
         1 => Ok(DependencyClassV1::InterventionAssigned),
         2 => Ok(DependencyClassV1::EndogenousRecomputed),
         3 => Ok(DependencyClassV1::FixedPolicy),
         4 => Ok(DependencyClassV1::PresentationOnly),
         _ => Err(InputDependencyContractErrorV1::UnknownEnum),
-    })
+    }
 }
 
-fn decode_tick_range(
-    value: &Value,
-) -> Result<DependencyTickRangeV1, InputDependencyContractErrorV1> {
-    let fields = array(value, 2)?;
-    Ok(DependencyTickRangeV1 {
-        first_tick: uint_value(&fields[0])?,
-        last_tick: uint_value(&fields[1])?,
-    })
-}
-
-fn decode_rule(
-    value: &Value,
-) -> Result<DependencyClassificationRuleV1, InputDependencyContractErrorV1> {
-    let fields = array(value, 2)?;
-    Ok(DependencyClassificationRuleV1 {
-        rule_id: text_value(&fields[0])?,
-        rule_version: u32_value(&fields[1])?,
-    })
-}
-
-fn encode_value(value: &Value) -> Result<Vec<u8>, InputDependencyContractErrorV1> {
-    let mut encoded = Vec::new();
-    ciborium::into_writer(value, &mut encoded)
-        .map(|()| encoded)
-        .or(Err(InputDependencyContractErrorV1::InvalidEncoding))
-}
-
-fn decode_value(encoded: &[u8]) -> Result<Value, InputDependencyContractErrorV1> {
-    preflight_cbor(encoded)?;
-    let value = ciborium::from_reader::<Value, _>(encoded)
-        .map_err(|_| InputDependencyContractErrorV1::InvalidEncoding)?;
-    encode_value(&value).and_then(|canonical| {
-        if canonical == encoded {
-            Ok(value)
-        } else {
-            Err(InputDependencyContractErrorV1::InvalidEncoding)
-        }
-    })
-}
-
-fn preflight_cbor(encoded: &[u8]) -> Result<(), InputDependencyContractErrorV1> {
-    crate::preflight_array_cbor(encoded, MAX_NESTING_DEPTH, MAX_FIELD_ITEMS, false).map_err(
-        |error| match error {
-            crate::CborPreflightError::InvalidEncoding => {
-                InputDependencyContractErrorV1::InvalidEncoding
-            }
-            crate::CborPreflightError::FieldOutOfBounds => {
-                InputDependencyContractErrorV1::FieldOutOfBounds
-            }
+fn decode_dependency(value: &Value) -> Result<InputDependencyV1, InputDependencyContractErrorV1> {
+    let mut fields = FieldReader::with_header(value, FIELD_COUNT, INPUT_DEPENDENCY_MAGIC_V1, 1);
+    let consumer = fields.read_node();
+    let source = fields.read_node();
+    let class = fields.read_u64();
+    let tick_range = fields.read_with(
+        tick_range_field,
+        DependencyTickRangeV1 {
+            first_tick: 0,
+            last_tick: 0,
         },
-    )
+    );
+    let authorization_digest = fields.read_bytes::<32>();
+    let classification_rule = fields.read_with(
+        rule_field,
+        DependencyClassificationRuleV1 {
+            rule_id: String::new(),
+            rule_version: 0,
+        },
+    );
+    let provenance_digest = fields.read_bytes::<32>();
+    fields
+        .finish()
+        .map_err(contract_error)
+        .and_then(|()| class_from_code(class))
+        .map(|dependency_class| InputDependencyV1 {
+            consumer,
+            source,
+            dependency_class,
+            tick_range,
+            authorization_digest,
+            classification_rule,
+            provenance_digest,
+        })
 }
 
-fn array(value: &Value, length: usize) -> Result<&[Value], InputDependencyContractErrorV1> {
-    match value {
-        Value::Array(values) if values.len() == length => Ok(values),
-        _ => Err(InputDependencyContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn text_value(value: &Value) -> Result<String, InputDependencyContractErrorV1> {
-    match value {
-        Value::Text(value) => Ok(value.clone()),
-        _ => Err(InputDependencyContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn uint_value(value: &Value) -> Result<u64, InputDependencyContractErrorV1> {
-    match value {
-        Value::Integer(value) => {
-            u64::try_from(*value).map_err(|_| InputDependencyContractErrorV1::InvalidEncoding)
-        }
-        _ => Err(InputDependencyContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn u32_value(value: &Value) -> Result<u32, InputDependencyContractErrorV1> {
-    uint_value(value).and_then(|value| {
-        u32::try_from(value).map_err(|_| InputDependencyContractErrorV1::FieldOutOfBounds)
+fn tick_range_field(value: &Value) -> Result<DependencyTickRangeV1, WireError> {
+    let mut fields = FieldReader::new(value, 2);
+    let first_tick = fields.read_u64();
+    let last_tick = fields.read_u64();
+    fields.finish().map(|()| DependencyTickRangeV1 {
+        first_tick,
+        last_tick,
     })
 }
 
-fn digest_value(value: &Value) -> Result<[u8; 32], InputDependencyContractErrorV1> {
-    match value {
-        Value::Bytes(value) => value
-            .as_slice()
-            .try_into()
-            .map_err(|_| InputDependencyContractErrorV1::InvalidEncoding),
-        _ => Err(InputDependencyContractErrorV1::InvalidEncoding),
+fn rule_field(value: &Value) -> Result<DependencyClassificationRuleV1, WireError> {
+    let mut fields = FieldReader::new(value, 2);
+    let rule_id = fields.read_text();
+    let rule_version = fields.read_u32();
+    fields.finish().map(|()| DependencyClassificationRuleV1 {
+        rule_id,
+        rule_version,
+    })
+}
+
+const fn contract_error(error: WireError) -> InputDependencyContractErrorV1 {
+    match error {
+        WireError::InvalidEncoding => InputDependencyContractErrorV1::InvalidEncoding,
+        WireError::FieldOutOfBounds => InputDependencyContractErrorV1::FieldOutOfBounds,
+        WireError::UnsupportedVersion => InputDependencyContractErrorV1::UnsupportedVersion,
     }
-}
-
-fn text(value: &str) -> Value {
-    Value::Text(value.to_owned())
-}
-
-fn uint(value: u64) -> Value {
-    Value::Integer(value.into())
-}
-
-fn bytes(value: &[u8; 32]) -> Value {
-    Value::Bytes(value.to_vec())
 }
