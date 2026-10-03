@@ -269,13 +269,13 @@ fn current_now_secs() -> u64 {
     WallTime::now().as_micros() / 1_000_000
 }
 
+/// Whether an Event type may leave the experiment host.
+///
+/// A public type is not subject-controlled (ADR-021 Revision 4 Decision 2)
+/// and is not the experiment's own consent-closed marker.
 fn is_public_event_type(event_type: &Kind) -> bool {
-    !pos_core::is_consent_event_type(event_type)
+    !pos_core::is_subject_controlled_event_type(event_type)
         && event_type.as_str() != EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
-        && !pos_core::is_geographic_event_type(event_type)
-        && pos_core::required_modality_for_event(event_type) == 0
-        && !event_type.as_str().starts_with("timeline.fork.")
-        && !event_type.as_str().starts_with("retention.")
 }
 
 /// Keep only the public Events of a read, in Timeline Order.
@@ -3344,6 +3344,33 @@ pub mod tests {
     };
     use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
     use pos_store::StoreConfig;
+
+    /// ADR-021 Revision 4 Decision 2: the public filter is exactly the shared
+    /// subject-controlled predicate plus the experiment's consent-closed marker.
+    #[test]
+    fn public_event_types_match_the_shared_subject_controlled_predicate() {
+        let table = [
+            (pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, false),
+            (pos_core::GEOGRAPHIC_EVENT_TYPE, false),
+            (pos_core::GEOGRAPHIC_CELL_EVENT_TYPE, false),
+            ("consent.x", false),
+            ("persona.prediction", false),
+            ("timeline.fork.requested", false),
+            ("retention.extended", false),
+            ("world.observation.v1", true),
+            ("ordinary.event", true),
+        ];
+        for (event_type, public) in table {
+            let kind = Kind::new(event_type);
+            assert_eq!(is_public_event_type(&kind), public, "{event_type}");
+            assert_eq!(
+                is_public_event_type(&kind),
+                !pos_core::is_subject_controlled_event_type(&kind)
+                    && event_type != EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE,
+                "{event_type}"
+            );
+        }
+    }
 
     // ── Inline test helpers ───────────────────────────────────────────────
 

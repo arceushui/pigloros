@@ -260,34 +260,35 @@ fn driver_visible_event(event: &Event) -> bool {
         && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
 }
 
-/// Whether a committed Event of a consent-sensitive type may reach a
-/// verified-prefix Driver in this pass (ADR-039; ADR-021 Revision 3
-/// Decision 1; ADR-024 Revision 1 Decision 5). A sensitive Event is visible
-/// only inside a protected pass whose validated token names its entity and
-/// grants its modality. A public pass sees none.
+/// Whether this pass's consent shows a subscribed committed Event.
 ///
-/// Only Drivers that read the full verified prefix are filtered. A
-/// cursor-based Driver keeps its previous view: filtering it here would let
-/// its Event cursor pass a hidden Event, which it would then never receive.
-/// Consent-gating cursor subscriptions without that loss is #494.
+/// A subject-controlled Event (ADR-021 Revision 4 Decision 2) is shown only
+/// inside a protected pass whose validated token names its entity and grants
+/// its modality (ADR-039; ADR-021 Revision 3 Decision 1; ADR-024 Revision 1
+/// Decision 5). A public pass sees none.
+///
+/// Registration admits a consent-sensitive subscription only for a Driver
+/// that reads the full verified prefix (ADR-021 Revision 4 Decision 1). That
+/// prefix is filtered again every pass, so a hidden Event is delivered after
+/// a later grant and is never lost behind an Event cursor.
 fn consent_visible_event(operation: &OperationContext, event: &Event) -> bool {
-    !pos_core::is_consent_sensitive_event_type(&event.event_type)
+    // `consent.*` Events are already excluded upstream by `driver_visible_event`.
+    !pos_core::is_subject_controlled_event_type(&event.event_type)
         || matches!(operation, OperationContext::Protected { token, .. }
             if token.subject_id() == event.entity
                 && token.authorize_event_type(&event.event_type).is_ok())
 }
 
-/// The committed Events one Driver may observe through its Event
+/// The committed Events one Driver may observe through its registered Event
 /// subscriptions: its subscribed types, minus host-owned consent and
-/// geographic Events, and, for a verified-prefix Driver only, minus
-/// consent-sensitive Events this pass may not show it.
+/// geographic Events and minus subject-controlled Events this pass may not
+/// show it.
 ///
 /// A Driver without Event subscriptions observes no committed Event, so the
 /// prefix is neither filtered nor copied for it.
 fn subscribed_driver_events(
     committed_events: &[Event],
     event_subscriptions: &[Kind],
-    verified_prefix_required: bool,
     operation: &OperationContext,
 ) -> Vec<Event> {
     if event_subscriptions.is_empty() {
@@ -298,7 +299,7 @@ fn subscribed_driver_events(
         .filter(|event| {
             event_subscriptions.contains(&event.event_type)
                 && driver_visible_event(event)
-                && (!verified_prefix_required || consent_visible_event(operation, event))
+                && consent_visible_event(operation, event)
         })
         .cloned()
         .collect()
@@ -1072,6 +1073,58 @@ struct PluginEntry {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
     manifest_slot: Option<String>,
+    event_observation: DriverEventObservation,
+}
+
+/// One Driver's Event-observation declarations, captured once at
+/// registration (ADR-021 Revision 4 Decision 1).
+///
+/// The host reads only this snapshot for Event delivery, consent filtering
+/// and the Event cursor rule. A later change in the Driver's answers has no
+/// effect and never fails a pass. An entry without a Driver holds the empty
+/// default.
+#[derive(Default)]
+struct DriverEventObservation {
+    event_subscriptions: Vec<Kind>,
+    verified_prefix_required: bool,
+}
+
+impl DriverEventObservation {
+    /// Capture the declarations of `driver`, if any.
+    ///
+    /// # Errors
+    /// Returns [`PluginCompositionErrorV1::CursorSubscriptionToConsentSensitiveType`]
+    /// for a Driver that does not read the full verified prefix but
+    /// subscribes to a consent-sensitive type.
+    fn capture(driver: Option<&dyn Driver>) -> Result<Self, PluginCompositionErrorV1> {
+        driver.map_or_else(|| Ok(Self::default()), Self::capture_driver)
+    }
+
+    fn capture_driver(driver: &dyn Driver) -> Result<Self, PluginCompositionErrorV1> {
+        let observation = Self {
+            event_subscriptions: driver.event_subscriptions().to_vec(),
+            verified_prefix_required: driver.requires_verified_event_prefix(),
+        };
+        observation
+            .cursor_subscription_to_consent_sensitive_type()
+            .map_or(Ok(observation), Err)
+    }
+
+    /// The first consent-sensitive subscription of a cursor-based Driver.
+    fn cursor_subscription_to_consent_sensitive_type(&self) -> Option<PluginCompositionErrorV1> {
+        let cursor = !self.verified_prefix_required;
+        self.event_subscriptions
+            .iter()
+            .find(|event_type| cursor && pos_core::is_consent_sensitive_event_type(event_type))
+            .map(cursor_subscription_error)
+    }
+}
+
+/// The closed composition error for a consent-sensitive cursor subscription.
+fn cursor_subscription_error(event_type: &Kind) -> PluginCompositionErrorV1 {
+    PluginCompositionErrorV1::CursorSubscriptionToConsentSensitiveType {
+        event_type: event_type.as_str().to_owned(),
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2372,8 +2425,8 @@ impl PluginRegistry {
                 name: entry.name.clone(),
             });
         };
-        let verified_prefix_required = driver.requires_verified_event_prefix();
-        if verified_prefix_required {
+        let observation = &entry.event_observation;
+        if observation.verified_prefix_required {
             let anchor = snapshot
                 .view_for(driver.subscriptions())
                 .anchor()
@@ -2390,17 +2443,16 @@ impl PluginRegistry {
         }
         let subscribed_events = subscribed_driver_events(
             committed_events,
-            driver.event_subscriptions(),
-            verified_prefix_required,
+            &observation.event_subscriptions,
             operation,
         );
         let observations = snapshot.view_for_events_after(
             driver.subscriptions(),
             &subscribed_events,
-            driver.event_subscriptions(),
+            &observation.event_subscriptions,
             entry.event_cursor,
         );
-        let observations = if verified_prefix_required {
+        let observations = if observation.verified_prefix_required {
             observations.with_verified_prefix_events(subscribed_events.clone())
         } else {
             observations
@@ -3431,11 +3483,15 @@ impl PluginRegistry {
 
     /// Verify a test-support output admission and claim the Event types its
     /// declarations derive, through the same shared ownership check.
+    ///
+    /// It then captures the Driver's registration snapshot through the shared
+    /// Driver rule (ADR-021 Revision 4 Decision 1).
     #[cfg(any(test, feature = "test-support"))]
     fn claim_test_admission(
         &self,
         admission: Result<OutputAdmissionV1, crate::OutputAdmissionErrorV1>,
-    ) -> Result<(OutputAdmissionV1, Vec<Kind>), RuntimeError> {
+        driver: &dyn Driver,
+    ) -> Result<(OutputAdmissionV1, Vec<Kind>, DriverEventObservation), RuntimeError> {
         admission.map_err(RuntimeError::from).and_then(|admission| {
             let owned_event_types: Vec<Kind> = admission
                 .policy()
@@ -3445,8 +3501,9 @@ impl PluginRegistry {
                 .map(|declaration| Kind::new(declaration.event_type()))
                 .collect();
             self.validate_exclusive_event_types(&owned_event_types)
+                .and_then(|()| DriverEventObservation::capture_driver(driver))
                 .map_err(RuntimeError::from)
-                .map(|()| (admission, owned_event_types))
+                .map(|observation| (admission, owned_event_types, observation))
         })
     }
 
@@ -3575,8 +3632,15 @@ impl PluginRegistry {
 
         let version = plugin.version().to_owned();
 
-        // The only fallible commit action runs before schemas or routes mutate.
-        self.install_reducer(id, &name, reducer, options.reducer_slot)?;
+        // The Driver rule and the only fallible commit action run before
+        // schemas or routes mutate.
+        let event_observation = self.admit_driver_and_reducer(
+            id,
+            &name,
+            driver.as_deref(),
+            reducer,
+            options.reducer_slot,
+        )?;
 
         // Register event type schemas
         for kind in &cap.owned_event_types {
@@ -3607,11 +3671,33 @@ impl PluginRegistry {
                 registration: options.registration,
                 output_admission: options.output_admission,
                 manifest_slot: options.manifest_slot,
+                event_observation,
             },
         );
         self.registration_revision += 1;
         self.restored_binding = None;
         Ok(())
+    }
+
+    /// Capture the Driver's registration snapshot, rejecting a cursor-based
+    /// consent-sensitive subscription, then install the reducer.
+    ///
+    /// The Driver rule runs first, so a rejection leaves the registry
+    /// unchanged (ADR-021 Revision 4 Decision 1).
+    fn admit_driver_and_reducer(
+        &mut self,
+        id: PluginId,
+        name: &str,
+        driver: Option<&dyn Driver>,
+        reducer: Option<Box<dyn Reducer>>,
+        reducer_slot: ReducerSlotV1,
+    ) -> Result<DriverEventObservation, RuntimeError> {
+        DriverEventObservation::capture(driver)
+            .map_err(RuntimeError::from)
+            .and_then(|observation| {
+                self.install_reducer(id, name, reducer, reducer_slot)
+                    .map(|()| observation)
+            })
     }
 
     /// Returns `true` if a plugin with this id is registered.
@@ -3756,8 +3842,9 @@ impl PluginRegistry {
             artifacts.retention_policy_artifact(),
         )?;
         let plugin_version = closure.output_policy().fields().plugin_version.clone();
-        let (admission, owned_event_types) = self.claim_test_admission(
+        let (admission, owned_event_types, event_observation) = self.claim_test_admission(
             OutputAdmissionV1::try_new_verified(plugin_id, &plugin_version, closure, owner_token),
+            driver.as_ref(),
         )?;
         let name = driver.name().to_owned();
         self.plugins.insert(
@@ -3773,6 +3860,7 @@ impl PluginRegistry {
                 registration: None,
                 output_admission: Some(admission),
                 manifest_slot: None,
+                event_observation,
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -3788,8 +3876,24 @@ impl PluginRegistry {
     /// type, so the shared Driver output vetting rejects any proposed Event.
     /// The entry is unpinned, so this seam exists only for tests and explicit
     /// `test-support` builds; production Plugins use a verified policy binding.
+    ///
+    /// # Errors
+    /// Returns [`PluginCompositionErrorV1::CursorSubscriptionToConsentSensitiveType`]
+    /// without changing the registry when a cursor-based Driver subscribes to
+    /// a consent-sensitive type (ADR-021 Revision 4 Decision 1).
     #[cfg(any(test, feature = "test-support"))]
-    pub fn register_driver(&mut self, driver: Box<dyn Driver>) {
+    pub fn register_driver(&mut self, driver: Box<dyn Driver>) -> Result<(), RuntimeError> {
+        DriverEventObservation::capture_driver(driver.as_ref())
+            .map(|event_observation| self.insert_undeclared_driver(driver, event_observation))
+            .map_err(RuntimeError::from)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn insert_undeclared_driver(
+        &mut self,
+        driver: Box<dyn Driver>,
+        event_observation: DriverEventObservation,
+    ) {
         self.restored_binding = None;
         let plugin_id = PluginId::new();
         let name = driver.name().to_owned();
@@ -3806,6 +3910,7 @@ impl PluginRegistry {
                 registration: None,
                 output_admission: None,
                 manifest_slot: None,
+                event_observation,
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -3829,8 +3934,9 @@ impl PluginRegistry {
                 name: driver.name().to_owned(),
             });
         }
-        let (admission, owned_event_types) = self.claim_test_admission(
+        let (admission, owned_event_types, event_observation) = self.claim_test_admission(
             OutputAdmissionV1::try_new(plugin_id, plugin_version, policy, budget),
+            driver.as_ref(),
         )?;
         let name = driver.name().to_owned();
         self.plugins.insert(
@@ -3846,6 +3952,7 @@ impl PluginRegistry {
                 registration: None,
                 output_admission: Some(admission),
                 manifest_slot: None,
+                event_observation,
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -4682,7 +4789,9 @@ mod tests {
         }
 
         let mut missing_admission_registry = gated_registry();
-        missing_admission_registry.register_driver(Box::new(UndeclaredOutputDriver));
+        missing_admission_registry
+            .register_driver(Box::new(UndeclaredOutputDriver))
+            .test_ok();
         assert!(matches!(
             missing_admission_registry.step_all(TimelineId::new()),
             Err(RuntimeError::Authority(
@@ -4713,6 +4822,7 @@ mod tests {
                 registration: None,
                 output_admission: None,
                 manifest_slot: None,
+                event_observation: DriverEventObservation::default(),
             },
         );
         registry
@@ -4736,6 +4846,7 @@ mod tests {
                 registration: None,
                 output_admission: None,
                 manifest_slot: None,
+                event_observation: DriverEventObservation::default(),
             },
         );
         registry
@@ -5110,7 +5221,9 @@ mod tests {
         let mut store = gated_store();
         let parent = store.create_timeline("parent").test_ok();
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(PanickingForkDriver));
+        registry
+            .register_driver(Box::new(PanickingForkDriver))
+            .test_ok();
         registry
             .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
             .test_ok();
@@ -5174,7 +5287,9 @@ mod tests {
         let mut store = FailedRollbackStore(gated_store());
         let parent = store.create_timeline("parent").test_ok();
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(PanickingForkDriver));
+        registry
+            .register_driver(Box::new(PanickingForkDriver))
+            .test_ok();
         registry
             .restore_driver_state(&[TimelineHistorySegment::new(parent.id(), Seq::ZERO)], &[])
             .test_ok();
@@ -7478,7 +7593,7 @@ mod tests {
         let mut store = gated_store();
         let timeline = store.create_timeline("verified-prefix").test_ok();
         let mut registry = gated_registry();
-        registry.register_driver(Box::new(PrefixDriver));
+        registry.register_driver(Box::new(PrefixDriver)).test_ok();
         let id = *registry.plugins.keys().next().test_ok();
         assert!(matches!(
             registry.invoke_selected_driver(
@@ -7553,6 +7668,14 @@ mod tests {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let mut registry = gated_registry();
         let plugin_id = PluginId::new();
+        let subscriptions = vec![
+            Kind::new("ordinary.event"),
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE),
+            Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE),
+        ];
+        // Inserted directly, bypassing the registration rule, so that even a
+        // snapshot holding host-owned and geographic types is filtered.
         registry.plugins.insert(
             plugin_id,
             PluginEntry {
@@ -7560,12 +7683,7 @@ mod tests {
                 version: "0.1.0".to_owned(),
                 owned_event_types: Vec::new(),
                 driver: Some(Box::new(EventDriver {
-                    subscriptions: vec![
-                        Kind::new("ordinary.event"),
-                        Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
-                        Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE),
-                        Kind::new(pos_core::GEOGRAPHIC_CELL_EVENT_TYPE),
-                    ],
+                    subscriptions: subscriptions.clone(),
                     observed: Arc::clone(&observed),
                 })),
                 approver: None,
@@ -7574,6 +7692,10 @@ mod tests {
                 registration: None,
                 output_admission: None,
                 manifest_slot: None,
+                event_observation: DriverEventObservation {
+                    event_subscriptions: subscriptions,
+                    verified_prefix_required: false,
+                },
             },
         );
 
