@@ -315,7 +315,7 @@ struct NativeMembers {
 
 /// Self-consistent members; even seeds carry a non-empty EPF1.
 fn native_members(plugin_id: PluginId, seed: u8) -> FixtureResult<NativeMembers> {
-    let profile = if seed % 2 == 0 {
+    let profile = if seed.is_multiple_of(2) {
         format!("EPF1-{seed}").into_bytes()
     } else {
         Vec::new()
@@ -1646,7 +1646,10 @@ fn owner_state<S: ManifestOwnerAdmissionPersistencePortV1>(
         .ok_or_else(|| "missing owner state".into())
 }
 
-fn successor(state: &ManifestOwnerAdmissionOwnerStateV1, operation: u8) -> AdmissionTransition {
+const fn successor(
+    state: &ManifestOwnerAdmissionOwnerStateV1,
+    operation: u8,
+) -> AdmissionTransition {
     AdmissionTransition {
         owner_id: state.owner_id,
         generation: state.configuration_generation + 1,

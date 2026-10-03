@@ -199,7 +199,7 @@ pub(crate) fn policy_and_closure(plugin_id: PluginId, seed: u8) -> Fallible<Poli
     let retention = retention_policy()?;
     let implementation = format!("implementation-{seed}").into_bytes();
     let configuration = format!("CFG1-{seed}").into_bytes();
-    let profile = if seed % 2 == 0 {
+    let profile = if seed.is_multiple_of(2) {
         format!("EPF1-{seed}").into_bytes()
     } else {
         Vec::new()
