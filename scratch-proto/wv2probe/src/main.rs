@@ -27,6 +27,7 @@ mod probe {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::rc::Rc;
+    use std::result::Result;
     use std::sync::atomic::{fence, AtomicI32, AtomicU32, AtomicU64, Ordering};
     use std::sync::{mpsc, Mutex, OnceLock};
     use std::time::{Duration, Instant};

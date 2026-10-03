@@ -104,7 +104,7 @@ jobs:
           cargo metadata --format-version 1 > /dev/null 2>&1
           for v in "" "api-key-sec1" "api-sig-der" "api-key-sec1,api-sig-der,der-direct" "api-key-sec1,api-sig-der,p256-pkcs8"; do
             f="$OUT/60-codec-nostd-[${v:-base}].txt"
-            cargo build -p codec-nostd --target x86_64-unknown-none --features "$v" > "$f" 2>&1; echo "exit=$?" >> "$f"
+            cargo check -p codec-nostd --target x86_64-unknown-none --features "$v" > "$f" 2>&1; echo "exit=$?" >> "$f"
             echo "== features=[${v}] $(tail -n1 "$f")"
             cargo tree -p codec-nostd --target x86_64-unknown-none --features "$v" -e normal >> "$f" 2>&1
           done
