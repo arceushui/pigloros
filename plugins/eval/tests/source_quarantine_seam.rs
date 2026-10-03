@@ -36,6 +36,14 @@ use common::{
     envelope_only, finding, naming_drafts, raw_source, unreadable, TestOptionExt, TestValueExt,
 };
 
+/// The one-member Fork ancestry of a fixture Timeline with no parent.
+fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+    vec![pos_core::TimelineMeta {
+        id: timeline,
+        ..pos_core::TimelineMeta::root("root")
+    }]
+}
+
 fn stores() -> Vec<(&'static str, Box<dyn ScheduledAdmissionStoreV1>)> {
     let mut stores: Vec<(&'static str, Box<dyn ScheduledAdmissionStoreV1>)> = vec![
         ("memory", Box::new(MemoryStore::new())),
@@ -181,7 +189,7 @@ fn stage_over(
 ) -> Result<Vec<EventDraft>, RuntimeError> {
     let head = store.logical_head(timeline).test_ok();
     registry.compose_non_participant_drivers().test_ok();
-    registry.step_all_anchored_protected(timeline, head, token.clone(), 0, prefix)
+    registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), head, token.clone(), 0, prefix)
 }
 
 /// Stage and atomically admit one scheduled pass; returns the committed

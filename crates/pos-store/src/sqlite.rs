@@ -3408,6 +3408,33 @@ impl SqliteStore {
         crate::with_validated_erasure_write_fence(&gate, timeline, operation, || effect(self))
     }
 
+    /// Walk one Timeline's stitched chain and apply each segment's own
+    /// erasure decision for `operation` inside the read's active fence.
+    fn authorized_fork_chain(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<ForkChain, CoreError> {
+        self.validated_erasure_gate().and_then(|gate| {
+            self.fork_chain(timeline).and_then(|chain| {
+                crate::authorize_inherited_scopes(
+                    &gate,
+                    chain.iter().map(|(member, _)| *member),
+                    operation,
+                )
+                .map(|()| chain)
+            })
+        })
+    }
+
+    fn authorize_inherited_scopes(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), CoreError> {
+        self.authorized_fork_chain(timeline, operation).map(|_| ())
+    }
+
     fn with_erasure_read_fence<T>(
         &self,
         timeline: TimelineId,
@@ -5641,7 +5668,7 @@ impl EventStore for SqliteStore {
     ) -> Result<Option<Event>, CoreError> {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
             store.ensure_generic_timeline_visibility(timeline)?;
-            let chain = store.fork_chain(timeline)?;
+            let chain = store.authorized_fork_chain(timeline, ErasureProtectedOperationV1::Read)?;
             let located = store
                 .conn
                 .query_row(
@@ -5833,6 +5860,9 @@ impl EventStore for SqliteStore {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
             store
                 .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| {
+                    store.authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
+                })
                 .and_then(|()| Self::read_unchecked_on(&store.conn, timeline, range))
         })
     }
@@ -5851,6 +5881,11 @@ impl EventStore for SqliteStore {
             store
                 .ensure_generic_timeline_visibility(timeline)
                 .and_then(|()| store.read_logical_bounded(timeline, range, bounds, started))
+                .and_then(|events| {
+                    store
+                        .authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
+                        .map(|()| events)
+                })
         })
     }
 
@@ -6261,6 +6296,9 @@ impl EventStore for SqliteStore {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Export, |store| {
             store
                 .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| {
+                    store.authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Export)
+                })
                 .and_then(|()| store.compute_chain_hash_at(timeline, at_seq))
         })
     }

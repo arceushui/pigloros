@@ -17,6 +17,14 @@ use std::{
     time::Duration,
 };
 
+/// The one-member Fork ancestry of a fixture Timeline with no parent.
+fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+    vec![pos_core::TimelineMeta {
+        id: timeline,
+        ..pos_core::TimelineMeta::root("root")
+    }]
+}
+
 trait TestValueExt<T> {
     fn test_ok(self) -> T;
 }
@@ -320,7 +328,7 @@ fn recovery_ignores_driverless_plugins_and_rejects_pending_transactions() {
     let mut pending = gated_registry();
     pending.register_test_driver(Box::new(DefaultRecoveryDriver));
     pending.compose_non_participant_drivers().test_ok();
-    pending.step_all_anchored(timeline, Seq::ZERO).test_ok();
+    pending.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO).test_ok();
     assert!(matches!(
         pending.restore_driver_state(&segments, &[]),
         Err(RuntimeError::PendingDriverStep)
@@ -338,7 +346,7 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     registry.register_generated(&plugin, None, None).test_ok();
     registry.register_test_driver(Box::new(DefaultRecoveryDriver));
     registry.compose_non_participant_drivers().test_ok();
-    registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
+    registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO).test_ok();
     registry.commit_step_at(Seq::ZERO, 0).test_ok();
     registry.commit_step_at(Seq::ZERO, 0).test_ok();
 
@@ -364,11 +372,11 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     }));
     cadenced.compose_non_participant_drivers().test_ok();
     cadenced
-        .tick_cadenced_anchored_protected(timeline, u128::MAX, Seq::ZERO, token.clone(), 0, &[])
+        .tick_cadenced_anchored_protected(timeline, &root_ancestry(timeline), u128::MAX, Seq::ZERO, token.clone(), 0, &[])
         .test_ok();
     cadenced.commit_step_at(Seq::ZERO, 0).test_ok();
     assert!(matches!(
-        cadenced.tick_cadenced_anchored_protected(timeline, u128::MAX, Seq::ZERO, token, 0, &[]),
+        cadenced.tick_cadenced_anchored_protected(timeline, &root_ancestry(timeline), u128::MAX, Seq::ZERO, token, 0, &[]),
         Err(RuntimeError::CadenceOverflow { .. })
     ));
 }

@@ -69,7 +69,11 @@ fn replay_range(
             outcome = replay_in_fence(sender, timeline, range, candidate, closure, &consumer_ids);
         };
         sender
-            .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
+            .with_protected_ancestry_fence(
+                timeline,
+                ErasureProtectedOperationV1::Read,
+                &mut effect,
+            )
             .map_err(crate::host_error_to_core)
             .and(outcome)
     })
@@ -163,6 +167,14 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    /// The one-member Fork ancestry of a fixture Timeline with no parent.
+    fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+        vec![pos_core::TimelineMeta {
+            id: timeline,
+            ..pos_core::TimelineMeta::root("root")
+        }]
+    }
 
     const REPLAY_DIGEST: pos_core::ErasureReferenceV1 =
         pos_core::ErasureReferenceV1::from_digest([43; 32]);
@@ -371,7 +383,7 @@ mod tests {
                 )
                 .test_ok();
             let drafts = registry
-                .step_all_anchored_with_events(timeline, action.seq, std::slice::from_ref(&action))
+                .step_all_anchored_with_events(timeline, &root_ancestry(timeline), action.seq, std::slice::from_ref(&action))
                 .test_ok();
             let committed = commands.append(timeline, &drafts).test_ok();
             (timeline, action, committed)

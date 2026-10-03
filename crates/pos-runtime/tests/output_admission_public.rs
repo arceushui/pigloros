@@ -16,6 +16,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// The one-member Fork ancestry of a fixture Timeline with no parent.
+fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+    vec![pos_core::TimelineMeta {
+        id: timeline,
+        ..pos_core::TimelineMeta::root("root")
+    }]
+}
+
 struct FixtureBinding {
     binding: pos_runtime::OutputPolicyBindingV1,
     output_policy_bytes: Vec<u8>,
@@ -817,12 +825,12 @@ fn failed_scheduler_pass_does_not_advance_earlier_driver_cadence() -> TestResult
     let timeline = pos_core::TimelineId::new();
     let mut scheduler = TickScheduler::new(registry);
     assert!(matches!(
-        scheduler.tick(timeline, 0),
+        scheduler.tick(timeline, &root_ancestry(timeline), 0),
         Err(RuntimeError::Authority(
             pos_core::AuthorityErrorV1::UnauthorizedSource
         ))
     ));
-    assert_eq!(scheduler.tick(timeline, 0)?.len(), 2);
+    assert_eq!(scheduler.tick(timeline, &root_ancestry(timeline), 0)?.len(), 2);
     Ok(())
 }
 
@@ -839,13 +847,13 @@ fn public_tick_and_step_reject_unowned_driver_output() -> TestResult {
     registry.register_generated(&plugin, None, Some(Box::new(RejectingDriver)))?;
     let timeline = pos_core::TimelineId::new();
     assert!(matches!(
-        registry.tick_cadenced(timeline, 0),
+        registry.tick_cadenced(timeline, &root_ancestry(timeline), 0),
         Err(RuntimeError::Authority(
             pos_core::AuthorityErrorV1::UnauthorizedSource
         ))
     ));
     assert!(matches!(
-        registry.step_all(timeline),
+        registry.step_all(timeline, &root_ancestry(timeline)),
         Err(RuntimeError::Authority(
             pos_core::AuthorityErrorV1::UnauthorizedSource
         ))
@@ -872,7 +880,7 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
     )?;
     admitted.compose_non_participant_drivers()?;
     assert!(matches!(
-        admitted.step_all_anchored(timeline, pos_core::Seq::ZERO),
+        admitted.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO),
         Ok(drafts) if drafts.len() == 1
     ));
 
@@ -888,7 +896,7 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
     )?;
     generated.compose_non_participant_drivers()?;
     assert!(matches!(
-        generated.step_all_anchored(timeline, pos_core::Seq::ZERO),
+        generated.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO),
         Ok(drafts) if drafts.len() == 1
     ));
     Ok(())
@@ -972,8 +980,8 @@ fn public_tick_and_step_validate_generated_driver_output() -> TestResult {
     ));
     registry.register_generated(&plugin, None, Some(Box::new(FixtureDriver)))?;
     let timeline = pos_core::TimelineId::new();
-    registry.tick_cadenced(timeline, 0)?;
-    registry.step_all(timeline)?;
+    registry.tick_cadenced(timeline, &root_ancestry(timeline), 0)?;
+    registry.step_all(timeline, &root_ancestry(timeline))?;
     Ok(())
 }
 
@@ -992,8 +1000,8 @@ fn successful_unanchored_steps_reset_admission_usage_at_each_call_boundary() -> 
         Some(Box::new(FullBudgetDriver)),
     )?;
     let mut scheduler = TickScheduler::new(scheduled_registry);
-    assert_eq!(scheduler.tick(timeline, 0)?.len(), 1_000);
-    assert_eq!(scheduler.tick(timeline, 1)?.len(), 1_000);
+    assert_eq!(scheduler.tick(timeline, &root_ancestry(timeline), 0)?.len(), 1_000);
+    assert_eq!(scheduler.tick(timeline, &root_ancestry(timeline), 1)?.len(), 1_000);
 
     let stepped_plugin = FixturePlugin {
         id: PluginId::new(),
@@ -1002,8 +1010,8 @@ fn successful_unanchored_steps_reset_admission_usage_at_each_call_boundary() -> 
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
     stepped_registry.register_generated(&stepped_plugin, None, Some(Box::new(FullBudgetDriver)))?;
-    assert_eq!(stepped_registry.step_all(timeline)?.len(), 1_000);
-    assert_eq!(stepped_registry.step_all(timeline)?.len(), 1_000);
+    assert_eq!(stepped_registry.step_all(timeline, &root_ancestry(timeline))?.len(), 1_000);
+    assert_eq!(stepped_registry.step_all(timeline, &root_ancestry(timeline))?.len(), 1_000);
     Ok(())
 }
 
@@ -1332,7 +1340,7 @@ fn verified_step_appends_output_at_the_exact_event_byte_limit() -> TestResult {
     let mut store = gated_store()?;
     let timeline = store.create_timeline("output-admission-exact-limit")?.id();
 
-    let drafts = registry.step_all_anchored(timeline, pos_core::Seq::ZERO)?;
+    let drafts = registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO)?;
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].payload.len(), usize::try_from(limit)?);
     assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
@@ -1351,7 +1359,7 @@ fn verified_step_rejects_output_one_byte_over_the_event_limit_before_append() ->
     let timeline = store.create_timeline("output-admission-overflow")?.id();
 
     assert!(matches!(
-        registry.step_all_anchored(timeline, pos_core::Seq::ZERO),
+        registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO),
         Err(RuntimeError::OutputAdmission(OutputAdmissionErrorV1::EventBytesExceeded {
             ref event_type,
             requested,
@@ -1410,7 +1418,7 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
     let mut store = gated_store()?;
     let timeline = store.create_timeline("output-admission-mixed-batch")?.id();
 
-    let rejected = registry.step_all_anchored(timeline, pos_core::Seq::ZERO);
+    let rejected = registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO);
     assert!(matches!(
         rejected,
         Err(RuntimeError::OutputAdmission(OutputAdmissionErrorV1::EventBytesExceeded {
@@ -1421,7 +1429,7 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
     ));
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::ZERO);
 
-    let drafts = registry.step_all_anchored(timeline, pos_core::Seq::ZERO)?;
+    let drafts = registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO)?;
     assert_eq!(drafts.len(), 1);
     assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::from_u64(1));
@@ -1441,7 +1449,7 @@ fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult 
     let timeline = store.create_timeline("output-admission-undeclared")?.id();
 
     assert!(matches!(
-        registry.step_all_anchored(timeline, pos_core::Seq::ZERO),
+        registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO),
         Err(RuntimeError::Authority(
             pos_core::AuthorityErrorV1::UnauthorizedSource
         ))

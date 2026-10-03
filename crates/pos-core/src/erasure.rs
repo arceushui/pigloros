@@ -1285,6 +1285,89 @@ impl ErasureContainmentGateV1 {
         drop(fence);
     }
 
+    /// Drive one fixture erasure request over `timeline` to `Complete`.
+    ///
+    /// This is available only to test targets. The request's resolved scope
+    /// is exactly `timeline`, and each containing lifecycle from
+    /// `AccessFrozen` to `Complete` is installed in order through the same
+    /// verified-state path a recovered coordinator state uses. Production
+    /// hosts install only recovered coordinator state.
+    ///
+    /// # Errors
+    /// Returns a containment error when a fixture state cannot be installed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn complete_timeline_erasure_for_test(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<ErasureLifecycleV1, ErasureContainmentErrorV1> {
+        let reference = |domain: &[u8]| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(domain);
+            hasher.update(&timeline.inner().to_bytes());
+            ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+        };
+        let request_reference = reference(b"test-support erasure request");
+        let member = reference(b"test-support erasure scope");
+        ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: request_reference,
+            subject: reference(b"test-support erasure subject"),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![member],
+            requester: reference(b"test-support erasure requester"),
+            authorization: reference(b"test-support erasure authorization"),
+            policy: reference(b"test-support erasure policy"),
+            request_position: 9,
+            horizon_position: 10,
+            provenance: reference(b"test-support erasure provenance"),
+        })
+        .and_then(|request| {
+            ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+                request: request_reference,
+                scope_members: vec![member],
+                scope_timeline_ids: vec![timeline],
+                target_closure: reference(b"test-support erasure targets"),
+                lineage_rule: None,
+            })
+            .map(|scope| (request, scope))
+        })
+        .map_err(containment_recovery_failure)
+        .and_then(|(request, scope)| {
+            [
+                ErasureLifecycleV1::AccessFrozen,
+                ErasureLifecycleV1::DestructionDispatched,
+                ErasureLifecycleV1::AwaitingAcknowledgements,
+                ErasureLifecycleV1::Complete,
+            ]
+            .into_iter()
+            .try_fold(ErasureLifecycleV1::Authorized, |previous, lifecycle| {
+                let state = ErasureStateV1 {
+                    request: request_reference,
+                    lifecycle,
+                    freeze_position: Some(10),
+                    coordinator: reference(b"test-support erasure coordinator"),
+                    pending_owners: Vec::new(),
+                    failed_owners: Vec::new(),
+                    replay_claim: ErasureReplayClaimV1::Exact,
+                    previous_state: Some(reference(&previous.code().to_le_bytes())),
+                    provenance: reference(b"test-support erasure provenance"),
+                    state_digest: reference(&lifecycle.code().to_le_bytes()),
+                };
+                self.install_verified_state_with_bindings(
+                    &ErasureVerifiedStateV1::from_parts(
+                        reference(b"test-support erasure manifest"),
+                        request.clone(),
+                        state,
+                        Some(scope.clone()),
+                        Vec::new(),
+                    ),
+                    &[(timeline, member)],
+                    &[],
+                )
+                .map(|()| lifecycle)
+            })
+        })
+    }
+
     fn authorize_state(
         &self,
         timeline: TimelineId,

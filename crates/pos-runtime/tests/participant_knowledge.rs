@@ -38,6 +38,14 @@ use std::{
     },
 };
 
+/// The one-member Fork ancestry of a fixture Timeline with no parent.
+fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+    vec![pos_core::TimelineMeta {
+        id: timeline,
+        ..pos_core::TimelineMeta::root("root")
+    }]
+}
+
 trait TestOk<T> {
     fn test_ok(self) -> T;
 }
@@ -731,7 +739,7 @@ fn stage_view(
     view: AuthorizedDriverViewV1,
     authority: AuthorizedViewAuthorityV1<'_>,
 ) -> Result<Vec<EventDraft>, RuntimeError> {
-    registry.stage_authorized_scheduled_pass(timeline, Seq::from_u64(12), &[view], &[authority])
+    registry.stage_authorized_scheduled_pass(timeline, &root_ancestry(timeline), Seq::from_u64(12), &[view], &[authority])
 }
 
 /// Host admission inputs for a port that has no published fence.
@@ -1590,7 +1598,7 @@ fn authorized_commit_rejects_a_legacy_pending_step() {
     let fixture = fixture();
     let (mut registry, state) = non_participant_registry(&fixture);
     registry
-        .step_all_anchored(fixture.timeline_id, Seq::from_u64(12))
+        .step_all_anchored(fixture.timeline_id, &root_ancestry(fixture.timeline_id), Seq::from_u64(12))
         .test_ok();
     let evaluation = observation_evaluation(&fixture.observation);
     let authority = current_authority(&fixture);
@@ -1692,7 +1700,7 @@ fn admit_recorded(
     authorities: &[AuthorizedViewAuthorityV1<'_>],
 ) -> (Seq, Hash) {
     registry
-        .stage_authorized_scheduled_pass(prepared.timeline, Seq::from_u64(12), views, authorities)
+        .stage_authorized_scheduled_pass(prepared.timeline, &root_ancestry(prepared.timeline), Seq::from_u64(12), views, authorities)
         .test_ok();
     let admission = prepared.admission(key);
     let mut port = RecordingPort {
@@ -1812,6 +1820,7 @@ fn late_revocation_of_one_view_aborts_the_whole_scheduled_pass() {
         registry
             .stage_authorized_scheduled_pass(
                 prepared.timeline,
+                &root_ancestry(prepared.timeline),
                 Seq::from_u64(12),
                 &[driver_view(&first), driver_view(&second)],
                 &[
@@ -1861,6 +1870,7 @@ fn a_failing_driver_aborts_every_driver_staged_by_the_pass() {
     assert_eq!(
         authority_error(registry.stage_authorized_scheduled_pass(
             timeline,
+            &root_ancestry(timeline),
             Seq::from_u64(12),
             &[driver_view(&first), driver_view(&second)],
             &[
@@ -1894,6 +1904,7 @@ fn views_must_follow_host_schedule_order_and_share_the_base_cut() {
     assert_eq!(
         authority_error(registry.stage_authorized_scheduled_pass(
             timeline,
+            &root_ancestry(timeline),
             Seq::from_u64(12),
             &[driver_view(&second), driver_view(&first)],
             &[
@@ -1906,6 +1917,7 @@ fn views_must_follow_host_schedule_order_and_share_the_base_cut() {
     assert_eq!(
         authority_error(registry.stage_authorized_scheduled_pass(
             timeline,
+            &root_ancestry(timeline),
             Seq::from_u64(11),
             &[driver_view(&first)],
             &[view_authority(&first, &first_evaluation, &first_authority)],
@@ -1915,6 +1927,7 @@ fn views_must_follow_host_schedule_order_and_share_the_base_cut() {
     assert_eq!(
         authority_error(registry.stage_authorized_scheduled_pass(
             timeline,
+            &root_ancestry(timeline),
             Seq::from_u64(12),
             &[driver_view(&first), driver_view(&second)],
             &[view_authority(&first, &first_evaluation, &first_authority)],
@@ -1950,7 +1963,7 @@ fn an_empty_authorized_pass_commits_without_admission() {
     let fixture = fixture();
     let (mut registry, state) = registry(&fixture, false);
     assert!(registry
-        .stage_authorized_scheduled_pass(fixture.timeline_id, Seq::from_u64(12), &[], &[])
+        .stage_authorized_scheduled_pass(fixture.timeline_id, &root_ancestry(fixture.timeline_id), Seq::from_u64(12), &[], &[])
         .test_ok()
         .is_empty());
 
@@ -2010,6 +2023,7 @@ fn authorized_pass_rejects_another_plugins_event_type_and_commits_nothing() {
         assert_eq!(
             authority_error(registry.stage_authorized_scheduled_pass(
                 prepared.timeline,
+                &root_ancestry(prepared.timeline),
                 Seq::from_u64(12),
                 &[driver_view(&first), driver_view(&second)],
                 &authorities,

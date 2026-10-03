@@ -72,7 +72,7 @@ pub fn compare(
                     );
                 };
                 second_timeline_fence_result = sender
-                    .with_protected_effect_fence(
+                    .with_protected_ancestry_fence(
                         b,
                         ErasureProtectedOperationV1::Export,
                         &mut second_timeline_effect,
@@ -80,7 +80,7 @@ pub fn compare(
                     .map_err(crate::host_error_to_core);
             };
             sender
-                .with_protected_effect_fence(
+                .with_protected_ancestry_fence(
                     a,
                     ErasureProtectedOperationV1::Export,
                     &mut first_timeline_effect,

@@ -4,7 +4,7 @@
 //! skipping drivers whose `tick_interval()` has not yet elapsed.
 
 use crate::{registry::PluginRegistry, RuntimeError};
-use pos_core::{event::EventDraft, ids::TimelineId};
+use pos_core::{event::EventDraft, ids::TimelineId, TimelineMeta};
 
 pub struct TickScheduler {
     /// The plugin registry being driven.
@@ -23,15 +23,18 @@ impl TickScheduler {
     /// tick will fire.
     ///
     /// `now_ns` is a nanosecond wall-clock timestamp (e.g. from [`pos_core::WallTime`]).
+    /// `ancestry` is the Timeline's Fork ancestry from [`pos_core::fork_ancestry`].
     ///
     /// # Errors
-    /// Propagates any [`RuntimeError`] from drivers.
+    /// Propagates any [`RuntimeError`] from drivers, or the closed erasure
+    /// error for an invalid ancestry or a denying scope.
     pub fn tick(
         &mut self,
         timeline: TimelineId,
+        ancestry: &[TimelineMeta],
         now_ns: u128,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        self.registry.tick_cadenced(timeline, now_ns)
+        self.registry.tick_cadenced(timeline, ancestry, now_ns)
     }
 }
 
@@ -226,6 +229,7 @@ mod tests {
     fn all_drivers_fire_on_first_tick() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
+        let ancestry = pos_core::fork_ancestry(store.as_ref(), tl.id()).test_ok();
         let mut reg = gated_registry();
         register_output_driver(
             &mut reg,
@@ -234,7 +238,7 @@ mod tests {
         );
         register_output_driver(&mut reg, "fast.tick", Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
-        let drafts = sched.tick(tl.id(), 0).test_ok();
+        let drafts = sched.tick(tl.id(), &ancestry, 0).test_ok();
         assert_eq!(drafts.len(), 2);
     }
 
@@ -243,6 +247,7 @@ mod tests {
     fn slow_driver_skipped_when_interval_not_elapsed() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
+        let ancestry = pos_core::fork_ancestry(store.as_ref(), tl.id()).test_ok();
         let mut reg = gated_registry();
         register_output_driver(
             &mut reg,
@@ -251,8 +256,8 @@ mod tests {
         );
         register_output_driver(&mut reg, "fast.tick", Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
-        sched.tick(tl.id(), 0).test_ok();
-        let drafts = sched.tick(tl.id(), 1).test_ok();
+        sched.tick(tl.id(), &ancestry, 0).test_ok();
+        let drafts = sched.tick(tl.id(), &ancestry, 1).test_ok();
         assert_eq!(drafts.len(), 1);
     }
 
@@ -261,6 +266,7 @@ mod tests {
     fn slow_driver_fires_after_interval_elapsed() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
+        let ancestry = pos_core::fork_ancestry(store.as_ref(), tl.id()).test_ok();
         let mut reg = gated_registry();
         register_output_driver(
             &mut reg,
@@ -269,10 +275,10 @@ mod tests {
         );
         register_output_driver(&mut reg, "fast.tick", Box::new(FastDriver::new()));
         let mut sched = TickScheduler::new(reg);
-        sched.tick(tl.id(), 0).test_ok();
-        let d = sched.tick(tl.id(), 50_000_000).test_ok();
+        sched.tick(tl.id(), &ancestry, 0).test_ok();
+        let d = sched.tick(tl.id(), &ancestry, 50_000_000).test_ok();
         assert_eq!(d.len(), 1);
-        let d = sched.tick(tl.id(), 100_000_000).test_ok();
+        let d = sched.tick(tl.id(), &ancestry, 100_000_000).test_ok();
         assert_eq!(d.len(), 2);
     }
 
@@ -281,9 +287,10 @@ mod tests {
     fn empty_registry_returns_empty() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
+        let ancestry = pos_core::fork_ancestry(store.as_ref(), tl.id()).test_ok();
         let reg = gated_registry();
         let mut sched = TickScheduler::new(reg);
-        let drafts = sched.tick(tl.id(), 0).test_ok();
+        let drafts = sched.tick(tl.id(), &ancestry, 0).test_ok();
         assert!(drafts.is_empty());
     }
 }
