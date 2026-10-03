@@ -922,7 +922,21 @@ fn the_panic_hook_and_worker_are_installed_once() {
 
 /// Threads of this process named as the staged-fold worker. Other test
 /// threads start and end concurrently, so only the worker's name counts.
+///
+/// The worker names itself as it starts, which can trail `acquire` under a
+/// sanitizer, so this waits up to about 5 s for exactly one to appear.
 fn worker_threads() -> usize {
+    let mut seen = named_worker_threads();
+    let mut polls = 0;
+    while seen != 1 && polls < 1_000 {
+        std::thread::sleep(Duration::from_millis(5));
+        seen = named_worker_threads();
+        polls += 1;
+    }
+    seen
+}
+
+fn named_worker_threads() -> usize {
     std::fs::read_dir("/proc/self/task").map_or(0, |tasks| {
         tasks
             .filter_map(Result::ok)

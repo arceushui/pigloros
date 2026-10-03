@@ -154,7 +154,21 @@ fn guarded(port: &mut TrustedClockFixtureV1) -> ReleaseGuardV1<'_> {
 }
 
 /// Threads of this process named as the staged-fold worker.
+///
+/// The worker names itself as it starts, which can trail `acquire` under a
+/// sanitizer, so this waits up to about 5 s for exactly one to appear.
 fn worker_threads() -> usize {
+    let mut seen = named_worker_threads();
+    let mut polls = 0;
+    while seen != 1 && polls < 1_000 {
+        std::thread::sleep(Duration::from_millis(5));
+        seen = named_worker_threads();
+        polls += 1;
+    }
+    seen
+}
+
+fn named_worker_threads() -> usize {
     std::fs::read_dir("/proc/self/task").map_or(0, |tasks| {
         tasks
             .filter_map(Result::ok)
