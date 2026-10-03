@@ -1277,6 +1277,34 @@ fn restore_inherited_eval_events(
         })
 }
 
+/// Build the train-phase registry, compose its Drivers non-participant, and
+/// create the train Timeline.
+fn begin_backtest_train(
+    registry_factory: &dyn Fn() -> PluginRegistry,
+    store: &mut dyn pos_core::store::EventStore,
+    runtime_gate: Arc<dyn ErasureGate>,
+    name: &str,
+) -> Result<(PluginRegistry, Arc<dyn ErasureGate>, Timeline), ExperimentError> {
+    let mut registry = compose_non_participant(registry_factory())?;
+    let (gate, timeline) = start_backtest_train(store, &mut registry, runtime_gate, name)?;
+    Ok((registry, gate, timeline))
+}
+
+/// Build the eval-phase registry, compose its Drivers non-participant, and
+/// restore the inherited train history into it.
+fn begin_backtest_eval(
+    registry_factory: &dyn Fn() -> PluginRegistry,
+    store: &dyn pos_core::store::EventStore,
+    timeline: pos_core::ids::TimelineId,
+    train_head: pos_core::clock::Seq,
+    gate: Arc<dyn ErasureGate>,
+) -> Result<(PluginRegistry, Vec<pos_core::Event>), ExperimentError> {
+    let mut registry = compose_non_participant(registry_factory())?;
+    let inherited =
+        prepare_backtest_eval_registry(store, timeline, train_head, &mut registry, gate)?;
+    Ok((registry, inherited))
+}
+
 fn prepare_backtest_eval_registry(
     store: &dyn pos_core::store::EventStore,
     timeline: pos_core::ids::TimelineId,
@@ -3160,9 +3188,8 @@ impl BacktestRunner {
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
-        let mut train_registry = compose_non_participant((self.registry_factory)())?;
-        let (erasure_gate, train_tl) =
-            start_backtest_train(store, &mut train_registry, runtime_gate, &train_name)?;
+        let (mut train_registry, erasure_gate, train_tl) =
+            begin_backtest_train(&*self.registry_factory, store, runtime_gate, &train_name)?;
         let train_tl_id = train_tl.id();
         let train_stop = StopCondition::MaxTicks(self.config.train_ticks);
         let (train_ticks, train_events, train_chain_head) = run_experiment_on_store(
@@ -3181,12 +3208,11 @@ impl BacktestRunner {
         let eval_tl_id = eval_tl.id();
 
         // --- Eval phase (same store, forked timeline) ---
-        let mut eval_registry = compose_non_participant((self.registry_factory)())?;
-        let inherited = prepare_backtest_eval_registry(
+        let (mut eval_registry, inherited) = begin_backtest_eval(
+            &*self.registry_factory,
             store,
             eval_tl_id,
             train_head_seq,
-            &mut eval_registry,
             erasure_gate,
         )?;
         hydrate_projections(&mut eval_registry, eval_tl_id, &inherited);
