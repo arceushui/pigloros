@@ -1152,7 +1152,8 @@ fn port_commits_whole_generation_or_reports_conflict() {
 fn port_appends_later_ticks_only_on_the_expected_basis() {
     let command = command();
     let mut store = FakeStore::new();
-    ok(store.publish_counterfactual_facts(fork(), facts()));
+    // The command invalidates prior generation 3.
+    store.published = Some((3, facts()));
     let CounterfactualInvalidationOutcomeV1::Committed(receipt) =
         ok(store.commit_counterfactual_invalidation(&command))
     else {
