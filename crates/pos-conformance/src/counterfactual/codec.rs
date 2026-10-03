@@ -26,11 +26,11 @@
 //!    [`FieldReader::new`] for nested fixed-length arrays, then return
 //!    `reader.finish().map(|()| record)`.
 //! 3. Read closed enum codes with [`FieldReader::read_enum`] over a `const`
-//!    code table, and embedded node coordinates with
-//!    [`FieldReader::read_node`]. Optional fields and variable-length lists
-//!    are added here as `read_*` methods over [`FieldReader::read_with`]; any
-//!    helper added here must be exercised by the contract that introduces it,
-//!    because unused helpers fail the build and untested branches fail the
+//!    code table, optional fields with the `read_optional*` methods,
+//!    variable-length lists with [`FieldReader::read_array`], and embedded
+//!    node coordinates with [`FieldReader::read_node`].
+//! 4. Any helper added here must be exercised by the contract that introduces
+//!    it, because unused helpers fail the build and untested branches fail the
 //!    region gate.
 
 use crate::DependencyNodeV1;
@@ -256,7 +256,20 @@ impl<'a> FieldReader<'a> {
     /// Read a field that is either `null` or a byte string of exactly
     /// `LENGTH` bytes.
     pub(super) fn read_optional_bytes<const LENGTH: usize>(&mut self) -> Option<[u8; LENGTH]> {
-        self.read_with(optional_bytes_field::<LENGTH>, None)
+        self.read_optional(fixed_bytes_field::<LENGTH>)
+    }
+
+    /// Read a field that is either `null` or an unsigned integer.
+    pub(super) fn read_optional_u64(&mut self) -> Option<u64> {
+        self.read_optional(u64_field)
+    }
+
+    /// Read a field that is either `null` or a value decoded by `decode`.
+    pub(super) fn read_optional<T>(
+        &mut self,
+        decode: fn(&Value) -> Result<T, WireError>,
+    ) -> Option<T> {
+        self.read_with(|value| optional_field(value, decode), None)
     }
 
     /// Read a variable-length array field, decoding every item with `decode`.
@@ -323,12 +336,13 @@ fn enum_code<T: Copy>(code: u64, codes: &[T]) -> Result<T, WireError> {
         .ok_or(WireError::UnknownEnum)
 }
 
-fn optional_bytes_field<const LENGTH: usize>(
+fn optional_field<T>(
     value: &Value,
-) -> Result<Option<[u8; LENGTH]>, WireError> {
+    decode: fn(&Value) -> Result<T, WireError>,
+) -> Result<Option<T>, WireError> {
     match value {
         Value::Null => Ok(None),
-        value => fixed_bytes_field::<LENGTH>(value).map(Some),
+        value => decode(value).map(Some),
     }
 }
 
