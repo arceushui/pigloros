@@ -7,13 +7,13 @@
 
 use pos_core::{
     local_cut_owner_intent_digest_v1, validate_local_cut_owner_result_v1,
-    validate_local_cut_owner_successor_v1, Hash, LocalCutCommitV1, LocalCutCompositionBindingRowV1,
-    LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1,
-    LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
-    LocalCutOwnerStateV1, LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutSealV2,
-    LocalCutTableRefV1, ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionInputV1,
-    ManifestOwnerAdmissionOwnerStateV1, PluginId, PreparedLocalCutOwnerCommitV1, TimelineId,
-    MAX_LOCAL_CUT_OWNER_ROWS_V1,
+    validate_local_cut_owner_successor_v1, CoreError, Hash, LocalCutCommitV1,
+    LocalCutCompositionBindingRowV1, LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1,
+    LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
+    LocalCutOwnerRequestV1, LocalCutOwnerStateV1, LocalCutReceiptV1, LocalCutRecordingContextRowV1,
+    LocalCutSealV2, LocalCutTableRefV1, ManifestOwnerAdmissionErrorV1,
+    ManifestOwnerAdmissionInputV1, ManifestOwnerAdmissionOwnerStateV1, PluginId,
+    PreparedLocalCutOwnerCommitV1, TimelineId, MAX_LOCAL_CUT_OWNER_ROWS_V1,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -657,6 +657,12 @@ pub(super) fn sqlite_validate_local_cut_owner_admission(
     Ok(())
 }
 
+/// Read the owner state and fully validate only its current visible cut.
+///
+/// This hot path checks the admitted header, rejects any retained cut after
+/// the last visible cut, and decodes only that last cut. Older cuts are decoded
+/// when a read or retry returns one, and by
+/// [`LocalCutOwnerPersistencePortV1::verify_local_cut_owner_history_v1`].
 fn sqlite_read_local_cut_owner_state(
     connection: &Connection,
     owner_id: [u8; 32],
@@ -672,34 +678,66 @@ fn sqlite_read_local_cut_owner_state(
     // generation, roster, receipt, and inventory. Its local-cut rows make a
     // missing admitted row corrupt there, so it never returns `None` here.
     sqlite_read_manifest_owner_current_state(connection, owner_id)?;
-    let mut statement = connection
+    let last_visible_cut_id = state.last_visible_cut_id.to_be_bytes();
+    // Cut identities are stored big-endian, so SQLite's bytewise blob order is
+    // their numeric order and `cut_id > ?2` selects exactly the later cuts.
+    let has_later_cut: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM local_cut_owner_cuts WHERE owner_id = ?1 AND cut_id > ?2
+             )",
+            params![owner_id.as_slice(), last_visible_cut_id.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+    if has_later_cut {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    let current =
+        sqlite_local_cut_owner_cut_by_id(connection, owner_id, state.last_visible_cut_id)?
+            .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+    if state.previous_visible_lcq1_hash != Some(current.result.receipt.digest()) {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    Ok(Some(state))
+}
+
+/// List one owner's raw retained cut identities in ascending order.
+///
+/// A retained `cut_id` that is not a blob fails the typed `Vec<u8>` read with
+/// `rusqlite::Error::InvalidColumnType`. That is the signal for a corrupt row,
+/// so it maps to `CorruptState`; every other error is a `StorageFailure`.
+fn sqlite_local_cut_owner_cut_ids(
+    connection: &Connection,
+    owner_id: [u8; 32],
+) -> Result<Vec<Vec<u8>>, LocalCutOwnerErrorV1> {
+    connection
         .prepare(
             "SELECT cut_id FROM local_cut_owner_cuts
              WHERE owner_id = ?1 ORDER BY cut_id",
         )
-        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
-    let cut_rows = statement
-        .query_map(params![owner_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))
-        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-        .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
-    let mut found_current = false;
-    for cut_bytes in cut_rows {
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![owner_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        })
+        .map_err(|error| match error {
+            rusqlite::Error::InvalidColumnType(..) => LocalCutOwnerErrorV1::CorruptState,
+            _ => LocalCutOwnerErrorV1::StorageFailure,
+        })
+}
+
+/// Fully validate the owner state and every retained cut, oldest first.
+fn sqlite_verify_local_cut_owner_history(
+    connection: &Connection,
+    owner_id: [u8; 32],
+) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
+    let state = sqlite_read_local_cut_owner_state(connection, owner_id)?;
+    for cut_bytes in sqlite_local_cut_owner_cut_ids(connection, owner_id)? {
         let cut_id = sqlite_local_cut_owner_u64(&cut_bytes)?;
-        let cut = sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)?;
-        if cut_id > state.last_visible_cut_id {
-            return Err(LocalCutOwnerErrorV1::CorruptState);
-        }
-        if cut_id == state.last_visible_cut_id {
-            if state.previous_visible_lcq1_hash != Some(cut.result.receipt.digest()) {
-                return Err(LocalCutOwnerErrorV1::CorruptState);
-            }
-            found_current = true;
-        }
+        sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)?;
     }
-    if !found_current {
-        return Err(LocalCutOwnerErrorV1::CorruptState);
-    }
-    Ok(Some(state))
+    Ok(state)
 }
 
 fn sqlite_resolve_local_cut_owner_retry(
@@ -976,6 +1014,49 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
             .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
         Ok(cut.map(|cut| cut.result))
     }
+
+    // Every read-write open runs this pass for each owner with local-cut rows.
+    // A read-only open does not, so its callers invoke the port method directly.
+    fn verify_local_cut_owner_history_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        let state = sqlite_verify_local_cut_owner_history(&transaction, owner_id)?;
+        transaction
+            .commit()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        Ok(state)
+    }
+}
+
+impl SqliteStore {
+    /// Verify the complete local-cut history of every owner with local-cut rows.
+    pub(super) fn verify_local_cut_owner_histories(&self) -> Result<(), CoreError> {
+        let owners = self
+            .conn
+            .prepare(
+                "SELECT owner_id FROM local_cut_owner_state
+                 UNION SELECT owner_id FROM local_cut_owner_state_timelines
+                 UNION SELECT owner_id FROM local_cut_owner_cuts",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, [u8; 32]>(0))
+                    .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            })
+            .map_err(Self::into_storage_error)?;
+        for owner_id in owners {
+            self.verify_local_cut_owner_history_v1(owner_id)
+                .map_err(|error| {
+                    CoreError::Storage(format!("local-cut owner history is invalid: {error}"))
+                })?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn sqlite_sync_local_cut_owner_after_admission(
@@ -1110,6 +1191,32 @@ mod local_cut_owner_coverage {
         operation_id: hash(102),
         result_inventory: hash(111),
     };
+    const SECOND_CUT: CutShape = CutShape {
+        cut_id: 6,
+        tick: 2,
+        operation_id: hash(118),
+        result_inventory: hash(113),
+    };
+    const THIRD_CUT: CutShape = CutShape {
+        cut_id: 7,
+        tick: 3,
+        operation_id: hash(116),
+        result_inventory: hash(114),
+    };
+    // Cut identities 255 and 256 order oppositely as little-endian bytes.
+    const BYTE_EDGE_CUT: CutShape = CutShape {
+        cut_id: 255,
+        tick: 1,
+        operation_id: hash(140),
+        result_inventory: hash(141),
+    };
+    const BYTE_CARRY_CUT: CutShape = CutShape {
+        cut_id: 256,
+        tick: 2,
+        operation_id: hash(142),
+        result_inventory: hash(143),
+    };
+    const OLD_CUT: &str = "WHERE cut_id = X'0000000000000005'";
     const CORRUPTION_PRAGMAS: &str =
         "PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON";
     const STATE_UPDATE_ABORT: &str = "CREATE TRIGGER fault \
@@ -1578,7 +1685,10 @@ mod local_cut_owner_coverage {
     }
 
     fn admitted() -> Fallible<Admitted> {
-        let mut store = SqliteStore::open_in_memory()?;
+        admitted_in(SqliteStore::open_in_memory()?)
+    }
+
+    fn admitted_in(mut store: SqliteStore) -> Fallible<Admitted> {
         let request = admission_request(1, None, &TIMELINES, hash(41), hash(40))?;
         let prepared = prepare_manifest_owner_admission_v1(request, &AdmissionOwner, None)?;
         let applied = store.commit_manifest_owner_admission_v1(prepared)?;
@@ -1611,7 +1721,10 @@ mod local_cut_owner_coverage {
     }
 
     fn committed() -> Fallible<Committed> {
-        let fixture = admitted()?;
+        committed_in(admitted()?)
+    }
+
+    fn committed_in(fixture: Admitted) -> Fallible<Committed> {
         let request = cut_request(&fixture.state, &fixture.snapshots, FIRST_CUT)?;
         let batch = prepare_cut(request, None, &fixture.state, &fixture.snapshots)?;
         let mut store = fixture.store;
@@ -1623,6 +1736,30 @@ mod local_cut_owner_coverage {
             snapshots: fixture.snapshots,
             batch,
         })
+    }
+
+    // Commits the next cut on top of the current admitted and local-cut state.
+    fn commit_next(
+        store: &mut SqliteStore,
+        snapshots: &[ManifestOwnerAdmissionSnapshotV1],
+        shape: CutShape,
+    ) -> Fallible<PreparedLocalCutOwnerCommitV1> {
+        let current = current_admission(store)?;
+        let local = store
+            .read_local_cut_owner_state_v1(OWNER)?
+            .ok_or("missing local-cut owner state")?;
+        let request = cut_request(&current, snapshots, shape)?;
+        let batch = prepare_cut(request, Some(&local), &current, snapshots)?;
+        let applied = store.commit_local_cut_owner_v1(batch.clone())?;
+        assert_eq!(applied.kind, LocalCutOwnerCommitKindV1::Applied);
+        Ok(batch)
+    }
+
+    // Two visible cuts: FIRST_CUT is history and SECOND_CUT is current.
+    fn with_history() -> Fallible<(Committed, PreparedLocalCutOwnerCommitV1)> {
+        let mut fixture = committed()?;
+        let second = commit_next(&mut fixture.store, &fixture.snapshots, SECOND_CUT)?;
+        Ok((fixture, second))
     }
 
     fn current_admission(store: &SqliteStore) -> Fallible<ManifestOwnerAdmissionOwnerStateV1> {
@@ -1706,6 +1843,10 @@ mod local_cut_owner_coverage {
         );
         assert_eq!(
             store.read_local_cut_owner_commit_v1(OWNER, 1),
+            Err(expected)
+        );
+        assert_eq!(
+            store.verify_local_cut_owner_history_v1(OWNER),
             Err(expected)
         );
     }
@@ -2173,8 +2314,9 @@ mod local_cut_owner_coverage {
         let read = |conn: &Connection| sqlite_read_local_cut_owner_state(conn, OWNER).err();
         let corrupt = Some(LocalError::CorruptState);
         assert_eq!(read(connection), None);
+        // A non-blob identity hides the current cut from the keyed lookup.
         let typed_id = after_cut_update(connection, "cut_id = 7", &[], read)?;
-        assert_eq!(typed_id, Some(LocalError::StorageFailure));
+        assert_eq!(typed_id, corrupt);
         let short_id = after_cut_update(connection, "cut_id = X'01'", &[], read)?;
         assert_eq!(short_id, corrupt);
         let damaged = after_cut_update(connection, "receipt_cbor = X'01'", &[], read)?;
@@ -2448,6 +2590,154 @@ mod local_cut_owner_coverage {
             fixture.store.commit_manifest_owner_admission_v1(successor),
             Err(AdmissionError::StorageFailure)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn hot_paths_decode_only_the_current_and_returned_cuts() -> TestResult {
+        let (mut fixture, second) = with_history()?;
+        let current = fixture.store.read_local_cut_owner_state_v1(OWNER)?;
+        assert_eq!(
+            fixture.store.verify_local_cut_owner_history_v1(OWNER)?,
+            current
+        );
+        fixture.store.verify_local_cut_owner_histories()?;
+        fixture.store.conn.execute(
+            &format!("UPDATE local_cut_owner_cuts SET request_bytes = X'01' {OLD_CUT}"),
+            [],
+        )?;
+        // Current-state reads, retries, commits, and current-cut reads never
+        // decode the damaged older cut.
+        assert_eq!(fixture.store.read_local_cut_owner_state_v1(OWNER)?, current);
+        let retry = fixture
+            .store
+            .resolve_local_cut_owner_retry_v1(
+                OWNER,
+                SECOND_CUT.operation_id,
+                second.intent_digest(),
+            )?
+            .ok_or("missing current-cut retry")?;
+        assert_eq!(retry.kind, LocalCutOwnerCommitKindV1::ExactRetry);
+        let third = commit_next(&mut fixture.store, &fixture.snapshots, THIRD_CUT)?;
+        assert_eq!(
+            fixture
+                .store
+                .read_local_cut_owner_commit_v1(OWNER, THIRD_CUT.cut_id)?,
+            Some(third.applied_result())
+        );
+        // Every path that returns the damaged cut, and the integrity pass, fail closed.
+        let corrupt = Err(LocalError::CorruptState);
+        assert_eq!(
+            fixture
+                .store
+                .read_local_cut_owner_commit_v1(OWNER, FIRST_CUT.cut_id),
+            corrupt
+        );
+        assert_eq!(
+            fixture.store.resolve_local_cut_owner_retry_v1(
+                OWNER,
+                FIRST_CUT.operation_id,
+                fixture.batch.intent_digest(),
+            ),
+            corrupt
+        );
+        assert_eq!(
+            fixture.store.verify_local_cut_owner_history_v1(OWNER),
+            Err(LocalError::CorruptState)
+        );
+        let opened = fixture.store.verify_local_cut_owner_histories();
+        assert!(matches!(
+            opened,
+            Err(CoreError::Storage(message)) if message.starts_with("local-cut owner history")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn history_verification_rejects_unreadable_older_cut_identities() -> TestResult {
+        let (fixture, _) = with_history()?;
+        let connection = &fixture.store.conn;
+        let probe = |conn: &Connection| {
+            (
+                sqlite_read_local_cut_owner_state(conn, OWNER).err(),
+                sqlite_verify_local_cut_owner_history(conn, OWNER).err(),
+            )
+        };
+        for (assignment, expected) in [
+            ("cut_id = 4", LocalError::CorruptState),
+            ("cut_id = X'00'", LocalError::CorruptState),
+            ("receipt_cbor = X'01'", LocalError::CorruptState),
+        ] {
+            let setup = format!("UPDATE local_cut_owner_cuts SET {assignment} {OLD_CUT}");
+            let outcome = with_rollback(connection, &setup, probe)?;
+            assert_eq!(outcome, (None, Some(expected)), "{assignment}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn open_history_pass_reports_unreadable_owner_rows() -> TestResult {
+        let (fixture, _) = with_history()?;
+        let store = &fixture.store;
+        let rejected = |_: &Connection| store.verify_local_cut_owner_histories().is_err();
+        for setup in [
+            "DROP TABLE local_cut_owner_state_timelines",
+            "INSERT INTO local_cut_owner_state_timelines VALUES (X'01', zeroblob(16))",
+        ] {
+            assert!(with_rollback(&store.conn, setup, rejected)?, "{setup}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn later_cut_check_orders_cut_ids_numerically() -> TestResult {
+        // Cut 255 precedes cut 256 only under the big-endian blob encoding that
+        // the `cut_id > ?2` later-cut check relies on.
+        let mut fixture = admitted()?;
+        let request = cut_request(&fixture.state, &fixture.snapshots, BYTE_EDGE_CUT)?;
+        let batch = prepare_cut(request, None, &fixture.state, &fixture.snapshots)?;
+        let applied = fixture.store.commit_local_cut_owner_v1(batch)?;
+        assert_eq!(applied.kind, LocalCutOwnerCommitKindV1::Applied);
+        commit_next(&mut fixture.store, &fixture.snapshots, BYTE_CARRY_CUT)?;
+        let current = fixture.store.read_local_cut_owner_state_v1(OWNER)?;
+        assert_eq!(
+            current.as_ref().map(|state| state.last_visible_cut_id),
+            Some(BYTE_CARRY_CUT.cut_id)
+        );
+        assert_eq!(
+            fixture.store.verify_local_cut_owner_history_v1(OWNER)?,
+            current
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reopening_a_store_verifies_every_retained_cut() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("local-cut-owner.sqlite");
+        let path = path.to_str().ok_or("non-UTF-8 test path")?;
+        let fixture = committed_in(admitted_in(SqliteStore::open(path)?)?)?;
+        let mut store = fixture.store;
+        commit_next(&mut store, &fixture.snapshots, SECOND_CUT)?;
+        drop(store);
+        let reopened = SqliteStore::open(path)?;
+        let verified = reopened.verify_local_cut_owner_history_v1(OWNER)?;
+        assert_eq!(
+            verified.map(|state| state.last_visible_cut_id),
+            Some(SECOND_CUT.cut_id)
+        );
+        reopened.conn.execute(
+            &format!("UPDATE local_cut_owner_cuts SET request_bytes = X'01' {OLD_CUT}"),
+            [],
+        )?;
+        drop(reopened);
+        let rejected = SqliteStore::open(path)
+            .err()
+            .ok_or("reopened a store with a damaged older cut")?;
+        assert!(matches!(
+            rejected,
+            CoreError::Storage(message) if message.starts_with("local-cut owner history")
+        ));
         Ok(())
     }
 }
