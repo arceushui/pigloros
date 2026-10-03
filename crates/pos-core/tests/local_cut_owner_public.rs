@@ -218,7 +218,7 @@ fn intent_proves_kind_four_and_kind_five_rows_against_their_tables() -> TestResu
     unproven_result.result_head_rows[0].event_count = 1;
     let mut missing_expected = request.clone();
     missing_expected.expected_head_rows.clear();
-    let mut unsorted_result = request.clone();
+    let mut unsorted_result = request;
     unsorted_result
         .result_head_rows
         .push(result_head(TimelineId::from_ulid(ulid::Ulid::nil())));
