@@ -25,7 +25,6 @@ use pos_runtime::{
     GuardedFoldWindowV1, HostProjectionProviderV1, InstalledPluginFactoryV1,
     InstalledPluginProductV1, NoActionApproverV1, StagedFoldErrorV1, StagedFoldExecutorV1,
     StagedFoldPlanV1, GUARD_RELEASE_LATE_SIGNAL, MAX_STAGED_INPUT_BYTES_V1,
-    STAGED_FOLD_WORKER_NAME_V1,
 };
 use pos_state::{
     CandidateBuildV1, InitialStateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1,
@@ -41,6 +40,8 @@ use std::{
     },
     time::Duration,
 };
+
+include!("common/mod.rs");
 
 const NAME: &str = "staged-fixture";
 const COUNTED: &str = "staged.counted";
@@ -100,6 +101,24 @@ fn counted_run(entity: EntityId, count: u64) -> Vec<Event> {
 fn blob(entity: EntityId, staged_bytes: u64, seq: u64) -> Event {
     let payload = CanonicalBytes::from_vec((staged_bytes - 19).to_le_bytes().to_vec());
     event(entity, COUNTED, payload, seq)
+}
+
+/// Blob Events on fresh entities whose staged sizes total exactly `total`.
+///
+/// Every first `apply` stays within the pending admission growth bound:
+/// from the 16-byte `initial()` State it may add 6 × 8 + 4096 bytes, so each
+/// entity holds at most 4160 staged bytes. The last entity takes the rest,
+/// which must be at least the 19-byte minimum.
+fn blobs_totalling(total: u64) -> Vec<Event> {
+    const PER_ENTITY: u64 = 16 + 6 * 8 + 4096;
+    let full = total / PER_ENTITY;
+    let rest = total - full * PER_ENTITY;
+    (0..full)
+        .map(|_| PER_ENTITY)
+        .chain(std::iter::once(rest))
+        .zip(1..)
+        .map(|(staged_bytes, seq)| blob(EntityId::new(), staged_bytes, seq))
+        .collect()
 }
 
 fn count_of(state: Option<&State>) -> Option<u64> {
@@ -802,13 +821,13 @@ fn staged_limits_fail_the_fold_deterministically() {
     let exact = test_ok(fold(
         &provider,
         consumer,
-        &[blob(entity, MAX_STAGED_OUTPUT_BYTES_V1, 1)],
+        &blobs_totalling(MAX_STAGED_OUTPUT_BYTES_V1),
     ));
     assert_eq!(exact.consumers(), &[consumer]);
     let over = fold(
         &provider,
         consumer,
-        &[blob(entity, MAX_STAGED_OUTPUT_BYTES_V1 + 1, 1)],
+        &blobs_totalling(MAX_STAGED_OUTPUT_BYTES_V1 + 1),
     );
     assert_eq!(test_err(over), StagedFoldErrorV1::StagedOutputExceeded);
     let growing = [blob(entity, 100, 1), blob(entity, 100_000, 2)];
@@ -885,11 +904,7 @@ fn a_second_fold_is_refused_while_one_runs() {
             fold(&provider, consumer, &events).map(|staged| staged.consumers().len())
         })
     };
-    let mut polls = 0;
-    while ExecutorHealthV1::current() != ExecutorHealthV1::Busy && polls < 2_000 {
-        std::thread::sleep(ms(5));
-        polls += 1;
-    }
+    await_health(ExecutorHealthV1::Busy, 2_000);
     assert_eq!(ExecutorHealthV1::current(), ExecutorHealthV1::Busy);
     let (other, other_consumer) = counting();
     assert_eq!(
@@ -918,32 +933,6 @@ fn the_panic_hook_and_worker_are_installed_once() {
 
     let outside = std::thread::spawn(|| assert!(black_box(false), "outside a staged callback"));
     assert!(outside.join().is_err());
-}
-
-/// Threads of this process named as the staged-fold worker. Other test
-/// threads start and end concurrently, so only the worker's name counts.
-///
-/// The worker names itself as it starts, which can trail `acquire` under a
-/// sanitizer, so this waits up to about 5 s for exactly one to appear.
-fn worker_threads() -> usize {
-    let mut seen = named_worker_threads();
-    let mut polls = 0;
-    while seen != 1 && polls < 1_000 {
-        std::thread::sleep(Duration::from_millis(5));
-        seen = named_worker_threads();
-        polls += 1;
-    }
-    seen
-}
-
-fn named_worker_threads() -> usize {
-    std::fs::read_dir("/proc/self/task").map_or(0, |tasks| {
-        tasks
-            .filter_map(Result::ok)
-            .filter_map(|task| std::fs::read_to_string(task.path().join("comm")).ok())
-            .filter(|name| name.trim_end() == STAGED_FOLD_WORKER_NAME_V1)
-            .count()
-    })
 }
 
 /// P1 and P2 (case 26): handoff work must be planned by `g0 + 29 s`, and a

@@ -151,10 +151,8 @@ fn replay_in_fence(
         }
     };
     // ADR-112's overrun signal is recorded, and the displaced maps are
-    // dropped, after the handoff returns.
-    pos_runtime::handoff(guard, expiries, prepared)
-        .map(|used| health.record_overrun(used.overrun_signal()))
-        .map_err(crate::unavailable)
+    // dropped, after the handoff returns; a refused handoff runs P2.
+    crate::handoff_with_p2(guard, expiries, prepared, health)
 }
 
 /// Verify, read, fold and re-verify one Replay inside its fence, check the
@@ -211,7 +209,10 @@ mod tests {
         }
     }
 
-    use crate::test_support::{count_policy, with_release, with_release_health, ProtectedFixture};
+    use crate::test_support::{
+        count_policy, with_mismatched_release_health, with_release, with_release_health,
+        ProtectedFixture,
+    };
     use crate::ReleaseHealthV1;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -866,6 +867,41 @@ mod tests {
         });
         assert!(matches!(refused, Err(CoreError::ArtifactUnavailable)));
         assert_eq!(count_for(&without_policy, timeline, &entity), 0);
+        assert_eq!(health.guard_release_late(), None);
+    }
+
+    /// A handoff refused after every staged check passed installs nothing
+    /// and runs P2 after the handoff's own rollback; an on-time teardown
+    /// reports no late signal.
+    #[test]
+    fn public_replay_runs_p2_when_the_handoff_is_refused() {
+        let fixture = count_fixture();
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let (timeline, entity) = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("refused-handoff").test_ok();
+            let entity = EntityId::new();
+            commands.append(timeline.id(), &[draft(entity)]).test_ok();
+            (timeline.id(), entity)
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut registry = fixture.registry(gate);
+        let mut reads = host.read_sender().test_ok();
+        let health = ReleaseHealthV1::new();
+        let refused = with_mismatched_release_health(&health, |release| {
+            super::replay(
+                &mut reads,
+                timeline,
+                &mut registry,
+                &closure,
+                release,
+                &fixture.fold(),
+            )
+        });
+        assert!(matches!(refused, Err(CoreError::ArtifactUnavailable)));
+        assert_eq!(count_for(&registry, timeline, &entity), 0);
+        assert_eq!(health.overrun_signal(), None);
         assert_eq!(health.guard_release_late(), None);
     }
 

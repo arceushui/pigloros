@@ -84,6 +84,17 @@ impl StateRegistry {
     }
 
     pub fn apply(&mut self, reducer: &dyn Reducer, event: &Event) {
+        self.apply_observing_initial(reducer, event, &mut |_| {});
+    }
+
+    /// [`Self::apply`], first showing `observe` the `initial()` State of an
+    /// entity this Event creates, before `apply` runs on it.
+    pub fn apply_observing_initial(
+        &mut self,
+        reducer: &dyn Reducer,
+        event: &Event,
+        observe: &mut dyn FnMut(&State),
+    ) {
         // Geographic evidence is owned by the Core visibility boundary.  A
         // generic StateRegistry must never hand it to a plugin reducer, even
         // when a caller bypasses ProjectionRegistry and uses this low-level
@@ -93,17 +104,23 @@ impl StateRegistry {
         {
             return;
         }
-        self.apply_reducer_event(reducer, event);
+        self.apply_reducer_event(reducer, event, observe);
     }
 
-    fn apply_reducer_event(&mut self, reducer: &dyn Reducer, event: &Event) {
+    fn apply_reducer_event(
+        &mut self,
+        reducer: &dyn Reducer,
+        event: &Event,
+        observe: &mut dyn FnMut(&State),
+    ) {
         if !reducer.projects_event(event) {
             return;
         }
-        let state = self
-            .states
-            .entry(event.entity)
-            .or_insert_with(|| reducer.initial());
+        let state = self.states.entry(event.entity).or_insert_with(|| {
+            let initial = reducer.initial();
+            observe(&initial);
+            initial
+        });
         reducer.apply(state, event);
     }
 
@@ -225,6 +242,26 @@ mod tests {
         assert!(!registry.is_empty());
         let entries: Vec<_> = registry.entries().map(|(id, _)| *id).collect();
         assert_eq!(entries, vec![entity]);
+    }
+
+    #[test]
+    fn only_a_created_entity_shows_its_initial_state() {
+        let entity = EntityId::new();
+        let mut registry = StateRegistry::new();
+        let mut observed = Vec::new();
+        for _ in 0..2 {
+            registry.apply_observing_initial(&CountReducer, &make_event(entity), &mut |state| {
+                observed.push(state.clone());
+            });
+        }
+        assert_eq!(observed, vec![CountReducer.initial()]);
+        assert_eq!(
+            registry
+                .get(&entity)
+                .and_then(|state| state.get("count"))
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
     }
 
     #[test]

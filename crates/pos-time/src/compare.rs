@@ -112,19 +112,19 @@ pub fn compare(
     crate::forget_on_failure(fenced, registry_b, revoked_b.as_ref())
 }
 
-/// Refuse a Fork point with no successor and a quarantined staged executor,
-/// then select each arm's consumers.
+/// Refuse a quarantined staged executor, then a Fork point with no
+/// successor, then select each arm's consumers.
 fn comparison_consumers(
     fork_seq: Seq,
     registries: [&ProjectionRegistry; 2],
 ) -> Result<[Vec<String>; 2], CoreError> {
+    // The quarantine check comes first, as in Replay (ADR-113 §5).
+    pos_runtime::require_staged_release().map_err(crate::unavailable)?;
     if fork_seq.as_u64() == u64::MAX {
         return Err(CoreError::ArtifactUnavailable);
     }
     let [registry_a, registry_b] = registries;
-    pos_runtime::require_staged_release()
-        .map_err(crate::unavailable)
-        .and_then(|()| crate::consumer_selection(registry_a))
+    crate::consumer_selection(registry_a)
         .and_then(|ids_a| crate::consumer_selection(registry_b).map(|ids_b| [ids_a, ids_b]))
 }
 
@@ -166,14 +166,12 @@ fn compare_in_fences(
         |(guard, (prepared, diverged_entities))| {
             // One token commits both arms. ADR-112's overrun signal is
             // recorded and the displaced maps are dropped after the handoff
-            // returns, and only then is the diff released.
-            pos_runtime::handoff(guard, expiries, prepared)
-                .map(|used| health.record_overrun(used.overrun_signal()))
-                .map_err(crate::unavailable)
-                .map(|()| ForkDiff {
-                    fork_seq: request.fork_seq,
-                    diverged_entities,
-                })
+            // returns, and only then is the diff released; a refused
+            // handoff runs P2.
+            crate::handoff_with_p2(guard, expiries, prepared, health).map(|()| ForkDiff {
+                fork_seq: request.fork_seq,
+                diverged_entities,
+            })
         },
     )
 }
@@ -239,6 +237,10 @@ fn prepare_comparison<'t>(
         return Err(CoreError::ArtifactUnavailable);
     }
     crate::handoff_reserve(guard)?;
+    // The diff is computed from the staged maps before the install pair is
+    // prepared. They are identical to the installed maps, because the
+    // install is an exact swap of these maps (ADR-113 clarification ticket
+    // #515); measuring this work inside the prepare bound is #512.
     let diverged_entities = staged_a
         .diverged_entities(&staged_b)
         .map_err(crate::unavailable)?;
@@ -316,7 +318,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::test_support::{with_release, ProtectedFixture};
+    use crate::test_support::{with_mismatched_release_health, with_release, ProtectedFixture};
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         ids::EntityId,
@@ -765,6 +767,41 @@ mod tests {
         ));
         assert_eq!(count_for(&registry_a, fork_a, entity), 0);
         assert_eq!(count_for(&registry_b, fork_b, entity), 0);
+    }
+
+    /// A handoff refused after both arms were prepared installs neither arm
+    /// and runs P2 after the handoff's own rollback; an on-time teardown
+    /// reports no late signal.
+    #[test]
+    fn public_compare_runs_p2_when_the_handoff_is_refused() {
+        let fixture = count_fixture();
+        let mut host = crate::test_support::open_exact_host();
+        let gate = host.containment_gate();
+        let entity = EntityId::new();
+        let (fork_a, fork_b, fork_seq) = forked(&mut host, &[entity], 1, [1, 2]);
+        let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
+        let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
+        let mut registry_a = fixture.registry(Arc::clone(&gate));
+        let mut registry_b = fixture.registry(gate);
+        let mut reads = host.read_sender().test_ok();
+        let health = ReleaseHealthV1::new();
+        let (fold_a, fold_b) = (fixture.fold(), fixture.fold());
+        let refused = with_mismatched_release_health(&health, |release| {
+            super::compare(
+                &mut reads,
+                [fork_a, fork_b],
+                fork_seq,
+                [&mut registry_a, &mut registry_b],
+                [&closure_a, &closure_b],
+                release,
+                [&fold_a, &fold_b],
+            )
+        });
+        assert!(matches!(refused, Err(CoreError::ArtifactUnavailable)));
+        assert_eq!(count_for(&registry_a, fork_a, entity), 0);
+        assert_eq!(count_for(&registry_b, fork_b, entity), 0);
+        assert_eq!(health.overrun_signal(), None);
+        assert_eq!(health.guard_release_late(), None);
     }
 
     /// Arms folded for different consumer sets cannot be compared slot by

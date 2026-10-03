@@ -22,7 +22,7 @@ use pos_core::{
 use pos_runtime::{
     require_staged_release, ExecutorHealthV1, GuardedFoldWindowV1, HostProjectionProviderV1,
     InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1, StagedFoldErrorV1,
-    StagedFoldExecutorV1, StagedFoldPlanV1, STAGED_FOLD_WORKER_NAME_V1,
+    StagedFoldExecutorV1, StagedFoldPlanV1,
 };
 use pos_state::{ProtectedProjectionProviderV1, RecordedConsumerV1};
 use std::{
@@ -33,6 +33,8 @@ use std::{
     },
     time::Duration,
 };
+
+include!("common/mod.rs");
 
 const NAME: &str = "quarantine-fixture";
 
@@ -153,31 +155,6 @@ fn guarded(port: &mut TrustedClockFixtureV1) -> ReleaseGuardV1<'_> {
     ))
 }
 
-/// Threads of this process named as the staged-fold worker.
-///
-/// The worker names itself as it starts, which can trail `acquire` under a
-/// sanitizer, so this waits up to about 5 s for exactly one to appear.
-fn worker_threads() -> usize {
-    let mut seen = named_worker_threads();
-    let mut polls = 0;
-    while seen != 1 && polls < 1_000 {
-        std::thread::sleep(Duration::from_millis(5));
-        seen = named_worker_threads();
-        polls += 1;
-    }
-    seen
-}
-
-fn named_worker_threads() -> usize {
-    std::fs::read_dir("/proc/self/task").map_or(0, |tasks| {
-        tasks
-            .filter_map(Result::ok)
-            .filter_map(|task| std::fs::read_to_string(task.path().join("comm")).ok())
-            .filter(|name| name.trim_end() == STAGED_FOLD_WORKER_NAME_V1)
-            .count()
-    })
-}
-
 fn plan(consumer: RecordedConsumerV1, events: &[Event]) -> StagedFoldPlanV1 {
     let source = ProjectionSourceV1::bound(TimelineId::new(), None);
     StagedFoldPlanV1::new(vec![consumer], events.to_vec(), source)
@@ -228,11 +205,7 @@ fn an_abandoned_fold_quarantines_the_process_until_it_ends() {
     // Case 18: the abandoned job ends at its next check, its late result is
     // discarded, and only then does quarantine clear.
     release.store(true, Ordering::SeqCst);
-    let mut polls = 0;
-    while ExecutorHealthV1::current() != ExecutorHealthV1::Ready && polls < 1_000 {
-        std::thread::sleep(Duration::from_millis(5));
-        polls += 1;
-    }
+    await_health(ExecutorHealthV1::Ready, 1_000);
     assert_eq!(ExecutorHealthV1::current(), ExecutorHealthV1::Ready);
     let executor = test_ok(StagedFoldExecutorV1::acquire());
     let mut port = TrustedClockFixtureV1::new();
@@ -257,11 +230,7 @@ fn an_abandoned_fold_quarantines_the_process_until_it_ends() {
         plan(consumer, &events).with_host_fault(),
     );
     assert!(faulted.is_err());
-    let mut polls = 0;
-    while ExecutorHealthV1::current() != ExecutorHealthV1::Quarantined && polls < 1_000 {
-        std::thread::sleep(Duration::from_millis(5));
-        polls += 1;
-    }
+    await_health(ExecutorHealthV1::Quarantined, 1_000);
     assert_eq!(ExecutorHealthV1::current(), ExecutorHealthV1::Quarantined);
     assert_eq!(
         require_staged_release(),

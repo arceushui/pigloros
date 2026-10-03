@@ -359,8 +359,26 @@ fn growth_beyond_the_declared_bound_fails_the_exact_pass() {
 }
 
 #[test]
+fn the_first_apply_of_an_entity_is_bounded_too() {
+    // BlobReducer's `initial()` State is the 16-byte identifier alone.
+    let mut within = assemble(vec![built_with(consumer(19), BlobReducer, bounds(64))]);
+    test_ok(fold_accounted(
+        &mut within,
+        &[blob(EntityId::new(), 16 + 64)],
+    ));
+    assert_eq!(within.accounting().last_exact(), 16 + 64);
+
+    let mut over = assemble(vec![built_with(consumer(20), BlobReducer, bounds(64))]);
+    assert_eq!(
+        fold_accounted(&mut over, &[blob(EntityId::new(), 16 + 65)]),
+        Err(StagedLimitErrorV1::GrowthBoundExceeded)
+    );
+}
+
+#[test]
 fn the_staged_output_limit_is_exact() {
-    let mut at_limit = assemble(vec![built(consumer(15), BlobReducer)]);
+    let generous = bounds(MAX_STAGED_OUTPUT_BYTES_V1);
+    let mut at_limit = assemble(vec![built_with(consumer(15), BlobReducer, generous)]);
     test_ok(fold_accounted(
         &mut at_limit,
         &[blob(EntityId::new(), MAX_STAGED_OUTPUT_BYTES_V1)],
@@ -370,7 +388,7 @@ fn the_staged_output_limit_is_exact() {
         MAX_STAGED_OUTPUT_BYTES_V1
     );
 
-    let mut over = assemble(vec![built(consumer(16), BlobReducer)]);
+    let mut over = assemble(vec![built_with(consumer(16), BlobReducer, generous)]);
     let event = blob(EntityId::new(), MAX_STAGED_OUTPUT_BYTES_V1 + 1);
     test_ok(over.fold_event_with(&event, |mut turn| {
         turn.apply();

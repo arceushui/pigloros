@@ -18,6 +18,13 @@ use pos_state::ProjectionRegistry;
 /// mirrors the full [`ProjectionRegistry`] state at capture time. It is kept
 /// serialisable so snapshots can be persisted and loaded without re-running
 /// every registered reducer.
+///
+/// Protected Snapshot capture, verification and reuse are `Unavailable`
+/// (ADR-113 §9), so nothing constructs a `Snapshot` in this release. The
+/// type, including its `registry` and `inventory_generation` fields, is
+/// retained deliberately for #502 (protected Snapshot PSS1 placement), which
+/// owns its future shape; this unsupported contract is deferred explicitly,
+/// not dead.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     /// The timeline this snapshot was taken from.
@@ -49,6 +56,12 @@ pub const fn snapshot(
 }
 
 /// Error type for snapshot consistency checks.
+///
+/// While protected Snapshots are `Unavailable` (ADR-113 §9), this module's
+/// checks return only [`Self::ArtifactUnavailable`]; [`Self::Store`] arises
+/// only from the `From<CoreError>` conversion. The other variants are
+/// retained deliberately for #502 (protected Snapshot PSS1 placement), which
+/// owns them; this unsupported contract is deferred explicitly, not dead.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
     /// ADR-060 no longer permits the snapshot as authoritative state.

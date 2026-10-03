@@ -359,9 +359,13 @@ impl StagedFoldExecutorV1 {
             cancel: Arc::clone(&window.cancel),
             reply,
         };
-        // The worker outlives every job, so the queue stays open. Were it
-        // closed, the job and its reply sender would drop here, and the
-        // wait below would end at once as a failure.
+        // Invariant: the queue is never closed. Its receiver belongs to the
+        // process-global worker, whose sender lives in the `WORKER`
+        // `OnceLock` and is never dropped, so `send` cannot fail. The result
+        // is discarded rather than branched on, because that branch could
+        // never run and would fail the 99% region-coverage gate. Were the
+        // queue ever closed, the job and its reply sender would drop here,
+        // and the wait below would end at once as a failure (fail closed).
         self.worker.send(job).ok();
         outcome.recv_timeout(remaining).unwrap_or_else(|_| {
             window.cancel.store(true, Ordering::SeqCst);
@@ -479,6 +483,10 @@ fn run_callback<T>(callback: impl FnOnce() -> T) -> Option<T> {
 /// leaked. A payload chain that never ends keeps the worker inside this
 /// callback, as a callback that never returns would, and the guard thread
 /// abandons it at its deadline.
+///
+/// It loops rather than `mem::forget`ting the payload: `mem_forget` is
+/// denied workspace-wide, and a deliberate leak would fail the LSan job
+/// (decision recorded under ADR-113 clarification ticket #515).
 fn drop_payload(mut payload: Box<dyn Any + Send>) {
     while let Err(next) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
         payload = next;

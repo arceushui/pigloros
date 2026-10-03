@@ -9,11 +9,7 @@
 //! visible registry uses, so a candidate fold equals the live fold, and it
 //! accounts its staged size incrementally for the staged executor.
 
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    convert::Infallible,
-    time::Duration,
-};
+use std::{collections::HashMap, convert::Infallible, time::Duration};
 
 use pos_core::{
     staged_install::ProjectionSourceV1, EntityId, Event, Hash, PluginId, Reducer, State,
@@ -241,7 +237,8 @@ struct EntityAccountV1 {
 /// Incremental staged-size accounting of one candidate (ADR-113 §4 E5).
 ///
 /// Each `apply` adds its declared growth bound to an upper bound, and each
-/// new entity adds its exact staged size once. An exact pass re-measures
+/// new entity adds the exact staged size of its `initial()` State once, so
+/// an exact pass bounds every `apply`, the first included. It re-measures
 /// every entity only when the upper bound would exceed the staged limit, and
 /// once at the end of the fold.
 #[derive(Debug, Default)]
@@ -272,24 +269,16 @@ impl StagedAccountingV1 {
         self.exact_passes
     }
 
-    fn record(&mut self, key: (usize, EntityId), state: &State, growth: u64) {
+    /// Charge one `apply`: its declared growth, plus the exact staged size of
+    /// the `initial()` State it started from when it created the entity. The
+    /// next exact pass then bounds the first `apply` of an entity too.
+    fn record(&mut self, key: (usize, EntityId), initial: Option<u64>, growth: u64) {
         self.current = false;
-        let added = match self.entities.entry(key) {
-            Entry::Occupied(mut account) => {
-                let account = account.get_mut();
-                account.declared = account.declared.saturating_add(growth);
-                growth
-            }
-            Entry::Vacant(account) => {
-                let measured = staged_state_bytes(state);
-                account.insert(EntityAccountV1 {
-                    measured,
-                    declared: 0,
-                });
-                measured
-            }
-        };
-        self.upper = self.upper.saturating_add(added);
+        let initial = initial.unwrap_or(0);
+        let account = self.entities.entry(key).or_default();
+        account.measured = account.measured.saturating_add(initial);
+        account.declared = account.declared.saturating_add(growth);
+        self.upper = self.upper.saturating_add(initial).saturating_add(growth);
     }
 
     fn forget(&mut self, slots: usize, subject: EntityId) {
@@ -357,6 +346,8 @@ pub struct CandidateTurnV1<'t> {
     event: &'t Event,
     slot: &'t mut CandidateSlotV1,
     accounting: &'t mut StagedAccountingV1,
+    /// Staged size of the `initial()` State this turn's `apply` created.
+    initial: Option<u64>,
 }
 
 impl CandidateTurnV1<'_> {
@@ -374,8 +365,16 @@ impl CandidateTurnV1<'_> {
 
     /// Offer the Event to the consumer's reducer: its exclusion check,
     /// `projects_event`, `initial` for an absent entity, then `apply`.
+    ///
+    /// The `initial()` State of an entity this Event creates is measured
+    /// before `apply` runs, for the next [`Self::account`].
     pub fn apply(&mut self) {
-        self.slot.inner.fold(self.event);
+        let initial = &mut self.initial;
+        self.slot
+            .inner
+            .fold_observing_initial(self.event, &mut |state| {
+                *initial = Some(staged_state_bytes(state));
+            });
     }
 
     /// Account the Event's effect on the consumer's staged size.
@@ -388,10 +387,10 @@ impl CandidateTurnV1<'_> {
             return Err(StagedLimitErrorV1::EntityLimitExceeded);
         }
         let entity = self.event.entity;
-        if let Some(state) = self.slot.inner.registry.get(&entity) {
+        if self.slot.inner.registry.get(&entity).is_some() {
             let growth = self.slot.bounds.growth(self.event);
             self.accounting
-                .record((self.ordinal, entity), state, growth);
+                .record((self.ordinal, entity), self.initial.take(), growth);
         }
         Ok(())
     }
@@ -537,6 +536,7 @@ impl DetachedProjectionCandidateV1 {
                     event,
                     slot,
                     accounting: &mut *accounting,
+                    initial: None,
                 })
             },
         )?;

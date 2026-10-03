@@ -108,6 +108,13 @@ impl Slot {
     fn fold(&mut self, event: &Event) {
         self.registry.apply(self.reducer.as_ref(), event);
     }
+
+    /// [`Self::fold`], showing `observe` the `initial()` State of an entity
+    /// the Event creates.
+    fn fold_observing_initial(&mut self, event: &Event, observe: &mut dyn FnMut(&State)) {
+        self.registry
+            .apply_observing_initial(self.reducer.as_ref(), event, observe);
+    }
 }
 
 /// Fold one Event into ordered reducer slots: the single live fold step

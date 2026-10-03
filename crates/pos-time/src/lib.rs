@@ -29,7 +29,8 @@
 use std::{cell::Cell, sync::Arc};
 
 use pos_core::trusted_clock::{
-    ApplicableExpiriesV1, ReleaseGuardV1, SystemGuardMonotonicSourceV1, TrustedClockOverrunKindV1,
+    ApplicableExpiriesV1, ProtectedHandoffTargetV1, ReleaseGuardV1, StagedProtectedOutputV1,
+    SystemGuardMonotonicSourceV1, TrustedClockOverrunKindV1,
 };
 use pos_core::{staged_install::ProjectionSourceV1, ErasureReferenceV1, Event};
 use pos_runtime::{
@@ -158,6 +159,35 @@ fn fold_staged(
 fn handoff_reserve(guard: &ReleaseGuardV1<'_>) -> Result<(), pos_core::CoreError> {
     pos_runtime::check_handoff_reserve(&mut SystemGuardMonotonicSourceV1, guard.guard_started_at())
         .map_err(unavailable)
+}
+
+/// The ADR-112 handoff of one staged install, then the health signals.
+///
+/// On success the overrun signal is recorded and the committed value (the
+/// displaced maps) is dropped after the handoff returns. On failure,
+/// `handoff_checked` has already rolled back and released the guard; P2 is
+/// then evaluated against the guard's `g0`, after that internal rollback, and
+/// the payload-free late signal is recorded before the failure is reported.
+fn handoff_with_p2<T: ProtectedHandoffTargetV1>(
+    guard: ReleaseGuardV1<'_>,
+    expiries: &ApplicableExpiriesV1,
+    staged: StagedProtectedOutputV1<T>,
+    health: &ReleaseHealthV1,
+) -> Result<(), pos_core::CoreError> {
+    let g0 = guard.guard_started_at();
+    match pos_runtime::handoff(guard, expiries, staged) {
+        Ok(used) => {
+            health.record_overrun(used.overrun_signal());
+            Ok(())
+        }
+        Err(error) => {
+            health.record_guard_release_late(pos_runtime::teardown_signal(
+                &mut SystemGuardMonotonicSourceV1,
+                g0,
+            ));
+            Err(unavailable(error))
+        }
+    }
 }
 
 /// P2, then teardown: a guard that did not reach the handoff is rolled back
@@ -319,8 +349,9 @@ pub mod test_support {
         WorldRetentionPolicyV1,
     };
     use pos_core::trusted_clock::{
-        open_release_guard, reserve_trusted_clock, ExpiryPremisesV1, SystemGuardMonotonicSourceV1,
-        SystemTrustedWallSourceV1, TrustedWallSourceV1, WaitBudgetV1,
+        open_release_guard, reserve_trusted_clock, ApplicableExpiriesV1, ExpiryPremisesV1,
+        ReleaseGuardV1, SystemGuardMonotonicSourceV1, SystemTrustedWallSourceV1,
+        TrustedWallSourceV1, WaitBudgetV1,
     };
     use pos_core::trusted_clock_fixture::TrustedClockFixtureV1;
     use pos_core::{
@@ -561,6 +592,37 @@ pub mod test_support {
         body: impl FnOnce(ProtectedReleaseV1<'_>) -> T,
     ) -> T {
         let mut port = TrustedClockFixtureV1::new();
+        let guard = guard_on(&mut port);
+        let expiries = far_expiries(&guard);
+        body(ProtectedReleaseV1 {
+            guard,
+            expiries,
+            health,
+        })
+    }
+
+    /// Run `body` with a release whose expiries were checked under another
+    /// authority's guard: every check before the handoff passes, and the
+    /// ADR-112 handoff then refuses it as `AuthorityRegressed`.
+    pub(crate) fn with_mismatched_release_health<T>(
+        health: &ReleaseHealthV1,
+        body: impl FnOnce(ProtectedReleaseV1<'_>) -> T,
+    ) -> T {
+        let mut other_port = TrustedClockFixtureV1::new();
+        let other_guard = guard_on(&mut other_port);
+        let expiries = far_expiries(&other_guard);
+        drop(other_guard);
+        let mut port = TrustedClockFixtureV1::new();
+        let guard = guard_on(&mut port);
+        body(ProtectedReleaseV1 {
+            guard,
+            expiries,
+            health,
+        })
+    }
+
+    /// Reserve on `port`'s identity and open its release guard.
+    fn guard_on(port: &mut TrustedClockFixtureV1) -> ReleaseGuardV1<'_> {
         let mut store = port.clone();
         let mut wait = WaitBudgetV1::new();
         let reservation = test_ok(reserve_trusted_clock(
@@ -570,12 +632,16 @@ pub mod test_support {
             &mut wait,
             None,
         ));
-        let guard = test_ok(open_release_guard(
-            &mut port,
+        test_ok(open_release_guard(
+            port,
             reservation,
             &mut wait,
             &mut SystemGuardMonotonicSourceV1,
-        ));
+        ))
+    }
+
+    /// Expiries far in the future, checked under `guard`.
+    fn far_expiries(guard: &ReleaseGuardV1<'_>) -> ApplicableExpiriesV1 {
         let far = test_ok(SystemTrustedWallSourceV1.sample()).as_micros() + 1_000 * DAY_MICROS;
         let leases = [lease(far)];
         let access = authenticated(far);
@@ -585,12 +651,7 @@ pub mod test_support {
             consent_references: &[],
             access: Some(&access),
         };
-        let expiries = test_ok(guard.applicable_expiries(&premises));
-        body(ProtectedReleaseV1 {
-            guard,
-            expiries,
-            health,
-        })
+        test_ok(guard.applicable_expiries(&premises))
     }
 
     struct ExactWorldReplayVerifier;
