@@ -375,6 +375,8 @@ fn accepts_complete_graph_and_exposes_canonical_view() -> TestResult {
     );
     assert!(consumer_digests(&validated, nodes[VIEW_DETAIL].node.artifact_digest).is_empty());
     assert!(consumer_digests(&validated, [0x99; 32]).is_empty());
+    assert!(consumer_digests(&validated, [0x01; 32]).is_empty());
+    assert!(consumer_digests(&validated, [0xff; 32]).is_empty());
 
     let full = validate_with(graph()?, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS)?;
     assert_eq!(
@@ -612,27 +614,50 @@ fn rejects_invalid_edge_lists() -> TestResult {
     Ok(())
 }
 
+/// The missing `PARENT <- EXOGENOUS` edge left by invalidating `edges[0]`.
+fn parent_gap(fixture: &Graph) -> UnknownEdgeCoordinateV1 {
+    UnknownEdgeCoordinateV1 {
+        consumer: fixture.nodes[PARENT].node.clone(),
+        missing_source_digest: Some(fixture.nodes[EXOGENOUS].node.artifact_digest),
+    }
+}
+
 #[test]
 fn rejects_unknown_edges_under_every_policy() -> TestResult {
-    let edits: [fn(&mut Graph); 4] = [
-        |graph| graph.edges[0].consumer.artifact_digest = [0x98; 32],
-        |graph| graph.edges[0].source.artifact_digest = [0x97; 32],
-        |graph| graph.edges[0].source.scheduler_position = 1,
-        |graph| graph.edges[0].consumer.output_ordinal = 1,
+    // Each edit makes `edges[0]` (`PARENT <- EXOGENOUS`) unknown, which also
+    // leaves that declared input without a valid edge. The flag says whether
+    // the missing edge's canonical key sorts before the unknown edge's key.
+    let edits: [(fn(&mut Graph), bool); 4] = [
+        (
+            |graph| graph.edges[0].consumer.artifact_digest = [0x98; 32],
+            false,
+        ),
+        (
+            |graph| graph.edges[0].source.artifact_digest = [0x97; 32],
+            true,
+        ),
+        (|graph| graph.edges[0].source.scheduler_position = 1, false),
+        (|graph| graph.edges[0].consumer.output_ordinal = 1, true),
     ];
-    for policy in [
-        UnknownEdgePolicyV1::Reject,
-        UnknownEdgePolicyV1::FullSuffixFromCut,
-    ] {
-        for edit in edits {
-            let mut fixture = graph()?;
-            edit(&mut fixture);
-            let expected = edge_coordinate(&fixture.edges[0]);
-            assert_eq!(
-                validate_with(fixture, policy, BOUNDS).map(drop),
-                Err(GraphError::UnknownDependencyEdge(expected))
-            );
-        }
+    for (edit, gap_first) in edits {
+        let mut fixture = graph()?;
+        edit(&mut fixture);
+        let unknown = GraphError::UnknownDependencyEdge(edge_coordinate(&fixture.edges[0]));
+        let expected = if gap_first {
+            GraphError::DependencyGraphIncomplete(parent_gap(&fixture))
+        } else {
+            unknown.clone()
+        };
+        let full = Graph {
+            plan: fixture.plan.clone(),
+            nodes: fixture.nodes.clone(),
+            edges: fixture.edges.clone(),
+        };
+        assert_eq!(validate(fixture).map(drop), Err(expected));
+        assert_eq!(
+            validate_with(full, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS).map(drop),
+            Err(unknown)
+        );
     }
 
     let mut undeclared = graph()?;
@@ -732,6 +757,130 @@ fn reject_policy_returns_first_canonical_missing_edge() -> TestResult {
             &removed
         )))
     );
+    Ok(())
+}
+
+#[test]
+fn reject_policy_reports_a_missing_input_digest_that_sorts_after_every_node() -> TestResult {
+    let mut fixture = graph()?;
+    fixture.nodes[ENDOGENOUS_B].input_digests.push([0xff; 32]);
+    let expected = UnknownEdgeCoordinateV1 {
+        consumer: fixture.nodes[ENDOGENOUS_B].node.clone(),
+        missing_source_digest: Some([0xff; 32]),
+    };
+    assert_eq!(
+        validate(fixture).map(drop),
+        Err(GraphError::DependencyGraphIncomplete(expected))
+    );
+    Ok(())
+}
+
+/// The base graph plus an endogenous node at Tick 10 that declares the
+/// `PARENT` input without an edge, and the missing edge it leaves.
+fn missing_at_tick_ten() -> TestResult<(Graph, UnknownEdgeCoordinateV1)> {
+    let mut fixture = graph()?;
+    let mut consumer = node(
+        FIRST_TICK,
+        1,
+        "world",
+        endogenous_digest(8),
+        DependencyClassV1::EndogenousRecomputed,
+    );
+    let source = fixture.nodes[PARENT].node.artifact_digest;
+    consumer.input_digests = vec![source];
+    let gap = UnknownEdgeCoordinateV1 {
+        consumer: consumer.node.clone(),
+        missing_source_digest: Some(source),
+    };
+    fixture.nodes.insert(ENDOGENOUS_A, consumer);
+    Ok((fixture, gap))
+}
+
+#[test]
+fn reject_policy_merges_edge_errors_and_missing_edges_by_canonical_key() -> TestResult {
+    // Missing edge at Tick 10, undeclared edge at Tick 20: the missing edge wins.
+    let (mut fixture, gap) = missing_at_tick_ten()?;
+    let view = fixture.nodes[VIEW + 1].node.artifact_digest;
+    fixture.nodes[VIEW_DETAIL + 1].input_digests.clear();
+    let position = fixture
+        .edges
+        .iter()
+        .position(|edge| edge.source.artifact_digest == view)
+        .ok_or("edge is absent from the fixture")?;
+    let undeclared = edge_coordinate(&fixture.edges[position]);
+    let full = Graph {
+        plan: fixture.plan.clone(),
+        nodes: fixture.nodes.clone(),
+        edges: fixture.edges.clone(),
+    };
+    assert_eq!(
+        validate(fixture).map(drop),
+        Err(GraphError::DependencyGraphIncomplete(gap))
+    );
+    // Under `FullSuffixFromCut` the undeclared edge stays fatal.
+    assert_eq!(
+        validate_with(full, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS).map(drop),
+        Err(GraphError::UnknownDependencyEdge(undeclared))
+    );
+
+    // Missing edge at Tick 10, class-rule violation at Tick 20: same order.
+    let (mut fixture, gap) = missing_at_tick_ten()?;
+    let position = fixture
+        .edges
+        .iter()
+        .position(|edge| edge.consumer == fixture.nodes[VIEW_DETAIL + 1].node)
+        .ok_or("edge is absent from the fixture")?;
+    fixture.edges[position].dependency_class = DependencyClassV1::EndogenousRecomputed;
+    assert_eq!(
+        validate(fixture).map(drop),
+        Err(GraphError::DependencyGraphIncomplete(gap))
+    );
+
+    // Undeclared edge at Tick 11, missing edge at Tick 20: the edge error wins.
+    let mut fixture = graph()?;
+    let fixed = fixture.nodes[FIXED].node.artifact_digest;
+    fixture.nodes[ENDOGENOUS_A]
+        .input_digests
+        .retain(|digest| *digest != fixed);
+    let undeclared = edge_coordinate(&fixture.edges[edge_position(&fixture, ENDOGENOUS_A, FIXED)?]);
+    let missing = edge_position(&fixture, VIEW_DETAIL, VIEW)?;
+    fixture.edges.remove(missing);
+    assert_eq!(
+        validate(fixture).map(drop),
+        Err(GraphError::UnknownDependencyEdge(undeclared))
+    );
+
+    // Unauthorized edge at Tick 11, missing edge at Tick 20: the edge error wins.
+    let mut fixture = graph()?;
+    let position = edge_position(&fixture, ENDOGENOUS_A, FIXED)?;
+    fixture.edges[position].authorization_digest = [0x01; 32];
+    let unauthorized = edge_coordinate(&fixture.edges[position]);
+    let missing = edge_position(&fixture, VIEW_DETAIL, VIEW)?;
+    fixture.edges.remove(missing);
+    assert_eq!(
+        validate(fixture).map(drop),
+        Err(GraphError::UnauthorizedDependency(unauthorized))
+    );
+    Ok(())
+}
+
+#[test]
+fn reports_the_smallest_edge_error_key_under_every_policy() -> TestResult {
+    for policy in [
+        UnknownEdgePolicyV1::Reject,
+        UnknownEdgePolicyV1::FullSuffixFromCut,
+    ] {
+        let mut fixture = graph()?;
+        let late = edge_position(&fixture, VIEW_DETAIL, VIEW)?;
+        fixture.edges[late].dependency_class = DependencyClassV1::EndogenousRecomputed;
+        let early = edge_position(&fixture, ENDOGENOUS_A, FIXED)?;
+        fixture.edges[early].authorization_digest = [0x01; 32];
+        let expected = edge_coordinate(&fixture.edges[early]);
+        assert_eq!(
+            validate_with(fixture, policy, BOUNDS).map(drop),
+            Err(GraphError::UnauthorizedDependency(expected))
+        );
+    }
     Ok(())
 }
 

@@ -18,10 +18,11 @@
 //! 2. the CFP1 plan itself;
 //! 3. every node: coordinate fields, provenance, declared inputs, the Tick
 //!    window of its origin, and, for root classes, its exact plan binding;
-//! 4. every edge: the IDP1 record and edge-list order, both endpoints, the
-//!    consumer's declaration of the input, the horizon, the class rules, and
-//!    the plan authorization of root sources;
-//! 5. direct-edge completeness under the [`UnknownEdgePolicyV1`].
+//! 4. the IDP1 records and edge-list order;
+//! 5. every edge: both endpoints, the consumer's declaration of the input,
+//!    the horizon, the class rules, and the plan authorization of root
+//!    sources, together with direct-edge completeness under the
+//!    [`UnknownEdgePolicyV1`], as described below.
 //!
 //! Contract decisions where ADR-064 is silent:
 //!
@@ -35,10 +36,10 @@
 //! - Every node declares the strictly ascending artifact digests of its
 //!   direct inputs. Each edge must resolve both endpoints to declared nodes
 //!   by exact coordinate and must be declared by its consumer; anything else
-//!   is an [`UnknownDependencyEdge`] under every policy. A declared input
-//!   without an edge is a missing edge `[consumer, Some(source_digest)]`, and
-//!   an `EndogenousRecomputed` node that declares no input has an unknown
-//!   input closure `[consumer, None]`.
+//!   is an [`UnknownDependencyEdge`]. A declared input without a valid edge
+//!   from the exact declared node is a missing edge
+//!   `[consumer, Some(source_digest)]`, and an `EndogenousRecomputed` node
+//!   that declares no input has an unknown input closure `[consumer, None]`.
 //! - `ExogenousFrozen`, `FixedPolicy`, and `InterventionAssigned` nodes are
 //!   roots: they declare no input, since an edge from recomputed state into
 //!   a purported frozen value makes it endogenous. An `ExogenousFrozen` or
@@ -53,11 +54,27 @@
 //!   never reaches authoritative state. An edge out of a root carries the
 //!   plan's authorization digest for that root: the descriptor's
 //!   authorization or the Intervention's consent decision.
-//! - Under [`UnknownEdgePolicyV1::Reject`] the first canonical missing edge
-//!   is returned as `DependencyGraphIncomplete`. Under
-//!   [`UnknownEdgePolicyV1::FullSuffixFromCut`] every missing edge is recorded
-//!   in canonical RCF1 order, at most 65,536 of them, and the graph is marked
-//!   incomplete so that no fine-grained reachability may be claimed.
+//! - Edge errors and missing edges share one canonical key: the RCF1
+//!   unknown-edge order of [`UnknownEdgeCoordinateV1`], that is the full
+//!   consumer coordinate `(tick, scheduler_position, owner_id bytes,
+//!   output_ordinal, schema_id, artifact_digest)` and then the source digest,
+//!   where `None` (an unknown input closure) orders before every digest. An
+//!   invalid edge is keyed `[edge consumer, Some(edge source digest)]`.
+//! - Under [`UnknownEdgePolicyV1::Reject`] every per-edge error (unknown
+//!   edge, horizon, class rule, or authorization) is merged with the missing
+//!   edges, and the one with the smallest canonical key is returned; on an
+//!   equal key the edge error wins. A missing edge is returned as
+//!   `DependencyGraphIncomplete`. Only IDP1 record and edge-list order errors
+//!   precede this merge, since without a canonical edge list there is no
+//!   canonical key order.
+//! - Under [`UnknownEdgePolicyV1::FullSuffixFromCut`] every per-edge error is
+//!   still fatal, and the one with the smallest canonical key is returned.
+//!   ADR-064 does not say whether an undeclared or inexact edge may be
+//!   absorbed into the full suffix; this contract conservatively rejects it,
+//!   since such an edge contradicts the declared graph rather than leaving a
+//!   gap in it. Otherwise every missing edge is recorded in canonical RCF1
+//!   order, at most 65,536 of them, and the graph is marked incomplete so
+//!   that no fine-grained reachability may be claimed.
 //! - Declared inputs count against the edge bound, since each one is either
 //!   an edge or a recorded missing edge.
 //!
@@ -275,7 +292,8 @@ impl ValidatedDependencyGraphV1 {
 /// # Errors
 ///
 /// Returns the first closed safe error in validation order: bounds, plan,
-/// nodes, edges, then completeness under `unknown_edge_policy`.
+/// nodes, and the edge list, then the per-edge error or missing edge chosen
+/// under `unknown_edge_policy` as the module documentation describes.
 pub fn validate_dependency_graph_v1(
     plan: &CounterfactualPlanV1,
     unknown_edge_policy: UnknownEdgePolicyV1,
@@ -284,11 +302,14 @@ pub fn validate_dependency_graph_v1(
     edges: Vec<InputDependencyV1>,
 ) -> Result<ValidatedDependencyGraphV1, DependencyGraphErrorV1> {
     check_work_bounds(bounds, &nodes, &edges)?;
-    plan.validate().map_err(DependencyGraphErrorV1::Plan)?;
-    let bindings = PlanBindings::new(plan);
+    let bindings = PlanBindings::new(plan).map_err(DependencyGraphErrorV1::Plan)?;
     let by_digest = validate_nodes(&bindings, &nodes)?;
-    let outgoing = validate_edges(&bindings, &nodes, &by_digest, &edges)?;
-    let unknown_edge_coordinates = missing_edges(unknown_edge_policy, &nodes, &edges)?;
+    let EdgeScan {
+        outgoing,
+        first_error,
+    } = validate_edges(&bindings, &nodes, &by_digest, &edges)?;
+    let unknown_edge_coordinates =
+        missing_edges(unknown_edge_policy, &nodes, &outgoing, first_error)?;
     Ok(ValidatedDependencyGraphV1 {
         plan_digest: plan.plan_digest,
         first_tick: plan.first_tick,
@@ -341,16 +362,22 @@ struct PlanBindings<'p> {
 }
 
 impl<'p> PlanBindings<'p> {
-    fn new(plan: &'p CounterfactualPlanV1) -> Self {
-        let interventions = plan
-            .interventions
+    /// Validate the plan, then index its Interventions by INT1 digest.
+    ///
+    /// The plan is validated first so that the Intervention list is bounded
+    /// before any digest is computed; a digest error is propagated, not
+    /// dropped.
+    fn new(plan: &'p CounterfactualPlanV1) -> Result<Self, CounterfactualPlanContractErrorV1> {
+        plan.validate()?;
+        plan.interventions
             .iter()
-            .filter_map(|intervention| intervention.digest().ok().map(|id| (id, intervention)))
-            .collect();
-        Self {
-            plan,
-            interventions,
-        }
+            .map(|intervention| intervention.digest().map(|id| (id, intervention)))
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(CounterfactualPlanContractErrorV1::Intervention)
+            .map(|interventions| Self {
+                plan,
+                interventions,
+            })
     }
 
     /// The plan binding of a root node; `None` for a non-root or unbound node.
@@ -383,6 +410,8 @@ fn descriptor_binding(
     descriptors: &[FrozenArtifactDescriptorV1],
     coordinate: &DependencyNodeV1,
 ) -> Option<RootBinding> {
+    // CFP1 validation enforces strictly ascending `(schema_id,
+    // artifact_digest)` descriptor order (`validate_descriptor_order`).
     descriptors
         .binary_search_by(|descriptor| {
             (descriptor.schema_id, &descriptor.artifact_digest)
@@ -444,7 +473,7 @@ fn validate_node_fields(node: &DependencyGraphNodeV1) -> Result<(), DependencyGr
     }
 }
 
-const fn validate_node_range(
+fn validate_node_range(
     plan: &CounterfactualPlanV1,
     node: &DependencyGraphNodeV1,
 ) -> Result<(), DependencyGraphErrorV1> {
@@ -452,7 +481,7 @@ const fn validate_node_range(
     let in_range = match node.origin {
         DependencyGraphNodeOriginV1::Committed => tick <= plan.parent_cut_tick,
         DependencyGraphNodeOriginV1::Provisional => {
-            plan.first_tick <= tick && tick <= plan.horizon_tick
+            (plan.first_tick..=plan.horizon_tick).contains(&tick)
         }
     };
     if in_range {
@@ -489,21 +518,45 @@ const fn is_root(class: DependencyClassV1) -> bool {
     )
 }
 
-/// Validate every edge and return `(source, consumer)` node positions,
-/// sorted so that each source's consumers are contiguous and ascending.
+/// A per-edge error and its canonical key `[edge consumer, Some(source)]`.
+type KeyedEdgeError = (UnknownEdgeCoordinateV1, DependencyGraphErrorV1);
+
+/// The valid edges of a graph and its first canonical per-edge error.
+struct EdgeScan {
+    /// `(source, consumer)` node positions of every valid edge, sorted so
+    /// that each source's consumers are contiguous and ascending.
+    outgoing: Vec<(usize, usize)>,
+    /// The per-edge error with the smallest canonical key, and that key.
+    first_error: Option<KeyedEdgeError>,
+}
+
+/// Check the edge list, then validate every edge, keeping the per-edge
+/// error with the smallest canonical key instead of the first in list order.
 fn validate_edges(
     bindings: &PlanBindings<'_>,
     nodes: &[DependencyGraphNodeV1],
     by_digest: &BTreeMap<[u8; 32], usize>,
     edges: &[InputDependencyV1],
-) -> Result<Vec<(usize, usize)>, DependencyGraphErrorV1> {
+) -> Result<EdgeScan, DependencyGraphErrorV1> {
     validate_input_dependency_order_v1(edges).map_err(DependencyGraphErrorV1::Dependency)?;
-    let mut outgoing = edges
-        .iter()
-        .map(|edge| validate_edge(bindings, nodes, by_digest, edge))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut outgoing = Vec::with_capacity(edges.len());
+    let mut first_error: Option<KeyedEdgeError> = None;
+    for edge in edges {
+        match validate_edge(bindings, nodes, by_digest, edge) {
+            Ok(positions) => outgoing.push(positions),
+            Err(error) => {
+                let key = edge_coordinate(edge);
+                if first_error.as_ref().is_none_or(|(first, _)| key < *first) {
+                    first_error = Some((key, error));
+                }
+            }
+        }
+    }
     outgoing.sort_unstable();
-    Ok(outgoing)
+    Ok(EdgeScan {
+        outgoing,
+        first_error,
+    })
 }
 
 fn validate_edge(
@@ -570,22 +623,45 @@ fn check_edge_rules(
     }
 }
 
-/// Collect missing direct edges in canonical RCF1 order under `policy`.
+/// Resolve per-edge errors and missing direct edges under `policy`, and
+/// return the missing edges recorded in canonical RCF1 order.
+///
+/// Only valid edges count as present, so an invalid edge never hides a
+/// missing edge with a smaller canonical key.
 fn missing_edges(
     policy: UnknownEdgePolicyV1,
     nodes: &[DependencyGraphNodeV1],
-    edges: &[InputDependencyV1],
+    outgoing: &[(usize, usize)],
+    first_error: Option<KeyedEdgeError>,
 ) -> Result<Vec<UnknownEdgeCoordinateV1>, DependencyGraphErrorV1> {
-    let present: BTreeSet<(&[u8; 32], &[u8; 32])> = edges
+    let present: BTreeSet<(&[u8; 32], &[u8; 32])> = outgoing
         .iter()
-        .map(|edge| (&edge.consumer.artifact_digest, &edge.source.artifact_digest))
+        .map(|&(source, consumer)| {
+            (
+                &nodes[consumer].node.artifact_digest,
+                &nodes[source].node.artifact_digest,
+            )
+        })
         .collect();
+    // Nodes are in canonical coordinate order, so gaps arrive in RCF1 order.
     let mut gaps = nodes.iter().flat_map(|node| node_gaps(node, &present));
-    match policy {
-        UnknownEdgePolicyV1::Reject => gaps.next().map_or(Ok(Vec::new()), |gap| {
-            Err(DependencyGraphErrorV1::DependencyGraphIncomplete(gap))
-        }),
-        UnknownEdgePolicyV1::FullSuffixFromCut => {
+    match (policy, first_error) {
+        (UnknownEdgePolicyV1::Reject, first_error) => {
+            let first_gap = gaps.next().map(|gap| {
+                (
+                    gap.clone(),
+                    DependencyGraphErrorV1::DependencyGraphIncomplete(gap),
+                )
+            });
+            // `min_by` keeps the first of equal keys, so an edge error wins a tie.
+            first_error
+                .into_iter()
+                .chain(first_gap)
+                .min_by(|left, right| left.0.cmp(&right.0))
+                .map_or(Ok(Vec::new()), |(_, error)| Err(error))
+        }
+        (UnknownEdgePolicyV1::FullSuffixFromCut, Some((_, error))) => Err(error),
+        (UnknownEdgePolicyV1::FullSuffixFromCut, None) => {
             let recorded: Vec<_> = gaps.take(MAX_UNKNOWN_EDGE_COORDINATES_V1 + 1).collect();
             if recorded.len() > MAX_UNKNOWN_EDGE_COORDINATES_V1 {
                 Err(DependencyGraphErrorV1::ResourceLimitExceeded)
@@ -597,7 +673,7 @@ fn missing_edges(
 }
 
 /// Missing edges of one node: an unknown input closure first, then every
-/// declared input without an edge, in ascending digest order.
+/// declared input without a valid edge, in ascending digest order.
 fn node_gaps<'g>(
     node: &'g DependencyGraphNodeV1,
     present: &'g BTreeSet<(&'g [u8; 32], &'g [u8; 32])>,
