@@ -3,7 +3,9 @@
 //! This module is the effect-free boundary checked by this crate's
 //! `clippy.toml`: the `forbid` header below re-raises the disallowed
 //! method, type and macro lists and the print, debug and exit lints, so no
-//! item in this module can allow or expect any of them.
+//! item in this module can allow or expect any of them. Crate helpers it
+//! calls from outside this module are covered by review, not by this
+//! `forbid` boundary (ADR-113 §7).
 #![forbid(
     clippy::disallowed_methods,
     clippy::disallowed_types,
