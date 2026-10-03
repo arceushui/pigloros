@@ -832,12 +832,25 @@ impl CounterfactualStorePortV1 for SqliteStore {
                                         .write_counterfactual_generation(
                                             command, generation, first_tick,
                                         )
-                                        .map(|head| {
+                                        .and_then(|head| {
                                             // The recheck pinned the prior head and the
                                             // first Tick is non-empty, so the head advanced.
+                                            // Were it not to, the outer error rolls the
+                                            // whole transaction back.
+                                            let reached = head.as_u64();
+                                            let expected =
+                                                command.expected_basis().fork_logical_head.as_u64();
                                             command
                                                 .committed_receipt(head)
-                                                .map(CounterfactualInvalidationOutcomeV1::Committed)
+                                                .map(|receipt| {
+                                                    Ok(CounterfactualInvalidationOutcomeV1::Committed(
+                                                        receipt,
+                                                    ))
+                                                })
+                                                .or(Err(CoreError::SeqOutOfRange {
+                                                    requested: reached,
+                                                    head: expected,
+                                                }))
                                         })
                                 },
                                 |conflict| {
