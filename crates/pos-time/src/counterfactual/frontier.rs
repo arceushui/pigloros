@@ -186,7 +186,8 @@ fn unsealed_frontier(
     let affected = affected_nodes(graph);
     let fallback = !graph.is_complete();
     // The plan has at least one Intervention and the graph one node for each,
-    // so the lowest affected node is the earliest seed.
+    // so `affected` is never empty; its lowest node is the lowest owner
+    // frontier (ADR-064 derivation step 5).
     let earliest = &affected[0].node;
     let (global_frontier_tick, global_frontier_scheduler_position, unknown_edge_policy) =
         if fallback {
@@ -202,6 +203,9 @@ fn unsealed_frontier(
                 UnknownEdgePolicyV1::Reject,
             )
         };
+    // `frontier_id`, `dependency_graph_digest`, `provenance_digest` and
+    // `frontier_digest` are placeholders that the caller overwrites before
+    // sealing; `seal` rejects a record whose digest does not match.
     RecomputationFrontierV1 {
         frontier_id: [0; 16],
         plan_digest: plan.plan_digest,
