@@ -105,6 +105,7 @@ const MAX_OWNER_ID_BYTES: usize = 128;
 ///
 /// Edge-level errors expose only the first canonical
 /// `[consumer_coordinate, source_digest]`; no other subject data is carried.
+/// The coordinate is boxed so that the error stays small.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DependencyGraphErrorV1 {
     /// A bound exceeds its hard maximum, or a node field is out of bounds.
@@ -142,16 +143,16 @@ pub enum DependencyGraphErrorV1 {
     InterventionNodeMissing,
     /// An edge endpoint is undeclared, or the consumer did not declare it.
     #[error("dependency-graph edge is unknown")]
-    UnknownDependencyEdge(UnknownEdgeCoordinateV1),
+    UnknownDependencyEdge(Box<UnknownEdgeCoordinateV1>),
     /// An edge class differs from its source, or presentation feeds authority.
     #[error("dependency-graph edge violates a class rule")]
-    ClassRuleViolation(UnknownEdgeCoordinateV1),
+    ClassRuleViolation(Box<UnknownEdgeCoordinateV1>),
     /// An edge out of a root lacks the plan's authorization for that root.
     #[error("dependency-graph edge is not authorized by the plan")]
-    UnauthorizedDependency(UnknownEdgeCoordinateV1),
+    UnauthorizedDependency(Box<UnknownEdgeCoordinateV1>),
     /// A required direct edge is missing under the `Reject` policy.
     #[error("dependency graph is incomplete")]
-    DependencyGraphIncomplete(UnknownEdgeCoordinateV1),
+    DependencyGraphIncomplete(Box<UnknownEdgeCoordinateV1>),
 }
 
 /// Caller-selected work bounds, checked before any allocation or traversal.
@@ -204,6 +205,7 @@ pub struct ValidatedDependencyGraphV1 {
     unknown_edge_policy: UnknownEdgePolicyV1,
     nodes: Vec<DependencyGraphNodeV1>,
     edges: Vec<InputDependencyV1>,
+    edge_digests: Vec<[u8; 32]>,
     unknown_edge_coordinates: Vec<UnknownEdgeCoordinateV1>,
     by_digest: BTreeMap<[u8; 32], usize>,
     outgoing: Vec<(usize, usize)>,
@@ -244,6 +246,12 @@ impl ValidatedDependencyGraphV1 {
     #[must_use]
     pub fn edges(&self) -> &[InputDependencyV1] {
         &self.edges
+    }
+
+    /// Canonical IDP1 digest of every edge, in canonical edge-list order.
+    #[must_use]
+    pub fn edge_digests(&self) -> &[[u8; 32]] {
+        &self.edge_digests
     }
 
     /// Missing edges recorded under `FullSuffixFromCut`, in RCF1 order.
@@ -305,6 +313,7 @@ pub fn validate_dependency_graph_v1(
     let bindings = PlanBindings::new(plan).map_err(DependencyGraphErrorV1::Plan)?;
     let by_digest = validate_nodes(&bindings, &nodes)?;
     let EdgeScan {
+        edge_digests,
         outgoing,
         first_error,
     } = validate_edges(&bindings, &nodes, &by_digest, &edges)?;
@@ -317,6 +326,7 @@ pub fn validate_dependency_graph_v1(
         unknown_edge_policy,
         nodes,
         edges,
+        edge_digests,
         unknown_edge_coordinates,
         by_digest,
         outgoing,
@@ -523,6 +533,8 @@ type KeyedEdgeError = (UnknownEdgeCoordinateV1, DependencyGraphErrorV1);
 
 /// The valid edges of a graph and its first canonical per-edge error.
 struct EdgeScan {
+    /// Canonical IDP1 digest of every edge, in edge-list order.
+    edge_digests: Vec<[u8; 32]>,
     /// `(source, consumer)` node positions of every valid edge, sorted so
     /// that each source's consumers are contiguous and ascending.
     outgoing: Vec<(usize, usize)>,
@@ -530,15 +542,24 @@ struct EdgeScan {
     first_error: Option<KeyedEdgeError>,
 }
 
-/// Check the edge list, then validate every edge, keeping the per-edge
-/// error with the smallest canonical key instead of the first in list order.
+/// Digest every IDP1 edge and check the edge-list order, then validate every
+/// edge, keeping the per-edge error with the smallest canonical key instead of
+/// the first in list order.
+///
+/// An IDP1 digest validates its record first, so the first invalid record is
+/// reported before any order error, exactly as the IDP1 order check does.
 fn validate_edges(
     bindings: &PlanBindings<'_>,
     nodes: &[DependencyGraphNodeV1],
     by_digest: &BTreeMap<[u8; 32], usize>,
     edges: &[InputDependencyV1],
 ) -> Result<EdgeScan, DependencyGraphErrorV1> {
-    validate_input_dependency_order_v1(edges).map_err(DependencyGraphErrorV1::Dependency)?;
+    let edge_digests = edges
+        .iter()
+        .map(InputDependencyV1::digest)
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|digests| validate_input_dependency_order_v1(edges).map(|()| digests))
+        .map_err(DependencyGraphErrorV1::Dependency)?;
     let mut outgoing = Vec::with_capacity(edges.len());
     let mut first_error: Option<KeyedEdgeError> = None;
     for edge in edges {
@@ -554,6 +575,7 @@ fn validate_edges(
     }
     outgoing.sort_unstable();
     Ok(EdgeScan {
+        edge_digests,
         outgoing,
         first_error,
     })
@@ -578,9 +600,9 @@ fn validate_edge(
             check_edge_rules(bindings, &nodes[consumer], &nodes[source], edge)
                 .map(|()| (source, consumer))
         }
-        _ => Err(DependencyGraphErrorV1::UnknownDependencyEdge(
+        _ => Err(DependencyGraphErrorV1::UnknownDependencyEdge(Box::new(
             edge_coordinate(edge),
-        )),
+        ))),
     }
 }
 
@@ -608,16 +630,16 @@ fn check_edge_rules(
         || (source.class == DependencyClassV1::PresentationOnly
             && consumer.class != DependencyClassV1::PresentationOnly)
     {
-        Err(DependencyGraphErrorV1::ClassRuleViolation(edge_coordinate(
-            edge,
+        Err(DependencyGraphErrorV1::ClassRuleViolation(Box::new(
+            edge_coordinate(edge),
         )))
     } else if bindings
         .root_binding(source)
         .is_some_and(|binding| binding.authorization_digest != edge.authorization_digest)
     {
-        Err(DependencyGraphErrorV1::UnauthorizedDependency(
+        Err(DependencyGraphErrorV1::UnauthorizedDependency(Box::new(
             edge_coordinate(edge),
-        ))
+        )))
     } else {
         Ok(())
     }
@@ -650,7 +672,7 @@ fn missing_edges(
             let first_gap = gaps.next().map(|gap| {
                 (
                     gap.clone(),
-                    DependencyGraphErrorV1::DependencyGraphIncomplete(gap),
+                    DependencyGraphErrorV1::DependencyGraphIncomplete(Box::new(gap)),
                 )
             });
             // `min_by` keeps the first of equal keys, so an edge error wins a tie.
