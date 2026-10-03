@@ -8,10 +8,13 @@
 //! Authorization lookup, plan admission, dependency-graph traversal, suffix
 //! invalidation, and execution belong to later ADR-064 contracts.
 
+use super::codec::{
+    bytes_value, decode_canonical, encode_value, text_value, uint_value, CborLimits, FieldReader,
+    WireError,
+};
 use crate::domain_digest;
 use ciborium::value::Value;
 use std::collections::BTreeSet;
-use std::io::Cursor;
 
 /// Magic for the immutable Intervention record.
 pub const INTERVENTION_MAGIC_V1: &str = "INT1";
@@ -21,8 +24,12 @@ pub const MAX_INTERVENTION_BYTES_V1: usize = 64 * 1024;
 pub const MAX_INTERVENTIONS_PER_PLAN_V1: usize = 1_024;
 
 const FIELD_COUNT: usize = 16;
-const MAX_FIELD_ITEMS: u64 = 16;
-const MAX_NESTING_DEPTH: u8 = 1;
+const LIMITS: CborLimits = CborLimits {
+    maximum_bytes: MAX_INTERVENTION_BYTES_V1,
+    maximum_depth: 1,
+    maximum_items: 16,
+    allow_simple_values: false,
+};
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_RATIONALE_BYTES: usize = 4_096;
 const DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.Intervention.v1";
@@ -91,7 +98,8 @@ impl InterventionOperationV1 {
 /// One ordered counterfactual Intervention represented by an INT1 record.
 ///
 /// The exact deterministic-CBOR array has 16 fields: magic `INT1`, version
-/// `1`, then the fields below in declaration order. Text fields are non-empty
+/// `1`, then the fields below in declaration order. The Intervention ID, the
+/// target schema ID, and every digest are nonzero. Text fields are non-empty
 /// UTF-8 without control characters; identifiers hold at most 128 bytes and the
 /// rationale at most 4,096 bytes. The complete record holds at most 65,536
 /// bytes.
@@ -177,20 +185,31 @@ impl InterventionV1 {
         intervention.validate().map(|()| intervention)
     }
 
-    /// Validate INT1 text field bounds.
+    /// Validate INT1 identity, digest, and text field bounds.
     ///
     /// # Errors
-    /// Returns [`InterventionContractErrorV1::FieldOutOfBounds`] when a text
-    /// field is empty, too long, or contains a control character.
+    /// Returns [`InterventionContractErrorV1::FieldOutOfBounds`] when the
+    /// Intervention ID or a bound digest is all zero, the target schema ID is
+    /// zero, or a text field is empty, too long, or contains a control
+    /// character.
     pub fn validate(&self) -> Result<(), InterventionContractErrorV1> {
-        if [
-            &self.target_entity_id,
-            &self.target_field,
-            &self.principal_id,
-            &self.capability,
-        ]
-        .into_iter()
-        .all(|value| bounded_text(value, MAX_IDENTIFIER_BYTES))
+        if self.intervention_id != [0; 16]
+            && self.target_schema_id != 0
+            && [
+                self.value_digest,
+                self.consent_decision_digest,
+                self.provenance_digest,
+            ]
+            .iter()
+            .all(|digest| *digest != [0; 32])
+            && [
+                &self.target_entity_id,
+                &self.target_field,
+                &self.principal_id,
+                &self.capability,
+            ]
+            .into_iter()
+            .all(|value| bounded_text(value, MAX_IDENTIFIER_BYTES))
             && bounded_text(&self.rationale, MAX_RATIONALE_BYTES)
         {
             Ok(())
@@ -205,7 +224,7 @@ impl InterventionV1 {
     /// Returns a closed safe error when validation or canonical encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, InterventionContractErrorV1> {
         self.validate()
-            .and_then(|()| encode_value(&encode_intervention(self)))
+            .and_then(|()| encode_value(&encode_intervention(self)).map_err(contract_error))
     }
 
     /// Decode and validate exact canonical INT1 bytes.
@@ -214,13 +233,10 @@ impl InterventionV1 {
     /// Returns a closed safe error for malformed, noncanonical, oversized,
     /// unsupported, or structurally invalid INT1 records.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, InterventionContractErrorV1> {
-        if bytes.len() > MAX_INTERVENTION_BYTES_V1 {
-            Err(InterventionContractErrorV1::FieldOutOfBounds)
-        } else {
-            decode_value(bytes)
-                .and_then(|value| decode_intervention(&value))
-                .and_then(|intervention| intervention.validate().map(|()| intervention))
-        }
+        decode_canonical(bytes, LIMITS)
+            .map_err(contract_error)
+            .and_then(|value| decode_intervention(&value))
+            .and_then(|intervention| intervention.validate().map(|()| intervention))
     }
 
     /// Compute the BLAKE3 digest of the canonical INT1 bytes, domain-separated
@@ -309,121 +325,67 @@ fn bounded_text(value: &str, maximum_bytes: usize) -> bool {
 
 fn encode_intervention(intervention: &InterventionV1) -> Value {
     Value::Array(vec![
-        Value::Text(INTERVENTION_MAGIC_V1.to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Bytes(intervention.intervention_id.to_vec()),
-        Value::Integer(intervention.target_schema_id.into()),
-        Value::Text(intervention.target_entity_id.clone()),
-        Value::Text(intervention.target_field.clone()),
-        Value::Integer(intervention.operation.code().into()),
-        Value::Bytes(intervention.value_digest.to_vec()),
-        Value::Integer(intervention.effective_tick.into()),
-        Value::Integer(intervention.ordinal.into()),
-        Value::Text(intervention.principal_id.clone()),
-        Value::Text(intervention.capability.clone()),
-        Value::Integer(intervention.consent_epoch.into()),
-        Value::Bytes(intervention.consent_decision_digest.to_vec()),
-        Value::Text(intervention.rationale.clone()),
-        Value::Bytes(intervention.provenance_digest.to_vec()),
+        text_value(INTERVENTION_MAGIC_V1),
+        uint_value(1),
+        bytes_value(&intervention.intervention_id),
+        uint_value(intervention.target_schema_id.into()),
+        text_value(&intervention.target_entity_id),
+        text_value(&intervention.target_field),
+        uint_value(intervention.operation.code()),
+        bytes_value(&intervention.value_digest),
+        uint_value(intervention.effective_tick),
+        uint_value(intervention.ordinal.into()),
+        text_value(&intervention.principal_id),
+        text_value(&intervention.capability),
+        uint_value(intervention.consent_epoch),
+        bytes_value(&intervention.consent_decision_digest),
+        text_value(&intervention.rationale),
+        bytes_value(&intervention.provenance_digest),
     ])
 }
 
 fn decode_intervention(value: &Value) -> Result<InterventionV1, InterventionContractErrorV1> {
-    let fields = array(value, FIELD_COUNT)?;
-    if text_value(&fields[0])? != INTERVENTION_MAGIC_V1 || uint_value(&fields[1])? != 1 {
-        return Err(InterventionContractErrorV1::UnsupportedVersion);
-    }
-    Ok(InterventionV1 {
-        intervention_id: fixed_bytes::<16>(&fields[2])?,
-        target_schema_id: u32_value(&fields[3])?,
-        target_entity_id: text_value(&fields[4])?,
-        target_field: text_value(&fields[5])?,
-        operation: InterventionOperationV1::from_code(uint_value(&fields[6])?)?,
-        value_digest: fixed_bytes::<32>(&fields[7])?,
-        effective_tick: uint_value(&fields[8])?,
-        ordinal: u32_value(&fields[9])?,
-        principal_id: text_value(&fields[10])?,
-        capability: text_value(&fields[11])?,
-        consent_epoch: uint_value(&fields[12])?,
-        consent_decision_digest: fixed_bytes::<32>(&fields[13])?,
-        rationale: text_value(&fields[14])?,
-        provenance_digest: fixed_bytes::<32>(&fields[15])?,
-    })
+    let mut fields = FieldReader::with_header(value, FIELD_COUNT, INTERVENTION_MAGIC_V1, 1);
+    let intervention_id = fields.read_bytes::<16>();
+    let target_schema_id = fields.read_u32();
+    let target_entity_id = fields.read_text();
+    let target_field = fields.read_text();
+    let operation_code = fields.read_u64();
+    let value_digest = fields.read_bytes::<32>();
+    let effective_tick = fields.read_u64();
+    let ordinal = fields.read_u32();
+    let principal_id = fields.read_text();
+    let capability = fields.read_text();
+    let consent_epoch = fields.read_u64();
+    let consent_decision_digest = fields.read_bytes::<32>();
+    let rationale = fields.read_text();
+    let provenance_digest = fields.read_bytes::<32>();
+    fields
+        .finish()
+        .map_err(contract_error)
+        .and_then(|()| InterventionOperationV1::from_code(operation_code))
+        .map(|operation| InterventionV1 {
+            intervention_id,
+            target_schema_id,
+            target_entity_id,
+            target_field,
+            operation,
+            value_digest,
+            effective_tick,
+            ordinal,
+            principal_id,
+            capability,
+            consent_epoch,
+            consent_decision_digest,
+            rationale,
+            provenance_digest,
+        })
 }
 
-fn decode_value(bytes: &[u8]) -> Result<Value, InterventionContractErrorV1> {
-    preflight_cbor(bytes).and_then(|()| {
-        ciborium::from_reader(Cursor::new(bytes))
-            .map_err(|_| InterventionContractErrorV1::InvalidEncoding)
-            .and_then(|value| {
-                encode_value(&value).and_then(|canonical| {
-                    if canonical == bytes {
-                        Ok(value)
-                    } else {
-                        Err(InterventionContractErrorV1::InvalidEncoding)
-                    }
-                })
-            })
-    })
-}
-
-fn preflight_cbor(bytes: &[u8]) -> Result<(), InterventionContractErrorV1> {
-    crate::preflight_array_cbor(bytes, MAX_NESTING_DEPTH, MAX_FIELD_ITEMS, false).map_err(|error| {
-        match error {
-            crate::CborPreflightError::InvalidEncoding => {
-                InterventionContractErrorV1::InvalidEncoding
-            }
-            crate::CborPreflightError::FieldOutOfBounds => {
-                InterventionContractErrorV1::FieldOutOfBounds
-            }
-        }
-    })
-}
-
-fn encode_value(value: &Value) -> Result<Vec<u8>, InterventionContractErrorV1> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)
-        .map(|()| bytes)
-        .or(Err(InterventionContractErrorV1::InvalidEncoding))
-}
-
-fn array(value: &Value, length: usize) -> Result<&[Value], InterventionContractErrorV1> {
-    match value {
-        Value::Array(values) if values.len() == length => Ok(values),
-        _ => Err(InterventionContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn text_value(value: &Value) -> Result<String, InterventionContractErrorV1> {
-    match value {
-        Value::Text(value) => Ok(value.clone()),
-        _ => Err(InterventionContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn uint_value(value: &Value) -> Result<u64, InterventionContractErrorV1> {
-    match value {
-        Value::Integer(value) => {
-            u64::try_from(*value).map_err(|_| InterventionContractErrorV1::InvalidEncoding)
-        }
-        _ => Err(InterventionContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn u32_value(value: &Value) -> Result<u32, InterventionContractErrorV1> {
-    uint_value(value).and_then(|value| {
-        u32::try_from(value).map_err(|_| InterventionContractErrorV1::FieldOutOfBounds)
-    })
-}
-
-fn fixed_bytes<const LENGTH: usize>(
-    value: &Value,
-) -> Result<[u8; LENGTH], InterventionContractErrorV1> {
-    match value {
-        Value::Bytes(value) => value
-            .as_slice()
-            .try_into()
-            .map_err(|_| InterventionContractErrorV1::InvalidEncoding),
-        _ => Err(InterventionContractErrorV1::InvalidEncoding),
+const fn contract_error(error: WireError) -> InterventionContractErrorV1 {
+    match error {
+        WireError::InvalidEncoding => InterventionContractErrorV1::InvalidEncoding,
+        WireError::FieldOutOfBounds => InterventionContractErrorV1::FieldOutOfBounds,
+        WireError::UnsupportedVersion => InterventionContractErrorV1::UnsupportedVersion,
     }
 }
