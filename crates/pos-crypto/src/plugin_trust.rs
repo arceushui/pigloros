@@ -363,19 +363,19 @@ impl VerifiedPluginTrustEvidenceV1 {
 /// closure, proves that closure equal to the PMF1 descriptors, recomputes
 /// every inner, manifest, and release digest, and derives the descriptor
 /// digest set from the PMF1 structure (ADR-061 revision 3). Its fields are
-/// private, so callers cannot supply an arbitrary interval or a partial digest
-/// list.
+/// crate-private and only that decoder constructs it, so callers cannot supply
+/// an arbitrary interval or a partial digest list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedPluginManifestProjectionV1 {
-    pmf1_digest: [u8; 32],
-    plugin_id: String,
-    owner: OwnerIdV1,
-    role: u64,
-    epoch: u64,
-    not_before: i64,
-    not_after: i64,
-    release_digest: [u8; 32],
-    descriptor_digests: Vec<[u8; 32]>,
+    pub(crate) pmf1_digest: [u8; 32],
+    pub(crate) plugin_id: String,
+    pub(crate) owner: OwnerIdV1,
+    pub(crate) role: u64,
+    pub(crate) epoch: u64,
+    pub(crate) not_before: i64,
+    pub(crate) not_after: i64,
+    pub(crate) release_digest: [u8; 32],
+    pub(crate) descriptor_digests: Vec<[u8; 32]>,
 }
 
 impl ValidatedPluginManifestProjectionV1 {
@@ -394,17 +394,7 @@ impl ValidatedPluginManifestProjectionV1 {
     pub fn from_verified_bundle(
         bundle: &VerifiedReleaseBundleV1,
     ) -> Result<Self, PluginManifestErrorV1> {
-        plugin_manifest::project_verified_bundle(bundle).map(|projection| Self {
-            pmf1_digest: projection.pmf1_digest,
-            plugin_id: projection.plugin_id,
-            owner: projection.owner,
-            role: projection.role,
-            epoch: projection.epoch,
-            not_before: projection.not_before,
-            not_after: projection.not_after,
-            release_digest: projection.release_digest,
-            descriptor_digests: projection.descriptor_digests,
-        })
+        plugin_manifest::project_verified_bundle(bundle)
     }
 
     fn is_complete(&self) -> bool {

@@ -27,6 +27,9 @@ echo "==> ASan CI policy"
 bash "$ROOT/scripts/check-asan-ci-policy.sh"
 python3 "$ROOT/scripts/test_check_asan_ci_policy.py"
 
+echo "==> PMF1 golden vectors match their independent generator"
+python3 "$ROOT/scripts/generate_pmf1_golden_vectors.py" --check
+
 echo "==> cargo-crap CI policy"
 python3 "$ROOT/scripts/check_cargo_crap_ci_policy.py"
 python3 "$ROOT/scripts/test_check_cargo_crap_ci_policy.py"

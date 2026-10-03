@@ -1130,6 +1130,8 @@ jobs:
         run: |
           python scripts/check_trusted_clock_port_impls.py
           python scripts/test_check_trusted_clock_port_impls.py
+      - name: Check PMF1 golden vectors match their generator
+        run: python scripts/generate_pmf1_golden_vectors.py --check
 
   modules-structure:
     name: modules-structure (reports only)

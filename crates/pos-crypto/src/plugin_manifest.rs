@@ -11,9 +11,10 @@
 use std::collections::BTreeSet;
 
 use pos_core::OwnerIdV1;
-use pos_plugin_release::{BlobV1, BundleMemberV1, VerifiedReleaseBundleV1};
+use pos_plugin_release::{BundleMemberV1, VerifiedReleaseBundleV1};
 use thiserror::Error;
 
+use crate::plugin_trust::ValidatedPluginManifestProjectionV1;
 use crate::strict_cbor::{Reader, StrictCborError};
 
 type Digest = [u8; 32];
@@ -24,6 +25,8 @@ type CapabilityKey<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str);
 type Dependency<'a> = (&'a str, Digest);
 /// Fields 17-20: dependency release digests, provenance and SBOM, licences.
 type SupplyChain = (Vec<Digest>, [Artifact; 2], Vec<Artifact>);
+/// An artifact with its position in PMF1 field order.
+type Positioned = (usize, Artifact);
 
 /// Maximum complete PMF1 size in bytes.
 const MAX_PMF1_BYTES: usize = 1024 * 1024;
@@ -266,41 +269,25 @@ struct Pmf1<'a> {
     signed: SignedFields,
 }
 
-/// The facts of one complete, closure-bound PMF1 V1 (ADR-103 projection).
-pub(crate) struct ManifestProjection {
-    pub(crate) pmf1_digest: Digest,
-    pub(crate) plugin_id: String,
-    pub(crate) owner: OwnerIdV1,
-    pub(crate) role: u64,
-    pub(crate) epoch: u64,
-    pub(crate) not_before: i64,
-    pub(crate) not_after: i64,
-    pub(crate) release_digest: Digest,
-    pub(crate) descriptor_digests: Vec<Digest>,
-}
-
 /// Decode, bind, and project the `pmf1` member of one verified closure.
 pub(crate) fn project_verified_bundle(
     bundle: &VerifiedReleaseBundleV1,
-) -> Result<ManifestProjection, PluginManifestErrorV1> {
-    let members = bundle.members();
-    // ADR-102 places the sole `pmf1` member first and #425 verified its blob.
-    let pmf1_digest = members.first().map_or("", BundleMemberV1::digest);
-    let bytes = blob_bytes(bundle, pmf1_digest);
+) -> Result<ValidatedPluginManifestProjectionV1, PluginManifestErrorV1> {
+    let bytes = bundle.pmf1();
     let pmf1 = decode(bytes)?;
     check_relations(&pmf1)?;
-    let artifacts = field_order(&pmf1);
-    check_closure(&artifacts, members)?;
-    check_inner_digests(&artifacts, bundle)?;
+    let expected = closure_order(&field_order(&pmf1));
+    check_closure(&expected, bundle.members())?;
+    check_inner_digests(&expected, bundle)?;
     check_signed_digests(bytes, &pmf1)?;
-    let descriptor_digests = artifacts
+    let descriptor_digests = expected
         .iter()
-        .flat_map(|artifact| [artifact.blake3, artifact.sha256])
+        .flat_map(|(_, artifact)| [artifact.blake3, artifact.sha256])
         .chain(pmf1.dependencies.iter().copied())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    Ok(ManifestProjection {
+    Ok(ValidatedPluginManifestProjectionV1 {
         pmf1_digest: *blake3::hash(bytes).as_bytes(),
         plugin_id: pmf1.plugin_id.to_owned(),
         owner: pmf1.signed.owner,
@@ -364,17 +351,6 @@ fn lower_hex(digest: &Digest) -> String {
         .flat_map(|byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]])
         .map(char::from)
         .collect()
-}
-
-/// Verified blob bytes for an OCI digest, or no bytes when absent.
-fn blob_bytes<'a>(bundle: &'a VerifiedReleaseBundleV1, digest: &str) -> &'a [u8] {
-    let blobs = bundle.blobs();
-    blobs
-        .binary_search_by(|blob| blob.digest().cmp(digest))
-        .ok()
-        .and_then(|index| blobs.get(index))
-        .map(BlobV1::bytes)
-        .unwrap_or_default()
 }
 
 const fn require(reader: &Pmf1Reader<'_>, valid: bool) -> Result<(), PluginManifestErrorV1> {
@@ -596,7 +572,9 @@ fn read_supply_chain(reader: &mut Pmf1Reader<'_>) -> Result<SupplyChain, PluginM
 /// Fields 21-27 and the end of the document.
 fn read_signed_fields(reader: &mut Pmf1Reader<'_>) -> Result<SignedFields, PluginManifestErrorV1> {
     reader.at(21);
-    let invalid_owner = PluginManifestErrorV1::InvalidField { ordinal: 21 };
+    let invalid_owner = PluginManifestErrorV1::InvalidField {
+        ordinal: reader.ordinal(),
+    };
     let owner = OwnerIdV1::new(reader.text(MAX_ID_BYTES)?).map_err(|_| invalid_owner)?;
     reader.at(22);
     let not_before = reader.signed()?;
@@ -691,22 +669,27 @@ fn field_order(pmf1: &Pmf1<'_>) -> Vec<Artifact> {
     artifacts
 }
 
-/// Phase 2: the PMF1-derived member list equals the non-`pmf1` members.
+/// The PMF1-derived member list `E` in ADR-102 layer order: role rank, then
+/// digest order for repeated roles.
+fn closure_order(artifacts: &[Artifact]) -> Vec<Positioned> {
+    let mut expected = artifacts.iter().copied().enumerate().collect::<Vec<_>>();
+    expected.sort_by_key(|(_, artifact)| (artifact.role.rank, artifact.sha256));
+    expected
+}
+
+/// Phase 2: `E` equals the non-`pmf1` members.
 fn check_closure(
-    artifacts: &[Artifact],
+    expected: &[Positioned],
     members: &[BundleMemberV1],
 ) -> Result<(), PluginManifestErrorV1> {
-    // ADR-102 layer order: role rank, then digest order for repeated roles.
-    let mut expected = artifacts.to_vec();
-    expected.sort_by_key(|artifact| (artifact.role.rank, artifact.sha256));
-    let members = members.get(1..).unwrap_or_default();
-    let shorter = expected.len().min(members.len());
+    let layers = members.len().saturating_sub(1);
+    let shorter = expected.len().min(layers);
     let index = expected
         .iter()
-        .zip(members)
-        .position(|(artifact, member)| !artifact.matches(member))
+        .zip(members.iter().skip(1))
+        .position(|((_, artifact), member)| !artifact.matches(member))
         .unwrap_or(shorter);
-    if index == expected.len() && index == members.len() {
+    if index == expected.len() && index == layers {
         Ok(())
     } else {
         Err(PluginManifestErrorV1::ClosureMismatch { index })
@@ -722,20 +705,23 @@ fn role_digest(domain: &[u8], bytes: &[u8]) -> Digest {
     *hasher.finalize().as_bytes()
 }
 
-/// Phase 3: every inner BLAKE3 digest, in PMF1 field and position order.
+/// Phase 3: every inner BLAKE3 digest; the first mismatch in PMF1 field and
+/// position order is reported. Phase 2 proved `E` equal to the layers.
 fn check_inner_digests(
-    artifacts: &[Artifact],
+    expected: &[Positioned],
     bundle: &VerifiedReleaseBundleV1,
 ) -> Result<(), PluginManifestErrorV1> {
-    for artifact in artifacts {
-        let bytes = blob_bytes(bundle, &artifact.oci_digest());
-        if role_digest(artifact.role.domain, bytes) != artifact.blake3 {
-            return Err(PluginManifestErrorV1::ArtifactDigestMismatch {
-                ordinal: artifact.ordinal,
-            });
-        }
-    }
-    Ok(())
+    expected
+        .iter()
+        .zip(bundle.member_bytes().skip(1))
+        .filter(|((_, artifact), bytes)| {
+            role_digest(artifact.role.domain, bytes) != artifact.blake3
+        })
+        .map(|((position, artifact), _)| (*position, artifact.ordinal))
+        .min()
+        .map_or(Ok(()), |(_, ordinal)| {
+            Err(PluginManifestErrorV1::ArtifactDigestMismatch { ordinal })
+        })
 }
 
 /// Phase 4: field 25, then field 27.

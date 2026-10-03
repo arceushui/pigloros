@@ -20,6 +20,7 @@ use pos_plugin_release::{
 use sha2::{Digest as _, Sha256};
 
 include!("support/plugin_trust_records.rs");
+include!("support/pmf1_golden_vectors.rs");
 
 type BoxResult<T> = Result<T, Box<dyn std::error::Error>>;
 type Projection = Result<ValidatedPluginManifestProjectionV1, PluginManifestErrorV1>;
@@ -751,6 +752,10 @@ fn exact_value_fields_reject_any_other_text_as_invalid_fields() -> TestResult {
     assert_eq!(project_raw(truncated)?, Err(encoding(0)));
     let not_utf8 = [0x64, b'P', b'M', b'F', 0xff];
     expect(&Release::with_raw(0, &not_utf8)?, invalid(0))?;
+    let mut world_not_utf8 = vec![0x78, 0x26];
+    world_not_utf8.extend_from_slice(&WORLD.as_bytes()[..37]);
+    world_not_utf8.push(0xff);
+    expect(&Release::with_raw(4, &world_not_utf8)?, invalid(4))?;
     expect(&Release::with(5, &unsigned(1))?, invalid(5))?;
     Ok(())
 }
@@ -1591,5 +1596,78 @@ fn manifest_and_release_digests_are_recomputed_in_order() -> TestResult {
     hasher.update(&sha256(WIT_BYTES));
     sha256_inputs.fields[27] = encode(&bytes(*hasher.finalize().as_bytes()))?;
     expect(&sha256_inputs, release_mismatch)?;
+    Ok(())
+}
+
+#[test]
+fn inner_digest_mismatches_follow_pmf1_field_order_not_layer_order() -> TestResult {
+    let mut documents = [EVENT_SCHEMA, STATE_SCHEMA];
+    documents.sort_by_key(|document| std::cmp::Reverse(sha256(document)));
+    let [later_layer, earlier_layer] = documents;
+    let event = schema_with(1, 1, wrong_blake3(Role::Schema, later_layer), 1);
+    let mut release = Release::with(11, &list(vec![event]))?;
+    let state = schema_with(2, 1, wrong_blake3(Role::Schema, earlier_layer), 1);
+    release.fields[12] = encode(&state)?;
+    expect(&release, digest_mismatch(11))
+}
+
+fn golden_digest(hex: &str) -> BoxResult<[u8; 32]> {
+    Ok(hex_bytes(hex)?.as_slice().try_into()?)
+}
+
+/// Authorize `projection` (`alpha/plugin`, epoch 9) with one revoked digest.
+fn authorize_with_revoked(
+    ptr1: &[u8],
+    projection: &ValidatedPluginManifestProjectionV1,
+    revoked: [u8; 32],
+) -> BoxResult<Result<[u8; 32], PluginTrustErrorV1>> {
+    let anchor = TrustedPluginRootAnchorV1::new("scope", digest(ptr1))?;
+    let artifacts = vec![revoked_artifact(revoked)];
+    let fields = revocation_fields(digest(ptr1), 1, None, 5, Vec::new(), artifacts);
+    let prv1 = signed_record(fields, REVOCATION_SIGNATURE_DOMAIN, &signer())?;
+    let evidence = verify_plugin_trust_v1(&anchor, &[ptr1], &[&prv1], 50, 5)?;
+    Ok(evidence
+        .authorize_release(projection)
+        .map(|fact| fact.resolved_public_key()))
+}
+
+#[test]
+fn independent_golden_closure_projects_and_binds_its_digests() -> TestResult {
+    let manifest = GOLDEN_OCI_MANIFEST.as_bytes().to_vec();
+    let size = u64::try_from(manifest.len())?;
+    let address = BundleAddressV1::new(GOLDEN_OCI_MANIFEST_DIGEST.to_owned(), size)?;
+    let mut blobs = BTreeMap::new();
+    for (oci, hex) in GOLDEN_BLOBS_HEX {
+        blobs.insert(oci.to_owned(), hex_bytes(hex)?);
+    }
+    let bundle = verify_oci_closure_v1(address, manifest, blobs)?;
+    let pmf1 = hex_bytes(GOLDEN_PMF1_HEX)?;
+    assert_eq!(bundle.pmf1(), pmf1.as_slice());
+    assert_eq!(digest(&pmf1), golden_digest(GOLDEN_PMF1_DIGEST_HEX)?);
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    let publishers = vec![publisher_entry("publisher", 9, publisher_public())];
+    let fields = root_fields(
+        1,
+        None,
+        publishers,
+        vec![grant("alpha/plugin", "publisher")],
+    );
+    let ptr1 = signed_record(fields, ROOT_SIGNATURE_DOMAIN, &signer())?;
+    let mut denied = vec![golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?];
+    for hex in GOLDEN_DESCRIPTOR_DIGESTS_HEX {
+        denied.push(golden_digest(hex)?);
+    }
+    for revoked in denied {
+        assert_eq!(authorize_with_revoked(&ptr1, &projection, revoked)?, DENIED);
+    }
+    let field_24 = golden_digest(GOLDEN_PREVIOUS_RELEASE_HEX)?;
+    let field_25 = golden_digest(GOLDEN_UNSIGNED_MANIFEST_DIGEST_HEX)?;
+    for carried in [field_24, field_25] {
+        assert!(pmf1.windows(32).any(|window| window == carried.as_slice()));
+    }
+    for excluded in [field_24, field_25, sha256(&pmf1), digest(&pmf1)] {
+        let authorized = authorize_with_revoked(&ptr1, &projection, excluded)?;
+        assert_eq!(authorized, Ok(publisher_public()));
+    }
     Ok(())
 }

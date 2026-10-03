@@ -119,6 +119,8 @@ pub struct VerifiedReleaseBundleV1 {
     manifest: BlobV1,
     blobs: Vec<BlobV1>,
     members: Vec<BundleMemberV1>,
+    /// The index into `blobs` of each member's verified bytes.
+    member_blobs: Vec<usize>,
 }
 
 impl VerifiedReleaseBundleV1 {
@@ -144,6 +146,20 @@ impl VerifiedReleaseBundleV1 {
     #[must_use]
     pub fn members(&self) -> &[BundleMemberV1] {
         &self.members
+    }
+
+    /// Return the verified bytes of the sole `pmf1` layer, which the closure
+    /// rules place first.
+    #[must_use]
+    pub fn pmf1(&self) -> &[u8] {
+        self.blobs[self.member_blobs[0]].bytes()
+    }
+
+    /// Return the verified bytes of every layer, in `members()` order.
+    pub fn member_bytes(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.member_blobs
+            .iter()
+            .map(|&index| self.blobs[index].bytes())
     }
 }
 
@@ -218,6 +234,7 @@ pub fn verify_oci_closure_v1(
         verify_descriptor_bytes(&digest, size, &bytes)?;
         blobs.push(BlobV1 { digest, bytes });
     }
+    let member_blobs = member_blob_indices(&blobs, &members);
     Ok(VerifiedReleaseBundleV1 {
         manifest: BlobV1 {
             digest: address.digest.clone(),
@@ -226,7 +243,22 @@ pub fn verify_oci_closure_v1(
         address,
         blobs,
         members,
+        member_blobs,
     })
+}
+
+/// Locate each member's verified blob. Every member digest is an expected
+/// closure digest, so every lookup succeeds.
+fn member_blob_indices(blobs: &[BlobV1], members: &[BundleMemberV1]) -> Vec<usize> {
+    let positions = blobs
+        .iter()
+        .enumerate()
+        .map(|(index, blob)| (blob.digest.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    members
+        .iter()
+        .map(|member| positions[member.digest.as_str()])
+        .collect()
 }
 
 struct ManifestPlan {
@@ -558,6 +590,12 @@ mod tests {
         assert_eq!(verified.manifest().len() as u64, address.size());
         for blob in verified.blobs() {
             assert_eq!(sha256_digest(blob.bytes()), blob.digest());
+        }
+        assert_eq!(verified.pmf1(), b"pmf1");
+        let member_bytes = verified.member_bytes().collect::<Vec<_>>();
+        assert_eq!(member_bytes.len(), verified.members().len());
+        for (member, bytes) in verified.members().iter().zip(member_bytes) {
+            assert_eq!(sha256_digest(bytes), member.digest());
         }
         for member in verified.members() {
             assert!(!member.member().is_empty());
