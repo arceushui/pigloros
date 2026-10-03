@@ -177,7 +177,10 @@ pub fn build_manifest_owner_scope_v1(
     let references = source.consumer_references.iter().flat_map(|reference| {
         [
             (WorldArtifactKindV1::Schema, reference.schema),
-            (WorldArtifactKindV1::ReducerImplementation, reference.reducer),
+            (
+                WorldArtifactKindV1::ReducerImplementation,
+                reference.reducer,
+            ),
             (WorldArtifactKindV1::RuntimeIdentity, reference.runtime),
         ]
     });
@@ -365,8 +368,14 @@ fn consumer_reference_set(wcs1: &WorldConsumerSetV1) -> BTreeSet<LeafKey> {
         .flat_map(|consumer| {
             [
                 (WorldArtifactKindV1::Schema, consumer.schema_hash()),
-                (WorldArtifactKindV1::ReducerImplementation, consumer.reducer_hash()),
-                (WorldArtifactKindV1::RuntimeIdentity, consumer.runtime_hash()),
+                (
+                    WorldArtifactKindV1::ReducerImplementation,
+                    consumer.reducer_hash(),
+                ),
+                (
+                    WorldArtifactKindV1::RuntimeIdentity,
+                    consumer.runtime_hash(),
+                ),
             ]
         })
         .collect()
