@@ -76,9 +76,19 @@ pub enum OutputAdmissionErrorV1 {
 
 /// Reject a Plugin declaration that lists one Event type more than once.
 ///
-/// Every binding constructor runs this before it builds an output policy, so
-/// a duplicate declaration fails with the closed ownership error on every
-/// registration path instead of as a malformed policy (ADR-024 Revision 1).
+/// Two binding constructors run this before they build an output policy, so
+/// a duplicate declaration fails with the closed ownership error instead of
+/// as a malformed policy (ADR-024 Revision 1):
+/// - `OutputPolicyBindingV1::from_source`, which builds the bindings the
+///   verified and test-support Driver registration paths take;
+/// - the registry's generated binding
+///   (`PluginRegistry::generated_output_binding_with_configuration_details`),
+///   behind the generated, generated-with-approver, pinned,
+///   pinned-with-approver, local and generated test-Driver paths.
+///
+/// The installed and manifest-slot registration stubs fail closed with
+/// `EPF1` before using any binding, until #467 (Wave 9) wires this check
+/// into installed registration.
 pub(crate) fn reject_duplicate_declaration<P: Plugin + ?Sized>(
     plugin: &P,
 ) -> Result<(), OutputAdmissionErrorV1> {
