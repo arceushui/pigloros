@@ -5,20 +5,30 @@
 //! recomputes one Fork suffix. The record binds the plan, room, and parent
 //! cut; the first recomputed Tick and the inclusive horizon; the ordered INT1
 //! Interventions; the frozen `ExogenousFrozen` and `FixedPolicy` descriptors;
-//! the classification bundle; the EPF1 execution-profile and TPS1
-//! trust-policy identities; the Plugin composition, scheduler, numeric,
-//! budget, and failure-policy identities; the requested `ReplayClaim`; and the
-//! previous plan digest. This module owns only the strict codec, the
-//! domain-separated digest, and structural validation; admission,
-//! authorization, consent, graph traversal, transactions, execution, and
-//! result generation belong to the coordinator.
+//! the classification bundle and the unknown-edge policy; the EPF1
+//! execution-profile and TPS1 trust-policy identities; the Plugin
+//! composition, scheduler, numeric, budget, and failure-policy identities; the
+//! requested `ReplayClaim`; and the previous plan digest. This module owns
+//! only the strict codec, the domain-separated digest, and structural
+//! validation; admission, authorization, consent, graph traversal,
+//! transactions, execution, and result generation belong to the coordinator.
 //!
 //! Contract decisions that ADR-064 leaves open:
 //!
-//! - The exact wire form is a 25-field deterministic-CBOR array in
+//! - The exact wire form is a 26-field deterministic-CBOR array in
 //!   [`CounterfactualPlanV1`] declaration order, preceded by the `CFP1` magic
-//!   and version `1`. The plan digest covers fields 0 through 23 under the
+//!   and version `1`: `[magic, version, plan_id, room_id, room_digest,
+//!   parent_timeline_id, parent_cut_seq, parent_cut_tick, parent_cut_digest,
+//!   first_tick, horizon_tick, interventions, exogenous_descriptors,
+//!   fixed_policy_descriptors, classification_bundle_digest,
+//!   unknown_edge_policy, execution_profile, trust_policy,
+//!   plugin_composition_digest, scheduler_digest, numeric_profile_digest,
+//!   budget_digest, failure_policy_digest, replay_claim, previous_plan_digest,
+//!   plan_digest]`. The plan digest covers fields 0 through 24 under the
 //!   `PiglorOS.CounterfactualPlan.v1\0` domain.
+//! - The unknown-edge policy is bound next to the classification bundle, so
+//!   a missing dependency edge is handled as the plan requested. It uses the
+//!   `RCF1` wire codes of [`UnknownEdgePolicyV1::ALL_V1`].
 //! - Each Intervention travels as its exact canonical INT1 bytes in a CBOR
 //!   byte string, so INT1 remains the single owner of its codec and its
 //!   closed errors surface unchanged through
@@ -45,8 +55,9 @@
 //!   claim may be requested; whether evidence supports it is decided later.
 //! - A plan cannot supersede itself: `previous_plan_digest` must differ from
 //!   `plan_digest`.
-//! - The plan ID and the room, parent-cut, classification-bundle, Plugin
-//!   composition, scheduler, numeric-profile, budget, and failure-policy
+//! - The plan ID, the parent timeline ID, and the room, parent-cut,
+//!   classification-bundle, EPF1 profile, TPS1 snapshot, Plugin composition,
+//!   scheduler, numeric-profile, budget, failure-policy, and any previous-plan
 //!   digests are nonzero, and every descriptor names a nonzero schema with
 //!   nonzero digests; an all-zero placeholder is out of bounds.
 //! - The plan carries no operational path: every artifact is a digest, and
@@ -65,8 +76,8 @@
 //! bound, which is therefore enforced on untrusted input before allocation.
 
 use super::codec::{
-    bytes_value, decode_canonical, encode_value, text_value, uint_value, CborLimits, FieldReader,
-    WireError,
+    bytes_value, decode_canonical, encode_value, nonzero, text_value, uint_value, CborLimits,
+    FieldReader, WireError,
 };
 use super::intervention::{
     validate_plan_interventions_v1, InterventionContractErrorV1, InterventionV1,
@@ -74,7 +85,7 @@ use super::intervention::{
 use super::replay_claim::{replay_claim_code, REPLAY_CLAIMS};
 use crate::{
     domain_digest, ExecutionProfileContractErrorV1, ExecutionProfileV1, ReplayClaimV1,
-    TrustPolicySnapshotContractErrorV1, TrustPolicySnapshotV1,
+    TrustPolicySnapshotContractErrorV1, TrustPolicySnapshotV1, UnknownEdgePolicyV1,
 };
 use ciborium::value::Value;
 use std::cmp::Ordering;
@@ -89,7 +100,7 @@ pub const MAX_EXOGENOUS_DESCRIPTORS_PER_PLAN_V1: usize = 65_536;
 /// Maximum number of `FixedPolicy` descriptors bound by one plan.
 pub const MAX_FIXED_POLICY_DESCRIPTORS_PER_PLAN_V1: usize = 4_096;
 
-const FIELD_COUNT: usize = 25;
+const FIELD_COUNT: usize = 26;
 const DESCRIPTOR_FIELD_COUNT: usize = 4;
 const EXECUTION_PROFILE_REF_FIELD_COUNT: usize = 3;
 const TRUST_POLICY_REF_FIELD_COUNT: usize = 3;
@@ -234,9 +245,9 @@ impl PlanTrustPolicyRefV1 {
 
 /// Complete immutable counterfactual plan represented by a CFP1 record.
 ///
-/// The exact deterministic-CBOR array has 25 fields: magic `CFP1`, version
+/// The exact deterministic-CBOR array has 26 fields: magic `CFP1`, version
 /// `1`, then the fields below in declaration order. The plan digest covers
-/// fields 0 through 23 under the `PiglorOS.CounterfactualPlan.v1\0` domain.
+/// fields 0 through 24 under the `PiglorOS.CounterfactualPlan.v1\0` domain.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CounterfactualPlanV1 {
     /// Plan identifier.
@@ -266,6 +277,9 @@ pub struct CounterfactualPlanV1 {
     pub fixed_policy_descriptors: Vec<FrozenArtifactDescriptorV1>,
     /// Digest of the dependency-classification bundle.
     pub classification_bundle_digest: [u8; 32],
+    /// How recomputation treats a required dependency edge that the graph
+    /// cannot resolve.
+    pub unknown_edge_policy: UnknownEdgePolicyV1,
     /// EPF1 execution-profile identity.
     pub execution_profile: PlanExecutionProfileRefV1,
     /// TPS1 trust-policy snapshot identity.
@@ -284,7 +298,7 @@ pub struct CounterfactualPlanV1 {
     pub replay_claim: ReplayClaimV1,
     /// Digest of the plan this plan supersedes, if any; never `plan_digest`.
     pub previous_plan_digest: Option<[u8; 32]>,
-    /// Domain-separated digest over fields 0 through 23.
+    /// Domain-separated digest over fields 0 through 24.
     pub plan_digest: [u8; 32],
 }
 
@@ -324,7 +338,7 @@ impl CounterfactualPlanV1 {
             .and_then(|plan| plan.validate().map(|()| plan))
     }
 
-    /// Compute the CFP1 domain-separated digest over fields 0 through 23.
+    /// Compute the CFP1 domain-separated digest over fields 0 through 24.
     ///
     /// The digest is computed over the fields as they are, without validating
     /// the plan, so a caller can seal a plan before validating it.
@@ -338,7 +352,7 @@ impl CounterfactualPlanV1 {
     }
 }
 
-/// Validate every CFP1 rule and return the unsigned body fields 0 through 23,
+/// Validate every CFP1 rule and return the unsigned body fields 0 through 24,
 /// so encoding reuses the field list that the digest check already built.
 fn validated_body_fields(
     plan: &CounterfactualPlanV1,
@@ -360,7 +374,7 @@ fn validated_body_fields(
         })
 }
 
-/// Build the unsigned body fields 0 through 23 once and digest their
+/// Build the unsigned body fields 0 through 24 once and digest their
 /// deterministic-CBOR array encoding under the CFP1 domain.
 fn digested_body_fields(
     plan: &CounterfactualPlanV1,
@@ -406,22 +420,28 @@ fn valid_identities(plan: &CounterfactualPlanV1) -> bool {
         && plan.trust_policy.epoch != 0
 }
 
-/// Whether every plan, cut, room, classification, and Plugin identity is
-/// nonzero.
+/// Whether every plan, timeline, cut, room, classification, EPF1, TPS1,
+/// Plugin, and previous-plan identity is nonzero.
 fn nonzero_digests(plan: &CounterfactualPlanV1) -> bool {
-    [
-        plan.plan_id.as_slice(),
-        plan.room_digest.as_slice(),
-        plan.parent_cut_digest.as_slice(),
-        plan.classification_bundle_digest.as_slice(),
-        plan.plugin_composition_digest.as_slice(),
-        plan.scheduler_digest.as_slice(),
-        plan.numeric_profile_digest.as_slice(),
-        plan.budget_digest.as_slice(),
-        plan.failure_policy_digest.as_slice(),
-    ]
-    .into_iter()
-    .all(nonzero)
+    nonzero(&plan.plan_id)
+        && nonzero(&plan.parent_timeline_id)
+        && [
+            plan.room_digest,
+            plan.parent_cut_digest,
+            plan.classification_bundle_digest,
+            plan.execution_profile.profile_digest,
+            plan.trust_policy.snapshot_digest,
+            plan.plugin_composition_digest,
+            plan.scheduler_digest,
+            plan.numeric_profile_digest,
+            plan.budget_digest,
+            plan.failure_policy_digest,
+        ]
+        .iter()
+        .all(nonzero)
+        && plan
+            .previous_plan_digest
+            .is_none_or(|digest| nonzero(&digest))
 }
 
 /// Whether a descriptor names a schema and carries nonzero digests.
@@ -430,10 +450,6 @@ fn valid_descriptor(descriptor: &FrozenArtifactDescriptorV1) -> bool {
         && nonzero(&descriptor.artifact_digest)
         && nonzero(&descriptor.authorization_digest)
         && nonzero(&descriptor.provenance_digest)
-}
-
-fn nonzero(value: &[u8]) -> bool {
-    value.iter().any(|byte| *byte != 0)
 }
 
 /// Whether the first Tick directly follows the cut and precedes the horizon.
@@ -550,6 +566,7 @@ fn body_fields(
                 encode_descriptors(&plan.exogenous_descriptors),
                 encode_descriptors(&plan.fixed_policy_descriptors),
                 bytes_value(&plan.classification_bundle_digest),
+                uint_value(plan.unknown_edge_policy.wire_code().into()),
                 encode_execution_profile_ref(&plan.execution_profile),
                 encode_trust_policy_ref(&plan.trust_policy),
                 bytes_value(&plan.plugin_composition_digest),
@@ -613,6 +630,8 @@ fn decode_plan(value: &Value) -> Result<CounterfactualPlanV1, CounterfactualPlan
     let exogenous_descriptors = fields.read_array(descriptor_field);
     let fixed_policy_descriptors = fields.read_array(descriptor_field);
     let classification_bundle_digest = fields.read_bytes();
+    let unknown_edge_policy =
+        fields.read_enum(&UnknownEdgePolicyV1::ALL_V1, UnknownEdgePolicyV1::Reject);
     let execution_profile = fields.read_nested(EXECUTION_PROFILE_REF_FIELD_COUNT, |profile| {
         PlanExecutionProfileRefV1 {
             profile_id: profile.read_text(),
@@ -660,6 +679,7 @@ fn decode_plan(value: &Value) -> Result<CounterfactualPlanV1, CounterfactualPlan
             exogenous_descriptors,
             fixed_policy_descriptors,
             classification_bundle_digest,
+            unknown_edge_policy,
             execution_profile,
             trust_policy,
             plugin_composition_digest,

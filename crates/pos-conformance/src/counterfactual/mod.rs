@@ -13,7 +13,11 @@ pub mod dependency;
 pub mod frontier_artifacts;
 pub mod intervention;
 pub mod plan;
-mod replay_claim;
+// Public module reachability keeps the crate-only wire table, shared with the
+// nested evidence codec, compatible with both `unreachable_pub` and Clippy's
+// `redundant_pub_crate` lint.
+#[doc(hidden)]
+pub mod replay_claim;
 pub mod result;
 
 pub use intervention::{
