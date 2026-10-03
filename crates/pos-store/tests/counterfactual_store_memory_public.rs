@@ -17,6 +17,9 @@ use pos_store::{
 
 type StoreError = CounterfactualStoreErrorV1;
 
+/// Tick number of every test command's first recomputation Tick.
+const FIRST_TICK: u64 = 17;
+
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
         std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
@@ -43,9 +46,65 @@ fn hash_field(value: Hash) -> Vec<u8> {
     [&[0x58, 0x20][..], &value.as_bytes()[..]].concat()
 }
 
-/// Encode one small CBOR unsigned integer (0..=23).
-fn small_uint(value: u64) -> Vec<u8> {
-    vec![ok(u8::try_from(value))]
+/// Encode one shortest-form CBOR unsigned integer.
+fn uint(value: u64) -> Vec<u8> {
+    let bytes = value.to_be_bytes();
+    match value {
+        0..=23 => vec![bytes[7]],
+        24..=0xff => vec![0x18, bytes[7]],
+        0x100..=0xffff => [&[0x19][..], &bytes[6..]].concat(),
+        0x1_0000..=0xffff_ffff => [&[0x1a][..], &bytes[4..]].concat(),
+        _ => [&[0x1b][..], &bytes[..]].concat(),
+    }
+}
+
+/// Encode one shortest-form CBOR head of `major` with `argument`.
+fn head(major: u8, argument: u64) -> Vec<u8> {
+    let mut encoded = uint(argument);
+    encoded[0] |= major << 5;
+    encoded
+}
+
+fn text_field(value: &str) -> Vec<u8> {
+    [
+        head(3, ok(u64::try_from(value.len()))),
+        value.as_bytes().to_vec(),
+    ]
+    .concat()
+}
+
+/// Encode one six-field dependency-node coordinate.
+fn node_field(tick: u64, owner: &str) -> Vec<u8> {
+    [
+        vec![0x86],
+        uint(tick),
+        uint(0),
+        text_field(owner),
+        uint(0),
+        uint(7),
+        hash_field(hash(21)),
+    ]
+    .concat()
+}
+
+/// Encode `SIV1` fields 8 through 14, as the `pos-core` port tests do.
+fn invalidation_middle() -> Vec<u8> {
+    [
+        node_field(5, "agent-a"),
+        node_field(4_294_967_296, "an-owner-identifier-of-thirty-"),
+        vec![0x81, 0x86],
+        text_field("event"),
+        uint(70_000),
+        hash_field(hash(22)),
+        node_field(5, "agent-a"),
+        uint(300),
+        uint(0),
+        vec![0x81],
+        hash_field(hash(23)),
+        vec![0x80, 0x80],
+        uint(0),
+    ]
+    .concat()
 }
 
 /// Frame fields after the version as one self-digested record.
@@ -117,6 +176,7 @@ impl Spec {
                 hash_field(self.plan),
                 hash_field(hash(2)),
                 hash_field(self.graph),
+                vec![0x01],
             ]
             .concat(),
         )));
@@ -128,9 +188,15 @@ impl Spec {
                 id_field([self.record_id; 16]),
                 hash_field(self.plan),
                 id_field(self.fork.inner().to_bytes()),
-                small_uint(self.prior),
-                small_uint(self.prior + 1),
+                uint(self.prior),
+                uint(self.prior + 1),
                 hash_field(frontier.digest()),
+                invalidation_middle(),
+                // Commit coordinate: the Fork, its expected head, the first Tick.
+                vec![0x83],
+                id_field(self.fork.inner().to_bytes()),
+                uint(self.head),
+                uint(FIRST_TICK),
             ]
             .concat(),
         )));
@@ -145,7 +211,7 @@ impl Spec {
                 invalidation,
                 invalid_artifacts: self.invalid_artifacts.clone(),
                 evictions: self.evictions.clone(),
-                first_tick: 17,
+                first_tick: FIRST_TICK,
                 first_tick_drafts: ok(PipelineDraftBatchV1::try_new(
                     (0..self.drafts).map(draft).collect(),
                 )),
@@ -253,7 +319,7 @@ fn commit_installs_the_whole_generation() {
 
     let receipt = committed(store, &command);
 
-    assert_eq!(receipt, command.committed_receipt(Seq::from_u64(3)));
+    assert_eq!(receipt, ok(command.committed_receipt(Seq::from_u64(3))));
     assert_eq!(receipt.generation(), at(fork, 1));
     assert_eq!(receipt.first_tick_head(), Seq::from_u64(3));
     assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 1)));
@@ -497,11 +563,48 @@ fn contained_fork_fails_closed_without_committing() {
         fixture.store.commit_counterfactual_invalidation(&command),
         Err(StoreError::StorageFailure)
     );
-    assert_eq!(fixture.store.current_fork_generation(fork), Ok(at(fork, 0)));
+    // The generation and artifact reads are fenced like every Timeline read.
+    assert_eq!(
+        fixture.store.current_fork_generation(fork),
+        Err(StoreError::StorageFailure)
+    );
     assert_eq!(
         fixture
             .store
             .read_generation_artifact(at(fork, 0), command.frontier().digest()),
-        Ok(None)
+        Err(StoreError::StorageFailure)
+    );
+    // Unfenced publication still reports the uncommitted generation 0.
+    assert_eq!(
+        fixture.store.publish_counterfactual_facts(fork, facts()),
+        Ok(at(fork, 0))
+    );
+}
+
+#[test]
+fn ungated_store_fails_closed_except_publication() {
+    let fixture = published();
+    let fork = fixture.fork;
+    let command = Spec::new(fork).command();
+
+    // Without the host erasure gate the appending commit and the
+    // Timeline-derived reads are refused, while publication touches only
+    // host-owned facts.
+    let mut ungated = fixture.store.without_erasure_gate();
+    assert_eq!(
+        ungated.commit_counterfactual_invalidation(&command),
+        Err(StoreError::StorageFailure)
+    );
+    assert_eq!(
+        ungated.publish_counterfactual_facts(fork, facts()),
+        Ok(at(fork, 0))
+    );
+    assert_eq!(
+        ungated.current_fork_generation(fork),
+        Err(StoreError::StorageFailure)
+    );
+    assert_eq!(
+        ungated.read_generation_artifact(at(fork, 0), hash(1)),
+        Err(StoreError::StorageFailure)
     );
 }
