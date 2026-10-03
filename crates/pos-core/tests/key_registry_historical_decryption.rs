@@ -67,13 +67,73 @@ fn retained_subject_epoch_decrypts_without_restoring_encryption_authority(
 }
 
 #[test]
+fn retained_recipient_epoch_decrypts_without_restoring_encryption_authority(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let old = KeyIdentityV1::new("recipient-owner", KeyRoleV1::ExportRecipientEncryption, 1);
+    let current = KeyIdentityV1::new("recipient-owner", KeyRoleV1::ExportRecipientEncryption, 2);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(old, digest(1), None))?;
+    registry.register_key(KeyRegistrationV1::new(current, digest(2), None))?;
+
+    assert_eq!(
+        registry.with_decryption_authorization(old, digest(1), || "old export")?,
+        "old export"
+    );
+    assert_eq!(
+        registry.with_decryption_authorization(current, digest(2), || "current export")?,
+        "current export"
+    );
+    denied(
+        &mut registry,
+        old,
+        digest(2),
+        pos_core::KeyRegistryErrorV1::EncryptionKeyMismatch,
+    );
+    denied(
+        &mut registry,
+        KeyIdentityV1::new("recipient-owner", KeyRoleV1::SubjectDataEncryption, 1),
+        digest(1),
+        pos_core::KeyRegistryErrorV1::NotFound,
+    );
+    let called = Cell::new(false);
+    assert_eq!(
+        registry.with_encryption_authorization(old, digest(1), || called.set(true)),
+        Err(pos_core::KeyRegistryErrorV1::InactiveKey)
+    );
+    assert!(!called.get());
+    assert_eq!(
+        registry.with_encryption_authorization(current, digest(2), || "new export")?,
+        "new export"
+    );
+
+    let request = KeyDestructionRequestV1::new(old, digest(1), digest(3));
+    registry.begin_key_destruction(request)?;
+    denied(
+        &mut registry,
+        old,
+        digest(1),
+        pos_core::KeyRegistryErrorV1::DestructionPending,
+    );
+    registry.complete_key_destruction(request, deletion_receipt(&request))?;
+    denied(
+        &mut registry,
+        old,
+        digest(1),
+        pos_core::KeyRegistryErrorV1::Destroyed,
+    );
+    assert_eq!(
+        registry.with_decryption_authorization(current, digest(2), || "still live")?,
+        "still live"
+    );
+    Ok(())
+}
+
+#[test]
 fn historical_decryption_checks_exact_identity_and_never_calls_on_failure(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subject = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
-    let recipient = KeyIdentityV1::new("subject-owner", KeyRoleV1::ExportRecipientEncryption, 1);
     let mut registry = KeyRegistryStateV1::new();
     registry.register_key(KeyRegistrationV1::new(subject, digest(1), None))?;
-    registry.register_key(KeyRegistrationV1::new(recipient, digest(2), None))?;
 
     denied(
         &mut registry,
@@ -83,10 +143,22 @@ fn historical_decryption_checks_exact_identity_and_never_calls_on_failure(
     );
     denied(
         &mut registry,
-        recipient,
-        digest(2),
-        pos_core::KeyRegistryErrorV1::HistoricalDecryptionRoleRequired,
+        KeyIdentityV1::new("subject-owner", KeyRoleV1::ExportRecipientEncryption, 0),
+        digest(1),
+        pos_core::KeyRegistryErrorV1::InvalidEpoch,
     );
+    for role in [
+        KeyRoleV1::SubjectAttributionSigning,
+        KeyRoleV1::TimelineIntegritySigning,
+        KeyRoleV1::PluginReleaseSigning,
+    ] {
+        denied(
+            &mut registry,
+            KeyIdentityV1::new("subject-owner", role, 1),
+            digest(1),
+            pos_core::KeyRegistryErrorV1::HistoricalDecryptionRoleRequired,
+        );
+    }
     denied(
         &mut registry,
         KeyIdentityV1::new("other-owner", KeyRoleV1::SubjectDataEncryption, 1),

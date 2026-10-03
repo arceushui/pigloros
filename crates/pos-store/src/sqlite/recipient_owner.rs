@@ -10,8 +10,15 @@ use std::{
 
 use pos_core::{
     recipient_owner_id_from_grantee, EntityId, EventStore, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, RecipientKeyDescriptorV1,
+    KeyRegistrationV1, KeyRegistryErrorV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    RecipientKeyDescriptorV1,
 };
+use pos_crypto::key_roles::key_material_digest;
+use pos_crypto::recipient_export::{
+    decrypt_timeline_export_v1, DecryptedTimelineExportV1, RecipientExportErrorV1,
+    RecipientTimelineExportV1,
+};
+use pos_crypto::recipient_key::recipient_public_key_from_private_v1;
 use rand::{rngs::SysRng, TryRng};
 use rusqlite::OptionalExtension;
 use rustix::fs::{
@@ -20,7 +27,15 @@ use rustix::fs::{
 };
 use zeroize::Zeroizing;
 
-use super::{begin_immediate_sql, finish_immediate_transaction, CoreError, SqliteStore};
+use super::{
+    begin_immediate_sql, finish_immediate_transaction, CoreError, RecipientExportDecryptionErrorV1,
+    SqliteRollbackOnDrop, SqliteStore,
+};
+
+const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
+    RecipientExportDecryptionErrorV1::Registry(KeyRegistryErrorV1::RegistryUnavailable);
+/// Never compared: the port rejects absent and destroyed identities first.
+const ABSENT_MATERIAL_DIGEST: pos_core::Hash = pos_core::Hash::from_bytes([0; 32]);
 
 fn storage_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Storage(error.to_string())
@@ -541,6 +556,125 @@ impl SqliteStore {
                 })
             });
         finish_immediate_transaction(&self.conn, result)
+    }
+
+    /// Decrypt one TRX1 export with a retained, live recipient epoch.
+    ///
+    /// The envelope syntax, suite, expected export ID, and exact recorded RKP1
+    /// descriptor are checked before any registry access. The decryption-only
+    /// registry port then admits the exact owner, role 4, and epoch under the
+    /// `SQLite` writer reservation, which stays held while the bound private
+    /// file is read and HPKE runs; rotation or destruction therefore either
+    /// precedes and denies this call or follows it. An older epoch may decrypt
+    /// after rotation, but this never authorizes encryption. The private file
+    /// must match the registered material fingerprint and derive the
+    /// descriptor's public key. The transaction only reads and always rolls
+    /// back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecipientExportDecryptionErrorV1::Export`] for an invalid,
+    /// mismatched, or unauthenticated envelope;
+    /// [`RecipientExportDecryptionErrorV1::Registry`] when the registry is
+    /// locked or unavailable, or the identity is absent, pending destruction,
+    /// destroyed, or bound to another public key; and
+    /// [`RecipientExportDecryptionErrorV1::MaterialUnavailable`] when the
+    /// registered private material is missing, unsafe, or corrupt.
+    pub fn decrypt_recipient_export(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        encoded: &[u8],
+        expected_export_id: [u8; 16],
+        expected_recipient: RecipientKeyDescriptorV1,
+    ) -> Result<DecryptedTimelineExportV1, RecipientExportDecryptionErrorV1> {
+        RecipientTimelineExportV1::decode(encoded)
+            .map_err(RecipientExportDecryptionErrorV1::Export)
+            .and_then(|envelope| {
+                if envelope.header.export_id == expected_export_id
+                    && envelope.header.recipient == expected_recipient
+                    && expected_recipient.is_for_grantee(owner.grantee_id)
+                {
+                    Ok(())
+                } else {
+                    Err(RecipientExportDecryptionErrorV1::Export(
+                        RecipientExportErrorV1::IdentityMismatch,
+                    ))
+                }
+            })
+            .and_then(|()| {
+                self.conn
+                    .execute_batch(begin_immediate_sql())
+                    .map_err(|_| RECIPIENT_REGISTRY_UNAVAILABLE)
+            })
+            .and_then(|()| {
+                let _rollback = SqliteRollbackOnDrop(&self.conn);
+                self.load_key_registry()
+                    .ok()
+                    .flatten()
+                    .ok_or(RECIPIENT_REGISTRY_UNAVAILABLE)
+                    .and_then(|mut registry| {
+                        let identity = expected_recipient.identity();
+                        // Absent and destroyed records carry no digest; the
+                        // port rejects both before comparing this placeholder.
+                        let registered_digest = registry
+                            .key_record(identity)
+                            .and_then(|record| record.private_material_digest)
+                            .unwrap_or(ABSENT_MATERIAL_DIGEST);
+                        registry
+                            .with_decryption_authorization(identity, registered_digest, || {
+                                self.decrypt_with_registered_material(
+                                    owner,
+                                    registered_digest,
+                                    encoded,
+                                    expected_export_id,
+                                    expected_recipient,
+                                )
+                            })
+                            .map_err(RecipientExportDecryptionErrorV1::Registry)
+                            .flatten()
+                    })
+            })
+    }
+
+    /// Open the bound private file and decrypt inside the held authorization.
+    ///
+    /// Any custody, inventory, file-binding, or fingerprint failure leaves the
+    /// key unavailable. Registered material that derives another public key
+    /// than the presented RKP1 descriptor is an encryption-key mismatch.
+    fn decrypt_with_registered_material(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        registered_digest: pos_core::Hash,
+        encoded: &[u8],
+        expected_export_id: [u8; 16],
+        expected_recipient: RecipientKeyDescriptorV1,
+    ) -> Result<DecryptedTimelineExportV1, RecipientExportDecryptionErrorV1> {
+        ensure_recipient_custody_tables(&self.conn)
+            .and_then(|()| claim_recipient_custody_directory(&self.conn, owner))
+            .and_then(|()| self.recipient_inventory_path(owner, expected_recipient.identity()))
+            .and_then(|(path, file_identity, _)| {
+                read_bound_private_key(owner, &path, file_identity)
+            })
+            .ok()
+            .filter(|material| key_material_digest(material) == registered_digest)
+            .ok_or(RecipientExportDecryptionErrorV1::MaterialUnavailable)
+            .and_then(|material| {
+                if recipient_public_key_from_private_v1(&material)
+                    == expected_recipient.public_key()
+                {
+                    decrypt_timeline_export_v1(
+                        encoded,
+                        expected_export_id,
+                        expected_recipient,
+                        &material,
+                    )
+                    .map_err(RecipientExportDecryptionErrorV1::Export)
+                } else {
+                    Err(RecipientExportDecryptionErrorV1::Registry(
+                        KeyRegistryErrorV1::EncryptionKeyMismatch,
+                    ))
+                }
+            })
     }
 
     /// Mark one recipient epoch pending, durably remove its owned key file,

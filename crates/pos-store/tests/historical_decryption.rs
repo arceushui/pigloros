@@ -51,11 +51,23 @@ fn exercise_adapter<S: EventStore + KeyRegistryHistoricalDecryptionPortV1>(
         digest(1),
         KeyRegistryErrorV1::InvalidEpoch,
     );
+    for role in [
+        KeyRoleV1::SubjectAttributionSigning,
+        KeyRoleV1::TimelineIntegritySigning,
+        KeyRoleV1::PluginReleaseSigning,
+    ] {
+        deny(
+            &mut store,
+            KeyIdentityV1::new("subject-owner", role, 1),
+            digest(1),
+            KeyRegistryErrorV1::HistoricalDecryptionRoleRequired,
+        );
+    }
     deny(
         &mut store,
-        KeyIdentityV1::new("subject-owner", KeyRoleV1::ExportRecipientEncryption, 1),
+        KeyIdentityV1::new("recipient-owner", KeyRoleV1::ExportRecipientEncryption, 0),
         digest(1),
-        KeyRegistryErrorV1::HistoricalDecryptionRoleRequired,
+        KeyRegistryErrorV1::InvalidEpoch,
     );
     deny(
         &mut store,
@@ -109,6 +121,57 @@ fn exercise_adapter<S: EventStore + KeyRegistryHistoricalDecryptionPortV1>(
         store.with_decryption_authorization(current, digest(2), || "still live")?,
         "still live"
     );
+    exercise_recipient_role(&mut store)
+}
+
+/// ADR-098 extends the same port to retained `ExportRecipientEncryption`
+/// epochs without restoring their encryption authority.
+fn exercise_recipient_role<S: EventStore + KeyRegistryHistoricalDecryptionPortV1>(
+    store: &mut S,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let old = KeyIdentityV1::new("recipient-owner", KeyRoleV1::ExportRecipientEncryption, 1);
+    let current = KeyIdentityV1::new("recipient-owner", KeyRoleV1::ExportRecipientEncryption, 2);
+    let mut registry = store.load_key_registry()?.ok_or("key registry is absent")?;
+    registry.register_key(KeyRegistrationV1::new(old, digest(11), None))?;
+    registry.register_key(KeyRegistrationV1::new(current, digest(12), None))?;
+    store.save_key_registry(&registry)?;
+
+    assert_eq!(
+        store.with_decryption_authorization(old, digest(11), || "retained export")?,
+        "retained export"
+    );
+    deny(
+        store,
+        old,
+        digest(12),
+        KeyRegistryErrorV1::EncryptionKeyMismatch,
+    );
+    deny(
+        store,
+        KeyIdentityV1::new("other-recipient", KeyRoleV1::ExportRecipientEncryption, 1),
+        digest(11),
+        KeyRegistryErrorV1::NotFound,
+    );
+    let mut persisted = store.load_key_registry()?.ok_or("key registry is absent")?;
+    assert_eq!(
+        persisted.with_encryption_authorization(old, digest(11), || "stale export"),
+        Err(KeyRegistryErrorV1::InactiveKey)
+    );
+
+    let request = KeyDestructionRequestV1::new(old, digest(11), digest(13));
+    store.begin_key_registry_destruction(request)?;
+    deny(
+        store,
+        old,
+        digest(11),
+        KeyRegistryErrorV1::DestructionPending,
+    );
+    store.complete_key_registry_destruction(request, deletion_receipt(&request))?;
+    deny(store, old, digest(11), KeyRegistryErrorV1::Destroyed);
+    assert_eq!(
+        store.with_decryption_authorization(current, digest(12), || "current export")?,
+        "current export"
+    );
     Ok(())
 }
 
@@ -135,12 +198,17 @@ fn sqlite_historical_decryption_holds_writer_reservation_through_callback(
         BeginDestruction,
     }
 
-    let old = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
-    let current = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 2);
-    for mutation in [
-        CompetingMutation::Rotate,
-        CompetingMutation::BeginDestruction,
+    use CompetingMutation::{BeginDestruction, Rotate};
+    use KeyRoleV1::{ExportRecipientEncryption as Recipient, SubjectDataEncryption as Subject};
+
+    for (role, mutation) in [
+        (Subject, Rotate),
+        (Subject, BeginDestruction),
+        (Recipient, Rotate),
+        (Recipient, BeginDestruction),
     ] {
+        let old = KeyIdentityV1::new("key-owner", role, 1);
+        let current = KeyIdentityV1::new("key-owner", role, 2);
         let database = tempfile::NamedTempFile::new()?;
         let path = database
             .path()
