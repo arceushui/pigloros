@@ -58,8 +58,11 @@
 //! - **Parent Logical Head.** A Fork's parent cut is immutable once the Fork
 //!   exists, so the coordinator validates the CFP1 parent Timeline and cut
 //!   `Seq` against the Fork's recorded parent cut and reads the Fork's moving
-//!   committed Logical Head, which the store rechecks atomically. A Fork
-//!   whose topology cannot be read is reported as `ParentCutNotFound`.
+//!   committed Logical Head, which the store rechecks atomically. A failed
+//!   Timeline or Logical Head read is `Store(StorageFailure)`; an absent
+//!   Timeline, a Timeline without a parent cut, or another parent cut is
+//!   `ParentCutNotFound`. The new generation is the prior generation plus
+//!   one; an overflow is `Invalidation(PriorGenerationMismatch)`.
 //! - **Epochs.** The trust epoch is the TPS1 epoch of the plan, after the
 //!   host TPS1 snapshot is proven to be the plan's. The revocation and erasure
 //!   epochs are the host's current epochs. All three are rechecked by the
@@ -67,14 +70,27 @@
 //! - **First recomputation Tick.** It is the `RCF1` global frontier Tick:
 //!   Ticks between the parent cut and the frontier are unaffected and are not
 //!   invalidated. The frontier must lie in `first_tick..=` the earliest
-//!   Intervention effective Tick (`FrontierOutOfRange` otherwise).
-//! - **`SIV1` fields.** The invalid start is the lowest affected node moved to
-//!   the global frontier `(tick, scheduler_position)`; the inclusive end is the
-//!   highest affected node moved to the endogenous suffix end Tick. The
+//!   Intervention effective Tick (`FrontierOutOfRange` otherwise). Under
+//!   `FullSuffixFromCut` the global frontier must be exactly
+//!   `(first_tick, 0)`, the first scheduler position of the first Tick after
+//!   the parent cut.
+//! - **Frontier range.** Every provisional output must lie at or before the
+//!   endogenous suffix end Tick, and every affected node at or after the
+//!   global frontier `(tick, scheduler_position)` and at or before the
+//!   endogenous suffix end Tick; otherwise the derivation is rejected as
+//!   `FrontierOutOfRange`.
+//! - **`SIV1` fields.** The invalid range is exact and made of real nodes:
+//!   the invalid start is the lowest and the inclusive invalid end the
+//!   highest node, in `DependencyNodeV1` order, of the union of the `RCF1`
+//!   affected nodes and the invalid-artifact producers. By the range rule
+//!   both lie between the global frontier and the endogenous suffix end
+//!   Tick, and the end is never below the start, as `SIV1` requires; when
+//!   the suffix end equals the frontier Tick, both lie on that Tick. The
 //!   invalid artifacts are, per the complete-suffix rule, every provisional
 //!   `EndogenousRecomputed` output of the prior generation at or after the
-//!   global frontier `(tick, scheduler_position)`, with artifact class
-//!   `EndogenousRecomputed`, in canonical producer order, duplicates merged.
+//!   global frontier `(tick, scheduler_position)` through the endogenous
+//!   suffix end Tick, with artifact class `EndogenousRecomputed`, in
+//!   canonical producer order, duplicates merged.
 //!   `PresentationOnly` outputs are excluded from the suffix claim. The
 //!   retained descriptors are the ascending unique artifact digests of every
 //!   `ExogenousFrozen` and `FixedPolicy` descriptor of the plan. The reason
@@ -83,15 +99,26 @@
 //!   `NewIntervention` otherwise. The commit coordinate is the Fork, its
 //!   committed head before the first Tick, and the first recomputation Tick.
 //!   `RCF1` and `SIV1` share the request's provenance digest.
-//! - **Index and eviction set.** The index is the ascending unique digests of
-//!   the invalid artifacts; the eviction set is the ascending union of the
-//!   request's invalid checkpoint and Projection/snapshot digests.
+//! - **Index and eviction set.** The eviction set is the ascending union of
+//!   the prior generation's checkpoint and Projection/snapshot digests of the
+//!   request, while the invalidated artifacts are quarantined through the
+//!   index, the ascending unique digests of the invalid artifacts.
 //! - **Staged inputs.** The stager receives only an immutable
 //!   [`CounterfactualTickInputsV1`]: the new generation coordinate, the Tick,
 //!   the Interventions effective at that Tick, and the plan's frozen
 //!   descriptors. It never receives the store, a prior-generation artifact,
 //!   or uncommitted state, and its drafts become visible only through the
 //!   atomic commit.
+//!
+//! # Deferred
+//!
+//! These ADR-064 admission step-1 checks are not done here and are deferred
+//! to a follow-up: the room, Plugin composition, frozen-artifact
+//! availability, and `ReplayClaim` sufficiency checks; reading the current
+//! trust, revocation, and erasure epochs from the store before staging
+//! (today they are host-supplied and rechecked only at commit); and proving
+//! the committed coverage of the Ticks from `first_tick` up to the global
+//! frontier.
 
 use std::collections::BTreeSet;
 
@@ -337,6 +364,10 @@ pub struct CounterfactualAdmissionRequestV1<'a> {
     pub invalid_projection_digests: &'a [[u8; 32]],
 }
 
+/// A failed store read; the store reports nothing more specific.
+const STORAGE_FAILURE: CounterfactualAdmissionErrorV1 =
+    CounterfactualAdmissionErrorV1::Store(CounterfactualStoreErrorV1::StorageFailure);
+
 /// The core `CounterfactualCoordinator` admission slice.
 ///
 /// It exclusively owns the store that holds the counterfactual port.
@@ -348,13 +379,14 @@ pub struct CounterfactualCoordinatorV1<S> {
 /// The Fork facts read before derivation.
 #[derive(Clone, Copy)]
 struct ForkBasisV1 {
-    generation: u64,
+    prior_generation: u64,
+    new_generation: u64,
     head: Seq,
 }
 
-/// The verified `SIV1` bytes with the index and eviction set derived from it.
+/// The validated `SIV1` bytes with the index and eviction set derived from it.
 struct InvalidationPartsV1 {
-    bytes: SuffixInvalidationBytesV1,
+    bytes: Vec<u8>,
     invalid_artifacts: Vec<Hash>,
     evictions: Vec<Hash>,
 }
@@ -401,23 +433,37 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             request.frontier_id,
             request.provenance_digest,
         )?;
-        let frontier = frontier_bytes(request, &derivation.frontier)?;
+        let frontier = frontier_cbor(request, &derivation)?;
         let invalidation = invalidation_parts(request, basis, &derivation)?;
         let tick = derivation.frontier.global_frontier_tick;
-        let drafts = stage_first_tick(stager, plan, invalidation.bytes.new_generation(), tick)?;
-        let command =
-            CounterfactualInvalidationCommandV1::try_new(CounterfactualInvalidationInputV1 {
-                fork: request.fork,
-                fork_logical_head: basis.head,
-                trust_epoch: plan.trust_policy.epoch,
-                revocation_epoch: request.revocation_epoch,
-                erasure_epoch: request.erasure_epoch,
-                frontier,
-                invalidation: invalidation.bytes,
-                invalid_artifacts: invalidation.invalid_artifacts,
-                evictions: invalidation.evictions,
-                first_tick: tick,
-                first_tick_drafts: drafts,
+        let generation = ForkGenerationV1 {
+            fork: request.fork,
+            generation: basis.new_generation,
+        };
+        let drafts = stage_first_tick(stager, plan, generation, tick)?;
+        // Both records were validated above, so only the command's own
+        // bindings can fail here; every store error maps once.
+        let command = RecomputationFrontierBytesV1::try_from_canonical(frontier)
+            .and_then(|frontier| {
+                SuffixInvalidationBytesV1::try_from_canonical(invalidation.bytes).and_then(
+                    |bytes| {
+                        CounterfactualInvalidationCommandV1::try_new(
+                            CounterfactualInvalidationInputV1 {
+                                fork: request.fork,
+                                fork_logical_head: basis.head,
+                                trust_epoch: plan.trust_policy.epoch,
+                                revocation_epoch: request.revocation_epoch,
+                                erasure_epoch: request.erasure_epoch,
+                                frontier,
+                                invalidation: bytes,
+                                invalid_artifacts: invalidation.invalid_artifacts,
+                                evictions: invalidation.evictions,
+                                first_tick: tick,
+                                first_tick_drafts: drafts,
+                            },
+                        )
+                    },
+                )
             })
             .map_err(CounterfactualAdmissionErrorV1::Store)?;
         self.commit(&command)
@@ -483,44 +529,45 @@ fn fork_basis<S: EventStore + CounterfactualStorePortV1>(
     request: &CounterfactualAdmissionRequestV1<'_>,
 ) -> Result<ForkBasisV1, CounterfactualAdmissionErrorV1> {
     let fork = request.fork;
-    let expected = Some((request.plan.parent_timeline_id, request.plan.parent_cut_seq));
-    store
+    let prior_generation = store
         .current_fork_generation(fork)
-        .map_err(CounterfactualAdmissionErrorV1::Store)
-        .and_then(|generation| {
-            let parent_cut = store
-                .get_timeline(fork)
-                .ok()
-                .flatten()
-                .and_then(|timeline| timeline.meta.fork_point)
-                .map(|(parent, seq)| (parent.inner().to_bytes(), seq.as_u64()));
-            if parent_cut == expected {
-                store
-                    .logical_head(fork)
-                    .map(|head| ForkBasisV1 {
-                        generation: generation.generation,
-                        head,
-                    })
-                    .or(Err(CounterfactualAdmissionErrorV1::Store(
-                        CounterfactualStoreErrorV1::StorageFailure,
-                    )))
-            } else {
-                Err(CounterfactualAdmissionErrorV1::ParentCutNotFound)
-            }
-        })
+        .map_err(CounterfactualAdmissionErrorV1::Store)?
+        .generation;
+    let parent_cut = store
+        .get_timeline(fork)
+        .or(Err(STORAGE_FAILURE))?
+        .and_then(|timeline| timeline.meta.fork_point)
+        .map(|(parent, seq)| (parent.inner().to_bytes(), seq.as_u64()));
+    if parent_cut != Some((request.plan.parent_timeline_id, request.plan.parent_cut_seq)) {
+        return Err(CounterfactualAdmissionErrorV1::ParentCutNotFound);
+    }
+    let head = store.logical_head(fork).or(Err(STORAGE_FAILURE))?;
+    let new_generation =
+        prior_generation
+            .checked_add(1)
+            .ok_or(CounterfactualAdmissionErrorV1::Invalidation(
+                FrontierArtifactErrorV1::PriorGenerationMismatch,
+            ))?;
+    Ok(ForkBasisV1 {
+        prior_generation,
+        new_generation,
+        head,
+    })
 }
 
-/// Re-validate the derived frontier, bind it, and verify its exact bytes.
-fn frontier_bytes(
+/// Re-validate the derived frontier, bind it, check its range, and return
+/// its validated canonical bytes.
+fn frontier_cbor(
     request: &CounterfactualAdmissionRequestV1<'_>,
-    frontier: &RecomputationFrontierV1,
-) -> Result<RecomputationFrontierBytesV1, CounterfactualAdmissionErrorV1> {
+    derivation: &CounterfactualFrontierDerivationV1,
+) -> Result<Vec<u8>, CounterfactualAdmissionErrorV1> {
+    let frontier = &derivation.frontier;
     let bytes = frontier
         .to_canonical_cbor()
         .map_err(CounterfactualAdmissionErrorV1::Frontier)?;
     check_frontier(request, frontier)?;
-    RecomputationFrontierBytesV1::try_from_canonical(bytes)
-        .map_err(CounterfactualAdmissionErrorV1::Store)
+    check_provisional_outputs(derivation)?;
+    Ok(bytes)
 }
 
 /// Bind the frontier to the plan and request and check its global range.
@@ -548,15 +595,41 @@ fn check_frontier(
     if bound != expected {
         return Err(CounterfactualAdmissionErrorV1::FrontierBindingMismatch);
     }
-    // A validated plan holds at least one Intervention, ordered by Tick.
-    let earliest = plan.interventions[0].effective_tick;
-    if frontier.global_frontier_tick < plan.first_tick || frontier.global_frontier_tick > earliest {
-        return Err(CounterfactualAdmissionErrorV1::FrontierOutOfRange);
+    let global = (
+        frontier.global_frontier_tick,
+        frontier.global_frontier_scheduler_position,
+    );
+    let in_range = match frontier.unknown_edge_policy {
+        UnknownEdgePolicyV1::FullSuffixFromCut => global == (plan.first_tick, 0),
+        UnknownEdgePolicyV1::Reject => plan.interventions.first().is_some_and(|earliest| {
+            (plan.first_tick..=earliest.effective_tick).contains(&frontier.global_frontier_tick)
+        }),
+    };
+    if in_range {
+        Ok(())
+    } else {
+        Err(CounterfactualAdmissionErrorV1::FrontierOutOfRange)
     }
-    Ok(())
 }
 
-/// Build, seal, and verify `SIV1`, and derive its index and eviction set.
+/// Reject a provisional output after the endogenous suffix end Tick: the
+/// suffix runs from the global frontier through the horizon only.
+fn check_provisional_outputs(
+    derivation: &CounterfactualFrontierDerivationV1,
+) -> Result<(), CounterfactualAdmissionErrorV1> {
+    let end = derivation.frontier.endogenous_suffix_end_tick;
+    if derivation
+        .provisional_outputs
+        .iter()
+        .any(|output| output.node.tick > end)
+    {
+        Err(CounterfactualAdmissionErrorV1::FrontierOutOfRange)
+    } else {
+        Ok(())
+    }
+}
+
+/// Build and seal `SIV1`, and derive its index and eviction set.
 fn invalidation_parts(
     request: &CounterfactualAdmissionRequestV1<'_>,
     basis: ForkBasisV1,
@@ -566,16 +639,26 @@ fn invalidation_parts(
     let frontier = &derivation.frontier;
     let fork_id = request.fork.inner().to_bytes();
     let reason = invalidation_reason(plan, frontier);
+    let artifacts = invalid_artifacts(derivation, basis.prior_generation, reason);
+    let (invalid_start, invalid_end) = invalid_range(frontier, &artifacts)?;
+    let index = digest_set(artifacts.iter().map(|artifact| artifact.artifact_digest));
+    let evictions = digest_set(
+        request
+            .invalid_checkpoint_digests
+            .iter()
+            .chain(request.invalid_projection_digests)
+            .copied(),
+    );
     let unsigned = SuffixInvalidationV1 {
         invalidation_id: request.invalidation_id,
         plan_digest: plan.plan_digest,
         fork_id,
-        prior_generation: basis.generation,
-        new_generation: basis.generation.wrapping_add(1),
+        prior_generation: basis.prior_generation,
+        new_generation: basis.new_generation,
         frontier_digest: frontier.frontier_digest,
-        invalid_start: invalid_start(frontier),
-        invalid_end: invalid_end(frontier),
-        invalid_artifacts: invalid_artifacts(derivation, basis.generation, reason),
+        invalid_start,
+        invalid_end,
+        invalid_artifacts: artifacts,
         invalid_checkpoint_digests: request.invalid_checkpoint_digests.to_vec(),
         invalid_projection_digests: request.invalid_projection_digests.to_vec(),
         retained_exogenous_digests: retained_descriptors(plan),
@@ -586,27 +669,10 @@ fn invalidation_parts(
         provenance_digest: request.provenance_digest,
         invalidation_digest: [0; 32],
     };
-    let invalid_artifacts = digest_set(
-        unsigned
-            .invalid_artifacts
-            .iter()
-            .map(|artifact| artifact.artifact_digest),
-    );
-    let evictions = digest_set(
-        request
-            .invalid_checkpoint_digests
-            .iter()
-            .chain(request.invalid_projection_digests)
-            .copied(),
-    );
-    seal_invalidation(unsigned).and_then(|bytes| {
-        SuffixInvalidationBytesV1::try_from_canonical(bytes)
-            .map_err(CounterfactualAdmissionErrorV1::Store)
-            .map(|bytes| InvalidationPartsV1 {
-                bytes,
-                invalid_artifacts,
-                evictions,
-            })
+    seal_invalidation(unsigned).map(|bytes| InvalidationPartsV1 {
+        bytes,
+        invalid_artifacts: index,
+        evictions,
     })
 }
 
@@ -642,26 +708,36 @@ const fn invalidation_reason(
     }
 }
 
-/// The lowest affected node moved to the global frontier.
-fn invalid_start(frontier: &RecomputationFrontierV1) -> DependencyNodeV1 {
-    DependencyNodeV1 {
-        tick: frontier.global_frontier_tick,
-        scheduler_position: frontier.global_frontier_scheduler_position,
-        ..frontier.affected_nodes[0].clone()
-    }
-}
-
-/// The highest affected node moved to the endogenous suffix end Tick.
-fn invalid_end(frontier: &RecomputationFrontierV1) -> DependencyNodeV1 {
-    let highest = frontier.affected_nodes.len() - 1;
-    DependencyNodeV1 {
-        tick: frontier.endogenous_suffix_end_tick,
-        ..frontier.affected_nodes[highest].clone()
+/// The exact `SIV1` invalid range: the lowest and highest node of the
+/// affected nodes and invalid-artifact producers, which must lie between the
+/// global frontier and the endogenous suffix end Tick.
+fn invalid_range(
+    frontier: &RecomputationFrontierV1,
+    artifacts: &[InvalidArtifactV1],
+) -> Result<(DependencyNodeV1, DependencyNodeV1), CounterfactualAdmissionErrorV1> {
+    let global = (
+        frontier.global_frontier_tick,
+        frontier.global_frontier_scheduler_position,
+    );
+    let nodes: BTreeSet<&DependencyNodeV1> = frontier
+        .affected_nodes
+        .iter()
+        .chain(artifacts.iter().map(|artifact| &artifact.producer))
+        .collect();
+    match (nodes.first().copied(), nodes.last().copied()) {
+        (Some(start), Some(end))
+            if (start.tick, start.scheduler_position) >= global
+                && end.tick <= frontier.endogenous_suffix_end_tick =>
+        {
+            Ok((start.clone(), end.clone()))
+        }
+        _ => Err(CounterfactualAdmissionErrorV1::FrontierOutOfRange),
     }
 }
 
 /// Every provisional endogenous output at or after the global frontier, in
-/// canonical producer order with duplicates merged.
+/// canonical producer order with duplicates merged. Outputs after the
+/// endogenous suffix end Tick were already rejected.
 fn invalid_artifacts(
     derivation: &CounterfactualFrontierDerivationV1,
     prior_generation: u64,
