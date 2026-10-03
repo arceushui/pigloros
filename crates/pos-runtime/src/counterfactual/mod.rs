@@ -7,3 +7,4 @@
 //! one submodule.
 
 pub mod coordinator;
+pub mod suffix;
