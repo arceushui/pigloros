@@ -16,9 +16,11 @@
 //!   them per Fork with [`MemoryStore::publish_counterfactual_facts`]; the
 //!   first publication starts the Fork at generation 0, and a republication
 //!   replaces only the facts, never the generation or the stored artifacts,
-//!   so the generation never decreases. Keeping the published epochs
-//!   monotonic is a host obligation; the adapter rechecks against whatever
-//!   facts were published last.
+//!   so the generation never decreases. The adapter rechecks against
+//!   whatever facts were published last.
+//! - **Epoch monotonicity.** The store does not require a republished trust,
+//!   revocation, or erasure epoch to be at least the previously published
+//!   one; keeping the published epochs monotonic is a host obligation.
 //! - **Logical Head.** The rechecked head is the Fork Timeline's committed
 //!   logical head (inherited prefix plus its own Events), matching the
 //!   admitted-batch adapter.
@@ -42,8 +44,11 @@
 //! - **Containment.** The commit appends Events, so it runs under the
 //!   ADR-060 erasure write fence and, like every generic Fork append, is
 //!   rejected on an ADR-099 admitted Fork whose appends are reserved for the
-//!   classified append authority. Reads touch no Timeline Events and are not
-//!   fenced.
+//!   classified append authority. The generation and artifact reads are
+//!   derived from the Fork Timeline, so they run under the ADR-060 erasure
+//!   read fence like every other `MemoryStore` Timeline read, and fail closed
+//!   without a bound erasure gate. Publishing facts writes host-owned facts
+//!   only, touches no Timeline Event or derived artifact, and is not fenced.
 //! - **Errors.** A missing, deleted, non-Fork, unpublished, or protected
 //!   Timeline is `ForkNotFound`; every other backend failure, including a
 //!   containment denial or an admitted Fork, is `StorageFailure`.
@@ -266,13 +271,15 @@ impl MemoryStore {
         let tick = self
             .stage_first_tick(command)
             .map_err(|error| store_error(&error))?;
-        self.event_ids
-            .extend(tick.events.iter().map(|event| event.id));
-        self.timelines.insert(fork, tick.timeline);
-        self.counterfactual_forks.insert(fork, next);
-        Ok(CounterfactualInvalidationOutcomeV1::Committed(
-            command.committed_receipt(tick.head),
-        ))
+        // The receipt is built before anything is installed, so even its
+        // `CorruptState` rejection commits nothing.
+        command.committed_receipt(tick.head).map(|receipt| {
+            self.event_ids
+                .extend(tick.events.iter().map(|event| event.id));
+            self.timelines.insert(fork, tick.timeline);
+            self.counterfactual_forks.insert(fork, next);
+            CounterfactualInvalidationOutcomeV1::Committed(receipt)
+        })
     }
 
     /// Stage the first Tick on a copy of the Fork Timeline. Nothing is
@@ -317,11 +324,16 @@ impl CounterfactualStorePortV1 for MemoryStore {
         &self,
         fork: TimelineId,
     ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1> {
-        self.counterfactual_fork(fork)
-            .map(|state| ForkGenerationV1 {
-                fork,
-                generation: state.generation,
-            })
+        self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
+            Ok(store
+                .counterfactual_fork(fork)
+                .map(|state| ForkGenerationV1 {
+                    fork,
+                    generation: state.generation,
+                }))
+        })
+        .map_err(|error| store_error(&error))
+        .and_then(std::convert::identity)
     }
 
     fn read_generation_artifact(
@@ -329,8 +341,13 @@ impl CounterfactualStorePortV1 for MemoryStore {
         at: ForkGenerationV1,
         artifact_digest: Hash,
     ) -> Result<Option<Vec<u8>>, CounterfactualStoreErrorV1> {
-        self.counterfactual_fork(at.fork)
-            .and_then(|state| at.resolve_read(state.generation, state.stored(artifact_digest)))
+        self.with_erasure_read_fence(at.fork, ErasureProtectedOperationV1::Read, |store| {
+            Ok(store
+                .counterfactual_fork(at.fork)
+                .and_then(|state| at.resolve_read(state.generation, state.stored(artifact_digest))))
+        })
+        .map_err(|error| store_error(&error))
+        .and_then(std::convert::identity)
     }
 }
 
@@ -389,6 +406,62 @@ mod tests {
         [&[0x50][..], &value[..]].concat()
     }
 
+    /// Encode one shortest-form CBOR unsigned integer.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn uint(value: u64) -> Vec<u8> {
+        let bytes = value.to_be_bytes();
+        match value {
+            0..=23 => vec![bytes[7]],
+            24..=0xff => vec![0x18, bytes[7]],
+            0x100..=0xffff => [&[0x19][..], &bytes[6..]].concat(),
+            0x1_0000..=0xffff_ffff => [&[0x1a][..], &bytes[4..]].concat(),
+            _ => [&[0x1b][..], &bytes[..]].concat(),
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn text_field(value: &str) -> Vec<u8> {
+        let mut encoded = uint(ok(u64::try_from(value.len())));
+        encoded[0] |= 3 << 5;
+        [encoded, value.as_bytes().to_vec()].concat()
+    }
+
+    /// Encode one six-field dependency-node coordinate.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn node_field(tick: u64, owner: &str) -> Vec<u8> {
+        [
+            vec![0x86],
+            uint(tick),
+            uint(0),
+            text_field(owner),
+            uint(0),
+            uint(7),
+            digest_field(Hash::from_bytes([21; 32])),
+        ]
+        .concat()
+    }
+
+    /// Encode `SIV1` fields 8 through 14, as the `pos-core` port tests do.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn invalidation_middle() -> Vec<u8> {
+        [
+            node_field(5, "agent-a"),
+            node_field(4_294_967_296, "an-owner-identifier-of-thirty-"),
+            vec![0x81, 0x86],
+            text_field("event"),
+            uint(70_000),
+            digest_field(Hash::from_bytes([22; 32])),
+            node_field(5, "agent-a"),
+            uint(300),
+            uint(0),
+            vec![0x81],
+            digest_field(Hash::from_bytes([23; 32])),
+            vec![0x80, 0x80],
+            uint(0),
+        ]
+        .concat()
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn command(fork: TimelineId) -> CounterfactualInvalidationCommandV1 {
         command_with_trust_epoch(fork, 0)
@@ -409,6 +482,7 @@ mod tests {
                 digest_field(Hash::from_bytes([5; 32])),
                 digest_field(Hash::from_bytes([2; 32])),
                 digest_field(Hash::from_bytes([3; 32])),
+                vec![0x01],
             ]
             .concat(),
         )));
@@ -422,6 +496,12 @@ mod tests {
                 id_field(fork.inner().to_bytes()),
                 vec![0x00, 0x01],
                 digest_field(frontier.digest()),
+                invalidation_middle(),
+                // Commit coordinate: the Fork, its expected head, the first Tick.
+                vec![0x83],
+                id_field(fork.inner().to_bytes()),
+                uint(1),
+                uint(1),
             ]
             .concat(),
         )));
@@ -489,9 +569,9 @@ mod tests {
         let retried = store.commit_counterfactual_invalidation(&command);
         assert_eq!(
             retried,
-            Ok(CounterfactualInvalidationOutcomeV1::Committed(
+            Ok(CounterfactualInvalidationOutcomeV1::Committed(ok(
                 command.committed_receipt(Seq::from_u64(2))
-            ))
+            )))
         );
         assert_eq!(store.state(fork).events.len(), 1);
         assert_eq!(store.event_ids.len(), event_ids.len() + 1);
