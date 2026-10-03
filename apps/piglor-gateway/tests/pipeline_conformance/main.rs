@@ -7,11 +7,12 @@
 //! ADR-021 Revision 3 observation profiles and their composition-time
 //! assignment (#504), participant-authorized recovery (#507), draft and
 //! exclusive Event-type ownership (#484, #486, ADR-024 Revision 1), source
-//! quarantine (#493, ADR-024 Revision 2), revocation persistence (#483)
-//! and the ADR-021 Revision 4 consent-sensitive Driver subscriptions
-//! (#494). Each case runs only through public seams, on `MemoryStore` and
-//! `SQLite` wherever a store is involved, and its expected observations are
-//! data in the manifest.
+//! quarantine (#493, ADR-024 Revision 2), revocation persistence (#483),
+//! the ADR-021 Revision 4 consent-sensitive Driver subscriptions (#494)
+//! and inherited-lineage erasure gating of Fork reads and passes (#499,
+//! ADR-021 Revision 4 Decision 3). Each case runs only through public seams,
+//! on `MemoryStore` and `SQLite` wherever a store is involved, and its
+//! expected observations are data in the manifest.
 //!
 //! The suite fails closed: an unknown manifest version or field, a changed
 //! fixture byte, a skipped mandatory case, a missing or unexpected capture,
@@ -24,6 +25,7 @@ pub mod eval_seam;
 pub mod gateway;
 pub mod harness;
 pub mod ingress;
+pub mod inherited_scope;
 pub mod nonparticipant;
 pub mod ownership;
 pub mod participant_recovery;
@@ -42,10 +44,10 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "f62908ed161c9fdfda7d549b2e906548d0ca12b1281c470497ea701a748c1c6f";
+const MANIFEST_SHA256: &str = "66d8a8bbcb85b46ecd49ed1d3ccfe65deb33aa3c8071c5d74bd0809240d4b831";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 54] = [
+const RUNNERS: [(&str, Runner); 58] = [
     ("PCF-ING-001", ingress::ingress_parity),
     ("PCF-ING-002", ingress::human_admission_receipt),
     ("PCF-ING-003", gateway::first_party_has_no_privileged_route),
@@ -151,6 +153,22 @@ const RUNNERS: [(&str, Runner); 54] = [
     ("PCF-REV-001", revocation::learned_revocation_is_persisted),
     ("PCF-REV-002", revocation::equal_epochs_distinct_revisions),
     ("PCF-REV-003", revocation::cross_connection_staleness),
+    (
+        "PCF-R4-006",
+        inherited_scope::frozen_ancestor_fails_pass_and_read,
+    ),
+    (
+        "PCF-R4-007",
+        inherited_scope::completed_ancestor_follows_persisted_state,
+    ),
+    (
+        "PCF-R4-008",
+        inherited_scope::export_and_snapshot_fail_closed,
+    ),
+    (
+        "PCF-R4-009",
+        inherited_scope::unanchored_step_all_fails_closed,
+    ),
 ];
 
 #[test]
@@ -170,7 +188,7 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
         .map(|case| case.id.clone())
         .collect();
     assert_eq!(report.not_applicable, inapplicable);
-    assert_eq!(manifest.cases.len(), 55);
+    assert_eq!(manifest.cases.len(), 59);
     assert_eq!(
         report.passed.len() + report.not_applicable.len(),
         manifest.cases.len()

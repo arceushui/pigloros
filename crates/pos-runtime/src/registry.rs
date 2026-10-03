@@ -28,7 +28,7 @@ use pos_core::{
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentError, ConsentGate, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
     ErasureProtectedOperationV1, OwnerIdV1, Plugin, ProposedAction, Reducer,
-    ScheduledObservationProfileV1, Timeline, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ScheduledObservationProfileV1, Timeline, TimelineMeta, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
@@ -320,6 +320,16 @@ fn validate_driver_output(entry: &PluginEntry, output: &StepOutput) -> Result<()
         .and_then(|()| validate_plugin_output(entry, &output.drafts))
 }
 
+/// Return the one-member Fork ancestry of a fixture Timeline with no parent.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) fn root_ancestry(timeline: TimelineId) -> Vec<TimelineMeta> {
+    vec![TimelineMeta {
+        id: timeline,
+        ..TimelineMeta::root("root")
+    }]
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_paths {
@@ -492,7 +502,9 @@ mod coverage_paths {
         registry.register_test_driver(Box::new(RestoreDriver {
             committed: Arc::clone(&committed),
         }));
-        assert!(registry.step_all(timeline).is_ok());
+        assert!(registry
+            .step_all(timeline, &root_ancestry(timeline))
+            .is_ok());
         let event = Event {
             id: EventId::new(),
             entity: EntityId::new(),
@@ -737,7 +749,7 @@ mod coverage_entrypoints {
             )
             .is_ok());
         assert!(registry
-            .tick_cadenced(timeline, u128::MAX)
+            .tick_cadenced(timeline, &root_ancestry(timeline), u128::MAX)
             .is_ok_and(|drafts| drafts.len() == 1));
     }
 
@@ -749,7 +761,9 @@ mod coverage_entrypoints {
             committed: std::sync::Arc::clone(&committed),
         }));
         let timeline = TimelineId::new();
-        assert!(registry.step_all(timeline).is_ok());
+        assert!(registry
+            .step_all(timeline, &root_ancestry(timeline))
+            .is_ok());
         let restore_event = event("coverage.restore.commit", 1);
         assert!(registry
             .restore_driver_state(
@@ -769,14 +783,14 @@ mod coverage_entrypoints {
             PluginRegistry::new()
                 .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .without_consent_gate()
-                .tick_cadenced(timeline, 0),
+                .tick_cadenced(timeline, &root_ancestry(timeline), 0),
             Err(RuntimeError::ConsentOperationUnavailable)
         ));
         assert!(matches!(
             PluginRegistry::new()
                 .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
                 .without_consent_gate()
-                .step_all(timeline),
+                .step_all(timeline, &root_ancestry(timeline)),
             Err(RuntimeError::ConsentOperationUnavailable)
         ));
     }
@@ -1864,9 +1878,12 @@ impl PluginRegistry {
         self.states_for_subscriptions(timeline, subscriptions)
     }
 
+    /// Run `effect` under `timeline`'s fence only while every scope in its
+    /// host-supplied Fork ancestry permits `operation`.
     fn with_erasure_fence<T>(
         &self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         operation: ErasureProtectedOperationV1,
         mut effect: impl FnMut(&Self) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
@@ -1878,14 +1895,17 @@ impl PluginRegistry {
         let mut run = || {
             result = effect(self);
         };
-        gate.with_fence(timeline, operation, &mut run)
+        pos_core::with_fork_ancestry_fence(&**gate, timeline, ancestry, operation, &mut run)
             .map_err(RuntimeError::ErasureContainment)?;
         result
     }
 
+    /// Mutable form of [`Self::with_erasure_fence`]; a refused fence aborts
+    /// any staged step.
     fn with_erasure_mut_fence<T>(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         operation: ErasureProtectedOperationV1,
         mut effect: impl FnMut(&mut Self) -> Result<T, RuntimeError>,
     ) -> Result<T, RuntimeError> {
@@ -1898,7 +1918,7 @@ impl PluginRegistry {
             let mut run = || {
                 result = effect(self);
             };
-            gate.with_fence(timeline, operation, &mut run)
+            pos_core::with_fork_ancestry_fence(&*gate, timeline, ancestry, operation, &mut run)
         };
         self.finish_mut_fence(fence_result, result)
     }
@@ -1920,6 +1940,7 @@ impl PluginRegistry {
     fn snapshot_for_tick(
         &self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         timeline_head: Seq,
         operation: &OperationContext,
     ) -> Result<ObservationSnapshot, RuntimeError> {
@@ -1936,6 +1957,7 @@ impl PluginRegistry {
 
         self.with_erasure_fence(
             timeline,
+            ancestry,
             ErasureProtectedOperationV1::Snapshot,
             |registry| {
                 registry.authorize_snapshot_subscriptions(
@@ -2170,11 +2192,17 @@ impl PluginRegistry {
 
     /// Rebuild projections from a host-captured completed Event prefix.
     ///
+    /// `ancestry` is the Timeline's Fork ancestry from
+    /// [`pos_core::fork_ancestry`]; every scope in it must permit the
+    /// `Snapshot`.
+    ///
     /// # Errors
-    /// Returns a closed source error when the Timeline cannot be authorized.
+    /// Returns a closed source error when the Timeline cannot be authorized,
+    /// the ancestry is invalid, or any contributing scope denies.
     pub fn refold_projection_events(
         &mut self,
         timeline: TimelineId,
+        ancestry: &[TimelineMeta],
         events: &[Event],
         expected_generation: Option<pos_core::ErasureReferenceV1>,
     ) -> Result<(), RuntimeError> {
@@ -2184,7 +2212,7 @@ impl PluginRegistry {
             .cloned()
             .collect();
         self.projections
-            .refold_events(timeline, &visible_events, expected_generation)?;
+            .refold_events(timeline, ancestry, &visible_events, expected_generation)?;
         Ok(())
     }
 
@@ -2235,14 +2263,18 @@ impl PluginRegistry {
     ///
     /// The registry never exposes the projection registry through this seam. The
     /// caller must present a token issued by the same host-bound gate and bound
-    /// to the requested subject and Timeline.
+    /// to the requested subject and Timeline. `ancestry` is the Timeline's
+    /// Fork ancestry from [`pos_core::fork_ancestry`]; every scope in it must
+    /// permit the `Snapshot`.
     ///
     /// # Errors
-    /// Returns a consent error when the token is invalid or a missing-gate error
-    /// when this registry has no host policy.
+    /// Returns a consent error when the token is invalid, a missing-gate error
+    /// when this registry has no host policy, or the closed erasure error when
+    /// the ancestry is invalid or any contributing scope denies.
     pub fn projection_state_for_reducer(
         &self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         timeline_head: Seq,
         now_secs: u64,
         token: &ConsentCapabilityToken,
@@ -2255,6 +2287,7 @@ impl PluginRegistry {
             .ok_or(RuntimeError::ConsentOperationUnavailable)?;
         self.with_erasure_fence(
             timeline,
+            ancestry,
             ErasureProtectedOperationV1::Snapshot,
             |registry| {
                 gate.authorize_projection(
@@ -2512,6 +2545,7 @@ impl PluginRegistry {
     fn step_anchored_transaction(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         observed_through: Seq,
         selection: AnchoredSelection,
         committed_events: &[Event],
@@ -2524,6 +2558,7 @@ impl PluginRegistry {
             .and_then(|()| {
                 self.step_anchored_transaction_live(
                     timeline,
+                    ancestry,
                     observed_through,
                     selection,
                     committed_events,
@@ -2535,6 +2570,7 @@ impl PluginRegistry {
     fn step_anchored_transaction_live(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         observed_through: Seq,
         selection: AnchoredSelection,
         committed_events: &[Event],
@@ -2542,6 +2578,7 @@ impl PluginRegistry {
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.with_erasure_mut_fence(
             timeline,
+            ancestry,
             ErasureProtectedOperationV1::PluginInput,
             |registry| {
                 registry.step_anchored_transaction_live_unfenced(
@@ -2784,7 +2821,13 @@ impl PluginRegistry {
         parent: TimelineId,
         child: TimelineId,
     ) -> Result<(), RuntimeError> {
-        if let Err(error) = self.projections.adopt_committed_fork(parent, child) {
+        let adopted = pos_core::fork_ancestry(&*store, child)
+            .map_err(|_| pos_core::AuthorityErrorV1::SourceUnavailable)
+            .and_then(|ancestry| {
+                self.projections
+                    .adopt_committed_fork(parent, child, &ancestry)
+            });
+        if let Err(error) = adopted {
             self.restored_binding = None;
             store.delete_timeline(child)?;
             return Err(RuntimeError::Authority(error));
@@ -4093,12 +4136,17 @@ impl PluginRegistry {
     /// Step ready drivers on cadence, returning all drafts from eligible plugins.
     ///
     /// Only drivers whose `tick_interval()` has elapsed since their last tick
-    /// will fire. First-tick drivers always fire.
+    /// will fire. First-tick drivers always fire. `ancestry` is the
+    /// Timeline's Fork ancestry from [`pos_core::fork_ancestry`]; every scope
+    /// in it must permit `PluginInput`. The registry is store-agnostic and
+    /// trusts each `TimelineMeta`, so the host must never assemble the chain
+    /// by hand.
     ///
     /// # Errors
     /// Propagates any [`RuntimeError`] from drivers. Returns
     /// [`RuntimeError::CadenceOverflow`] before snapshot creation or driver mutation
     /// when a prior tick plus the configured interval cannot fit in `u128` nanoseconds.
+    /// Returns the closed erasure error for an invalid ancestry or a denying scope.
     ///
     /// # Panics
     ///
@@ -4107,6 +4155,7 @@ impl PluginRegistry {
     pub fn tick_cadenced(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_live_execution()
@@ -4114,6 +4163,7 @@ impl PluginRegistry {
             .and_then(|()| {
                 self.with_erasure_mut_fence(
                     timeline,
+                    ancestry,
                     ErasureProtectedOperationV1::PluginInput,
                     |registry| registry.tick_cadenced_live(timeline, now_ns),
                 )
@@ -4225,11 +4275,13 @@ impl PluginRegistry {
     pub fn tick_cadenced_anchored(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         now_ns: u128,
         observed_through: Seq,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.step_anchored_transaction(
             timeline,
+            ancestry,
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
             &[],
@@ -4240,16 +4292,19 @@ impl PluginRegistry {
     /// Step cadence-ready Drivers with a host-filtered committed Event prefix.
     ///
     /// # Errors
-    /// Returns a staged-step, cadence, Driver, or draft validation error.
+    /// Returns a staged-step, cadence, Driver, draft validation, or closed
+    /// erasure error.
     pub fn tick_cadenced_anchored_with_events(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         now_ns: u128,
         observed_through: Seq,
         committed_events: &[Event],
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.step_anchored_transaction(
             timeline,
+            ancestry,
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
             committed_events,
@@ -4260,10 +4315,12 @@ impl PluginRegistry {
     /// Step cadence-ready Drivers under a host-issued protected capability.
     ///
     /// # Errors
-    /// Returns a consent, staged-step, cadence, Driver, or draft validation error.
+    /// Returns a consent, staged-step, cadence, Driver, draft validation, or
+    /// closed erasure error.
     pub fn tick_cadenced_anchored_protected(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         now_ns: u128,
         observed_through: Seq,
         token: ConsentCapabilityToken,
@@ -4272,6 +4329,7 @@ impl PluginRegistry {
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.step_anchored_transaction(
             timeline,
+            ancestry,
             observed_through,
             AnchoredSelection::Cadenced { now_ns },
             committed_events,
@@ -4288,28 +4346,44 @@ impl PluginRegistry {
     /// Step all plugins that have a driver, collecting their event drafts.
     ///
     /// Calls `driver.step(timeline, observations)` on each plugin that registered a driver.
-    /// Returns all drafts from all drivers in registration order.
+    /// Returns all drafts from all drivers in registration order. `ancestry` is
+    /// the Timeline's Fork ancestry from [`pos_core::fork_ancestry`]; every
+    /// scope in it must permit `PluginInput`. The registry is store-agnostic
+    /// and trusts each `TimelineMeta`, so the host must never assemble the
+    /// chain by hand. Like the anchored variants, a refused fence aborts any
+    /// pending step.
     ///
     /// # Errors
-    /// Propagates any [`RuntimeError`] from drivers.
+    /// Propagates any [`RuntimeError`] from drivers, or returns the closed
+    /// erasure error for an invalid ancestry or a denying scope.
     pub fn step_all(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_live_execution()
             .and_then(|()| self.reject_participant_bound_drivers())
-            .and_then(|()| self.step_all_live(timeline))
+            .and_then(|()| {
+                self.with_erasure_mut_fence(
+                    timeline,
+                    ancestry,
+                    ErasureProtectedOperationV1::PluginInput,
+                    |registry| registry.step_all_live(timeline, ancestry),
+                )
+            })
     }
 
     fn step_all_live(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.ensure_no_pending_step()?;
         self.reject_unanchored_drivers()?;
         self.validate_operation(timeline, &OperationContext::Public, Seq::ZERO, None)?;
         self.restored_binding = None;
-        let snapshot = self.snapshot_for_tick(timeline, Seq::ZERO, &OperationContext::Public)?;
+        let snapshot =
+            self.snapshot_for_tick(timeline, ancestry, Seq::ZERO, &OperationContext::Public)?;
         let (all_drafts, staged_driver_ids) =
             self.collect_live_driver_outputs(timeline, &snapshot)?;
         if let Err(error) = self.validate_protected_drafts(
@@ -4358,6 +4432,12 @@ impl PluginRegistry {
     /// Step every Driver against one host-owned immutable-prefix anchor,
     /// staging Driver state until commit or abort.
     ///
+    /// Every anchored and cadenced entry point takes `ancestry`, the
+    /// Timeline's Fork ancestry from [`pos_core::fork_ancestry`]. The
+    /// registry is store-agnostic and trusts each `TimelineMeta`, so the host
+    /// must never assemble the chain by hand; an invalid chain or any denying
+    /// scope fails the pass with the closed erasure error.
+    ///
     /// # Errors
     /// Returns [`RuntimeError::PendingDriverStep`] when a prior anchored step is
     /// still pending, or propagates a Driver or draft validation error.
@@ -4368,10 +4448,12 @@ impl PluginRegistry {
     pub fn step_all_anchored(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         observed_through: Seq,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.step_anchored_transaction(
             timeline,
+            ancestry,
             observed_through,
             AnchoredSelection::All,
             &[],
@@ -4382,15 +4464,17 @@ impl PluginRegistry {
     /// Step all Drivers with a host-filtered committed Event prefix.
     ///
     /// # Errors
-    /// Returns a staged-step, Driver, or draft validation error.
+    /// Returns a staged-step, Driver, draft validation, or closed erasure error.
     pub fn step_all_anchored_with_events(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         observed_through: Seq,
         committed_events: &[Event],
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.step_anchored_transaction(
             timeline,
+            ancestry,
             observed_through,
             AnchoredSelection::All,
             committed_events,
@@ -4401,10 +4485,12 @@ impl PluginRegistry {
     /// Step every Driver under a host-issued protected capability.
     ///
     /// # Errors
-    /// Returns a consent, staged-step, Driver, or draft validation error.
+    /// Returns a consent, staged-step, Driver, draft validation, or closed
+    /// erasure error.
     pub fn step_all_anchored_protected(
         &mut self,
         timeline: pos_core::ids::TimelineId,
+        ancestry: &[TimelineMeta],
         observed_through: Seq,
         token: ConsentCapabilityToken,
         now_secs: u64,
@@ -4412,6 +4498,7 @@ impl PluginRegistry {
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
         self.step_anchored_transaction(
             timeline,
+            ancestry,
             observed_through,
             AnchoredSelection::All,
             committed_events,
@@ -4792,8 +4879,9 @@ mod tests {
         missing_admission_registry
             .register_driver(Box::new(UndeclaredOutputDriver))
             .test_ok();
+        let fresh_timeline = TimelineId::new();
         assert!(matches!(
-            missing_admission_registry.step_all(TimelineId::new()),
+            missing_admission_registry.step_all(fresh_timeline, &root_ancestry(fresh_timeline)),
             Err(RuntimeError::Authority(
                 pos_core::AuthorityErrorV1::UnauthorizedSource
             ))
@@ -5233,7 +5321,7 @@ mod tests {
         ));
         assert_eq!(store.list_timelines().test_ok().len(), 1);
         assert!(matches!(
-            registry.step_all(parent.id()),
+            registry.step_all(parent.id(), &root_ancestry(parent.id())),
             Err(RuntimeError::DriverCommitPanicked { .. })
         ));
     }
@@ -5311,7 +5399,9 @@ mod tests {
         ));
 
         let mut pending = gated_registry();
-        pending.step_all_anchored(parent.id(), Seq::ZERO).test_ok();
+        pending
+            .step_all_anchored(parent.id(), &root_ancestry(parent.id()), Seq::ZERO)
+            .test_ok();
         assert!(matches!(
             pending.fork_restored_timeline(store.as_mut(), parent.id(), Seq::ZERO, "child"),
             Err(RuntimeError::PendingDriverStep)
@@ -6732,8 +6822,9 @@ mod tests {
             .test_ok();
         registry.compose_non_participant_drivers().test_ok();
 
+        let fresh_timeline = TimelineId::new();
         let error = registry
-            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .step_all_anchored(fresh_timeline, &root_ancestry(fresh_timeline), Seq::ZERO)
             .test_err();
         assert!(matches!(error, RuntimeError::DriverPanicked { .. }));
         registry.abort_step();
@@ -6757,7 +6848,7 @@ mod tests {
         );
 
         assert!(matches!(
-            registry.step_all_anchored(timeline, Seq::ZERO),
+            registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO),
             Err(RuntimeError::ErasureContainment(
                 ErasureContainmentErrorV1::RecoveryUnavailable
             ))
@@ -6782,8 +6873,9 @@ mod tests {
                 poison_after_step: None,
             }),
         );
+        let fresh_timeline = TimelineId::new();
         registry
-            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .step_all_anchored(fresh_timeline, &root_ancestry(fresh_timeline), Seq::ZERO)
             .test_ok();
 
         let error = registry.commit_step_at(Seq::ZERO, 0).test_err();
@@ -6807,12 +6899,13 @@ mod tests {
             .register_generated(&plugin, None, Some(Box::new(AbortPanickingDriver)))
             .test_ok();
         registry.compose_non_participant_drivers().test_ok();
+        let fresh_timeline = TimelineId::new();
         registry
-            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .step_all_anchored(fresh_timeline, &root_ancestry(fresh_timeline), Seq::ZERO)
             .test_ok();
         registry.abort_step();
         assert!(registry
-            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .step_all_anchored(fresh_timeline, &root_ancestry(fresh_timeline), Seq::ZERO)
             .is_err());
     }
 
@@ -6860,8 +6953,9 @@ mod tests {
                 aborted: Arc::clone(&aborted),
             }),
         );
+        let fresh_timeline = TimelineId::new();
         let error = registry
-            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .step_all_anchored(fresh_timeline, &root_ancestry(fresh_timeline), Seq::ZERO)
             .test_err();
         assert!(matches!(error, RuntimeError::ResourceExhausted { .. }));
         assert!(*aborted.lock().test_ok());
@@ -6882,13 +6976,13 @@ mod tests {
         registry.compose_non_participant_drivers().test_ok();
 
         assert!(matches!(
-            registry.step_all(timeline),
+            registry.step_all(timeline, &root_ancestry(timeline)),
             Err(RuntimeError::MissingSnapshotAnchor { .. })
         ));
         assert_eq!(state.lock().test_ok().steps, 0);
 
         assert!(registry
-            .step_all_anchored(timeline, Seq::from_u64(7))
+            .step_all_anchored(timeline, &root_ancestry(timeline), Seq::from_u64(7))
             .test_ok()
             .is_empty());
         {
@@ -6903,15 +6997,15 @@ mod tests {
             drop(observed);
         }
         assert!(matches!(
-            registry.step_all_anchored(timeline, Seq::from_u64(7)),
+            registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::from_u64(7)),
             Err(RuntimeError::PendingDriverStep)
         ));
         assert!(matches!(
-            registry.step_all(timeline),
+            registry.step_all(timeline, &root_ancestry(timeline)),
             Err(RuntimeError::PendingDriverStep)
         ));
         assert!(matches!(
-            registry.tick_cadenced(timeline, 0),
+            registry.tick_cadenced(timeline, &root_ancestry(timeline), 0),
             Err(RuntimeError::PendingDriverStep)
         ));
         assert_eq!(state.lock().test_ok().steps, 1);
@@ -6921,7 +7015,7 @@ mod tests {
         assert!(!state.lock().test_ok().staged);
 
         registry
-            .step_all_anchored(timeline, Seq::from_u64(7))
+            .step_all_anchored(timeline, &root_ancestry(timeline), Seq::from_u64(7))
             .test_ok();
         registry.abort_step();
         assert_eq!(state.lock().test_ok().aborts, 1);
@@ -6951,7 +7045,9 @@ mod tests {
             .test_ok();
         assert_eq!(state.lock().test_ok().restores, 1);
 
-        registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
+        registry
+            .step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO)
+            .test_ok();
         assert!(matches!(
             registry.restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[]),
             Err(RuntimeError::PendingDriverStep)
@@ -7038,12 +7134,13 @@ mod tests {
         let mut registry = gated_registry();
         registry.register_test_driver(Box::new(StepCommitPanickingDriver));
         registry.compose_non_participant_drivers().test_ok();
+        let fresh_timeline = TimelineId::new();
         registry
-            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .step_all_anchored(fresh_timeline, &root_ancestry(fresh_timeline), Seq::ZERO)
             .test_ok();
         registry.commit_step_at(Seq::ZERO, 0).test_ok();
         assert!(registry
-            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .step_all_anchored(fresh_timeline, &root_ancestry(fresh_timeline), Seq::ZERO)
             .is_err());
     }
 
@@ -7160,7 +7257,9 @@ mod tests {
         }));
         registry.compose_non_participant_drivers().test_ok();
 
-        assert!(registry.step_all_anchored(timeline, Seq::ZERO).is_err());
+        assert!(registry
+            .step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO)
+            .is_err());
         let first = first.lock().test_ok();
         assert_eq!(first.steps, 1);
         assert_eq!(first.aborts, 1);
@@ -7184,31 +7283,37 @@ mod tests {
         registry.compose_non_participant_drivers().test_ok();
 
         assert!(registry
-            .tick_cadenced_anchored_with_events(timeline, 0, Seq::ZERO, &[])
+            .tick_cadenced_anchored_with_events(
+                timeline,
+                &root_ancestry(timeline),
+                0,
+                Seq::ZERO,
+                &[],
+            )
             .test_ok()
             .is_empty());
         registry.abort_step();
         registry
-            .tick_cadenced_anchored(timeline, 0, Seq::ZERO)
+            .tick_cadenced_anchored(timeline, &root_ancestry(timeline), 0, Seq::ZERO)
             .test_ok();
         registry.commit_step_at(Seq::ZERO, 0).test_ok();
         assert_eq!(state.lock().test_ok().steps, 2);
 
         assert!(matches!(
-            registry.tick_cadenced(timeline, 50),
+            registry.tick_cadenced(timeline, &root_ancestry(timeline), 50),
             Err(RuntimeError::MissingSnapshotAnchor { .. })
         ));
         assert_eq!(state.lock().test_ok().steps, 2);
 
         assert!(registry
-            .tick_cadenced_anchored(timeline, 50, Seq::ZERO)
+            .tick_cadenced_anchored(timeline, &root_ancestry(timeline), 50, Seq::ZERO)
             .test_ok()
             .is_empty());
         registry.commit_step_at(Seq::ZERO, 0).test_ok();
         assert_eq!(state.lock().test_ok().steps, 2);
 
         registry
-            .tick_cadenced_anchored(timeline, 100, Seq::ZERO)
+            .tick_cadenced_anchored(timeline, &root_ancestry(timeline), 100, Seq::ZERO)
             .test_ok();
         registry.commit_step_at(Seq::ZERO, 0).test_ok();
         assert_eq!(state.lock().test_ok().steps, 3);
@@ -7331,6 +7436,7 @@ mod tests {
         assert!(matches!(
             unbound.projection_state_for_reducer(
                 timeline,
+                &root_ancestry(timeline),
                 Seq::ZERO,
                 0,
                 &token,
@@ -7369,12 +7475,28 @@ mod tests {
             .projections
             .apply_event(timeline, &projection_event(unrelated, Seq::from_u64(2)));
         let state = bound
-            .projection_state_for_reducer(timeline, Seq::ZERO, 0, &token, "projection", subject)
+            .projection_state_for_reducer(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::ZERO,
+                0,
+                &token,
+                "projection",
+                subject,
+            )
             .test_ok()
             .test_ok();
         assert_eq!(state.get("n").and_then(serde_json::Value::as_u64), Some(1));
         assert!(bound
-            .projection_state_for_reducer(timeline, Seq::ZERO, 0, &token, "missing", subject,)
+            .projection_state_for_reducer(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::ZERO,
+                0,
+                &token,
+                "missing",
+                subject,
+            )
             .test_ok()
             .is_none());
         let authorized = bound
@@ -7453,7 +7575,9 @@ mod tests {
         let mut reg = gated_registry();
         let p = simple_plugin("p", &[]);
         reg.register_generated(&p, None, None).test_ok();
-        let drafts = reg.tick_cadenced(tl.id(), 0).test_ok();
+        let drafts = reg
+            .tick_cadenced(tl.id(), &root_ancestry(tl.id()), 0)
+            .test_ok();
         assert!(drafts.is_empty());
     }
 
@@ -7515,12 +7639,12 @@ mod tests {
         assert_eq!(reg.driver_count(), 1);
         reg.compose_non_participant_drivers().test_ok();
 
-        let drafts = reg.step_all(tl.id()).test_ok();
+        let drafts = reg.step_all(tl.id(), &root_ancestry(tl.id())).test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.tick");
 
         let anchored = reg
-            .step_all_anchored_with_events(tl.id(), Seq::ZERO, &[])
+            .step_all_anchored_with_events(tl.id(), &root_ancestry(tl.id()), Seq::ZERO, &[])
             .test_ok();
         assert_eq!(anchored.len(), 1);
         assert_eq!(anchored[0].event_type.as_str(), "driver.tick");
@@ -7534,7 +7658,7 @@ mod tests {
         let p = simple_plugin("nodrive", &[]);
         let mut reg = gated_registry();
         reg.register_generated(&p, None, None).test_ok();
-        let drafts = reg.step_all(tl.id()).test_ok();
+        let drafts = reg.step_all(tl.id(), &root_ancestry(tl.id())).test_ok();
         assert!(drafts.is_empty());
     }
 
@@ -7855,10 +7979,14 @@ mod tests {
         let mut reg = gated_registry();
         reg.register_test_driver(Box::new(FailingDriver));
 
-        let error = reg.step_all(timeline.id()).test_err();
+        let error = reg
+            .step_all(timeline.id(), &root_ancestry(timeline.id()))
+            .test_err();
         assert!(error.to_string().contains("failing"));
 
-        let error = reg.tick_cadenced(timeline.id(), 0).test_err();
+        let error = reg
+            .tick_cadenced(timeline.id(), &root_ancestry(timeline.id()), 0)
+            .test_err();
         assert!(error.to_string().contains("failing"));
     }
 
@@ -7918,7 +8046,9 @@ mod tests {
             fails: true,
         }));
 
-        let error = registry.step_all(timeline.id()).test_err();
+        let error = registry
+            .step_all(timeline.id(), &root_ancestry(timeline.id()))
+            .test_err();
 
         assert!(error.to_string().contains("failing"));
         assert!(!*first_staged
@@ -7956,11 +8086,11 @@ mod tests {
         let mut registry = gated_registry();
         registry.register_test_driver(Box::new(GeographicDriver));
         assert!(matches!(
-            registry.step_all(timeline.id()),
+            registry.step_all(timeline.id(), &root_ancestry(timeline.id())),
             Err(RuntimeError::GeographicDraft { .. })
         ));
         assert!(matches!(
-            registry.tick_cadenced(timeline.id(), 0),
+            registry.tick_cadenced(timeline.id(), &root_ancestry(timeline.id()), 0),
             Err(RuntimeError::GeographicDraft { .. })
         ));
     }
@@ -8015,11 +8145,11 @@ mod tests {
             Box::new(ConsentDriver),
         );
         assert!(matches!(
-            registry.step_all(timeline.id()),
+            registry.step_all(timeline.id(), &root_ancestry(timeline.id())),
             Err(RuntimeError::ConsentDraft { .. })
         ));
         assert!(matches!(
-            registry.tick_cadenced(timeline.id(), 0),
+            registry.tick_cadenced(timeline.id(), &root_ancestry(timeline.id()), 0),
             Err(RuntimeError::ConsentDraft { .. })
         ));
 
@@ -8029,51 +8159,57 @@ mod tests {
             &["driver.allowed.v1"],
             Box::new(AllowedDriver),
         );
-        assert_eq!(allowed.tick_cadenced(timeline.id(), 0).test_ok().len(), 1);
+        assert_eq!(
+            allowed
+                .tick_cadenced(timeline.id(), &root_ancestry(timeline.id()), 0)
+                .test_ok()
+                .len(),
+            1
+        );
+    }
+
+    /// A Driver that emits one Event once its subscribed projection reaches 1.
+    struct ProjectionObservingDriver {
+        target: ProjectionKey,
+        entity: EntityId,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Driver for ProjectionObservingDriver {
+        fn name(&self) -> &'static str {
+            "observing"
+        }
+
+        fn subscriptions(&self) -> &[ProjectionKey] {
+            std::slice::from_ref(&self.target)
+        }
+
+        fn step(
+            &mut self,
+            _: pos_core::ids::TimelineId,
+            observations: ObservationView<'_>,
+        ) -> Result<crate::driver::StepOutput, RuntimeError> {
+            let observed = observations
+                .state_for(&self.target)
+                .and_then(|state| state.get("n"))
+                .and_then(serde_json::Value::as_u64);
+            let drafts = (observed == Some(1))
+                .then(|| {
+                    EventDraft::new(
+                        self.entity,
+                        Kind::new("driver.observed"),
+                        CanonicalBytes::from_vec(vec![]),
+                    )
+                })
+                .into_iter()
+                .collect();
+            Ok(crate::driver::StepOutput::new(drafts))
+        }
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn tick_cadenced_materializes_only_subscribed_projection_state() {
-        use crate::driver::ProjectionKey;
-
-        struct ObservingDriver {
-            target: ProjectionKey,
-            entity: EntityId,
-        }
-
-        impl Driver for ObservingDriver {
-            fn name(&self) -> &'static str {
-                "observing"
-            }
-
-            fn subscriptions(&self) -> &[ProjectionKey] {
-                std::slice::from_ref(&self.target)
-            }
-
-            fn step(
-                &mut self,
-                _: pos_core::ids::TimelineId,
-                observations: ObservationView<'_>,
-            ) -> Result<crate::driver::StepOutput, RuntimeError> {
-                let observed = observations
-                    .state_for(&self.target)
-                    .and_then(|state| state.get("n"))
-                    .and_then(serde_json::Value::as_u64);
-                let drafts = (observed == Some(1))
-                    .then(|| {
-                        EventDraft::new(
-                            self.entity,
-                            Kind::new("driver.observed"),
-                            CanonicalBytes::from_vec(vec![]),
-                        )
-                    })
-                    .into_iter()
-                    .collect();
-                Ok(crate::driver::StepOutput::new(drafts))
-            }
-        }
-
         let mut store = gated_store();
         let timeline = store.create_timeline("t").test_ok();
         let observed_entity = EntityId::new();
@@ -8114,21 +8250,36 @@ mod tests {
         register_output_driver(
             &mut reg,
             &["driver.observed"],
-            Box::new(ObservingDriver {
+            Box::new(ProjectionObservingDriver {
                 target: ProjectionKey::new(observed_entity),
                 entity: observed_entity,
             }),
         );
 
         let drafts = reg
-            .tick_cadenced_anchored_protected(timeline.id(), 0, Seq::ZERO, token.clone(), 0, &[])
+            .tick_cadenced_anchored_protected(
+                timeline.id(),
+                &root_ancestry(timeline.id()),
+                0,
+                Seq::ZERO,
+                token.clone(),
+                0,
+                &[],
+            )
             .test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
         reg.abort_step();
 
         let drafts = reg
-            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token.clone(), 0, &[])
+            .step_all_anchored_protected(
+                timeline.id(),
+                &root_ancestry(timeline.id()),
+                Seq::ZERO,
+                token.clone(),
+                0,
+                &[],
+            )
             .test_ok();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].event_type.as_str(), "driver.observed");
@@ -8138,7 +8289,14 @@ mod tests {
         // must still stop the protected Driver input path.
         reg.projections = std::mem::take(&mut reg.projections).without_erasure_gate();
         assert!(reg
-            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
+            .step_all_anchored_protected(
+                timeline.id(),
+                &root_ancestry(timeline.id()),
+                Seq::ZERO,
+                token,
+                0,
+                &[],
+            )
             .is_err());
     }
 
@@ -8197,7 +8355,15 @@ mod tests {
         reg.compose_non_participant_drivers().test_ok();
 
         let drafts = reg
-            .tick_cadenced_anchored_protected(timeline.id(), 0, Seq::ZERO, token, 0, &[])
+            .tick_cadenced_anchored_protected(
+                timeline.id(),
+                &root_ancestry(timeline.id()),
+                0,
+                Seq::ZERO,
+                token,
+                0,
+                &[],
+            )
             .test_ok();
         assert!(drafts.is_empty());
     }
@@ -8251,7 +8417,9 @@ mod tests {
         assert!(reg
             .snapshot_for_subscriptions(timeline, &subscriptions)
             .is_err());
-        assert!(reg.refold_projection_events(timeline, &[], None).is_err());
+        assert!(reg
+            .refold_projection_events(timeline, &root_ancestry(timeline), &[], None)
+            .is_err());
     }
 
     struct AppendFailStore;
@@ -8342,7 +8510,9 @@ mod tests {
             Box::new(SensitiveDriver { subject }),
         );
         assert!(matches!(
-            registry.tick_cadenced(timeline, 0).test_err(),
+            registry
+                .tick_cadenced(timeline, &root_ancestry(timeline), 0)
+                .test_err(),
             RuntimeError::Consent(ConsentError::NoConsent)
         ));
     }
@@ -8398,8 +8568,12 @@ mod tests {
         }));
 
         let timeline = TimelineId::new();
-        registry.tick_cadenced(timeline, u128::MAX - 1).test_ok();
-        let error = registry.tick_cadenced(timeline, u128::MAX).test_err();
+        registry
+            .tick_cadenced(timeline, &root_ancestry(timeline), u128::MAX - 1)
+            .test_ok();
+        let error = registry
+            .tick_cadenced(timeline, &root_ancestry(timeline), u128::MAX)
+            .test_err();
 
         assert!(matches!(
             error,
@@ -8420,11 +8594,11 @@ mod tests {
         }));
         anchored.compose_non_participant_drivers().test_ok();
         anchored
-            .tick_cadenced_anchored(timeline, u128::MAX - 1, Seq::ZERO)
+            .tick_cadenced_anchored(timeline, &root_ancestry(timeline), u128::MAX - 1, Seq::ZERO)
             .test_ok();
         anchored.commit_step_at(Seq::ZERO, 0).test_ok();
         let error = anchored
-            .tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO)
+            .tick_cadenced_anchored(timeline, &root_ancestry(timeline), u128::MAX, Seq::ZERO)
             .test_err();
         assert!(matches!(
             error,
@@ -8482,8 +8656,16 @@ mod tests {
         }
 
         let timeline = TimelineId::new();
-        assert_eq!(registry.tick_cadenced(timeline, 0).test_ok().len(), 3);
-        let drafts = registry.tick_cadenced(timeline, 1).test_ok();
+        assert_eq!(
+            registry
+                .tick_cadenced(timeline, &root_ancestry(timeline), 0)
+                .test_ok()
+                .len(),
+            3
+        );
+        let drafts = registry
+            .tick_cadenced(timeline, &root_ancestry(timeline), 1)
+            .test_ok();
         assert_eq!(
             drafts
                 .iter()
@@ -8523,16 +8705,22 @@ mod tests {
         let _ = plugin;
         register_output_driver(&mut reg, &["interval.tick"], Box::new(IntervalDriver));
 
-        let first = reg.tick_cadenced(timeline.id(), 0).test_ok();
+        let first = reg
+            .tick_cadenced(timeline.id(), &root_ancestry(timeline.id()), 0)
+            .test_ok();
         assert_eq!(first.len(), 1);
 
-        let too_early = reg.tick_cadenced(timeline.id(), 50_000_000).test_ok();
+        let too_early = reg
+            .tick_cadenced(timeline.id(), &root_ancestry(timeline.id()), 50_000_000)
+            .test_ok();
         assert!(
             too_early.is_empty(),
             "interval gate should suppress a second tick"
         );
 
-        let ready = reg.tick_cadenced(timeline.id(), 100_000_000).test_ok();
+        let ready = reg
+            .tick_cadenced(timeline.id(), &root_ancestry(timeline.id()), 100_000_000)
+            .test_ok();
         assert_eq!(
             ready.len(),
             1,
@@ -8601,7 +8789,14 @@ mod tests {
         reg.compose_non_participant_drivers().test_ok();
 
         let drafts = reg
-            .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
+            .step_all_anchored_protected(
+                timeline.id(),
+                &root_ancestry(timeline.id()),
+                Seq::ZERO,
+                token,
+                0,
+                &[],
+            )
             .test_ok();
         assert_eq!(drafts.len(), 0);
 
@@ -9187,7 +9382,10 @@ mod tests {
         let mut driverless = gated_registry();
         let plugin = simple_plugin("coverage-driverless", &[]);
         driverless.register_generated(&plugin, None, None).test_ok();
-        driverless.tick_cadenced(TimelineId::new(), 0).test_ok();
+        let fresh_timeline = TimelineId::new();
+        driverless
+            .tick_cadenced(fresh_timeline, &root_ancestry(fresh_timeline), 0)
+            .test_ok();
         driverless.commit_step_at(Seq::ZERO, 0).test_ok();
     }
 
@@ -9307,7 +9505,14 @@ mod coverage_public_error_paths {
         }));
         assert!(mismatch.compose_non_participant_drivers().is_ok());
         assert!(mismatch
-            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .step_all_anchored_protected(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::ZERO,
+                token,
+                0,
+                &[],
+            )
             .is_err());
     }
 
@@ -9322,7 +9527,14 @@ mod coverage_public_error_paths {
         commit.register_test_driver(Box::new(EmptyDriver));
         assert!(commit.compose_non_participant_drivers().is_ok());
         assert!(commit
-            .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
+            .step_all_anchored_protected(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::ZERO,
+                token,
+                0,
+                &[],
+            )
             .is_ok());
         revoke(&authority, timeline, &consent_grant);
         assert!(commit.commit_step_at(Seq::ZERO, 1).is_err());
@@ -9347,13 +9559,21 @@ mod erasure_gate_coverage {
         let timeline = pos_core::ids::TimelineId::new();
         let mut missing = PluginRegistry::new();
         assert!(matches!(
-            missing.step_all_anchored(timeline, pos_core::clock::Seq::ZERO),
+            missing.step_all_anchored(
+                timeline,
+                &root_ancestry(timeline),
+                pos_core::clock::Seq::ZERO,
+            ),
             Err(RuntimeError::ErasureContainment(_))
         ));
         let mut missing = PluginRegistry::new()
             .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()));
         assert!(missing
-            .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
+            .step_all_anchored(
+                timeline,
+                &root_ancestry(timeline),
+                pos_core::clock::Seq::ZERO,
+            )
             .is_ok());
         missing.abort_step();
 
@@ -9363,7 +9583,11 @@ mod erasure_gate_coverage {
         // gate after composition and reopen the protected path.
         rejecting.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
         assert!(rejecting
-            .step_all_anchored(timeline, pos_core::clock::Seq::ZERO)
+            .step_all_anchored(
+                timeline,
+                &root_ancestry(timeline),
+                pos_core::clock::Seq::ZERO,
+            )
             .is_ok());
         assert!(rejecting
             .commit_step_at(pos_core::clock::Seq::ZERO, 0)
@@ -9424,22 +9648,22 @@ mod erasure_gate_error_paths {
         let timeline = TimelineId::new();
         let mut missing = PluginRegistry::new().without_erasure_gate();
         assert!(matches!(
-            missing.step_all(timeline),
+            missing.step_all(timeline, &root_ancestry(timeline)),
             Err(RuntimeError::ErasureOperationUnavailable)
         ));
         assert!(matches!(
-            missing.step_all_anchored(timeline, Seq::ZERO),
+            missing.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO),
             Err(RuntimeError::ErasureOperationUnavailable)
         ));
 
         let rejecting = Arc::new(ErasureContainmentGateV1::new_fail_closed());
         let mut bound = PluginRegistry::new().with_erasure_gate(rejecting);
         assert!(matches!(
-            bound.step_all(timeline),
+            bound.step_all(timeline, &root_ancestry(timeline)),
             Err(RuntimeError::ErasureContainment(_))
         ));
         assert!(matches!(
-            bound.step_all_anchored(timeline, Seq::ZERO),
+            bound.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO),
             Err(RuntimeError::ErasureContainment(_))
         ));
     }

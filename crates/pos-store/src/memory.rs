@@ -1410,6 +1410,20 @@ impl MemoryStore {
         self.complete_erasure_read_fence(&gate, fenced, result)
     }
 
+    /// Apply each stitched segment's own erasure decision for `operation`
+    /// inside the read's active fence.
+    fn authorize_inherited_scopes(
+        &self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+    ) -> Result<(), CoreError> {
+        self.validated_erasure_gate().and_then(|gate| {
+            self.fork_chain(timeline).and_then(|chain| {
+                crate::authorize_inherited_scopes(&gate, chain.timelines, operation)
+            })
+        })
+    }
+
     fn with_erasure_read_filter<T>(
         &self,
         timeline: TimelineId,
@@ -5348,7 +5362,9 @@ impl EventStore for MemoryStore {
         event_id: EventId,
     ) -> Result<Option<Event>, CoreError> {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
-            read_event_by_id(store, timeline, event_id)
+            store
+                .authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
+                .and_then(|()| read_event_by_id(store, timeline, event_id))
         })
     }
 
@@ -5432,6 +5448,9 @@ impl EventStore for MemoryStore {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
             store
                 .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| {
+                    store.authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
+                })
                 .and_then(|()| store.collect_events_in_range(timeline, range))
         })
     }
@@ -5443,9 +5462,16 @@ impl EventStore for MemoryStore {
         bounds: EventReadBounds,
     ) -> Result<Vec<Event>, CoreError> {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
+            // The bounded walk enforces depth, cycle and time limits before the
+            // inherited scopes are authorized over the same chain.
             store
                 .ensure_generic_timeline_visibility(timeline)
                 .and_then(|()| store.collect_events_in_range_bounded(timeline, range, bounds))
+                .and_then(|events| {
+                    store
+                        .authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
+                        .map(|()| events)
+                })
         })
     }
 
@@ -5612,6 +5638,9 @@ impl EventStore for MemoryStore {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Export, |store| {
             store
                 .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| {
+                    store.authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Export)
+                })
                 .and_then(|()| store.compute_chain_hash_at(timeline, at_seq))
         })
     }

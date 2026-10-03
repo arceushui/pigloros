@@ -49,6 +49,7 @@ pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 pos-experiment = { path = "../pos-experiment", features = ["test-support"] }
 pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 pos-state = { path = "../../crates/pos-state" }
+pos-time = { path = "../../crates/pos-time" }
 pos-plugin-agent = { path = "../../plugins/agent" }
 pos-plugin-eval = { path = "../../plugins/eval" }
 pos-plugin-persona = { path = "../../plugins/persona" }

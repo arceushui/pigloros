@@ -45,6 +45,10 @@ name = "human_admission"
 required-features = ["test-support"]
 
 [[test]]
+name = "inherited_scope_passes"
+required-features = ["test-support"]
+
+[[test]]
 name = "output_admission_public"
 required-features = ["test-support"]
 

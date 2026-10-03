@@ -39,7 +39,9 @@ use pos_state::{
 
 use super::{
     harness::Capture,
-    support::{draft, expect_err, gated_registry, FixturePlugin, RecordingPort, TestOk},
+    support::{
+        draft, expect_err, gated_registry, root_ancestry, FixturePlugin, RecordingPort, TestOk,
+    },
 };
 
 /// The two observation digest domains ADR-021 Revision 3 Decision 5 names.
@@ -496,6 +498,7 @@ pub(super) fn stage_authorized(
     registry
         .stage_authorized_scheduled_pass(
             participant.timeline_id,
+            &root_ancestry(participant.timeline_id),
             Seq::from_u64(CUT),
             &[participant.view()],
             &[participant.authority(&evaluation, &current)],
@@ -547,7 +550,11 @@ pub fn one_pass_one_profile() -> Capture {
     let (mut registry, aborts) = non_participant_registry(&participant);
     let mut port = RecordingPort::default();
     let anchored = registry
-        .step_all_anchored(participant.timeline_id, Seq::from_u64(CUT))
+        .step_all_anchored(
+            participant.timeline_id,
+            &root_ancestry(participant.timeline_id),
+            Seq::from_u64(CUT),
+        )
         .test_ok();
     let mixed = expect_err(stage_authorized(&mut registry, &participant));
     let crossed = admit_authorized(&mut registry, &participant, &mut port);
@@ -587,7 +594,11 @@ pub fn digest_domain_separation() -> Capture {
     let (mut authorized, _) = participant_registry(&participant, false);
     let mut port = RecordingPort::default();
     anchored
-        .step_all_anchored(participant.timeline_id, Seq::from_u64(CUT))
+        .step_all_anchored(
+            participant.timeline_id,
+            &root_ancestry(participant.timeline_id),
+            Seq::from_u64(CUT),
+        )
         .test_ok();
     let anchored_refusal = expect_err(anchored.admit_scheduled_pass(&mut port, &admission()));
     stage_authorized(&mut authorized, &participant).test_ok();
@@ -690,6 +701,7 @@ fn stage_views(
     registry
         .stage_authorized_scheduled_pass(
             views[0].timeline_id,
+            &root_ancestry(views[0].timeline_id),
             Seq::from_u64(CUT),
             &drivers,
             &authorities,

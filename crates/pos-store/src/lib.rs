@@ -135,6 +135,17 @@ pub(crate) fn with_validated_erasure_write_fence<T>(
     result
 }
 
+/// Apply every stitched segment's own erasure decision under the read's
+/// active fence (ADR-021 Revision 4 Decision 3).
+pub(crate) fn authorize_inherited_scopes(
+    gate: &pos_core::ErasureContainmentGateV1,
+    chain: impl IntoIterator<Item = TimelineId>,
+    operation: pos_core::ErasureProtectedOperationV1,
+) -> Result<(), CoreError> {
+    pos_core::authorize_fork_scopes(gate, chain, operation)
+        .map_err(pos_core::store::erasure_containment_error)
+}
+
 /// Finalize first-commit context for a local committed batch. A supplied
 /// origin must agree with the owning segment and inherited Fork prefix.
 fn finalize_committed_origins(

@@ -17,7 +17,7 @@
 use pos_core::{
     AuthorityRegistrySnapshotV1, ErasureProtectedOperationV1, EventDraft, Hash,
     KnowledgeSnapshotV1, ObservationSnapshotV1, PersistedAuthorityV1, PluginId,
-    ReplayClaimEvaluationV1, ScheduledObservationProfileV1, Seq, TimelineId,
+    ReplayClaimEvaluationV1, ScheduledObservationProfileV1, Seq, TimelineId, TimelineMeta,
 };
 use pos_state::AuthorizedObservationV1;
 
@@ -96,10 +96,15 @@ impl PluginRegistry {
     /// closed authority error covers views out of schedule order, unpaired or
     /// stale authority, views from another base cut, and ambient
     /// subscriptions. A Driver, output, schema, or budget error is also
-    /// possible.
+    /// possible. `ancestry` is the Timeline's Fork ancestry from
+    /// [`pos_core::fork_ancestry`], never assembled by hand, because the
+    /// registry is store-agnostic and trusts each `TimelineMeta`; an invalid
+    /// ancestry or any denying scope in it fails the pass with the closed
+    /// erasure error.
     pub fn stage_authorized_scheduled_pass(
         &mut self,
         timeline: TimelineId,
+        ancestry: &[TimelineMeta],
         observed_through: Seq,
         views: &[AuthorizedDriverViewV1],
         authorities: &[AuthorizedViewAuthorityV1<'_>],
@@ -117,6 +122,7 @@ impl PluginRegistry {
             .and_then(|(indices, snapshots)| {
                 self.with_erasure_mut_fence(
                     timeline,
+                    ancestry,
                     ErasureProtectedOperationV1::PluginInput,
                     |registry| {
                         registry.stage_released_views(

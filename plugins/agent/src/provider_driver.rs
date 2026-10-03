@@ -452,6 +452,14 @@ mod tests {
     };
     use std::{sync::Arc, time::Duration};
 
+    /// The one-member Fork ancestry of a fixture Timeline with no parent.
+    fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+        vec![pos_core::TimelineMeta {
+            id: timeline,
+            ..pos_core::TimelineMeta::root("root")
+        }]
+    }
+
     const PLUGIN_HASH: [u8; 32] = [3; 32];
     const PROVIDER_HASH: [u8; 32] = [4; 32];
 
@@ -815,7 +823,11 @@ mod tests {
         let mut fixture = provider_driver(vec![attempt]);
         let drafts = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::from_u64(7))
+            .step_all_anchored(
+                fixture.timeline,
+                &root_ancestry(fixture.timeline),
+                Seq::from_u64(7),
+            )
             .test_ok();
         assert_eq!(fixture.calls.get(), 1);
         assert_eq!(drafts[0].event_type.as_str(), RECORDER_EVENT_TYPE);
@@ -1099,7 +1111,11 @@ mod tests {
                 provider_driver(vec![ProviderAttempt::Response(wire.try_into().test_ok())]);
             let drafts = fixture
                 .registry
-                .step_all_anchored(fixture.timeline, Seq::ZERO)
+                .step_all_anchored(
+                    fixture.timeline,
+                    &root_ancestry(fixture.timeline),
+                    Seq::ZERO,
+                )
                 .test_ok();
             let record = record_from_drafts(&drafts);
             assert_eq!(record.result(), expected);
@@ -1149,12 +1165,20 @@ mod tests {
         ]);
         let first = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::ZERO)
+            .step_all_anchored(
+                fixture.timeline,
+                &root_ancestry(fixture.timeline),
+                Seq::ZERO,
+            )
             .test_ok();
         assert_eq!(fixture.calls.get(), 1);
         let pending = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::ZERO)
+            .step_all_anchored(
+                fixture.timeline,
+                &root_ancestry(fixture.timeline),
+                Seq::ZERO,
+            )
             .test_err();
         assert_eq!(
             pending.to_string(),
@@ -1165,7 +1189,11 @@ mod tests {
         fixture.registry.abort_step();
         let retry = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::ZERO)
+            .step_all_anchored(
+                fixture.timeline,
+                &root_ancestry(fixture.timeline),
+                Seq::ZERO,
+            )
             .test_ok();
         assert_eq!(fixture.calls.get(), 2);
         assert_eq!(first[0].payload, retry[0].payload);
@@ -1174,7 +1202,11 @@ mod tests {
 
         let next = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::from_u64(5))
+            .step_all_anchored(
+                fixture.timeline,
+                &root_ancestry(fixture.timeline),
+                Seq::from_u64(5),
+            )
             .test_ok();
         let record = record_from_drafts(&next);
         assert_eq!(record.request().driver_tick(), 1);
@@ -1314,7 +1346,11 @@ mod tests {
         let mut fixture = provider_driver(vec![ProviderAttempt::NoResponse]);
         let _ = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::ZERO)
+            .step_all_anchored(
+                fixture.timeline,
+                &root_ancestry(fixture.timeline),
+                Seq::ZERO,
+            )
             .test_ok();
         let segments = [TimelineHistorySegment::new(fixture.timeline, Seq::ZERO)];
         // The registry guards restore_driver_state with PendingDriverStep when
@@ -1335,7 +1371,11 @@ mod tests {
         ]);
         let drafts = fixture
             .registry
-            .step_all_anchored(fixture.timeline, Seq::ZERO)
+            .step_all_anchored(
+                fixture.timeline,
+                &root_ancestry(fixture.timeline),
+                Seq::ZERO,
+            )
             .test_ok();
         assert_eq!(admit_staged(&mut fixture), drafts.len());
         // committed_tick is now 1; the guard fires before verifying evidence.

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use pos_core::store::SeqRange;
 use pos_core::{
-    CoreError, EntityId, ErasureProtectedOperationV1, Seq, StateRegistry, TimelineId,
+    CoreError, EntityId, ErasureProtectedOperationV1, Seq, StateRegistry, TimelineId, TimelineMeta,
     WorldReplayClosureV1,
 };
 use pos_runtime::{ErasureReadSenderV1, WorldReplayUseV1};
@@ -73,7 +73,7 @@ fn with_snapshot_fence(
     effect: &mut impl FnMut(&mut ErasureReadSenderV1<'_>),
 ) -> Result<(), CoreError> {
     sender
-        .with_protected_effect_fence(timeline, ErasureProtectedOperationV1::Snapshot, effect)
+        .with_protected_ancestry_fence(timeline, ErasureProtectedOperationV1::Snapshot, effect)
         .map_err(crate::host_error_to_core)
 }
 
@@ -98,12 +98,18 @@ fn snapshot_with_use(
 ) -> Result<Snapshot, CoreError> {
     let read_bounds = crate::require_world_replay(sender, closure, requested_use)?;
     let events = crate::read_complete_world_replay(sender, requested_use, read_bounds)?;
-    let snapshot = snapshot_from_events(
-        timeline,
-        registry,
-        &events,
-        *closure.inventory_generation().as_bytes(),
-    )?;
+    let snapshot = sender
+        .fork_ancestry(timeline)
+        .map_err(crate::host_error_to_core)
+        .and_then(|ancestry| {
+            snapshot_from_events(
+                timeline,
+                &ancestry,
+                registry,
+                &events,
+                *closure.inventory_generation().as_bytes(),
+            )
+        })?;
     let final_bounds = crate::require_world_replay(sender, closure, requested_use)?;
     if final_bounds == read_bounds {
         Ok(snapshot)
@@ -190,11 +196,18 @@ fn run_verified_snapshot_consistency_transaction(
         let mut outcome = Err(SnapshotError::ArtifactUnavailable);
         let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
             outcome = snapshot_use(sender, snap.timeline, &consumer_ids)
-                .map_err(SnapshotError::from)
                 .and_then(|requested_use| {
+                    sender
+                        .fork_ancestry(snap.timeline)
+                        .map_err(crate::host_error_to_core)
+                        .map(|ancestry| (requested_use, ancestry))
+                })
+                .map_err(SnapshotError::from)
+                .and_then(|(requested_use, ancestry)| {
                     verify_snapshot_effect_with_rechecks(
                         sender,
                         snap,
+                        &ancestry,
                         candidate,
                         closure,
                         &requested_use,
@@ -210,6 +223,7 @@ fn run_verified_snapshot_consistency_transaction(
 fn verify_snapshot_effect_with_rechecks(
     sender: &mut ErasureReadSenderV1<'_>,
     snap: &Snapshot,
+    ancestry: &[TimelineMeta],
     registry: &mut ProjectionRegistry,
     closure: &WorldReplayClosureV1,
     requested_use: &WorldReplayUseV1,
@@ -228,6 +242,7 @@ fn verify_snapshot_effect_with_rechecks(
     verify_snapshot_event_sets(
         snap,
         registry,
+        ancestry,
         &all_events[tail_start..],
         &all_events,
         Some(pos_core::ErasureReferenceV1::from_digest(
@@ -267,6 +282,7 @@ fn snapshot_use(
 
 fn snapshot_from_events(
     timeline: TimelineId,
+    ancestry: &[TimelineMeta],
     registry: &mut ProjectionRegistry,
     events: &[pos_core::Event],
     inventory_generation: [u8; 32],
@@ -274,7 +290,8 @@ fn snapshot_from_events(
     let at_seq = events.last().map_or(Seq::ZERO, |event| event.seq);
     registry.fold_events(timeline, events);
     registry
-        .state_snapshot(timeline)
+        .bind_fork_ancestry(timeline, ancestry)
+        .and_then(|()| registry.state_snapshot(timeline))
         .map(|snapshot| Snapshot {
             timeline,
             at_seq,
@@ -287,6 +304,7 @@ fn snapshot_from_events(
 fn verify_snapshot_event_sets(
     snap: &Snapshot,
     registry: &mut ProjectionRegistry,
+    ancestry: &[TimelineMeta],
     tail_events: &[pos_core::Event],
     all_events: &[pos_core::Event],
     expected_generation: Option<pos_core::ErasureReferenceV1>,
@@ -295,7 +313,7 @@ fn verify_snapshot_event_sets(
         .into_iter()
         .collect();
     registry
-        .restore_from_snapshot(snap.timeline, &snap.registry, expected_generation)
+        .restore_from_snapshot(snap.timeline, ancestry, &snap.registry, expected_generation)
         .map_err(|_| SnapshotError::ArtifactUnavailable)?;
     registry.fold_events(snap.timeline, tail_events);
     let incremental_state = registry
@@ -368,7 +386,11 @@ fn snapshot_from_store(
         )
         .map_err(|_| CoreError::ArtifactUnavailable)
         .and_then(|()| store.read(timeline, SeqRange::all()))
-        .and_then(|events| snapshot_from_events(timeline, registry, &events, [0; 32]))
+        .and_then(|events| {
+            pos_core::fork_ancestry(store, timeline).and_then(|ancestry| {
+                snapshot_from_events(timeline, &ancestry, registry, &events, [0; 32])
+            })
+        })
 }
 
 #[cfg(test)]
@@ -397,7 +419,18 @@ fn verify_snapshot_consistency_from_store(
                 .map_err(SnapshotError::from)
         })
         .and_then(|(tail_events, all_events)| {
-            verify_snapshot_event_sets(snap, registry, &tail_events, &all_events, None)
+            pos_core::fork_ancestry(store, snap.timeline)
+                .map_err(SnapshotError::from)
+                .and_then(|ancestry| {
+                    verify_snapshot_event_sets(
+                        snap,
+                        registry,
+                        &ancestry,
+                        &tail_events,
+                        &all_events,
+                        None,
+                    )
+                })
         })
 }
 
@@ -971,6 +1004,7 @@ mod tests {
         assert!(super::verify_snapshot_effect_with_rechecks(
             &mut reads,
             &snap,
+            &[],
             &mut registry,
             &closure,
             &requested_use,
@@ -1355,10 +1389,12 @@ mod extra_tests {
         let captured = snapshot(store.as_ref(), timeline.id(), &mut captured_registry).test_ok();
         let events = store.read(timeline.id(), SeqRange::all()).test_ok();
         let mut restored_registry = make_registry();
+        let ancestry = pos_core::fork_ancestry(store.as_ref(), timeline.id()).test_ok();
         assert!(matches!(
             verify_snapshot_event_sets(
                 &captured,
                 &mut restored_registry,
+                &ancestry,
                 &[],
                 &events,
                 Some(ErasureReferenceV1::from_digest([7; 32])),
