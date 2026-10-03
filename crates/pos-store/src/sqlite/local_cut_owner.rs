@@ -546,20 +546,37 @@ fn sqlite_validate_local_cut_owner_cut(
 ) -> Result<(), LocalCutOwnerErrorV1> {
     validate_local_cut_owner_result_v1(owner_id, cut_id, &cut.result)?;
     let commit = cut.result.commit.as_input();
-    if commit.partition_ledger_seq != cut.request.partition_ledger_seq
-        || commit.manifest_hash != cut.request.manifest_hash
-        || commit.result_heads_table != cut.request.result_heads_table
-        || commit.participant_successor_table != cut.request.participant_successor_table
-        || commit.cpu_completion_table != cut.request.cpu_completion_table
-        || commit.action_disposition_table != cut.request.action_disposition_table
-        || commit.candidate_bases_table != cut.request.candidate_bases_table
-        || commit.invocation_bridges_table != cut.request.invocation_bridges_table
-        || commit.result_inventory_generation != cut.request.result_inventory_generation
-        || commit.release_fence_proof_digest != cut.request.release_fence_proof_digest
-    {
+    let request = &cut.request;
+    // Stored and expected bindings are compared pairwise, so both tuples must
+    // list their fields in the same order.
+    let stored = (
+        &commit.partition_ledger_seq,
+        &commit.manifest_hash,
+        &commit.result_heads_table,
+        &commit.participant_successor_table,
+        &commit.cpu_completion_table,
+        &commit.action_disposition_table,
+        &commit.candidate_bases_table,
+        &commit.invocation_bridges_table,
+        &commit.result_inventory_generation,
+        &commit.release_fence_proof_digest,
+    );
+    let expected = (
+        &request.partition_ledger_seq,
+        &request.manifest_hash,
+        &request.result_heads_table,
+        &request.participant_successor_table,
+        &request.cpu_completion_table,
+        &request.action_disposition_table,
+        &request.candidate_bases_table,
+        &request.invocation_bridges_table,
+        &request.result_inventory_generation,
+        &request.release_fence_proof_digest,
+    );
+    if stored != expected {
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
-    validate_local_cut_owner_recordings_v1(&cut.request, &cut.result)
+    validate_local_cut_owner_recordings_v1(request, &cut.result)
 }
 
 fn sqlite_local_cut_owner_cut_by_id(
