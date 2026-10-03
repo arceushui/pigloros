@@ -94,7 +94,6 @@ use pos_core::{
     PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1, WorldArtifactLeafV1,
     WorldClosureReadLimitsV1, WorldConsumerSetV1, WorldReplayHandleV1, ERASURE_MAX_RECOVERY_ERRORS,
     GEOGRAPHIC_EVENT_TYPE, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
-
 };
 
 use crate::fork_admission_authority::{

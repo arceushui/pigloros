@@ -281,24 +281,26 @@ const fn fidelity(level: u8, max_cpu_us: u32) -> FidelityBudgetV1 {
 }
 
 fn budget(plugin_id: PluginId, profile_hash: Hash) -> FixtureResult<ExecutableBudgetPolicyV1> {
-    Ok(ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-        revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
-        cut_budget_family: 0,
-        max_event_bytes: 4096,
-        fidelity_budgets: [
-            fidelity(0, 500_000),
-            fidelity(1, 250_000),
-            fidelity(2, 50_000),
-        ],
-        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id,
-            cpu_reservations_us: [100, 100, 100],
-        }],
-        accounting_semantics: 0,
-        execution_profile_hash: profile_hash,
-        max_pass_wall_duration_us: 1_000,
-    })?)
+    Ok(ExecutableBudgetPolicyV1::new(
+        ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4096,
+            fidelity_budgets: [
+                fidelity(0, 500_000),
+                fidelity(1, 250_000),
+                fidelity(2, 50_000),
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [100, 100, 100],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: profile_hash,
+            max_pass_wall_duration_us: 1_000,
+        },
+    )?)
 }
 
 /// Native OPC1 members one to five; member zero is the EOP1 built over them.
@@ -465,7 +467,10 @@ fn consumer_set(
                 .leaf
                 .digest(),
         )?],
-        producers: vec![WorldProducerV1::new(producer.0.fields().plugin_id, producer.0.digest())?],
+        producers: vec![WorldProducerV1::new(
+            producer.0.fields().plugin_id,
+            producer.0.digest(),
+        )?],
         optional_view_roots,
     })?)
 }

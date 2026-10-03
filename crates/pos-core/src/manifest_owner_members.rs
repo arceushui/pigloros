@@ -590,8 +590,8 @@ impl ScopeLeaves<'_> {
         native_bytes: &[u8],
         mut children: Vec<Hash>,
     ) -> Result<WorldArtifactLeafV1, ManifestOwnerAdmissionErrorV1> {
-        let classification = (self.classify)(kind, native_digest)
-            .ok_or(AdmissionError::InvalidBatch)?;
+        let classification =
+            (self.classify)(kind, native_digest).ok_or(AdmissionError::InvalidBatch)?;
         children.sort_unstable();
         WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
             scope: self.scope,

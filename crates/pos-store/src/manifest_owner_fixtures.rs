@@ -172,24 +172,26 @@ const fn fidelity(level: u8, max_cpu_us: u32) -> FidelityBudgetV1 {
 }
 
 fn budget(plugin_id: PluginId, profile: &[u8]) -> Fallible<ExecutableBudgetPolicyV1> {
-    Ok(ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-        revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
-        cut_budget_family: 0,
-        max_event_bytes: 4096,
-        fidelity_budgets: [
-            fidelity(0, 500_000),
-            fidelity(1, 250_000),
-            fidelity(2, 50_000),
-        ],
-        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id,
-            cpu_reservations_us: [100, 100, 100],
-        }],
-        accounting_semantics: 0,
-        execution_profile_hash: Hash::from_bytes(*blake3::hash(profile).as_bytes()),
-        max_pass_wall_duration_us: 1_000,
-    })?)
+    Ok(ExecutableBudgetPolicyV1::new(
+        ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4096,
+            fidelity_budgets: [
+                fidelity(0, 500_000),
+                fidelity(1, 250_000),
+                fidelity(2, 50_000),
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [100, 100, 100],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes(*blake3::hash(profile).as_bytes()),
+            max_pass_wall_duration_us: 1_000,
+        },
+    )?)
 }
 
 /// Self-consistent EOP1/OPC1 pair; even seeds carry a non-empty EPF1.
