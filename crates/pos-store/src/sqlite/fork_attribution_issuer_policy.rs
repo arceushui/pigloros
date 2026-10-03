@@ -23,6 +23,17 @@ use crate::fork_attribution_issuer_policy::{
 /// bytes when the history row exists.
 type StoredPolicyRowV1 = (String, i64, [u8; 32], Option<Vec<u8>>);
 
+/// The history row count, then the floor's scope, generation, and digest and
+/// the bytes of the history row it names; the floor columns are all null
+/// when no floor row exists.
+type FloorReadRowV1 = (
+    i64,
+    Option<String>,
+    Option<i64>,
+    Option<[u8; 32]>,
+    Option<Vec<u8>>,
+);
+
 impl From<rusqlite::Error> for ForkAttributionIssuerPolicyErrorV1 {
     /// Storage failure; for writes the commit state is unknown. No `SQLite`
     /// failure is trusted to prove what was or was not committed.
@@ -125,21 +136,22 @@ fn persist_floor_policy(
 /// contiguous with it: one row per generation up to the floor, and no rows at
 /// all without a floor.
 fn read_floor_policy(conn: &Connection) -> LoadedIssuerPolicyV1 {
-    let rows = conn.query_row(
-        "SELECT COUNT(*) FROM fork_attribution_issuer_policies",
+    // One statement reads the history count and the optional floor row from
+    // the same snapshot, even in autocommit; the anchor makes it one row.
+    let (rows, scope, generation, digest, bytes) = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM fork_attribution_issuer_policies),
+                floor.scope, floor.generation, floor.policy_digest, history.fip1_cbor
+         FROM (SELECT 1) AS anchor
+         LEFT JOIN fork_attribution_issuer_policy_floor AS floor
+         LEFT JOIN fork_attribution_issuer_policies AS history
+             ON history.policy_digest = floor.policy_digest",
         [],
-        |row| row.get::<_, i64>(0),
+        |row| FloorReadRowV1::try_from(row),
     )?;
-    let row = conn
-        .query_row(
-            "SELECT floor.scope, floor.generation, floor.policy_digest, history.fip1_cbor
-             FROM fork_attribution_issuer_policy_floor AS floor
-             LEFT JOIN fork_attribution_issuer_policies AS history
-                 ON history.policy_digest = floor.policy_digest",
-            [],
-            |row| StoredPolicyRowV1::try_from(row),
-        )
-        .optional()?;
+    let row = scope
+        .zip(generation)
+        .zip(digest)
+        .map(|((scope, generation), digest)| (scope, generation, digest, bytes));
     let floor = row.map(stored_policy_row).transpose()?;
     let generation = floor.as_ref().map_or(0, |policy| policy.input().generation);
     if u64::try_from(rows) == Ok(generation) {

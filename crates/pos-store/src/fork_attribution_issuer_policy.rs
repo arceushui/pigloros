@@ -224,7 +224,7 @@ pub enum ForkAttributionIssuerPolicyErrorV1 {
     #[error("Fork attribution issuer policy state is corrupt")]
     CorruptPolicy,
     /// Storage failure; for writes the commit state is unknown.
-    #[error("Fork attribution issuer policy storage outcome is indeterminate")]
+    #[error("Fork attribution issuer storage failure; for writes the commit state is unknown")]
     StorageIndeterminate,
 }
 
