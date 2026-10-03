@@ -37,6 +37,7 @@ pub mod reviewed_policy;
 pub mod scheduled_admission_host;
 pub mod scheduler;
 pub mod schema;
+pub mod trusted_clock;
 pub mod world_profile;
 pub mod world_replay;
 
@@ -86,6 +87,7 @@ pub use scheduled_admission_host::LocalScheduledAdmissionHostV1;
 pub use scheduled_admission_host::{ScheduledAdmissionPortsV1, ScheduledAdmissionStoreV1};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
+pub use trusted_clock::handoff;
 pub use world_profile::HostWorldProfileV1;
 pub use world_replay::{
     VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
