@@ -60,12 +60,15 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
-    event::{CanonicalBytes, Event, EventDraft, Kind},
+    event::{CanonicalBytes, EventDraft, Kind},
     ids::{EntityId, PluginId},
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
 };
 use serde::{Deserialize, Serialize};
+
+mod reducer;
+
+pub use reducer::SocietyReducer;
 
 /// Entity kind for society aggregate nodes.
 pub const ENTITY_KIND: &str = "society-aggregate";
@@ -85,7 +88,7 @@ pub enum SocietyDimension {
 }
 
 impl SocietyDimension {
-    /// Stable string key used in [`State`].
+    /// Stable string key used in [`State`](pos_core::state::State).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -179,6 +182,29 @@ impl Plugin for SocietyPlugin {
     }
 }
 
+// Reviewed staged Reducer catalogue factory (ADR-113 §1): every protected
+// candidate builds a fresh `SocietyReducer` here and keeps only the reducer.
+#[cfg(feature = "installed-factory")]
+impl pos_runtime::InstalledPluginFactoryV1 for SocietyPlugin {
+    type Configuration = ();
+    type Plugin = Self;
+    type Approver = pos_runtime::NoActionApproverV1;
+
+    fn configuration_details(_configuration: &()) -> Vec<u8> {
+        pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1.to_vec()
+    }
+
+    fn build(
+        _configuration: &(),
+    ) -> pos_runtime::InstalledPluginProductV1<Self, pos_runtime::NoActionApproverV1> {
+        pos_runtime::InstalledPluginProductV1 {
+            plugin: Self::new(),
+            reducer: Some(Box::new(SocietyReducer)),
+            approver: pos_runtime::NoActionApproverV1,
+        }
+    }
+}
+
 /// Installed read-only projection of Society Signals owned by another Plugin.
 ///
 /// This Plugin has a Reducer but no Driver, `ActionApprover`, or owned Event
@@ -241,80 +267,6 @@ pub fn draft_signal(entity: EntityId, signal: &SocietySignal) -> EventDraft {
     )
 }
 
-/// Tracks per-dimension count, sum, mean, and last value.
-pub struct SocietyReducer;
-
-impl SocietyReducer {
-    fn dim_key(prefix: &str, dim: SocietyDimension) -> String {
-        format!("{prefix}.{}", dim.as_str())
-    }
-}
-
-impl Reducer for SocietyReducer {
-    fn initial(&self) -> State {
-        let mut s = State::new();
-        let zero = serde_json::json!(0.0);
-        for dim in SocietyDimension::all() {
-            s.set(
-                Self::dim_key("count", dim),
-                serde_json::Value::Number(0.into()),
-            );
-            s.set(Self::dim_key("sum", dim), zero.clone());
-            s.set(Self::dim_key("mean", dim), zero.clone());
-            s.set(Self::dim_key("last", dim), serde_json::Value::Null);
-        }
-        s.set("signals", serde_json::Value::Number(0.into()));
-        s
-    }
-
-    fn apply(&self, state: &mut State, event: &Event) {
-        if event.event_type.as_str() != EVENT_TYPE_SIGNAL {
-            return;
-        }
-
-        let Ok(signal) = ciborium::from_reader::<SocietySignal, _>(event.payload.as_slice()) else {
-            return;
-        };
-
-        // Bad CBOR / non-finite samples do not bump `signals` or dimension stats.
-        if !signal.value.is_finite() {
-            return;
-        }
-
-        let signals = state
-            .get("signals")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        state.set("signals", serde_json::Value::Number((signals + 1).into()));
-
-        // Scaffold contract: samples are clamped to `[0.0, 1.0]`.
-        let value = signal.value.clamp(0.0, 1.0);
-
-        let dim = signal.dimension;
-        let count = state
-            .get(&Self::dim_key("count", dim))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0)
-            + 1;
-        let sum = state
-            .get(&Self::dim_key("sum", dim))
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0)
-            + value;
-        #[allow(clippy::cast_precision_loss)]
-        let mean = sum / (count as f64);
-
-        state.set(
-            Self::dim_key("count", dim),
-            serde_json::Value::Number(count.into()),
-        );
-        // `value`/`sum`/`mean` are finite here, so `json!(f64)` always yields a Number.
-        state.set(Self::dim_key("sum", dim), serde_json::json!(sum));
-        state.set(Self::dim_key("mean", dim), serde_json::json!(mean));
-        state.set(Self::dim_key("last", dim), serde_json::json!(value));
-    }
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -344,8 +296,9 @@ mod tests {
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
-        event::SchemaVersion,
+        event::{Event, SchemaVersion},
         ids::EventId,
+        state::Reducer,
     };
 
     fn make_signal_event(entity: EntityId, signal: &SocietySignal) -> Event {
@@ -654,5 +607,52 @@ mod tests {
             state.get("signals").and_then(serde_json::Value::as_u64),
             Some(5)
         );
+    }
+
+    #[test]
+    #[cfg(feature = "installed-factory")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn staged_factory_builds_a_fresh_reducer_per_candidate() {
+        use pos_runtime::{
+            fold_detached_candidate_v1, HostProjectionProviderV1, InitialStateV1,
+            ProtectedProjectionProviderV1, StagedReducerAdmissionErrorV1,
+        };
+
+        let mut provider = HostProjectionProviderV1::default();
+        assert_eq!(
+            <SocietyPlugin as pos_runtime::InstalledPluginFactoryV1>::configuration_details(&()),
+            pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1
+        );
+        assert_eq!(
+            provider.admit::<SocietyPlugin>(std::sync::Arc::new(())),
+            Err(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
+        );
+        let consumer = provider
+            .admit_fixture::<SocietyPlugin>(std::sync::Arc::new(()))
+            .test_ok();
+        let source =
+            pos_core::staged_install::ProjectionSourceV1::bound(pos_core::TimelineId::new(), None);
+        let open = || provider.open_candidate(&[consumer], InitialStateV1::Empty, source);
+        let mut folded = open().test_ok();
+        let fresh = open().test_ok();
+        let entity = EntityId::new();
+        let event = make_signal_event(
+            entity,
+            &SocietySignal {
+                dimension: SocietyDimension::Trust,
+                value: 0.5,
+                subject: None,
+                object: None,
+            },
+        );
+        fold_detached_candidate_v1(&mut folded, std::slice::from_ref(&event));
+
+        let mut expected = SocietyReducer.initial();
+        SocietyReducer.apply(&mut expected, &event);
+        assert_eq!(
+            folded.state_for(consumer.plugin_id(), &entity),
+            Some(&expected)
+        );
+        assert!(fresh.state_for(consumer.plugin_id(), &entity).is_none());
     }
 }

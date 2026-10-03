@@ -1,6 +1,5 @@
 use ciborium::value::Value;
 use pos_core::ids::{EntityId, PluginId, TimelineId};
-use std::collections::HashSet;
 use std::io::Cursor;
 use thiserror::Error;
 use ulid::Ulid;
@@ -77,7 +76,12 @@ impl ActionCatalogueV1 {
             return Err(AgentDecisionError::InvalidActionCatalogueCount);
         }
 
-        let mut seen = HashSet::with_capacity(action_ids.len());
+        #[expect(
+            clippy::disallowed_types,
+            reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
+                      a duplicate check needs no iteration order"
+        )]
+        let mut seen = std::collections::HashSet::with_capacity(action_ids.len());
         for action_id in &action_ids {
             validate_action_identifier(action_id)?;
             if !seen.insert(action_id.as_str()) {

@@ -6,8 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Compiles the reviewed staged Reducer catalogue factory for host composition
+# roots (ADR-113 §1). Off by default so the wasm World client graph stays free
+# of pos-runtime.
+installed-factory = ["dep:pos-runtime"]
+
 [dependencies]
 pos-core = { path = "../../crates/pos-core" }
+pos-runtime = { path = "../../crates/pos-runtime", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
