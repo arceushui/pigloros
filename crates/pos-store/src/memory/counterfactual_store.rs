@@ -338,7 +338,7 @@ impl MemoryStore {
         command.committed_receipt(tick.head).map(|receipt| {
             entries.install_tick(tick);
             entries.counterfactual.advance(command);
-            CounterfactualInvalidationOutcomeV1::Committed(receipt)
+            CounterfactualInvalidationOutcomeV1::Committed(Box::new(receipt))
         })
     }
 
@@ -679,8 +679,8 @@ mod tests {
         let retried = store.commit_counterfactual_invalidation(&command);
         assert_eq!(
             retried,
-            Ok(CounterfactualInvalidationOutcomeV1::Committed(ok(
-                command.committed_receipt(Seq::from_u64(2))
+            Ok(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
+                ok(command.committed_receipt(Seq::from_u64(2)))
             )))
         );
         assert_eq!(store.state(fork).events.len(), 1);
