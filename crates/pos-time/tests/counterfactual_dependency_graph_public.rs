@@ -5,7 +5,9 @@ use pos_conformance::counterfactual::dependency::{
     DependencyClassificationRuleV1, DependencyTickRangeV1, InputDependencyContractErrorV1,
     InputDependencyV1,
 };
-use pos_conformance::counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1;
+use pos_conformance::counterfactual::frontier_artifacts::{
+    UnknownEdgeCoordinateV1, MAX_CAUSE_DIGESTS_V1, MAX_UNKNOWN_EDGE_COORDINATES_V1,
+};
 use pos_conformance::counterfactual::plan::{
     CounterfactualPlanContractErrorV1, CounterfactualPlanV1, FrozenArtifactDescriptorV1,
     PlanExecutionProfileRefV1, PlanTrustPolicyRefV1,
@@ -20,7 +22,7 @@ use pos_time::counterfactual::dependency_graph::{
     validate_dependency_graph_v1, DependencyGraphBoundsV1 as Bounds,
     DependencyGraphErrorV1 as GraphError, DependencyGraphNodeOriginV1 as Origin,
     DependencyGraphNodeV1 as Node, ValidatedDependencyGraphV1, MAX_DEPENDENCY_GRAPH_EDGES_V1,
-    MAX_DEPENDENCY_GRAPH_NODES_V1, MAX_UNKNOWN_EDGE_COORDINATES_V1,
+    MAX_DEPENDENCY_GRAPH_NODES_V1,
 };
 use std::collections::BTreeSet;
 use std::error::Error as _;
@@ -120,6 +122,7 @@ fn plan() -> TestResult<CounterfactualPlanV1> {
         exogenous_descriptors: vec![descriptor(1, 0x50), descriptor(2, 0x40)],
         fixed_policy_descriptors: vec![descriptor(3, 0x30)],
         classification_bundle_digest: [5; 32],
+        unknown_edge_policy: UnknownEdgePolicyV1::Reject,
         execution_profile: PlanExecutionProfileRefV1::from_execution_profile_v1(&profile)?,
         trust_policy: PlanTrustPolicyRefV1::from_trust_policy_snapshot_v1(&snapshot)?,
         plugin_composition_digest: [6; 32],
@@ -301,16 +304,26 @@ fn graph() -> TestResult<Graph> {
     graph_with(|_| ())
 }
 
+/// Validate `graph` under `bounds` after resealing its plan with `policy`,
+/// since the plan digest binds the unknown-edge policy.
 fn validate_with(
-    graph: Graph,
+    mut graph: Graph,
     policy: UnknownEdgePolicyV1,
     bounds: Bounds,
-) -> Result<ValidatedDependencyGraphV1, GraphError> {
-    validate_dependency_graph_v1(&graph.plan, policy, bounds, graph.nodes, graph.edges)
+) -> TestResult<Result<ValidatedDependencyGraphV1, GraphError>> {
+    graph.plan.unknown_edge_policy = policy;
+    graph.plan.plan_digest = graph.plan.digest()?;
+    Ok(validate_dependency_graph_v1(
+        &graph.plan,
+        bounds,
+        graph.nodes,
+        graph.edges,
+    ))
 }
 
+/// Validate `graph` under its plan as built, with the `Reject` policy.
 fn validate(graph: Graph) -> Result<ValidatedDependencyGraphV1, GraphError> {
-    validate_with(graph, UnknownEdgePolicyV1::Reject, BOUNDS)
+    validate_dependency_graph_v1(&graph.plan, BOUNDS, graph.nodes, graph.edges)
 }
 
 fn edited(edit: impl FnOnce(&mut [Node])) -> TestResult<Result<(), GraphError>> {
@@ -390,7 +403,7 @@ fn accepts_complete_graph_and_exposes_canonical_view() -> TestResult {
     assert!(consumer_digests(&validated, [0x01; 32]).is_empty());
     assert!(consumer_digests(&validated, [0xff; 32]).is_empty());
 
-    let full = validate_with(graph()?, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS)?;
+    let full = validate_with(graph()?, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS)??;
     assert_eq!(
         full.unknown_edge_policy(),
         UnknownEdgePolicyV1::FullSuffixFromCut
@@ -405,7 +418,7 @@ fn rejects_bounds_above_hard_maximums() -> TestResult {
         max_nodes: MAX_DEPENDENCY_GRAPH_NODES_V1,
         max_edges: MAX_DEPENDENCY_GRAPH_EDGES_V1,
     };
-    assert!(validate_with(graph()?, UnknownEdgePolicyV1::Reject, maximum).is_ok());
+    assert!(validate_with(graph()?, UnknownEdgePolicyV1::Reject, maximum)?.is_ok());
     for bounds in [
         Bounds {
             max_nodes: MAX_DEPENDENCY_GRAPH_NODES_V1 + 1,
@@ -417,7 +430,7 @@ fn rejects_bounds_above_hard_maximums() -> TestResult {
         },
     ] {
         assert_eq!(
-            validate_with(graph()?, UnknownEdgePolicyV1::Reject, bounds).map(drop),
+            validate_with(graph()?, UnknownEdgePolicyV1::Reject, bounds)?.map(drop),
             Err(GraphError::FieldOutOfBounds)
         );
     }
@@ -430,7 +443,7 @@ fn bounds_nodes_edges_and_declared_inputs_before_traversal() -> TestResult {
         max_nodes: NODE_COUNT,
         max_edges: EDGE_SPECS.len(),
     };
-    assert!(validate_with(graph()?, UnknownEdgePolicyV1::Reject, exact).is_ok());
+    assert!(validate_with(graph()?, UnknownEdgePolicyV1::Reject, exact)?.is_ok());
     for bounds in [
         Bounds {
             max_nodes: NODE_COUNT - 1,
@@ -442,7 +455,7 @@ fn bounds_nodes_edges_and_declared_inputs_before_traversal() -> TestResult {
         },
     ] {
         assert_eq!(
-            validate_with(graph()?, UnknownEdgePolicyV1::Reject, bounds).map(drop),
+            validate_with(graph()?, UnknownEdgePolicyV1::Reject, bounds)?.map(drop),
             Err(GraphError::ResourceLimitExceeded)
         );
     }
@@ -451,7 +464,7 @@ fn bounds_nodes_edges_and_declared_inputs_before_traversal() -> TestResult {
     let undeclared = edge(&extra_edge.nodes[VIEW_DETAIL], &extra_edge.nodes[EXOGENOUS]);
     extra_edge.edges.push(undeclared);
     assert_eq!(
-        validate_with(extra_edge, UnknownEdgePolicyV1::Reject, exact).map(drop),
+        validate_with(extra_edge, UnknownEdgePolicyV1::Reject, exact)?.map(drop),
         Err(GraphError::ResourceLimitExceeded)
     );
 
@@ -462,7 +475,7 @@ fn bounds_nodes_edges_and_declared_inputs_before_traversal() -> TestResult {
         ..exact
     };
     assert_eq!(
-        validate_with(missing_edge, UnknownEdgePolicyV1::Reject, fewer_edges).map(drop),
+        validate_with(missing_edge, UnknownEdgePolicyV1::Reject, fewer_edges)?.map(drop),
         Err(GraphError::ResourceLimitExceeded)
     );
     Ok(())
@@ -480,6 +493,36 @@ fn rejects_invalid_plan() -> TestResult {
         ))
     );
     assert!(error.as_ref().and_then(std::error::Error::source).is_some());
+
+    // The plan digest binds the unknown-edge policy, so it cannot be relabelled.
+    let mut relabelled = graph()?;
+    relabelled.plan.unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
+    assert_eq!(
+        validate(relabelled).map(drop),
+        Err(GraphError::Plan(
+            CounterfactualPlanContractErrorV1::DigestMismatch
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn applies_the_policy_bound_by_the_plan() -> TestResult {
+    let (fixture, expected) = incomplete_graph()?;
+    let validated = validate_with(fixture, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS)??;
+    assert_eq!(
+        validated.unknown_edge_policy(),
+        UnknownEdgePolicyV1::FullSuffixFromCut
+    );
+    assert_eq!(validated.unknown_edge_coordinates(), expected.as_slice());
+
+    let (fixture, expected) = incomplete_graph()?;
+    assert_eq!(
+        validate_with(fixture, UnknownEdgePolicyV1::Reject, BOUNDS)?.map(drop),
+        Err(GraphError::DependencyGraphIncomplete(Box::new(
+            expected[0].clone()
+        )))
+    );
     Ok(())
 }
 
@@ -623,6 +666,28 @@ fn rejects_invalid_edge_lists() -> TestResult {
         ))
     );
     assert!(error.as_ref().and_then(std::error::Error::source).is_some());
+
+    let mut repeated = graph()?;
+    let first = repeated.edges[0].clone();
+    repeated.edges.insert(1, first);
+    assert_eq!(
+        validate(repeated).map(drop),
+        Err(GraphError::Dependency(
+            InputDependencyContractErrorV1::DuplicateIdentity
+        ))
+    );
+
+    // An invalid record is reported before an earlier order error.
+    let mut invalid = graph()?;
+    invalid.edges.swap(0, 1);
+    let last = invalid.edges.len() - 1;
+    invalid.edges[last].provenance_digest = [0; 32];
+    assert_eq!(
+        validate(invalid).map(drop),
+        Err(GraphError::Dependency(
+            InputDependencyContractErrorV1::FieldOutOfBounds
+        ))
+    );
     Ok(())
 }
 
@@ -667,7 +732,7 @@ fn rejects_unknown_edges_under_every_policy() -> TestResult {
         };
         assert_eq!(validate(fixture).map(drop), Err(expected));
         assert_eq!(
-            validate_with(full, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS).map(drop),
+            validate_with(full, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS)?.map(drop),
             Err(unknown)
         );
     }
@@ -831,7 +896,7 @@ fn reject_policy_merges_edge_errors_and_missing_edges_by_canonical_key() -> Test
     );
     // Under `FullSuffixFromCut` the undeclared edge stays fatal.
     assert_eq!(
-        validate_with(full, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS).map(drop),
+        validate_with(full, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS)?.map(drop),
         Err(GraphError::UnknownDependencyEdge(Box::new(undeclared)))
     );
 
@@ -889,7 +954,7 @@ fn reports_the_smallest_edge_error_key_under_every_policy() -> TestResult {
         fixture.edges[early].authorization_digest = [0x01; 32];
         let expected = edge_coordinate(&fixture.edges[early]);
         assert_eq!(
-            validate_with(fixture, policy, BOUNDS).map(drop),
+            validate_with(fixture, policy, BOUNDS)?.map(drop),
             Err(GraphError::UnauthorizedDependency(Box::new(expected)))
         );
     }
@@ -899,23 +964,38 @@ fn reports_the_smallest_edge_error_key_under_every_policy() -> TestResult {
 #[test]
 fn full_suffix_policy_records_missing_edges_in_canonical_order() -> TestResult {
     let (fixture, expected) = incomplete_graph()?;
-    let validated = validate_with(fixture, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS)?;
+    let validated = validate_with(fixture, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS)??;
     assert_eq!(validated.unknown_edge_coordinates(), expected.as_slice());
     assert!(!validated.is_complete());
     Ok(())
 }
 
-fn bulk_graph(missing: u32) -> TestResult<Graph> {
-    let mut fixture = graph()?;
+/// One provisional endogenous node at Tick 19 that declares `inputs`.
+fn bulk_node(scheduler_position: u32, inputs: std::ops::Range<u32>) -> Node {
+    let mut artifact_digest = [0xd7; 32];
+    artifact_digest[..4].copy_from_slice(&scheduler_position.to_be_bytes());
     let mut bulk = node(
         19,
-        0,
+        scheduler_position,
         "bulk",
-        endogenous_digest(7),
+        artifact_digest,
         DependencyClassV1::EndogenousRecomputed,
     );
-    bulk.input_digests = (0..missing).map(bulk_digest).collect();
-    fixture.nodes.insert(VIEW, bulk);
+    bulk.input_digests = inputs.map(bulk_digest).collect();
+    bulk
+}
+
+/// The base graph plus `missing` declared inputs without edges, spread over
+/// bulk nodes of at most `MAX_CAUSE_DIGESTS_V1` inputs each.
+fn bulk_graph(missing: u32) -> TestResult<Graph> {
+    let mut fixture = graph()?;
+    let per_node = u32::try_from(MAX_CAUSE_DIGESTS_V1)?;
+    let bulk: Vec<Node> = (0..missing.div_ceil(per_node))
+        .map(|chunk| bulk_node(chunk, chunk * per_node..missing.min((chunk + 1) * per_node)))
+        .collect();
+    let tail = fixture.nodes.split_off(VIEW);
+    fixture.nodes.extend(bulk);
+    fixture.nodes.extend(tail);
     Ok(fixture)
 }
 
@@ -930,19 +1010,88 @@ fn bounds_recorded_missing_edges() -> TestResult {
         bulk_graph(limit)?,
         UnknownEdgePolicyV1::FullSuffixFromCut,
         bounds,
-    )?;
+    )??;
     assert_eq!(
         validated.unknown_edge_coordinates().len(),
         MAX_UNKNOWN_EDGE_COORDINATES_V1
     );
+    assert!(validated
+        .nodes()
+        .iter()
+        .all(|node| node.input_digests.len() <= MAX_CAUSE_DIGESTS_V1));
     assert_eq!(
         validate_with(
             bulk_graph(limit + 1)?,
             UnknownEdgePolicyV1::FullSuffixFromCut,
             bounds,
-        )
+        )?
         .map(drop),
         Err(GraphError::ResourceLimitExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn bounds_declared_inputs_per_node_at_the_cause_limit() -> TestResult {
+    let limit = u32::try_from(MAX_CAUSE_DIGESTS_V1)?;
+    let bounds = Bounds {
+        max_nodes: 64,
+        max_edges: MAX_CAUSE_DIGESTS_V1 + 64,
+    };
+    let mut at_limit = graph()?;
+    at_limit.nodes.insert(VIEW, bulk_node(0, 0..limit));
+    let validated = validate_with(at_limit, UnknownEdgePolicyV1::FullSuffixFromCut, bounds)??;
+    assert_eq!(
+        validated.unknown_edge_coordinates().len(),
+        MAX_CAUSE_DIGESTS_V1
+    );
+
+    let mut over = graph()?;
+    over.nodes.insert(VIEW, bulk_node(0, 0..limit + 1));
+    assert_eq!(
+        validate_with(over, UnknownEdgePolicyV1::FullSuffixFromCut, bounds)?.map(drop),
+        Err(GraphError::ResourceLimitExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn committed_endogenous_nodes_without_inputs_are_prefix_roots() -> TestResult {
+    // Initial (genesis) state in the parent prefix declares no input.
+    let mut committed = graph()?;
+    let genesis = node(
+        PARENT_CUT_TICK - 1,
+        0,
+        "world",
+        endogenous_digest(9),
+        DependencyClassV1::EndogenousRecomputed,
+    );
+    committed.nodes.insert(PARENT, genesis);
+    let full = Graph {
+        plan: committed.plan.clone(),
+        nodes: committed.nodes.clone(),
+        edges: committed.edges.clone(),
+    };
+    assert!(validate(committed)?.is_complete());
+    assert!(validate_with(full, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS)??.is_complete());
+
+    // The same no-input node in a Fork generation has an unknown closure.
+    let mut provisional = graph()?;
+    let fork_node = node(
+        FIRST_TICK,
+        1,
+        "world",
+        endogenous_digest(9),
+        DependencyClassV1::EndogenousRecomputed,
+    );
+    let expected = UnknownEdgeCoordinateV1 {
+        consumer: fork_node.node.clone(),
+        missing_source_digest: None,
+    };
+    provisional.nodes.insert(ENDOGENOUS_A, fork_node);
+    assert_eq!(
+        validate(provisional).map(drop),
+        Err(GraphError::DependencyGraphIncomplete(Box::new(expected)))
     );
     Ok(())
 }
