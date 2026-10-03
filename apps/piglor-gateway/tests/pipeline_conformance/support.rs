@@ -27,6 +27,7 @@ use pos_store::{memory::MemoryStore, sqlite::SqliteStore, StoreConfig};
 
 /// A Timeline's Fork ancestry, read from the store through the shared
 /// `pos_core::fork_ancestry` helper.
+#[must_use]
 pub fn ancestry<S: pos_core::EventStore + ?Sized>(
     store: &S,
     timeline: TimelineId,
@@ -35,6 +36,7 @@ pub fn ancestry<S: pos_core::EventStore + ?Sized>(
 }
 
 /// The one-member ancestry of a store-less fixture Timeline with no parent.
+#[must_use]
 pub fn root_ancestry(timeline: TimelineId) -> Vec<TimelineMeta> {
     vec![TimelineMeta {
         id: timeline,
