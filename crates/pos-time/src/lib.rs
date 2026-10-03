@@ -13,9 +13,12 @@
 //! | [`mod@snapshot`] | Capture and verify state snapshots |
 //! | [`compare()`] | Diff two divergent timelines after a fork |
 //! | [`merge()`] | Conflict-free / strategy-guided timeline merge |
+//! | `counterfactual` | ADR-064 counterfactual dependency-graph validation and recomputation-frontier derivation (Linux only) |
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod compare;
+#[cfg(target_os = "linux")]
+pub mod counterfactual;
 pub mod merge;
 pub mod replay;
 pub mod snapshot;
