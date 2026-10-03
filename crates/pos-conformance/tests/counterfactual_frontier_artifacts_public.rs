@@ -888,6 +888,9 @@ fn invalidation_identifiers_generation_and_range_are_exact() -> TestResult {
             |s| {
                 s.prior_generation = u64::MAX;
                 s.new_generation = 0;
+                for artifact in &mut s.invalid_artifacts {
+                    artifact.prior_generation = u64::MAX;
+                }
             },
             generation,
         ),
@@ -901,6 +904,9 @@ fn invalidation_identifiers_generation_and_range_are_exact() -> TestResult {
         ("later generation", |s| {
             s.prior_generation = 7;
             s.new_generation = 8;
+            for artifact in &mut s.invalid_artifacts {
+                artifact.prior_generation = 7;
+            }
         }),
         ("single coordinate", |s| {
             s.invalid_end = s.invalid_start.clone();
@@ -926,6 +932,7 @@ fn invalidation_rejects_every_all_zero_digest_like_the_nested_verifier() -> Test
             OUT_OF_RANGE,
         ),
         ("zero plan", |s| s.plan_digest = [0; 32], OUT_OF_RANGE),
+        ("zero fork", |s| s.fork_id = [0; 16], OUT_OF_RANGE),
         (
             "zero frontier digest",
             |s| s.frontier_digest = [0; 32],
@@ -972,6 +979,65 @@ fn invalidation_rejects_every_all_zero_digest_like_the_nested_verifier() -> Test
         s.invalid_start.artifact_digest = [0; 32];
         s.invalid_end.artifact_digest = [0; 32];
     })])
+}
+
+#[test]
+fn invalid_artifacts_belong_to_the_prior_generation() -> TestResult {
+    assert_invalidation_rejected(&[
+        (
+            "artifact from a later generation",
+            |s| s.invalid_artifacts[1].prior_generation = 1,
+            OUT_OF_RANGE,
+        ),
+        (
+            "artifact from an earlier generation",
+            |s| {
+                s.prior_generation = 7;
+                s.new_generation = 8;
+                for artifact in &mut s.invalid_artifacts {
+                    artifact.prior_generation = 7;
+                }
+                s.invalid_artifacts[2].prior_generation = 6;
+            },
+            OUT_OF_RANGE,
+        ),
+    ]);
+    let mut minimal = unsigned_invalidation();
+    minimal.fork_id = [0; 16];
+    minimal.fork_id[15] = 1;
+    let minimal = signed_invalidation(minimal)?;
+    assert_eq!(
+        SuffixInvalidationV1::from_canonical_cbor(&minimal.to_canonical_cbor()?)?,
+        minimal
+    );
+    Ok(())
+}
+
+#[test]
+fn record_header_is_checked_before_the_field_count() -> TestResult {
+    let frontier_fields = root_fields(&frontier()?.to_canonical_cbor()?)?;
+    let invalidation_fields = root_fields(&invalidation()?.to_canonical_cbor()?)?;
+    for (fields, magic) in [(frontier_fields, "RCF2"), (invalidation_fields, "SIV2")] {
+        let mut short = fields;
+        short.truncate(10);
+        let mut future_magic = short.clone();
+        future_magic[0] = text(magic);
+        let mut future_version = short.clone();
+        future_version[1] = uint(2);
+        for (record, expected) in [
+            (future_magic, FrontierArtifactErrorV1::UnsupportedVersion),
+            (future_version, FrontierArtifactErrorV1::UnsupportedVersion),
+            (short, ENCODING),
+        ] {
+            let encoded = encode(&Value::Array(record))?;
+            if magic == "RCF2" {
+                assert_frontier_decode(&encoded, expected);
+            } else {
+                assert_invalidation_decode(&encoded, expected);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[test]
