@@ -408,9 +408,10 @@ fn generated_binding(plugin: &DriverPlugin) -> OutputPolicyBindingV1 {
     .test_ok()
 }
 
-/// Register a cursor-based Driver subscribed to `event_type` through the
-/// generated, test-support verified and undeclared paths. Each path must
-/// reject it and leave the registry unchanged.
+/// Register a cursor Driver subscribed to `event_type` on every path.
+///
+/// The generated, test-support verified and undeclared paths must each reject
+/// it and leave the registry unchanged.
 fn assert_rejected_everywhere(event_type: &str) {
     let seen = Seen::default();
     let cursor = || -> Box<dyn Driver> {

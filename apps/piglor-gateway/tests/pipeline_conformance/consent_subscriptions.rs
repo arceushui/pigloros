@@ -159,8 +159,8 @@ fn registration(byte: u8) -> PluginRegistrationV1 {
     )
 }
 
-fn approver() -> Option<Box<dyn ActionApprover>> {
-    Some(Box::new(CountingApprover(Arc::default())))
+fn approver() -> Box<dyn ActionApprover> {
+    Box::new(CountingApprover(Arc::default()))
 }
 
 /// Register `plugin` with `driver` through one named public path. The
@@ -172,10 +172,11 @@ fn register(
     driver: Box<dyn Driver>,
 ) -> Result<(), RuntimeError> {
     let owned = kinds(&plugin.owned);
+    let approver = Some(approver());
     match path {
         "generated" => registry.register_generated(plugin, None, Some(driver)),
         "generated-with-approver" => {
-            registry.register_generated_with_approver(plugin, None, Some(driver), approver(), owned)
+            registry.register_generated_with_approver(plugin, None, Some(driver), approver, owned)
         }
         "local" => registry.register_local(plugin, vec!["r4-local".to_owned()], None, Some(driver)),
         "pinned" => registry.register_pinned_generated(plugin, registration(1), None, Some(driver)),
@@ -184,7 +185,7 @@ fn register(
             registration(2),
             None,
             Some(driver),
-            approver(),
+            approver,
             owned,
         ),
         "verified" => registry.register_with_verified_output_policy(
@@ -198,7 +199,7 @@ fn register(
             binding(plugin),
             None,
             Some(driver),
-            approver(),
+            approver,
             owned,
         ),
         "test-driver" => registry.register_test_driver_with_verified_output_policy(
@@ -287,8 +288,9 @@ fn rejected_on_every_path(types: &[(&str, &str)]) -> Capture {
     capture
 }
 
-/// PCF-R4-001: a cursor-based Driver subscribing to a type with an ADR-039
-/// modality is rejected at registration on every path, and the registry is
+/// PCF-R4-001: a cursor Driver subscribing to an ADR-039 modality is rejected.
+///
+/// The rejection holds at registration on every path and leaves the registry
 /// unchanged; the same Driver declaring the verified prefix registers.
 #[must_use]
 pub fn cursor_modality_subscription_is_rejected() -> Capture {
@@ -338,7 +340,7 @@ impl Subscriber {
         timeline: TimelineId,
         token: Option<&ConsentCapabilityToken>,
     ) -> String {
-        *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = "not-run".to_owned();
+        "not-run".clone_into(&mut self.seen.lock().unwrap_or_else(PoisonError::into_inner));
         pass(registry, backend, timeline, token)
             .map_or_else(|error| error.to_string(), |_| read(&self.seen))
     }
@@ -367,10 +369,11 @@ fn bare_token(
     )
 }
 
-/// PCF-R4-003: a verified-prefix Driver subscribed to a consent-sensitive
-/// type registers. Across a public pass, a protected pass without the
-/// modality and a later grant, it never observes a sensitive Event without
-/// consent and observes every earlier one after the grant.
+/// PCF-R4-003: a verified-prefix Driver may subscribe to a sensitive type.
+///
+/// Across a public pass, a protected pass without the modality and a later
+/// grant, it never observes a sensitive Event without consent and observes
+/// every earlier one after the grant.
 #[must_use]
 pub fn verified_prefix_delivery_loses_nothing() -> Capture {
     let mut capture = Capture::default();
@@ -414,9 +417,10 @@ pub fn verified_prefix_delivery_loses_nothing() -> Capture {
     capture
 }
 
-/// PCF-R4-004: a cursor-based Driver subscribing only to non-sensitive
-/// types registers and keeps cursor delivery: each pass shows only the
-/// subscribed Events after its cursor, in a public or a protected pass.
+/// PCF-R4-004: a cursor Driver with only non-sensitive types keeps its cursor.
+///
+/// It registers, and each pass shows only the subscribed Events after its
+/// cursor, in a public or a protected pass.
 #[must_use]
 pub fn cursor_subscription_to_ordinary_types_is_unchanged() -> Capture {
     let mut capture = Capture::default();
@@ -457,10 +461,11 @@ pub fn cursor_subscription_to_ordinary_types_is_unchanged() -> Capture {
     capture
 }
 
-/// PCF-R4-005: the registration snapshot governs. A Driver whose
-/// declarations change after registration keeps its registered behaviour:
-/// no newly added type is delivered, the cursor rule is unchanged, and the
-/// pass is not failed for the change.
+/// PCF-R4-005: the registration snapshot governs.
+///
+/// A Driver whose declarations change after registration keeps its
+/// registered behaviour: no newly added type is delivered, the cursor rule is
+/// unchanged, and the pass is not failed for the change.
 #[must_use]
 pub fn registration_snapshot_governs() -> Capture {
     let mut capture = Capture::default();
