@@ -12,18 +12,20 @@ use pos_core::retention::{
     WorldRetentionPolicyV1,
 };
 use pos_core::{
-    build_manifest_owner_scope_v1, ArtifactDataClassV1, ArtifactTransitionRuleV1,
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash,
+    build_manifest_owner_scope_v1, derive_local_cut_world_closure_v1, ArtifactDataClassV1,
+    ArtifactTransitionRuleV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+    FidelityBudgetV1, Hash, LocalCutExpectedHeadRowV1, LocalCutRecordingContextRowV1,
+    LocalCutResultHeadRowV1, LocalCutSealV2, LocalCutWorldClosureSourceV1,
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
-    ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1,
-    ManifestOwnerClassifiedLeafV1, ManifestOwnerConsumerReferenceV1,
-    ManifestOwnerLeafClassificationV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1,
-    ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1,
-    ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-    ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId, TimelineId,
-    WorkloadProfileV1, WorldArtifactKindV1, WorldClosureReadLimitsV1, WorldConsumerSetInputV1,
-    WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
+    ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
+    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
+    ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
+    ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
+    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1,
+    PluginId, TimelineId, WorkloadProfileV1, WorldArtifactKindV1, WorldClosureReadLimitsV1,
+    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
 };
 
 pub(crate) type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -369,9 +371,6 @@ fn reference_leaf(scope: &ManifestOwnerScopeV1, kind: WorldArtifactKindV1) -> Fa
         .ok_or_else(|| "missing fixture reference leaf".into())
 }
 
-type ContextRows = Vec<pos_core::LocalCutRecordingContextRowV1>;
-type ExpectedHeadRows = Vec<pos_core::LocalCutExpectedHeadRowV1>;
-
 /// Genesis chain hash attested by every fixture local-cut source owner.
 pub(crate) const SOURCE_GENESIS: Hash = hash(0x47);
 
@@ -379,9 +378,9 @@ pub(crate) const SOURCE_GENESIS: Hash = hash(0x47);
 ///
 /// Each row names the scope's recorded RLS1 and chains to `predecessor`.
 pub(crate) fn zero_event_inputs(
-    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+    snapshots: &[ManifestOwnerAdmissionSnapshotV1],
     predecessor: &dyn Fn(TimelineId) -> Option<Hash>,
-) -> Fallible<(ContextRows, ExpectedHeadRows)> {
+) -> Fallible<(Vec<LocalCutRecordingContextRowV1>, Vec<LocalCutExpectedHeadRowV1>)> {
     let mut contexts = Vec::with_capacity(snapshots.len());
     let mut heads = Vec::with_capacity(snapshots.len());
     for snapshot in snapshots {
@@ -393,13 +392,13 @@ pub(crate) fn zero_event_inputs(
             .find(|member| member.leaf.as_input().kind == WorldArtifactKindV1::RetentionLease)
             .ok_or("missing recorded lease leaf")?;
         let predecessor_wcb_hash = predecessor(timeline.timeline_id);
-        contexts.push(pos_core::LocalCutRecordingContextRowV1 {
+        contexts.push(LocalCutRecordingContextRowV1 {
             timeline_id: timeline.timeline_id,
             wcs_hash: timeline.wcs1.digest(),
             retention_lease_hash: lease.leaf.as_input().native_digest,
             predecessor_wcb_hash,
         });
-        heads.push(pos_core::LocalCutExpectedHeadRowV1 {
+        heads.push(LocalCutExpectedHeadRowV1 {
             timeline_id: timeline.timeline_id,
             logical_head: 0,
             stitched_chain_hash: SOURCE_GENESIS,
@@ -417,13 +416,13 @@ pub(crate) fn zero_event_inputs(
 /// Kind-5 rows naming the WCB1 the owner derives for each Timeline.
 pub(crate) fn zero_event_results(
     operation_id: Hash,
-    seal: &pos_core::LocalCutSealV2,
-    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
-    contexts: &[pos_core::LocalCutRecordingContextRowV1],
-) -> Fallible<Vec<pos_core::LocalCutResultHeadRowV1>> {
+    seal: &LocalCutSealV2,
+    snapshots: &[ManifestOwnerAdmissionSnapshotV1],
+    contexts: &[LocalCutRecordingContextRowV1],
+) -> Fallible<Vec<LocalCutResultHeadRowV1>> {
     let mut rows = Vec::with_capacity(snapshots.len());
     for (snapshot, context) in snapshots.iter().zip(contexts) {
-        let source = pos_core::LocalCutWorldClosureSourceV1 {
+        let source = LocalCutWorldClosureSourceV1 {
             operation_id,
             seal,
             admission: snapshot,
@@ -431,8 +430,8 @@ pub(crate) fn zero_event_results(
             predecessor_binding_hash: context.predecessor_wcb_hash,
             genesis_hash: SOURCE_GENESIS,
         };
-        let closure = pos_core::derive_local_cut_world_closure_v1(&source)?;
-        rows.push(pos_core::LocalCutResultHeadRowV1 {
+        let closure = derive_local_cut_world_closure_v1(&source)?;
+        rows.push(LocalCutResultHeadRowV1 {
             timeline_id: context.timeline_id,
             result_logical_head: 0,
             result_stitched_hash: SOURCE_GENESIS,

@@ -528,11 +528,13 @@ pub fn local_cut_owner_intent_digest_v1(
 /// identity, wrong owner state, unverified result inventory, or any
 /// signer/key-role mismatch. A kind-8 lease other than the scope's recorded
 /// RLS1 returns `Conflict`; head rows outside the zero-Event non-Fork profile
-/// return `OwnerRejected`; a closure beyond the recorded read limits returns
-/// `BoundExceeded`; kind-4/kind-5 rows that differ from their tables, the
-/// admitted Timelines, the kind-8 predecessor or the derived WCB1 return
-/// `InvalidBatch`. The request cannot supply authority, evidence, or a
-/// signature.
+/// return `OwnerRejected`, which carries the rejection ADR-081 R2.7 names
+/// `CoverageGap` without modelling that diagnostic; a closure beyond the
+/// recorded read limits returns `BoundExceeded`; kind-4/kind-5 rows that
+/// differ from their tables, the admitted Timelines, the kind-8 predecessor or
+/// the derived WCB1, and a leaf set that cannot pack into one WDB1 directory,
+/// return `InvalidBatch`. The request is authenticated before any WCB1 is
+/// derived from it, and cannot supply authority, evidence, or a signature.
 pub fn prepare_local_cut_owner_commit_v1(
     request: LocalCutOwnerRequestV1,
     current_state: Option<&LocalCutOwnerStateV1>,
