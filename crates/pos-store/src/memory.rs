@@ -11534,7 +11534,8 @@ fn validate_memory_local_cut_operation(
     validate_local_cut_owner_result_v1(owner_id, cut_id, &operation.result)?;
     let commit = operation.result.commit.as_input();
     let request = &operation.request;
-    // One tuple comparison keeps this exact-binding check branch-free.
+    // Stored and expected bindings are compared pairwise, so both tuples must
+    // list their fields in the same order.
     let stored = (
         (
             &request.operation_id,
