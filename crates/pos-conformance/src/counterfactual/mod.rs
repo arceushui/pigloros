@@ -12,6 +12,7 @@ mod codec;
 pub mod dependency;
 pub mod frontier_artifacts;
 pub mod intervention;
+pub mod plan;
 pub mod result;
 
 pub use intervention::{
