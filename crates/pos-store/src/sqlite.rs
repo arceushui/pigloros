@@ -111,7 +111,7 @@ use crate::fork_delivery_journal::{
 };
 use crate::fork_event_authority::{
     classified_event_matches_operation, fork_append_request, permitted_fork_admission,
-    preflight_classifier_sources,
+    preflight_classifier_sources, recover_classified_operation,
 };
 use crate::fork_manifest_publication::{
     authorize_publication, publication_parent_head, publication_sources,
@@ -10874,8 +10874,6 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
         operation_id: Hash,
         draft: &EventDraft,
     ) -> Result<Option<ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1> {
-        let source = permit.source();
-        let child_timeline_id = permit.child_timeline_id();
         if !permit.is_live_for(session) {
             return Err(ForkEventAuthorityErrorV1::Unauthenticated);
         }
@@ -10886,27 +10884,14 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
         else {
             return Ok(None);
         };
-        let request = fork_append_request(operation_id, child_timeline_id, source, draft)?;
-        if operation.input().request_digest != request.digest() {
-            return Err(ForkEventAuthorityErrorV1::Conflict);
-        }
-        sqlite_validated_classified_event(&self.conn, self.hasher.as_ref(), &operation).and_then(
-            |event| {
-                if event.entity != draft.entity
-                    || event.event_type != draft.event_type
-                    || event.payload != draft.payload
-                    || event.causation_id != draft.causation_id
-                    || event.correlation_id != draft.correlation_id
-                    || event.schema_version != draft.schema_version
-                    || event.signature.is_some()
-                    || event.payload_hash != operation.input().payload_hash
-                    || event.wall_time != operation.input().wall_time
-                {
-                    Err(ForkEventAuthorityErrorV1::CorruptAuthority)
-                } else {
-                    Ok(Some(ForkClassifiedAppendReceiptV1 { event, operation }))
-                }
+        recover_classified_operation(
+            |operation| {
+                sqlite_validated_classified_event(&self.conn, self.hasher.as_ref(), operation)
             },
+            operation,
+            permit,
+            operation_id,
+            draft,
         )
     }
 
