@@ -37,12 +37,12 @@ const fn terminal_error(code: ErrorCode, tick: u64) -> TerminalError {
     }
 }
 
-fn sealed(mut result: CounterfactualResultV1) -> CounterfactualResultV1 {
-    result.result_digest = result.digest();
-    result
+fn sealed(mut result: CounterfactualResultV1) -> Result<CounterfactualResultV1, ResultError> {
+    result.result_digest = result.digest()?;
+    Ok(result)
 }
 
-fn completed() -> CounterfactualResultV1 {
+fn completed() -> Result<CounterfactualResultV1, ResultError> {
     sealed(CounterfactualResultV1 {
         result_id: [1; 16],
         plan_digest: [2; 32],
@@ -65,8 +65,8 @@ fn completed() -> CounterfactualResultV1 {
     })
 }
 
-fn failed() -> CounterfactualResultV1 {
-    let mut result = completed();
+fn failed() -> Result<CounterfactualResultV1, ResultError> {
+    let mut result = completed()?;
     result.committed_through_tick = Some(11);
     result.checkpoints = vec![checkpoint(10, 0x40)];
     result.terminal_state = TerminalState::Failed;
@@ -81,7 +81,7 @@ fn resealed_validation(
 ) -> Result<(), ResultError> {
     let mut result = base.clone();
     edit(&mut result);
-    sealed(result).validate()
+    sealed(result)?.validate()
 }
 
 fn encode(value: &Value) -> TestResult<Vec<u8>> {
@@ -119,7 +119,7 @@ fn decoded(bytes: &[u8]) -> Result<CounterfactualResultV1, ResultError> {
 
 #[test]
 fn completed_result_roundtrips_exact_wire_fields_and_domain_digest() -> TestResult {
-    let result = completed();
+    let result = completed()?;
     assert!(result.is_complete());
     assert_eq!(result.validate(), Ok(()));
     let bytes = result.to_canonical_cbor()?;
@@ -152,7 +152,7 @@ fn completed_result_roundtrips_exact_wire_fields_and_domain_digest() -> TestResu
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.CounterfactualResult.v1\0");
     hasher.update(&encode(&Value::Array(expected.clone()))?);
-    assert_eq!(result.digest(), *hasher.finalize().as_bytes());
+    assert_eq!(result.digest()?, *hasher.finalize().as_bytes());
     expected.push(Value::Bytes(result.result_digest.to_vec()));
     assert_eq!(fields_of(&bytes)?, expected);
     assert_eq!(
@@ -164,7 +164,7 @@ fn completed_result_roundtrips_exact_wire_fields_and_domain_digest() -> TestResu
 
 #[test]
 fn incomplete_results_roundtrip_with_safe_terminal_errors() -> TestResult {
-    let result = failed();
+    let result = failed()?;
     assert!(!result.is_complete());
     let bytes = result.to_canonical_cbor()?;
     assert_eq!(decoded(&bytes)?, result);
@@ -178,7 +178,7 @@ fn incomplete_results_roundtrip_with_safe_terminal_errors() -> TestResult {
         ])
     );
 
-    let mut nothing_committed = failed();
+    let mut nothing_committed = failed()?;
     nothing_committed.committed_through_tick = None;
     nothing_committed.checkpoints.clear();
     nothing_committed.terminal_error = Some(TerminalError {
@@ -187,16 +187,16 @@ fn incomplete_results_roundtrip_with_safe_terminal_errors() -> TestResult {
         scheduler_position: u32::MAX,
         safe_digest: None,
     });
-    let nothing_committed = sealed(nothing_committed);
+    let nothing_committed = sealed(nothing_committed)?;
     let bytes = nothing_committed.to_canonical_cbor()?;
     assert_eq!(fields_of(&bytes)?[8], Value::Null);
     assert_eq!(decoded(&bytes)?, nothing_committed);
 
-    let mut stopped = failed();
+    let mut stopped = failed()?;
     stopped.terminal_state = TerminalState::SafeStopped;
     stopped.terminal_error = None;
     stopped.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
-    let stopped = sealed(stopped);
+    let stopped = sealed(stopped)?;
     assert_eq!(decoded(&stopped.to_canonical_cbor()?)?, stopped);
     Ok(())
 }
@@ -212,9 +212,9 @@ fn every_closed_enum_code_has_one_exact_wire_value() -> TestResult {
     assert_eq!(ErrorCode::ALL[25], ErrorCode::DependencyGraphIncomplete);
     assert_eq!(ErrorCode::ALL[32], ErrorCode::MixedForkGeneration);
     for (index, code) in ErrorCode::ALL.into_iter().enumerate() {
-        let mut result = failed();
+        let mut result = failed()?;
         result.terminal_error = Some(terminal_error(code, 12));
-        let result = sealed(result);
+        let result = sealed(result)?;
         let bytes = result.to_canonical_cbor()?;
         let fields = fields_of(&bytes)?;
         let Value::Array(error) = &fields[FIELD_TERMINAL_ERROR] else {
@@ -227,7 +227,7 @@ fn every_closed_enum_code_has_one_exact_wire_value() -> TestResult {
         assert_eq!(usize::from(state as u8), index);
     }
     assert_eq!(
-        fields_of(&failed().to_canonical_cbor()?)?[FIELD_TERMINAL_STATE],
+        fields_of(&failed()?.to_canonical_cbor()?)?[FIELD_TERMINAL_STATE],
         uint(1)
     );
     let claims = [
@@ -238,9 +238,9 @@ fn every_closed_enum_code_has_one_exact_wire_value() -> TestResult {
         ReplayClaimV1::IncompatibleProfile,
     ];
     for (index, claim) in claims.into_iter().enumerate() {
-        let mut result = completed();
+        let mut result = completed()?;
         result.replay_claim = claim;
-        let result = sealed(result);
+        let result = sealed(result)?;
         let bytes = result.to_canonical_cbor()?;
         assert_eq!(
             fields_of(&bytes)?[FIELD_REPLAY_CLAIM],
@@ -253,13 +253,13 @@ fn every_closed_enum_code_has_one_exact_wire_value() -> TestResult {
 
 #[test]
 fn decoder_rejects_unknown_enum_codes() -> TestResult {
-    let completed_bytes = completed().to_canonical_cbor()?;
+    let completed_bytes = completed()?.to_canonical_cbor()?;
     for (field, code) in [(FIELD_TERMINAL_STATE, 3), (FIELD_REPLAY_CLAIM, 5)] {
         let bytes = with_field(&completed_bytes, field, uint(code))?;
         assert_eq!(decoded(&bytes), Err(ResultError::UnknownEnum));
     }
     let bytes = with_field(
-        &failed().to_canonical_cbor()?,
+        &failed()?.to_canonical_cbor()?,
         FIELD_TERMINAL_ERROR,
         Value::Array(vec![uint(33), uint(12), uint(7), Value::Null]),
     )?;
@@ -269,7 +269,7 @@ fn decoder_rejects_unknown_enum_codes() -> TestResult {
 
 #[test]
 fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
-    let base = completed();
+    let base = completed()?;
     let identity_edits: [Edit; 11] = [
         |result| result.result_id[0] ^= 1,
         |result| result.plan_digest[0] ^= 1,
@@ -296,16 +296,16 @@ fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
     for edit in identity_edits {
         let mut result = base.clone();
         edit(&mut result);
-        assert_ne!(result.digest(), base.digest());
+        assert_ne!(result.digest()?, base.digest()?);
         assert_eq!(result.validate(), Err(ResultError::DigestMismatch));
-        assert_eq!(sealed(result).validate(), Ok(()));
+        assert_eq!(sealed(result)?.validate(), Ok(()));
     }
     for edit in shape_edits {
         let mut result = base.clone();
         edit(&mut result);
-        assert_ne!(result.digest(), base.digest());
+        assert_ne!(result.digest()?, base.digest()?);
     }
-    let error_base = failed();
+    let error_base = failed()?;
     let error_edits: [fn(&mut TerminalError); 4] = [
         |error| error.code = ErrorCode::AtomicCommitFailed,
         |error| error.tick += 1,
@@ -317,7 +317,7 @@ fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
         if let Some(error) = result.terminal_error.as_mut() {
             edit(error);
         }
-        assert_ne!(result.digest(), error_base.digest());
+        assert_ne!(result.digest()?, error_base.digest()?);
     }
 
     let mut tampered = base.clone();
@@ -337,8 +337,8 @@ fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
 }
 
 #[test]
-fn range_bounds_are_enforced_at_each_edge() {
-    let base = completed();
+fn range_bounds_are_enforced_at_each_edge() -> TestResult {
+    let base = completed()?;
     let cases: [(Edit, Result<(), ResultError>); 7] = [
         (
             |result| result.fork_generation = 0,
@@ -396,11 +396,12 @@ fn range_bounds_are_enforced_at_each_edge() {
     for (edit, expected) in cases {
         assert_eq!(resealed_validation(&base, edit), expected);
     }
+    Ok(())
 }
 
 #[test]
-fn checkpoints_are_bounded_ordered_unique_and_single_generation() {
-    let base = completed();
+fn checkpoints_are_bounded_ordered_unique_and_single_generation() -> TestResult {
+    let base = completed()?;
     let cases: [(Edit, ResultError); 7] = [
         (
             |result| result.checkpoints.insert(0, checkpoint(9, 0x3f)),
@@ -443,10 +444,11 @@ fn checkpoints_are_bounded_ordered_unique_and_single_generation() {
     for (edit, expected) in cases {
         assert_eq!(resealed_validation(&base, edit), Err(expected));
     }
+    Ok(())
 }
 
-fn maximum_checkpoints() -> CounterfactualResultV1 {
-    let mut result = completed();
+fn maximum_checkpoints() -> Result<CounterfactualResultV1, ResultError> {
+    let mut result = completed()?;
     let last_tick = u64::try_from(MAX_COUNTERFACTUAL_RESULT_CHECKPOINTS_V1).unwrap_or(0) - 1;
     result.first_tick = 0;
     result.horizon_tick = last_tick;
@@ -463,7 +465,7 @@ fn maximum_checkpoints() -> CounterfactualResultV1 {
 
 #[test]
 fn checkpoint_list_accepts_exactly_its_bound() -> TestResult {
-    let result = maximum_checkpoints();
+    let result = maximum_checkpoints()?;
     assert_eq!(result.checkpoints.len(), 65_536);
     let bytes = result.to_canonical_cbor()?;
     assert!(bytes.len() <= MAX_COUNTERFACTUAL_RESULT_BYTES_V1);
@@ -477,7 +479,7 @@ fn checkpoint_list_accepts_exactly_its_bound() -> TestResult {
         fork_generation: GENERATION,
         checkpoint_digest: [0xff; 32],
     });
-    let oversized = sealed(oversized);
+    let oversized = sealed(oversized)?;
     assert_eq!(oversized.validate(), Err(ResultError::FieldOutOfBounds));
 
     let mut fields = fields_of(&bytes)?;
@@ -497,9 +499,9 @@ fn checkpoint_list_accepts_exactly_its_bound() -> TestResult {
 }
 
 #[test]
-fn terminal_state_must_agree_with_range_error_and_checkpoints() {
-    let complete = completed();
-    let incomplete = failed();
+fn terminal_state_must_agree_with_range_error_and_checkpoints() -> TestResult {
+    let complete = completed()?;
+    let incomplete = failed()?;
     let cases: [(&CounterfactualResultV1, Edit); 9] = [
         (&complete, |result| {
             result.terminal_error = Some(terminal_error(ErrorCode::PluginFailure, 12));
@@ -545,11 +547,12 @@ fn terminal_state_must_agree_with_range_error_and_checkpoints() {
         }),
         Err(ResultError::InconsistentTerminalState)
     );
+    Ok(())
 }
 
 #[test]
-fn incomplete_suffixes_cannot_claim_exact_success() {
-    let incomplete = failed();
+fn incomplete_suffixes_cannot_claim_exact_success() -> TestResult {
+    let incomplete = failed()?;
     for claim in [
         ReplayClaimV1::Exact,
         ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
@@ -570,11 +573,12 @@ fn incomplete_suffixes_cannot_claim_exact_success() {
         );
     }
     assert_eq!(
-        resealed_validation(&completed(), |result| {
+        resealed_validation(&completed()?, |result| {
             result.replay_claim = ReplayClaimV1::ExactAuthoritativeWithRedactedViews;
         }),
         Ok(())
     );
+    Ok(())
 }
 
 #[test]
@@ -587,7 +591,7 @@ fn decoder_enforces_size_limit_before_parsing() {
 
 #[test]
 fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
-    let valid = completed().to_canonical_cbor()?;
+    let valid = completed()?.to_canonical_cbor()?;
     let mut trailing = valid.clone();
     trailing.push(0);
     let mut short = fields_of(&valid)?;
@@ -645,8 +649,8 @@ fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
 
 #[test]
 fn decoder_rejects_malformed_field_types() -> TestResult {
-    let valid = completed().to_canonical_cbor()?;
-    let failed_bytes = failed().to_canonical_cbor()?;
+    let valid = completed()?.to_canonical_cbor()?;
+    let failed_bytes = failed()?.to_canonical_cbor()?;
     let bad_error =
         |fields: Vec<Value>| with_field(&failed_bytes, FIELD_TERMINAL_ERROR, Value::Array(fields));
     for (bytes, expected) in [
@@ -709,13 +713,14 @@ fn decoder_rejects_malformed_field_types() -> TestResult {
 }
 
 #[test]
-fn invalid_records_are_never_encoded() {
-    let mut result = completed();
+fn invalid_records_are_never_encoded() -> TestResult {
+    let mut result = completed()?;
     result.fork_generation = 0;
     assert_eq!(
-        sealed(result).to_canonical_cbor(),
+        sealed(result)?.to_canonical_cbor(),
         Err(ResultError::FieldOutOfBounds)
     );
+    Ok(())
 }
 
 #[test]
