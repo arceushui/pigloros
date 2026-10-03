@@ -283,7 +283,8 @@ pub(crate) fn project_verified_bundle(
 ) -> Result<ManifestProjection, PluginManifestErrorV1> {
     let members = bundle.members();
     // ADR-102 places the sole `pmf1` member first and #425 verified its blob.
-    let bytes = blob_bytes(bundle, members.first().map_or("", BundleMemberV1::digest));
+    let pmf1_digest = members.first().map_or("", BundleMemberV1::digest);
+    let bytes = blob_bytes(bundle, pmf1_digest);
     let pmf1 = decode(bytes)?;
     check_relations(&pmf1)?;
     let artifacts = field_order(&pmf1);
@@ -573,8 +574,7 @@ fn read_supply_chain(
     reader: &mut Pmf1Reader<'_>,
 ) -> Result<(Vec<Digest>, [Artifact; 2], Vec<Artifact>), PluginManifestErrorV1> {
     reader.at(17);
-    let dependencies =
-        read_increasing(reader, MAX_LIST, read_dependency, |dependency| dependency.0)?;
+    let dependencies = read_increasing(reader, MAX_LIST, read_dependency, |entry| entry.0)?;
     reader.at(18);
     let provenance = read_artifact(reader, &PROVENANCE)?;
     reader.at(19);
@@ -594,8 +594,8 @@ fn read_supply_chain(
 /// Fields 21-27 and the end of the document.
 fn read_signed_fields(reader: &mut Pmf1Reader<'_>) -> Result<SignedFields, PluginManifestErrorV1> {
     reader.at(21);
-    let owner = OwnerIdV1::new(reader.text(MAX_ID_BYTES)?)
-        .map_err(|_| PluginManifestErrorV1::InvalidField { ordinal: 21 })?;
+    let invalid_owner = PluginManifestErrorV1::InvalidField { ordinal: 21 };
+    let owner = OwnerIdV1::new(reader.text(MAX_ID_BYTES)?).map_err(|_| invalid_owner)?;
     reader.at(22);
     let not_before = reader.signed()?;
     reader.at(23);
