@@ -567,16 +567,16 @@ pub(crate) fn classified_event_matches_operation(
 /// Whether a recovered classified Event carries exactly the retried draft's content.
 ///
 /// The `FOP1` request digest binds the draft, but only this comparison binds
-/// the stored Event's entity, Event type, payload, causation, correlation, and
-/// schema version to it. `WallTime`, payload hash, signature, and origin are
-/// `FOP1` fields, checked by [`classified_event_matches_operation`].
+/// the stored Event's entity, Event type, payload, causation, and correlation
+/// to it. `WallTime`, payload hash, signature, and origin are `FOP1` fields,
+/// checked by [`classified_event_matches_operation`]. The schema version is
+/// not compared: `SchemaVersion` has the single value V1.
 fn classified_event_matches_draft(event: &Event, draft: &EventDraft) -> bool {
     event.entity == draft.entity
         && event.event_type == draft.event_type
         && event.payload == draft.payload
         && event.causation_id == draft.causation_id
         && event.correlation_id == draft.correlation_id
-        && event.schema_version == draft.schema_version
 }
 
 /// Apply the one classified-append recovery rule to a stored `FOP1`.
