@@ -8,8 +8,8 @@ use pos_conformance::counterfactual::frontier_artifacts::{
     FrontierArtifactErrorV1, UnknownEdgeCoordinateV1,
 };
 use pos_conformance::counterfactual::plan::{
-    CounterfactualPlanContractErrorV1, CounterfactualPlanV1, FrozenArtifactDescriptorV1,
-    PlanExecutionProfileRefV1, PlanTrustPolicyRefV1,
+    CounterfactualPlanV1, FrozenArtifactDescriptorV1, PlanExecutionProfileRefV1,
+    PlanTrustPolicyRefV1,
 };
 use pos_conformance::counterfactual::{InterventionOperationV1, InterventionV1};
 use pos_conformance::{
@@ -23,7 +23,7 @@ use pos_time::counterfactual::dependency_graph::{
     ValidatedDependencyGraphV1,
 };
 use pos_time::counterfactual::frontier::{
-    dependency_graph_digest_v1, derive_recomputation_frontier_v1,
+    affected_presentation_outputs_v1, dependency_graph_digest_v1, derive_recomputation_frontier_v1,
     RecomputationFrontierErrorV1 as FrontierError,
 };
 use std::collections::BTreeSet;
@@ -44,6 +44,11 @@ const AGENT_B: usize = 8;
 const WORLD_D: usize = 9;
 const VIEW: usize = 10;
 const WEATHER: usize = 11;
+/// Presentation output of `VIEW`, appended by `presentation_graph`.
+const VIEW_CHAIN: usize = 12;
+/// Presentation output of the unaffected `WEATHER`, appended by
+/// `presentation_graph`.
+const WEATHER_VIEW: usize = 13;
 /// `(consumer, source)` node positions of every edge in the base graph.
 const EDGE_SPECS: [(usize, usize); 14] = [
     (PARENT, EXOGENOUS),
@@ -132,6 +137,7 @@ fn plan() -> TestResult<CounterfactualPlanV1> {
         exogenous_descriptors: vec![descriptor(1, 0x50)],
         fixed_policy_descriptors: vec![descriptor(3, 0x30)],
         classification_bundle_digest: [5; 32],
+        unknown_edge_policy: UnknownEdgePolicyV1::Reject,
         execution_profile: PlanExecutionProfileRefV1::from_execution_profile_v1(&profile)?,
         trust_policy: PlanTrustPolicyRefV1::from_trust_policy_snapshot_v1(&snapshot)?,
         plugin_composition_digest: [6; 32],
@@ -312,12 +318,15 @@ fn graph() -> TestResult<Graph> {
     graph_with(|_| (), &[])
 }
 
+/// Reseal the plan with the requested `policy`, which its digest binds, and
+/// validate the graph against it.
 fn validate(
-    graph: Graph,
+    mut graph: Graph,
     policy: UnknownEdgePolicyV1,
 ) -> TestResult<(CounterfactualPlanV1, ValidatedDependencyGraphV1)> {
-    let validated =
-        validate_dependency_graph_v1(&graph.plan, policy, BOUNDS, graph.nodes, graph.edges)?;
+    graph.plan.unknown_edge_policy = policy;
+    graph.plan.plan_digest = graph.plan.digest()?;
+    let validated = validate_dependency_graph_v1(&graph.plan, BOUNDS, graph.nodes, graph.edges)?;
     Ok((graph.plan, validated))
 }
 
@@ -471,6 +480,8 @@ fn full_suffix_fallback_starts_at_first_tick_after_cut() -> TestResult {
     )?;
     let frontier = derive(&plan, &validated)?;
     let (_, complete) = derive_base()?;
+    // The fallback was taken, so the applied policy is the requested one.
+    assert_eq!(frontier.plan_digest, plan.plan_digest);
     assert_eq!(
         frontier.unknown_edge_policy,
         UnknownEdgePolicyV1::FullSuffixFromCut
@@ -502,10 +513,106 @@ fn full_suffix_fallback_starts_at_first_tick_after_cut() -> TestResult {
 }
 
 #[test]
-fn complete_graph_under_full_suffix_policy_keeps_fine_grained_frontier() -> TestResult {
+fn records_the_applied_policy_and_binds_the_requested_one_in_the_plan() -> TestResult {
     let (plan, validated) = validate(graph()?, UnknownEdgePolicyV1::FullSuffixFromCut)?;
     let (_, complete) = derive_base()?;
-    assert_eq!(derive(&plan, &validated)?, complete);
+    let frontier = derive(&plan, &validated)?;
+    // The requested `FullSuffixFromCut` is bound by the plan digest in `RCF1`.
+    assert_eq!(validated.unknown_edge_policy(), plan.unknown_edge_policy);
+    assert_eq!(frontier.plan_digest, plan.plan_digest);
+    assert_ne!(frontier.plan_digest, complete.plan_digest);
+    // No edge is missing, so the fallback is not taken and `Reject` applies.
+    assert_eq!(frontier.unknown_edge_policy, UnknownEdgePolicyV1::Reject);
+    assert!(frontier.unknown_edge_coordinates.is_empty());
+    assert_eq!(frontier.affected_nodes, complete.affected_nodes);
+    assert_eq!(frontier.owner_frontiers, complete.owner_frontiers);
+    assert_eq!(
+        (
+            frontier.global_frontier_tick,
+            frontier.global_frontier_scheduler_position
+        ),
+        (
+            complete.global_frontier_tick,
+            complete.global_frontier_scheduler_position
+        )
+    );
+    frontier.validate()?;
+    Ok(())
+}
+
+/// Shift a base-graph position past the committed presentation output that
+/// `presentation_graph` inserts at `FIXED`.
+const fn shifted(position: usize) -> usize {
+    if position >= FIXED {
+        position + 1
+    } else {
+        position
+    }
+}
+
+/// The base graph plus a committed presentation output of `PARENT`, a
+/// presentation output of `VIEW`, and one of the unaffected `WEATHER`,
+/// omitting the `omitted` base edges.
+fn presentation_graph(omitted: &[(usize, usize)]) -> TestResult<Graph> {
+    let plan = plan()?;
+    let mut nodes = base_nodes(&plan)?;
+    for (position, seed) in [(0, 9), (1, 10)] {
+        nodes.push(node(
+            17,
+            position,
+            "ui",
+            endogenous_digest(seed),
+            DependencyClassV1::PresentationOnly,
+        ));
+    }
+    nodes.insert(
+        FIXED,
+        node(
+            PARENT_CUT_TICK,
+            2,
+            "ui",
+            endogenous_digest(11),
+            DependencyClassV1::PresentationOnly,
+        ),
+    );
+    let specs: Vec<(usize, usize)> = EDGE_SPECS
+        .iter()
+        .chain(&[(VIEW_CHAIN, VIEW), (WEATHER_VIEW, WEATHER)])
+        .map(|&(consumer, source)| (shifted(consumer), shifted(source)))
+        .chain([(FIXED, PARENT)])
+        .collect();
+    let omitted: Vec<(usize, usize)> = omitted
+        .iter()
+        .map(|&(consumer, source)| (shifted(consumer), shifted(source)))
+        .collect();
+    Ok(connect(plan, nodes, &specs, &omitted))
+}
+
+#[test]
+fn lists_presentation_outputs_of_affected_nodes() -> TestResult {
+    let fixture = presentation_graph(&[])?;
+    let expected = coordinates(&fixture.nodes, &[shifted(VIEW), shifted(VIEW_CHAIN)]);
+    let (_, validated) = validate(fixture, UnknownEdgePolicyV1::Reject)?;
+    assert_eq!(affected_presentation_outputs_v1(&validated), expected);
+
+    let (_, base) = validate(graph()?, UnknownEdgePolicyV1::Reject)?;
+    assert_eq!(
+        affected_presentation_outputs_v1(&base),
+        coordinates(&graph()?.nodes, &[VIEW])
+    );
+    Ok(())
+}
+
+#[test]
+fn lists_every_provisional_presentation_output_under_the_fallback() -> TestResult {
+    let fixture = presentation_graph(&[(WORLD_D, WORLD_A)])?;
+    let expected = coordinates(
+        &fixture.nodes,
+        &[shifted(VIEW), shifted(VIEW_CHAIN), shifted(WEATHER_VIEW)],
+    );
+    let (_, validated) = validate(fixture, UnknownEdgePolicyV1::FullSuffixFromCut)?;
+    assert!(!validated.is_complete());
+    assert_eq!(affected_presentation_outputs_v1(&validated), expected);
     Ok(())
 }
 
@@ -533,7 +640,8 @@ fn graph_digest_matches_documented_frame() -> TestResult {
 
 #[test]
 fn graph_digest_is_sensitive_to_every_node_and_edge_change() -> TestResult {
-    let (_, base) = validate(graph()?, UnknownEdgePolicyV1::Reject)?;
+    // Every graph is validated under one plan, so only the graph differs.
+    let (_, base) = validate(graph()?, UnknownEdgePolicyV1::FullSuffixFromCut)?;
     let base_digest = dependency_graph_digest_v1(&base);
     let edits: [fn(&mut [Node]); 4] = [
         |nodes| nodes[WEATHER].provenance_digest = [0x74; 32],
@@ -543,7 +651,10 @@ fn graph_digest_is_sensitive_to_every_node_and_edge_change() -> TestResult {
     ];
     let mut digests = BTreeSet::from([base_digest]);
     for edit in edits {
-        let (_, edited) = validate(graph_with(edit, &[])?, UnknownEdgePolicyV1::Reject)?;
+        let (_, edited) = validate(
+            graph_with(edit, &[])?,
+            UnknownEdgePolicyV1::FullSuffixFromCut,
+        )?;
         assert_eq!(
             dependency_graph_digest_v1(&edited),
             documented_graph_digest(&edited)?
@@ -579,16 +690,16 @@ fn frontier_digest_binds_caller_fields() -> TestResult {
 }
 
 #[test]
-fn rejects_invalid_or_foreign_plan_and_missing_provenance() -> TestResult {
+fn rejects_foreign_plan_and_missing_provenance() -> TestResult {
     let (plan, validated) = validate(graph()?, UnknownEdgePolicyV1::Reject)?;
+    let (_, base) = derive_base()?;
+    // The plan is identified by its digest only: every plan field comes from
+    // the graph's validated binding, so unsealed edits cannot leak in.
     let mut tampered = plan.clone();
     tampered.room_digest = [0x99; 32];
-    assert_eq!(
-        derive(&tampered, &validated),
-        Err(FrontierError::Plan(
-            CounterfactualPlanContractErrorV1::DigestMismatch
-        ))
-    );
+    tampered.parent_cut_digest = [0x98; 32];
+    tampered.classification_bundle_digest = [0x97; 32];
+    assert_eq!(derive(&tampered, &validated)?, base);
     tampered.plan_digest = tampered.digest()?;
     assert_eq!(
         derive(&tampered, &validated),
@@ -645,7 +756,6 @@ fn enforces_owner_frontier_bound() -> TestResult {
 #[test]
 fn errors_render_distinct_safe_messages() {
     let errors = [
-        FrontierError::Plan(CounterfactualPlanContractErrorV1::InvalidEncoding),
         FrontierError::PlanMismatch,
         FrontierError::ProvenanceMissing,
         FrontierError::Frontier(FrontierArtifactErrorV1::InvalidEncoding),
@@ -656,5 +766,5 @@ fn errors_render_distinct_safe_messages() {
         .iter()
         .filter(|error| error.source().is_some())
         .count();
-    assert_eq!(with_source, 2);
+    assert_eq!(with_source, 1);
 }

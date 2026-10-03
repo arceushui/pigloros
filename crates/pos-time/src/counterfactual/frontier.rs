@@ -4,9 +4,14 @@
 //! [`derive_recomputation_frontier_v1`] takes a CFP1 [`CounterfactualPlanV1`]
 //! and the [`ValidatedDependencyGraphV1`] that was validated against it and
 //! returns a sealed `RCF1` [`RecomputationFrontierV1`] that passes the
-//! standalone `RCF1` validation and carries its exact frontier digest. It
-//! inventories no invalid artifact, persists nothing, evicts nothing,
-//! executes no Tick, and calls no Plugin.
+//! standalone `RCF1` validation and carries its exact frontier digest. The
+//! plan is not validated again: graph validation already validated it, so
+//! derivation only checks that the caller's plan digest is the graph's and
+//! takes every plan field from the graph's validated plan binding.
+//! [`affected_presentation_outputs_v1`] lists the `PresentationOnly` outputs
+//! made stale by the same derivation. Neither inventories an invalid
+//! artifact, persists anything, evicts anything, executes a Tick, or calls a
+//! Plugin.
 //!
 //! Derivation follows ADR-064 "Frontier derivation":
 //!
@@ -32,23 +37,41 @@
 //!   it in the first layer.
 //! - Traversal enters only `EndogenousRecomputed` consumers. Roots declare no
 //!   input and are never consumers, so `ExogenousFrozen` and `FixedPolicy`
-//!   nodes are never affected and their frozen bytes stay reusable;
-//!   `PresentationOnly` outputs are excluded from the suffix claim. Node
+//!   nodes are never affected and their frozen bytes stay reusable.
+//!   `PresentationOnly` outputs are excluded from the `RCF1` affected nodes,
+//!   which are exactly the endogenous suffix claim, but they are not
+//!   silently kept: [`affected_presentation_outputs_v1`] returns the
+//!   presentation outputs that consume an affected node, directly or through
+//!   other presentation outputs, and Fork admission (#338) quarantines them
+//!   through the invalid-artifact index. Node
 //!   coordinates and artifact digests are one-to-one in a validated graph, so
 //!   visiting a coordinate once visits its digest once.
 //! - Owner frontiers range over every affected node, seeds included. The
 //!   cause digests of an owner frontier are the ascending digests of its
 //!   affected direct inputs; a seed has none, so its cause is its own
 //!   artifact digest, the INT1 record digest.
-//! - The `FullSuffixFromCut` fallback is applied, and recorded in `RCF1`
-//!   field 11, only when the graph recorded a missing edge. A complete graph
-//!   validated under `FullSuffixFromCut` yields the fine-grained frontier and
-//!   records `Reject`, since `RCF1` forbids `FullSuffixFromCut` without an
-//!   unknown-edge coordinate. Under the fallback the affected nodes and owner
-//!   frontiers remain the explanatory reachability of the known edges.
+//! - The requested and the applied unknown-edge policy are recorded
+//!   separately. The requested policy is the plan's `unknown_edge_policy`,
+//!   bound by the CFP1 plan digest that `RCF1` carries as `plan_digest`.
+//!   `RCF1` field 11 `unknown_edge_policy` records the applied policy:
+//!   `FullSuffixFromCut` only when the graph recorded a missing edge, so the
+//!   fallback was actually taken, and `Reject` otherwise. A complete graph
+//!   requested under `FullSuffixFromCut` therefore yields the fine-grained
+//!   frontier and records `Reject`, which `RCF1` also requires, since it
+//!   forbids `FullSuffixFromCut` without an unknown-edge coordinate. Under the
+//!   fallback the affected nodes and owner frontiers remain the explanatory
+//!   reachability of the known edges.
+//! - Under the fallback no reachability may be claimed, so every
+//!   `Provisional` `PresentationOnly` output, which lies in the full suffix
+//!   from the cut, is an affected presentation output.
 //! - The derived frontier is checked by the standalone `RCF1` validation, so
 //!   its seed, affected-node, owner-frontier, cause-digest, and encoded-size
-//!   bounds surface as [`RecomputationFrontierErrorV1::Frontier`].
+//!   bounds surface as [`RecomputationFrontierErrorV1::Frontier`]. In
+//!   particular, a validated graph whose `RCF1` encoding would exceed
+//!   `MAX_RECOMPUTATION_FRONTIER_BYTES_V1` (64 MiB), for example a very large
+//!   affected set with long owner IDs, fails at sealing with
+//!   `Frontier(FieldOutOfBounds)`; that is the defined failure, not a panic or
+//!   a truncated frontier.
 //!
 //! ADR gap: `RCF1` field 5 names a dependency-graph digest, but no canonical
 //! graph encoding exists. [`dependency_graph_digest_v1`] defines a minimal
@@ -58,17 +81,18 @@
 //! canonical IDP1 digest of every edge in canonical edge order. A node frame
 //! is the big-endian `tick` (`u64`), `scheduler_position` (`u32`), owner byte
 //! length (`u64`) and owner bytes, `output_ordinal` (`u32`), and `schema_id`
-//! (`u32`); the artifact digest; the one-byte IDP1 class code, from
-//! `ExogenousFrozen` = 0 through `PresentationOnly` = 4 in IDP1 order; the
+//! (`u32`); the artifact digest; the one-byte IDP1 class code
+//! [`DependencyClassV1::wire_code`], from `ExogenousFrozen` = 0 through
+//! `PresentationOnly` = 4 in IDP1 order; the
 //! big-endian `u64` declared-input count and the declared input digests; and
 //! the provenance digest. The node origin is omitted because the plan's
 //! parent-cut Tick determines it.
 
-use super::dependency_graph::{DependencyGraphNodeV1, ValidatedDependencyGraphV1};
-use pos_conformance::counterfactual::frontier_artifacts::FrontierArtifactErrorV1;
-use pos_conformance::counterfactual::plan::{
-    CounterfactualPlanContractErrorV1, CounterfactualPlanV1,
+use super::dependency_graph::{
+    DependencyGraphNodeOriginV1, DependencyGraphNodeV1, ValidatedDependencyGraphV1,
 };
+use pos_conformance::counterfactual::frontier_artifacts::FrontierArtifactErrorV1;
+use pos_conformance::counterfactual::plan::CounterfactualPlanV1;
 use pos_conformance::{
     DependencyClassV1, DependencyNodeV1, OwnerFrontierV1, RecomputationFrontierV1,
     UnknownEdgePolicyV1,
@@ -80,9 +104,6 @@ const DEPENDENCY_GRAPH_DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.CounterfactualDepend
 /// Closed safe errors exposed by recomputation-frontier derivation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum RecomputationFrontierErrorV1 {
-    /// The CFP1 plan is invalid.
-    #[error("recomputation-frontier counterfactual plan is invalid")]
-    Plan(#[source] CounterfactualPlanContractErrorV1),
     /// The plan is not the plan the dependency graph was validated against.
     #[error("recomputation-frontier plan does not match the dependency graph")]
     PlanMismatch,
@@ -97,14 +118,15 @@ pub enum RecomputationFrontierErrorV1 {
 /// Derive the sealed `RCF1` recomputation frontier of `graph` for `plan`.
 ///
 /// `frontier_id` and `provenance_digest` fill `RCF1` fields 2 and 15; every
-/// other field is derived from the plan and the graph. See the module
-/// documentation for every rule.
+/// other field is derived from the graph and its validated plan binding.
+/// `plan` is not validated again; its digest must equal the graph's plan
+/// digest. See the module documentation for every rule.
 ///
 /// # Errors
 ///
-/// Returns the first closed safe error: an invalid plan, a zero provenance
-/// digest, a plan other than the graph's, or a frontier that violates the
-/// `RCF1` contract or its bounds.
+/// Returns the first closed safe error: a zero provenance digest, a plan
+/// other than the graph's, or a frontier that violates the `RCF1` contract
+/// or its bounds, including the 64 MiB encoded-size bound.
 pub fn derive_recomputation_frontier_v1(
     plan: &CounterfactualPlanV1,
     graph: &ValidatedDependencyGraphV1,
@@ -116,10 +138,46 @@ pub fn derive_recomputation_frontier_v1(
         frontier_id,
         dependency_graph_digest: dependency_graph_digest_v1(graph),
         provenance_digest,
-        ..unsealed_frontier(plan, graph)
+        ..unsealed_frontier(graph)
     }
     .seal()
     .map_err(RecomputationFrontierErrorV1::Frontier)
+}
+
+/// The `PresentationOnly` outputs made stale by recomputing `graph`'s
+/// frontier, in canonical node order.
+///
+/// For a complete graph these are the presentation outputs that consume an
+/// affected node of [`derive_recomputation_frontier_v1`], directly or
+/// through other presentation outputs. For a graph with missing edges, whose
+/// frontier falls back to the full suffix from the cut, they are every
+/// `Provisional` presentation output. Fork admission (#338) quarantines them
+/// through the invalid-artifact index; `RCF1` does not list them, because its
+/// affected nodes are the endogenous suffix claim.
+#[must_use]
+pub fn affected_presentation_outputs_v1(
+    graph: &ValidatedDependencyGraphV1,
+) -> Vec<DependencyNodeV1> {
+    let outputs: Vec<&DependencyGraphNodeV1> = if graph.is_complete() {
+        reachable(
+            graph,
+            affected_nodes(graph),
+            DependencyClassV1::PresentationOnly,
+        )
+        .into_values()
+        .filter(|node| node.class == DependencyClassV1::PresentationOnly)
+        .collect()
+    } else {
+        graph
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.class == DependencyClassV1::PresentationOnly
+                    && node.origin == DependencyGraphNodeOriginV1::Provisional
+            })
+            .collect()
+    };
+    outputs.into_iter().map(|node| node.node.clone()).collect()
 }
 
 /// Compute the documented digest of a validated dependency graph.
@@ -144,37 +202,33 @@ pub fn dependency_graph_digest_v1(graph: &ValidatedDependencyGraphV1) -> [u8; 32
     *hasher.finalize().as_bytes()
 }
 
+/// Check the caller's fields; the plan was validated with the graph, so only
+/// its identity is compared.
 fn check_inputs(
     plan: &CounterfactualPlanV1,
     graph: &ValidatedDependencyGraphV1,
     provenance_digest: [u8; 32],
 ) -> Result<(), RecomputationFrontierErrorV1> {
-    plan.validate()
-        .map_err(RecomputationFrontierErrorV1::Plan)
-        .and_then(|()| {
-            if provenance_digest == [0; 32] {
-                Err(RecomputationFrontierErrorV1::ProvenanceMissing)
-            } else if plan.plan_digest == graph.plan_digest() {
-                Ok(())
-            } else {
-                Err(RecomputationFrontierErrorV1::PlanMismatch)
-            }
-        })
+    if provenance_digest == [0; 32] {
+        Err(RecomputationFrontierErrorV1::ProvenanceMissing)
+    } else if plan.plan_digest == graph.plan_digest() {
+        Ok(())
+    } else {
+        Err(RecomputationFrontierErrorV1::PlanMismatch)
+    }
 }
 
 /// Every derived field; the caller supplies the ID, graph digest, and
 /// provenance, and [`RecomputationFrontierV1::seal`] supplies the frontier
 /// digest.
-fn unsealed_frontier(
-    plan: &CounterfactualPlanV1,
-    graph: &ValidatedDependencyGraphV1,
-) -> RecomputationFrontierV1 {
+fn unsealed_frontier(graph: &ValidatedDependencyGraphV1) -> RecomputationFrontierV1 {
     let affected = affected_nodes(graph);
     let fallback = !graph.is_complete();
     // The plan has at least one Intervention and the graph one node for each,
     // so `affected` is never empty; its lowest node is the lowest owner
     // frontier (ADR-064 derivation step 5).
     let earliest = &affected[0].node;
+    // The applied policy: `FullSuffixFromCut` only when the fallback is taken.
     let (global_frontier_tick, global_frontier_scheduler_position, unknown_edge_policy) =
         if fallback {
             (
@@ -194,8 +248,8 @@ fn unsealed_frontier(
     // computes `frontier_digest`.
     RecomputationFrontierV1 {
         frontier_id: [0; 16],
-        plan_digest: plan.plan_digest,
-        parent_cut_digest: plan.parent_cut_digest,
+        plan_digest: graph.plan_digest(),
+        parent_cut_digest: graph.parent_cut_digest(),
         dependency_graph_digest: [0; 32],
         intervention_seed_nodes: seeds(graph).map(|node| node.node.clone()).collect(),
         affected_nodes: affected.iter().map(|node| node.node.clone()).collect(),
@@ -205,7 +259,7 @@ fn unsealed_frontier(
         unknown_edge_policy,
         unknown_edge_coordinates: graph.unknown_edge_coordinates().to_vec(),
         endogenous_suffix_end_tick: graph.horizon_tick(),
-        classification_bundle_digest: plan.classification_bundle_digest,
+        classification_bundle_digest: graph.classification_bundle_digest(),
         provenance_digest: [0; 32],
         frontier_digest: [0; 32],
     }
@@ -219,25 +273,41 @@ fn seeds(graph: &ValidatedDependencyGraphV1) -> impl Iterator<Item = &Dependency
         .filter(|node| node.class == DependencyClassV1::InterventionAssigned)
 }
 
+/// Nodes keyed by coordinate, so values iterate in canonical node order.
+type NodeSet<'g> = BTreeMap<&'g DependencyNodeV1, &'g DependencyGraphNodeV1>;
+
 /// Seeds plus every endogenous node reachable from them, in canonical order.
 fn affected_nodes(graph: &ValidatedDependencyGraphV1) -> Vec<&DependencyGraphNodeV1> {
-    let mut affected: BTreeMap<&DependencyNodeV1, &DependencyGraphNodeV1> =
-        seeds(graph).map(|node| (&node.node, node)).collect();
-    let mut layer: Vec<&DependencyGraphNodeV1> = affected.values().copied().collect();
+    reachable(
+        graph,
+        seeds(graph).collect(),
+        DependencyClassV1::EndogenousRecomputed,
+    )
+    .into_values()
+    .collect()
+}
+
+/// `start` plus every node of class `enter` transitively reachable from it
+/// through consumers of class `enter`, visited in canonical breadth-first
+/// layers, each node once.
+fn reachable<'g>(
+    graph: &'g ValidatedDependencyGraphV1,
+    start: Vec<&'g DependencyGraphNodeV1>,
+    enter: DependencyClassV1,
+) -> NodeSet<'g> {
+    let mut visited: NodeSet<'g> = start.iter().map(|node| (&node.node, *node)).collect();
+    let mut layer = start;
     while !layer.is_empty() {
-        let next: BTreeMap<&DependencyNodeV1, &DependencyGraphNodeV1> = layer
+        let next: NodeSet<'g> = layer
             .iter()
             .flat_map(|node| graph.consumers(node.node.artifact_digest))
-            .filter(|consumer| {
-                consumer.class == DependencyClassV1::EndogenousRecomputed
-                    && !affected.contains_key(&consumer.node)
-            })
+            .filter(|consumer| consumer.class == enter && !visited.contains_key(&consumer.node))
             .map(|consumer| (&consumer.node, consumer))
             .collect();
         layer = next.values().copied().collect();
-        affected.extend(next);
+        visited.extend(next);
     }
-    affected.into_values().collect()
+    visited
 }
 
 /// The first affected node of each owner, which is its lowest coordinate.
@@ -283,7 +353,7 @@ fn hash_node(hasher: &mut blake3::Hasher, node: &DependencyGraphNodeV1) {
     hasher.update(&coordinate.output_ordinal.to_be_bytes());
     hasher.update(&coordinate.schema_id.to_be_bytes());
     hasher.update(&coordinate.artifact_digest);
-    hasher.update(&[class_code(node.class)]);
+    hasher.update(&[node.class.wire_code()]);
     hasher.update(&length(node.input_digests.len()));
     for digest in &node.input_digests {
         hasher.update(digest);
@@ -293,14 +363,4 @@ fn hash_node(hasher: &mut blake3::Hasher, node: &DependencyGraphNodeV1) {
 
 const fn length(count: usize) -> [u8; 8] {
     (count as u64).to_be_bytes()
-}
-
-const fn class_code(class: DependencyClassV1) -> u8 {
-    match class {
-        DependencyClassV1::ExogenousFrozen => 0,
-        DependencyClassV1::InterventionAssigned => 1,
-        DependencyClassV1::EndogenousRecomputed => 2,
-        DependencyClassV1::FixedPolicy => 3,
-        DependencyClassV1::PresentationOnly => 4,
-    }
 }
