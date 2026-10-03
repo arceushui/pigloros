@@ -6,6 +6,7 @@
 //! `PluginRegistry`, so case 14 compares two independent folds of the same
 //! Event range rather than a candidate opened from the live registry.
 
+use pos_core::staged_install::ProjectionSourceV1;
 use pos_core::{
     clock::{Seq, WallTime},
     crypto::Hash,
@@ -21,8 +22,8 @@ use pos_runtime::{
     StagedReducerAdmissionErrorV1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
 use pos_state::{
-    EntityStateProjection, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1,
-    RecordedConsumerV1,
+    EntityStateProjection, InitialStateV1, ProjectionCandidateErrorV1,
+    ProjectionObservationPolicyV1, ProtectedProjectionProviderV1, RecordedConsumerV1,
 };
 use std::{
     fmt::Debug,
@@ -223,6 +224,10 @@ fn admitted_fixture(
     (provider, consumer, builds)
 }
 
+fn source() -> ProjectionSourceV1 {
+    ProjectionSourceV1::bound(TimelineId::new(), None)
+}
+
 fn test_some<T>(value: Option<T>) -> T {
     value.unwrap_or_else(|| std::panic::resume_unwind(Box::new("missing fixture value")))
 }
@@ -246,6 +251,17 @@ fn reviewed_admission_rejects_unreviewed_factories_before_any_build() {
         provider.admit::<EntityStatePlugin>(Arc::new(())),
         Err(StagedReducerAdmissionErrorV1::NotReviewed)
     );
+    let policy = test_ok(ProjectionObservationPolicyV1::try_new(
+        vec!["count".to_owned()],
+        "count.v1".to_owned(),
+        Hash::from_bytes([7; 32]),
+        Hash::from_bytes([8; 32]),
+        Hash::from_bytes([9; 32]),
+    ));
+    assert_eq!(
+        provider.admit_observable::<CountingPlugin>(Arc::clone(&configuration), policy),
+        Err(StagedReducerAdmissionErrorV1::NotReviewed)
+    );
     assert_eq!(configuration.builds(), 0);
     let counting = std::any::type_name::<CountingPlugin>();
     assert!(!is_reviewed_staged_factory(counting));
@@ -257,8 +273,8 @@ fn every_candidate_builds_fresh_reducer_internals() {
     let (provider, consumer, builds) = admitted_fixture(FixtureConfiguration::default());
     assert_eq!(builds.load(Ordering::SeqCst), 1);
 
-    let mut folded = test_ok(provider.open_candidate(&[consumer]));
-    let fresh = test_ok(provider.open_candidate(&[consumer]));
+    let mut folded = test_ok(provider.open_candidate(&[consumer], InitialStateV1::Empty, source()));
+    let fresh = test_ok(provider.open_candidate(&[consumer], InitialStateV1::Empty, source()));
     assert_eq!(builds.load(Ordering::SeqCst), 3);
 
     let entity = EntityId::new();
@@ -302,7 +318,11 @@ fn inexact_consumer_sets_are_rejected_before_any_build() {
     let stale = RecordedConsumerV1::new(consumer.plugin_id(), Hash::from_bytes([7; 32]));
     let unknown = RecordedConsumerV1::new(PluginId::new(), consumer.reducer_identity());
 
-    let rejection = |plan: &[RecordedConsumerV1]| provider.open_candidate(plan).err();
+    let rejection = |plan: &[RecordedConsumerV1]| {
+        provider
+            .open_candidate(plan, InitialStateV1::Empty, source())
+            .err()
+    };
     let mismatch = Some(ProjectionCandidateErrorV1::ConsumerSetMismatch);
 
     assert_eq!(rejection(&[]), mismatch);
@@ -332,7 +352,9 @@ fn factories_that_build_no_reducer_are_never_folded() {
         ..FixtureConfiguration::default()
     });
     assert_eq!(
-        provider.open_candidate(&[consumer]).err(),
+        provider
+            .open_candidate(&[consumer], InitialStateV1::Empty, source())
+            .err(),
         Some(ProjectionCandidateErrorV1::PluginMismatch)
     );
     assert_eq!(builds.load(Ordering::SeqCst), 2);
@@ -354,7 +376,8 @@ fn one_plugin_identity_is_admitted_once() {
         provider.admit_fixture::<CountingPlugin>(Arc::new(fixed())),
         Err(StagedReducerAdmissionErrorV1::DuplicatePlugin)
     );
-    let candidate = test_ok(provider.open_candidate(&[distinct, consumer]));
+    let candidate =
+        test_ok(provider.open_candidate(&[distinct, consumer], InitialStateV1::Empty, source()));
     assert_eq!(candidate.consumers(), vec![distinct, consumer]);
 }
 
@@ -382,7 +405,9 @@ fn effectful_reducer_registered_outside_the_catalogue_is_not_admitted() {
     assert_eq!(builds.load(Ordering::SeqCst), 1);
 
     assert_eq!(
-        provider.open_candidate(&plan).err(),
+        provider
+            .open_candidate(&plan, InitialStateV1::Empty, source())
+            .err(),
         Some(ProjectionCandidateErrorV1::NotAdmitted)
     );
     assert_eq!(counter.load(Ordering::SeqCst), 0);
@@ -412,7 +437,9 @@ fn entity_state_projection_is_not_admitted() {
         Err(StagedReducerAdmissionErrorV1::NotReviewed)
     );
     assert_eq!(
-        provider.open_candidate(&[named]).err(),
+        provider
+            .open_candidate(&[named], InitialStateV1::Empty, source())
+            .err(),
         Some(ProjectionCandidateErrorV1::NotAdmitted)
     );
 }
@@ -490,7 +517,8 @@ fn candidate_fold_matches_the_live_plugin_registry_fold() {
         event(kept, COUNTED, 9),
     ];
 
-    let mut candidate = test_ok(provider.open_candidate(&[consumer]));
+    let mut candidate =
+        test_ok(provider.open_candidate(&[consumer], InitialStateV1::Empty, source()));
     fold_detached_candidate_v1(&mut candidate, &events);
     let expected_kept = live_fold_state(timeline, kept, &events);
     let expected_revoked = live_fold_state(timeline, revoked, &events);
@@ -506,7 +534,8 @@ fn candidate_fold_matches_the_live_plugin_registry_fold() {
         expected_revoked.as_ref()
     );
     let prefix = &events[..3];
-    let mut before_revocation = test_ok(provider.open_candidate(&[consumer]));
+    let mut before_revocation =
+        test_ok(provider.open_candidate(&[consumer], InitialStateV1::Empty, source()));
     fold_detached_candidate_v1(&mut before_revocation, prefix);
     let revoked_prior = live_fold_state(timeline, revoked, prefix);
     assert_eq!(count_of(revoked_prior.as_ref()), Some(2));

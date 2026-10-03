@@ -1538,8 +1538,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn staged_factory_builds_a_fresh_reducer_per_candidate() {
         use pos_runtime::{
-            fold_detached_candidate_v1, HostProjectionProviderV1, ProtectedProjectionProviderV1,
-            StagedReducerAdmissionErrorV1,
+            fold_detached_candidate_v1, HostProjectionProviderV1, InitialStateV1,
+            ProtectedProjectionProviderV1, StagedReducerAdmissionErrorV1,
         };
 
         let mut provider = HostProjectionProviderV1::default();
@@ -1554,8 +1554,11 @@ mod tests {
         let consumer = provider
             .admit_fixture::<EvalPlugin>(std::sync::Arc::new(()))
             .test_ok();
-        let mut folded = provider.open_candidate(&[consumer]).test_ok();
-        let fresh = provider.open_candidate(&[consumer]).test_ok();
+        let source =
+            pos_core::staged_install::ProjectionSourceV1::bound(pos_core::TimelineId::new(), None);
+        let open = || provider.open_candidate(&[consumer], InitialStateV1::Empty, source);
+        let mut folded = open().test_ok();
+        let fresh = open().test_ok();
         let entity = EntityId::new();
         let event = make_event(
             entity,

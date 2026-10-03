@@ -53,6 +53,7 @@ pub mod plugin;
 pub mod recipient_key;
 pub mod repro_manifest_root;
 pub mod retention;
+pub mod staged_install;
 pub mod state;
 pub mod store;
 pub mod timeline;

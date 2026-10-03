@@ -264,12 +264,18 @@ fn plugin_claimable_event_type(kind: &Kind) -> bool {
         .is_none_or(|host| host.claimable)
 }
 
-/// The host's projection input: every Event except the consent-closed
-/// control marker. The visible registry and detached candidates share it.
+/// Whether `event` is host projection input: every Event except the
+/// consent-closed control marker. The visible registry, detached candidates
+/// and staged plans share it.
+pub(crate) fn is_host_projection_event(event: &Event) -> bool {
+    event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+}
+
+/// The host's projection input selected by [`is_host_projection_event`].
 fn host_projection_events(events: &[Event]) -> Vec<Event> {
     events
         .iter()
-        .filter(|event| event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE)
+        .filter(|event| is_host_projection_event(event))
         .cloned()
         .collect()
 }
