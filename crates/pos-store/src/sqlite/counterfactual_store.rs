@@ -785,7 +785,9 @@ impl SqliteStore {
             })
             .map(Ok)
             .or_else(|error| {
-                let outcome_known = rolled_back(&error);
+                // Only a failed rollback leaves the outcome unknown, and it
+                // then wins over the rejection.
+                let outcome_known = !matches!(error, CoreError::StorageOutcomeUnknown(_));
                 rejection
                     .filter(|_| outcome_known)
                     .map_or(Err(error), |rejected| Ok(Err(rejected)))
@@ -883,13 +885,6 @@ impl SqliteStore {
                 .map(|()| Ok(CounterfactualInvalidationOutcomeV1::Committed(receipt)))
         })
     }
-}
-
-/// Whether a transaction error still guarantees the rollback: only an unknown
-/// outcome (a failed rollback) does not, and it then wins over a rejection.
-fn rolled_back(error: &CoreError) -> bool {
-    std::mem::discriminant(error)
-        != std::mem::discriminant(&CoreError::StorageOutcomeUnknown(String::new()))
 }
 
 /// Whether this database holds any counterfactual table, index, or trigger.
@@ -1026,5 +1021,33 @@ impl CounterfactualStorePortV1 for SqliteStore {
             }),
         )
         .and_then(|(current, stored)| at.resolve_read(current, stored))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A rejection is reported only while its rollback is guaranteed: once
+    /// the rollback itself fails, the unknown outcome wins.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_failed_rollback_wins_over_a_rejection() {
+        let store = super::super::tests::new_store();
+        // An open transaction makes the counterfactual scope a savepoint.
+        assert!(store.conn.execute_batch("BEGIN").is_ok());
+        let rejected =
+            store.in_counterfactual_scope(|_| Ok(Err::<(), _>(StoreError::CorruptState)));
+        assert!(matches!(rejected, Ok(Err(StoreError::CorruptState))));
+        // Releasing the savepoint inside the scope makes its rollback fail.
+        let unknown = store.in_counterfactual_scope(|store| {
+            assert!(store
+                .conn
+                .execute_batch("RELEASE SAVEPOINT pigloros_protected_effect")
+                .is_ok());
+            Ok(Err::<(), _>(StoreError::CorruptState))
+        });
+        assert!(matches!(unknown, Err(CoreError::StorageOutcomeUnknown(_))));
+        assert!(store.conn.execute_batch("ROLLBACK").is_ok());
     }
 }
