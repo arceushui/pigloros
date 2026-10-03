@@ -32,10 +32,13 @@
 //! The largest structurally valid record is far below the 16 MiB bound, which
 //! is therefore enforced on untrusted input before any allocation.
 
+use super::codec::{
+    bytes_value, decode_canonical, encode_value, text_value, uint_value, CborLimits, FieldReader,
+    WireError,
+};
 use crate::{domain_digest, ReplayClaimV1};
 use ciborium::value::Value;
 use std::collections::BTreeSet;
-use std::io::Cursor;
 
 /// Magic for the immutable counterfactual-result record.
 pub const COUNTERFACTUAL_RESULT_MAGIC_V1: &str = "CFR1";
@@ -47,8 +50,12 @@ pub const MAX_COUNTERFACTUAL_RESULT_CHECKPOINTS_V1: usize = 65_536;
 const FIELD_COUNT: usize = 20;
 const CHECKPOINT_FIELD_COUNT: usize = 3;
 const TERMINAL_ERROR_FIELD_COUNT: usize = 4;
-const MAX_NESTING_DEPTH: u8 = 3;
-const MAX_NESTED_ARRAY_ITEMS: u64 = 65_536;
+const LIMITS: CborLimits = CborLimits {
+    maximum_bytes: MAX_COUNTERFACTUAL_RESULT_BYTES_V1,
+    maximum_depth: 3,
+    maximum_items: 65_536,
+    allow_simple_values: true,
+};
 const RESULT_DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.CounterfactualResult.v1";
 const REPLAY_CLAIMS: [ReplayClaimV1; 5] = [
     ReplayClaimV1::Exact,
@@ -314,8 +321,8 @@ impl CounterfactualResultV1 {
     /// Returns a closed safe error when validation or encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, CounterfactualResultContractErrorV1> {
         validated_body_fields(self).and_then(|mut fields| {
-            fields.push(byte_string(&self.result_digest));
-            encode_value(&fields)
+            fields.push(bytes_value(&self.result_digest));
+            encode_value(&fields).map_err(contract_error)
         })
     }
 
@@ -326,11 +333,10 @@ impl CounterfactualResultV1 {
     /// Returns a closed safe error for malformed, noncanonical, oversized, or
     /// structurally invalid CFR1 records.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, CounterfactualResultContractErrorV1> {
-        if bytes.len() > MAX_COUNTERFACTUAL_RESULT_BYTES_V1 {
-            return Err(CounterfactualResultContractErrorV1::FieldOutOfBounds);
-        }
-        let result = decode_value(bytes).and_then(|value| decode_result(&value))?;
-        result.validate().map(|()| result)
+        decode_canonical(bytes, LIMITS)
+            .map_err(contract_error)
+            .and_then(|value| decode_result(&value))
+            .and_then(|result| result.validate().map(|()| result))
     }
 
     /// Compute the CFR1 domain-separated digest over fields 0 through 18.
@@ -371,10 +377,12 @@ fn digested_body_fields(
     result: &CounterfactualResultV1,
 ) -> Result<(Vec<Value>, [u8; 32]), CounterfactualResultContractErrorV1> {
     let fields = body_fields(result);
-    encode_value(&fields).map(|unsigned| {
-        let digest = domain_digest(RESULT_DIGEST_DOMAIN_V1, &unsigned);
-        (fields, digest)
-    })
+    encode_value(&fields)
+        .map_err(contract_error)
+        .map(|unsigned| {
+            let digest = domain_digest(RESULT_DIGEST_DOMAIN_V1, &unsigned);
+            (fields, digest)
+        })
 }
 
 fn validate_range(
@@ -476,48 +484,49 @@ const fn validate_replay_claim(
 
 fn body_fields(result: &CounterfactualResultV1) -> Vec<Value> {
     vec![
-        Value::Text(COUNTERFACTUAL_RESULT_MAGIC_V1.to_owned()),
-        uint(1),
-        byte_string(&result.result_id),
-        byte_string(&result.plan_digest),
-        byte_string(&result.fork_id),
-        uint(result.fork_generation),
-        uint(result.first_tick),
-        uint(result.horizon_tick),
-        result.committed_through_tick.map_or(Value::Null, uint),
+        text_value(COUNTERFACTUAL_RESULT_MAGIC_V1),
+        uint_value(1),
+        bytes_value(&result.result_id),
+        bytes_value(&result.plan_digest),
+        bytes_value(&result.fork_id),
+        uint_value(result.fork_generation),
+        uint_value(result.first_tick),
+        uint_value(result.horizon_tick),
+        result
+            .committed_through_tick
+            .map_or(Value::Null, uint_value),
         Value::Array(result.checkpoints.iter().map(encode_checkpoint).collect()),
-        uint(u64::from(result.terminal_state as u8)),
+        uint_value(u64::from(result.terminal_state as u8)),
         result
             .terminal_error
             .as_ref()
             .map_or(Value::Null, encode_terminal_error),
-        byte_string(&result.suffix_digest),
-        byte_string(&result.dependency_root),
-        byte_string(&result.provenance_root),
-        uint(replay_claim_code(result.replay_claim)),
-        byte_string(&result.execution_profile_digest),
-        byte_string(&result.trust_policy_snapshot_digest),
-        byte_string(&result.evaluator_identity_digest),
+        bytes_value(&result.suffix_digest),
+        bytes_value(&result.dependency_root),
+        bytes_value(&result.provenance_root),
+        uint_value(replay_claim_code(result.replay_claim)),
+        bytes_value(&result.execution_profile_digest),
+        bytes_value(&result.trust_policy_snapshot_digest),
+        bytes_value(&result.evaluator_identity_digest),
     ]
 }
 
 fn encode_checkpoint(checkpoint: &CounterfactualCheckpointRefV1) -> Value {
     Value::Array(vec![
-        uint(checkpoint.tick),
-        uint(checkpoint.fork_generation),
-        byte_string(&checkpoint.checkpoint_digest),
+        uint_value(checkpoint.tick),
+        uint_value(checkpoint.fork_generation),
+        bytes_value(&checkpoint.checkpoint_digest),
     ])
 }
 
 fn encode_terminal_error(error: &CounterfactualTerminalErrorV1) -> Value {
     Value::Array(vec![
-        uint(u64::from(error.code as u8)),
-        uint(error.tick),
-        uint(u64::from(error.scheduler_position)),
+        uint_value(u64::from(error.code as u8)),
+        uint_value(error.tick),
+        uint_value(u64::from(error.scheduler_position)),
         error
             .safe_digest
-            .as_ref()
-            .map_or(Value::Null, byte_string::<32>),
+            .map_or(Value::Null, |digest| bytes_value(&digest)),
     ])
 }
 
@@ -531,166 +540,91 @@ const fn replay_claim_code(claim: ReplayClaimV1) -> u64 {
     }
 }
 
-fn uint(value: u64) -> Value {
-    Value::Integer(value.into())
-}
-
-fn byte_string<const LENGTH: usize>(value: &[u8; LENGTH]) -> Value {
-    Value::Bytes(value.to_vec())
-}
-
 fn decode_result(
     value: &Value,
 ) -> Result<CounterfactualResultV1, CounterfactualResultContractErrorV1> {
-    let fields = array(value, FIELD_COUNT)?;
-    if !matches!(&fields[0], Value::Text(magic) if magic == COUNTERFACTUAL_RESULT_MAGIC_V1)
-        || uint_value(&fields[1]) != Ok(1)
-    {
-        return Err(CounterfactualResultContractErrorV1::UnsupportedVersion);
-    }
-    Ok(CounterfactualResultV1 {
-        result_id: fixed_bytes(&fields[2])?,
-        plan_digest: fixed_bytes(&fields[3])?,
-        fork_id: fixed_bytes(&fields[4])?,
-        fork_generation: uint_value(&fields[5])?,
-        first_tick: uint_value(&fields[6])?,
-        horizon_tick: uint_value(&fields[7])?,
-        committed_through_tick: optional(&fields[8], uint_value)?,
-        checkpoints: array_values(&fields[9])?
-            .iter()
-            .map(decode_checkpoint)
-            .collect::<Result<_, _>>()?,
-        terminal_state: enum_value(&fields[10], &CounterfactualTerminalStateV1::ALL)?,
-        terminal_error: optional(&fields[11], decode_terminal_error)?,
-        suffix_digest: fixed_bytes(&fields[12])?,
-        dependency_root: fixed_bytes(&fields[13])?,
-        provenance_root: fixed_bytes(&fields[14])?,
-        replay_claim: enum_value(&fields[15], &REPLAY_CLAIMS)?,
-        execution_profile_digest: fixed_bytes(&fields[16])?,
-        trust_policy_snapshot_digest: fixed_bytes(&fields[17])?,
-        evaluator_identity_digest: fixed_bytes(&fields[18])?,
-        result_digest: fixed_bytes(&fields[19])?,
+    let mut fields =
+        FieldReader::with_header(value, FIELD_COUNT, COUNTERFACTUAL_RESULT_MAGIC_V1, 1);
+    let result_id = fields.read_bytes::<16>();
+    let plan_digest = fields.read_bytes::<32>();
+    let fork_id = fields.read_bytes::<16>();
+    let fork_generation = fields.read_u64();
+    let first_tick = fields.read_u64();
+    let horizon_tick = fields.read_u64();
+    let committed_through_tick = fields.read_optional_u64();
+    let checkpoints = fields.read_array(checkpoint_field);
+    let terminal_state = fields.read_enum(
+        &CounterfactualTerminalStateV1::ALL,
+        CounterfactualTerminalStateV1::Completed,
+    );
+    let terminal_error = fields.read_optional(terminal_error_field);
+    let suffix_digest = fields.read_bytes::<32>();
+    let dependency_root = fields.read_bytes::<32>();
+    let provenance_root = fields.read_bytes::<32>();
+    let replay_claim = fields.read_enum(&REPLAY_CLAIMS, ReplayClaimV1::Exact);
+    let execution_profile_digest = fields.read_bytes::<32>();
+    let trust_policy_snapshot_digest = fields.read_bytes::<32>();
+    let evaluator_identity_digest = fields.read_bytes::<32>();
+    let result_digest = fields.read_bytes::<32>();
+    fields
+        .finish()
+        .map(|()| CounterfactualResultV1 {
+            result_id,
+            plan_digest,
+            fork_id,
+            fork_generation,
+            first_tick,
+            horizon_tick,
+            committed_through_tick,
+            checkpoints,
+            terminal_state,
+            terminal_error,
+            suffix_digest,
+            dependency_root,
+            provenance_root,
+            replay_claim,
+            execution_profile_digest,
+            trust_policy_snapshot_digest,
+            evaluator_identity_digest,
+            result_digest,
+        })
+        .map_err(contract_error)
+}
+
+fn checkpoint_field(value: &Value) -> Result<CounterfactualCheckpointRefV1, WireError> {
+    let mut fields = FieldReader::new(value, CHECKPOINT_FIELD_COUNT);
+    let tick = fields.read_u64();
+    let fork_generation = fields.read_u64();
+    let checkpoint_digest = fields.read_bytes::<32>();
+    fields.finish().map(|()| CounterfactualCheckpointRefV1 {
+        tick,
+        fork_generation,
+        checkpoint_digest,
     })
 }
 
-fn decode_checkpoint(
-    value: &Value,
-) -> Result<CounterfactualCheckpointRefV1, CounterfactualResultContractErrorV1> {
-    let fields = array(value, CHECKPOINT_FIELD_COUNT)?;
-    Ok(CounterfactualCheckpointRefV1 {
-        tick: uint_value(&fields[0])?,
-        fork_generation: uint_value(&fields[1])?,
-        checkpoint_digest: fixed_bytes(&fields[2])?,
+fn terminal_error_field(value: &Value) -> Result<CounterfactualTerminalErrorV1, WireError> {
+    let mut fields = FieldReader::new(value, TERMINAL_ERROR_FIELD_COUNT);
+    let code = fields.read_enum(
+        &CounterfactualTerminalErrorCodeV1::ALL,
+        CounterfactualTerminalErrorCodeV1::InvalidEncoding,
+    );
+    let tick = fields.read_u64();
+    let scheduler_position = fields.read_u32();
+    let safe_digest = fields.read_optional_bytes::<32>();
+    fields.finish().map(|()| CounterfactualTerminalErrorV1 {
+        code,
+        tick,
+        scheduler_position,
+        safe_digest,
     })
 }
 
-fn decode_terminal_error(
-    value: &Value,
-) -> Result<CounterfactualTerminalErrorV1, CounterfactualResultContractErrorV1> {
-    let fields = array(value, TERMINAL_ERROR_FIELD_COUNT)?;
-    Ok(CounterfactualTerminalErrorV1 {
-        code: enum_value(&fields[0], &CounterfactualTerminalErrorCodeV1::ALL)?,
-        tick: uint_value(&fields[1])?,
-        scheduler_position: uint_value(&fields[2]).and_then(|position| {
-            u32::try_from(position)
-                .map_err(|_| CounterfactualResultContractErrorV1::FieldOutOfBounds)
-        })?,
-        safe_digest: optional(&fields[3], fixed_bytes::<32>)?,
-    })
-}
-
-fn decode_value(bytes: &[u8]) -> Result<Value, CounterfactualResultContractErrorV1> {
-    crate::preflight_array_cbor(bytes, MAX_NESTING_DEPTH, MAX_NESTED_ARRAY_ITEMS, true)
-        .map_err(preflight_error)?;
-    let value: Value = ciborium::from_reader(Cursor::new(bytes))
-        .map_err(|_| CounterfactualResultContractErrorV1::InvalidEncoding)?;
-    encode_value(&value).and_then(|canonical| {
-        if canonical == bytes {
-            Ok(value)
-        } else {
-            Err(CounterfactualResultContractErrorV1::InvalidEncoding)
-        }
-    })
-}
-
-const fn preflight_error(error: crate::CborPreflightError) -> CounterfactualResultContractErrorV1 {
+const fn contract_error(error: WireError) -> CounterfactualResultContractErrorV1 {
     match error {
-        crate::CborPreflightError::InvalidEncoding => {
-            CounterfactualResultContractErrorV1::InvalidEncoding
-        }
-        crate::CborPreflightError::FieldOutOfBounds => {
-            CounterfactualResultContractErrorV1::FieldOutOfBounds
-        }
+        WireError::InvalidEncoding => CounterfactualResultContractErrorV1::InvalidEncoding,
+        WireError::FieldOutOfBounds => CounterfactualResultContractErrorV1::FieldOutOfBounds,
+        WireError::UnsupportedVersion => CounterfactualResultContractErrorV1::UnsupportedVersion,
+        WireError::UnknownEnum => CounterfactualResultContractErrorV1::UnknownEnum,
     }
-}
-
-/// Encode one value as deterministic CBOR.
-///
-/// A `Vec<Value>` encodes exactly like the equivalent `Value::Array`: both
-/// serialize as a definite-length array of the same items.
-fn encode_value<T: serde::Serialize + ?Sized>(
-    value: &T,
-) -> Result<Vec<u8>, CounterfactualResultContractErrorV1> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)
-        .map(|()| bytes)
-        .or(Err(CounterfactualResultContractErrorV1::InvalidEncoding))
-}
-
-fn array(value: &Value, length: usize) -> Result<&[Value], CounterfactualResultContractErrorV1> {
-    match value {
-        Value::Array(values) if values.len() == length => Ok(values),
-        _ => Err(CounterfactualResultContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn array_values(value: &Value) -> Result<&[Value], CounterfactualResultContractErrorV1> {
-    match value {
-        Value::Array(values) => Ok(values),
-        _ => Err(CounterfactualResultContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn uint_value(value: &Value) -> Result<u64, CounterfactualResultContractErrorV1> {
-    match value {
-        Value::Integer(value) => {
-            u64::try_from(*value).map_err(|_| CounterfactualResultContractErrorV1::InvalidEncoding)
-        }
-        _ => Err(CounterfactualResultContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn fixed_bytes<const LENGTH: usize>(
-    value: &Value,
-) -> Result<[u8; LENGTH], CounterfactualResultContractErrorV1> {
-    match value {
-        Value::Bytes(value) => value
-            .as_slice()
-            .try_into()
-            .map_err(|_| CounterfactualResultContractErrorV1::InvalidEncoding),
-        _ => Err(CounterfactualResultContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn optional<T>(
-    value: &Value,
-    decode: impl Fn(&Value) -> Result<T, CounterfactualResultContractErrorV1>,
-) -> Result<Option<T>, CounterfactualResultContractErrorV1> {
-    if matches!(value, Value::Null) {
-        Ok(None)
-    } else {
-        decode(value).map(Some)
-    }
-}
-
-fn enum_value<T: Copy>(
-    value: &Value,
-    codes: &[T],
-) -> Result<T, CounterfactualResultContractErrorV1> {
-    uint_value(value).and_then(|code| {
-        usize::try_from(code)
-            .ok()
-            .and_then(|index| codes.get(index).copied())
-            .ok_or(CounterfactualResultContractErrorV1::UnknownEnum)
-    })
 }

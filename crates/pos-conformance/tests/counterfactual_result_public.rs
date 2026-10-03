@@ -623,7 +623,7 @@ fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
         ),
         (
             with_field(&valid, 0, Value::Bytes(b"CFR1".to_vec()))?,
-            ResultError::UnsupportedVersion,
+            ResultError::InvalidEncoding,
         ),
         (
             with_field(&valid, 1, uint(2))?,
