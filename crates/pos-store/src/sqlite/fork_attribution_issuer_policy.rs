@@ -23,14 +23,16 @@ use crate::fork_attribution_issuer_policy::{
 /// bytes when the history row exists.
 type StoredPolicyRowV1 = (String, i64, [u8; 32], Option<Vec<u8>>);
 
-/// The history row count, then the floor's scope, generation, and digest and
-/// the bytes of the history row it names; the floor columns are all null
-/// when no floor row exists.
+/// The history row count and highest generation, then the floor's scope,
+/// generation, and digest, then the generation and bytes of the history row
+/// the floor names. The floor columns are all null when no floor row exists.
 type FloorReadRowV1 = (
     i64,
+    Option<i64>,
     Option<String>,
     Option<i64>,
     Option<[u8; 32]>,
+    Option<i64>,
     Option<Vec<u8>>,
 );
 
@@ -136,11 +138,16 @@ fn persist_floor_policy(
 /// contiguous with it: one row per generation up to the floor, and no rows at
 /// all without a floor.
 fn read_floor_policy(conn: &Connection) -> LoadedIssuerPolicyV1 {
-    // One statement reads the history count and the optional floor row from
-    // the same snapshot, even in autocommit; the anchor makes it one row.
-    let (rows, scope, generation, digest, bytes) = conn.query_row(
+    // The floor table is a singleton (`CHECK (singleton = 1)`), so joining it
+    // to the one-row anchor yields exactly one row: the history count and
+    // highest generation always, and the floor columns only when a floor row
+    // exists. One statement reads all of it from one snapshot, even in
+    // autocommit.
+    let (rows, highest, scope, generation, digest, row_generation, bytes) = conn.query_row(
         "SELECT (SELECT COUNT(*) FROM fork_attribution_issuer_policies),
-                floor.scope, floor.generation, floor.policy_digest, history.fip1_cbor
+                (SELECT MAX(generation) FROM fork_attribution_issuer_policies),
+                floor.scope, floor.generation, floor.policy_digest,
+                history.generation, history.fip1_cbor
          FROM (SELECT 1) AS anchor
          LEFT JOIN fork_attribution_issuer_policy_floor AS floor
          LEFT JOIN fork_attribution_issuer_policies AS history
@@ -148,13 +155,22 @@ fn read_floor_policy(conn: &Connection) -> LoadedIssuerPolicyV1 {
         [],
         |row| FloorReadRowV1::try_from(row),
     )?;
-    let row = scope
-        .zip(generation)
-        .zip(digest)
-        .map(|((scope, generation), digest)| (scope, generation, digest, bytes));
-    let floor = row.map(stored_policy_row).transpose()?;
+    // The floor columns are NOT NULL, so they are all present or all absent.
+    let floor = match (scope, generation, digest) {
+        (Some(scope), Some(generation), Some(digest)) => {
+            // The history row the floor names must sit at the floor's own
+            // generation; otherwise it is treated as missing.
+            let bytes = bytes.filter(|_| row_generation == Some(generation));
+            Some(stored_policy_row((scope, generation, digest, bytes))?)
+        }
+        _ => None,
+    };
     let generation = floor.as_ref().map_or(0, |policy| policy.input().generation);
-    if u64::try_from(rows) == Ok(generation) {
+    // Generations are unique and at least 1, so a history whose row count and
+    // highest generation both equal the floor generation is exactly
+    // `1..=generation`; with no floor, the history must be empty.
+    let highest = highest.map_or(Ok(0), u64::try_from);
+    if u64::try_from(rows) == Ok(generation) && highest == Ok(generation) {
         Ok(floor)
     } else {
         Err(ForkAttributionIssuerPolicyErrorV1::CorruptPolicy)
@@ -451,6 +467,21 @@ mod tests {
             .execute_batch("DELETE FROM fork_attribution_issuer_policies WHERE generation = 1")?;
         assert_eq!(store.issuer_policy_floor(), Err(CORRUPT));
         assert_eq!(install(&mut store, &policies[2]), Err(CORRUPT));
+        // The right row count but a gap: generations {2, 3} behind floor 2.
+        let mut store = installed_store(&policies)?;
+        store.conn.execute_batch(
+            "UPDATE fork_attribution_issuer_policies SET generation = 3 WHERE generation = 1",
+        )?;
+        assert_eq!(store.issuer_policy_floor(), Err(CORRUPT));
+        assert_eq!(install(&mut store, &policies[2]), Err(CORRUPT));
+        // Contiguous generations, but the floor's row is stored at generation 1.
+        let store = installed_store(&policies)?;
+        store.conn.execute_batch(
+            "UPDATE fork_attribution_issuer_policies SET generation = 3 WHERE generation = 1;
+             UPDATE fork_attribution_issuer_policies SET generation = 1 WHERE generation = 2;
+             UPDATE fork_attribution_issuer_policies SET generation = 2 WHERE generation = 3;",
+        )?;
+        assert_eq!(store.issuer_policy_floor(), Err(CORRUPT));
         Ok(())
     }
 
