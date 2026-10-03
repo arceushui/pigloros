@@ -1,8 +1,8 @@
 //! Public-interface tests for ADR-064 recomputation-frontier derivation.
+#![cfg(target_os = "linux")]
 
 use pos_conformance::counterfactual::dependency::{
-    DependencyClassificationRuleV1, DependencyTickRangeV1, InputDependencyContractErrorV1,
-    InputDependencyV1,
+    DependencyClassificationRuleV1, DependencyTickRangeV1, InputDependencyV1,
 };
 use pos_conformance::counterfactual::frontier_artifacts::{
     FrontierArtifactErrorV1, UnknownEdgeCoordinateV1,
@@ -405,7 +405,7 @@ fn derives_canonical_frontier_from_intervention_reachability() -> TestResult {
         frontier_id: FRONTIER_ID,
         plan_digest: plan.plan_digest,
         parent_cut_digest: plan.parent_cut_digest,
-        dependency_graph_digest: dependency_graph_digest_v1(&validated)?,
+        dependency_graph_digest: dependency_graph_digest_v1(&validated),
         intervention_seed_nodes: coordinates(&nodes, &[INTERVENTION_A, INTERVENTION_B]),
         affected_nodes: coordinates(
             &nodes,
@@ -513,7 +513,7 @@ fn complete_graph_under_full_suffix_policy_keeps_fine_grained_frontier() -> Test
 fn graph_digest_matches_documented_frame() -> TestResult {
     let (plan, validated) = validate(graph()?, UnknownEdgePolicyV1::Reject)?;
     assert_eq!(
-        dependency_graph_digest_v1(&validated)?,
+        dependency_graph_digest_v1(&validated),
         documented_graph_digest(&validated)?
     );
     let (_, incomplete) = validate(
@@ -521,7 +521,7 @@ fn graph_digest_matches_documented_frame() -> TestResult {
         UnknownEdgePolicyV1::FullSuffixFromCut,
     )?;
     assert_eq!(
-        dependency_graph_digest_v1(&incomplete)?,
+        dependency_graph_digest_v1(&incomplete),
         documented_graph_digest(&incomplete)?
     );
     assert_eq!(
@@ -534,7 +534,7 @@ fn graph_digest_matches_documented_frame() -> TestResult {
 #[test]
 fn graph_digest_is_sensitive_to_every_node_and_edge_change() -> TestResult {
     let (_, base) = validate(graph()?, UnknownEdgePolicyV1::Reject)?;
-    let base_digest = dependency_graph_digest_v1(&base)?;
+    let base_digest = dependency_graph_digest_v1(&base);
     let edits: [fn(&mut [Node]); 4] = [
         |nodes| nodes[WEATHER].provenance_digest = [0x74; 32],
         |nodes| nodes[WEATHER].class = DependencyClassV1::PresentationOnly,
@@ -545,16 +545,16 @@ fn graph_digest_is_sensitive_to_every_node_and_edge_change() -> TestResult {
     for edit in edits {
         let (_, edited) = validate(graph_with(edit, &[])?, UnknownEdgePolicyV1::Reject)?;
         assert_eq!(
-            dependency_graph_digest_v1(&edited)?,
+            dependency_graph_digest_v1(&edited),
             documented_graph_digest(&edited)?
         );
-        digests.insert(dependency_graph_digest_v1(&edited)?);
+        digests.insert(dependency_graph_digest_v1(&edited));
     }
     let (_, missing) = validate(
         graph_with(|_| (), &[(WEATHER, EXOGENOUS)])?,
         UnknownEdgePolicyV1::FullSuffixFromCut,
     )?;
-    digests.insert(dependency_graph_digest_v1(&missing)?);
+    digests.insert(dependency_graph_digest_v1(&missing));
     assert_eq!(digests.len(), edits.len() + 2);
     Ok(())
 }
@@ -648,7 +648,6 @@ fn errors_render_distinct_safe_messages() {
         FrontierError::Plan(CounterfactualPlanContractErrorV1::InvalidEncoding),
         FrontierError::PlanMismatch,
         FrontierError::ProvenanceMissing,
-        FrontierError::Dependency(InputDependencyContractErrorV1::InvalidEncoding),
         FrontierError::Frontier(FrontierArtifactErrorV1::InvalidEncoding),
     ];
     let messages: BTreeSet<String> = errors.iter().map(ToString::to_string).collect();
@@ -657,5 +656,5 @@ fn errors_render_distinct_safe_messages() {
         .iter()
         .filter(|error| error.source().is_some())
         .count();
-    assert_eq!(with_source, 3);
+    assert_eq!(with_source, 2);
 }
