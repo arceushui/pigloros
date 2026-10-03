@@ -25,6 +25,7 @@
 //! registry forgets only the revoked subjects of that range, after release
 //! (ADR-093 Revision 4). Each release reports its payload-free health
 //! signals into the caller's [`ReleaseHealthV1`].
+//! | [`mod@counterfactual`] | ADR-064 counterfactual dependency-graph validation (Linux only) |
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use std::{cell::Cell, sync::Arc};
@@ -44,6 +45,7 @@ use pos_state::{
 };
 
 pub mod compare;
+#[cfg(target_os = "linux")]
 pub mod counterfactual;
 pub mod merge;
 pub mod replay;
