@@ -31,6 +31,17 @@ use pos_core::{
 mod candidate;
 mod staged;
 
+/// One staged consumer's private State map and the identity it must match.
+///
+/// Defined at the crate root so the `staged` and `candidate` modules can read
+/// its private fields without widening their visibility.
+struct StagedSlotV1 {
+    plugin_id: PluginId,
+    name: &'static str,
+    observation_policy: Option<ProjectionObservationPolicyV1>,
+    registry: StateRegistry,
+}
+
 pub use candidate::{
     CandidateBoundsV1, CandidateBuildV1, CandidateReducerV1, CandidateTurnV1,
     DetachedProjectionCandidateV1, InitialStateV1, ProjectionCandidateErrorV1,

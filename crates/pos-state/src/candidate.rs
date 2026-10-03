@@ -20,10 +20,7 @@ use pos_core::{
     StateRegistry,
 };
 
-use crate::{
-    staged::{StagedProjectionV1, StagedSlotV1},
-    ProjectionObservationPolicyV1,
-};
+use crate::{staged::StagedProjectionV1, ProjectionObservationPolicyV1, StagedSlotV1};
 
 /// Largest staged output of one fold, in staged-size bytes (ADR-093).
 pub const MAX_STAGED_OUTPUT_BYTES_V1: u64 = 64 * 1024 * 1024;
