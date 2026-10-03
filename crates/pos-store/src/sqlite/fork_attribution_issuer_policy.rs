@@ -226,11 +226,13 @@ mod tests {
         )?)
     }
 
-    /// Generations 1..=3 hold one issuer that is Active, Retired, then Revoked.
+    /// Generations 1..=3 hold one issuer: Active, then revoked in an emergency
+    /// successor (retiring the only Active issuer is refused), then a third
+    /// generation that tests use only where install fails before planning.
     fn lifecycle() -> Fallible<Vec<ForkAttributionIssuerPolicyV1>> {
         let states = [
             ForkAttributionIssuerStateV1::Active,
-            ForkAttributionIssuerStateV1::Retired,
+            ForkAttributionIssuerStateV1::Revoked,
             ForkAttributionIssuerStateV1::Revoked,
         ];
         let mut policies: Vec<ForkAttributionIssuerPolicyV1> = Vec::new();
