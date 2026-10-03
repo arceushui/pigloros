@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
 mod bundle_contract;
+pub mod counterfactual;
 mod execution_profile;
 mod non_interference;
 mod non_interference_report;
