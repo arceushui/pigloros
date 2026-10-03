@@ -32,7 +32,10 @@ use pos_state::{
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use std::{
     fmt::Debug,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 trait TestOk<T> {
@@ -2327,4 +2330,104 @@ fn revocation_before_recovery_is_caught_by_the_store_fence() {
         );
         assert_eq!(prepared.committed().len(), 1, "{name}");
     }
+}
+
+/// A participant Driver whose live Event-subscription answer flips once
+/// `changed` is set, after registration (ADR-021 Revision 4 Decision 1).
+struct ChangingSubscriptionDriver {
+    inner: ParticipantDriver,
+    before: Vec<Kind>,
+    after: Vec<Kind>,
+    changed: Arc<AtomicBool>,
+}
+
+impl Driver for ChangingSubscriptionDriver {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn event_subscriptions(&self) -> &[Kind] {
+        if self.changed.load(Ordering::SeqCst) {
+            &self.after
+        } else {
+            &self.before
+        }
+    }
+
+    fn requires_verified_event_prefix(&self) -> bool {
+        self.changed.load(Ordering::SeqCst)
+    }
+
+    fn step(
+        &mut self,
+        timeline: TimelineId,
+        observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        self.inner.step(timeline, observations)
+    }
+
+    fn commit_step(&mut self) {
+        self.inner.commit_step();
+    }
+
+    fn abort_step(&mut self) {
+        self.inner.abort_step();
+    }
+}
+
+/// Register and bind a participant Driver whose Event subscriptions are
+/// `before` at registration and `after` once the returned flag is set.
+fn changing_registry(
+    fixture: &Fixture,
+    before: &[&str],
+    after: &[&str],
+) -> (PluginRegistry, Arc<Mutex<DriverState>>, Arc<AtomicBool>) {
+    let state = Arc::new(Mutex::new(DriverState::default()));
+    let changed = Arc::new(AtomicBool::new(false));
+    let driver = ChangingSubscriptionDriver {
+        inner: ParticipantDriver {
+            state: Arc::clone(&state),
+            entity: EntityId::new(),
+            event_type: Kind::new("participant.planned"),
+            ambient_subscription: None,
+        },
+        before: before.iter().copied().map(Kind::new).collect(),
+        after: after.iter().copied().map(Kind::new).collect(),
+        changed: Arc::clone(&changed),
+    };
+    let mut registry = gated_registry();
+    registry
+        .register_generated(
+            &TestPlugin {
+                id: fixture.plugin_id,
+                event_type: "participant.planned",
+            },
+            None,
+            Some(Box::new(driver)),
+        )
+        .test_ok();
+    bind_participant(&mut registry, fixture);
+    (registry, state, changed)
+}
+
+#[test]
+fn the_authorized_pass_ignores_event_subscriptions_added_after_registration() {
+    let fixture = fixture();
+    let (mut registry, state, changed) =
+        changing_registry(&fixture, &[], &["ordinary.event", "persona.prediction"]);
+    changed.store(true, Ordering::SeqCst);
+
+    assert_eq!(stage_current(&mut registry, &fixture).test_ok().len(), 1);
+    assert_eq!(observed(&state).steps, 1);
+}
+
+#[test]
+fn the_authorized_pass_keeps_event_subscriptions_dropped_after_registration() {
+    let fixture = fixture();
+    let (mut registry, state, changed) = changing_registry(&fixture, &["ordinary.event"], &[]);
+    changed.store(true, Ordering::SeqCst);
+
+    assert!(error_text(stage_current(&mut registry, &fixture))
+        .contains("authority source is unauthorized"));
+    assert_eq!(observed(&state).steps, 0);
 }

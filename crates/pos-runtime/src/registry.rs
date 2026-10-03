@@ -272,6 +272,7 @@ fn driver_visible_event(event: &Event) -> bool {
 /// prefix is filtered again every pass, so a hidden Event is delivered after
 /// a later grant and is never lost behind an Event cursor.
 fn consent_visible_event(operation: &OperationContext, event: &Event) -> bool {
+    // `consent.*` Events are already excluded upstream by `driver_visible_event`.
     !pos_core::is_subject_controlled_event_type(&event.event_type)
         || matches!(operation, OperationContext::Protected { token, .. }
             if token.subject_id() == event.entity
@@ -3481,9 +3482,10 @@ impl PluginRegistry {
     }
 
     /// Verify a test-support output admission and claim the Event types its
-    /// declarations derive, through the same shared ownership check, then
-    /// capture the Driver's registration snapshot through the shared Driver
-    /// rule (ADR-021 Revision 4 Decision 1).
+    /// declarations derive, through the same shared ownership check.
+    ///
+    /// It then captures the Driver's registration snapshot through the shared
+    /// Driver rule (ADR-021 Revision 4 Decision 1).
     #[cfg(any(test, feature = "test-support"))]
     fn claim_test_admission(
         &self,
@@ -3632,8 +3634,13 @@ impl PluginRegistry {
 
         // The Driver rule and the only fallible commit action run before
         // schemas or routes mutate.
-        let event_observation =
-            self.admit_driver_and_reducer(id, &name, driver.as_deref(), reducer, &options)?;
+        let event_observation = self.admit_driver_and_reducer(
+            id,
+            &name,
+            driver.as_deref(),
+            reducer,
+            options.reducer_slot,
+        )?;
 
         // Register event type schemas
         for kind in &cap.owned_event_types {
@@ -3683,12 +3690,12 @@ impl PluginRegistry {
         name: &str,
         driver: Option<&dyn Driver>,
         reducer: Option<Box<dyn Reducer>>,
-        options: &RegistrationOptions,
+        reducer_slot: ReducerSlotV1,
     ) -> Result<DriverEventObservation, RuntimeError> {
         DriverEventObservation::capture(driver)
             .map_err(RuntimeError::from)
             .and_then(|observation| {
-                self.install_reducer(id, name, reducer, options.reducer_slot)
+                self.install_reducer(id, name, reducer, reducer_slot)
                     .map(|()| observation)
             })
     }
