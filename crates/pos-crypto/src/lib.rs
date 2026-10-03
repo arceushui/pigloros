@@ -11,8 +11,14 @@ pub mod fork_attribution;
 pub mod fork_attribution_authority;
 pub mod fork_authentication;
 pub mod key_roles;
+pub mod plugin_manifest;
 pub mod plugin_trust;
 pub mod recipient_export;
 pub mod recipient_key;
 pub mod signing;
+// Public module reachability keeps the crate-only strict CBOR reader shared by
+// PTR1, PRV1, and PMF1 compatible with both `unreachable_pub` and Clippy's
+// `redundant_pub_crate` lint.
+#[doc(hidden)]
+pub mod strict_cbor;
 pub mod timeline_erasure;
