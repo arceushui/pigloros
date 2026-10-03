@@ -103,7 +103,8 @@ use crate::fork_delivery_journal::{
     ForkDeliveryStartupOutcomeV1, ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 use crate::fork_event_authority::{
-    fork_append_request, permitted_fork_admission, preflight_classifier_sources,
+    classified_event_matches_operation, fork_append_request, permitted_fork_admission,
+    preflight_classifier_sources,
 };
 use crate::fork_manifest_publication::{
     authorize_publication, publication_parent_head, publication_sources,
@@ -11194,14 +11195,7 @@ fn sqlite_classified_event(
                 .and_then(|event| SqliteStore::logical_event(prefix, event).ok())
             })
         })
-        .filter(|event| {
-            event.id == operation.input().event_id
-                && event.seq.as_u64() == logical_seq
-                && event.origin.is_some_and(|origin| {
-                    origin.origin_timeline_id == child_timeline_id
-                        && origin.origin_logical_seq.as_u64() == logical_seq
-                })
-        })
+        .filter(|event| event.id == operation.input().event_id && event.seq.as_u64() == logical_seq)
         .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
 }
 
@@ -11325,7 +11319,7 @@ fn sqlite_validate_classified_records(
                 .filter(|classification| {
                     let (expected_origin, expected_intervention) =
                         operation.expected_provenance(table, *classification);
-                    event.payload_hash == input.payload_hash
+                    classified_event_matches_operation(&event, operation)
                         && origin == expected_origin
                         && origin.digest() == input.event_origin_digest
                         && intervention == expected_intervention
