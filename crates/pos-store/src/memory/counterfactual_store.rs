@@ -1,13 +1,13 @@
 //! `MemoryStore` adapter for the ADR-064 counterfactual storage port.
 //!
-//! One invalidation commits as a single clone-and-swap: the adapter stages
-//! the first recomputation Tick on a copy of the Fork Timeline, rechecks the
-//! persisted [`CounterfactualBasisV1`] against the committed state, stages the
-//! next generation on a copy of the Fork's counterfactual state, and installs
-//! both only after every fallible step succeeded. A conflict, an error, or
-//! an injected failure therefore leaves the store unchanged. Cloning the per-Fork state is
-//! acceptable here: `MemoryStore` is the unindexed in-process reference
-//! adapter for tests and benchmarks.
+//! One invalidation commits as a single clone-and-swap: the adapter rechecks
+//! the persisted [`CounterfactualBasisV1`] against the committed state first,
+//! then stages the first recomputation Tick on a copy of the Fork Timeline
+//! and the next generation on a copy of the Fork's counterfactual state, and
+//! installs both only after every fallible step succeeded. A conflict, an
+//! error, or an injected failure therefore leaves the store unchanged.
+//! Cloning the per-Fork state is acceptable here: `MemoryStore` is the
+//! unindexed in-process reference adapter for tests and benchmarks.
 //!
 //! # ADR gap decisions
 //!
@@ -16,17 +16,29 @@
 //!   them per Fork with [`MemoryStore::publish_counterfactual_facts`]; the
 //!   first publication starts the Fork at generation 0, and a republication
 //!   replaces only the facts, never the generation or the stored artifacts,
-//!   so the generation never decreases.
+//!   so the generation never decreases. Keeping the published epochs
+//!   monotonic is a host obligation; the adapter rechecks against whatever
+//!   facts were published last.
 //! - **Logical Head.** The rechecked head is the Fork Timeline's committed
 //!   logical head (inherited prefix plus its own Events), matching the
 //!   admitted-batch adapter.
+//! - **Recheck order.** The basis is rechecked before the first Tick is
+//!   staged, so a stale command reports `InvalidationConflict` even when its
+//!   drafts could not be appended, matching the `SQLite` adapter.
 //! - **Readable artifacts.** The committed `RCF1` and `SIV1` bytes become
-//!   readable by their self-digests at the new generation. Staging later
-//!   recomputed outputs is owned by the coordinator slices, not this adapter.
+//!   readable by their self-digests at the new generation. Bytes committed by
+//!   an earlier generation stay readable at later generations unless they
+//!   were quarantined: they are retained audit records by design, not
+//!   authoritative Fork state. Staging later recomputed outputs is owned by
+//!   the coordinator slices, not this adapter.
 //! - **Quarantine.** Every digest in a committed invalid-artifact index or
 //!   eviction set is quarantined permanently: reads report it as
 //!   [`StoredCounterfactualArtifactV1::Quarantined`] even when this store
 //!   holds its bytes, which stay retained for audit only.
+//! - **Deleted Forks.** Deleting a Fork Timeline keeps its counterfactual
+//!   state, exactly like the `SQLite` adapter, so a generation never
+//!   decreases and the audit bytes are retained. Publication, reads, and
+//!   commits on a deleted Fork still report `ForkNotFound`.
 //! - **Containment.** The commit appends Events, so it runs under the
 //!   ADR-060 erasure write fence and, like every generic Fork append, is
 //!   rejected on an ADR-099 admitted Fork whose appends are reserved for the
@@ -34,7 +46,7 @@
 //!   fenced.
 //! - **Errors.** A missing, deleted, non-Fork, unpublished, or protected
 //!   Timeline is `ForkNotFound`; every other backend failure, including a
-//!   containment denial, is `StorageFailure`.
+//!   containment denial or an admitted Fork, is `StorageFailure`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -138,8 +150,6 @@ impl CounterfactualForkStateV1 {
 
 /// The first recomputation Tick staged on a copy of the Fork Timeline.
 struct StagedFirstTickV1 {
-    /// Fork Logical Head before the first Tick.
-    prior_head: Seq,
     /// Fork Timeline state with the first Tick's Events appended.
     timeline: TimelineState,
     /// The first Tick's committed Events.
@@ -157,17 +167,20 @@ const fn store_error(error: &CoreError) -> CounterfactualStoreErrorV1 {
     }
 }
 
-/// The logical head of one Timeline state: inherited prefix plus own Events.
-fn logical_head(state: &TimelineState) -> Result<Seq, CoreError> {
-    crate::checked_logical_head(
-        state
-            .timeline
-            .meta
-            .fork_point
-            .map_or(0, |(_, fork)| fork.as_u64()),
-        state.timeline.head.as_u64(),
-    )
-    .map(Seq::from_u64)
+/// The inherited logical prefix of one Timeline state.
+fn logical_prefix(state: &TimelineState) -> u64 {
+    state
+        .timeline
+        .meta
+        .fork_point
+        .map_or(0, |(_, fork)| fork.as_u64())
+}
+
+/// The logical head of one committed Timeline state: inherited prefix plus
+/// own Events. Every committed Event's logical sequence was checked when it
+/// was appended, so the sum cannot overflow.
+fn committed_logical_head(state: &TimelineState) -> Seq {
+    Seq::from_u64(logical_prefix(state).saturating_add(state.timeline.head.as_u64()))
 }
 
 /// The staged head after the first Tick, the last fallible step before a
@@ -179,7 +192,8 @@ fn staged_first_tick_head(staged: &TimelineState) -> Result<Seq, CoreError> {
             "injected counterfactual install failure".to_owned(),
         ));
     }
-    logical_head(staged)
+    crate::checked_logical_head(logical_prefix(staged), staged.timeline.head.as_u64())
+        .map(Seq::from_u64)
 }
 
 impl MemoryStore {
@@ -231,7 +245,7 @@ impl MemoryStore {
         })
     }
 
-    /// Stage the first Tick, recheck the persisted basis, and install the
+    /// Recheck the persisted basis, then stage the first Tick and install the
     /// whole generation, inside the erasure write fence.
     fn commit_visible_counterfactual(
         &mut self,
@@ -239,18 +253,19 @@ impl MemoryStore {
     ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
         let fork = command.fork();
         let state = self.counterfactual_fork(fork)?;
-        let tick = self
-            .stage_first_tick(command)
-            .map_err(|error| store_error(&error))?;
+        let prior_head = committed_logical_head(self.state(fork));
         if let Some(conflict) = command
             .expected_basis()
-            .first_conflict(&state.basis(tick.prior_head))
+            .first_conflict(&state.basis(prior_head))
         {
             return Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
                 conflict,
             ));
         }
         let next = state.advanced(command);
+        let tick = self
+            .stage_first_tick(command)
+            .map_err(|error| store_error(&error))?;
         self.event_ids
             .extend(tick.events.iter().map(|event| event.id));
         self.timelines.insert(fork, tick.timeline);
@@ -268,20 +283,14 @@ impl MemoryStore {
     ) -> Result<StagedFirstTickV1, CoreError> {
         let mut timeline = self.state(command.fork()).clone();
         let hasher = self.hasher.as_ref();
-        logical_head(&timeline)
-            .and_then(|prior_head| {
-                command
-                    .first_tick_drafts()
-                    .drafts()
-                    .iter()
-                    .map(|draft| Self::append_one_to_state(&mut timeline, draft, hasher))
-                    .collect::<Result<Vec<_>, _>>()
-                    .and_then(|events| {
-                        staged_first_tick_head(&timeline).map(|head| (prior_head, events, head))
-                    })
-            })
-            .map(|(prior_head, events, head)| StagedFirstTickV1 {
-                prior_head,
+        command
+            .first_tick_drafts()
+            .drafts()
+            .iter()
+            .map(|draft| Self::append_one_to_state(&mut timeline, draft, hasher))
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|events| staged_first_tick_head(&timeline).map(|head| (events, head)))
+            .map(|(events, head)| StagedFirstTickV1 {
                 timeline,
                 events,
                 head,
@@ -331,8 +340,9 @@ mod tests {
 
     use pos_core::{
         CanonicalBytes, CounterfactualInvalidationInputV1, EntityId, ErasureContainmentGateV1,
-        EventDraft, EventStore, Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
-        SuffixInvalidationBytesV1,
+        EventDraft, EventStore, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
+        ForkAttributionOriginV1, InvalidationConflictV1, Kind, OwnerIdV1, PipelineDraftBatchV1,
+        RecomputationFrontierBytesV1, SuffixInvalidationBytesV1,
     };
 
     use super::*;
@@ -381,6 +391,15 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn command(fork: TimelineId) -> CounterfactualInvalidationCommandV1 {
+        command_with_trust_epoch(fork, 0)
+    }
+
+    /// One invalidation command expecting `trust_epoch`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn command_with_trust_epoch(
+        fork: TimelineId,
+        trust_epoch: u64,
+    ) -> CounterfactualInvalidationCommandV1 {
         let frontier = ok(RecomputationFrontierBytesV1::try_from_canonical(frame(
             (0x91, 0x90),
             b"RCF1",
@@ -410,7 +429,7 @@ mod tests {
             CounterfactualInvalidationInputV1 {
                 fork,
                 fork_logical_head: Seq::from_u64(1),
-                trust_epoch: 0,
+                trust_epoch,
                 revocation_epoch: 0,
                 erasure_epoch: 0,
                 frontier,
@@ -423,24 +442,34 @@ mod tests {
         ))
     }
 
-    #[test]
+    /// The facts every test Fork is published with.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn injected_install_failure_leaves_the_store_unchanged() {
+    const fn facts() -> MemoryCounterfactualFactsV1 {
+        MemoryCounterfactualFactsV1 {
+            plan_digest: Hash::from_bytes([5; 32]),
+            dependency_graph_digest: Hash::from_bytes([3; 32]),
+            trust_epoch: 0,
+            revocation_epoch: 0,
+            erasure_epoch: 0,
+        }
+    }
+
+    /// A store with an open erasure gate and a published Fork at logical Seq 1.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn published_store() -> (MemoryStore, TimelineId) {
         let mut store = MemoryStore::new();
         ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
         let root = ok(store.create_timeline("counterfactual-root")).id();
         ok(store.append(root, &[draft(0)]));
         let fork = ok(store.fork(root, Seq::from_u64(1), "counterfactual-fork")).id();
-        ok(store.publish_counterfactual_facts(
-            fork,
-            MemoryCounterfactualFactsV1 {
-                plan_digest: Hash::from_bytes([5; 32]),
-                dependency_graph_digest: Hash::from_bytes([3; 32]),
-                trust_epoch: 0,
-                revocation_epoch: 0,
-                erasure_epoch: 0,
-            },
-        ));
+        ok(store.publish_counterfactual_facts(fork, facts()));
+        (store, fork)
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn injected_install_failure_leaves_the_store_unchanged() {
+        let (mut store, fork) = published_store();
         let command = command(fork);
         let saved_state = store.counterfactual_forks.clone();
         let events = store.state(fork).events.clone();
@@ -466,5 +495,146 @@ mod tests {
         );
         assert_eq!(store.state(fork).events.len(), 1);
         assert_eq!(store.event_ids.len(), event_ids.len() + 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn conflict_is_reported_before_the_first_tick_is_staged() {
+        let (mut store, fork) = published_store();
+        let saved_state = store.counterfactual_forks.clone();
+
+        // The armed fault stands in for a first Tick that cannot be staged.
+        FAIL_NEXT_COUNTERFACTUAL_INSTALL.with(|fail| fail.set(true));
+        let outcome = store.commit_counterfactual_invalidation(&command_with_trust_epoch(fork, 1));
+        let staging_ran = !FAIL_NEXT_COUNTERFACTUAL_INSTALL.with(|fail| fail.replace(false));
+
+        assert_eq!(
+            outcome,
+            Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
+                InvalidationConflictV1::TrustEpoch
+            ))
+        );
+        assert!(!staging_ran);
+        assert_eq!(store.counterfactual_forks, saved_state);
+        assert!(store.state(fork).events.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admitted_fork_commit_fails_closed_without_committing() {
+        let (mut store, fork) = published_store();
+        store.fork_admissions.insert(
+            fork,
+            ok(ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+                operation_id: Hash::from_bytes([1; 32]),
+                principal_owner_binding_digest: Hash::from_bytes([2; 32]),
+                creator: OwnerIdV1::from_static("test-owner"),
+                parent_timeline_id: TimelineId::new(),
+                child_timeline_id: fork,
+                room_revision_descriptor_hash: Hash::from_bytes([3; 32]),
+                parent_logical_head: 0,
+                parent_chain_head_hash: Hash::from_bytes([4; 32]),
+                completed_fold_cursor: 0,
+                post_fold_tick_boundary: 0,
+                plugin_composition_hash: Hash::from_bytes([5; 32]),
+                attribution_required: false,
+                origin: ForkAttributionOriginV1::Local,
+            })),
+        );
+        let saved_state = store.counterfactual_forks.clone();
+        let event_ids = store.event_ids.clone();
+        let command = command(fork);
+
+        assert_eq!(
+            store.commit_counterfactual_invalidation(&command),
+            Err(CounterfactualStoreErrorV1::StorageFailure)
+        );
+        assert_eq!(
+            store.current_fork_generation(fork),
+            Ok(ForkGenerationV1 {
+                fork,
+                generation: 0
+            })
+        );
+        assert_eq!(store.counterfactual_forks, saved_state);
+        assert!(store.state(fork).events.is_empty());
+        assert_eq!(store.event_ids, event_ids);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn deleted_fork_is_not_found_but_keeps_its_counterfactual_state() {
+        let (mut store, fork) = published_store();
+        let command = command(fork);
+        ok(store.commit_counterfactual_invalidation(&command));
+        let saved_state = store.counterfactual_forks.get(&fork).cloned();
+
+        ok(store.delete_timeline(fork));
+
+        assert_eq!(
+            store.current_fork_generation(fork),
+            Err(CounterfactualStoreErrorV1::ForkNotFound)
+        );
+        assert_eq!(
+            store.read_generation_artifact(
+                ForkGenerationV1 {
+                    fork,
+                    generation: 1
+                },
+                command.frontier().digest()
+            ),
+            Err(CounterfactualStoreErrorV1::ForkNotFound)
+        );
+        assert_eq!(
+            store.commit_counterfactual_invalidation(&command),
+            Err(CounterfactualStoreErrorV1::ForkNotFound)
+        );
+        assert_eq!(
+            store.publish_counterfactual_facts(fork, facts()),
+            Err(CounterfactualStoreErrorV1::ForkNotFound)
+        );
+        assert_eq!(store.counterfactual_forks.get(&fork).cloned(), saved_state);
+        assert_eq!(
+            saved_state.map(|state| (state.generation, state.artifacts.len())),
+            Some((1, 2))
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn geographic_evidence_protected_fork_is_not_found() {
+        let (mut store, fork) = published_store();
+        store.geographic_timelines.insert(fork);
+
+        assert_eq!(
+            store.publish_counterfactual_facts(fork, facts()),
+            Err(CounterfactualStoreErrorV1::ForkNotFound)
+        );
+        assert_eq!(
+            store.current_fork_generation(fork),
+            Err(CounterfactualStoreErrorV1::ForkNotFound)
+        );
+        assert_eq!(
+            store.read_generation_artifact(
+                ForkGenerationV1 {
+                    fork,
+                    generation: 0
+                },
+                Hash::from_bytes([9; 32])
+            ),
+            Err(CounterfactualStoreErrorV1::ForkNotFound)
+        );
+        assert_eq!(
+            store.commit_counterfactual_invalidation(&command(fork)),
+            Err(CounterfactualStoreErrorV1::ForkNotFound)
+        );
+        assert!(store.state(fork).events.is_empty());
+        assert_eq!(
+            store
+                .counterfactual_forks
+                .get(&fork)
+                .map(|state| state.generation),
+            Some(0)
+        );
     }
 }
