@@ -4576,7 +4576,7 @@ pub mod strict_codec {
             };
             frontier.intervention_seed_nodes = vec![node.clone()];
             frontier.affected_nodes = vec![node.clone()];
-            frontier.owner_frontiers = vec![OwnerFrontierV1 {
+            frontier.owner_frontiers = vec![crate::OwnerFrontierV1 {
                 owner_id: "proof".to_owned(),
                 earliest_tick: 2,
                 earliest_scheduler_position: 1,
