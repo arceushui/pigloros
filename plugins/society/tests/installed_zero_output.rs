@@ -5,8 +5,8 @@ use std::error::Error;
 use pos_core::Plugin;
 use pos_plugin_society::{SocietyReducer, SocietySignalProjectionPlugin};
 use pos_runtime::{
-    installed_plugin_role_v1, DomainImplementationKindV1, InstalledOutputPolicySourceV1,
-    OutputAdmissionErrorV1, OutputPolicyBindingV1, PluginAvailabilityV1, PluginIsolationV1,
+    installed_plugin_role_v1, DomainImplementationKindV1, OutputAdmissionErrorV1,
+    OutputPolicyBindingV1, OutputPolicySourceV1, PluginAvailabilityV1, PluginIsolationV1,
     PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError,
 };
 
@@ -23,9 +23,9 @@ fn society_projection_is_zero_output_but_uninstalled_without_epf1() -> Result<()
     assert!(capability.has_reducer);
 
     assert!(matches!(
-        OutputPolicyBindingV1::from_installed_source(
+        OutputPolicyBindingV1::from_source(
             plugin.as_ref(),
-            InstalledOutputPolicySourceV1::Society,
+            OutputPolicySourceV1::Society,
             b"society-read-only-projection",
             "deterministic-local-v1",
         ),
@@ -33,9 +33,9 @@ fn society_projection_is_zero_output_but_uninstalled_without_epf1() -> Result<()
     ));
 
     // Generated can check the empty declaration structurally, not install it.
-    let binding = OutputPolicyBindingV1::from_installed_source(
+    let binding = OutputPolicyBindingV1::from_source(
         plugin.as_ref(),
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         b"society-read-only-projection",
         "deterministic-local-v1",
     )?;
