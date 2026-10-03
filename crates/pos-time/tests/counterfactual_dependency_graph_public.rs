@@ -1,4 +1,5 @@
 //! Public-interface tests for ADR-064 counterfactual dependency-graph validation.
+#![cfg(target_os = "linux")]
 
 use pos_conformance::counterfactual::dependency::{
     DependencyClassificationRuleV1, DependencyTickRangeV1, InputDependencyContractErrorV1,
@@ -26,6 +27,8 @@ use std::error::Error as _;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type EdgeKey = (u64, u32, String, u32, [u8; 32]);
+/// A graph edit and whether its missing edge sorts before its unknown edge.
+type UnknownEdgeCase = (fn(&mut Graph), bool);
 
 const EXOGENOUS: usize = 0;
 const PARENT: usize = 1;
@@ -331,6 +334,10 @@ fn edge_coordinate(edge: &InputDependencyV1) -> UnknownEdgeCoordinateV1 {
     }
 }
 
+fn boxed_edge(edge: &InputDependencyV1) -> Box<UnknownEdgeCoordinateV1> {
+    Box::new(edge_coordinate(edge))
+}
+
 fn consumer_digests(graph: &ValidatedDependencyGraphV1, source: [u8; 32]) -> Vec<[u8; 32]> {
     graph
         .consumers(source)
@@ -353,6 +360,11 @@ fn accepts_complete_graph_and_exposes_canonical_view() -> TestResult {
     assert_eq!(validated.unknown_edge_policy(), UnknownEdgePolicyV1::Reject);
     assert_eq!(validated.nodes(), nodes.as_slice());
     assert_eq!(validated.edges(), edges.as_slice());
+    let edge_digests = edges
+        .iter()
+        .map(InputDependencyV1::digest)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(validated.edge_digests(), edge_digests.as_slice());
     assert!(validated.unknown_edge_coordinates().is_empty());
     assert!(validated.is_complete());
     let parent = nodes[PARENT].node.artifact_digest;
@@ -627,7 +639,7 @@ fn rejects_unknown_edges_under_every_policy() -> TestResult {
     // Each edit makes `edges[0]` (`PARENT <- EXOGENOUS`) unknown, which also
     // leaves that declared input without a valid edge. The flag says whether
     // the missing edge's canonical key sorts before the unknown edge's key.
-    let edits: [(fn(&mut Graph), bool); 4] = [
+    let edits: [UnknownEdgeCase; 4] = [
         (
             |graph| graph.edges[0].consumer.artifact_digest = [0x98; 32],
             false,
@@ -642,9 +654,9 @@ fn rejects_unknown_edges_under_every_policy() -> TestResult {
     for (edit, gap_first) in edits {
         let mut fixture = graph()?;
         edit(&mut fixture);
-        let unknown = GraphError::UnknownDependencyEdge(edge_coordinate(&fixture.edges[0]));
+        let unknown = GraphError::UnknownDependencyEdge(boxed_edge(&fixture.edges[0]));
         let expected = if gap_first {
-            GraphError::DependencyGraphIncomplete(parent_gap(&fixture))
+            GraphError::DependencyGraphIncomplete(Box::new(parent_gap(&fixture)))
         } else {
             unknown.clone()
         };
@@ -669,7 +681,7 @@ fn rejects_unknown_edges_under_every_policy() -> TestResult {
     let expected = edge_coordinate(&undeclared.edges[position]);
     assert_eq!(
         validate(undeclared).map(drop),
-        Err(GraphError::UnknownDependencyEdge(expected))
+        Err(GraphError::UnknownDependencyEdge(Box::new(expected)))
     );
     Ok(())
 }
@@ -682,7 +694,7 @@ fn enforces_edge_class_rules() -> TestResult {
     let expected = edge_coordinate(&mismatched.edges[position]);
     assert_eq!(
         validate(mismatched).map(drop),
-        Err(GraphError::ClassRuleViolation(expected))
+        Err(GraphError::ClassRuleViolation(Box::new(expected)))
     );
 
     let presentation = graph_with(|nodes| {
@@ -692,7 +704,7 @@ fn enforces_edge_class_rules() -> TestResult {
     let expected = edge_coordinate(&presentation.edges[position]);
     assert_eq!(
         validate(presentation).map(drop),
-        Err(GraphError::ClassRuleViolation(expected))
+        Err(GraphError::ClassRuleViolation(Box::new(expected)))
     );
     Ok(())
 }
@@ -710,7 +722,7 @@ fn requires_plan_authorization_on_root_edges() -> TestResult {
         let expected = edge_coordinate(&fixture.edges[position]);
         assert_eq!(
             validate(fixture).map(drop),
-            Err(GraphError::UnauthorizedDependency(expected))
+            Err(GraphError::UnauthorizedDependency(Box::new(expected)))
         );
     }
     Ok(())
@@ -745,7 +757,9 @@ fn reject_policy_returns_first_canonical_missing_edge() -> TestResult {
     let (fixture, expected) = incomplete_graph()?;
     assert_eq!(
         validate(fixture).map(drop),
-        Err(GraphError::DependencyGraphIncomplete(expected[0].clone()))
+        Err(GraphError::DependencyGraphIncomplete(Box::new(
+            expected[0].clone()
+        )))
     );
 
     let mut single = graph()?;
@@ -753,9 +767,7 @@ fn reject_policy_returns_first_canonical_missing_edge() -> TestResult {
     let removed = single.edges.remove(position);
     assert_eq!(
         validate(single).map(drop),
-        Err(GraphError::DependencyGraphIncomplete(edge_coordinate(
-            &removed
-        )))
+        Err(GraphError::DependencyGraphIncomplete(boxed_edge(&removed)))
     );
     Ok(())
 }
@@ -770,7 +782,7 @@ fn reject_policy_reports_a_missing_input_digest_that_sorts_after_every_node() ->
     };
     assert_eq!(
         validate(fixture).map(drop),
-        Err(GraphError::DependencyGraphIncomplete(expected))
+        Err(GraphError::DependencyGraphIncomplete(Box::new(expected)))
     );
     Ok(())
 }
@@ -815,12 +827,12 @@ fn reject_policy_merges_edge_errors_and_missing_edges_by_canonical_key() -> Test
     };
     assert_eq!(
         validate(fixture).map(drop),
-        Err(GraphError::DependencyGraphIncomplete(gap))
+        Err(GraphError::DependencyGraphIncomplete(Box::new(gap)))
     );
     // Under `FullSuffixFromCut` the undeclared edge stays fatal.
     assert_eq!(
         validate_with(full, UnknownEdgePolicyV1::FullSuffixFromCut, BOUNDS).map(drop),
-        Err(GraphError::UnknownDependencyEdge(undeclared))
+        Err(GraphError::UnknownDependencyEdge(Box::new(undeclared)))
     );
 
     // Missing edge at Tick 10, class-rule violation at Tick 20: same order.
@@ -833,7 +845,7 @@ fn reject_policy_merges_edge_errors_and_missing_edges_by_canonical_key() -> Test
     fixture.edges[position].dependency_class = DependencyClassV1::EndogenousRecomputed;
     assert_eq!(
         validate(fixture).map(drop),
-        Err(GraphError::DependencyGraphIncomplete(gap))
+        Err(GraphError::DependencyGraphIncomplete(Box::new(gap)))
     );
 
     // Undeclared edge at Tick 11, missing edge at Tick 20: the edge error wins.
@@ -847,7 +859,7 @@ fn reject_policy_merges_edge_errors_and_missing_edges_by_canonical_key() -> Test
     fixture.edges.remove(missing);
     assert_eq!(
         validate(fixture).map(drop),
-        Err(GraphError::UnknownDependencyEdge(undeclared))
+        Err(GraphError::UnknownDependencyEdge(Box::new(undeclared)))
     );
 
     // Unauthorized edge at Tick 11, missing edge at Tick 20: the edge error wins.
@@ -859,7 +871,7 @@ fn reject_policy_merges_edge_errors_and_missing_edges_by_canonical_key() -> Test
     fixture.edges.remove(missing);
     assert_eq!(
         validate(fixture).map(drop),
-        Err(GraphError::UnauthorizedDependency(unauthorized))
+        Err(GraphError::UnauthorizedDependency(Box::new(unauthorized)))
     );
     Ok(())
 }
@@ -878,7 +890,7 @@ fn reports_the_smallest_edge_error_key_under_every_policy() -> TestResult {
         let expected = edge_coordinate(&fixture.edges[early]);
         assert_eq!(
             validate_with(fixture, policy, BOUNDS).map(drop),
-            Err(GraphError::UnauthorizedDependency(expected))
+            Err(GraphError::UnauthorizedDependency(Box::new(expected)))
         );
     }
     Ok(())
@@ -960,10 +972,10 @@ fn errors_render_distinct_safe_messages() {
         GraphError::RootNotInPlan,
         GraphError::UnclosedEndogenousInput,
         GraphError::InterventionNodeMissing,
-        GraphError::UnknownDependencyEdge(coordinate.clone()),
-        GraphError::ClassRuleViolation(coordinate.clone()),
-        GraphError::UnauthorizedDependency(coordinate.clone()),
-        GraphError::DependencyGraphIncomplete(coordinate),
+        GraphError::UnknownDependencyEdge(Box::new(coordinate.clone())),
+        GraphError::ClassRuleViolation(Box::new(coordinate.clone())),
+        GraphError::UnauthorizedDependency(Box::new(coordinate.clone())),
+        GraphError::DependencyGraphIncomplete(Box::new(coordinate)),
     ];
     let messages: BTreeSet<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(messages.len(), errors.len());
