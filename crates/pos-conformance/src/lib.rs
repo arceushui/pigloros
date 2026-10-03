@@ -998,6 +998,14 @@ pub struct RecomputationFrontierV1 {
     pub global_frontier_tick: u64,
     pub global_frontier_scheduler_position: u32,
     pub unknown_edge_policy: UnknownEdgePolicyV1,
+    /// Required edges the frontier could not resolve.
+    ///
+    /// The nested v1 evidence encodes each entry in the ADR-064 shape
+    /// `[consumer_coordinate, missing_source_digest_or_null]`, the same record
+    /// the standalone `RCF1` artifact uses. This replaced an earlier bare
+    /// coordinate list without changing any verified bytes: the evidence
+    /// header verifier requires `Reject` with an empty list, so no verified
+    /// evidence could carry a non-empty one.
     pub unknown_edge_coordinates: Vec<counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1>,
     pub endogenous_suffix_end_tick: u64,
     pub classification_bundle_digest: [u8; 32],
@@ -1923,6 +1931,7 @@ pub mod strict_codec {
     use crate::counterfactual::frontier_artifacts::{
         decode_recomputation_frontier_value, decode_suffix_invalidation_value,
         dependency_node_value, recomputation_frontier_value, suffix_invalidation_value,
+        FrontierArtifactErrorV1,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -3443,10 +3452,6 @@ pub mod strict_codec {
         })
     }
 
-    fn encode_node(node: &DependencyNodeV1) -> Value {
-        dependency_node_value(node)
-    }
-
     fn decode_node(value: &Value) -> Result<DependencyNodeV1, StrictCborError> {
         let fields = array(value, "dependency_node", 6)?;
         Ok(DependencyNodeV1 {
@@ -3473,8 +3478,8 @@ pub mod strict_codec {
 
     fn encode_dependency(dependency: &InputDependencyV1) -> Value {
         Value::Array(vec![
-            encode_node(&dependency.consumer),
-            encode_node(&dependency.source),
+            dependency_node_value(&dependency.consumer),
+            dependency_node_value(&dependency.source),
             enum_dependency_class(dependency.dependency_class),
             digest(&dependency.authorization_digest),
             digest(&dependency.provenance_digest),
@@ -3528,15 +3533,24 @@ pub mod strict_codec {
     }
 
     fn decode_frontier(value: &Value) -> Result<RecomputationFrontierV1, StrictCborError> {
-        decode_recomputation_frontier_value(value).map_err(|_| StrictCborError::InvalidField {
-            field: "recomputation_frontier".to_owned(),
-        })
+        decode_recomputation_frontier_value(value)
+            .map_err(|error| nested_record_error(error, "recomputation_frontier"))
     }
 
     fn decode_invalidation(value: &Value) -> Result<SuffixInvalidationV1, StrictCborError> {
-        decode_suffix_invalidation_value(value).map_err(|_| StrictCborError::InvalidField {
-            field: "suffix_invalidation".to_owned(),
-        })
+        decode_suffix_invalidation_value(value)
+            .map_err(|error| nested_record_error(error, "suffix_invalidation"))
+    }
+
+    /// A magic or version mismatch keeps its own code; every other shape
+    /// failure names the nested record.
+    fn nested_record_error(error: FrontierArtifactErrorV1, field: &str) -> StrictCborError {
+        match error {
+            FrontierArtifactErrorV1::UnsupportedVersion => StrictCborError::UnsupportedVersion,
+            _ => StrictCborError::InvalidField {
+                field: field.to_owned(),
+            },
+        }
     }
 
     fn encode_counterfactual(contract: &CounterfactualContractV1) -> Value {
@@ -4447,14 +4461,42 @@ pub mod strict_codec {
                 10,
                 uint(u64::from(u32::MAX) + 1),
             );
-            assert!(decode_frontier(&frontier).is_err());
+            assert_eq!(
+                decode_frontier(&frontier),
+                Err(StrictCborError::InvalidField {
+                    field: "recomputation_frontier".to_owned(),
+                })
+            );
+            let frontier = replace_field(
+                &recomputation_frontier_value(&contract.frontier),
+                0,
+                text("RCF2"),
+            );
+            assert_eq!(
+                decode_frontier(&frontier),
+                Err(StrictCborError::UnsupportedVersion)
+            );
 
             let invalidation = replace_field(
                 &suffix_invalidation_value(&contract.invalidation),
                 15,
                 Value::Array(vec![uint(1), Value::Null, Value::Bool(true)]),
             );
-            assert!(decode_invalidation(&invalidation).is_err());
+            assert_eq!(
+                decode_invalidation(&invalidation),
+                Err(StrictCborError::InvalidField {
+                    field: "suffix_invalidation".to_owned(),
+                })
+            );
+            let invalidation = replace_field(
+                &suffix_invalidation_value(&contract.invalidation),
+                1,
+                uint(2),
+            );
+            assert_eq!(
+                decode_invalidation(&invalidation),
+                Err(StrictCborError::UnsupportedVersion)
+            );
 
             let counterfactual = replace_field(&encode_counterfactual(contract), 8, Value::Null);
             assert!(decode_counterfactual(&counterfactual).is_err());
@@ -4482,6 +4524,49 @@ pub mod strict_codec {
                     field: "dependency_class".to_owned(),
                 })
             );
+        }
+
+        #[test]
+        fn nested_frontier_roundtrips_adr_unknown_edge_records() {
+            let evidence = super::super::tests::evidence();
+            let mut contract = evidence.contract.counterfactual;
+            let consumer = DependencyNodeV1 {
+                tick: 2,
+                scheduler_position: 1,
+                owner_id: "proof".to_owned(),
+                output_ordinal: 0,
+                schema_id: 1,
+                artifact_digest: [7; 32],
+            };
+            contract.frontier.unknown_edge_policy = crate::UnknownEdgePolicyV1::FullSuffixFromCut;
+            contract.frontier.unknown_edge_coordinates = vec![
+                crate::counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1 {
+                    consumer: consumer.clone(),
+                    missing_source_digest: None,
+                },
+                crate::counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1 {
+                    consumer: consumer.clone(),
+                    missing_source_digest: Some([8; 32]),
+                },
+            ];
+
+            let encoded = encode_counterfactual(&contract);
+            let edges = encoded
+                .as_array()
+                .and_then(|fields| fields[5].as_array())
+                .and_then(|frontier| frontier[12].as_array())
+                .cloned();
+            assert_eq!(
+                edges,
+                Some(vec![
+                    Value::Array(vec![dependency_node_value(&consumer), Value::Null]),
+                    Value::Array(vec![
+                        dependency_node_value(&consumer),
+                        Value::Bytes(vec![8; 32]),
+                    ]),
+                ])
+            );
+            assert_eq!(decode_counterfactual(&encoded), Ok(contract));
         }
     }
 }
