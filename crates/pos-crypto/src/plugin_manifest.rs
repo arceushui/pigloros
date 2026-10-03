@@ -22,6 +22,8 @@ type Pmf1Reader<'a> = Reader<'a, PluginManifestErrorV1>;
 type CapabilityKey<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str);
 /// `(dependency_id, release_digest32)`.
 type Dependency<'a> = (&'a str, Digest);
+/// Fields 17-20: dependency release digests, provenance and SBOM, licences.
+type SupplyChain = (Vec<Digest>, [Artifact; 2], Vec<Artifact>);
 
 /// Maximum complete PMF1 size in bytes.
 const MAX_PMF1_BYTES: usize = 1024 * 1024;
@@ -572,9 +574,7 @@ fn read_dependency<'a>(
 }
 
 /// Fields 17-20: dependencies, provenance, SBOM, and licences.
-fn read_supply_chain(
-    reader: &mut Pmf1Reader<'_>,
-) -> Result<(Vec<Digest>, [Artifact; 2], Vec<Artifact>), PluginManifestErrorV1> {
+fn read_supply_chain(reader: &mut Pmf1Reader<'_>) -> Result<SupplyChain, PluginManifestErrorV1> {
     reader.at(17);
     let dependencies = read_increasing(reader, MAX_LIST, read_dependency, |entry| entry.0)?;
     reader.at(18);
