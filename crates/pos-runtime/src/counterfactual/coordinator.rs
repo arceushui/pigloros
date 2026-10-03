@@ -413,7 +413,7 @@ const STORAGE_FAILURE: CounterfactualAdmissionErrorV1 =
 /// It exclusively owns the store that holds the counterfactual port.
 #[derive(Debug)]
 pub struct CounterfactualCoordinatorV1<S> {
-    store: S,
+    pub(super) store: S,
 }
 
 /// The validated `SIV1` bytes with the index and eviction set derived from it.
