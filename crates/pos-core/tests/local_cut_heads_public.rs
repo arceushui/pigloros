@@ -198,7 +198,7 @@ fn one_page_tables_match_independent_lcp1_encodings() -> TestResult {
     let rows = expected_rows(2);
     let table = LocalCutHeadsTableV1::expected_heads(OWNER, CUT, &rows)?;
     let page = page_bytes(4, 0, rows.iter().map(expected_value).collect())?;
-    assert_eq!(table.records(), [page.clone()]);
+    assert_eq!(table.records(), std::slice::from_ref(&page));
     assert_eq!(
         table.table_ref(),
         LocalCutTableRefV1::new(2, Some(page_digest(&page)))?
@@ -207,7 +207,7 @@ fn one_page_tables_match_independent_lcp1_encodings() -> TestResult {
     let rows = result_rows(64);
     let table = LocalCutHeadsTableV1::result_heads(OWNER, CUT, &rows)?;
     let page = page_bytes(5, 0, rows.iter().map(result_value).collect())?;
-    assert_eq!(table.records(), [page.clone()]);
+    assert_eq!(table.records(), std::slice::from_ref(&page));
     assert_eq!(
         table.table_ref(),
         LocalCutTableRefV1::new(64, Some(page_digest(&page)))?
