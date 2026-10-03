@@ -22,7 +22,8 @@
 //! - Each Intervention travels as its exact canonical INT1 bytes in a CBOR
 //!   byte string, so INT1 remains the single owner of its codec and its
 //!   closed errors surface unchanged through
-//!   [`CounterfactualPlanContractErrorV1::Intervention`]. The ordered list is
+//!   [`CounterfactualPlanContractErrorV1::Intervention`]. The ordered list
+//!   holds 1 through 1,024 Interventions (an empty list is rejected) and is
 //!   validated by [`validate_plan_interventions_v1`].
 //! - The first recomputed Tick is exactly the Tick after the parent cut, and
 //!   every Intervention is effective inside `first_tick..=horizon_tick`. An
@@ -42,10 +43,17 @@
 //!   owned elsewhere.
 //! - The requested `ReplayClaim` uses the CFR1 wire codes 0 through 4 and any
 //!   claim may be requested; whether evidence supports it is decided later.
+//! - A plan cannot supersede itself: `previous_plan_digest` must differ from
+//!   `plan_digest`.
 //! - The plan carries no operational path: every artifact is a digest, and
 //!   the room, profile, and policy identifiers are 1 through 128 bytes of
-//!   UTF-8 without control characters that neither start with `/` or `~`,
-//!   contain `\`, nor contain a `..` path component.
+//!   UTF-8 without control characters that neither start with `/`, `~`, or a
+//!   drive-letter prefix such as `C:`, contain `\`, nor contain a `.` or `..`
+//!   path component.
+//! - The deterministic-CBOR nesting depth is at most 3, counting the record
+//!   array as depth 0: the deepest legal items are the scalar fields of a
+//!   descriptor, inside a descriptor array (depth 2) inside a descriptor list
+//!   (depth 1). INT1 Interventions are opaque byte strings at depth 2.
 //!
 //! The largest structurally valid record encodes to about 12.5 MB (1,024
 //! Interventions of at most about 4.9 KB, 65,536 exogenous and 4,096
@@ -55,6 +63,7 @@
 use super::intervention::{
     validate_plan_interventions_v1, InterventionContractErrorV1, InterventionV1,
 };
+use super::replay_claim::{replay_claim_code, REPLAY_CLAIMS};
 use crate::{
     domain_digest, ExecutionProfileContractErrorV1, ExecutionProfileV1, ReplayClaimV1,
     TrustPolicySnapshotContractErrorV1, TrustPolicySnapshotV1,
@@ -79,16 +88,10 @@ const EXECUTION_PROFILE_REF_FIELD_COUNT: usize = 3;
 const TRUST_POLICY_REF_FIELD_COUNT: usize = 3;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_SEMANTIC_VERSION_BYTES: usize = 64;
-const MAX_NESTING_DEPTH: u8 = 2;
+/// Deepest legal item: a descriptor field (record 0, list 1, descriptor 2, field 3).
+const MAX_NESTING_DEPTH: u8 = 3;
 const MAX_NESTED_ARRAY_ITEMS: u64 = 65_536;
 const PLAN_DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.CounterfactualPlan.v1";
-const REPLAY_CLAIMS: [ReplayClaimV1; 5] = [
-    ReplayClaimV1::Exact,
-    ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
-    ReplayClaimV1::StructuralOnly,
-    ReplayClaimV1::UnverifiableArtifactsMissing,
-    ReplayClaimV1::IncompatibleProfile,
-];
 
 /// Closed safe errors exposed by the CFP1 contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,7 +245,8 @@ pub struct CounterfactualPlanV1 {
     pub first_tick: u64,
     /// Inclusive horizon Tick; not before the first Tick.
     pub horizon_tick: u64,
-    /// 1 to 1,024 Interventions ordered by `(effective_tick, ordinal, id)`.
+    /// 1 to 1,024 Interventions ordered by `(effective_tick, ordinal, id)`;
+    /// an empty list is rejected.
     pub interventions: Vec<InterventionV1>,
     /// Up to 65,536 strictly ordered `ExogenousFrozen` descriptors.
     pub exogenous_descriptors: Vec<FrozenArtifactDescriptorV1>,
@@ -266,7 +270,7 @@ pub struct CounterfactualPlanV1 {
     pub failure_policy_digest: [u8; 32],
     /// Replay claim requested for the recomputed suffix.
     pub replay_claim: ReplayClaimV1,
-    /// Digest of the plan this plan supersedes, if any.
+    /// Digest of the plan this plan supersedes, if any; never `plan_digest`.
     pub previous_plan_digest: Option<[u8; 32]>,
     /// Domain-separated digest over fields 0 through 23.
     pub plan_digest: [u8; 32],
@@ -359,7 +363,11 @@ fn digested_body_fields(
 }
 
 fn validate_bounds(plan: &CounterfactualPlanV1) -> Result<(), CounterfactualPlanContractErrorV1> {
-    if valid_identities(plan) && valid_tick_range(plan) && valid_descriptor_counts(plan) {
+    if valid_identities(plan)
+        && valid_tick_range(plan)
+        && valid_descriptor_counts(plan)
+        && plan.previous_plan_digest != Some(plan.plan_digest)
+    {
         Ok(())
     } else {
         Err(CounterfactualPlanContractErrorV1::FieldOutOfBounds)
@@ -397,8 +405,16 @@ fn plan_identifier(value: &str) -> bool {
         && value.len() <= MAX_IDENTIFIER_BYTES
         && !value.chars().any(char::is_control)
         && !value.starts_with(['/', '~'])
+        && !has_drive_letter_prefix(value)
         && !value.contains('\\')
-        && !value.split('/').any(|component| component == "..")
+        && !value
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
+}
+
+/// Whether a value starts with a drive-letter prefix such as `C:`.
+const fn has_drive_letter_prefix(value: &str) -> bool {
+    matches!(value.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
 }
 
 fn validate_intervention_window(
@@ -530,16 +546,6 @@ fn encode_trust_policy_ref(policy: &PlanTrustPolicyRefV1) -> Value {
         uint(policy.epoch),
         byte_string(&policy.snapshot_digest),
     ])
-}
-
-const fn replay_claim_code(claim: ReplayClaimV1) -> u64 {
-    match claim {
-        ReplayClaimV1::Exact => 0,
-        ReplayClaimV1::ExactAuthoritativeWithRedactedViews => 1,
-        ReplayClaimV1::StructuralOnly => 2,
-        ReplayClaimV1::UnverifiableArtifactsMissing => 3,
-        ReplayClaimV1::IncompatibleProfile => 4,
-    }
 }
 
 fn uint(value: u64) -> Value {
