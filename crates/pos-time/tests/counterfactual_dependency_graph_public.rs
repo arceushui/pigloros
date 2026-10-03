@@ -368,6 +368,8 @@ fn accepts_complete_graph_and_exposes_canonical_view() -> TestResult {
     );
     let validated = validate(fixture)?;
     assert_eq!(validated.plan_digest(), plan_digest);
+    assert_eq!(validated.parent_cut_digest(), [4; 32]);
+    assert_eq!(validated.classification_bundle_digest(), [5; 32]);
     assert_eq!(validated.first_tick(), FIRST_TICK);
     assert_eq!(validated.horizon_tick(), HORIZON_TICK);
     assert_eq!(validated.unknown_edge_policy(), UnknownEdgePolicyV1::Reject);
