@@ -197,9 +197,11 @@ where
         .find(|entry| entry.type_name == factory && type_name::<F::Plugin>() == factory)
         .ok_or(StagedReducerAdmissionErrorV1::NotReviewed)?;
     let admission = PENDING_CONFORMANCE_ADMISSION_V1;
+    // Admission requires recorded conformance evidence, which #512 supplies.
     admission
         .conformance_digest
-        .and(Some((admission, reviewed.id)))
+        .is_some()
+        .then_some((admission, reviewed.id))
         .ok_or(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
 }
 
