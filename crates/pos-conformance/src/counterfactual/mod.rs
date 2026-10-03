@@ -8,6 +8,7 @@
 //! crate-private CBOR helpers the schemas share live in `codec`.
 
 mod codec;
+pub mod checkpoint;
 pub mod dependency;
 pub mod intervention;
 
