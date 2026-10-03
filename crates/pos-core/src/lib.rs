@@ -53,10 +53,14 @@ pub mod plugin;
 pub mod recipient_key;
 pub mod repro_manifest_root;
 pub mod retention;
+pub mod staged_install;
 pub mod state;
 pub mod store;
 pub mod timeline;
 pub mod timeline_envelope;
+pub mod trusted_clock;
+#[cfg(any(test, feature = "test-support"))]
+pub mod trusted_clock_fixture;
 pub mod world_artifact;
 pub mod world_closure_binding;
 pub mod world_consumer_set;
@@ -542,6 +546,13 @@ pub use timeline_envelope::{
     TimelineEventEnvelopeErrorV1, TimelineEventEnvelopeInputV1, TimelineEventEnvelopeV1,
     TimelineEventVerificationV1, MAX_TIMELINE_EVENT_ENVELOPE_BYTES_V1,
     MAX_TIMELINE_EVENT_PAYLOAD_BYTES_V1,
+};
+pub use trusted_clock::{
+    acknowledge_trusted_clock_overrun, commit_pending_overrun_latch, handoff_checked,
+    open_release_guard, reserve_trusted_clock, wall_time_from_epoch_duration,
+    wall_time_from_system_time, AuthorizedArtifactUseV1, HandoffTokenV1,
+    HostAuthorizationProvenanceV1, ProtectedHandoffTargetV1, ReleaseGuardPortV1,
+    StagedProtectedOutputV1, TrustedClockErrorV1, TrustedClockStorePortV1, WaitPhaseV1,
 };
 pub use world_consumer_set::{
     WorldConsumerSetErrorV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,

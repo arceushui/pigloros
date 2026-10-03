@@ -8,13 +8,17 @@
 //! - [`ProjectionRegistry`]: a named registry of [`Reducer`] implementations.
 //! - [`EntityStateProjection`]: a built-in `Reducer` that folds event metadata per entity.
 //! - [`RelationshipIndex`]: an adjacency index for directed [`Relationship`] values.
+//! - [`ProtectedProjectionProviderV1`] and [`DetachedProjectionCandidateV1`]:
+//!   private protected projection candidates folded by the live fold step.
 //!
 //! No I/O, no async.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, convert::Infallible, sync::Arc};
 
 use pos_core::{
+    staged_install::{PreparedInstallPairV1, PreparedInstallV1, ProjectionSourceV1},
+    trusted_clock::StagedProtectedOutputV1,
     AuthorityErrorV1, AuthorityRegistrySnapshotV1, AuthorizationDecisionV1, AuthorizationRequestV1,
     CanonicalBytes, ConsentRevocationFoldListener, ConsentRevokedV1, EntityId,
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1, Event,
@@ -23,6 +27,28 @@ use pos_core::{
     PluginId, Reducer, Relationship, Seq, State, StateRegistry, TimelineId,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
+
+mod candidate;
+mod staged;
+
+/// One staged consumer's private State map and the identity it must match.
+///
+/// Defined at the crate root so the `staged` and `candidate` modules can read
+/// its private fields without widening their visibility.
+struct StagedSlotV1 {
+    plugin_id: PluginId,
+    name: &'static str,
+    observation_policy: Option<ProjectionObservationPolicyV1>,
+    registry: StateRegistry,
+}
+
+pub use candidate::{
+    CandidateBoundsV1, CandidateBuildV1, CandidateReducerV1, CandidateTurnV1,
+    DetachedProjectionCandidateV1, InitialStateV1, ProjectionCandidateErrorV1,
+    ProtectedProjectionProviderV1, RecordedConsumerV1, StagedAccountingV1, StagedLimitErrorV1,
+    MAX_STAGED_CONSUMERS_V1, MAX_STAGED_ENTITIES_PER_CONSUMER_V1, MAX_STAGED_OUTPUT_BYTES_V1,
+};
+pub use staged::{InstallErrorV1, RevokedSubjectsV1, StagedProjectionV1};
 
 // ---------------------------------------------------------------------------
 // EntityStateProjection
@@ -69,12 +95,59 @@ pub enum ProjectionSlotErrorV1 {
     DuplicatePluginId { plugin_id: PluginId },
 }
 
-/// One named slot inside the registry.
+/// One named slot inside the registry, also the slot type of a detached
+/// candidate, so both offer an Event to a reducer through one `Slot::fold`.
 struct Slot {
     plugin_id: Option<PluginId>,
     reducer: Box<dyn Reducer>,
     registry: StateRegistry,
     observation_policy: Option<ProjectionObservationPolicyV1>,
+}
+
+impl Slot {
+    fn fold(&mut self, event: &Event) {
+        self.registry.apply(self.reducer.as_ref(), event);
+    }
+
+    /// [`Self::fold`], showing `observe` the `initial()` State of an entity
+    /// the Event creates.
+    fn fold_observing_initial(&mut self, event: &Event, observe: &mut dyn FnMut(&State)) {
+        self.registry
+            .apply_observing_initial(self.reducer.as_ref(), event, observe);
+    }
+}
+
+/// Fold one Event into ordered reducer slots: the single live fold step
+/// shared by [`ProjectionRegistry`] and [`DetachedProjectionCandidateV1`].
+///
+/// A well-formed `consent.revoked.v1` Event reaches no reducer; its decoded
+/// revocation is returned so the caller forgets the subject. A malformed
+/// revocation, any other consent Event and any geographic Event are skipped.
+/// Every other Event is offered to every slot in order through `offer`, which
+/// applies it; the staged executor wraps each offer in its enforcement points.
+///
+/// # Errors
+/// Returns the first error of `offer`; later slots are not offered the Event.
+fn fold_bound_event<T, E>(
+    slots: impl Iterator<Item = T>,
+    event: &Event,
+    mut offer: impl FnMut(T) -> Result<(), E>,
+) -> Result<Option<ConsentRevokedV1>, E> {
+    if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
+        return Ok(ConsentRevokedV1::decode(&event.payload).ok());
+    }
+    // Consent is host control-plane state.  It is never reducer input and
+    // therefore cannot become a Plugin-visible projection or snapshot.
+    if pos_core::is_consent_event_type(&event.event_type) {
+        return Ok(None);
+    }
+    if pos_core::is_geographic_event_type(&event.event_type) {
+        return Ok(None);
+    }
+    for slot in slots {
+        offer(slot)?;
+    }
+    Ok(None)
 }
 
 /// A named registry of [`Reducer`] implementations backed by per-name [`StateRegistry`]s.
@@ -89,14 +162,8 @@ pub struct ProjectionRegistry {
     /// Whether the current gate was supplied by the host composition root.
     /// The constructor's fail-closed gate can be replaced exactly once.
     erasure_gate_bound: bool,
-    source_timeline: Option<TimelineId>,
-    source_generation: Option<ErasureReferenceV1>,
-    mixed_sources: bool,
-    /// Nesting depth for state transactions, used to retain privacy effects
-    /// when a later protected-use check rolls ordinary state back.
-    state_transaction_depth: usize,
-    /// Consent revocations observed by active state transactions.
-    transaction_revocations: Vec<EntityId>,
+    /// The Timeline and generation the accumulated State was folded from.
+    source: ProjectionSourceV1,
 }
 
 impl Default for ProjectionRegistry {
@@ -105,11 +172,7 @@ impl Default for ProjectionRegistry {
             slots: Vec::new(),
             erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
             erasure_gate_bound: false,
-            source_timeline: None,
-            source_generation: None,
-            mixed_sources: false,
-            state_transaction_depth: 0,
-            transaction_revocations: Vec::new(),
+            source: ProjectionSourceV1::default(),
         }
     }
 }
@@ -184,11 +247,16 @@ impl ProjectionRegistry {
     }
 
     fn source_matches_timeline(&self, timeline: TimelineId) -> bool {
-        !self.mixed_sources && self.source_timeline.is_none_or(|source| source == timeline)
+        !self.source.is_mixed()
+            && self
+                .source
+                .timeline()
+                .is_none_or(|source| source == timeline)
     }
 
     fn source_generation_is_current(&self, gate: &dyn ErasureGate) -> bool {
-        self.source_timeline.is_none() || self.source_generation == gate.inventory_generation().ok()
+        self.source.timeline().is_none()
+            || self.source.generation() == gate.inventory_generation().ok()
     }
 
     fn apply_if_current_generation<T>(
@@ -271,6 +339,23 @@ impl ProjectionRegistry {
         name: &str,
         reducer: Box<dyn Reducer>,
     ) -> Result<(), ProjectionSlotErrorV1> {
+        self.register_installed_reducer_with_policy(plugin_id, name, reducer, None)
+    }
+
+    /// Register an installed reducer with the observation policy, if any,
+    /// installed beside it at the same composition seam. A staged result
+    /// installs into this slot only when its copied policy equals
+    /// `observation_policy`.
+    ///
+    /// # Errors
+    /// Rejects an invalid name or duplicate Plugin identity before mutation.
+    pub fn register_installed_reducer_with_policy(
+        &mut self,
+        plugin_id: PluginId,
+        name: &str,
+        reducer: Box<dyn Reducer>,
+        observation_policy: Option<ProjectionObservationPolicyV1>,
+    ) -> Result<(), ProjectionSlotErrorV1> {
         if name.is_empty() || name.len() > pos_core::MAX_AUTHORITY_TEXT_BYTES {
             return Err(ProjectionSlotErrorV1::InvalidName);
         }
@@ -287,7 +372,7 @@ impl ProjectionRegistry {
                 plugin_id: Some(plugin_id),
                 reducer,
                 registry: StateRegistry::new(),
-                observation_policy: None,
+                observation_policy,
             },
         ));
         Ok(())
@@ -303,51 +388,42 @@ impl ProjectionRegistry {
     }
 
     fn apply_bound_event(&mut self, event: &Event) {
-        if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
-            if let Ok(revocation) = ConsentRevokedV1::decode(&event.payload) {
-                self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
-            }
-            return;
-        }
-        // Consent is host control-plane state.  It is never reducer input and
-        // therefore cannot become a Plugin-visible projection or snapshot.
-        if pos_core::is_consent_event_type(&event.event_type) {
-            return;
-        }
-        if pos_core::is_geographic_event_type(&event.event_type) {
-            return;
-        }
-        for (_, slot) in &mut self.slots {
-            slot.registry.apply(slot.reducer.as_ref(), event);
+        let Ok(revocation) =
+            fold_bound_event(self.slots.iter_mut().map(|(_, slot)| slot), event, |slot| {
+                slot.fold(event);
+                Ok::<(), Infallible>(())
+            });
+        if let Some(revocation) = revocation {
+            self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
         }
     }
 
     fn bind_event_source(&mut self, timeline: TimelineId) -> bool {
-        if self.mixed_sources {
+        if self.source.is_mixed() {
             return false;
         }
-        let generation = self
-            .erasure_gate
-            .as_ref()
-            .and_then(|gate| gate.inventory_generation().ok());
-        if self.source_timeline.is_some() && self.source_generation != generation {
+        let generation = self.current_generation();
+        if self.source.timeline().is_some() && self.source.generation() != generation {
             self.clear_state();
-            self.mixed_sources = true;
+            self.source = ProjectionSourceV1::mixed();
             return false;
         }
-        match self.source_timeline {
+        match self.source.timeline() {
             Some(source) if source != timeline => {
                 self.clear_state();
-                self.mixed_sources = true;
+                self.source = ProjectionSourceV1::mixed();
                 return false;
             }
-            None => {
-                self.source_timeline = Some(timeline);
-                self.source_generation = generation;
-            }
+            None => self.source = ProjectionSourceV1::bound(timeline, generation),
             Some(_) => {}
         }
         true
+    }
+
+    fn current_generation(&self) -> Option<ErasureReferenceV1> {
+        self.erasure_gate
+            .as_ref()
+            .and_then(|gate| gate.inventory_generation().ok())
     }
 
     /// Batch-fold Events from one host-identified Timeline into every reducer.
@@ -378,7 +454,7 @@ impl ProjectionRegistry {
             if gate.inventory_generation().ok() == expected_generation {
                 self.clear_state();
                 self.fold_events(timeline, events);
-                refolded = !self.mixed_sources;
+                refolded = !self.source.is_mixed();
             }
         };
         gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut refold)
@@ -400,7 +476,12 @@ impl ProjectionRegistry {
         parent: TimelineId,
         child: TimelineId,
     ) -> Result<(), AuthorityErrorV1> {
-        if self.mixed_sources || self.source_timeline.is_some_and(|source| source != parent) {
+        if self.source.is_mixed()
+            || self
+                .source
+                .timeline()
+                .is_some_and(|source| source != parent)
+        {
             return Err(AuthorityErrorV1::SourceUnavailable);
         }
         self.erasure_gate
@@ -409,8 +490,8 @@ impl ProjectionRegistry {
             .ok_or(AuthorityErrorV1::SourceUnavailable)
             .and_then(|gate| {
                 let mut bind = || {
-                    self.source_timeline = Some(child);
-                    self.source_generation = gate.inventory_generation().ok();
+                    self.source =
+                        ProjectionSourceV1::bound(child, gate.inventory_generation().ok());
                 };
                 gate.with_fence(child, ErasureProtectedOperationV1::Fork, &mut bind)
                     .map_err(|_| AuthorityErrorV1::SourceUnavailable)
@@ -654,70 +735,7 @@ impl ProjectionRegistry {
         for (_, slot) in &mut self.slots {
             slot.registry = StateRegistry::new();
         }
-        self.source_timeline = None;
-        self.source_generation = None;
-        self.mixed_sources = false;
-    }
-
-    /// Run an operation, restoring accumulated state maps when it fails.
-    ///
-    /// This does not isolate protected Replay or Snapshot candidates. Reducer
-    /// registrations, reducer internals, policies, and external effects are not
-    /// rolled back; an owner-controlled private candidate is still required
-    /// before releasing protected results.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error produced by `operation` after restoring the original
-    /// accumulated state.
-    pub fn try_with_state_transaction<T, E>(
-        &mut self,
-        operation: impl FnOnce(&mut Self) -> Result<T, E>,
-    ) -> Result<T, E> {
-        let mut before: HashMap<(String, Option<PluginId>), StateRegistry> = self
-            .slots
-            .iter()
-            .map(|(name, slot)| ((name.clone(), slot.plugin_id), slot.registry.clone()))
-            .collect();
-        let before_source = (
-            self.source_timeline,
-            self.source_generation,
-            self.mixed_sources,
-        );
-        let revocation_checkpoint = self.transaction_revocations.len();
-        let outermost = self.state_transaction_depth == 0;
-        self.state_transaction_depth += 1;
-        let outcome = operation(self);
-        self.state_transaction_depth -= 1;
-        match outcome {
-            Ok(value) => {
-                if outermost {
-                    self.transaction_revocations.clear();
-                }
-                Ok(value)
-            }
-            Err(error) => {
-                let revoked_subjects =
-                    self.transaction_revocations[revocation_checkpoint..].to_vec();
-                for (name, slot) in &mut self.slots {
-                    slot.registry = before
-                        .remove(&(name.clone(), slot.plugin_id))
-                        .unwrap_or_default();
-                }
-                (
-                    self.source_timeline,
-                    self.source_generation,
-                    self.mixed_sources,
-                ) = before_source;
-                for subject in revoked_subjects {
-                    self.forget_subject(&subject);
-                }
-                if outermost {
-                    self.transaction_revocations.clear();
-                }
-                Err(error)
-            }
-        }
+        self.source = ProjectionSourceV1::default();
     }
 
     /// Retain only one subject's accumulated state in every reducer.
@@ -731,6 +749,91 @@ impl ProjectionRegistry {
         for (_, slot) in &mut self.slots {
             slot.registry.remove(subject);
         }
+    }
+
+    /// Forget revoked subjects after a failed protected Replay or Compare.
+    ///
+    /// This is the failure-path exception authorized by ADR-093 Revision 4
+    /// (ADR-113 §6): the host collects only subject IDs from the verified
+    /// Event range inside the guard and applies them here after release. It
+    /// removes cached State only; it is not a Projection publication.
+    pub fn forget_revoked_subjects(&mut self, subjects: &RevokedSubjectsV1) {
+        for subject in subjects.subjects() {
+            self.forget_subject(subject);
+        }
+    }
+
+    /// Check a staged protected projection against this registry and
+    /// prepare its install, before ADR-112's final trusted sample.
+    ///
+    /// The registry must have a host-bound erasure gate, the staged source
+    /// must be bound at that gate's current inventory generation, and every
+    /// staged slot must match the visible slot at the same position:
+    /// installed Plugin identity, name and observation policy.
+    /// The result is sealed; only `pos_core::trusted_clock::handoff_checked`
+    /// can commit it.
+    ///
+    /// # Errors
+    /// Returns [`InstallErrorV1::SourceMismatch`] or
+    /// [`InstallErrorV1::SlotMismatch`]; the registry is unchanged and the
+    /// staged result is dropped.
+    pub fn prepare_install(
+        &mut self,
+        staged: StagedProjectionV1,
+    ) -> Result<StagedProtectedOutputV1<PreparedInstallV1<'_>>, InstallErrorV1> {
+        self.check_install(&staged)?;
+        Ok(StagedProtectedOutputV1::stage(self.prepare_checked(staged)))
+    }
+
+    /// Check and prepare both Compare arms over two distinct registries; both
+    /// commit under one handoff token or neither does.
+    ///
+    /// # Errors
+    /// Returns the first arm's check failure; neither registry changes.
+    pub fn prepare_install_pair<'a, 'b>(
+        arm_a: &'a mut Self,
+        staged_a: StagedProjectionV1,
+        arm_b: &'b mut Self,
+        staged_b: StagedProjectionV1,
+    ) -> Result<StagedProtectedOutputV1<PreparedInstallPairV1<'a, 'b>>, InstallErrorV1> {
+        arm_a.check_install(&staged_a)?;
+        arm_b.check_install(&staged_b)?;
+        Ok(StagedProtectedOutputV1::stage(PreparedInstallPairV1::new(
+            arm_a.prepare_checked(staged_a),
+            arm_b.prepare_checked(staged_b),
+        )))
+    }
+
+    fn check_install(&self, staged: &StagedProjectionV1) -> Result<(), InstallErrorV1> {
+        if !self.erasure_gate_bound || staged.source.generation() != self.current_generation() {
+            return Err(InstallErrorV1::SourceMismatch);
+        }
+        let slots_match = self.slots.len() == staged.slots.len()
+            && self
+                .slots
+                .iter()
+                .zip(&staged.slots)
+                .all(|((name, live), staged_slot)| {
+                    live.plugin_id == Some(staged_slot.plugin_id)
+                        && name == staged_slot.name
+                        && live.observation_policy == staged_slot.observation_policy
+                });
+        if slots_match {
+            Ok(())
+        } else {
+            Err(InstallErrorV1::SlotMismatch)
+        }
+    }
+
+    fn prepare_checked(&mut self, staged: StagedProjectionV1) -> PreparedInstallV1<'_> {
+        let StagedProjectionV1 { source, slots, .. } = staged;
+        let pairs = self
+            .slots
+            .iter_mut()
+            .zip(slots)
+            .map(|((_, live), staged_slot)| (&mut live.registry, staged_slot.registry))
+            .collect();
+        PreparedInstallV1::new(pairs, &mut self.source, source)
     }
 
     /// Restore accumulated state from a previously captured snapshot map.
@@ -760,8 +863,7 @@ impl ProjectionRegistry {
             let current_generation = gate.inventory_generation().ok();
             if current_generation == expected_generation {
                 self.clear_state();
-                self.source_timeline = Some(timeline);
-                self.source_generation = current_generation;
+                self.source = ProjectionSourceV1::bound(timeline, current_generation);
                 for (name, slot) in &mut self.slots {
                     // Missing snapshot entries stay empty after `clear_state`.
                     if let Some(state) = snapshot.get(name) {
@@ -1134,9 +1236,6 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
 
 impl ConsentRevocationFoldListener for ProjectionRegistry {
     fn on_consent_revoked(&mut self, subject_id: EntityId, _fence_seq: u64) {
-        if self.state_transaction_depth > 0 {
-            self.transaction_revocations.push(subject_id);
-        }
         self.forget_subject(&subject_id);
     }
 }
@@ -1617,7 +1716,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn failed_state_transaction_does_not_restore_revoked_subject_projection() {
+    fn failed_protected_use_forgets_only_the_revoked_subject_ids() {
         let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         let subject = EntityId::new();
@@ -1635,57 +1734,17 @@ mod tests {
         event.payload = revocation.encode().unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
         });
+        let mut malformed = make_event_typed(other, EVENT_TYPE_CONSENT_REVOKED_V1);
+        malformed.payload = CanonicalBytes::from_static(b"not a revocation");
+        let range = [make_event(other), malformed, event];
 
-        let result = registry.try_with_state_transaction(|candidate| {
-            candidate.apply_event(test_timeline(), &event);
-            Err::<(), _>(())
-        });
-
-        assert_eq!(result, Err(()));
+        let subjects = RevokedSubjectsV1::from_verified_events(&range);
+        assert_eq!(subjects.subjects(), &[subject]);
+        registry.forget_revoked_subjects(&subjects);
         assert!(registry.state_for_test(&subject).is_none());
         assert!(registry.state_for_test(&other).is_some());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn outer_state_transaction_retains_nested_revocation_after_failure() {
-        let mut registry = open_projection_registry();
-        registry.register("events", Box::new(EntityStateProjection));
-        let subject = EntityId::new();
-        registry.apply_event(test_timeline(), &make_event(subject));
-        let revocation = ConsentRevokedV1 {
-            subject_id: subject,
-            grantee_id: EntityId::new(),
-            grant_seq: 1,
-            fence_seq: 2,
-        };
-        let mut event = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
-        event.payload = revocation.encode().unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
-        });
-
-        let result = registry.try_with_state_transaction(|candidate| {
-            let nested = candidate.try_with_state_transaction(|inner| {
-                inner.apply_event(test_timeline(), &event);
-                Err::<(), _>(())
-            });
-            assert_eq!(nested, Err(()));
-            Ok::<(), ()>(())
-        });
-
-        assert_eq!(result, Ok(()));
-        assert!(registry.state_for_test(&subject).is_none());
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn successful_nested_state_transaction_keeps_outer_transaction_open() {
-        let mut registry = ProjectionRegistry::new();
-        let result = registry.try_with_state_transaction(|outer| {
-            outer.try_with_state_transaction(|_inner| Ok::<(), ()>(()))
-        });
-        assert_eq!(result, Ok(()));
-        assert_eq!(registry.state_transaction_depth, 0);
+        registry.forget_revoked_subjects(&RevokedSubjectsV1::default());
+        assert!(registry.state_for_test(&other).is_some());
     }
 
     #[test]
@@ -2403,7 +2462,7 @@ mod wave3_tests {
     }
 
     #[test]
-    fn installed_same_name_reducers_keep_independent_state_and_rollback() {
+    fn installed_same_name_reducers_keep_independent_state() {
         let first = PluginId::new();
         let second = PluginId::new();
         let entity = EntityId::new();
@@ -2466,41 +2525,6 @@ mod wave3_tests {
             ),
             Err(ProjectionSlotErrorV1::InvalidName)
         );
-        let denied: Result<(), &str> = registry.try_with_state_transaction(|candidate| {
-            candidate.apply_event(timeline, &ev(entity));
-            Err("denied")
-        });
-        assert_eq!(denied, Err("denied"));
-        assert_eq!(count(&registry, first), Some(1));
-        assert_eq!(count(&registry, second), None);
-    }
-
-    #[test]
-    fn failed_state_transaction_restores_by_slot_after_registration_reorders_slots() {
-        let entity = EntityId::new();
-        let mut registry = open_projection_registry();
-        registry.register("first", Box::new(EntityStateProjection));
-        registry.apply_event(test_timeline(), &ev(entity));
-        registry.register("second", Box::new(EntityStateProjection));
-        registry.apply_event(test_timeline(), &ev(entity));
-        let count = |registry: &ProjectionRegistry, name| {
-            test_ok(registry.state_for_reducer(test_timeline(), name, &entity))
-                .and_then(|state| state.get("event_count").and_then(serde_json::Value::as_u64))
-        };
-        assert_eq!(count(&registry, "first"), Some(2));
-        assert_eq!(count(&registry, "second"), Some(1));
-
-        let denied: Result<(), &str> = registry.try_with_state_transaction(|candidate| {
-            candidate.register("first", Box::new(EntityStateProjection));
-            candidate.register("third", Box::new(EntityStateProjection));
-            candidate.apply_event(test_timeline(), &ev(entity));
-            Err("denied")
-        });
-
-        assert_eq!(denied, Err("denied"));
-        assert_eq!(count(&registry, "first"), Some(2));
-        assert_eq!(count(&registry, "second"), Some(1));
-        assert_eq!(count(&registry, "third"), None);
     }
 
     #[test]

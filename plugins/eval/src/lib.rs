@@ -24,12 +24,16 @@ use pos_core::{
     ids::PluginId,
     ids::TimelineId,
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
     store::EventStore,
     store::SeqRange,
     ErasureArtifactClassV1, ErasureReferenceV1, ReplayClaimEvaluationV1,
 };
+use pos_runtime::{InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1};
 use serde::{Deserialize, Serialize};
+
+mod reducer;
+
+pub use reducer::EvalReducer;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -273,71 +277,22 @@ impl Plugin for EvalPlugin {
     }
 }
 
-// ---------------------------------------------------------------------------
-// EvalReducer
-// ---------------------------------------------------------------------------
+// Reviewed staged Reducer catalogue factory (ADR-113 §1): every protected
+// candidate builds a fresh `EvalReducer` here and keeps only the reducer.
+impl InstalledPluginFactoryV1 for EvalPlugin {
+    type Configuration = ();
+    type Plugin = Self;
+    type Approver = NoActionApproverV1;
 
-/// Tracks prediction and outcome events in [`State`].
-pub struct EvalReducer;
-
-impl Reducer for EvalReducer {
-    fn initial(&self) -> State {
-        let mut s = State::new();
-        s.set("n_predictions", serde_json::json!(0_u64));
-        s.set("n_outcomes", serde_json::json!(0_u64));
-        s.set("predictions", serde_json::json!([]));
-        s.set("outcomes", serde_json::json!([]));
-        s
+    fn configuration_details(_configuration: &()) -> Vec<u8> {
+        pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1.to_vec()
     }
 
-    fn apply(&self, state: &mut State, event: &Event) {
-        match event.event_type.as_str() {
-            EVENT_TYPE_PREDICTION => {
-                let n = state
-                    .get("n_predictions")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                state.set("n_predictions", serde_json::json!(n + 1));
-
-                // Decode CBOR payload; skip silently on decode error.
-                if let Ok(p) =
-                    ciborium::from_reader::<PredictionPayload, _>(event.payload.as_slice())
-                {
-                    let mut arr = state
-                        .get("predictions")
-                        .and_then(serde_json::Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    arr.push(serde_json::json!({
-                        "prediction_id": p.prediction_id,
-                        "predicted_prob": p.predicted_prob,
-                    }));
-                    state.set("predictions", serde_json::Value::Array(arr));
-                }
-            }
-            EVENT_TYPE_OUTCOME => {
-                let n = state
-                    .get("n_outcomes")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                state.set("n_outcomes", serde_json::json!(n + 1));
-
-                // Decode CBOR payload; skip silently on decode error.
-                if let Ok(o) = ciborium::from_reader::<OutcomePayload, _>(event.payload.as_slice())
-                {
-                    let mut arr = state
-                        .get("outcomes")
-                        .and_then(serde_json::Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    arr.push(serde_json::json!({
-                        "prediction_id": o.prediction_id,
-                        "outcome": o.outcome,
-                    }));
-                    state.set("outcomes", serde_json::Value::Array(arr));
-                }
-            }
-            _ => {}
+    fn build(_configuration: &()) -> InstalledPluginProductV1<Self, NoActionApproverV1> {
+        InstalledPluginProductV1 {
+            plugin: Self::new(),
+            reducer: Some(Box::new(EvalReducer)),
+            approver: NoActionApproverV1,
         }
     }
 }
@@ -571,6 +526,11 @@ fn report_from_events(events: &[Event]) -> Result<CalibrationReport, EvalError> 
 
     // Lift vs personal base rate: per-entity historical outcome rate as baseline.
     // Uses leave-one-out: each prediction is scored against the entity's other outcomes.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
+                  per-entity lookups need no iteration order"
+    )]
     let mut entity_outcomes: std::collections::HashMap<String, Vec<f64>> =
         std::collections::HashMap::new();
     for r in &resolved {
@@ -663,6 +623,7 @@ mod tests {
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
+        state::Reducer,
         CoreError, ErasureContainmentGateV1,
     };
     use pos_store::{open_store as open_unbound_store, StoreConfig};
@@ -818,6 +779,54 @@ mod tests {
                 .and_then(serde_json::Value::as_array)
                 .map(Vec::len),
             Some(0)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducer_appends_in_place_and_replaces_absent_or_non_array_records() {
+        let reducer = EvalReducer;
+        let entity = EntityId::new();
+        let prediction = make_event(
+            entity,
+            EVENT_TYPE_PREDICTION,
+            encode_prediction("e1", 0.25, "p1"),
+            1,
+        );
+        let outcome = make_event(entity, EVENT_TYPE_OUTCOME, encode_outcome("p1", true), 2);
+
+        let mut absent = pos_core::state::State::new();
+        reducer.apply(&mut absent, &prediction);
+        reducer.apply(&mut absent, &outcome);
+        let mut non_array = pos_core::state::State::new();
+        non_array.set("predictions", serde_json::json!("not an array"));
+        non_array.set("outcomes", serde_json::json!({ "stale": true }));
+        reducer.apply(&mut non_array, &prediction);
+        reducer.apply(&mut non_array, &outcome);
+
+        for state in [&absent, &non_array] {
+            assert_eq!(
+                state.get("predictions"),
+                Some(&serde_json::json!([{ "prediction_id": "p1", "predicted_prob": 0.25 }]))
+            );
+            assert_eq!(
+                state.get("outcomes"),
+                Some(&serde_json::json!([{ "prediction_id": "p1", "outcome": true }]))
+            );
+            assert_eq!(state.get("n_predictions"), Some(&serde_json::json!(1)));
+            assert_eq!(state.get("n_outcomes"), Some(&serde_json::json!(1)));
+        }
+
+        let mut grown = reducer.initial();
+        for _ in 0..3 {
+            reducer.apply(&mut grown, &prediction);
+        }
+        assert_eq!(
+            grown
+                .get("predictions")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(3)
         );
     }
 
@@ -1523,5 +1532,48 @@ mod tests {
         // personal base rate with leave-one-out: entity e1 (2 preds) gives
         // base rates excluding self; entity e2 (1 pred) gives base_rate=0
         assert!(report.lift_vs_personal_base_rate.is_finite());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn staged_factory_builds_a_fresh_reducer_per_candidate() {
+        use pos_runtime::{
+            fold_detached_candidate_v1, HostProjectionProviderV1, InitialStateV1,
+            ProtectedProjectionProviderV1, StagedReducerAdmissionErrorV1,
+        };
+
+        let mut provider = HostProjectionProviderV1::default();
+        assert_eq!(
+            EvalPlugin::configuration_details(&()),
+            pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1
+        );
+        assert_eq!(
+            provider.admit::<EvalPlugin>(std::sync::Arc::new(())),
+            Err(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
+        );
+        let consumer = provider
+            .admit_fixture::<EvalPlugin>(std::sync::Arc::new(()))
+            .test_ok();
+        let source =
+            pos_core::staged_install::ProjectionSourceV1::bound(pos_core::TimelineId::new(), None);
+        let open = || provider.open_candidate(&[consumer], InitialStateV1::Empty, source);
+        let mut folded = open().test_ok();
+        let fresh = open().test_ok();
+        let entity = EntityId::new();
+        let event = make_event(
+            entity,
+            EVENT_TYPE_PREDICTION,
+            encode_prediction("e1", 0.5, "p1"),
+            1,
+        );
+        fold_detached_candidate_v1(&mut folded, std::slice::from_ref(&event));
+
+        let mut expected = EvalReducer.initial();
+        EvalReducer.apply(&mut expected, &event);
+        assert_eq!(
+            folded.state_for(consumer.plugin_id(), &entity),
+            Some(&expected)
+        );
+        assert!(fresh.state_for(consumer.plugin_id(), &entity).is_none());
     }
 }

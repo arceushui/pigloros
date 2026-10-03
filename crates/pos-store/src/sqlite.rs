@@ -127,6 +127,7 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+mod fork_attribution_issuer_policy;
 mod local_cut_owner;
 mod pipeline_admission;
 
@@ -1001,6 +1002,77 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             "UNIQUE (fpa1_cbor)",
         ],
     },
+    SqliteSchemaTable {
+        name: "fork_attribution_issuer_policies",
+        columns_query: "PRAGMA table_info(fork_attribution_issuer_policies)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "policy_digest",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "generation",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fip1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(policy_digest) = 32)",
+            // 96 is `MAX_FORK_ATTRIBUTION_ISSUER_POLICY_HISTORY_V1` and 20480
+            // is `pos_core::MAX_FORK_ATTRIBUTION_ISSUER_POLICY_BYTES_V1`; a unit
+            // test in `sqlite::fork_attribution_issuer_policy` pins both.
+            "CHECK (generation BETWEEN 1 AND 96)",
+            "CHECK (length(fip1_cbor) BETWEEN 1 AND 20480)",
+            "UNIQUE (generation)",
+            "UNIQUE (fip1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "fork_attribution_issuer_policy_floor",
+        columns_query: "PRAGMA table_info(fork_attribution_issuer_policy_floor)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "singleton",
+                kind: "INTEGER",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "scope",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "generation",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "policy_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (singleton = 1)",
+            // 96 is `MAX_FORK_ATTRIBUTION_ISSUER_POLICY_HISTORY_V1`, pinned by a
+            // unit test in `sqlite::fork_attribution_issuer_policy`.
+            "CHECK (generation BETWEEN 1 AND 96)",
+            "CHECK (length(policy_digest) = 32)",
+        ],
+    },
 ];
 
 /// Build the current erasure schema from the same table and constraint
@@ -1053,7 +1125,9 @@ fn sqlite_schema_ddl(tables: &[SqliteSchemaTable]) -> String {
         .join("\n")
 }
 
-fn normalize_schema_sql(sql: &str) -> String {
+/// Lowercase `sql` and drop all whitespace, so two `CREATE` statements
+/// compare equal only when they differ in case and layout alone.
+pub(crate) fn normalize_schema_sql(sql: &str) -> String {
     sql.to_ascii_lowercase()
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -8281,7 +8355,7 @@ fn sqlite_artifact_registration_table_exists(
     )
 }
 
-fn sqlite_artifact_registration_schema_exists(
+pub(crate) fn sqlite_artifact_registration_schema_exists(
     connection: &Connection,
 ) -> Result<bool, rusqlite::Error> {
     connection.query_row(

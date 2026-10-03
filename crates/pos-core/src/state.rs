@@ -66,7 +66,38 @@ impl StateRegistry {
         self.states.keys().copied()
     }
 
+    /// Return every cached entity State, in no particular order.
+    pub fn entries(&self) -> impl Iterator<Item = (&EntityId, &State)> + '_ {
+        self.states.iter()
+    }
+
+    /// Number of entities with cached state.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
+
+    /// Whether no entity has cached state.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
+
     pub fn apply(&mut self, reducer: &dyn Reducer, event: &Event) {
+        self.apply_observing_initial(reducer, event, &mut |_| {});
+    }
+
+    /// [`Self::apply`], first showing `observe` the `initial()` State of an
+    /// entity this Event creates, before `apply` runs on it.
+    ///
+    /// Host-internal: used by `pos-state`'s staged candidate accounting
+    /// (ADR-113 §4 E5); not a Plugin API.
+    pub fn apply_observing_initial(
+        &mut self,
+        reducer: &dyn Reducer,
+        event: &Event,
+        observe: &mut dyn FnMut(&State),
+    ) {
         // Geographic evidence is owned by the Core visibility boundary.  A
         // generic StateRegistry must never hand it to a plugin reducer, even
         // when a caller bypasses ProjectionRegistry and uses this low-level
@@ -76,17 +107,23 @@ impl StateRegistry {
         {
             return;
         }
-        self.apply_reducer_event(reducer, event);
+        self.apply_reducer_event(reducer, event, observe);
     }
 
-    fn apply_reducer_event(&mut self, reducer: &dyn Reducer, event: &Event) {
+    fn apply_reducer_event(
+        &mut self,
+        reducer: &dyn Reducer,
+        event: &Event,
+        observe: &mut dyn FnMut(&State),
+    ) {
         if !reducer.projects_event(event) {
             return;
         }
-        let state = self
-            .states
-            .entry(event.entity)
-            .or_insert_with(|| reducer.initial());
+        let state = self.states.entry(event.entity).or_insert_with(|| {
+            let initial = reducer.initial();
+            observe(&initial);
+            initial
+        });
         reducer.apply(state, event);
     }
 
@@ -196,6 +233,38 @@ mod tests {
         assert!(registry.get(&entity).is_none());
         let default = registry.get_or_default(&entity);
         assert!(default.fields.is_empty());
+    }
+
+    #[test]
+    fn registry_reports_its_cached_entities() {
+        let entity = EntityId::new();
+        let mut registry = StateRegistry::new();
+        assert!(registry.is_empty());
+        registry.apply(&CountReducer, &make_event(entity));
+        assert_eq!(registry.len(), 1);
+        assert!(!registry.is_empty());
+        let entries: Vec<_> = registry.entries().map(|(id, _)| *id).collect();
+        assert_eq!(entries, vec![entity]);
+    }
+
+    #[test]
+    fn only_a_created_entity_shows_its_initial_state() {
+        let entity = EntityId::new();
+        let mut registry = StateRegistry::new();
+        let mut observed = Vec::new();
+        for _ in 0..2 {
+            registry.apply_observing_initial(&CountReducer, &make_event(entity), &mut |state| {
+                observed.push(state.clone());
+            });
+        }
+        assert_eq!(observed, vec![CountReducer.initial()]);
+        assert_eq!(
+            registry
+                .get(&entity)
+                .and_then(|state| state.get("count"))
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
     }
 
     #[test]
