@@ -13,6 +13,7 @@
 //! | [`mod@snapshot`] | Protected snapshots, `Unavailable` until #502 |
 //! | [`compare()`] | Install both Fork arms and report diverged entities |
 //! | [`merge()`] | Conflict-free / strategy-guided timeline merge |
+//! | [`mod@counterfactual`] | ADR-064 counterfactual dependency-graph validation |
 //!
 //! Protected Replay and Compare never fold through a visible
 //! `ProjectionRegistry` (ADR-113 §8). Inside ADR-112's release guard they read
@@ -43,6 +44,7 @@ use pos_state::{
 };
 
 pub mod compare;
+pub mod counterfactual;
 pub mod merge;
 pub mod replay;
 pub mod snapshot;
