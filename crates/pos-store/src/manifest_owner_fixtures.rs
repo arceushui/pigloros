@@ -24,7 +24,6 @@ use pos_core::{
     ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId, TimelineId,
     WorkloadProfileV1, WorldArtifactKindV1, WorldClosureReadLimitsV1, WorldConsumerSetInputV1,
     WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
-
 };
 
 pub(crate) type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
