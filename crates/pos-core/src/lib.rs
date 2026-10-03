@@ -237,7 +237,9 @@ pub use local_cut_commit::{
     LocalCutCommitV1, LocalCutReceiptInputV1, LocalCutReceiptV1, MAX_LOCAL_CUT_COMMIT_BYTES_V1,
     MAX_LOCAL_CUT_RECEIPT_BYTES_V1,
 };
-pub use local_cut_heads::{LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1, LocalCutResultHeadRowV1};
+pub use local_cut_heads::{
+    LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1, LocalCutResultHeadRowV1,
+};
 pub use local_cut_owner::{
     local_cut_owner_intent_digest_v1, prepare_local_cut_owner_commit_v1,
     validate_local_cut_owner_result_v1, validate_local_cut_owner_successor_v1,

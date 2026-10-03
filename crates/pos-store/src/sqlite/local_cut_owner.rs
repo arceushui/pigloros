@@ -61,6 +61,7 @@ pub(super) const LOCAL_CUT_OWNER_SCHEMA_SQL: &str =
          binding_hash BLOB NOT NULL UNIQUE CHECK (length(binding_hash) = 32),
          binding_cbor BLOB NOT NULL CHECK (length(binding_cbor) <= 1024),
          receipt_cbor BLOB NOT NULL CHECK (length(receipt_cbor) <= 1024),
+         head_rows BLOB NOT NULL CHECK (length(head_rows) <= 512),
          PRIMARY KEY (owner_id, cut_id, timeline_id)
      );
      CREATE INDEX IF NOT EXISTS local_cut_world_recordings_by_timeline
@@ -269,9 +270,13 @@ fn sqlite_read_local_cut_owner_table(
 
 /// Encode a request that `local_cut_owner_intent_digest_v1` already accepted.
 ///
-/// Those request bounds cap the encoding near 520 MB, below
-/// `SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1`, so no accepted request can
-/// exceed the stored column limit.
+/// The kind-4 and kind-5 rows are stored per Timeline beside each WCB1, not
+/// here. With at most 1,048,576 rows per table, the kind-14 records take at
+/// most 16,384 pages of 9,909 bytes plus 70 branches (about 163.1 MB), the
+/// kind-1 rows 222 bytes each (232.8 MB), and the kind-8 rows 113 bytes each
+/// (118.5 MB). With the seal and fixed fields this caps the encoding at about
+/// 514.3 MB, below `SQLITE_MAX_LOCAL_CUT_OWNER_REQUEST_BYTES_V1` (536.9 MB),
+/// so no accepted request can exceed the stored column limit.
 fn sqlite_local_cut_owner_request_bytes(request: &LocalCutOwnerRequestV1) -> Vec<u8> {
     let mut out = Vec::with_capacity(2048);
     out.extend_from_slice(SQLITE_LOCAL_CUT_OWNER_REQUEST_MAGIC_V1);
@@ -302,7 +307,6 @@ fn sqlite_local_cut_owner_request_bytes(request: &LocalCutOwnerRequestV1) -> Vec
         out.extend_from_slice(row.retention_lease_hash.as_bytes());
         sqlite_append_local_cut_owner_optional_hash(&mut out, row.predecessor_wcb_hash);
     }
-    sqlite_append_local_cut_owner_heads(&mut out, request);
     out.extend_from_slice(&request.partition_ledger_seq.to_be_bytes());
     for table in [
         request.result_heads_table,
@@ -319,30 +323,62 @@ fn sqlite_local_cut_owner_request_bytes(request: &LocalCutOwnerRequestV1) -> Vec
     out
 }
 
-/// Append the kind-4 and kind-5 rows in their fixed-width stored layout.
-fn sqlite_append_local_cut_owner_heads(out: &mut Vec<u8>, request: &LocalCutOwnerRequestV1) {
-    sqlite_append_local_cut_owner_u32(out, request.expected_head_rows.len());
-    for row in &request.expected_head_rows {
-        out.extend_from_slice(&row.timeline_id.inner().to_bytes());
-        out.extend_from_slice(&row.logical_head.to_be_bytes());
-        out.extend_from_slice(row.stitched_chain_hash.as_bytes());
-        out.extend_from_slice(&row.source_timeline_id.inner().to_bytes());
-        out.extend_from_slice(&row.source_segment_head.to_be_bytes());
-        out.extend_from_slice(row.source_chain_hash.as_bytes());
-        out.extend_from_slice(&row.logical_prefix.to_be_bytes());
-        sqlite_append_local_cut_owner_optional_hash(out, row.lineage_proof_hash);
-        sqlite_append_local_cut_owner_optional_hash(out, row.predecessor_wcb_hash);
+/// Encode one Timeline's kind-4 and kind-5 rows without their Timeline key.
+///
+/// Both rows are fixed width apart from two optional hashes, so the encoding
+/// stays below 300 bytes.
+fn sqlite_local_cut_world_head_bytes(
+    expected: &LocalCutExpectedHeadRowV1,
+    result: &LocalCutResultHeadRowV1,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(300);
+    out.extend_from_slice(&expected.logical_head.to_be_bytes());
+    out.extend_from_slice(expected.stitched_chain_hash.as_bytes());
+    out.extend_from_slice(&expected.source_timeline_id.inner().to_bytes());
+    out.extend_from_slice(&expected.source_segment_head.to_be_bytes());
+    out.extend_from_slice(expected.source_chain_hash.as_bytes());
+    out.extend_from_slice(&expected.logical_prefix.to_be_bytes());
+    sqlite_append_local_cut_owner_optional_hash(&mut out, expected.lineage_proof_hash);
+    sqlite_append_local_cut_owner_optional_hash(&mut out, expected.predecessor_wcb_hash);
+    out.extend_from_slice(&result.result_logical_head.to_be_bytes());
+    out.extend_from_slice(result.result_stitched_hash.as_bytes());
+    out.extend_from_slice(&result.result_source_segment_head.to_be_bytes());
+    out.extend_from_slice(result.result_source_chain_hash.as_bytes());
+    out.extend_from_slice(result.successor_wcb_hash.as_bytes());
+    out.extend_from_slice(&result.event_count.to_be_bytes());
+    out
+}
+
+/// Decode one stored Timeline's kind-4 and kind-5 rows under its key.
+fn sqlite_decode_local_cut_world_heads(
+    timeline_id: TimelineId,
+    bytes: &[u8],
+) -> Result<SqliteLocalCutHeadPairV1, LocalCutOwnerErrorV1> {
+    let mut cursor = SqliteLocalCutOwnerCursorV1::new(bytes);
+    let expected = LocalCutExpectedHeadRowV1 {
+        timeline_id,
+        logical_head: cursor.u64()?,
+        stitched_chain_hash: cursor.hash()?,
+        source_timeline_id: cursor.timeline()?,
+        source_segment_head: cursor.u64()?,
+        source_chain_hash: cursor.hash()?,
+        logical_prefix: cursor.u64()?,
+        lineage_proof_hash: cursor.optional_hash()?,
+        predecessor_wcb_hash: cursor.optional_hash()?,
+    };
+    let result = LocalCutResultHeadRowV1 {
+        timeline_id,
+        result_logical_head: cursor.u64()?,
+        result_stitched_hash: cursor.hash()?,
+        result_source_segment_head: cursor.u64()?,
+        result_source_chain_hash: cursor.hash()?,
+        successor_wcb_hash: cursor.hash()?,
+        event_count: cursor.u64()?,
+    };
+    if !cursor.is_finished() {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
     }
-    sqlite_append_local_cut_owner_u32(out, request.result_head_rows.len());
-    for row in &request.result_head_rows {
-        out.extend_from_slice(&row.timeline_id.inner().to_bytes());
-        out.extend_from_slice(&row.result_logical_head.to_be_bytes());
-        out.extend_from_slice(row.result_stitched_hash.as_bytes());
-        out.extend_from_slice(&row.result_source_segment_head.to_be_bytes());
-        out.extend_from_slice(row.result_source_chain_hash.as_bytes());
-        out.extend_from_slice(row.successor_wcb_hash.as_bytes());
-        out.extend_from_slice(&row.event_count.to_be_bytes());
-    }
+    Ok((expected, result))
 }
 
 fn sqlite_local_cut_owner_request_cursor(
@@ -413,57 +449,6 @@ fn sqlite_decode_local_cut_owner_recording_contexts(
     Ok(recording_context_rows)
 }
 
-fn sqlite_decode_local_cut_owner_expected_heads(
-    cursor: &mut SqliteLocalCutOwnerCursorV1<'_>,
-) -> Result<Vec<LocalCutExpectedHeadRowV1>, LocalCutOwnerErrorV1> {
-    let count = cursor.count()?;
-    let mut rows = Vec::with_capacity(count);
-    for _ in 0..count {
-        rows.push(LocalCutExpectedHeadRowV1 {
-            timeline_id: cursor.timeline()?,
-            logical_head: cursor.u64()?,
-            stitched_chain_hash: cursor.hash()?,
-            source_timeline_id: cursor.timeline()?,
-            source_segment_head: cursor.u64()?,
-            source_chain_hash: cursor.hash()?,
-            logical_prefix: cursor.u64()?,
-            lineage_proof_hash: cursor.optional_hash()?,
-            predecessor_wcb_hash: cursor.optional_hash()?,
-        });
-    }
-    Ok(rows)
-}
-
-fn sqlite_decode_local_cut_owner_result_heads(
-    cursor: &mut SqliteLocalCutOwnerCursorV1<'_>,
-) -> Result<Vec<LocalCutResultHeadRowV1>, LocalCutOwnerErrorV1> {
-    let count = cursor.count()?;
-    let mut rows = Vec::with_capacity(count);
-    for _ in 0..count {
-        rows.push(LocalCutResultHeadRowV1 {
-            timeline_id: cursor.timeline()?,
-            result_logical_head: cursor.u64()?,
-            result_stitched_hash: cursor.hash()?,
-            result_source_segment_head: cursor.u64()?,
-            result_source_chain_hash: cursor.hash()?,
-            successor_wcb_hash: cursor.hash()?,
-            event_count: cursor.u64()?,
-        });
-    }
-    Ok(rows)
-}
-
-/// Read the kind-8, kind-4 and kind-5 rows in their encoded order.
-fn sqlite_decode_local_cut_owner_cut_rows(
-    cursor: &mut SqliteLocalCutOwnerCursorV1<'_>,
-) -> Result<SqliteLocalCutOwnerCutRowsV1, LocalCutOwnerErrorV1> {
-    Ok((
-        sqlite_decode_local_cut_owner_recording_contexts(cursor)?,
-        sqlite_decode_local_cut_owner_expected_heads(cursor)?,
-        sqlite_decode_local_cut_owner_result_heads(cursor)?,
-    ))
-}
-
 /// Read the six LCC1 table references in their encoded order.
 fn sqlite_read_local_cut_owner_tables(
     cursor: &mut SqliteLocalCutOwnerCursorV1<'_>,
@@ -478,8 +463,11 @@ fn sqlite_read_local_cut_owner_tables(
     ])
 }
 
+/// Decode a stored request and rejoin the kind-4 and kind-5 rows read from
+/// its cut's per-Timeline WCB1 rows before re-deriving the intent digest.
 fn sqlite_decode_local_cut_owner_request(
     bytes: &[u8],
+    (expected_head_rows, result_head_rows): SqliteLocalCutHeadRowsV1,
 ) -> Result<(LocalCutOwnerRequestV1, Hash), LocalCutOwnerErrorV1> {
     let mut cursor = sqlite_local_cut_owner_request_cursor(bytes)?;
     let operation_id = cursor.hash()?;
@@ -489,8 +477,7 @@ fn sqlite_decode_local_cut_owner_request(
     let manifest_hash = cursor.hash()?;
     let records = sqlite_decode_local_cut_owner_records(&mut cursor)?;
     let composition_rows = sqlite_decode_local_cut_owner_composition_rows(&mut cursor)?;
-    let (recording_context_rows, expected_head_rows, result_head_rows) =
-        sqlite_decode_local_cut_owner_cut_rows(&mut cursor)?;
+    let recording_context_rows = sqlite_decode_local_cut_owner_recording_contexts(&mut cursor)?;
     let partition_ledger_seq = cursor.u64()?;
     let [result_heads_table, participant_successor_table, cpu_completion_table, action_disposition_table, candidate_bases_table, invocation_bridges_table] =
         sqlite_read_local_cut_owner_tables(&mut cursor)?;
@@ -534,14 +521,16 @@ fn sqlite_decode_local_cut_owner_request(
     Ok((request, intent_digest))
 }
 
-/// Stored `(timeline, scope, binding digest, WCB1, WCR1)` columns of one row.
-type SqliteWorldRecordingRowV1 = ([u8; 16], [u8; 32], [u8; 32], Vec<u8>, Vec<u8>);
-/// Decoded kind-8, kind-4 and kind-5 request rows.
-type SqliteLocalCutOwnerCutRowsV1 = (
-    Vec<LocalCutRecordingContextRowV1>,
-    Vec<LocalCutExpectedHeadRowV1>,
-    Vec<LocalCutResultHeadRowV1>,
-);
+/// Stored `(timeline, scope, binding digest, WCB1, WCR1, heads)` columns.
+type SqliteWorldRecordingRowV1 = ([u8; 16], [u8; 32], [u8; 32], Vec<u8>, Vec<u8>, Vec<u8>);
+/// One Timeline's kind-4 and kind-5 rows.
+type SqliteLocalCutHeadPairV1 = (LocalCutExpectedHeadRowV1, LocalCutResultHeadRowV1);
+/// One cut's kind-4 and kind-5 rows, in Timeline order.
+type SqliteLocalCutHeadRowsV1 = (Vec<LocalCutExpectedHeadRowV1>, Vec<LocalCutResultHeadRowV1>);
+/// One Timeline's WCB1/WCR1 recording and its kind-4 and kind-5 rows.
+type SqliteLocalCutWorldRowV1 = (LocalCutWorldRecordingV1, SqliteLocalCutHeadPairV1);
+/// One cut's WCB1/WCR1 recordings and their kind-4 and kind-5 rows.
+type SqliteLocalCutWorldRowsV1 = (Vec<LocalCutWorldRecordingV1>, SqliteLocalCutHeadRowsV1);
 
 #[derive(Clone)]
 struct SqliteLocalCutOwnerCutV1 {
@@ -603,7 +592,8 @@ fn sqlite_local_cut_owner_cut_by_id(
     };
     let operation_id = sqlite_local_cut_owner_hash(&operation_id)?;
     let intent_digest = sqlite_local_cut_owner_hash(&intent_digest)?;
-    let (request, decoded_intent) = sqlite_decode_local_cut_owner_request(&request_bytes)?;
+    let (recordings, heads) = sqlite_local_cut_world_recordings(connection, owner_id, cut_id)?;
+    let (request, decoded_intent) = sqlite_decode_local_cut_owner_request(&request_bytes, heads)?;
     let commit = LocalCutCommitV1::from_canonical_cbor(&commit_bytes)
         .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
     let receipt = LocalCutReceiptV1::from_canonical_cbor(&receipt_bytes)
@@ -620,35 +610,23 @@ fn sqlite_local_cut_owner_cut_by_id(
             seal,
             commit,
             receipt,
-            recordings: Vec::new(),
+            recordings,
         },
     };
-    sqlite_complete_local_cut_owner_cut(connection, owner_id, cut_id, cut)
-        .map(Some)
+    sqlite_validate_local_cut_owner_cut(owner_id, cut_id, &cut)
+        .map(|()| Some(cut))
 }
 
-/// Attach one cut's stored WCB1/WCR1 rows, then validate the complete cut.
-fn sqlite_complete_local_cut_owner_cut(
-    connection: &Connection,
-    owner_id: [u8; 32],
-    cut_id: u64,
-    mut cut: SqliteLocalCutOwnerCutV1,
-) -> Result<SqliteLocalCutOwnerCutV1, LocalCutOwnerErrorV1> {
-    cut.result.recordings = sqlite_local_cut_world_recordings(connection, owner_id, cut_id)?;
-    sqlite_validate_local_cut_owner_cut(owner_id, cut_id, &cut)?;
-    Ok(cut)
-}
-
-/// Read one cut's WCB1/WCR1 rows in Timeline order.
+/// Read one cut's WCB1/WCR1 rows and their kind-4/kind-5 rows in Timeline order.
 fn sqlite_local_cut_world_recordings(
     connection: &Connection,
     owner_id: [u8; 32],
     cut_id: u64,
-) -> Result<Vec<LocalCutWorldRecordingV1>, LocalCutOwnerErrorV1> {
+) -> Result<SqliteLocalCutWorldRowsV1, LocalCutOwnerErrorV1> {
     let cut_id = cut_id.to_be_bytes();
     let rows = connection
         .prepare(
-            "SELECT timeline_id, scope, binding_hash, binding_cbor, receipt_cbor
+            "SELECT timeline_id, scope, binding_hash, binding_cbor, receipt_cbor, head_rows
              FROM local_cut_world_recordings
              WHERE owner_id = ?1 AND cut_id = ?2 ORDER BY timeline_id",
         )
@@ -661,6 +639,7 @@ fn sqlite_local_cut_world_recordings(
                         row.get::<_, [u8; 32]>(2)?,
                         row.get::<_, Vec<u8>>(3)?,
                         row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
                     ))
                 })
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>)
@@ -671,15 +650,18 @@ fn sqlite_local_cut_world_recordings(
         .collect()
 }
 
-/// Decode one stored WCB1/WCR1 row against its key, digest index and WDB1 root.
+/// Decode one stored WCB1/WCR1 row against its key, digest index and WDB1 root,
+/// with the Timeline's kind-4 and kind-5 rows.
 fn sqlite_decode_local_cut_world_recording(
     connection: &Connection,
-    (timeline_id, scope, binding_hash, binding_cbor, receipt_cbor): &SqliteWorldRecordingRowV1,
-) -> Result<LocalCutWorldRecordingV1, LocalCutOwnerErrorV1> {
+    row: &SqliteWorldRecordingRowV1,
+) -> Result<SqliteLocalCutWorldRowV1, LocalCutOwnerErrorV1> {
+    let (timeline_id, scope, binding_hash, binding_cbor, receipt_cbor, head_rows) = row;
     let binding = WorldClosureBindingV1::from_canonical_cbor(binding_cbor)
         .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
     let receipt = WorldRecordingReceiptV1::from_canonical_cbor(receipt_cbor)
         .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+    let heads = sqlite_decode_local_cut_world_heads(binding.as_input().timeline_id, head_rows)?;
     let scope = Hash::from_bytes(*scope);
     let root = binding.as_input().dependency_root_hash;
     if *timeline_id != binding.as_input().timeline_id.inner().to_bytes()
@@ -688,11 +670,12 @@ fn sqlite_decode_local_cut_world_recording(
     {
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
-    Ok(LocalCutWorldRecordingV1 {
+    let recording = LocalCutWorldRecordingV1 {
         scope,
         binding,
         receipt,
-    })
+    };
+    Ok((recording, heads))
 }
 
 fn sqlite_world_dependency_branch_exists(
@@ -751,15 +734,23 @@ fn sqlite_insert_local_cut_world_recordings(
     batch: &PreparedLocalCutOwnerCommitV1,
 ) -> Result<(), LocalCutOwnerErrorV1> {
     let owner_id = batch.successor_state().owner_id;
-    let cut_id = batch.request().seal.as_input().cut_id.to_be_bytes();
-    for recording in batch.recordings() {
+    let request = batch.request();
+    let cut_id = request.seal.as_input().cut_id.to_be_bytes();
+    // Preparation matched the kind-4, kind-5 and WCB1 rows to the same
+    // admitted Timelines in the same order.
+    let heads = request
+        .expected_head_rows
+        .iter()
+        .zip(&request.result_head_rows);
+    for (recording, (expected, result)) in batch.recordings().iter().zip(heads) {
         let binding = recording.binding;
         let timeline_id = binding.as_input().timeline_id.inner().to_bytes();
         connection
             .execute(
                 "INSERT INTO local_cut_world_recordings
-                 (owner_id, cut_id, timeline_id, scope, binding_hash, binding_cbor, receipt_cbor)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (owner_id, cut_id, timeline_id, scope, binding_hash, binding_cbor, receipt_cbor,
+                  head_rows)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     owner_id.as_slice(),
                     cut_id.as_slice(),
@@ -768,6 +759,7 @@ fn sqlite_insert_local_cut_world_recordings(
                     binding.digest().as_bytes().as_slice(),
                     binding.to_canonical_cbor(),
                     recording.receipt.to_canonical_cbor(),
+                    sqlite_local_cut_world_head_bytes(expected, result),
                 ],
             )
             .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
@@ -781,7 +773,7 @@ fn sqlite_insert_local_cut_world_recordings(
                     params![
                         directory.scope().as_bytes().as_slice(),
                         branch.digest().as_bytes().as_slice(),
-                        branch.to_canonical_cbor(),
+                        branch.encode().as_slice(),
                     ],
                 )
                 .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
@@ -2029,6 +2021,18 @@ mod local_cut_owner_coverage {
         Ok(())
     }
 
+    // Decode with the kind-4/kind-5 rows a stored cut reads from its WCB1 rows.
+    fn decode_request(
+        bytes: &[u8],
+        request: &LocalCutOwnerRequestV1,
+    ) -> Result<(LocalCutOwnerRequestV1, Hash), LocalError> {
+        let heads = (
+            request.expected_head_rows.clone(),
+            request.result_head_rows.clone(),
+        );
+        sqlite_decode_local_cut_owner_request(bytes, heads)
+    }
+
     fn patched(bytes: &[u8], offset: usize, patch: &[u8]) -> Fallible<Vec<u8>> {
         let mut out = bytes.to_vec();
         out.get_mut(offset..offset + patch.len())
@@ -2190,12 +2194,12 @@ mod local_cut_owner_coverage {
     fn request_decoder_rejects_every_truncated_prefix() -> TestResult {
         let request = synthetic_request(1)?;
         let bytes = sqlite_local_cut_owner_request_bytes(&request);
-        let (decoded, intent_digest) = sqlite_decode_local_cut_owner_request(&bytes)?;
+        let (decoded, intent_digest) = decode_request(&bytes, &request)?;
         assert_eq!(decoded, request);
         assert_eq!(intent_digest, local_cut_owner_intent_digest_v1(&request)?);
         for length in 0..bytes.len() {
             assert_eq!(
-                sqlite_decode_local_cut_owner_request(&bytes[..length]).err(),
+                decode_request(&bytes[..length], &request).err(),
                 Some(LocalError::CorruptState),
                 "{length}"
             );
@@ -2233,7 +2237,7 @@ mod local_cut_owner_coverage {
         ];
         for candidate in candidates {
             assert_eq!(
-                sqlite_decode_local_cut_owner_request(&candidate).err(),
+                decode_request(&candidate, &request).err(),
                 Some(LocalError::CorruptState)
             );
         }
@@ -2260,9 +2264,33 @@ mod local_cut_owner_coverage {
         assert_eq!(reordered.len(), bytes.len());
         assert_ne!(reordered, bytes);
         assert_eq!(
-            sqlite_decode_local_cut_owner_request(&reordered).err(),
+            decode_request(&reordered, &request).err(),
             Some(LocalError::CorruptState)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn world_head_decoder_rejects_every_truncated_or_extended_row() -> TestResult {
+        let request = synthetic_request(1)?;
+        let expected = request.expected_head_rows.first().ok_or("no kind-4 row")?;
+        let result = request.result_head_rows.first().ok_or("no kind-5 row")?;
+        let bytes = sqlite_local_cut_world_head_bytes(expected, result);
+        let decoded = sqlite_decode_local_cut_world_heads(timeline(1), &bytes)?;
+        assert_eq!(decoded, (*expected, *result));
+        let mut extended = bytes.clone();
+        extended.push(0);
+        assert_eq!(
+            sqlite_decode_local_cut_world_heads(timeline(1), &extended).err(),
+            Some(LocalError::CorruptState)
+        );
+        for length in 0..bytes.len() {
+            assert_eq!(
+                sqlite_decode_local_cut_world_heads(timeline(1), &bytes[..length]).err(),
+                Some(LocalError::CorruptState),
+                "{length}"
+            );
+        }
         Ok(())
     }
 
@@ -2900,6 +2928,9 @@ mod local_cut_owner_coverage {
             first_recording_update("receipt_cbor = X'01'"),
             first_recording_update("timeline_id = X'09090909090909090909090909090909'"),
             first_recording_update("binding_hash = zeroblob(32)"),
+            first_recording_update("head_rows = X'01'"),
+            first_recording_update("head_rows = head_rows || X'00'"),
+            first_recording_update("head_rows = X'01' || substr(head_rows, 2)"),
             format!("DELETE FROM local_cut_world_recordings {FIRST_TIMELINE_ROW}"),
             "DELETE FROM world_dependency_branches".to_owned(),
         ] {
