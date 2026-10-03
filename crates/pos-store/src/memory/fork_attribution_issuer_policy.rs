@@ -163,10 +163,12 @@ mod tests {
         let rescoped = policy("destination-b", 1, None, active)?;
         let (store, first) = installed_store()?;
         assert!(committed(&store, first.digest(), 1)?.is_ok());
+        // Each case stores its own content digest, so only the targeted
+        // generation, digest, or scope check can reject it.
         for tampered in [
-            (first.digest(), moved),
+            (moved.digest(), moved),
             (Hash::from_bytes([0; 32]), first.clone()),
-            (first.digest(), rescoped),
+            (rescoped.digest(), rescoped),
         ] {
             let (mut store, first) = installed_store()?;
             store.fork_attribution_issuer_policies[0] = tampered;
