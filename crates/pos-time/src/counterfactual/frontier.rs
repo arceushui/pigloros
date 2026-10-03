@@ -112,12 +112,13 @@ pub fn derive_recomputation_frontier_v1(
     provenance_digest: [u8; 32],
 ) -> Result<RecomputationFrontierV1, RecomputationFrontierErrorV1> {
     check_inputs(plan, graph, provenance_digest)?;
-    seal(RecomputationFrontierV1 {
+    RecomputationFrontierV1 {
         frontier_id,
         dependency_graph_digest: dependency_graph_digest_v1(graph),
         provenance_digest,
         ..unsealed_frontier(plan, graph)
-    })
+    }
+    .seal()
     .map_err(RecomputationFrontierErrorV1::Frontier)
 }
 
@@ -162,7 +163,8 @@ fn check_inputs(
 }
 
 /// Every derived field; the caller supplies the ID, graph digest, and
-/// provenance, and [`seal`] supplies the frontier digest.
+/// provenance, and [`RecomputationFrontierV1::seal`] supplies the frontier
+/// digest.
 fn unsealed_frontier(
     plan: &CounterfactualPlanV1,
     graph: &ValidatedDependencyGraphV1,
@@ -188,8 +190,8 @@ fn unsealed_frontier(
             )
         };
     // `frontier_id`, `dependency_graph_digest` and `provenance_digest` are
-    // placeholders the caller overwrites, and `seal` computes
-    // `frontier_digest`.
+    // placeholders the caller overwrites, and `RecomputationFrontierV1::seal`
+    // computes `frontier_digest`.
     RecomputationFrontierV1 {
         frontier_id: [0; 16],
         plan_digest: plan.plan_digest,
@@ -270,25 +272,6 @@ fn owner_frontier(node: &DependencyGraphNodeV1, affected: &BTreeSet<[u8; 32]>) -
             causes
         },
     }
-}
-
-/// Fill the frontier digest, then run the standalone `RCF1` validation.
-///
-/// This is the fewest encodings the public `RCF1` API allows: `digest`
-/// encodes the unsigned fields once, and `validate` must run on the sealed
-/// record to enforce the field and encoded-size bounds. The re-encoding that
-/// `validate` does internally to verify the digest belongs to the `RCF1`
-/// contract, not to this derivation.
-fn seal(
-    unsigned: RecomputationFrontierV1,
-) -> Result<RecomputationFrontierV1, FrontierArtifactErrorV1> {
-    unsigned
-        .digest()
-        .map(|frontier_digest| RecomputationFrontierV1 {
-            frontier_digest,
-            ..unsigned
-        })
-        .and_then(|frontier| frontier.validate().map(|()| frontier))
 }
 
 fn hash_node(hasher: &mut blake3::Hasher, node: &DependencyGraphNodeV1) {
