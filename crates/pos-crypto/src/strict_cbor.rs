@@ -130,10 +130,11 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
 
     pub(crate) fn signed(&mut self) -> Result<i64, E> {
         let (major, value) = self.head()?;
-        let value = i64::try_from(value).map_err(|_| self.invalid())?;
         match major {
-            0 => Ok(value),
-            1 => Ok(-1 - value),
+            0 => i64::try_from(value).map_err(|_| self.invalid()),
+            1 => i64::try_from(value)
+                .map(|value| -1 - value)
+                .map_err(|_| self.invalid()),
             _ => Err(self.invalid()),
         }
     }
