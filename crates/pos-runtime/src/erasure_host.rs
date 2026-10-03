@@ -4143,7 +4143,7 @@ impl ErasureReadSenderV1<'_> {
     ) -> Result<(), ErasureHostErrorV1> {
         let ancestry = self.fork_ancestry(timeline)?;
         let gate = Arc::clone(&self.host.gate);
-        let mut decision = Ok(());
+        let mut decision = Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable);
         let mut gated = |sender: &mut Self| {
             decision = pos_core::with_fork_ancestry_fence(
                 &*gate,

@@ -3473,12 +3473,22 @@ mod tests {
             )
             .test_ok();
         let resumed_drafts = registry
-            .step_all_anchored_with_events(timeline, &root_ancestry(timeline), Seq::from_u64(4), &events)
+            .step_all_anchored_with_events(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::from_u64(4),
+                &events,
+            )
             .test_ok();
         assert_eq!(resumed_drafts[0].causation_id, Some(events[1].id));
         registry.abort_step();
         registry
-            .step_all_anchored_with_events(timeline, &root_ancestry(timeline), Seq::from_u64(4), &events)
+            .step_all_anchored_with_events(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::from_u64(4),
+                &events,
+            )
             .test_ok();
         let mut reduced = WorldReducer.initial();
         WorldReducer.apply(&mut reduced, &events[2]);
@@ -3565,7 +3575,12 @@ mod tests {
             )
             .test_ok();
         let resumed_drafts = registry
-            .step_all_anchored_with_events(timeline, &root_ancestry(timeline), Seq::from_u64(2), &events)
+            .step_all_anchored_with_events(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::from_u64(2),
+                &events,
+            )
             .test_ok();
         assert_eq!(resumed_drafts.len(), 1);
         let resumed = WorldObservationV1::decode(&resumed_drafts[0].payload).test_ok();
@@ -3637,7 +3652,12 @@ mod tests {
             )
             .test_ok();
         let drafts = registry
-            .step_all_anchored_with_events(timeline, &root_ancestry(timeline), action.seq, std::slice::from_ref(&action))
+            .step_all_anchored_with_events(
+                timeline,
+                &root_ancestry(timeline),
+                action.seq,
+                std::slice::from_ref(&action),
+            )
             .test_ok();
         // This fixture has synthetic history, not a durable store for the new drafts.
         registry.abort_step();
@@ -3992,7 +4012,12 @@ mod tests {
             .test_ok();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         registry
-            .step_all_anchored_with_events(timeline, &root_ancestry(timeline), Seq::from_u64(2), &events)
+            .step_all_anchored_with_events(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::from_u64(2),
+                &events,
+            )
             .test_ok();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -4119,12 +4144,22 @@ mod tests {
 
         let unrelated = store.create_timeline("unrelated").test_ok();
         assert!(matches!(
-            registry.step_all_anchored_with_events(unrelated.id(), &root_ancestry(unrelated.id()), Seq::from_u64(2), &events),
+            registry.step_all_anchored_with_events(
+                unrelated.id(),
+                &pos_core::fork_ancestry(store.as_ref(), unrelated.id()).test_ok(),
+                Seq::from_u64(2),
+                &events,
+            ),
             Err(RuntimeError::SnapshotTimelineMismatch { .. })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         registry
-            .step_all_anchored_with_events(child.id(), &root_ancestry(child.id()), Seq::from_u64(2), &events)
+            .step_all_anchored_with_events(
+                child.id(),
+                &pos_core::fork_ancestry(store.as_ref(), child.id()).test_ok(),
+                Seq::from_u64(2),
+                &events,
+            )
             .test_ok();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -4170,7 +4205,12 @@ mod tests {
         let events = installed_history(body_id, timeline);
         let (mut registry, calls) = installed_registry(body_id);
         let error = registry
-            .step_all_anchored_with_events(timeline, &root_ancestry(timeline), Seq::from_u64(2), &events)
+            .step_all_anchored_with_events(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::from_u64(2),
+                &events,
+            )
             .test_err();
         assert!(matches!(
             error,
@@ -4193,12 +4233,22 @@ mod tests {
             .test_ok();
         assert!(matches!(
             empty_restored
-                .step_all_anchored_with_events(other_timeline, &root_ancestry(other_timeline), Seq::from_u64(2), &events,),
+                .step_all_anchored_with_events(
+                    other_timeline,
+                    &root_ancestry(other_timeline),
+                    Seq::from_u64(2),
+                    &events,
+                ),
             Err(RuntimeError::SnapshotTimelineMismatch { .. })
         ));
         assert_eq!(empty_calls.load(Ordering::SeqCst), 0);
         assert!(matches!(
-            empty_restored.step_all_anchored_with_events(timeline, &root_ancestry(timeline), Seq::from_u64(2), &events,),
+            empty_restored.step_all_anchored_with_events(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::from_u64(2),
+                &events,
+            ),
             Err(RuntimeError::WorldInstallation(
                 WorldInstallationErrorV1::RetainedConfigAmbiguous
             ))
@@ -4217,7 +4267,12 @@ mod tests {
         config.backend_content_hash = [7; 32];
         changed[0].payload = config.encode().test_ok();
         assert!(matches!(
-            restored.step_all_anchored_with_events(timeline, &root_ancestry(timeline), Seq::from_u64(2), &changed),
+            restored.step_all_anchored_with_events(
+                timeline,
+                &root_ancestry(timeline),
+                Seq::from_u64(2),
+                &changed,
+            ),
             Err(RuntimeError::WorldInstallation(
                 WorldInstallationErrorV1::BackendDigestMismatch
             ))

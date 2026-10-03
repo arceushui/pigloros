@@ -1340,7 +1340,11 @@ fn verified_step_appends_output_at_the_exact_event_byte_limit() -> TestResult {
     let mut store = gated_store()?;
     let timeline = store.create_timeline("output-admission-exact-limit")?.id();
 
-    let drafts = registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO)?;
+    let drafts = registry.step_all_anchored(
+        timeline,
+        &root_ancestry(timeline),
+        pos_core::Seq::ZERO,
+    )?;
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].payload.len(), usize::try_from(limit)?);
     assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
@@ -1418,7 +1422,11 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
     let mut store = gated_store()?;
     let timeline = store.create_timeline("output-admission-mixed-batch")?.id();
 
-    let rejected = registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO);
+    let rejected = registry.step_all_anchored(
+        timeline,
+        &root_ancestry(timeline),
+        pos_core::Seq::ZERO,
+    );
     assert!(matches!(
         rejected,
         Err(RuntimeError::OutputAdmission(OutputAdmissionErrorV1::EventBytesExceeded {
@@ -1429,7 +1437,11 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
     ));
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::ZERO);
 
-    let drafts = registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO)?;
+    let drafts = registry.step_all_anchored(
+        timeline,
+        &root_ancestry(timeline),
+        pos_core::Seq::ZERO,
+    )?;
     assert_eq!(drafts.len(), 1);
     assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::from_u64(1));

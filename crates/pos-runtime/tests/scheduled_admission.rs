@@ -533,7 +533,11 @@ fn scheduled_pass_commits_every_due_batch_in_schedule_and_vector_order() {
         );
         assert_eq!(budget(store.as_ref(), host.timeline), Some(7), "{name}");
 
-        ok(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), Seq::from_u64(4)));
+        ok(registry.step_all_anchored(
+            host.timeline,
+            &root_ancestry(host.timeline),
+            Seq::from_u64(4),
+        ));
         registry.abort_step();
     }
 }
@@ -591,7 +595,11 @@ fn store_budget_fence_and_erasure_failures_commit_nothing() {
         assert_eq!(rejection(exhausted), "ResourceExhausted", "{name}");
 
         let unfenced = host.on(ok(store.create_timeline("unfenced")).id());
-        ok(registry.step_all_anchored(unfenced.timeline, &root_ancestry(unfenced.timeline), Seq::ZERO));
+        ok(registry.step_all_anchored(
+            unfenced.timeline,
+            &root_ancestry(unfenced.timeline),
+            Seq::ZERO,
+        ));
         let missing = unfenced.admit(&mut registry, store.as_mut(), 2);
         assert_eq!(rejection(missing), "PolicyIndeterminate", "{name}");
 
@@ -726,7 +734,11 @@ fn in_doubt_pass_recovers_its_receipt_without_rerunning_drivers() {
         ok(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), Seq::ZERO));
         lose_outcome(&host, &mut registry, store.as_mut(), 1);
         assert!(matches!(
-            registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), Seq::from_u64(2)),
+            registry.step_all_anchored(
+                host.timeline,
+                &root_ancestry(host.timeline),
+                Seq::from_u64(2),
+            ),
             Err(RuntimeError::PendingDriverStep)
         ));
 
@@ -739,10 +751,18 @@ fn in_doubt_pass_recovers_its_receipt_without_rerunning_drivers() {
         let none = err(registry.recover_scheduled_pass(store.as_mut()));
         assert!(none.to_string().contains("no scheduled pass admission"));
 
-        ok(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), Seq::from_u64(2)));
+        ok(registry.step_all_anchored(
+            host.timeline,
+            &root_ancestry(host.timeline),
+            Seq::from_u64(2),
+        ));
         lose_outcome(&host, &mut registry, store.as_mut(), 2);
         registry.abort_step();
-        ok(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), Seq::from_u64(4)));
+        ok(registry.step_all_anchored(
+            host.timeline,
+            &root_ancestry(host.timeline),
+            Seq::from_u64(4),
+        ));
         registry.abort_step();
         assert_eq!(
             entries(&log)[2..],
@@ -809,13 +829,23 @@ fn cadence_commits_only_after_admission_and_empty_passes_admit_no_event() {
     let mut registry = host.registry();
     register(&mut registry, driver("first", vec![b"a1"], &log));
 
-    ok(registry.tick_cadenced_anchored(host.timeline, &root_ancestry(host.timeline), 100, Seq::ZERO));
+    ok(registry.tick_cadenced_anchored(
+        host.timeline,
+        &root_ancestry(host.timeline),
+        100,
+        Seq::ZERO,
+    ));
     publish(&mut store, host.timeline, stale_consent(host.revisions), 10);
     let stale = err(host.admit(&mut registry, &mut store, 1));
     assert!(stale.to_string().ends_with("AdmissionConflict"), "{stale}");
     publish(&mut store, host.timeline, host.revisions, 10);
 
-    let due = ok(registry.tick_cadenced_anchored(host.timeline, &root_ancestry(host.timeline), 100, Seq::ZERO));
+    let due = ok(registry.tick_cadenced_anchored(
+        host.timeline,
+        &root_ancestry(host.timeline),
+        100,
+        Seq::ZERO,
+    ));
     assert_eq!(due.len(), 1, "an aborted pass must not advance cadence");
     assert_eq!(
         receipt(host.admit(&mut registry, &mut store, 2))
@@ -824,7 +854,12 @@ fn cadence_commits_only_after_admission_and_empty_passes_admit_no_event() {
         1
     );
 
-    let idle = ok(registry.tick_cadenced_anchored(host.timeline, &root_ancestry(host.timeline), 105, Seq::from_u64(1)));
+    let idle = ok(registry.tick_cadenced_anchored(
+        host.timeline,
+        &root_ancestry(host.timeline),
+        105,
+        Seq::from_u64(1),
+    ));
     assert!(idle.is_empty());
     assert!(ok(host.admit(&mut registry, &mut store, 3)).is_none());
     assert_eq!(committed_events(&store, host.timeline).len(), 1);
@@ -861,7 +896,11 @@ fn nested_fork_pass_commits_in_stitched_timeline_order() {
         human_event(store.as_mut(), child);
         let nested = host.on(ok(store.fork(child, Seq::from_u64(3), "grandchild")).id());
         publish(store.as_mut(), nested.timeline, host.revisions, 10);
-        ok(registry.step_all_anchored(nested.timeline, &root_ancestry(nested.timeline), Seq::from_u64(3)));
+        ok(registry.step_all_anchored(
+            nested.timeline,
+            &root_ancestry(nested.timeline),
+            Seq::from_u64(3),
+        ));
         let committed = receipt(nested.admit(&mut registry, store.as_mut(), 2));
 
         let positions: Vec<u64> = committed
@@ -956,7 +995,14 @@ fn protected_pass_binds_its_authorized_snapshot_and_rechecks_consent() {
     let mut registry = observer_registry(&host, &authority, &log);
     let observed = fold_projection(&mut store, &mut registry, host.timeline, subject);
     let stage = |registry: &mut PluginRegistry| {
-        ok(registry.step_all_anchored_protected(host.timeline, &root_ancestry(host.timeline), observed, token.clone(), 1, &[]))
+        ok(registry.step_all_anchored_protected(
+            host.timeline,
+            &root_ancestry(host.timeline),
+            observed,
+            token.clone(),
+            1,
+            &[],
+        ))
     };
 
     assert_eq!(stage(&mut registry).len(), 1);
@@ -1255,7 +1301,11 @@ fn anchored_pass_rejects_another_plugins_event_type_and_commits_nothing() {
         register(&mut registry, driver("first", vec![b"a1"], &log));
         register_intruder(&mut registry, &log);
 
-        let error = err(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), Seq::ZERO));
+        let error = err(registry.step_all_anchored(
+            host.timeline,
+            &root_ancestry(host.timeline),
+            Seq::ZERO,
+        ));
         assert_ownership_rejected(&error, &log, name);
         assert!(
             matches!(
@@ -1596,7 +1646,14 @@ fn protected_pass_scopes_each_drivers_view_to_its_own_subscriptions() {
             probe("other", "agent.scheduled.other", &[other], subject, &log),
         );
         let head = ok(store.logical_head(host.timeline));
-        let refused = err(registry.step_all_anchored_protected(host.timeline, &root_ancestry(host.timeline), head, token, 1, &[]));
+        let refused = err(registry.step_all_anchored_protected(
+            host.timeline,
+            &root_ancestry(host.timeline),
+            head,
+            token,
+            1,
+            &[],
+        ));
         assert!(
             matches!(
                 refused,
@@ -1632,7 +1689,11 @@ fn public_pass_refuses_subscribers_and_hides_projections_from_the_rest() {
         );
 
         assert_eq!(
-            ok(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), observed)).len(),
+            ok(registry.step_all_anchored(
+                host.timeline,
+                &root_ancestry(host.timeline),
+                observed,
+            )).len(),
             1,
             "{name}"
         );
@@ -1655,7 +1716,11 @@ fn public_pass_refuses_subscribers_and_hides_projections_from_the_rest() {
             ),
         );
         let head = ok(store.logical_head(host.timeline));
-        let refused = err(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), head));
+        let refused = err(registry.step_all_anchored(
+            host.timeline,
+            &root_ancestry(host.timeline),
+            head,
+        ));
         assert!(
             matches!(
                 refused,
@@ -1748,7 +1813,11 @@ fn composition_fixes_one_profile_per_driver_before_any_pass() {
         );
         assert_eq!(registry.scheduled_binding(first), None, "{name}");
         assert_eq!(
-            err(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), Seq::ZERO)).to_string(),
+            err(registry.step_all_anchored(
+                host.timeline,
+                &root_ancestry(host.timeline),
+                Seq::ZERO,
+            )).to_string(),
             "scheduled Driver 'first' has no observation profile assignment",
             "{name}"
         );
@@ -1799,7 +1868,12 @@ fn participant_bound_drivers_never_stage_outside_their_authorized_views() {
         let head = ok(store.logical_head(host.timeline));
         let refusals = [
             err(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), head)),
-            err(registry.tick_cadenced_anchored(host.timeline, &root_ancestry(host.timeline), 0, head)),
+            err(registry.tick_cadenced_anchored(
+                host.timeline,
+                &root_ancestry(host.timeline),
+                0,
+                head,
+            )),
             err(registry.step_all(host.timeline, &root_ancestry(host.timeline))),
             err(registry.tick_cadenced(host.timeline, &root_ancestry(host.timeline), 0)),
             err(registry.compose_non_participant_drivers()),

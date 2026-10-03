@@ -5880,12 +5880,10 @@ impl EventStore for SqliteStore {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
             store
                 .ensure_generic_timeline_visibility(timeline)
-                .and_then(|()| store.read_logical_bounded(timeline, range, bounds, started))
-                .and_then(|events| {
-                    store
-                        .authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
-                        .map(|()| events)
+                .and_then(|()| {
+                    store.authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
                 })
+                .and_then(|()| store.read_logical_bounded(timeline, range, bounds, started))
         })
     }
 

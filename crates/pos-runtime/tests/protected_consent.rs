@@ -621,7 +621,14 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     let revisions = observe(&registry, &mut store, timeline);
 
     let drafts =
-        test_ok(registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token.clone(), 1, &[]));
+        test_ok(registry.step_all_anchored_protected(
+            timeline,
+            &root_ancestry(timeline),
+            Seq::ZERO,
+            token.clone(),
+            1,
+            &[],
+        ));
     assert_eq!(drafts.len(), 1);
 
     test_ok(authority.record_revocation_on_timeline(
@@ -647,7 +654,14 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
 
     let wrong_timeline = TimelineId::new();
     let error =
-        test_err(registry.step_all_anchored_protected(wrong_timeline, &root_ancestry(wrong_timeline), Seq::ZERO, token, 1, &[]));
+        test_err(registry.step_all_anchored_protected(
+            wrong_timeline,
+            &root_ancestry(wrong_timeline),
+            Seq::ZERO,
+            token,
+            1,
+            &[],
+        ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -667,7 +681,14 @@ fn protected_public_seam_fails_closed_without_a_bound_gate() {
         Box::new(ProtectedEventDriver { entity: subject }),
     );
 
-    let error = test_err(registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[]));
+    let error = test_err(registry.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -721,7 +742,14 @@ fn protected_public_seam_rejects_a_gate_that_returns_a_different_token() {
         Box::new(ProtectedEventDriver { entity: subject }),
     );
 
-    let error = test_err(registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[]));
+    let error = test_err(registry.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -744,7 +772,14 @@ fn protected_public_seam_rejects_a_draft_for_a_different_subject() {
         }),
     );
 
-    let error = test_err(registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[]));
+    let error = test_err(registry.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -766,7 +801,14 @@ fn protected_public_seam_rejects_a_retention_draft_for_a_different_subject() {
         }),
     );
 
-    let error = test_err(registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[]));
+    let error = test_err(registry.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -873,7 +915,14 @@ fn protected_public_seam_revalidates_at_the_fresh_commit_fence_time() {
     );
 
     let revisions = observe(&registry, &mut store, timeline);
-    let drafts = test_ok(registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[]));
+    let drafts = test_ok(registry.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert_eq!(drafts.len(), 1);
     let error = test_err(admit(&mut registry, &mut store, revisions, Seq::ZERO, 2));
     assert!(matches!(
@@ -909,7 +958,14 @@ fn protected_append_fence_rejects_before_store_append() {
     );
     let revisions = observe(&registry, &mut store, timeline.id());
     let drafts =
-        test_ok(registry.step_all_anchored_protected(timeline.id(), &root_ancestry(timeline.id()), Seq::ZERO, token, 1, &[]));
+        test_ok(registry.step_all_anchored_protected(
+            timeline.id(),
+            &root_ancestry(timeline.id()),
+            Seq::ZERO,
+            token,
+            1,
+            &[],
+        ));
     assert_eq!(drafts.len(), 1);
 
     let error = test_err(admit(&mut registry, &mut store, revisions, Seq::ZERO, 2));
@@ -937,7 +993,14 @@ fn protected_public_seam_aborts_when_the_gate_rejects_a_draft() {
         Box::new(ProtectedEventDriver { entity: subject }),
     );
 
-    let error = test_err(registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[]));
+    let error = test_err(registry.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -1021,7 +1084,15 @@ fn protected_cadenced_public_seam_stages_and_commits() {
     let revisions = observe(&registry, &mut store, timeline);
 
     let drafts =
-        test_ok(registry.tick_cadenced_anchored_protected(timeline, &root_ancestry(timeline), 0, Seq::ZERO, token, 1, &[]));
+        test_ok(registry.tick_cadenced_anchored_protected(
+            timeline,
+            &root_ancestry(timeline),
+            0,
+            Seq::ZERO,
+            token,
+            1,
+            &[],
+        ));
     assert_eq!(drafts.len(), 1);
     let receipt = test_ok(
         test_ok(admit(&mut registry, &mut store, revisions, Seq::ZERO, 1))
@@ -1057,7 +1128,11 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
         &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
         &[event],
     ));
-    assert!(test_ok(registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO)).is_empty());
+    assert!(test_ok(registry.step_all_anchored(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+    )).is_empty());
     test_ok(registry.commit_step_at(Seq::ZERO, 0));
     assert!(test_ok(registry.tick_cadenced(timeline, &root_ancestry(timeline), 0)).is_empty());
 
@@ -1067,7 +1142,11 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
     }));
     test_ok(projection_registry.compose_non_participant_drivers());
     assert!(matches!(
-        test_err(projection_registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO)),
+        test_err(projection_registry.step_all_anchored(
+            timeline,
+            &root_ancestry(timeline),
+            Seq::ZERO,
+        )),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
 }
@@ -1126,7 +1205,11 @@ fn public_registry_steps_a_registered_driverless_plugin() {
     let mut driverless = PluginRegistry::new();
     let plugin = configured_plugin("driverless", &[], false, false);
     test_ok(driverless.register_generated(&plugin, None, None));
-    assert!(test_ok(driverless.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO)).is_empty());
+    assert!(test_ok(driverless.step_all_anchored(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+    )).is_empty());
     test_ok(driverless.commit_step_at(Seq::ZERO, 0));
     assert!(test_ok(driverless.tick_cadenced(timeline, &root_ancestry(timeline), 0)).is_empty());
 }
@@ -1181,7 +1264,11 @@ fn public_registry_requires_consent_for_subscribed_projections() {
     }));
     test_ok(subscribed_anchored.compose_non_participant_drivers());
     assert!(matches!(
-        test_err(subscribed_anchored.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO)),
+        test_err(subscribed_anchored.step_all_anchored(
+            timeline,
+            &root_ancestry(timeline),
+            Seq::ZERO,
+        )),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
 }
@@ -1224,7 +1311,14 @@ fn public_registry_rejects_a_protected_driver_without_matching_consent() {
         }),
     );
     assert!(matches!(
-        test_err(protected.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[])),
+        test_err(protected.step_all_anchored_protected(
+            timeline,
+            &root_ancestry(timeline),
+            Seq::ZERO,
+            token,
+            1,
+            &[],
+        )),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
 }
@@ -1244,7 +1338,14 @@ fn public_registry_rechecks_revocation_when_committing() {
         Box::new(ProtectedEventDriver { entity: subject }),
     );
     let revisions = observe(&revoked, &mut store, timeline);
-    let drafts = test_ok(revoked.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[]));
+    let drafts = test_ok(revoked.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert_eq!(drafts.len(), 1);
     test_ok(authority.record_revocation_on_timeline(
         timeline,
@@ -1380,7 +1481,11 @@ fn public_registry_deduplicates_subscriptions_before_authorization() {
     duplicate_subscriptions.register_test_driver(Box::new(SubscribedDriver { key: duplicate_key }));
     test_ok(duplicate_subscriptions.compose_non_participant_drivers());
     assert!(matches!(
-        test_err(duplicate_subscriptions.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO)),
+        test_err(duplicate_subscriptions.step_all_anchored(
+            timeline,
+            &root_ancestry(timeline),
+            Seq::ZERO,
+        )),
         RuntimeError::Consent(ConsentError::NoConsent)
     ));
 }
@@ -1511,7 +1616,14 @@ fn public_registry_requires_a_gate_for_protected_admission() {
     let token = authority.record_grant_on_timeline(timeline, &grant(EntityId::new()));
     let mut protected_missing_gate = PluginRegistry::new().with_consent_authority(authority);
     let revisions = observe(&protected_missing_gate, &mut store, timeline);
-    test_ok(protected_missing_gate.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 0, &[]));
+    test_ok(protected_missing_gate.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token,
+        0,
+        &[],
+    ));
     protected_missing_gate = protected_missing_gate.without_consent_gate();
     assert!(matches!(
         admit(
@@ -1722,7 +1834,14 @@ fn protected_draft_seam_rejects_a_modality_not_in_the_presented_token() {
     );
 
     assert!(matches!(
-        test_err(registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[],)),
+        test_err(registry.step_all_anchored_protected(
+            timeline,
+            &root_ancestry(timeline),
+            Seq::ZERO,
+            token,
+            1,
+            &[],
+        )),
         RuntimeError::Consent(ConsentError::ModalityNotGranted)
     ));
 }
@@ -1805,7 +1924,11 @@ fn public_cadence_and_empty_registry_cover_ready_and_overflow_boundaries() {
 
     let mut registry = PluginRegistry::new();
     registry.register_test_driver(Box::new(OverflowCadencedDriver));
-    assert!(test_ok(registry.tick_cadenced(timeline, &root_ancestry(timeline), u128::MAX)).is_empty());
+    assert!(test_ok(registry.tick_cadenced(
+        timeline,
+        &root_ancestry(timeline),
+        u128::MAX,
+    )).is_empty());
     assert!(matches!(
         test_err(registry.tick_cadenced(timeline, &root_ancestry(timeline), u128::MAX)),
         RuntimeError::CadenceOverflow { .. }
@@ -1951,7 +2074,12 @@ fn public_registry_commits_and_admits_empty_anchored_steps() {
     let mut store = admission_store();
     let timeline = test_ok(store.create_timeline("registry-metadata"));
     let mut anchored = PluginRegistry::new();
-    assert!(test_ok(anchored.tick_cadenced_anchored(timeline.id(), &root_ancestry(timeline.id()), 0, Seq::ZERO)).is_empty());
+    assert!(test_ok(anchored.tick_cadenced_anchored(
+        timeline.id(),
+        &root_ancestry(timeline.id()),
+        0,
+        Seq::ZERO,
+    )).is_empty());
     test_ok(anchored.commit_step_at(Seq::ZERO, 0));
 
     let mut admitted = PluginRegistry::new();
@@ -2083,7 +2211,14 @@ fn protected_recovery_fails_closed_after_the_consent_gate_is_unbound() {
     register_protected_schema(&mut registry);
     let host = test_ok(LocalScheduledAdmissionHostV1::shared());
     let revisions = test_ok(host.observe(&registry, &mut store, timeline));
-    let drafts = test_ok(registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), Seq::ZERO, token, 1, &[]));
+    let drafts = test_ok(registry.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert_eq!(drafts.len(), 1);
 
     let lost = test_err(host.admit(

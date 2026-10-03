@@ -104,7 +104,8 @@ pub fn with_fork_ancestry_fence<G: ErasureGate + ?Sized>(
     effect: &mut dyn FnMut(),
 ) -> Result<(), ErasureContainmentErrorV1> {
     validate_fork_ancestry(timeline, ancestry).and_then(|()| {
-        let mut decision = Ok(());
+        // A gate that returns without running the effect leaves this closed.
+        let mut decision = Err(ErasureContainmentErrorV1::RecoveryUnavailable);
         let mut gated = || {
             decision = authorize_fork_scopes(gate, ancestry.iter().map(|meta| meta.id), operation);
             if decision.is_ok() {

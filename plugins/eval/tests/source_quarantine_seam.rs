@@ -189,7 +189,14 @@ fn stage_over(
 ) -> Result<Vec<EventDraft>, RuntimeError> {
     let head = store.logical_head(timeline).test_ok();
     registry.compose_non_participant_drivers().test_ok();
-    registry.step_all_anchored_protected(timeline, &root_ancestry(timeline), head, token.clone(), 0, prefix)
+    registry.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        head,
+        token.clone(),
+        0,
+        prefix,
+    )
 }
 
 /// Stage and atomically admit one scheduled pass; returns the committed

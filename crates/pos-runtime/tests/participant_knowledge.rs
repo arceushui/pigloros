@@ -739,7 +739,13 @@ fn stage_view(
     view: AuthorizedDriverViewV1,
     authority: AuthorizedViewAuthorityV1<'_>,
 ) -> Result<Vec<EventDraft>, RuntimeError> {
-    registry.stage_authorized_scheduled_pass(timeline, &root_ancestry(timeline), Seq::from_u64(12), &[view], &[authority])
+    registry.stage_authorized_scheduled_pass(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::from_u64(12),
+        &[view],
+        &[authority],
+    )
 }
 
 /// Host admission inputs for a port that has no published fence.
@@ -1598,7 +1604,11 @@ fn authorized_commit_rejects_a_legacy_pending_step() {
     let fixture = fixture();
     let (mut registry, state) = non_participant_registry(&fixture);
     registry
-        .step_all_anchored(fixture.timeline_id, &root_ancestry(fixture.timeline_id), Seq::from_u64(12))
+        .step_all_anchored(
+            fixture.timeline_id,
+            &root_ancestry(fixture.timeline_id),
+            Seq::from_u64(12),
+        )
         .test_ok();
     let evaluation = observation_evaluation(&fixture.observation);
     let authority = current_authority(&fixture);
@@ -1700,7 +1710,13 @@ fn admit_recorded(
     authorities: &[AuthorizedViewAuthorityV1<'_>],
 ) -> (Seq, Hash) {
     registry
-        .stage_authorized_scheduled_pass(prepared.timeline, &root_ancestry(prepared.timeline), Seq::from_u64(12), views, authorities)
+        .stage_authorized_scheduled_pass(
+            prepared.timeline,
+            &root_ancestry(prepared.timeline),
+            Seq::from_u64(12),
+            views,
+            authorities,
+        )
         .test_ok();
     let admission = prepared.admission(key);
     let mut port = RecordingPort {
@@ -1963,7 +1979,13 @@ fn an_empty_authorized_pass_commits_without_admission() {
     let fixture = fixture();
     let (mut registry, state) = registry(&fixture, false);
     assert!(registry
-        .stage_authorized_scheduled_pass(fixture.timeline_id, &root_ancestry(fixture.timeline_id), Seq::from_u64(12), &[], &[])
+        .stage_authorized_scheduled_pass(
+            fixture.timeline_id,
+            &root_ancestry(fixture.timeline_id),
+            Seq::from_u64(12),
+            &[],
+            &[],
+        )
         .test_ok()
         .is_empty());
 

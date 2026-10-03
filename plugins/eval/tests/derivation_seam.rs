@@ -168,7 +168,14 @@ fn stage(
     let prefix = store.read(timeline, SeqRange::all()).test_ok();
     registry.compose_non_participant_drivers().test_ok();
     registry
-        .step_all_anchored_protected(timeline, &root_ancestry(timeline), head, token.clone(), 0, &prefix)
+        .step_all_anchored_protected(
+            timeline,
+            &root_ancestry(timeline),
+            head,
+            token.clone(),
+            0,
+            &prefix,
+        )
         .map(|drafts| (head, drafts))
 }
 
@@ -340,7 +347,15 @@ fn a_legacy_persona_emitted_eval_timeline_folds_and_reports_unchanged() {
         registry.fold_events(timeline, &legacy);
         let head = store.logical_head(timeline).test_ok();
         let folded = registry
-            .projection_state_for_reducer(timeline, &root_ancestry(timeline), head, 0, &token, "eval", entity)
+            .projection_state_for_reducer(
+                timeline,
+                &root_ancestry(timeline),
+                head,
+                0,
+                &token,
+                "eval",
+                entity,
+            )
             .test_ok()
             .map(|state| {
                 (

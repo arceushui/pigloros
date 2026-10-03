@@ -210,13 +210,32 @@ impl ProjectionRegistry {
         self.source_ancestry = Some((timeline, ancestry.iter().map(|meta| meta.id).collect()));
     }
 
-    fn record_adopted_fork(&mut self, parent: TimelineId, child: TimelineId) {
-        let inherited = self
-            .source_ancestry
-            .take()
-            .filter(|(head, _)| *head == parent)
-            .map_or_else(|| vec![parent], |(_, scopes)| scopes);
-        self.source_ancestry = Some((child, std::iter::once(child).chain(inherited).collect()));
+    /// Keep `ancestry` bound only when the fenced effect actually applied.
+    fn record_applied_ancestry(
+        &mut self,
+        applied: bool,
+        timeline: TimelineId,
+        ancestry: &[TimelineMeta],
+    ) -> Result<(), AuthorityErrorV1> {
+        if applied {
+            self.record_source_ancestry(timeline, ancestry);
+            Ok(())
+        } else {
+            Err(AuthorityErrorV1::SourceUnavailable)
+        }
+    }
+
+    /// Require `ancestry` to be the committed child's complete chain through
+    /// `parent`.
+    fn validate_adopted_ancestry(
+        parent: TimelineId,
+        child: TimelineId,
+        ancestry: &[TimelineMeta],
+    ) -> Result<(), AuthorityErrorV1> {
+        pos_core::validate_fork_ancestry(child, ancestry)
+            .ok()
+            .filter(|()| ancestry.get(1).is_some_and(|meta| meta.id == parent))
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
     }
 
     fn authorize_source_ancestry(
@@ -225,9 +244,9 @@ impl ProjectionRegistry {
         timeline: TimelineId,
     ) -> Result<(), AuthorityErrorV1> {
         self.source_ancestry
-            .iter()
+            .as_ref()
             .filter(|(head, _)| *head == timeline)
-            .try_for_each(|(_, scopes)| {
+            .map_or(Ok(()), |(_, scopes)| {
                 pos_core::authorize_fork_scopes(
                     gate,
                     scopes.iter().copied(),
@@ -449,36 +468,42 @@ impl ProjectionRegistry {
             &mut refold,
         )
         .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
-        self.record_source_ancestry(timeline, ancestry);
-        refolded
-            .then_some(())
-            .ok_or(AuthorityErrorV1::SourceUnavailable)
+        self.record_applied_ancestry(refolded, timeline, ancestry)
     }
 
     /// Rebind a restored parent projection only after its child Fork has been
     /// committed and installed by the host. The child containment proof is
     /// checked before the inherited state can be exposed under that identity.
     ///
+    /// `ancestry` is the child's complete Fork ancestry from
+    /// [`pos_core::fork_ancestry`], whose second member is `parent`. It stays
+    /// bound, so every later Snapshot read of the child fences each scope.
+    ///
     /// # Errors
-    /// Returns a closed source error for mixed or mismatched input or when the
-    /// committed child is not available in the current host gate.
+    /// Returns a closed source error for mixed or mismatched input, an
+    /// incomplete or foreign ancestry, or when the committed child is not
+    /// available in the current host gate.
     pub fn adopt_committed_fork(
         &mut self,
         parent: TimelineId,
         child: TimelineId,
+        ancestry: &[TimelineMeta],
     ) -> Result<(), AuthorityErrorV1> {
         if self.mixed_sources || self.source_timeline.is_some_and(|source| source != parent) {
             return Err(AuthorityErrorV1::SourceUnavailable);
         }
-        self.erasure_gate
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or(AuthorityErrorV1::SourceUnavailable)
+        Self::validate_adopted_ancestry(parent, child, ancestry)
+            .and_then(|()| {
+                self.erasure_gate
+                    .as_ref()
+                    .map(Arc::clone)
+                    .ok_or(AuthorityErrorV1::SourceUnavailable)
+            })
             .and_then(|gate| {
                 let mut bind = || {
                     self.source_timeline = Some(child);
                     self.source_generation = gate.inventory_generation().ok();
-                    self.record_adopted_fork(parent, child);
+                    self.record_source_ancestry(child, ancestry);
                 };
                 gate.with_fence(child, ErasureProtectedOperationV1::Fork, &mut bind)
                     .map_err(|_| AuthorityErrorV1::SourceUnavailable)
@@ -853,10 +878,7 @@ impl ProjectionRegistry {
             &mut install,
         )
         .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
-        self.record_source_ancestry(timeline, ancestry);
-        restored
-            .then_some(())
-            .ok_or(AuthorityErrorV1::SourceUnavailable)
+        self.record_applied_ancestry(restored, timeline, ancestry)
     }
 
     /// Materialize a snapshot of all per-reducer state inside the current
@@ -2052,8 +2074,18 @@ mod tests {
         let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         registry.apply_event(source, &make_event(entity));
+        let ancestry = [
+            TimelineMeta {
+                id: child,
+                ..TimelineMeta::forked_from(unrelated, Seq::ZERO, "child")
+            },
+            TimelineMeta {
+                id: unrelated,
+                ..TimelineMeta::root("unrelated")
+            },
+        ];
         assert_eq!(
-            registry.adopt_committed_fork(unrelated, child),
+            registry.adopt_committed_fork(unrelated, child, &ancestry),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
         assert!(test_ok(registry.state_for(source, &entity)).is_some());

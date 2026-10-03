@@ -383,7 +383,12 @@ mod tests {
                 )
                 .test_ok();
             let drafts = registry
-                .step_all_anchored_with_events(timeline, &root_ancestry(timeline), action.seq, std::slice::from_ref(&action))
+                .step_all_anchored_with_events(
+                    timeline,
+                    &root_ancestry(timeline),
+                    action.seq,
+                    std::slice::from_ref(&action),
+                )
                 .test_ok();
             let committed = commands.append(timeline, &drafts).test_ok();
             (timeline, action, committed)

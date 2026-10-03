@@ -2821,7 +2821,10 @@ impl PluginRegistry {
         parent: TimelineId,
         child: TimelineId,
     ) -> Result<(), RuntimeError> {
-        if let Err(error) = self.projections.adopt_committed_fork(parent, child) {
+        let adopted = pos_core::fork_ancestry(&*store, child)
+            .map_err(|_| pos_core::AuthorityErrorV1::SourceUnavailable)
+            .and_then(|ancestry| self.projections.adopt_committed_fork(parent, child, &ancestry));
+        if let Err(error) = adopted {
             self.restored_binding = None;
             store.delete_timeline(child)?;
             return Err(RuntimeError::Authority(error));
@@ -4132,7 +4135,9 @@ impl PluginRegistry {
     /// Only drivers whose `tick_interval()` has elapsed since their last tick
     /// will fire. First-tick drivers always fire. `ancestry` is the
     /// Timeline's Fork ancestry from [`pos_core::fork_ancestry`]; every scope
-    /// in it must permit `PluginInput`.
+    /// in it must permit `PluginInput`. The registry is store-agnostic and
+    /// trusts each `TimelineMeta`, so the host must never assemble the chain
+    /// by hand.
     ///
     /// # Errors
     /// Propagates any [`RuntimeError`] from drivers. Returns
@@ -4340,7 +4345,10 @@ impl PluginRegistry {
     /// Calls `driver.step(timeline, observations)` on each plugin that registered a driver.
     /// Returns all drafts from all drivers in registration order. `ancestry` is
     /// the Timeline's Fork ancestry from [`pos_core::fork_ancestry`]; every
-    /// scope in it must permit `PluginInput`.
+    /// scope in it must permit `PluginInput`. The registry is store-agnostic
+    /// and trusts each `TimelineMeta`, so the host must never assemble the
+    /// chain by hand. Like the anchored variants, a refused fence aborts any
+    /// pending step.
     ///
     /// # Errors
     /// Propagates any [`RuntimeError`] from drivers, or returns the closed
@@ -4420,6 +4428,12 @@ impl PluginRegistry {
 
     /// Step every Driver against one host-owned immutable-prefix anchor,
     /// staging Driver state until commit or abort.
+    ///
+    /// Every anchored and cadenced entry point takes `ancestry`, the
+    /// Timeline's Fork ancestry from [`pos_core::fork_ancestry`]. The
+    /// registry is store-agnostic and trusts each `TimelineMeta`, so the host
+    /// must never assemble the chain by hand; an invalid chain or any denying
+    /// scope fails the pass with the closed erasure error.
     ///
     /// # Errors
     /// Returns [`RuntimeError::PendingDriverStep`] when a prior anchored step is

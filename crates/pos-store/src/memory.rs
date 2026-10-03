@@ -5362,11 +5362,9 @@ impl EventStore for MemoryStore {
         event_id: EventId,
     ) -> Result<Option<Event>, CoreError> {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
-            read_event_by_id(store, timeline, event_id).and_then(|event| {
-                store
-                    .authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
-                    .map(|()| event)
-            })
+            store
+                .authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
+                .and_then(|()| read_event_by_id(store, timeline, event_id))
         })
     }
 
@@ -5466,12 +5464,10 @@ impl EventStore for MemoryStore {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Read, |store| {
             store
                 .ensure_generic_timeline_visibility(timeline)
-                .and_then(|()| store.collect_events_in_range_bounded(timeline, range, bounds))
-                .and_then(|events| {
-                    store
-                        .authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
-                        .map(|()| events)
+                .and_then(|()| {
+                    store.authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
                 })
+                .and_then(|()| store.collect_events_in_range_bounded(timeline, range, bounds))
         })
     }
 

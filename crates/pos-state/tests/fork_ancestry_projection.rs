@@ -46,6 +46,12 @@ impl Lineage {
         }
     }
 
+    fn grandchild_ancestry(&self) -> Vec<TimelineMeta> {
+        let mut ancestry = vec![Self::member(self.grandchild, Some(self.child))];
+        ancestry.extend(self.child_ancestry());
+        ancestry
+    }
+
     fn child_ancestry(&self) -> Vec<TimelineMeta> {
         vec![
             Self::member(self.child, Some(self.root)),
@@ -162,45 +168,46 @@ fn refold_and_restore_fail_closed_on_a_denied_ancestor_and_keep_the_chain() {
 }
 
 #[test]
-fn an_adopted_fork_inherits_its_parent_ancestry() {
+fn an_adopted_fork_requires_and_keeps_its_complete_ancestry() {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     let lineage = Lineage::new();
     let entity = EntityId::new();
+    let complete = lineage.grandchild_ancestry();
 
-    // The parent's own chain is known: freezing the root denies the grandchild.
-    let mut known = registry(&gate);
-    known
-        .refold_events(lineage.child, &lineage.child_ancestry(), &[event(entity)], None)
+    let mut adopted = registry(&gate);
+    adopted.fold_events(lineage.child, &[event(entity)]);
+    // Empty, foreign, and a chain that skips the parent all fail closed.
+    let foreign = lineage.child_ancestry();
+    let skipping = [
+        Lineage::member(lineage.grandchild, Some(lineage.root)),
+        Lineage::member(lineage.root, None),
+    ];
+    let invalid: [&[TimelineMeta]; 3] = [&[], &foreign, &skipping];
+    for ancestry in invalid {
+        assert_eq!(
+            adopted.adopt_committed_fork(lineage.child, lineage.grandchild, ancestry),
+            UNAVAILABLE
+        );
+    }
+    adopted
+        .adopt_committed_fork(lineage.child, lineage.grandchild, &complete)
         .test_ok();
-    known
-        .adopt_committed_fork(lineage.child, lineage.grandchild)
-        .test_ok();
-    read(&known, lineage.grandchild, entity).test_ok();
+    read(&adopted, lineage.grandchild, entity).test_ok();
 
-    // The parent's chain is unknown: the parent itself is still fenced.
-    let mut partial = registry(&gate);
-    partial.fold_events(lineage.child, &[event(entity)]);
-    partial
-        .adopt_committed_fork(lineage.child, lineage.grandchild)
-        .test_ok();
-    read(&partial, lineage.grandchild, entity).test_ok();
-
-    // A chain bound for another Timeline is not inherited by the adoption.
-    let mut foreign = registry(&gate);
-    foreign.fold_events(lineage.child, &[event(entity)]);
-    foreign
-        .bind_fork_ancestry(lineage.root, &[Lineage::member(lineage.root, None)])
-        .test_ok();
-    foreign
-        .adopt_committed_fork(lineage.child, lineage.grandchild)
-        .test_ok();
+    // A failed refold binds nothing.
+    let mut stale = registry(&gate);
+    assert_eq!(
+        stale.refold_events(
+            lineage.child,
+            &lineage.child_ancestry(),
+            &[event(entity)],
+            Some(pos_core::ErasureReferenceV1::from_digest([9; 32])),
+        ),
+        UNAVAILABLE
+    );
+    stale.fold_events(lineage.child, &[event(entity)]);
 
     gate.freeze_timeline_for_test(lineage.root);
-    assert_eq!(read(&known, lineage.grandchild, entity), UNAVAILABLE);
-    assert_eq!(read(&partial, lineage.grandchild, entity), Ok(()));
-    assert_eq!(read(&foreign, lineage.grandchild, entity), Ok(()));
-
-    gate.freeze_timeline_for_test(lineage.child);
-    assert_eq!(read(&partial, lineage.grandchild, entity), UNAVAILABLE);
-    assert_eq!(read(&foreign, lineage.grandchild, entity), UNAVAILABLE);
+    assert_eq!(read(&adopted, lineage.grandchild, entity), UNAVAILABLE);
+    assert_eq!(read(&stale, lineage.child, entity), Ok(()));
 }

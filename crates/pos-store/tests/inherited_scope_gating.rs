@@ -178,17 +178,22 @@ fn stitched_reads_include_inherited_segments_while_every_scope_is_open() {
 #[test]
 fn a_frozen_ancestor_fails_every_stitched_read_of_its_descendants_closed() {
     for (name, store) in stores() {
-        let topology = topology(store);
+        let mut topology = topology(store);
+        let own = topology.store.append(topology.child, &[draft()]).test_ok();
         topology.gate.freeze_timeline_for_test(topology.root);
         assert_stitched_reads_frozen(&topology, topology.root, name);
         assert_stitched_reads_frozen(&topology, topology.child, name);
         assert_stitched_reads_frozen(&topology, topology.grandchild, name);
         // A Fork's own segment is not stitched and keeps its own decision.
-        assert!(topology
+        let own_segment = topology
             .store
             .read_own(topology.child, SeqRange::all())
-            .test_ok()
-            .is_empty());
+            .test_ok();
+        assert_eq!(
+            own_segment.iter().map(|event| event.id).collect::<Vec<_>>(),
+            [own[0].id],
+            "{name}"
+        );
         assert_unrelated_reads_normally(&topology, name);
     }
 }

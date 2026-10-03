@@ -97,8 +97,10 @@ impl PluginRegistry {
     /// stale authority, views from another base cut, and ambient
     /// subscriptions. A Driver, output, schema, or budget error is also
     /// possible. `ancestry` is the Timeline's Fork ancestry from
-    /// [`pos_core::fork_ancestry`]; an invalid ancestry or any denying scope
-    /// in it fails the pass with the closed erasure error.
+    /// [`pos_core::fork_ancestry`], never assembled by hand, because the
+    /// registry is store-agnostic and trusts each `TimelineMeta`; an invalid
+    /// ancestry or any denying scope in it fails the pass with the closed
+    /// erasure error.
     pub fn stage_authorized_scheduled_pass(
         &mut self,
         timeline: TimelineId,
