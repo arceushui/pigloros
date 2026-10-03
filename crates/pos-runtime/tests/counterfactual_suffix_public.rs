@@ -867,7 +867,7 @@ fn configure<B: Backend>(
     })
 }
 
-fn suffix_request(fixture: &Fixture) -> CounterfactualSuffixRequestV1<'_> {
+const fn suffix_request(fixture: &Fixture) -> CounterfactualSuffixRequestV1<'_> {
     CounterfactualSuffixRequestV1 {
         plan: &fixture.plan,
         receipt: fixture.receipt,
@@ -1114,7 +1114,7 @@ fn recomputes_every_tick_through_the_horizon<B: Backend>() -> TestResult {
             CanonicalBytes::from_vec(bytes.clone()),
         ));
     }
-    let staged: Vec<_> = expected_events
+    let committed_drafts: Vec<_> = expected_events
         .into_iter()
         .map(|draft| {
             (
@@ -1124,7 +1124,7 @@ fn recomputes_every_tick_through_the_horizon<B: Backend>() -> TestResult {
             )
         })
         .collect();
-    assert_eq!(committed_events(&setup)?, staged);
+    assert_eq!(committed_events(&setup)?, committed_drafts);
     Ok(())
 }
 both_backends!(recomputes_every_tick_through_the_horizon);
@@ -1471,7 +1471,7 @@ fn stale_generation_and_foreign_plans_are_rejected<B: Backend>() -> TestResult {
 
     let mut setup = prepare::<B>()?;
     let mut foreign = setup.fixture.plan.clone();
-    foreign.room_id = "room.beta".to_owned();
+    "room.beta".clone_into(&mut foreign.room_id);
     foreign.plan_digest = foreign.digest()?;
     let mut corrupt = setup.fixture.plan.clone();
     corrupt.plan_digest = [1; 32];
