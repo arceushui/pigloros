@@ -25,11 +25,13 @@
 //! 2. Decode with [`FieldReader::with_header`] for the record and
 //!    [`FieldReader::new`] for nested fixed-length arrays, then return
 //!    `reader.finish().map(|()| record)`.
-//! 3. Closed enum codes, optional fields, and variable-length lists stay with
-//!    the contract or are added here as `read_*` methods over
-//!    [`FieldReader::read_with`]; any helper added here must be exercised by
-//!    the contract that introduces it, because unused helpers fail the build
-//!    and untested branches fail the region gate.
+//! 3. Read closed enum codes with [`FieldReader::read_enum`] over a `const`
+//!    code table, and embedded node coordinates with
+//!    [`FieldReader::read_node`]. Optional fields and variable-length lists
+//!    are added here as `read_*` methods over [`FieldReader::read_with`]; any
+//!    helper added here must be exercised by the contract that introduces it,
+//!    because unused helpers fail the build and untested branches fail the
+//!    region gate.
 
 use crate::DependencyNodeV1;
 use ciborium::value::Value;
@@ -44,6 +46,8 @@ pub(super) enum WireError {
     FieldOutOfBounds,
     /// The record magic or schema version is not the expected one.
     UnsupportedVersion,
+    /// A well-typed enum code lies outside its closed code table.
+    UnknownEnum,
 }
 
 /// Structural bounds checked before a record is decoded.
@@ -203,7 +207,7 @@ impl<'a> FieldReader<'a> {
     /// field has failed or this one fails.
     pub(super) fn read_with<T>(
         &mut self,
-        decode: fn(&Value) -> Result<T, WireError>,
+        decode: impl FnOnce(&Value) -> Result<T, WireError>,
         fallback: T,
     ) -> T {
         let decoded = self
@@ -237,6 +241,16 @@ impl<'a> FieldReader<'a> {
     /// Read a byte-string field of exactly `LENGTH` bytes.
     pub(super) fn read_bytes<const LENGTH: usize>(&mut self) -> [u8; LENGTH] {
         self.read_with(fixed_bytes_field::<LENGTH>, [0; LENGTH])
+    }
+
+    /// Read a closed enum whose wire code indexes `codes`; a non-integer
+    /// records [`WireError::InvalidEncoding`] and a code outside the table
+    /// records [`WireError::UnknownEnum`].
+    pub(super) fn read_enum<T: Copy>(&mut self, codes: &[T], fallback: T) -> T {
+        self.read_with(
+            |value| u64_field(value).and_then(|code| enum_code(code, codes)),
+            fallback,
+        )
     }
 
     /// Read a node coordinate encoded by [`node_value`].
@@ -285,6 +299,14 @@ fn fixed_bytes_field<const LENGTH: usize>(value: &Value) -> Result<[u8; LENGTH],
         }
         _ => Err(WireError::InvalidEncoding),
     }
+}
+
+fn enum_code<T: Copy>(code: u64, codes: &[T]) -> Result<T, WireError> {
+    usize::try_from(code)
+        .ok()
+        .and_then(|index| codes.get(index))
+        .copied()
+        .ok_or(WireError::UnknownEnum)
 }
 
 fn node_field(value: &Value) -> Result<DependencyNodeV1, WireError> {
