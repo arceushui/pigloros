@@ -46,7 +46,7 @@ use super::{
 const ANCHORED_DOMAIN: &[u8] = b"PiglorOS.ScheduledObservationSnapshot.v1\0";
 const AUTHORIZED_DOMAIN: &[u8] = b"PiglorOS.AuthorizedScheduledPass.v1\0";
 /// The shared base cut of every pass in these runners.
-const CUT: u64 = 12;
+pub(super) const CUT: u64 = 12;
 const PLANNED: &str = "participant.planned";
 
 const fn digest(byte: u8) -> Hash {
@@ -54,15 +54,15 @@ const fn digest(byte: u8) -> Hash {
 }
 
 /// A participant-authorized view and the authority behind it.
-struct Participant {
-    observation: AuthorizedObservationV1,
+pub(super) struct Participant {
+    pub(super) observation: AuthorizedObservationV1,
     knowledge: KnowledgeSnapshotV1,
     state: AuthorityPersistenceStateV1,
-    host: AuthorityPersistenceHostV1,
+    pub(super) host: AuthorityPersistenceHostV1,
     authority_registry: AuthorityRegistrySnapshotV1,
-    grant: CapabilityGrantV1,
-    plugin_id: PluginId,
-    timeline_id: TimelineId,
+    pub(super) grant: CapabilityGrantV1,
+    pub(super) plugin_id: PluginId,
+    pub(super) timeline_id: TimelineId,
 }
 
 struct Ids {
@@ -217,7 +217,9 @@ fn knowledge_snapshot(snapshot: &ObservationSnapshotV1) -> KnowledgeSnapshotV1 {
     .test_ok()
 }
 
-fn observation_evaluation(observation: &AuthorizedObservationV1) -> ReplayClaimEvaluationV1 {
+pub(super) fn observation_evaluation(
+    observation: &AuthorizedObservationV1,
+) -> ReplayClaimEvaluationV1 {
     ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::Exact,
         &[ArtifactClaimInputV1 {
@@ -242,7 +244,7 @@ fn participant() -> Participant {
 }
 
 /// A participant view of `timeline_id` for a fresh participant Plugin.
-fn participant_on(timeline_id: TimelineId) -> Participant {
+pub(super) fn participant_on(timeline_id: TimelineId) -> Participant {
     let ids = Ids {
         principal: PrincipalRefV1::try_new([1; 16], "host.test").test_ok(),
         participant_id: EntityId::new(),
@@ -318,11 +320,11 @@ fn participant_on(timeline_id: TimelineId) -> Participant {
 }
 
 impl Participant {
-    fn current_authority(&self) -> PersistedAuthorityV1 {
+    pub(super) fn current_authority(&self) -> PersistedAuthorityV1 {
         self.state.resolve(self.grant.grant_id()).test_ok()
     }
 
-    fn view(&self) -> AuthorizedDriverViewV1 {
+    pub(super) fn view(&self) -> AuthorizedDriverViewV1 {
         AuthorizedDriverViewV1 {
             plugin_id: self.plugin_id,
             observation: self.observation.clone(),
@@ -330,7 +332,7 @@ impl Participant {
         }
     }
 
-    const fn authority<'a>(
+    pub(super) const fn authority<'a>(
         &'a self,
         evaluation: &'a ReplayClaimEvaluationV1,
         authority: &'a PersistedAuthorityV1,
@@ -414,7 +416,7 @@ fn non_participant_registry(participant: &Participant) -> (PluginRegistry, Arc<A
 }
 
 /// Bind each participant's Driver to its view's ADR-059 Participant.
-fn bind_participants(registry: &mut PluginRegistry, participants: &[&Participant]) {
+pub(super) fn bind_participants(registry: &mut PluginRegistry, participants: &[&Participant]) {
     let bindings: Vec<(PluginId, ScheduledDriverBindingV1)> = participants
         .iter()
         .map(|participant| {
@@ -485,7 +487,7 @@ fn admission() -> ScheduledPassAdmissionV1 {
     }
 }
 
-fn stage_authorized(
+pub(super) fn stage_authorized(
     registry: &mut PluginRegistry,
     participant: &Participant,
 ) -> Result<usize, RuntimeError> {

@@ -5,7 +5,8 @@
 //! ingress through atomic host admission (#316, #318, #319), failure
 //! precedence, recovery, Replay and evaluation non-authority (#320), the
 //! ADR-021 Revision 3 observation profiles and their composition-time
-//! assignment (#504), draft and exclusive Event-type
+//! assignment (#504), participant-authorized recovery (#507), draft and
+//! exclusive Event-type
 //! ownership (#484, #486, ADR-024 Revision 1), source quarantine (#493,
 //! ADR-024 Revision 2) and revocation persistence
 //! (#483). Each case runs only through public seams, on `MemoryStore` and
@@ -24,6 +25,7 @@ pub mod harness;
 pub mod ingress;
 pub mod nonparticipant;
 pub mod ownership;
+pub mod participant_recovery;
 pub mod profiles;
 pub mod quarantine;
 pub mod revocation;
@@ -39,10 +41,10 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "c8b4317bd9cae975b0c0a5b3eaf87bb7a4056a58a790a6a359cc57b3e6f5da32";
+const MANIFEST_SHA256: &str = "bc5018ae994f50c508af50c04627cc5d4aa1d46041f19cba079ecf11c1e5ab8c";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 48] = [
+const RUNNERS: [(&str, Runner); 49] = [
     ("PCF-ING-001", ingress::ingress_parity),
     ("PCF-ING-002", ingress::human_admission_receipt),
     ("PCF-ING-003", gateway::first_party_has_no_privileged_route),
@@ -53,6 +55,10 @@ const RUNNERS: [(&str, Runner); 48] = [
     ("PCF-REC-001", ingress::disconnect_after_commit),
     ("PCF-REC-002", ingress::lost_acknowledgement_recovery),
     ("PCF-REC-003", ingress::exact_retry_and_conflict),
+    (
+        "PCF-REC-004",
+        participant_recovery::participant_commit_recovery,
+    ),
     ("PCF-RPL-001", ingress::replay_never_resubmits),
     ("PCF-EVL-001", ingress::evaluation_non_authority),
     ("PCF-R3-001", profiles::participant_pass_needs_its_fence),
@@ -143,7 +149,7 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
         .map(|case| case.id.clone())
         .collect();
     assert_eq!(report.not_applicable, inapplicable);
-    assert_eq!(manifest.cases.len(), 49);
+    assert_eq!(manifest.cases.len(), 50);
     assert_eq!(
         report.passed.len() + report.not_applicable.len(),
         manifest.cases.len()
@@ -152,7 +158,7 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
         .cases
         .iter()
         .all(|case| case.mandatory && !case.id.is_empty()));
-    assert_eq!(manifest.exclusions.len(), 3);
+    assert_eq!(manifest.exclusions.len(), 2);
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────
