@@ -75,11 +75,10 @@ fn finish_issuer_policy_transaction<T>(
             .commit()
             .map(|()| value)
             .map_err(ForkAttributionIssuerPolicyErrorV1::from),
-        Err(error) => Err(transaction
-            .rollback()
-            .map_or(ForkAttributionIssuerPolicyErrorV1::StorageIndeterminate, |()| {
-                error
-            })),
+        Err(error) => Err(transaction.rollback().map_or(
+            ForkAttributionIssuerPolicyErrorV1::StorageIndeterminate,
+            |()| error,
+        )),
     }
 }
 

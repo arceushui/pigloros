@@ -195,7 +195,11 @@ fn unpinned_malformed_or_invalid_key_policies_install_nothing() -> Fallible<()> 
         (&wrong_digest, bytes.as_slice(), PolicyError::PinMismatch),
         (&wrong_scope, bytes.as_slice(), PolicyError::PinMismatch),
         (&pinned, truncated.as_slice(), PolicyError::InvalidEncoding),
-        (&pinned, unsupported.as_slice(), PolicyError::UnsupportedVersion),
+        (
+            &pinned,
+            unsupported.as_slice(),
+            PolicyError::UnsupportedVersion,
+        ),
     ];
     on_both_adapters(|store| {
         for (pin, bytes, error) in &attempts {
