@@ -113,6 +113,11 @@ pub enum ForkAttributionIssuerAdmissionBasisV1 {
     /// its stored admission names this historical policy generation. The
     /// current floor and current issuer states are never consulted, so a
     /// committed import stays recoverable after retirement or revocation.
+    ///
+    /// The recorded generation must be one in which the issuer was `Active`,
+    /// because that policy admitted the import. `Retired` or `Revoked` there
+    /// means the committed admission is inconsistent with durable policy, a
+    /// corruption-level failure the import reports as corrupt authority.
     CommittedImport {
         /// Generation recorded by the committed import admission.
         policy_generation: u64,
@@ -157,6 +162,10 @@ pub enum ForkAttributionIssuerPolicyErrorV1 {
     /// An issuer public key is not valid, non-weak Ed25519 material.
     #[error("Fork attribution issuer key is invalid")]
     InvalidIssuerKey,
+    /// A `pos-crypto` signature check failed. This port only checks keys, so
+    /// it never returns this; the mapping keeps crypto failures distinct.
+    #[error("Fork attribution issuer signature is invalid")]
+    InvalidSignature,
     /// The operator pin names a different scope or digest.
     #[error("Fork attribution issuer policy does not match the operator pin")]
     PinMismatch,
@@ -187,6 +196,10 @@ pub enum ForkAttributionIssuerPolicyErrorV1 {
     /// The successor adds no identity and advances no state.
     #[error("Fork attribution issuer policy successor changes nothing")]
     NoOpSuccessor,
+    /// The successor leaves no `Active` identity without revoking one; only
+    /// an emergency revocation may leave zero `Active` issuers.
+    #[error("Fork attribution issuer policy leaves no active issuer")]
+    NoActiveIssuer,
     /// No issuer policy is installed, so no new import can be admitted.
     #[error("Fork attribution issuer policy is unavailable")]
     PolicyUnavailable,
@@ -222,9 +235,11 @@ impl From<ForkAttributionCodecErrorV1> for ForkAttributionIssuerPolicyErrorV1 {
 }
 
 impl From<ForkAttributionAuthoritySignatureErrorV1> for ForkAttributionIssuerPolicyErrorV1 {
-    /// Key checks are the only `pos-crypto` calls this port makes.
-    fn from(_: ForkAttributionAuthoritySignatureErrorV1) -> Self {
-        Self::InvalidIssuerKey
+    fn from(error: ForkAttributionAuthoritySignatureErrorV1) -> Self {
+        match error {
+            ForkAttributionAuthoritySignatureErrorV1::InvalidIssuerKey => Self::InvalidIssuerKey,
+            ForkAttributionAuthoritySignatureErrorV1::InvalidSignature => Self::InvalidSignature,
+        }
     }
 }
 
@@ -390,12 +405,35 @@ fn advance_floor(
 /// state (`Active` < `Retired` < `Revoked`); every new identity enters
 /// `Active`; for one issuer ID only the newest epoch may be `Active`, so a
 /// rotation retires its predecessor in the same policy; and the candidate
-/// must add an identity or advance a state. A candidate may leave zero
-/// `Active` identities, which fails every new import closed.
+/// must add an identity or advance a state. At least one identity must stay
+/// `Active`, unless the candidate is an emergency successor that revokes an
+/// identity `Active` in the predecessor; zero `Active` identities then fail
+/// every new import closed.
 fn validate_transition(
     previous: &[ForkAttributionIssuerPolicyEntryV1],
     candidate: &ForkAttributionIssuerPolicyV1,
 ) -> PolicyResultV1<IssuerPolicyInstallOutcomeV1> {
+    let entries = &candidate.input().entries;
+    let advanced = entries.len() > previous.len()
+        || previous
+            .iter()
+            .any(|old| candidate.issuer_state(&old.issuer) != Some(old.state));
+    let legal = transition_is_legal(previous, candidate);
+    let keeps_active = keeps_or_revokes_active(previous, candidate);
+    match (legal, advanced, keeps_active) {
+        (false, _, _) => Err(ForkAttributionIssuerPolicyErrorV1::IllegalTransition),
+        (true, false, _) => Err(ForkAttributionIssuerPolicyErrorV1::NoOpSuccessor),
+        (true, true, false) => Err(ForkAttributionIssuerPolicyErrorV1::NoActiveIssuer),
+        (true, true, true) => Ok(IssuerPolicyInstallOutcomeV1::Installed),
+    }
+}
+
+/// Identities stay with a non-regressing state, enter `Active`, and only the
+/// newest epoch of one issuer ID is `Active`.
+fn transition_is_legal(
+    previous: &[ForkAttributionIssuerPolicyEntryV1],
+    candidate: &ForkAttributionIssuerPolicyV1,
+) -> bool {
     let entries = &candidate.input().entries;
     let retained = previous.iter().all(|old| {
         candidate
@@ -410,19 +448,22 @@ fn validate_transition(
         pair[0].issuer.issuer_id() != pair[1].issuer.issuer_id()
             || pair[0].state != ForkAttributionIssuerStateV1::Active
     });
-    let advanced = entries.len() > previous.len()
+    retained && entered_active && newest_active
+}
+
+/// The candidate keeps an `Active` identity, or revokes one that was `Active`.
+fn keeps_or_revokes_active(
+    previous: &[ForkAttributionIssuerPolicyEntryV1],
+    candidate: &ForkAttributionIssuerPolicyV1,
+) -> bool {
+    let active = ForkAttributionIssuerStateV1::Active;
+    let revoked = Some(ForkAttributionIssuerStateV1::Revoked);
+    let entries = &candidate.input().entries;
+    let keeps = entries.iter().any(|entry| entry.state == active);
+    keeps
         || previous
             .iter()
-            .any(|old| candidate.issuer_state(&old.issuer) != Some(old.state));
-    if retained && entered_active && newest_active {
-        if advanced {
-            Ok(IssuerPolicyInstallOutcomeV1::Installed)
-        } else {
-            Err(ForkAttributionIssuerPolicyErrorV1::NoOpSuccessor)
-        }
-    } else {
-        Err(ForkAttributionIssuerPolicyErrorV1::IllegalTransition)
-    }
+            .any(|old| old.state == active && candidate.issuer_state(&old.issuer) == revoked)
 }
 
 /// Decide one issuer admission against the policy `load` returns for the

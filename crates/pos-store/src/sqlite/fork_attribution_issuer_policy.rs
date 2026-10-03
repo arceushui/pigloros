@@ -19,8 +19,9 @@ use crate::fork_attribution_issuer_policy::{
     LoadedIssuerPolicyV1, PolicyResultV1,
 };
 
-/// The floor row joined with the history row its digest names.
-type StoredFloorRowV1 = (String, u64, [u8; 32], Option<Vec<u8>>);
+/// The expected scope, generation, and digest of one stored policy, with its
+/// bytes when the history row exists.
+type StoredPolicyRowV1 = (String, u64, [u8; 32], Option<Vec<u8>>);
 
 impl From<rusqlite::Error> for ForkAttributionIssuerPolicyErrorV1 {
     /// Deliberately conservative: no `SQLite` failure is trusted to prove what
@@ -129,14 +130,16 @@ fn read_floor_policy(conn: &Connection) -> LoadedIssuerPolicyV1 {
              LEFT JOIN fork_attribution_issuer_policies AS history
                  ON history.policy_digest = floor.policy_digest",
             [],
-            |row| StoredFloorRowV1::try_from(row),
+            |row| StoredPolicyRowV1::try_from(row),
         )
         .optional()?;
-    row.map(stored_floor_policy).transpose()
+    row.map(stored_policy_row).transpose()
 }
 
-fn stored_floor_policy(
-    (scope, generation, digest, bytes): StoredFloorRowV1,
+/// Decode one stored policy and require it to be exactly the expected scope,
+/// generation, and digest.
+fn stored_policy_row(
+    (scope, generation, digest, bytes): StoredPolicyRowV1,
 ) -> PolicyResultV1<ForkAttributionIssuerPolicyV1> {
     let policy = bytes.as_deref().map(stored_policy).transpose()?;
     policy
@@ -148,18 +151,22 @@ fn stored_floor_policy(
         .ok_or(ForkAttributionIssuerPolicyErrorV1::CorruptPolicy)
 }
 
-/// Read the retained policy at one committed generation, if any.
+/// Read the retained policy at one committed generation, if any, requiring it
+/// to be in the floor's scope, at its row generation, and at its row digest.
 fn read_retained_policy(conn: &Connection, generation: u64) -> LoadedIssuerPolicyV1 {
     // Stored generations are 1..=96, so an unrepresentable one matches nothing.
     let generation = i64::try_from(generation).unwrap_or(-1);
-    let bytes = conn
+    let row = conn
         .query_row(
-            "SELECT fip1_cbor FROM fork_attribution_issuer_policies WHERE generation = ?1",
+            "SELECT floor.scope, history.generation, history.policy_digest, history.fip1_cbor
+             FROM fork_attribution_issuer_policies AS history
+             JOIN fork_attribution_issuer_policy_floor AS floor
+             WHERE history.generation = ?1",
             params![generation],
-            |row| row.get::<_, Vec<u8>>(0),
+            |row| StoredPolicyRowV1::try_from(row),
         )
         .optional()?;
-    bytes.as_deref().map(stored_policy).transpose()
+    row.map(stored_policy_row).transpose()
 }
 
 /// Decode stored policy bytes; any failure is corrupt durable state.
@@ -193,9 +200,27 @@ mod tests {
         Ok(ForkAttributionIssuerV1::new("issuer-a", 1, key)?)
     }
 
+    /// One policy holding the single test issuer in `state`.
+    fn policy(
+        generation: u64,
+        previous: Option<Hash>,
+        state: ForkAttributionIssuerStateV1,
+    ) -> Fallible<ForkAttributionIssuerPolicyV1> {
+        Ok(ForkAttributionIssuerPolicyV1::new(
+            ForkAttributionIssuerPolicyInputV1 {
+                scope: "destination-a".to_owned(),
+                generation,
+                previous_policy_digest: previous,
+                entries: vec![ForkAttributionIssuerPolicyEntryV1 {
+                    issuer: issuer()?,
+                    state,
+                }],
+            },
+        )?)
+    }
+
     /// Generations 1..=3 hold one issuer that is Active, Retired, then Revoked.
     fn lifecycle() -> Fallible<Vec<ForkAttributionIssuerPolicyV1>> {
-        let issuer = issuer()?;
         let states = [
             ForkAttributionIssuerStateV1::Active,
             ForkAttributionIssuerStateV1::Retired,
@@ -204,16 +229,7 @@ mod tests {
         let mut policies: Vec<ForkAttributionIssuerPolicyV1> = Vec::new();
         for (generation, state) in (1..).zip(states) {
             let previous = policies.last().map(ForkAttributionIssuerPolicyV1::digest);
-            let policy = ForkAttributionIssuerPolicyV1::new(ForkAttributionIssuerPolicyInputV1 {
-                scope: "destination-a".to_owned(),
-                generation,
-                previous_policy_digest: previous,
-                entries: vec![ForkAttributionIssuerPolicyEntryV1 {
-                    issuer: issuer.clone(),
-                    state,
-                }],
-            })?;
-            policies.push(policy);
+            policies.push(policy(generation, previous, state)?);
         }
         Ok(policies)
     }
@@ -377,6 +393,65 @@ mod tests {
             policy_generation: 1,
         };
         assert_eq!(admit(&store, &policies[0], committed)?, Err(INDETERMINATE));
+        Ok(())
+    }
+
+    #[test]
+    fn committed_lookups_cross_check_the_retained_row() -> Fallible<()> {
+        let policies = lifecycle()?;
+        let other_digest = "x'0101010101010101010101010101010101010101010101010101010101010101'";
+        for (tamper, generation) in [
+            (
+                "UPDATE fork_attribution_issuer_policies SET generation = 5 WHERE generation = 1"
+                    .to_owned(),
+                5,
+            ),
+            (
+                "UPDATE fork_attribution_issuer_policy_floor SET scope = 'destination-b'"
+                    .to_owned(),
+                1,
+            ),
+            (
+                format!(
+                    "UPDATE fork_attribution_issuer_policies SET policy_digest = {other_digest}
+                     WHERE generation = 1"
+                ),
+                1,
+            ),
+        ] {
+            let store = installed_store(&policies)?;
+            store.conn.execute_batch(&tamper)?;
+            let committed = ForkAttributionIssuerAdmissionBasisV1::CommittedImport {
+                policy_generation: generation,
+            };
+            assert_eq!(admit(&store, &policies[0], committed)?, Err(CORRUPT));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_ninety_seventh_record_is_refused() -> Fallible<()> {
+        // Single-step transitions reach at most 95 records, so seed a floor
+        // at the 96-record ceiling directly.
+        let active = ForkAttributionIssuerStateV1::Active;
+        let ceiling = policy(96, Some(Hash::from_bytes([2; 32])), active)?;
+        let next = policy(97, Some(ceiling.digest()), active)?;
+        let mut store = SqliteStore::open_in_memory()?;
+        let digest = ceiling.digest();
+        store.conn.execute(
+            "INSERT INTO fork_attribution_issuer_policies (policy_digest, generation, fip1_cbor)
+             VALUES (?1, 96, ?2)",
+            params![digest.as_bytes().as_slice(), ceiling.to_canonical_cbor()],
+        )?;
+        store.conn.execute(
+            "INSERT INTO fork_attribution_issuer_policy_floor
+                 (singleton, scope, generation, policy_digest)
+             VALUES (1, 'destination-a', 96, ?1)",
+            params![digest.as_bytes().as_slice()],
+        )?;
+        let exhausted = Err(ForkAttributionIssuerPolicyErrorV1::HistoryExhausted);
+        assert_eq!(install(&mut store, &next), exhausted);
+        assert_eq!(history_rows(&store)?, 1);
         Ok(())
     }
 }

@@ -11,6 +11,7 @@ use pos_core::{
     ForkAttributionIssuerPolicyV1, ForkAttributionIssuerStateV1 as State, ForkAttributionIssuerV1,
     Hash, PublicKey,
 };
+use pos_crypto::fork_attribution_authority::ForkAttributionAuthoritySignatureErrorV1;
 use pos_store::{
     memory::MemoryStore, sqlite::SqliteStore, AuthenticatedOperatorPolicyPinV1,
     ForkAttributionIssuerAdmissionBasisV1 as Basis, ForkAttributionIssuerAdmissionQueryV1,
@@ -23,6 +24,7 @@ use pos_store::{
 type Fallible<T> = Result<T, Box<dyn Error>>;
 type Policy = ForkAttributionIssuerPolicyV1;
 type Issuer = ForkAttributionIssuerV1;
+type SignatureError = ForkAttributionAuthoritySignatureErrorV1;
 
 const SCOPE: &str = "destination-a";
 const ACTIVE: State = State::Active;
@@ -314,12 +316,18 @@ fn rotation_must_retire_the_older_epoch_in_the_same_policy() -> Fallible<()> {
 }
 
 #[test]
-fn emergency_revocation_may_leave_no_active_issuer() -> Fallible<()> {
+fn only_an_emergency_revocation_may_leave_no_active_issuer() -> Fallible<()> {
     let a = issuer("issuer-a", 1, 1)?;
-    let first = genesis(&[(&a, ACTIVE)])?;
-    let second = successor(&first, &[(&a, REVOKED)])?;
+    let b = issuer("issuer-b", 1, 2)?;
+    let first = genesis(&[(&a, ACTIVE), (&b, ACTIVE)])?;
+    let partly_retired = successor(&first, &[(&a, ACTIVE), (&b, RETIRED)])?;
+    let all_retired = successor(&partly_retired, &[(&a, RETIRED), (&b, RETIRED)])?;
+    let second = successor(&partly_retired, &[(&a, REVOKED), (&b, RETIRED)])?;
     on_both_adapters(|store| {
         assert_eq!(install(store, &first), Ok(installed(&first)));
+        let partly = install(store, &partly_retired);
+        assert_eq!(partly, Ok(installed(&partly_retired)));
+        refuse(store, &all_retired, PolicyError::NoActiveIssuer)?;
         assert_eq!(install(store, &second), Ok(installed(&second)));
         let revoked = Err(PolicyError::IssuerRevoked);
         assert_eq!(decide(store, &a, &second, Basis::AbsentImport), revoked);
@@ -330,8 +338,9 @@ fn emergency_revocation_may_leave_no_active_issuer() -> Fallible<()> {
     })
 }
 
-/// The 96 single-step records reachable from 32 identities: genesis, 31
-/// additions, 32 retirements, then 32 revocations.
+/// The 95 single-step records reachable from 32 identities: genesis, 31
+/// additions, 31 retirements, 31 revocations, and the emergency revocation
+/// of the last `Active` identity, which can never be retired first.
 fn lifetime_history() -> Fallible<Vec<Policy>> {
     let issuers = (0..32_u8)
         .map(|index| issuer(&format!("issuer-{index:02}"), 1, index + 1))
@@ -340,7 +349,7 @@ fn lifetime_history() -> Fallible<Vec<Policy>> {
     let mut history = vec![genesis(&[(&issuers[0], ACTIVE)])?];
     let steps = (1..32)
         .map(|_| None)
-        .chain((0..32).map(|index| Some((index, RETIRED))))
+        .chain((0..31).map(|index| Some((index, RETIRED))))
         .chain((0..32).map(|index| Some((index, REVOKED))));
     for step in steps {
         match step {
@@ -368,17 +377,17 @@ fn same_entries(policy: &Policy) -> Vec<(&Issuer, State)> {
 }
 
 #[test]
-fn ninety_six_records_install_and_the_ninety_seventh_fails_closed() -> Fallible<()> {
+fn every_lifetime_transition_installs_within_the_history_ceiling() -> Fallible<()> {
     let history = lifetime_history()?;
     let last = history.last().ok_or("empty history")?;
     let ceiling = MAX_FORK_ATTRIBUTION_ISSUER_POLICY_HISTORY_V1;
-    assert_eq!(last.input().generation, ceiling);
+    assert_eq!(last.input().generation, ceiling - 1);
     let exhausted = successor(last, &same_entries(last))?;
     on_both_adapters(|store| {
         for policy in &history {
             assert_eq!(install(store, policy), Ok(installed(policy)));
         }
-        refuse(store, &exhausted, PolicyError::HistoryExhausted)?;
+        refuse(store, &exhausted, PolicyError::NoOpSuccessor)?;
         assert_eq!(store.issuer_policy_floor(), Ok(Some(floor(last))));
         Ok(())
     })
@@ -469,6 +478,14 @@ fn committed_imports_are_decided_by_their_recorded_policy_only() -> Fallible<()>
         }
         Ok(())
     })
+}
+
+#[test]
+fn signature_failures_stay_distinct_from_key_failures() {
+    let key = PolicyError::from(SignatureError::InvalidIssuerKey);
+    assert_eq!(key, PolicyError::InvalidIssuerKey);
+    let signature = PolicyError::from(SignatureError::InvalidSignature);
+    assert_eq!(signature, PolicyError::InvalidSignature);
 }
 
 #[test]

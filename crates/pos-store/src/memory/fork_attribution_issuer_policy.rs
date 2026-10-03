@@ -41,13 +41,19 @@ impl ForkAttributionIssuerPolicyInstallationPortV1 for MemoryStore {
     ) -> Result<ForkAttributionIssuerAdmissionV1, ForkAttributionIssuerPolicyErrorV1> {
         let history = &self.fork_attribution_issuer_policies;
         admit_fork_attribution_issuer(query, |basis| {
+            let floor = history.last();
+            let scope = floor.map(|floor| floor.input().scope.as_str());
             let policy = match basis {
                 ForkAttributionIssuerAdmissionBasisV1::CommittedImport { policy_generation } => {
-                    history
-                        .iter()
-                        .find(|policy| policy.input().generation == policy_generation)
+                    // The retained policy must sit at the requested generation
+                    // in the floor's scope. Entries are stored only after the
+                    // install checks, so their digest is their content digest.
+                    history.iter().find(|policy| {
+                        policy.input().generation == policy_generation
+                            && scope == Some(policy.input().scope.as_str())
+                    })
                 }
-                ForkAttributionIssuerAdmissionBasisV1::AbsentImport => history.last(),
+                ForkAttributionIssuerAdmissionBasisV1::AbsentImport => floor,
             };
             Ok(policy.cloned())
         })
