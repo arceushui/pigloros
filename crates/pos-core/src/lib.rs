@@ -318,6 +318,8 @@ pub use consent::{
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
+#[cfg(any(test, feature = "test-support"))]
+pub use erasure::NonInvokingErasureGateForTest;
 pub use erasure::{
     acknowledgement_inventory_reference, destruction_command_reference,
     erasure_evidence_set_reference, extract_adapter_admission_registration_v1,

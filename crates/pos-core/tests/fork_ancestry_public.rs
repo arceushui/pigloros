@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use pos_core::{
     authorize_fork_scopes, fork_ancestry, validate_fork_ancestry, with_fork_ancestry_fence,
     CoreError, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
-    ErasureLifecycleV1, ErasureProtectedOperationV1, Event, EventDraft, EventStore, Seq, SeqRange,
-    Timeline, TimelineId, TimelineMeta,
+    ErasureLifecycleV1, ErasureProtectedOperationV1, Event, EventDraft, EventStore,
+    NonInvokingErasureGateForTest, Seq, SeqRange, Timeline, TimelineId, TimelineMeta,
 };
 
 const READ: ErasureProtectedOperationV1 = ErasureProtectedOperationV1::Read;
@@ -217,6 +217,24 @@ fn the_ancestry_fence_runs_the_effect_only_when_every_scope_permits() {
         Err(ErasureContainmentErrorV1::AccessFrozen)
     );
     assert_eq!(runs, 1);
+}
+
+#[test]
+fn a_gate_that_never_runs_the_effect_fails_the_ancestry_fence_closed() {
+    let gate = NonInvokingErasureGateForTest;
+    let timeline = TimelineId::new();
+    let chain = [meta(timeline, None)];
+    let mut runs = 0;
+    assert_eq!(gate.authorize(timeline, READ), Ok(()));
+    assert_eq!(
+        gate.inventory_generation(),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    assert_eq!(
+        with_fork_ancestry_fence(&gate, timeline, &chain, READ, &mut || runs += 1),
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    );
+    assert_eq!(runs, 0);
 }
 
 #[test]

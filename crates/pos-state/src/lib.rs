@@ -2073,6 +2073,32 @@ mod tests {
     }
 
     #[test]
+    fn adoption_fails_closed_when_the_gate_never_runs_the_bind() {
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let ancestry = [
+            TimelineMeta {
+                id: child,
+                ..TimelineMeta::forked_from(parent, Seq::ZERO, "child")
+            },
+            TimelineMeta {
+                id: parent,
+                ..TimelineMeta::root("parent")
+            },
+        ];
+        let mut registry = ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(pos_core::NonInvokingErasureGateForTest));
+        registry.register("events", Box::new(EntityStateProjection));
+        registry.apply_event(parent, &make_event(EntityId::new()));
+        assert_eq!(
+            registry.adopt_committed_fork(parent, child, &ancestry),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(registry.source_ancestry, None);
+        assert_eq!(registry.source_timeline, Some(parent));
+    }
+
+    #[test]
     fn committed_fork_rejects_a_different_projection_parent() {
         let source = TimelineId::new();
         let unrelated = TimelineId::new();

@@ -1469,6 +1469,42 @@ impl ErasureContainmentGateV1 {
 
 impl erasure_gate_sealed::Sealed for ErasureContainmentGateV1 {}
 
+/// A containment double that permits every decision but never runs a fenced
+/// effect.
+///
+/// It is available only to test targets, to prove that a caller fails closed
+/// when a gate returns without invoking its protected effect.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NonInvokingErasureGateForTest;
+
+#[cfg(any(test, feature = "test-support"))]
+impl erasure_gate_sealed::Sealed for NonInvokingErasureGateForTest {}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ErasureGate for NonInvokingErasureGateForTest {
+    fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
+        Err(ErasureContainmentErrorV1::RecoveryUnavailable)
+    }
+
+    fn authorize(
+        &self,
+        _timeline: TimelineId,
+        _operation: ErasureProtectedOperationV1,
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        Ok(())
+    }
+
+    fn with_fence(
+        &self,
+        _timeline: TimelineId,
+        _operation: ErasureProtectedOperationV1,
+        _effect: &mut dyn FnMut(),
+    ) -> Result<(), ErasureContainmentErrorV1> {
+        Ok(())
+    }
+}
+
 impl ErasureGate for ErasureContainmentGateV1 {
     fn inventory_generation(&self) -> Result<ErasureReferenceV1, ErasureContainmentErrorV1> {
         Self::inventory_generation(self)
