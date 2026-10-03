@@ -201,7 +201,7 @@ impl<T> TestSome<T> for Option<T> {
     }
 }
 
-fn is_frozen(result: &PassResult) -> bool {
+const fn is_frozen(result: &PassResult) -> bool {
     matches!(
         result,
         Err(RuntimeError::ErasureContainment(

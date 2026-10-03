@@ -87,7 +87,7 @@ fn bounds() -> EventReadBounds {
     EventReadBounds::new(1_024, 64, 8, 64)
 }
 
-fn is_frozen<T>(result: Result<T, CoreError>) -> bool {
+const fn is_frozen<T>(result: &Result<T, CoreError>) -> bool {
     matches!(result, Err(CoreError::ErasureAccessFrozen))
 }
 
@@ -95,19 +95,19 @@ fn is_frozen<T>(result: Result<T, CoreError>) -> bool {
 fn assert_stitched_reads_frozen(topology: &Topology, timeline: TimelineId, label: &str) {
     let store = topology.store.as_ref();
     assert!(
-        is_frozen(store.read(timeline, SeqRange::all())),
+        is_frozen(&store.read(timeline, SeqRange::all())),
         "{label}: read"
     );
     assert!(
-        is_frozen(store.read_bounded(timeline, SeqRange::all(), bounds())),
+        is_frozen(&store.read_bounded(timeline, SeqRange::all(), bounds())),
         "{label}: read_bounded"
     );
     assert!(
-        is_frozen(store.read_event_by_id(timeline, topology.inherited_event)),
+        is_frozen(&store.read_event_by_id(timeline, topology.inherited_event)),
         "{label}: read_event_by_id"
     );
     assert!(
-        is_frozen(store.chain_hash_at(timeline, Seq::from_u64(1))),
+        is_frozen(&store.chain_hash_at(timeline, Seq::from_u64(1))),
         "{label}: chain_hash_at"
     );
 }
