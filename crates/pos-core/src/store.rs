@@ -341,6 +341,115 @@ pub struct TimelineExport {
 /// Export/import helpers live as free functions alongside the trait so callers can
 /// hold `Box<dyn EventStore>` and swap backends without changing call sites.
 pub trait EventStore: Send {
+    /// Atomically persist an owner-verified immutable artifact-registration closure.
+    ///
+    /// This seam lets callers returned by the standard store factory use the
+    /// same backend for Timeline data and artifact catalogs. Stores that do
+    /// not retain artifact catalogs fail closed by default.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error when the backend does not support
+    /// this catalog or cannot commit the complete closure atomically.
+    fn commit_artifact_registration_batch(
+        &mut self,
+        _batch: crate::PreparedArtifactRegistrationBatchV1,
+    ) -> Result<
+        crate::ArtifactRegistrationCommitOutcomeV1,
+        crate::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+    }
+
+    /// Read one exact owner-specific artifact-registration row.
+    ///
+    /// # Errors
+    /// Returns a closed persistence error when a retained row is corrupt or
+    /// the backend cannot determine its current value.
+    fn read_artifact_registration(
+        &self,
+        _owner_id: &crate::OwnerIdV1,
+        _registration_address: Hash,
+    ) -> Result<
+        Option<crate::ArtifactRegistrationCatalogRowV1>,
+        crate::ArtifactRegistrationPersistenceErrorV1,
+    > {
+        Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+    }
+
+    /// Open or resume an exact local adapter-recording session in this store.
+    ///
+    /// # Errors
+    /// Returns a storage error when this adapter does not retain recordings.
+    fn adapter_recording_open_session(
+        &mut self,
+        _session: crate::AdapterRecordingSessionV1,
+    ) -> Result<(), crate::AdapterRecordingStoreErrorV1> {
+        Err(crate::AdapterRecordingStoreErrorV1::StorageFailure)
+    }
+
+    /// Reserve one adapter invocation before any provider effect.
+    ///
+    /// # Errors
+    /// Returns a storage error when this adapter does not retain recordings.
+    fn adapter_recording_reserve_call(
+        &mut self,
+        _owner_reference: Hash,
+        _run_operation_id: Hash,
+        _reservation: crate::AdapterCallReservationV1,
+    ) -> Result<crate::AdapterCallReservationOutcomeV1, crate::AdapterRecordingStoreErrorV1> {
+        Err(crate::AdapterRecordingStoreErrorV1::StorageFailure)
+    }
+
+    /// Persist one exact adapter response before returning it to the Plugin.
+    ///
+    /// # Errors
+    /// Returns a storage error when this adapter does not retain recordings.
+    fn adapter_recording_complete_call(
+        &mut self,
+        _owner_reference: Hash,
+        _run_operation_id: Hash,
+        _global_call_index: u64,
+        _output_bytes: Vec<u8>,
+    ) -> Result<(), crate::AdapterRecordingStoreErrorV1> {
+        Err(crate::AdapterRecordingStoreErrorV1::StorageFailure)
+    }
+
+    /// Close a complete adapter recording and return exact MAT1 bytes.
+    ///
+    /// # Errors
+    /// Returns a storage error when this adapter does not retain recordings.
+    fn adapter_recording_close_session(
+        &mut self,
+        _owner_reference: Hash,
+        _run_operation_id: Hash,
+    ) -> Result<Vec<u8>, crate::AdapterRecordingStoreErrorV1> {
+        Err(crate::AdapterRecordingStoreErrorV1::StorageFailure)
+    }
+
+    /// Read exact MAT1 bytes from a closed adapter recording.
+    ///
+    /// # Errors
+    /// Returns a storage error when this adapter does not retain recordings.
+    fn adapter_recording_read_closed_session(
+        &self,
+        _owner_reference: Hash,
+        _run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, crate::AdapterRecordingStoreErrorV1> {
+        Err(crate::AdapterRecordingStoreErrorV1::StorageFailure)
+    }
+
+    /// Abort an open adapter recording.
+    ///
+    /// # Errors
+    /// Returns a storage error when this adapter does not retain recordings.
+    fn adapter_recording_abort_session(
+        &mut self,
+        _owner_reference: Hash,
+        _run_operation_id: Hash,
+    ) -> Result<(), crate::AdapterRecordingStoreErrorV1> {
+        Err(crate::AdapterRecordingStoreErrorV1::StorageFailure)
+    }
+
     /// Bind the host-owned erasure containment gate used by protected store
     /// operations. Adapters retain the gate for their lifetime and must check
     /// it inside the same logical boundary as the protected effect.
@@ -1116,6 +1225,69 @@ pub const fn erasure_containment_error(error: ErasureContainmentErrorV1) -> Core
     }
 }
 
+impl crate::AdapterRecordingStoreV1 for dyn EventStore + '_ {
+    fn open_adapter_recording_session(
+        &mut self,
+        session: crate::AdapterRecordingSessionV1,
+    ) -> Result<(), crate::AdapterRecordingStoreErrorV1> {
+        EventStore::adapter_recording_open_session(self, session)
+    }
+
+    fn reserve_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        reservation: crate::AdapterCallReservationV1,
+    ) -> Result<crate::AdapterCallReservationOutcomeV1, crate::AdapterRecordingStoreErrorV1> {
+        EventStore::adapter_recording_reserve_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            reservation,
+        )
+    }
+
+    fn complete_adapter_call(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+        global_call_index: u64,
+        output_bytes: Vec<u8>,
+    ) -> Result<(), crate::AdapterRecordingStoreErrorV1> {
+        EventStore::adapter_recording_complete_call(
+            self,
+            owner_reference,
+            run_operation_id,
+            global_call_index,
+            output_bytes,
+        )
+    }
+
+    fn close_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Vec<u8>, crate::AdapterRecordingStoreErrorV1> {
+        EventStore::adapter_recording_close_session(self, owner_reference, run_operation_id)
+    }
+
+    fn read_closed_adapter_recording_session(
+        &self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<Option<Vec<u8>>, crate::AdapterRecordingStoreErrorV1> {
+        EventStore::adapter_recording_read_closed_session(self, owner_reference, run_operation_id)
+    }
+
+    fn abort_adapter_recording_session(
+        &mut self,
+        owner_reference: Hash,
+        run_operation_id: Hash,
+    ) -> Result<(), crate::AdapterRecordingStoreErrorV1> {
+        EventStore::adapter_recording_abort_session(self, owner_reference, run_operation_id)
+    }
+}
+
 fn persist_registry_after_timeline_creation<S: EventStore + ?Sized>(
     store: &mut S,
     timeline: Timeline,
@@ -1841,6 +2013,209 @@ mod tests {
         }
     }
 
+    #[test]
+    fn event_store_recording_bridge_preserves_fail_closed_defaults() {
+        let owner_reference = Hash::from_bytes([1; 32]);
+        let run_operation_id = Hash::from_bytes([2; 32]);
+        let world_handle = crate::WorldReplayHandleV1::new(crate::WorldReplayHandleInputV1 {
+            owner_reference,
+            timeline_id: TimelineId::new(),
+            cut_id: 1,
+            commit_receipt_digest: Hash::from_bytes([3; 32]),
+            recording_receipt_digest: Hash::from_bytes([4; 32]),
+            logical_head: 0,
+            stitched_head_hash: Hash::from_bytes([5; 32]),
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let admission = crate::AdapterAdmissionV1::new(crate::AdapterAdmissionInputV1 {
+            owner_reference,
+            configuration_generation: 1,
+            scope_digest: Hash::from_bytes([6; 32]),
+            entries: Vec::new(),
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let schema_digest = crate::public_adapter_schema_digest_v1();
+        let session = crate::AdapterRecordingSessionV1::new(
+            owner_reference,
+            world_handle,
+            run_operation_id,
+            admission,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let invocation = crate::AdapterInvocationV1::new(crate::AdapterInvocationInputV1 {
+            adapter_id: "adapter".to_owned(),
+            provider_id: "provider".to_owned(),
+            operation_id: "read".to_owned(),
+            protocol_version: 1,
+            request_schema_digest: schema_digest,
+            response_schema_digest: schema_digest,
+            configuration_digest: Hash::from_bytes([9; 32]),
+            global_call_index: 0,
+            exact_request_payload: Vec::new(),
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let reservation = crate::AdapterCallReservationV1::new(
+            crate::PluginId::new(),
+            0,
+            invocation,
+            Hash::from_bytes([10; 32]),
+            0,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let concrete_store = TrivialStore::new();
+        let mut store: Box<dyn EventStore> = Box::new(concrete_store);
+        let unavailable = crate::AdapterRecordingStoreErrorV1::StorageFailure;
+
+        assert_eq!(
+            crate::AdapterRecordingStoreV1::open_adapter_recording_session(&mut *store, session,),
+            Err(unavailable)
+        );
+        assert_eq!(
+            crate::AdapterRecordingStoreV1::reserve_adapter_call(
+                &mut *store,
+                owner_reference,
+                run_operation_id,
+                reservation,
+            ),
+            Err(unavailable)
+        );
+        assert_eq!(
+            crate::AdapterRecordingStoreV1::complete_adapter_call(
+                &mut *store,
+                owner_reference,
+                run_operation_id,
+                0,
+                Vec::new(),
+            ),
+            Err(unavailable)
+        );
+        assert_eq!(
+            crate::AdapterRecordingStoreV1::close_adapter_recording_session(
+                &mut *store,
+                owner_reference,
+                run_operation_id,
+            ),
+            Err(unavailable)
+        );
+        assert_eq!(
+            crate::AdapterRecordingStoreV1::read_closed_adapter_recording_session(
+                &*store,
+                owner_reference,
+                run_operation_id,
+            ),
+            Err(unavailable)
+        );
+        assert_eq!(
+            crate::AdapterRecordingStoreV1::abort_adapter_recording_session(
+                &mut *store,
+                owner_reference,
+                run_operation_id,
+            ),
+            Err(unavailable)
+        );
+    }
+
+    #[test]
+    fn stores_without_recording_support_fail_closed_for_every_recording_operation() {
+        let owner_reference = Hash::from_bytes([1; 32]);
+        let run_operation_id = Hash::from_bytes([2; 32]);
+        let world_handle = crate::WorldReplayHandleV1::new(crate::WorldReplayHandleInputV1 {
+            owner_reference,
+            timeline_id: TimelineId::new(),
+            cut_id: 1,
+            commit_receipt_digest: Hash::from_bytes([3; 32]),
+            recording_receipt_digest: Hash::from_bytes([4; 32]),
+            logical_head: 0,
+            stitched_head_hash: Hash::from_bytes([5; 32]),
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let admission = crate::AdapterAdmissionV1::new(crate::AdapterAdmissionInputV1 {
+            owner_reference,
+            configuration_generation: 1,
+            scope_digest: Hash::from_bytes([6; 32]),
+            entries: Vec::new(),
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let schema_digest = crate::public_adapter_schema_digest_v1();
+        let session = crate::AdapterRecordingSessionV1::new(
+            owner_reference,
+            world_handle,
+            run_operation_id,
+            admission,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let invocation = crate::AdapterInvocationV1::new(crate::AdapterInvocationInputV1 {
+            adapter_id: "adapter".to_owned(),
+            provider_id: "provider".to_owned(),
+            operation_id: "read".to_owned(),
+            protocol_version: 1,
+            request_schema_digest: schema_digest,
+            response_schema_digest: schema_digest,
+            configuration_digest: Hash::from_bytes([9; 32]),
+            global_call_index: 0,
+            exact_request_payload: Vec::new(),
+        })
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let reservation = crate::AdapterCallReservationV1::new(
+            crate::PluginId::new(),
+            0,
+            invocation,
+            Hash::from_bytes([10; 32]),
+            0,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+        let mut store = TrivialStore::new();
+        let unavailable = crate::AdapterRecordingStoreErrorV1::StorageFailure;
+
+        assert_eq!(
+            EventStore::adapter_recording_open_session(&mut store, session),
+            Err(unavailable)
+        );
+        assert_eq!(
+            EventStore::adapter_recording_reserve_call(
+                &mut store,
+                owner_reference,
+                run_operation_id,
+                reservation,
+            ),
+            Err(unavailable)
+        );
+        assert_eq!(
+            EventStore::adapter_recording_complete_call(
+                &mut store,
+                owner_reference,
+                run_operation_id,
+                0,
+                Vec::new(),
+            ),
+            Err(unavailable)
+        );
+        assert_eq!(
+            EventStore::adapter_recording_close_session(
+                &mut store,
+                owner_reference,
+                run_operation_id,
+            ),
+            Err(unavailable)
+        );
+        assert_eq!(
+            EventStore::adapter_recording_read_closed_session(
+                &store,
+                owner_reference,
+                run_operation_id,
+            ),
+            Err(unavailable)
+        );
+        assert_eq!(
+            EventStore::adapter_recording_abort_session(
+                &mut store,
+                owner_reference,
+                run_operation_id,
+            ),
+            Err(unavailable)
+        );
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum InitializationFailure {
         None,
@@ -2285,6 +2660,23 @@ mod tests {
             .import_committed(TimelineMeta::root("y"), &[])
             .test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
+
+        let mut unsupported_catalog_store = TrivialStore::new();
+        assert_eq!(
+            EventStore::commit_artifact_registration_batch(
+                &mut unsupported_catalog_store,
+                crate::PreparedArtifactRegistrationBatchV1::empty_for_test(),
+            ),
+            Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+        );
+        assert_eq!(
+            EventStore::read_artifact_registration(
+                &unsupported_catalog_store,
+                &crate::OwnerIdV1::from_static("unsupported-event-store-test"),
+                Hash::zero(),
+            ),
+            Err(crate::ArtifactRegistrationPersistenceErrorV1::StorageFailure)
+        );
 
         Ok(())
     }

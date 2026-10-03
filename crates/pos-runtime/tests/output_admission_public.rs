@@ -7,8 +7,8 @@ use pos_core::{
 };
 use pos_runtime::{
     installed_plugin_role_v1, validate_output_policy_artifacts_v1, DomainImplementationKindV1,
-    Driver, InstalledOutputPolicySourceV1, LocalScheduledAdmissionHostV1, ObservationView,
-    OutputAdmissionErrorV1, PluginAvailabilityV1, PluginIsolationV1, PluginPinV1,
+    Driver, LocalScheduledAdmissionHostV1, ObservationView, OutputAdmissionErrorV1,
+    OutputPolicySourceV1, PluginAvailabilityV1, PluginIsolationV1, PluginPinV1,
     PluginRegistrationV1, PluginRegistry, RuntimeError, StepOutput, TickScheduler,
 };
 use std::error::Error;
@@ -28,9 +28,9 @@ struct FixtureBinding {
 
 fn verified_binding<P: Plugin>(plugin: &P) -> Result<FixtureBinding, Box<dyn Error>> {
     let configuration_details = b"fixture-configuration";
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    let binding = pos_runtime::OutputPolicyBindingV1::from_source(
         plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Generated,
+        pos_runtime::OutputPolicySourceV1::Generated,
         configuration_details,
         "deterministic-local-v1",
     )?;
@@ -367,7 +367,7 @@ fn verified_output_policy_closure_is_retrievable_and_fail_closed() -> TestResult
     assert!(!source.executable_budget_bytes.is_empty());
     assert!(!source.implementation_artifact.is_empty());
     assert!(source.configuration_artifact.starts_with(b"CFG1"));
-    assert!(!source.profile_artifact.is_empty());
+    assert!(source.profile_artifact.is_empty());
     assert!(!source.retention_artifact.is_empty());
     assert_artifact_shape_rejections(&source);
     assert_artifact_size_rejections(&source);
@@ -441,7 +441,7 @@ fn verified_binding_rejects_a_foreign_plugin_instance() -> TestResult {
 }
 
 #[test]
-fn unknown_or_changed_execution_profile_fails_before_registry_mutation() -> TestResult {
+fn local_execution_profile_absence_does_not_create_installed_authority() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -449,30 +449,16 @@ fn unknown_or_changed_execution_profile_fails_before_registry_mutation() -> Test
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
 
-    // An unknown profile resolves no EPF1 bytes, so no binding can exist.
-    assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            b"fixture-configuration",
-            "unknown-profile-v1",
-        ),
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    ));
-
-    // A binding resolved under another draft profile carries changed EPF1
-    // bytes and still cannot enter installed registration.
+    // Generated local admission has no EPF1 profile member.
     let local = verified_binding(&plugin)?;
-    let changed = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    let changed = pos_runtime::OutputPolicyBindingV1::from_source(
         &plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         b"fixture-configuration",
         "deterministic-air-gapped-v1",
     )?;
-    assert_ne!(
-        changed.execution_profile_artifact(),
-        local.profile_artifact.as_slice()
-    );
+    assert!(changed.execution_profile_artifact().is_empty());
+    assert!(local.profile_artifact.is_empty());
     let pin = PluginPinV1::try_new(
         DomainImplementationKindV1::Plugin,
         PluginIsolationV1::OperatorTrustedNative,
@@ -791,9 +777,9 @@ fn public_binding_rejects_foreign_capability_name() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::RuleAgent,
             &[],
             "deterministic-local-v1",
         ),
@@ -807,9 +793,9 @@ fn public_binding_rejects_name_only_installed_source_claims() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::RuleAgent,
             &[],
             "deterministic-local-v1",
         ),
@@ -994,9 +980,9 @@ fn explicit_registration_rejects_unowned_installed_source() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::RuleAgent,
+            OutputPolicySourceV1::RuleAgent,
             b"fixture-configuration",
             "deterministic-local-v1",
         ),
@@ -1010,9 +996,9 @@ fn explicit_registration_rejects_name_only_source_even_with_configuration() {
         id: PluginId::new(),
     };
     assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            InstalledOutputPolicySourceV1::Agent,
+            OutputPolicySourceV1::Agent,
             b"fixture-configuration",
             "deterministic-local-v1",
         ),
@@ -1286,19 +1272,18 @@ fn verified_step_rejects_an_undeclared_event_type_before_append() -> TestResult 
 }
 
 #[test]
-fn verified_binding_rejects_an_undeclared_execution_profile() {
+fn generated_binding_keeps_an_undeclared_profile_metadata_only() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
-    assert!(matches!(
-        pos_runtime::OutputPolicyBindingV1::from_installed_source(
-            &plugin,
-            InstalledOutputPolicySourceV1::Generated,
-            b"fixture-configuration",
-            "undeclared-profile-v1",
-        ),
-        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EPF1" })
-    ));
+    let binding = pos_runtime::OutputPolicyBindingV1::from_source(
+        &plugin,
+        OutputPolicySourceV1::Generated,
+        b"fixture-configuration",
+        "undeclared-profile-v1",
+    )?;
+    assert!(binding.execution_profile_artifact().is_empty());
+    Ok(())
 }
 
 struct UpgradingPlugin {
@@ -1338,9 +1323,9 @@ fn verified_registration_rejects_a_policy_recorded_for_another_plugin_identity()
         id: PluginId::new(),
         upgraded: AtomicBool::new(false),
     };
-    let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    let binding = pos_runtime::OutputPolicyBindingV1::from_source(
         &plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         b"fixture-configuration",
         "deterministic-local-v1",
     )?;

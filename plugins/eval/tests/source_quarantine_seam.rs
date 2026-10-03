@@ -25,8 +25,8 @@ use pos_plugin_eval::{
 };
 use pos_plugin_persona::{draft_prediction_source, PredictionOutcomeV1};
 use pos_runtime::{
-    Driver, InstalledOutputPolicySourceV1, LocalScheduledAdmissionHostV1, ObservationView,
-    OutputPolicyBindingV1, PluginRegistry, RuntimeError, ScheduledAdmissionStoreV1, StepOutput,
+    Driver, LocalScheduledAdmissionHostV1, ObservationView, OutputPolicyBindingV1,
+    OutputPolicySourceV1, PluginRegistry, RuntimeError, ScheduledAdmissionStoreV1, StepOutput,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
@@ -106,9 +106,9 @@ fn registry(
         .with_consent_authority(authority.clone())
         .with_erasure_gate(gate);
     let eval = EvalPlugin::new();
-    let binding = OutputPolicyBindingV1::from_installed_source(
+    let binding = OutputPolicyBindingV1::from_source(
         &eval,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &config.configuration_details(),
         "deterministic-local-v1",
     )

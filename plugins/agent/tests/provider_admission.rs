@@ -21,8 +21,8 @@ use pos_plugin_agent::{
     EVENT_TYPE_ACTION,
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, schema::EventTypeSchema, InstalledOutputPolicySourceV1,
-    OutputPolicyBindingV1, PluginRegistry, RuntimeError, ScheduledPassAdmissionV1,
+    recorder::RECORDER_EVENT_TYPE, schema::EventTypeSchema, OutputPolicyBindingV1,
+    OutputPolicySourceV1, PluginRegistry, RuntimeError, ScheduledPassAdmissionV1,
     TimelineHistorySegment,
 };
 use pos_store::memory::MemoryStore;
@@ -232,9 +232,9 @@ fn provider_proposal_commits_only_through_host_admission() {
         FixtureAgentDecisionProvider::new(vec![accepted_proposal(), accepted_proposal()]);
     let calls = provider.call_count_handle();
     let mut registry = PluginRegistry::new().with_erasure_gate(gate);
-    let binding = ok(OutputPolicyBindingV1::from_installed_source(
+    let binding = ok(OutputPolicyBindingV1::from_source(
         &plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &[],
         "deterministic-local-v1",
     ));

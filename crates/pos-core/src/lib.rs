@@ -10,6 +10,9 @@
 //! those protected domain concepts.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+pub mod adapter_admission;
+pub mod adapter_recording;
+pub mod adapter_transcript;
 pub mod authority;
 #[cfg(test)]
 extern crate self as pos_core;
@@ -45,6 +48,7 @@ pub mod pipeline_admission;
 pub mod pipeline_evidence;
 pub mod plugin;
 pub mod recipient_key;
+pub mod repro_manifest_root;
 pub mod retention;
 pub mod state;
 pub mod store;
@@ -55,10 +59,172 @@ pub mod world_closure_binding;
 pub mod world_consumer_set;
 pub mod world_dependency_directory;
 pub mod world_history;
+pub mod world_key_evidence;
 pub mod world_recording_receipt;
 pub mod world_replay;
+pub mod world_replay_handle;
 pub mod world_transform;
 
+/// Write the preferred definite-length CBOR header for one major type.
+pub(crate) fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
+    let prefix = major << 5;
+    let bytes = value.to_be_bytes();
+    match value {
+        0..=23 => out.push(prefix | bytes[7]),
+        24..=0xff => out.extend_from_slice(&[prefix | 0x18, bytes[7]]),
+        0x100..=0xffff => {
+            out.push(prefix | 0x19);
+            out.extend_from_slice(&bytes[6..]);
+        }
+        0x1_0000..=0xffff_ffff => {
+            out.push(prefix | 0x1a);
+            out.extend_from_slice(&bytes[4..]);
+        }
+        _ => {
+            out.push(prefix | 0x1b);
+            out.extend_from_slice(&bytes);
+        }
+    }
+}
+
+/// Write one preferred definite-length CBOR byte or text string.
+pub(crate) fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8], major: u8) {
+    encode_head(out, major, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+/// Write one preferred definite-length CBOR hash byte string.
+pub(crate) fn encode_hash(out: &mut Vec<u8>, hash: Hash) {
+    encode_bytes(out, hash.as_bytes(), 2);
+}
+
+/// Low-level structural read failure for bounded definite-length CBOR records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CborReadError {
+    /// The requested token, byte range, or CBOR major type is invalid.
+    InvalidEncoding,
+}
+
+/// Shared byte cursor for the bounded structural CBOR codecs.
+///
+/// Protocol modules retain their own field bounds, semantic validation, and
+/// public errors. This cursor owns only byte movement and basic CBOR heads.
+pub(crate) struct CborCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> CborCursor<'a> {
+    pub(crate) const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    pub(crate) const fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+
+    pub(crate) fn consume_if(&mut self, byte: u8) -> bool {
+        if self.bytes.get(self.offset) == Some(&byte) {
+            self.offset += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take an exact byte range and advance the cursor.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when the range exceeds the remaining input.
+    pub(crate) fn take(&mut self, length: usize) -> Result<&'a [u8], CborReadError> {
+        self.bytes
+            .get(self.offset..)
+            .and_then(|remaining| remaining.get(..length))
+            .inspect(|_| self.offset += length)
+            .ok_or(CborReadError::InvalidEncoding)
+    }
+
+    /// Read one byte and advance the cursor.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when no byte remains.
+    pub(crate) fn byte(&mut self) -> Result<u8, CborReadError> {
+        self.take(1).map(|bytes| bytes[0])
+    }
+
+    /// Match and consume an exact byte prefix.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when the bytes do not match or are truncated.
+    pub(crate) fn fixed(&mut self, expected: &[u8]) -> Result<(), CborReadError> {
+        self.take(expected.len()).and_then(|actual| {
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(CborReadError::InvalidEncoding)
+            }
+        })
+    }
+
+    /// Read a definite-length CBOR head of the expected major type.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` for a wrong major type, reserved additional
+    /// information, or a truncated numeric argument.
+    pub(crate) fn head(&mut self, expected_major: u8) -> Result<u64, CborReadError> {
+        self.byte().and_then(|first| {
+            if first >> 5 != expected_major {
+                return Err(CborReadError::InvalidEncoding);
+            }
+            match first & 0x1f {
+                small @ 0..=23 => Ok(u64::from(small)),
+                24 => self.number::<1>(),
+                25 => self.number::<2>(),
+                26 => self.number::<4>(),
+                27 => self.number::<8>(),
+                _ => Err(CborReadError::InvalidEncoding),
+            }
+        })
+    }
+
+    /// Read an unsigned integer represented by exactly `N` big-endian bytes.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when fewer than `N` bytes remain.
+    pub(crate) fn number<const N: usize>(&mut self) -> Result<u64, CborReadError> {
+        self.unsigned_bytes(N)
+    }
+
+    /// Read an unsigned integer represented by the requested big-endian width.
+    ///
+    /// # Errors
+    /// Returns `InvalidEncoding` when the requested width exceeds the input.
+    pub(crate) fn unsigned_bytes(&mut self, length: usize) -> Result<u64, CborReadError> {
+        self.take(length).map(|bytes| {
+            bytes
+                .iter()
+                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
+        })
+    }
+}
+
+pub use adapter_admission::{
+    adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterAdmissionEntryV1,
+    AdapterAdmissionErrorV1, AdapterAdmissionInputV1, AdapterAdmissionV1, AdapterDataClassV1,
+    AdapterEffectModeV1, MAX_ADAPTER_ADMISSION_BYTES_V1, MAX_ADAPTER_ADMISSION_ENTRIES_V1,
+    MAX_ADAPTER_CONFIGURATION_BYTES_V1,
+};
+pub use adapter_recording::{
+    close_adapter_recording_v1, completed_adapter_call_v1, validate_closed_adapter_recording_v1,
+    AdapterCallReservationOutcomeV1, AdapterCallReservationV1, AdapterRecordingSessionV1,
+    AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1,
+};
+pub use adapter_transcript::{
+    adapter_output_digest_v1, AdapterInvocationInputV1, AdapterInvocationV1,
+    AdapterTranscriptCallV1, AdapterTranscriptErrorV1, AdapterTranscriptInputV1,
+    AdapterTranscriptV1, MAX_ADAPTER_CALL_BYTES_V1, MAX_ADAPTER_TRANSCRIPT_BYTES_V1,
+    MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
+};
 pub use local_cut_seal::{
     local_cut_tree_scope_v1, LocalCutBranchChildV1, LocalCutManifestBindingBranchV1,
     LocalCutManifestBindingPageV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
@@ -71,6 +237,10 @@ pub use manifest_owner_link::{
     ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1,
     MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, MAX_MANIFEST_OWNER_PLUGINS_V1,
     MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+};
+pub use repro_manifest_root::{
+    ReproManifestRootErrorV1, ReproManifestRootInputV1, ReproManifestRootV1,
+    MAX_REPRO_MANIFEST_LABEL_BYTES_V1, MAX_REPRO_MANIFEST_ROOT_BYTES_V1,
 };
 pub use world_artifact::{
     WorldArtifactErrorV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
@@ -120,17 +290,27 @@ pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use erasure::{
     acknowledgement_inventory_reference, destruction_command_reference,
-    erasure_evidence_set_reference, selected_obligations_reference, ArtifactClaimInputV1,
+    erasure_evidence_set_reference, extract_adapter_admission_registration_v1,
+    extract_adapter_transcript_registration_v1, extract_repro_manifest_root_registration_v1,
+    inspect_artifact_registration_graph_v1, prepare_artifact_registration_batch_v1,
+    selected_obligations_reference, validate_artifact_registration_catalog_graph_v1,
+    AdapterArtifactRegistrationErrorV1, ArtifactChildEdgeV1, ArtifactClaimInputV1,
     ArtifactDataClassV1, ArtifactDestructionDispositionV1, ArtifactKeyDependencyV1,
-    ArtifactOptionalityV1, ArtifactRedactionStateV1, ArtifactStateV1, ArtifactTransitionRuleV1,
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
-    ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
-    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureAdmittedForkContextV1,
-    ErasureApplicabilityDecisionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
-    ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
-    ErasureAtomicFreezeResultV1, ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1,
-    ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    ArtifactOptionalityV1, ArtifactRedactionStateV1, ArtifactRegistrationCatalogRowV1,
+    ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationErrorV1, ArtifactRegistrationFieldsV1,
+    ArtifactRegistrationGraphErrorV1, ArtifactRegistrationGraphNodeV1,
+    ArtifactRegistrationGraphSummaryV1, ArtifactRegistrationInputV1,
+    ArtifactRegistrationOwnerVerificationErrorV1, ArtifactRegistrationOwnerVerifierV1,
+    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
+    ArtifactRegistrationPreparationErrorV1, ArtifactRegistrationV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, ErasureAcknowledgementOutcomeV1,
+    ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
+    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
+    ErasureAdmittedForkContextV1, ErasureApplicabilityDecisionV1, ErasureArtifactClassV1,
+    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptOutcomeInputV1,
+    ErasureAttemptOutcomeV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
     ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1, ErasureCasEffectV1,
     ErasureCasOutcomeV1, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureCoordinator,
     ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
@@ -161,9 +341,11 @@ pub use erasure::{
     ErasureTopologyTransitionPermitV1, ErasureVerifiedEmptyInventoryQueryV1,
     ErasureVerifiedInventoryQueryV1, ErasureVerifiedInventoryV1, ErasureVerifiedStateQueryV1,
     ErasureVerifiedStateV1, ErasureVerifiedTopologyObservationV1, ErasureVerifiedTopologyProofV1,
-    EvaluatedArtifactClaimV1, PreparedErasureCasV1, PreparedErasureForkAdmissionV1,
+    EvaluatedArtifactClaimV1, PreparedArtifactRegistrationBatchV1,
+    PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkAdmissionV1,
     PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1, RegisteredArtifactV1,
-    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, StoredErasureManifestV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, ReproManifestArtifactRegistrationErrorV1,
+    ReproManifestRootRegistrationInputV1, StoredErasureManifestV1,
     ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
     ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
     ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
@@ -183,7 +365,11 @@ pub use erasure::{
     ERASURE_REJOIN_PROOF_TAG_V1, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
     ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES, MAX_ARTIFACT_GRAPH_DEPTH_V1,
+    MAX_ARTIFACT_GRAPH_EDGES_V1, MAX_ARTIFACT_GRAPH_KEYS_V1, MAX_ARTIFACT_GRAPH_REGISTRATIONS_V1,
+    MAX_ARTIFACT_GRAPH_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_BATCH_BYTES_V1,
+    MAX_ARTIFACT_REGISTRATION_BYTES_V1, MAX_ARTIFACT_REGISTRATION_CHILDREN_V1,
+    MAX_ARTIFACT_REGISTRATION_KEYS_V1,
 };
 pub use error::CoreError;
 pub use event::{
@@ -323,11 +509,16 @@ pub use world_dependency_directory::{
     MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1, MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1,
 };
 pub use world_history::{
-    WorldEventPageV1, WorldEventRowInputV1, WorldEventRowV1, WorldHistoryBranchInputV1,
-    WorldHistoryBranchV1, WorldHistoryChildRecordRefV1, WorldHistoryChildV1, WorldHistoryErrorV1,
+    WorldEventOccurrenceV1, WorldEventPageV1, WorldEventRowInputV1, WorldEventRowV1,
+    WorldHistoryBranchInputV1, WorldHistoryBranchV1, WorldHistoryChildRecordRefV1,
+    WorldHistoryChildV1, WorldHistoryErrorV1, MAX_WORLD_EVENT_OCCURRENCE_BYTES_V1,
     MAX_WORLD_EVENT_PAGE_BYTES_V1, MAX_WORLD_EVENT_PAGE_ROWS_V1, MAX_WORLD_EVENT_TYPE_BYTES_V1,
     MAX_WORLD_HISTORY_BRANCH_BYTES_V1, MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1,
     MAX_WORLD_HISTORY_HEIGHT_V1,
+};
+pub use world_key_evidence::{
+    WorldKeyEvidenceErrorV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1,
+    MAX_WORLD_KEY_EVIDENCE_BYTES_V1,
 };
 pub use world_recording_receipt::{
     WorldRecordingReceiptErrorV1, WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,
@@ -338,6 +529,10 @@ pub use world_replay::WorldReplayClosureAuthorityV1;
 pub use world_replay::{
     WorldReplayAdmissionV1, WorldReplayArtifactObservationV1, WorldReplayClosureErrorV1,
     WorldReplayClosureInputV1, WorldReplayClosureV1, MAX_WORLD_REPLAY_ARTIFACTS_V1,
+};
+pub use world_replay_handle::{
+    WorldReplayHandleErrorV1, WorldReplayHandleInputV1, WorldReplayHandleV1,
+    MAX_WORLD_REPLAY_HANDLE_BYTES_V1,
 };
 pub use world_transform::{
     Wgs84PositionV1, WorldCoordinateV1, WorldGeographicEvidenceCapabilityV1,

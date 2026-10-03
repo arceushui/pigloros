@@ -21,8 +21,8 @@ use pos_plugin_society::{
 };
 use pos_plugin_world::{encode_actuator_pair_v1, ActionKindV1, WorldActionV1};
 use pos_runtime::{
-    Driver, ErasureExecutionHostV1, InstalledOutputPolicySourceV1, ObservationView,
-    OutputPolicyBindingV1, ProjectionKey, RuntimeError, StepOutput,
+    Driver, ErasureExecutionHostV1, ObservationView, OutputPolicyBindingV1, OutputPolicySourceV1,
+    ProjectionKey, RuntimeError, StepOutput,
 };
 use pos_state::{EntityStateProjection, ProjectionRegistry};
 use pos_store::{open_store, SeqRange, StoreConfig};
@@ -110,9 +110,9 @@ struct ObservationProbeDriver {
 fn agent_output_binding(
     plugin: &AgentPlugin,
 ) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(OutputPolicyBindingV1::from_installed_source(
+    Ok(OutputPolicyBindingV1::from_source(
         plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &[],
         "deterministic-local-v1",
     )?)
@@ -121,9 +121,9 @@ fn agent_output_binding(
 fn owned_event_type_binding<P: Plugin>(
     plugin: &P,
 ) -> Result<OutputPolicyBindingV1, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(OutputPolicyBindingV1::from_installed_source(
+    Ok(OutputPolicyBindingV1::from_source(
         plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &[],
         "deterministic-local-v1",
     )?)
