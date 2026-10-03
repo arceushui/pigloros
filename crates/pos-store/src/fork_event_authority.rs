@@ -564,6 +564,60 @@ pub(crate) fn classified_event_matches_operation(
         })
 }
 
+/// Whether a recovered classified Event carries exactly the retried draft's content.
+///
+/// The `FOP1` request digest binds the draft, but only this comparison binds
+/// the stored Event's entity, Event type, payload, causation, correlation, and
+/// schema version to it. `WallTime`, payload hash, signature, and origin are
+/// `FOP1` fields, checked by [`classified_event_matches_operation`].
+fn classified_event_matches_draft(event: &Event, draft: &EventDraft) -> bool {
+    event.entity == draft.entity
+        && event.event_type == draft.event_type
+        && event.payload == draft.payload
+        && event.causation_id == draft.causation_id
+        && event.correlation_id == draft.correlation_id
+        && event.schema_version == draft.schema_version
+}
+
+/// Apply the one classified-append recovery rule to a stored `FOP1`.
+///
+/// Every adapter checks, in this order:
+/// 1. a retried request whose digest differs from the `FOP1` request is a
+///    `Conflict`, before any stored Event is read;
+/// 2. `validated_event` rereads the authority graph and the committed Event
+///    exactly bound by the `FOP1`, and fails with the adapter's error;
+/// 3. a stored Event whose content differs from the retried draft is
+///    `CorruptAuthority`: the equal request digest proves the draft is the
+///    one the `FOP1` committed, so only the stored Event can be wrong.
+pub(crate) fn recover_classified_operation<F>(
+    validated_event: F,
+    operation: ForkAppendOperationV1,
+    permit: &ForkAppendSourcePermitV1,
+    operation_id: Hash,
+    draft: &EventDraft,
+) -> Result<Option<ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1>
+where
+    F: FnOnce(&ForkAppendOperationV1) -> Result<Event, ForkEventAuthorityErrorV1>,
+{
+    fork_append_request(
+        operation_id,
+        permit.child_timeline_id(),
+        permit.source(),
+        draft,
+    )
+    .and_then(|request| {
+        (operation.input().request_digest == request.digest())
+            .then_some(())
+            .ok_or(ForkEventAuthorityErrorV1::Conflict)
+    })
+    .and_then(|()| validated_event(&operation))
+    .and_then(|event| {
+        classified_event_matches_draft(&event, draft)
+            .then_some(Some(ForkClassifiedAppendReceiptV1 { event, operation }))
+            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+    })
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -3978,6 +4032,156 @@ mod tests {
                 classified_entry_point_errors(&mut store, &fixture),
                 memory,
                 "{name} must give the same results on SQLite as on MemoryStore"
+            );
+        }
+        Ok(())
+    }
+
+    fn tamper_entity(event: &mut Event) {
+        event.entity = EntityId::new();
+    }
+
+    fn tamper_event_type(event: &mut Event) {
+        event.event_type = Kind::new("fork.event.tampered");
+    }
+
+    fn tamper_payload(event: &mut Event) {
+        event.payload = CanonicalBytes::from_vec(b"tampered-event-content".to_vec());
+    }
+
+    const fn tamper_causation(event: &mut Event) {
+        event.causation_id = Some(event.id);
+    }
+
+    fn tamper_correlation(event: &mut Event) {
+        event.correlation_id = Some(pos_core::CorrelationId::new());
+    }
+
+    /// Stored Event content that the `FOP1` binds only through its request
+    /// digest. Each tamper touches only the committed Timeline Event.
+    const RECOVERED_CONTENT_TAMPERS: [ClassifiedEventTamperV1; 5] = [
+        ClassifiedEventTamperV1 {
+            name: "entity",
+            memory: tamper_entity,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET entity_id = '01ARZ3NDEKTSV4RRFFQ69G5FAV' \
+                     WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "event-type",
+            memory: tamper_event_type,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET event_type = 'fork.event.tampered' WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "payload",
+            memory: tamper_payload,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET payload = X'00' WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "causation",
+            memory: tamper_causation,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET causation_id = event_id WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "correlation",
+            memory: tamper_correlation,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET correlation_id = '01ARZ3NDEKTSV4RRFFQ69G5FAV' \
+                     WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+    ];
+
+    /// Recovery results for the retried host draft, then for a different request.
+    type RecoveryErrorsV1 = [Option<ForkEventAuthorityErrorV1>; 2];
+
+    /// Recovery results before, then after, one stored-content tamper.
+    type RecoveryParityV1 = [RecoveryErrorsV1; 2];
+
+    /// ADR-105 r6 R6.9: an intact graph recovers the retried draft, a stored
+    /// Event unequal to that draft is corrupt authority, and a different
+    /// request is a `Conflict` before any stored Event is read.
+    const EXPECTED_RECOVERY: RecoveryParityV1 = [
+        [None, Some(ForkEventAuthorityErrorV1::Conflict)],
+        [
+            Some(ForkEventAuthorityErrorV1::CorruptAuthority),
+            Some(ForkEventAuthorityErrorV1::Conflict),
+        ],
+    ];
+
+    fn recovery_errors<S>(store: &S, fixture: &HostAppendFixtureV1) -> RecoveryErrorsV1
+    where
+        S: ForkEventProvenanceAuthorityPortV1,
+    {
+        let different = EventDraft {
+            payload: CanonicalBytes::from_vec(b"different-request".to_vec()),
+            ..fixture.draft.clone()
+        };
+        [&fixture.draft, &different].map(|draft| {
+            store
+                .recover_classified_append(
+                    &fixture.lifecycle.session,
+                    &fixture.permit,
+                    HOST_OPERATION_ID,
+                    draft,
+                )
+                .err()
+        })
+    }
+
+    /// Recover the host Event on `MemoryStore` before and after one tamper.
+    fn memory_tampered_recovery(
+        tamper: fn(&mut Event),
+    ) -> Result<RecoveryParityV1, Box<dyn Error>> {
+        let mut store = MemoryStore::new();
+        let fixture = host_append_fixture(&mut store)?;
+        let intact = recovery_errors(&store, &fixture);
+        store.test_tamper_classified_event(HOST_OPERATION_ID, tamper);
+        Ok([intact, recovery_errors(&store, &fixture)])
+    }
+
+    #[test]
+    fn memory_recovery_rejects_stored_content_unequal_to_draft() -> Result<(), Box<dyn Error>> {
+        for tamper in RECOVERED_CONTENT_TAMPERS {
+            let name = tamper.name;
+            assert_eq!(
+                memory_tampered_recovery(tamper.memory)?,
+                EXPECTED_RECOVERY,
+                "{name} must make MemoryStore recovery corrupt authority"
+            );
+        }
+        Ok(())
+    }
+
+    /// ADR-105 r6 R6.9 adapter parity: the same stored-content tamper gives
+    /// the same recovery results on both adapters.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_recovery_matches_memory_for_tampered_event_content() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let operation_id = HOST_OPERATION_ID.as_bytes().to_vec();
+        for tamper in RECOVERED_CONTENT_TAMPERS {
+            let name = tamper.name;
+            let path = directory.path().join(format!("recovered-{name}.sqlite"));
+            let mut store = sqlite_store_at(&path)?;
+            let fixture = host_append_fixture(&mut store)?;
+            let intact = recovery_errors(&store, &fixture);
+            let connection = Connection::open(&path)?;
+            let changed = connection.execute(tamper.sqlite, params![operation_id])?;
+            assert_eq!(changed, 1, "{name} fixture must be present");
+            let memory = memory_tampered_recovery(tamper.memory)?;
+            assert_eq!(memory, EXPECTED_RECOVERY);
+            assert_eq!(
+                [intact, recovery_errors(&store, &fixture)],
+                memory,
+                "{name} must give the same recovery results on SQLite as on MemoryStore"
             );
         }
         Ok(())

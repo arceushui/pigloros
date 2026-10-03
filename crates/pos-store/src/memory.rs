@@ -91,7 +91,7 @@ use crate::fork_delivery_journal::{
 };
 use crate::fork_event_authority::{
     classified_event_matches_operation, fork_append_request, permitted_fork_admission,
-    preflight_classifier_sources,
+    preflight_classifier_sources, recover_classified_operation,
 };
 use crate::fork_manifest_publication::{
     authorize_publication, publication_parent_head, publication_sources,
@@ -2408,8 +2408,6 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
         operation_id: Hash,
         draft: &EventDraft,
     ) -> Result<Option<ForkClassifiedAppendReceiptV1>, ForkEventAuthorityErrorV1> {
-        let source = permit.source();
-        let child_timeline_id = permit.child_timeline_id();
         if !permit.is_live_for(session) {
             return Err(ForkEventAuthorityErrorV1::Unauthenticated);
         }
@@ -2420,16 +2418,13 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
         let Some(operation) = self.fork_append_operations.get(&operation_id) else {
             return Ok(None);
         };
-        let request = fork_append_request(operation_id, child_timeline_id, source, draft)?;
-        if operation.input().request_digest != request.digest() {
-            return Err(ForkEventAuthorityErrorV1::Conflict);
-        }
-        self.validate_classified_provenance(operation).map(|event| {
-            Some(ForkClassifiedAppendReceiptV1 {
-                event,
-                operation: operation.clone(),
-            })
-        })
+        recover_classified_operation(
+            |operation| self.validate_classified_provenance(operation),
+            operation.clone(),
+            permit,
+            operation_id,
+            draft,
+        )
     }
 
     fn read_fork_event_suffix(
