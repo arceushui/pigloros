@@ -8,7 +8,7 @@
 use std::marker::PhantomData;
 
 /// Maps one reader failure at a record field onto a caller's closed error.
-pub(super) trait StrictCborError {
+pub(crate) trait StrictCborError {
     /// A truncated, non-shortest, indefinite, or wrongly typed item.
     fn invalid_encoding(ordinal: u8) -> Self;
     /// A collection count or text length above its maximum.
@@ -16,7 +16,7 @@ pub(super) trait StrictCborError {
 }
 
 /// A strict reader over one complete canonical record.
-pub(super) struct Reader<'a, E> {
+pub(crate) struct Reader<'a, E> {
     bytes: &'a [u8],
     offset: usize,
     ordinal: u8,
@@ -24,7 +24,7 @@ pub(super) struct Reader<'a, E> {
 }
 
 impl<'a, E: StrictCborError> Reader<'a, E> {
-    pub(super) const fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) const fn new(bytes: &'a [u8]) -> Self {
         Self {
             bytes,
             offset: 0,
@@ -34,25 +34,25 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     }
 
     /// Report later failures at record field `ordinal`.
-    pub(super) const fn at(&mut self, ordinal: u8) {
+    pub(crate) const fn at(&mut self, ordinal: u8) {
         self.ordinal = ordinal;
     }
 
     /// The record field ordinal that failures are reported at.
-    pub(super) const fn ordinal(&self) -> u8 {
+    pub(crate) const fn ordinal(&self) -> u8 {
         self.ordinal
     }
 
     /// The number of bytes consumed so far.
-    pub(super) const fn offset(&self) -> usize {
+    pub(crate) const fn offset(&self) -> usize {
         self.offset
     }
 
-    pub(super) fn invalid(&self) -> E {
+    pub(crate) fn invalid(&self) -> E {
         E::invalid_encoding(self.ordinal)
     }
 
-    pub(super) fn exceeded(&self) -> E {
+    pub(crate) fn exceeded(&self) -> E {
         E::bounds_exceeded(self.ordinal)
     }
 
@@ -75,7 +75,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     }
 
     /// Read one shortest-form item head as `(major type, argument)`.
-    pub(super) fn head(&mut self) -> Result<(u8, u64), E> {
+    pub(crate) fn head(&mut self) -> Result<(u8, u64), E> {
         let first = self.byte()?;
         let small = first & 31;
         let (width, minimum) = match small {
@@ -103,7 +103,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     }
 
     /// Read a definite array header whose count is at most `max`.
-    pub(super) fn array(&mut self, max: usize) -> Result<usize, E> {
+    pub(crate) fn array(&mut self, max: usize) -> Result<usize, E> {
         let (major, count) = self.head()?;
         if major != 4 {
             return Err(self.invalid());
@@ -112,7 +112,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     }
 
     /// Read a definite array header with exactly `members` members.
-    pub(super) fn fixed_array(&mut self, members: u64) -> Result<(), E> {
+    pub(crate) fn fixed_array(&mut self, members: u64) -> Result<(), E> {
         if self.head()? == (4, members) {
             Ok(())
         } else {
@@ -120,7 +120,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
         }
     }
 
-    pub(super) fn unsigned(&mut self) -> Result<u64, E> {
+    pub(crate) fn unsigned(&mut self) -> Result<u64, E> {
         let (major, value) = self.head()?;
         if major != 0 {
             return Err(self.invalid());
@@ -128,7 +128,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
         Ok(value)
     }
 
-    pub(super) fn signed(&mut self) -> Result<i64, E> {
+    pub(crate) fn signed(&mut self) -> Result<i64, E> {
         let (major, value) = self.head()?;
         match major {
             0 => i64::try_from(value).map_err(|_| self.invalid()),
@@ -140,7 +140,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     }
 
     /// Read valid UTF-8 text of at most `max` bytes.
-    pub(super) fn text(&mut self, max: usize) -> Result<&'a str, E> {
+    pub(crate) fn text(&mut self, max: usize) -> Result<&'a str, E> {
         let (major, length) = self.head()?;
         if major != 3 {
             return Err(self.invalid());
@@ -153,7 +153,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     ///
     /// A different length is a different value: it is never a bound failure
     /// and the bytes are not read.
-    pub(super) fn exact_text(&mut self, expected: &str) -> Result<bool, E> {
+    pub(crate) fn exact_text(&mut self, expected: &str) -> Result<bool, E> {
         let (major, length) = self.head()?;
         if major != 3 {
             return Err(self.invalid());
@@ -164,7 +164,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
         Ok(self.take(expected.len())? == expected.as_bytes())
     }
 
-    pub(super) fn bytes<const N: usize>(&mut self) -> Result<[u8; N], E> {
+    pub(crate) fn bytes<const N: usize>(&mut self) -> Result<[u8; N], E> {
         let (major, length) = self.head()?;
         if major != 2 || usize::try_from(length) != Ok(N) {
             return Err(self.invalid());
@@ -175,13 +175,13 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     }
 
     /// Consume a CBOR `null` when it is the next item.
-    pub(super) fn null(&mut self) -> bool {
+    pub(crate) fn null(&mut self) -> bool {
         let null = self.bytes.get(self.offset) == Some(&0xf6);
         self.offset += usize::from(null);
         null
     }
 
-    pub(super) fn optional_bytes<const N: usize>(&mut self) -> Result<Option<[u8; N]>, E> {
+    pub(crate) fn optional_bytes<const N: usize>(&mut self) -> Result<Option<[u8; N]>, E> {
         if self.null() {
             Ok(None)
         } else {
@@ -190,7 +190,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     }
 
     /// Read CBOR `false` (`0xf4`) or `true` (`0xf5`).
-    pub(super) fn boolean(&mut self) -> Result<bool, E> {
+    pub(crate) fn boolean(&mut self) -> Result<bool, E> {
         match self.byte()? {
             0xf4 => Ok(false),
             0xf5 => Ok(true),
@@ -198,7 +198,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
         }
     }
 
-    pub(super) fn finish(&self) -> Result<(), E> {
+    pub(crate) fn finish(&self) -> Result<(), E> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
