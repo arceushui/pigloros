@@ -1164,7 +1164,7 @@ mod local_cut_owner_coverage {
         LocalCutSealInputV2, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1,
         ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerAdmissionRequestV1,
         ManifestOwnerAdmissionSnapshotV1, ManifestOwnerAdmissionVerifierV1,
-        ManifestOwnerMemberLeafClassV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
+        ManifestOwnerClassifiedLeafV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
         ManifestSlotAdmissionReceiptV1, PreparedManifestOwnerAdmissionV1,
     };
@@ -1299,7 +1299,7 @@ mod local_cut_owner_coverage {
             _timeline_id: TimelineId,
             _scope: Hash,
             members: &ManifestOwnerScopeMembersV1,
-        ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+        ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
             Ok(member_classes(members))
         }
     }

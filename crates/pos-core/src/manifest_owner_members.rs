@@ -18,14 +18,16 @@ use crate::output_policy::OutputPolicyV1;
 use crate::retention::{WorldRetentionLeaseInputV1, WorldRetentionLeaseV1, WorldRetentionPolicyV1};
 use crate::world_replay::WorldReplayClosureV1;
 use crate::{
-    ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, Hash,
-    PluginId, TimelineId, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
-    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldClosureReadLimitsV1, WorldConsumerSetV1,
+    ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, Hash, PluginId,
+    TimelineId, WorldArtifactKeyDependencyV1, WorldArtifactKindV1, WorldArtifactLeafInputV1,
+    WorldArtifactLeafV1, WorldClosureReadLimitsV1, WorldConsumerSetV1,
 };
 
-type Kind = WorldArtifactKindV1;
-type AdmissionError = ManifestOwnerAdmissionErrorV1;
-type Classifier<'a> = &'a dyn Fn(Kind, Hash) -> Option<ManifestOwnerLeafClassificationV1>;
+/// Owner policy hook: classify one `(kind, native digest)` leaf, or `None`.
+type Classifier<'a> =
+    &'a dyn Fn(WorldArtifactKindV1, Hash) -> Option<ManifestOwnerLeafClassificationV1>;
+/// One leaf's `(kind, native digest)` identity within a scope.
+type LeafKey = (WorldArtifactKindV1, Hash);
 /// One scope's EOP1/OPC1 copies and member leaves, as counted by the byte budget.
 pub(crate) type ScopeBytes<'a> = (
     &'a [ManifestOwnerPolicyCopiesV1],
@@ -36,6 +38,11 @@ const BASE_CONFIGURATION_DOMAIN: &[u8] = b"pigloros.base-configuration.v1";
 const IMPLEMENTATION_DOMAIN: &[u8] = b"pigloros.implementation-artifact.v1";
 /// Inclusive WCB1 traversal-depth bound shared with `WorldClosureBindingV1`.
 const MAX_COMBINED_DEPTH_V1: u8 = 32;
+/// Retained native-byte bound of one scoped member leaf.
+///
+/// The `SQLite` `manifest_owner_member_leaves.native_bytes` CHECK enforces the
+/// same 16 MiB bound, so both stores accept exactly the same members.
+pub const MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1: usize = 16_777_216;
 
 /// Owner-hook classification recorded in one scoped WAL1 leaf.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,9 +55,10 @@ pub struct ManifestOwnerLeafClassificationV1 {
     pub key_dependencies: Vec<WorldArtifactKeyDependencyV1>,
 }
 
-/// Classification the installed owner hook returns for one member leaf.
+/// One member leaf's identity with the classification the installed owner
+/// hook returns for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManifestOwnerMemberLeafClassV1 {
+pub struct ManifestOwnerClassifiedLeafV1 {
     /// WAL1 kind of the classified member or reference leaf.
     pub kind: WorldArtifactKindV1,
     /// Native digest of the classified member or reference leaf.
@@ -59,7 +67,7 @@ pub struct ManifestOwnerMemberLeafClassV1 {
     pub classification: ManifestOwnerLeafClassificationV1,
 }
 
-impl ManifestOwnerMemberLeafClassV1 {
+impl ManifestOwnerClassifiedLeafV1 {
     /// Copy the identity and classification recorded in one leaf.
     #[must_use]
     pub fn of_leaf(leaf: &WorldArtifactLeafV1) -> Self {
@@ -78,28 +86,14 @@ impl ManifestOwnerMemberLeafClassV1 {
 
 /// One scoped member or reference leaf with its retained native bytes.
 ///
-/// Reference leaves (kinds 6-9) record no native bytes; their native-content
-/// state is fixed by kind and can never be `Retained`.
+/// Reference leaves (kinds 6-9) record no native bytes, so their content is
+/// never retained.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestOwnerMemberLeafV1 {
     /// Required scoped WAL1 leaf.
     pub leaf: WorldArtifactLeafV1,
     /// Exact retained native bytes; empty for a reference leaf.
     pub native_bytes: Vec<u8>,
-}
-
-impl ManifestOwnerMemberLeafV1 {
-    /// Native-content state fixed by the leaf kind.
-    #[must_use]
-    pub const fn state(&self) -> ArtifactStateV1 {
-        match self.leaf.as_input().kind {
-            Kind::AudiencePolicy => ArtifactStateV1::MissingFrozenInput,
-            Kind::Schema => ArtifactStateV1::MissingSchema,
-            Kind::ReducerImplementation => ArtifactStateV1::MissingPlugin,
-            Kind::RuntimeIdentity => ArtifactStateV1::MissingRuntime,
-            _ => ArtifactStateV1::Retained,
-        }
-    }
 }
 
 /// Exact lease records and member leaves for one owned Timeline scope.
@@ -173,24 +167,21 @@ pub struct ManifestOwnerScopeV1 {
 ///
 /// # Errors
 /// Returns `InvalidBatch` for malformed or mismatched RTP1/RLS1/EOP1/OPC1
-/// members, a lease for another Timeline, an unclassified leaf, or a
-/// classification that does not form a valid WAL1 leaf.
+/// members, a lease for another Timeline, an unclassified leaf, a
+/// classification that does not form a valid WAL1 leaf, or a classifier that
+/// answers one `(kind, native digest)` inconsistently.
 pub fn build_manifest_owner_scope_v1(
     source: &ManifestOwnerScopeSourceV1,
-    classify: &dyn Fn(WorldArtifactKindV1, Hash) -> Option<ManifestOwnerLeafClassificationV1>,
+    classify: Classifier<'_>,
 ) -> Result<ManifestOwnerScopeV1, ManifestOwnerAdmissionErrorV1> {
     let references = source.consumer_references.iter().flat_map(|reference| {
         [
-            (Kind::Schema, reference.schema),
-            (Kind::ReducerImplementation, reference.reducer),
-            (Kind::RuntimeIdentity, reference.runtime),
+            (WorldArtifactKindV1::Schema, reference.schema),
+            (WorldArtifactKindV1::ReducerImplementation, reference.reducer),
+            (WorldArtifactKindV1::RuntimeIdentity, reference.runtime),
         ]
     });
-    let policies = source.policy_sources.iter().map(|policy| PolicyBytes {
-        plugin_id: policy.plugin_id,
-        eop1_bytes: &policy.eop1_bytes,
-        opc1_bytes: &policy.opc1_bytes,
-    });
+    let policies = source.policy_sources.iter().map(PolicyBytes::from);
     derive_scope(
         ScopeInputs {
             owner_id: source.owner_id,
@@ -217,12 +208,12 @@ pub fn validate_manifest_owner_lease_replacement_v1(
     previous: &ManifestOwnerScopeMembersV1,
     next: &ManifestOwnerScopeMembersV1,
 ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-    let previous = recorded_lease(previous).ok_or(AdmissionError::CorruptState)?;
-    let next = recorded_lease(next).ok_or(AdmissionError::InvalidBatch)?;
+    let previous = recorded_lease(previous).ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let next = recorded_lease(next).ok_or(ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
     if next.admission_closes_at_micros > previous.admission_closes_at_micros
         || next.retention_deadline_micros > previous.retention_deadline_micros
     {
-        return Err(AdmissionError::OwnerRejected);
+        return Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
     }
     Ok(())
 }
@@ -236,12 +227,20 @@ fn recorded_lease(members: &ManifestOwnerScopeMembersV1) -> Option<WorldRetentio
         .map(|lease| *lease.as_input())
 }
 
-/// Check read limits and every scope's aggregate retained native bytes.
+/// Check read limits and every scope's retained native bytes.
 ///
-/// Every read limit must be nonzero. The aggregate covers member leaves and
-/// every EOP1/OPC1 copy, so it also bounds each single retained member by
-/// `max_native_bytes`; OPC1 bytes embed their members, which therefore count
-/// toward the aggregate more than once.
+/// Every read limit must be nonzero and the combined depth at most 32. Each
+/// member leaf must fit [`MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1`]. The
+/// aggregate covers member leaves and every EOP1/OPC1 copy, so it also bounds
+/// each single retained member by `max_native_bytes`; OPC1 bytes embed their
+/// members, which therefore count toward the aggregate more than once.
+///
+/// Admission only records `max_node_visits` and `max_combined_depth`. The
+/// ADR-081 R2.3 traversal-bound rejection, which checks both against the
+/// actual closure, is enforced at cut time by #523 through the WDB1 packer.
+/// The rule that one generation keeps identical limits holds vacuously here:
+/// every admission creates a new configuration generation, and reusing an
+/// `(owner, generation, Timeline)` row returns `Conflict`.
 pub(crate) fn validate_scope_budgets<'a>(
     limits: WorldClosureReadLimitsV1,
     scopes: impl IntoIterator<Item = ScopeBytes<'a>>,
@@ -250,9 +249,12 @@ pub(crate) fn validate_scope_budgets<'a>(
         || limits.max_native_bytes == 0
         || !(1..=MAX_COMBINED_DEPTH_V1).contains(&limits.max_combined_depth)
     {
-        return Err(AdmissionError::InvalidBatch);
+        return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
     }
     for (copies, members) in scopes {
+        if members.leaves.iter().any(exceeds_member_bound) {
+            return Err(ManifestOwnerAdmissionErrorV1::BoundExceeded);
+        }
         let retained = members
             .leaves
             .iter()
@@ -264,17 +266,22 @@ pub(crate) fn validate_scope_budgets<'a>(
             )
             .fold(0_u64, |total, length| total.saturating_add(length as u64));
         if retained > limits.max_native_bytes {
-            return Err(AdmissionError::BoundExceeded);
+            return Err(ManifestOwnerAdmissionErrorV1::BoundExceeded);
         }
     }
     Ok(())
 }
 
+const fn exceeds_member_bound(member: &ManifestOwnerMemberLeafV1) -> bool {
+    member.native_bytes.len() > MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1
+}
+
 /// Require the exact member leaves derived from the scope's native bytes.
 ///
-/// Derived EOP1/OPC1 leaves carry the request scope only when the supplied
-/// copies (already checked against that scope) are equal to them, so copy
-/// equality also proves the recomputed scope.
+/// The recomputed scope is not compared on its own: every derived EOP1/OPC1
+/// copy leaf carries it, and the supplied copies were already checked
+/// against the request scope, so copy equality proves it. A separate check
+/// could never fail on its own and so could not be tested.
 pub(crate) fn validate_scope_members(
     owner_id: [u8; 32],
     timeline_id: TimelineId,
@@ -292,7 +299,7 @@ pub(crate) fn validate_scope_members(
                 .flat_map(|copy| [&copy.eop1_leaf, &copy.opc1_leaf]),
         )
         .map(|leaf| {
-            let class = ManifestOwnerMemberLeafClassV1::of_leaf(leaf);
+            let class = ManifestOwnerClassifiedLeafV1::of_leaf(leaf);
             ((class.kind, class.native_digest), class.classification)
         })
         .collect::<BTreeMap<_, _>>();
@@ -302,11 +309,7 @@ pub(crate) fn validate_scope_members(
         .map(|member| member.leaf.as_input())
         .filter(|leaf| is_consumer_reference(leaf.kind))
         .map(|leaf| (leaf.kind, leaf.native_digest));
-    let policies = copies.iter().map(|copy| PolicyBytes {
-        plugin_id: copy.plugin_id,
-        eop1_bytes: &copy.eop1_bytes,
-        opc1_bytes: &copy.opc1_bytes,
-    });
+    let policies = copies.iter().map(PolicyBytes::from);
     let derived = derive_scope(
         ScopeInputs {
             owner_id,
@@ -323,7 +326,7 @@ pub(crate) fn validate_scope_members(
         || !wcs1.optional_view_roots().is_empty()
         || consumer_reference_set(wcs1) != reference_leaf_set(members)
     {
-        return Err(AdmissionError::InvalidBatch);
+        return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
     }
     Ok(())
 }
@@ -331,41 +334,45 @@ pub(crate) fn validate_scope_members(
 /// Require the owner hook's classification of every member leaf, in order.
 pub(crate) fn verify_member_classes(
     members: &ManifestOwnerScopeMembersV1,
-    classes: &[ManifestOwnerMemberLeafClassV1],
+    classes: &[ManifestOwnerClassifiedLeafV1],
 ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
     let recorded = members
         .leaves
         .iter()
-        .map(|member| ManifestOwnerMemberLeafClassV1::of_leaf(&member.leaf))
+        .map(|member| ManifestOwnerClassifiedLeafV1::of_leaf(&member.leaf))
         .collect::<Vec<_>>();
     if classes == recorded.as_slice() {
         Ok(())
     } else {
-        Err(AdmissionError::InvalidBatch)
+        Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
     }
 }
 
-const fn is_consumer_reference(kind: Kind) -> bool {
-    matches!(
-        kind,
-        Kind::Schema | Kind::ReducerImplementation | Kind::RuntimeIdentity
-    )
+/// WCS1 consumer reference kinds: schema, reducer and runtime (kinds 7-9).
+const CONSUMER_REFERENCE_KINDS: [WorldArtifactKindV1; 3] = [
+    WorldArtifactKindV1::Schema,
+    WorldArtifactKindV1::ReducerImplementation,
+    WorldArtifactKindV1::RuntimeIdentity,
+];
+
+fn is_consumer_reference(kind: WorldArtifactKindV1) -> bool {
+    CONSUMER_REFERENCE_KINDS.contains(&kind)
 }
 
-fn consumer_reference_set(wcs1: &WorldConsumerSetV1) -> BTreeSet<(Kind, Hash)> {
+fn consumer_reference_set(wcs1: &WorldConsumerSetV1) -> BTreeSet<LeafKey> {
     wcs1.consumers()
         .iter()
         .flat_map(|consumer| {
             [
-                (Kind::Schema, consumer.schema_hash()),
-                (Kind::ReducerImplementation, consumer.reducer_hash()),
-                (Kind::RuntimeIdentity, consumer.runtime_hash()),
+                (WorldArtifactKindV1::Schema, consumer.schema_hash()),
+                (WorldArtifactKindV1::ReducerImplementation, consumer.reducer_hash()),
+                (WorldArtifactKindV1::RuntimeIdentity, consumer.runtime_hash()),
             ]
         })
         .collect()
 }
 
-fn reference_leaf_set(members: &ManifestOwnerScopeMembersV1) -> BTreeSet<(Kind, Hash)> {
+fn reference_leaf_set(members: &ManifestOwnerScopeMembersV1) -> BTreeSet<LeafKey> {
     members
         .leaves
         .iter()
@@ -384,16 +391,16 @@ struct ScopeInputs<'a> {
 
 fn derive_scope<'a>(
     inputs: ScopeInputs<'_>,
-    references: impl Iterator<Item = (Kind, Hash)>,
+    references: impl Iterator<Item = LeafKey>,
     policies: impl Iterator<Item = PolicyBytes<'a>>,
     classify: Classifier<'_>,
 ) -> Result<ManifestOwnerScopeV1, ManifestOwnerAdmissionErrorV1> {
     let policy = WorldRetentionPolicyV1::from_canonical_cbor(inputs.rtp1_bytes)
-        .map_err(|_| AdmissionError::InvalidBatch)?;
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
     let lease = WorldRetentionLeaseV1::from_canonical_cbor(inputs.rls1_bytes, &policy)
-        .map_err(|_| AdmissionError::InvalidBatch)?;
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
     if lease.as_input().timeline_id != inputs.timeline_id {
-        return Err(AdmissionError::InvalidBatch);
+        return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
     }
     let scope = WorldReplayClosureV1::artifact_scope(inputs.timeline_id, lease.digest());
     let mut leaves = ScopeLeaves {
@@ -404,19 +411,24 @@ fn derive_scope<'a>(
         members: BTreeMap::new(),
     };
     let audience = policy.as_input().audience_policy_hash;
-    let audience_leaf = leaves.member(Kind::AudiencePolicy, audience, &[], Vec::new())?;
+    let audience_leaf = leaves.member(
+        WorldArtifactKindV1::AudiencePolicy,
+        audience,
+        &[],
+        Vec::new(),
+    )?;
     let retention = RetentionMember {
         digest: policy.digest(),
         bytes: inputs.rtp1_bytes,
         leaf: leaves.member(
-            Kind::RetentionPolicy,
+            WorldArtifactKindV1::RetentionPolicy,
             policy.digest(),
             inputs.rtp1_bytes,
             vec![audience_leaf],
         )?,
     };
     leaves.member(
-        Kind::RetentionLease,
+        WorldArtifactKindV1::RetentionLease,
         lease.digest(),
         inputs.rls1_bytes,
         vec![retention.leaf],
@@ -446,6 +458,26 @@ struct PolicyBytes<'a> {
     opc1_bytes: &'a [u8],
 }
 
+impl<'a> From<&'a ManifestOwnerPolicySourceV1> for PolicyBytes<'a> {
+    fn from(source: &'a ManifestOwnerPolicySourceV1) -> Self {
+        Self {
+            plugin_id: source.plugin_id,
+            eop1_bytes: &source.eop1_bytes,
+            opc1_bytes: &source.opc1_bytes,
+        }
+    }
+}
+
+impl<'a> From<&'a ManifestOwnerPolicyCopiesV1> for PolicyBytes<'a> {
+    fn from(copy: &'a ManifestOwnerPolicyCopiesV1) -> Self {
+        Self {
+            plugin_id: copy.plugin_id,
+            eop1_bytes: &copy.eop1_bytes,
+            opc1_bytes: &copy.opc1_bytes,
+        }
+    }
+}
+
 struct RetentionMember<'a> {
     digest: Hash,
     bytes: &'a [u8],
@@ -470,12 +502,12 @@ fn derive_copy(
         opc1_bytes,
     } = source;
     let policy = OutputPolicyV1::from_canonical_cbor(eop1_bytes)
-        .map_err(|_| AdmissionError::InvalidBatch)?;
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
     let envelope = OutputPolicyClosureEnvelopeV1::from_canonical_bytes_v1(opc1_bytes, eop1_bytes)
-        .map_err(|_| AdmissionError::InvalidBatch)?;
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
     let members = policy_member_leaves(leaves, &policy, &envelope, retention)?;
     let eop1_leaf = leaves.leaf(
-        Kind::OutputPolicy,
+        WorldArtifactKindV1::OutputPolicy,
         policy.digest(),
         eop1_bytes,
         vec![
@@ -494,7 +526,7 @@ fn derive_copy(
     ];
     closure_children.extend(members.profile);
     let opc1_leaf = leaves.leaf(
-        Kind::OutputPolicyClosure,
+        WorldArtifactKindV1::OutputPolicyClosure,
         opc1_native_digest(opc1_bytes),
         opc1_bytes,
         closure_children,
@@ -516,7 +548,7 @@ fn policy_member_leaves(
 ) -> Result<PolicyMemberLeaves, ManifestOwnerAdmissionErrorV1> {
     let budget_bytes = envelope.executable_budget_bytes();
     let budget = ExecutableBudgetPolicyV1::from_canonical_cbor(budget_bytes)
-        .map_err(|_| AdmissionError::InvalidBatch)?;
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
     let fields = policy.fields();
     let configuration = envelope.configuration_artifact();
     let implementation = envelope.implementation_artifact();
@@ -530,14 +562,14 @@ fn policy_member_leaves(
         || fields.executable_profile_hash != budget.digest()
         || profile_digest != Hash::from_bytes(*blake3::hash(profile_bytes).as_bytes())
     {
-        return Err(AdmissionError::InvalidBatch);
+        return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
     }
     // A Generated profile is empty and has no kind5 member or edge.
     let profile = if profile_bytes.is_empty() {
         None
     } else {
         Some(leaves.member(
-            Kind::ExecutionProfile,
+            WorldArtifactKindV1::ExecutionProfile,
             profile_digest,
             profile_bytes,
             Vec::new(),
@@ -545,19 +577,19 @@ fn policy_member_leaves(
     };
     Ok(PolicyMemberLeaves {
         budget: leaves.member(
-            Kind::ExecutableBudgetPolicy,
+            WorldArtifactKindV1::ExecutableBudgetPolicy,
             budget.digest(),
             budget_bytes,
             profile.into_iter().collect(),
         )?,
         configuration: leaves.member(
-            Kind::BaseConfiguration,
+            WorldArtifactKindV1::BaseConfiguration,
             fields.base_configuration_digest,
             configuration,
             Vec::new(),
         )?,
         implementation: leaves.member(
-            Kind::PluginImplementationIdentity,
+            WorldArtifactKindV1::PluginImplementationIdentity,
             fields.implementation_hash,
             implementation,
             Vec::new(),
@@ -579,19 +611,19 @@ struct ScopeLeaves<'a> {
     scope: Hash,
     lease: Hash,
     classify: Classifier<'a>,
-    members: BTreeMap<(Kind, Hash), ManifestOwnerMemberLeafV1>,
+    members: BTreeMap<LeafKey, ManifestOwnerMemberLeafV1>,
 }
 
 impl ScopeLeaves<'_> {
     fn leaf(
         &self,
-        kind: Kind,
+        kind: WorldArtifactKindV1,
         native_digest: Hash,
         native_bytes: &[u8],
         mut children: Vec<Hash>,
     ) -> Result<WorldArtifactLeafV1, ManifestOwnerAdmissionErrorV1> {
-        let classification =
-            (self.classify)(kind, native_digest).ok_or(AdmissionError::InvalidBatch)?;
+        let classification = (self.classify)(kind, native_digest)
+            .ok_or(ManifestOwnerAdmissionErrorV1::InvalidBatch)?;
         children.sort_unstable();
         WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
             scope: self.scope,
@@ -606,25 +638,33 @@ impl ScopeLeaves<'_> {
             key_dependencies: classification.key_dependencies,
             child_node_hashes: children,
         })
-        .map_err(|_| AdmissionError::InvalidBatch)
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::InvalidBatch)
     }
 
-    /// Register one member leaf; an identical `(kind, digest)` deduplicates.
+    /// Register one member leaf under its `(kind, native digest)` key.
+    ///
+    /// An identical registration deduplicates. The native digest fixes the
+    /// bytes and children, so a second, different leaf can only come from a
+    /// classifier that answers one key inconsistently; that conflict rejects.
     fn member(
         &mut self,
-        kind: Kind,
+        kind: WorldArtifactKindV1,
         native_digest: Hash,
         native_bytes: &[u8],
         children: Vec<Hash>,
     ) -> Result<Hash, ManifestOwnerAdmissionErrorV1> {
         let leaf = self.leaf(kind, native_digest, native_bytes, children)?;
-        let address = leaf.digest();
-        self.members
+        let recorded = self
+            .members
             .entry((kind, native_digest))
             .or_insert_with(|| ManifestOwnerMemberLeafV1 {
-                leaf,
+                leaf: leaf.clone(),
                 native_bytes: native_bytes.to_vec(),
             });
-        Ok(address)
+        if recorded.leaf == leaf {
+            Ok(leaf.digest())
+        } else {
+            Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+        }
     }
 }

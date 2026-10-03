@@ -18,10 +18,10 @@ use pos_core::{
     ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
-    ManifestOwnerAdmissionVerifierV1, ManifestOwnerConsumerReferenceV1,
-    ManifestOwnerLeafClassificationV1, ManifestOwnerMemberLeafClassV1, ManifestOwnerPolicyCopiesV1,
-    ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1,
-    ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
+    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
+    ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
+    ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
     ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptInputV1,
     ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1, ManifestSlotBindingRowV1,
     ManifestSlotBindingV1, OutputPolicyClosureEnvelopeV1, OwnerIdV1, Plugin, PluginId,
@@ -431,11 +431,11 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
         _timeline_id: TimelineId,
         _scope: Hash,
         members: &ManifestOwnerScopeMembersV1,
-    ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
         Ok(members
             .leaves
             .iter()
-            .map(|member| ManifestOwnerMemberLeafClassV1::of_leaf(&member.leaf))
+            .map(|member| ManifestOwnerClassifiedLeafV1::of_leaf(&member.leaf))
             .collect())
     }
 }
@@ -1851,7 +1851,7 @@ impl ManifestOwnerAdmissionVerifierV1 for FaultyOwner {
         timeline_id: TimelineId,
         scope: Hash,
         members: &ManifestOwnerScopeMembersV1,
-    ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
         self.reject_at(OwnerFault::MemberLeaves)?;
         self.inner
             .classify_scope_member_leaves(timeline_id, scope, members)

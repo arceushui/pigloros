@@ -271,9 +271,10 @@ pub use manifest_owner_link::{
 };
 pub use manifest_owner_members::{
     build_manifest_owner_scope_v1, validate_manifest_owner_lease_replacement_v1,
-    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
-    ManifestOwnerMemberLeafClassV1, ManifestOwnerMemberLeafV1, ManifestOwnerPolicySourceV1,
+    ManifestOwnerClassifiedLeafV1, ManifestOwnerConsumerReferenceV1,
+    ManifestOwnerLeafClassificationV1, ManifestOwnerMemberLeafV1, ManifestOwnerPolicySourceV1,
     ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1,
+    MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1,
 };
 pub use repro_manifest_root::{
     ReproManifestRootErrorV1, ReproManifestRootInputV1, ReproManifestRootV1,

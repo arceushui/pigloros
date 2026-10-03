@@ -17,8 +17,8 @@ use pos_core::{
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1,
-    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
-    ManifestOwnerMemberLeafClassV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1,
+    ManifestOwnerClassifiedLeafV1, ManifestOwnerConsumerReferenceV1,
+    ManifestOwnerLeafClassificationV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1,
     ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1,
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
     ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId, TimelineId,
@@ -103,7 +103,7 @@ impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
         _timeline_id: TimelineId,
         _scope: Hash,
         members: &ManifestOwnerScopeMembersV1,
-    ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
         Ok(member_classes(members))
     }
 }
@@ -111,11 +111,11 @@ impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
 /// Echo the classification recorded in each member leaf, in leaf order.
 pub(crate) fn member_classes(
     members: &ManifestOwnerScopeMembersV1,
-) -> Vec<ManifestOwnerMemberLeafClassV1> {
+) -> Vec<ManifestOwnerClassifiedLeafV1> {
     members
         .leaves
         .iter()
-        .map(|member| ManifestOwnerMemberLeafClassV1::of_leaf(&member.leaf))
+        .map(|member| ManifestOwnerClassifiedLeafV1::of_leaf(&member.leaf))
         .collect()
 }
 

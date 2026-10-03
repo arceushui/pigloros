@@ -1105,6 +1105,9 @@ const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artif
              REFERENCES adapter_recording_sessions(owner_reference, run_operation_id)
      );";
 
+// `manifest_owner_member_leaves.native_bytes <= 16777216` mirrors
+// `pos_core::MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1`, which preparation
+// enforces first, so the memory and SQLite stores accept the same members.
 const MANIFEST_OWNER_ADMISSION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS manifest_owner_admission_state (
          owner_id BLOB PRIMARY KEY CHECK (length(owner_id) = 32),
          configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
@@ -7065,39 +7068,59 @@ fn sqlite_latest_manifest_owner_lease(
                 owner_id.as_slice(),
                 timeline_id.inner().to_bytes().as_slice(),
             ],
-            sqlite_blob_pair,
+            sqlite_manifest_owner_lease,
         )
         .optional()
-        .map(|lease| lease.map(sqlite_manifest_owner_lease))
         .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)
 }
 
+/// Map one `(rtp1_bytes, rls1_bytes)` lease row to a leaf-less member record.
 fn sqlite_manifest_owner_lease(
-    (rtp1_bytes, rls1_bytes): (Vec<u8>, Vec<u8>),
-) -> ManifestOwnerScopeMembersV1 {
-    ManifestOwnerScopeMembersV1 {
-        rtp1_bytes,
-        rls1_bytes,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ManifestOwnerScopeMembersV1> {
+    Ok(ManifestOwnerScopeMembersV1 {
+        rtp1_bytes: row.get(0)?,
+        rls1_bytes: row.get(1)?,
         leaves: Vec::new(),
-    }
+    })
 }
 
-fn sqlite_blob_pair(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Vec<u8>, Vec<u8>)> {
-    Ok((row.get(0)?, row.get(1)?))
+/// Raw `manifest_owner_admission_read_limits` columns before decoding.
+struct SqliteReadLimitsRow {
+    max_node_visits: Vec<u8>,
+    max_native_bytes: Vec<u8>,
+    max_combined_depth: u8,
 }
 
-fn sqlite_read_limits_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Vec<u8>, Vec<u8>, u8)> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+fn sqlite_read_limits_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SqliteReadLimitsRow> {
+    Ok(SqliteReadLimitsRow {
+        max_node_visits: row.get(0)?,
+        max_native_bytes: row.get(1)?,
+        max_combined_depth: row.get(2)?,
+    })
+}
+
+/// One joined member row: the canonical WAL1 leaf and its native bytes.
+struct SqliteMemberLeafRow {
+    leaf_cbor: Vec<u8>,
+    native_bytes: Vec<u8>,
+}
+
+fn sqlite_member_leaf_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SqliteMemberLeafRow> {
+    Ok(SqliteMemberLeafRow {
+        leaf_cbor: row.get(0)?,
+        native_bytes: row.get(1)?,
+    })
 }
 
 fn sqlite_manifest_owner_member_leaf(
-    (leaf, native_bytes): (Vec<u8>, Vec<u8>),
+    row: SqliteMemberLeafRow,
 ) -> Result<ManifestOwnerMemberLeafV1, ManifestOwnerAdmissionErrorV1> {
-    let decoded = WorldArtifactLeafV1::from_canonical_cbor(&leaf)
+    let leaf = WorldArtifactLeafV1::from_canonical_cbor(&row.leaf_cbor)
         .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
     Ok(ManifestOwnerMemberLeafV1 {
-        leaf: decoded,
-        native_bytes,
+        leaf,
+        native_bytes: row.native_bytes,
     })
 }
 
@@ -7166,6 +7189,10 @@ fn sqlite_insert_manifest_owner_members(
 /// Register one scoped member leaf: an identical WAL1 registration (whose
 /// native digest and length fix its bytes) deduplicates; any other leaf under
 /// the same `(scope, kind, native digest)` key conflicts.
+///
+/// Native bytes are deliberately not compared: preparation derived them from
+/// the native records and the leaf's native digest commits to them, so an
+/// equal leaf can only carry equal bytes.
 fn sqlite_insert_manifest_owner_member_leaf(
     connection: &Connection,
     scope: Hash,
@@ -7710,11 +7737,11 @@ fn sqlite_read_manifest_owner_read_limits(
         )
         .optional()
         .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
-    let (visits, bytes, depth) = row.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let row = row.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
     Ok(WorldClosureReadLimitsV1 {
-        max_node_visits: manifest_owner_generation(visits)?,
-        max_native_bytes: manifest_owner_generation(bytes)?,
-        max_combined_depth: depth,
+        max_node_visits: manifest_owner_generation(row.max_node_visits)?,
+        max_native_bytes: manifest_owner_generation(row.max_native_bytes)?,
+        max_combined_depth: row.max_combined_depth,
     })
 }
 
@@ -7731,17 +7758,15 @@ fn sqlite_read_manifest_owner_scope_members(
         generation_bytes.as_slice(),
         timeline_bytes.as_slice(),
     ];
-    let lease = connection
+    let mut members = connection
         .query_row(
             "SELECT rtp1_bytes, rls1_bytes FROM manifest_owner_scope_leases
              WHERE owner_id = ?1 AND configuration_generation = ?2 AND timeline_id = ?3",
             key,
-            sqlite_blob_pair,
+            sqlite_manifest_owner_lease,
         )
         .optional()
-        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
-    let mut members = lease
-        .map(sqlite_manifest_owner_lease)
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?
         .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
     let mut statement = connection
         .prepare(
@@ -7756,7 +7781,7 @@ fn sqlite_read_manifest_owner_scope_members(
         )
         .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
     let rows = statement
-        .query_map(key, sqlite_blob_pair)
+        .query_map(key, sqlite_member_leaf_row)
         .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
         .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
     drop(statement);

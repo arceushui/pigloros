@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pos_core::output_policy::{OutputPolicyInputV1, OutputPolicyV1};
@@ -13,15 +14,16 @@ use pos_core::{
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionRequestV1,
-    ManifestOwnerAdmissionVerifierV1, ManifestOwnerConsumerReferenceV1,
-    ManifestOwnerLeafClassificationV1, ManifestOwnerMemberLeafClassV1, ManifestOwnerMemberLeafV1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
+    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1, ManifestOwnerMemberLeafV1,
     ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
     ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
     ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1,
     PluginId, TimelineId, WorkloadProfileV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
     WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldClosureReadLimitsV1,
     WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
-    WorldReplayClosureV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    WorldReplayClosureV1, MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1,
+    MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 use pos_store::{memory::MemoryStore, ManifestOwnerAdmissionPersistencePortV1};
 
@@ -193,11 +195,11 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
         _timeline_id: TimelineId,
         _scope: Hash,
         members: &ManifestOwnerScopeMembersV1,
-    ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
         let mut classes = members
             .leaves
             .iter()
-            .map(|member| ManifestOwnerMemberLeafClassV1::of_leaf(&member.leaf))
+            .map(|member| ManifestOwnerClassifiedLeafV1::of_leaf(&member.leaf))
             .collect::<Vec<_>>();
         match self.member_fault {
             MemberFault::Accept => Ok(classes),
@@ -1262,7 +1264,6 @@ fn scope_builder_records_lease_members_edges_and_reference_states() -> TestResul
     for member in &members.leaves {
         let leaf = member.leaf.as_input();
         let state = reference_state(leaf.kind);
-        assert_eq!(member.state(), state);
         assert_eq!(
             member.native_bytes.is_empty(),
             state != ArtifactStateV1::Retained
@@ -1404,6 +1405,34 @@ fn scope_builder_rejects_inconsistent_native_members() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn scope_builder_deduplicates_identical_members_and_rejects_conflicts() -> TestResult {
+    let lease = default_lease(timeline(1))?;
+    let mut source = scope_source([7; 32], &lease, &sources()?)?;
+    let single = build_manifest_owner_scope_v1(&source, &*structural())?;
+    let reference = source.consumer_references[0];
+    source.consumer_references.push(reference);
+    assert_eq!(
+        build_manifest_owner_scope_v1(&source, &*structural())?,
+        single
+    );
+    let answered = Cell::new(false);
+    let inconsistent = |kind: WorldArtifactKindV1, _: Hash| {
+        let repeated = kind == WorldArtifactKindV1::Schema && answered.replace(true);
+        let data_class = if repeated {
+            ArtifactDataClassV1::PublicRecord
+        } else {
+            ArtifactDataClassV1::StructuralAuditMetadata
+        };
+        Some(classification(data_class))
+    };
+    assert_eq!(
+        build_manifest_owner_scope_v1(&source, &inconsistent),
+        Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+    );
+    Ok(())
+}
+
 fn recorded_members(lease: &WorldRetentionLeaseV1) -> FixtureResult<ManifestOwnerScopeMembersV1> {
     Ok(ManifestOwnerScopeMembersV1 {
         rtp1_bytes: retention_policy()?.to_canonical_cbor(),
@@ -1418,6 +1447,8 @@ fn lease_replacement_never_extends_the_recorded_lease() -> TestResult {
     let extension = Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
     for (closes_day, deadline_day, expected) in [
         (11, 111, Ok(())),
+        (11, 110, Ok(())),
+        (10, 111, Ok(())),
         (10, 110, Ok(())),
         (12, 111, extension),
         (11, 112, extension),
@@ -1485,6 +1516,7 @@ fn preparation_checks_read_limits_and_the_retained_byte_budget() -> TestResult {
             Err(ManifestOwnerAdmissionErrorV1::BoundExceeded),
         ),
         (read_limits(1, retained, 1), Ok(())),
+        (read_limits(1, retained, 32), Ok(())),
     ] {
         let mut candidate = valid.clone();
         candidate.read_limits = limits;
@@ -1497,6 +1529,33 @@ fn preparation_checks_read_limits_and_the_retained_byte_budget() -> TestResult {
             prepare_manifest_owner_admission_v1(candidate, &owner, None).map(drop),
             expected
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn preparation_bounds_each_retained_member() -> TestResult {
+    let timeline_id = timeline(35);
+    let operation_id = hash(135);
+    let valid = request(genesis([35; 32], operation_id), &[timeline_id])?;
+    let cap = MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1;
+    let bound = Err(ManifestOwnerAdmissionErrorV1::BoundExceeded);
+    // At the cap the member passes the bound and fails only the derivation.
+    let underived = Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
+    for (length, digest, prepared) in [(cap, Ok(()), underived), (cap + 1, bound, bound)] {
+        let mut candidate = valid.clone();
+        candidate.read_limits.max_native_bytes = u64::MAX;
+        candidate.timelines[0].members.leaves[0].native_bytes = vec![0; length];
+        assert_eq!(
+            manifest_owner_admission_intent_digest_v1(&candidate).map(drop),
+            digest
+        );
+        let owner = FixtureOwner::new(vec![timeline_id], operation_id);
+        assert_eq!(
+            prepare_manifest_owner_admission_v1(candidate, &owner, None).map(drop),
+            prepared
+        );
+        assert_eq!(owner.signatures_issued.load(Ordering::SeqCst), 0);
     }
     Ok(())
 }
@@ -1568,7 +1627,7 @@ fn underived_requests(
     let references = &mut retained_reference.timelines[0].members.leaves;
     let audience = references
         .iter_mut()
-        .find(|member| member.state() == ArtifactStateV1::MissingFrozenInput)
+        .find(|member| member.leaf.as_input().kind == WorldArtifactKindV1::AudiencePolicy)
         .ok_or("missing audience reference leaf")?;
     audience.native_bytes = vec![1];
     let mut optional_view = valid.clone();

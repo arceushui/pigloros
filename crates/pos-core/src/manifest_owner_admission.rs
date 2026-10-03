@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use crate::manifest_owner_members::{
     validate_scope_budgets, validate_scope_members, verify_member_classes,
-    ManifestOwnerMemberLeafClassV1, ManifestOwnerScopeMembersV1,
+    ManifestOwnerClassifiedLeafV1, ManifestOwnerScopeMembersV1,
 };
 use crate::output_policy::OutputPolicyV1;
 use crate::{
@@ -246,7 +246,7 @@ pub trait ManifestOwnerAdmissionVerifierV1: Send + Sync {
         timeline_id: TimelineId,
         scope: Hash,
         members: &ManifestOwnerScopeMembersV1,
-    ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1>;
+    ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1>;
 }
 
 /// Exact Required native bytes and WAL1 leaves for one admitted Plugin.
@@ -669,7 +669,10 @@ pub trait ManifestOwnerAdmissionPersistencePortV1 {
     /// # Errors
     /// Returns `OwnerRejected` for a lease extension, otherwise `Conflict`,
     /// `CorruptState`, or `StorageFailure`; failure leaves no partial
-    /// generation or visible receipt.
+    /// generation or visible receipt. `Conflict` is the intended error for a
+    /// member leaf that differs from one an earlier transaction persisted
+    /// under the same key; request-shape faults never reach the store and are
+    /// rejected as `InvalidBatch` during preparation.
     fn commit_manifest_owner_admission_v1(
         &mut self,
         batch: PreparedManifestOwnerAdmissionV1,

@@ -11290,6 +11290,9 @@ fn memory_validate_manifest_owner_successor(
                 &timeline.members,
             )?;
         }
+        // Native bytes are deliberately not compared: preparation derived
+        // them from the native records and the leaf's native digest commits
+        // to them, so an equal leaf can only carry equal bytes.
         if timeline.members.leaves.iter().any(|member| {
             store
                 .manifest_owner_member_leaves
@@ -14122,7 +14125,7 @@ mod local_cut_owner_coverage {
         LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutSealInputV2, LocalCutSealV2,
         LocalCutTableRefV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
         ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1,
-        ManifestOwnerMemberLeafClassV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
+        ManifestOwnerClassifiedLeafV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
         ManifestSlotAdmissionReceiptV1,
     };
@@ -14248,7 +14251,7 @@ mod local_cut_owner_coverage {
             _timeline_id: TimelineId,
             _scope: Hash,
             members: &ManifestOwnerScopeMembersV1,
-        ) -> Result<Vec<ManifestOwnerMemberLeafClassV1>, ManifestOwnerAdmissionErrorV1> {
+        ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
             Ok(member_classes(members))
         }
     }
