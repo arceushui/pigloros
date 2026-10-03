@@ -256,7 +256,18 @@ fn admitted_scope(
             key_dependencies: Vec::new(),
         })
     };
-    Ok(build_manifest_owner_scope_v1(&source, &classify)?)
+    let scope = build_manifest_owner_scope_v1(&source, &classify)?;
+    for copy in &scope.policy_copies {
+        let admitted = sources
+            .iter()
+            .find(|source| source.plugin_id() == copy.plugin_id)
+            .ok_or("missing admitted Plugin source")?;
+        assert_eq!(
+            copy.opc1_leaf.as_input().native_digest,
+            admitted.closure_hash()
+        );
+    }
+    Ok(scope)
 }
 
 fn reference_leaf(

@@ -19,11 +19,12 @@ use pos_core::{
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1,
     ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
     ManifestOwnerMemberLeafClassV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1,
-    ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1,
+    ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1,
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
     ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId, TimelineId,
     WorkloadProfileV1, WorldArtifactKindV1, WorldClosureReadLimitsV1, WorldConsumerSetInputV1,
     WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
+
 };
 
 pub(crate) type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -196,14 +197,25 @@ fn budget(plugin_id: PluginId, profile: &[u8]) -> Fallible<ExecutableBudgetPolic
 
 /// Self-consistent EOP1/OPC1 pair; even seeds carry a non-empty EPF1.
 pub(crate) fn policy_and_closure(plugin_id: PluginId, seed: u8) -> Fallible<PolicySource> {
-    let retention = retention_policy()?;
-    let implementation = format!("implementation-{seed}").into_bytes();
-    let configuration = format!("CFG1-{seed}").into_bytes();
-    let profile = if seed.is_multiple_of(2) {
+    let (policy, members) = policy_members(plugin_id, seed)?;
+    Ok((policy, closure_bytes(members)))
+}
+
+/// Even seeds carry a non-empty EPF1; odd seeds use the Generated profile.
+fn fixture_profile(seed: u8) -> Vec<u8> {
+    if seed.is_multiple_of(2) {
         format!("EPF1-{seed}").into_bytes()
     } else {
         Vec::new()
-    };
+    }
+}
+
+/// The EOP1 and its six OPC1 members in closure order.
+fn policy_members(plugin_id: PluginId, seed: u8) -> Fallible<(OutputPolicyV1, [Vec<u8>; 6])> {
+    let retention = retention_policy()?;
+    let implementation = format!("implementation-{seed}").into_bytes();
+    let configuration = format!("CFG1-{seed}").into_bytes();
+    let profile = fixture_profile(seed);
     let budget = budget(plugin_id, &profile)?;
     let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
         plugin_id,
@@ -223,13 +235,18 @@ pub(crate) fn policy_and_closure(plugin_id: PluginId, seed: u8) -> Fallible<Poli
         profile,
         retention.to_canonical_cbor(),
     ];
+    Ok((policy, members))
+}
+
+/// Frame OPC1 members with their big-endian lengths.
+fn closure_bytes(members: [Vec<u8>; 6]) -> Vec<u8> {
     let mut closure = b"OPC1".to_vec();
     for member in members {
         let length = u64::try_from(member.len()).unwrap_or(u64::MAX);
         closure.extend_from_slice(&length.to_be_bytes());
         closure.extend_from_slice(&member);
     }
-    Ok((policy, closure))
+    closure
 }
 
 pub(crate) fn opc1_digest(bytes: &[u8]) -> Hash {
@@ -278,7 +295,25 @@ pub(crate) fn timeline_request(
     timeline_id: TimelineId,
     sources: &[PolicySource],
 ) -> Fallible<ManifestOwnerTimelineAdmissionRequestV1> {
-    let source = ManifestOwnerScopeSourceV1 {
+    let source = scope_source(owner, timeline_id, sources)?;
+    let scope = build_manifest_owner_scope_v1(&source, &|_, _| Some(structural_classification()))?;
+    let wcs1 = fixture_wcs1(&scope, sources)?;
+    Ok(ManifestOwnerTimelineAdmissionRequestV1 {
+        timeline_id,
+        scope: scope.scope,
+        wcs1,
+        policy_copies: scope.policy_copies,
+        members: scope.members,
+    })
+}
+
+/// Native records behind one fixture scope: a real lease and both Plugins.
+fn scope_source(
+    owner: [u8; 32],
+    timeline_id: TimelineId,
+    sources: &[PolicySource],
+) -> Fallible<ManifestOwnerScopeSourceV1> {
+    Ok(ManifestOwnerScopeSourceV1 {
         owner_id: owner,
         timeline_id,
         rtp1_bytes: retention_policy()?.to_canonical_cbor(),
@@ -296,34 +331,42 @@ pub(crate) fn timeline_request(
                 opc1_bytes: closure.clone(),
             })
             .collect(),
-    };
-    let scope = build_manifest_owner_scope_v1(&source, &|_, _| Some(structural_classification()))?;
-    let producer = sources.first().ok_or("missing fixture policy")?;
-    let reference = |kind| {
-        scope
-            .members
-            .leaves
-            .iter()
-            .find(|member| member.leaf.as_input().kind == kind)
-            .map(|member| member.leaf.digest())
-            .ok_or("missing fixture reference leaf")
-    };
-    let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-        scope: scope.scope,
-        consumers: vec![WorldConsumerV1::new(
-            "local-observer".to_owned(),
-            reference(WorldArtifactKindV1::ReducerImplementation)?,
-            reference(WorldArtifactKindV1::Schema)?,
-            reference(WorldArtifactKindV1::RuntimeIdentity)?,
-        )?],
-        producers: vec![WorldProducerV1::new(plugin(1), producer.0.digest())?],
-        optional_view_roots: Vec::new(),
-    })?;
-    Ok(ManifestOwnerTimelineAdmissionRequestV1 {
-        timeline_id,
-        scope: scope.scope,
-        wcs1,
-        policy_copies: scope.policy_copies,
-        members: scope.members,
     })
+}
+
+/// WCS1 naming the producer and the scope's derived reference leaves.
+fn fixture_wcs1(
+    scope: &ManifestOwnerScopeV1,
+    sources: &[PolicySource],
+) -> Fallible<WorldConsumerSetV1> {
+    let producer = sources.first().ok_or("missing fixture policy")?;
+    let consumer = fixture_consumer(scope)?;
+    let producer = WorldProducerV1::new(plugin(1), producer.0.digest())?;
+    WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+        scope: scope.scope,
+        consumers: vec![consumer],
+        producers: vec![producer],
+        optional_view_roots: Vec::new(),
+    })
+    .map_err(Into::into)
+}
+
+/// The one WCS1 consumer naming the scope's kind7/8/9 reference leaves.
+fn fixture_consumer(scope: &ManifestOwnerScopeV1) -> Fallible<WorldConsumerV1> {
+    let reducer = reference_leaf(scope, WorldArtifactKindV1::ReducerImplementation)?;
+    let schema = reference_leaf(scope, WorldArtifactKindV1::Schema)?;
+    let runtime = reference_leaf(scope, WorldArtifactKindV1::RuntimeIdentity)?;
+    WorldConsumerV1::new("local-observer".to_owned(), reducer, schema, runtime)
+        .map_err(Into::into)
+}
+
+/// WAL1 address of the scope's reference leaf of one kind.
+fn reference_leaf(scope: &ManifestOwnerScopeV1, kind: WorldArtifactKindV1) -> Fallible<Hash> {
+    scope
+        .members
+        .leaves
+        .iter()
+        .find(|member| member.leaf.as_input().kind == kind)
+        .map(|member| member.leaf.digest())
+        .ok_or_else(|| "missing fixture reference leaf".into())
 }
