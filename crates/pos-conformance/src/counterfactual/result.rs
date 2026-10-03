@@ -28,6 +28,7 @@
 //!   records a recomputation, so it never names generation 0.
 //! - Any terminal error code is accepted under `Failed`; CFR1 does not
 //!   restrict which codes may end a recomputation.
+//!
 //! The largest structurally valid record is far below the 16 MiB bound, which
 //! is therefore enforced on untrusted input before any allocation.
 
