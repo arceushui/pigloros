@@ -2904,43 +2904,38 @@ impl PluginRegistry {
     fn generated_output_binding(
         plugin: &dyn Plugin,
     ) -> Result<OutputPolicyBindingV1, RuntimeError> {
-        let plugin_version = plugin.version().to_owned();
-        let (policy, budget) = Self::generated_output_binding_with_budget_input(
-            plugin,
-            &plugin_version,
-            Self::generated_budget_input(plugin),
-        )?;
-        Ok(OutputPolicyBindingV1::from_source_with_policy(
-            plugin,
-            OutputPolicySourceV1::Generated,
-            policy,
-            budget,
-            &[],
-            "deterministic-local-v1",
-        )?)
+        Self::generated_output_binding_with_configuration_details(plugin, &[])
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    /// Build every generated binding. The duplicate-declaration check runs
+    /// before any policy is built, so no generated binding can skip it and a
+    /// type listed twice fails with the closed ownership error rather than as
+    /// a malformed policy (ADR-024 Revision 1).
     fn generated_output_binding_with_configuration_details(
         plugin: &dyn Plugin,
         configuration_details: &[u8],
     ) -> Result<OutputPolicyBindingV1, RuntimeError> {
-        let plugin_version = plugin.version().to_owned();
-        let (policy, budget) = Self::generated_output_binding_with_budget_input_and_details(
-            plugin,
-            &plugin_version,
-            Self::generated_budget_input(plugin),
-            configuration_details,
-        )?;
-        OutputPolicyBindingV1::from_source_with_policy(
-            plugin,
-            OutputPolicySourceV1::Generated,
-            policy,
-            budget,
-            configuration_details,
-            "deterministic-local-v1",
-        )
-        .map_err(RuntimeError::from)
+        crate::output_admission::reject_duplicate_declaration(plugin)
+            .map_err(RuntimeError::from)
+            .and_then(|()| {
+                Self::generated_output_binding_with_budget_input_and_details(
+                    plugin,
+                    plugin.version(),
+                    Self::generated_budget_input(plugin),
+                    configuration_details,
+                )
+            })
+            .and_then(|(policy, budget)| {
+                OutputPolicyBindingV1::from_source_with_policy(
+                    plugin,
+                    OutputPolicySourceV1::Generated,
+                    policy,
+                    budget,
+                    configuration_details,
+                    "deterministic-local-v1",
+                )
+                .map_err(RuntimeError::from)
+            })
     }
 
     fn generated_budget_input(plugin: &dyn Plugin) -> pos_core::ExecutableBudgetPolicyInputV1 {
@@ -2982,6 +2977,7 @@ impl PluginRegistry {
         }
     }
 
+    #[cfg(test)]
     fn generated_output_binding_with_budget_input(
         plugin: &dyn Plugin,
         plugin_version: &str,
@@ -3393,6 +3389,9 @@ impl PluginRegistry {
 
     /// The one shared ownership check of every registration path that
     /// installs owned Event types (ADR-024 Revision 1 Decisions 1-3, 7).
+    ///
+    /// Its within-declaration arm (the first repeat of an earlier `Kind`) has
+    /// the same semantics as `output_admission::reject_duplicate_declaration`.
     ///
     /// It rejects a type listed twice in one declaration, a type another
     /// registration already owns, and a host pre-registered type that no

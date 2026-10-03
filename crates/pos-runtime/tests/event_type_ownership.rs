@@ -6,12 +6,13 @@
 
 use pos_core::{
     state::{Reducer, State},
-    Capability, Event, Kind, Plugin, PluginId,
+    Capability, Event, Hash, Kind, Plugin, PluginId,
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, OutputPolicyBindingV1,
-    OutputPolicySourceV1, PluginComposition, PluginCompositionErrorV1, PluginRegistry,
-    RuntimeError, StepOutput,
+    recorder::RECORDER_EVENT_TYPE, DomainImplementationKindV1, Driver, ObservationView,
+    OutputAdmissionErrorV1, OutputPolicyBindingV1, OutputPolicySourceV1, PluginAvailabilityV1,
+    PluginComposition, PluginCompositionErrorV1, PluginIsolationV1, PluginPinV1,
+    PluginRegistrationV1, PluginRegistry, RuntimeError, StepOutput,
 };
 
 trait TestValueExt<T> {
@@ -198,6 +199,137 @@ fn a_declaration_listing_a_type_twice_is_rejected_before_any_other_check() {
 
     assert_eq!(error, Some(owner_error("dup.type")));
     assert_eq!(snapshot(&registry), before);
+}
+
+fn pinned_registration(byte: u8) -> PluginRegistrationV1 {
+    PluginRegistrationV1::new(
+        PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([byte; 32]),
+            vec![format!("duplicate-role-{byte}")],
+        )
+        .test_ok(),
+        PluginAvailabilityV1::Available,
+    )
+}
+
+/// The test-support Driver path takes a binding built from the Plugin.
+fn register_test_driver(
+    registry: &mut PluginRegistry,
+    plugin: &OwnerPlugin,
+) -> Result<(), RuntimeError> {
+    OutputPolicyBindingV1::from_source(
+        plugin,
+        OutputPolicySourceV1::Generated,
+        &[],
+        "deterministic-local-v1",
+    )
+    .map_err(RuntimeError::from)
+    .and_then(|binding| {
+        registry.register_test_driver_with_verified_output_policy(
+            plugin.id,
+            binding,
+            Box::new(IdleDriver),
+        )
+    })
+}
+
+/// Register `plugin` through one named public registration path.
+fn register_on_path(
+    registry: &mut PluginRegistry,
+    path: &str,
+    plugin: &OwnerPlugin,
+) -> Result<(), RuntimeError> {
+    match path {
+        "generated" => registry.register_generated(plugin, None, None),
+        "generated-with-approver" => {
+            registry.register_generated_with_approver(plugin, None, None, None, std::iter::empty())
+        }
+        "pinned" => registry.register_pinned_generated(plugin, pinned_registration(1), None, None),
+        "pinned-with-approver" => registry.register_pinned_generated_with_approver(
+            plugin,
+            pinned_registration(2),
+            None,
+            None,
+            None,
+            std::iter::empty(),
+        ),
+        "local" => registry.register_local(plugin, vec!["duplicate-local".to_owned()], None, None),
+        _ => register_test_driver(registry, plugin),
+    }
+}
+
+/// ADR-024 Revision 1 (#505): a declaration that lists one type twice fails
+/// with the closed ownership error on every registration path that builds
+/// its own binding, before any policy is constructed, and leaves the
+/// registry unchanged.
+#[test]
+fn a_declaration_listing_a_type_twice_fails_with_the_ownership_error_on_every_path() {
+    for path in [
+        "generated",
+        "generated-with-approver",
+        "pinned",
+        "pinned-with-approver",
+        "local",
+        "test-driver",
+    ] {
+        let duplicate = OwnerPlugin::new("duplicate", &["dup.other", "dup.type", "dup.type"]);
+        let mut registry = PluginRegistry::new();
+        let before = snapshot(&registry);
+
+        let error = register_on_path(&mut registry, path, &duplicate);
+
+        assert!(
+            matches!(
+                error,
+                Err(RuntimeError::Composition(
+                    PluginCompositionErrorV1::DuplicateEventTypeOwner { ref event_type }
+                )) if event_type == "dup.type"
+            ),
+            "{path}: {error:?}"
+        );
+        assert_eq!(snapshot(&registry), before, "{path}");
+    }
+}
+
+/// The binding constructor itself reports the duplicate declaration as the
+/// closed ownership error, which the runtime error keeps as a composition
+/// error rather than an output-admission error.
+#[test]
+fn binding_construction_reports_a_duplicate_declaration_as_the_ownership_error() {
+    let duplicate = OwnerPlugin::new("duplicate", &["dup.type", "dup.type"]);
+    let error = OutputPolicyBindingV1::from_source(
+        &duplicate,
+        OutputPolicySourceV1::Generated,
+        &[],
+        "deterministic-local-v1",
+    )
+    .err();
+    let closed = PluginCompositionErrorV1::DuplicateEventTypeOwner {
+        event_type: "dup.type".to_owned(),
+    };
+    assert_eq!(
+        error,
+        Some(OutputAdmissionErrorV1::Composition(closed.clone()))
+    );
+    assert!(matches!(
+        error.map(RuntimeError::from),
+        Some(RuntimeError::Composition(ref inner)) if *inner == closed
+    ));
+    assert!(matches!(
+        RuntimeError::from(OutputAdmissionErrorV1::PluginMismatch),
+        RuntimeError::OutputAdmission(OutputAdmissionErrorV1::PluginMismatch)
+    ));
+    // A declaration without a duplicate still builds its binding.
+    let distinct = OwnerPlugin::new("distinct", &["dup.other", "dup.type"]);
+    let built = OutputPolicyBindingV1::from_source(
+        &distinct,
+        OutputPolicySourceV1::Generated,
+        &[],
+        "deterministic-local-v1",
+    );
+    assert!(built.is_ok());
 }
 
 #[test]
