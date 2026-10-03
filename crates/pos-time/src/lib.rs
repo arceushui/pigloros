@@ -771,7 +771,7 @@ mod tests {
     fn a_late_refused_handoff_records_the_guard_release_late_signal() {
         let health = ReleaseHealthV1::new();
         let refused = crate::test_support::with_mismatched_release_health(&health, |release| {
-            let mut late = ScriptedGuardMonotonicSourceV1::new([Duration::from_secs(3_600)]);
+            let mut late = ScriptedGuardMonotonicSourceV1::new([Duration::from_hours(1)]);
             let staged = StagedProtectedOutputV1::stage(StagedArtifactBytesV1::new(vec![7]));
             handoff_with_p2_on(
                 release.guard,
