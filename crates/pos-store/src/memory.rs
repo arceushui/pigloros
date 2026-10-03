@@ -11316,7 +11316,7 @@ fn memory_latest_manifest_owner_admission(
         .map(|(_, snapshot)| snapshot)
 }
 
-fn memory_manifest_owner_member_key(
+const fn memory_manifest_owner_member_key(
     scope: Hash,
     member: &pos_core::ManifestOwnerMemberLeafV1,
 ) -> MemoryManifestOwnerMemberKeyV1 {
@@ -14120,9 +14120,9 @@ mod local_cut_owner_coverage {
         LocalCutCompositionBindingRowV1, LocalCutManifestBindingRowV1,
         LocalCutManifestBindingTableV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
         LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutSealInputV2, LocalCutSealV2,
-        LocalCutTableRefV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
-        ManifestOwnerAdmissionVerifierV1, ManifestOwnerMemberLeafClassV1,
-        ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
+        LocalCutTableRefV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
+        ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1,
+        ManifestOwnerMemberLeafClassV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
         ManifestSlotAdmissionReceiptV1,
     };
