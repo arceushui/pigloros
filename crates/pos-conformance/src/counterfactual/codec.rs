@@ -280,7 +280,7 @@ impl<'a> FieldReader<'a> {
         self.next += 1;
         self.slot += 1;
         decoded.unwrap_or_else(|error| {
-            self.failure = self.failure.or(Some(FieldFailure::at(error, slot)));
+            self.failure = self.failure.or_else(|| Some(FieldFailure::at(error, slot)));
             fallback
         })
     }
@@ -375,7 +375,7 @@ impl<'a> FieldReader<'a> {
             None => {
                 self.failure = self
                     .failure
-                    .or(Some(FieldFailure::at(WireError::InvalidEncoding, slot)));
+                    .or_else(|| Some(FieldFailure::at(WireError::InvalidEncoding, slot)));
                 Vec::new()
             }
         }
