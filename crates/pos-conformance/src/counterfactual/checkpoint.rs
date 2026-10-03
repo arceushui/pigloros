@@ -8,8 +8,8 @@
 //! belong to the core `CounterfactualCoordinator`.
 
 use super::codec::{
-    bytes_value, decode_canonical, encode_value, text_value, uint_value, CborLimits, FieldReader,
-    WireError,
+    bytes_value, decode_canonical, encode_value, nonzero, text_value, uint_value, CborLimits,
+    FieldReader, WireError,
 };
 use crate::domain_digest;
 use ciborium::value::Value;
@@ -39,7 +39,6 @@ const LIMITS: CborLimits = CborLimits {
     maximum_items: 4_096,
     allow_simple_values: true,
 };
-const ZERO_DIGEST: [u8; 32] = [0; 32];
 
 /// Closed safe errors exposed by the RCP1 contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,7 +182,7 @@ impl RecomputeCheckpointV1 {
 fn validate_structure(
     checkpoint: &RecomputeCheckpointV1,
 ) -> Result<(), RecomputeCheckpointContractErrorV1> {
-    if checkpoint.plan_digest == ZERO_DIGEST || checkpoint.provenance_root == ZERO_DIGEST {
+    if !nonzero(&checkpoint.plan_digest) || !nonzero(&checkpoint.provenance_root) {
         return Err(RecomputeCheckpointContractErrorV1::FieldOutOfBounds);
     }
     validate_entries(&checkpoint.plugin_state_digests, 0)
@@ -214,14 +213,14 @@ fn validate_entries(
 fn valid_entry(entry: &CheckpointDigestEntryV1) -> bool {
     !entry.owner_id.is_empty()
         && entry.owner_id.len() <= MAX_CHECKPOINT_OWNER_ID_BYTES_V1
-        && entry.digest != ZERO_DIGEST
+        && nonzero(&entry.digest)
 }
 
 fn validate_cursor(cursor: &ExogenousCursorV1) -> Result<(), RecomputeCheckpointContractErrorV1> {
     let consistent = cursor
         .last_descriptor_digest
         .map_or(cursor.consumed_descriptors == 0, |digest| {
-            cursor.consumed_descriptors != 0 && digest != ZERO_DIGEST
+            cursor.consumed_descriptors != 0 && nonzero(&digest)
         });
     if consistent && cursor.consumed_descriptors <= MAX_EXOGENOUS_CURSOR_POSITION_V1 {
         Ok(())
