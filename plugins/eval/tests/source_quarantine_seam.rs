@@ -180,6 +180,7 @@ fn stage_over(
     prefix: &[Event],
 ) -> Result<Vec<EventDraft>, RuntimeError> {
     let head = store.logical_head(timeline).test_ok();
+    registry.compose_non_participant_drivers().test_ok();
     registry.step_all_anchored_protected(timeline, head, token.clone(), 0, prefix)
 }
 

@@ -17,7 +17,7 @@
 use pos_core::{
     AuthorityRegistrySnapshotV1, ErasureProtectedOperationV1, EventDraft, Hash,
     KnowledgeSnapshotV1, ObservationSnapshotV1, PersistedAuthorityV1, PluginId,
-    ReplayClaimEvaluationV1, Seq, TimelineId,
+    ReplayClaimEvaluationV1, ScheduledObservationProfileV1, Seq, TimelineId,
 };
 use pos_state::AuthorizedObservationV1;
 
@@ -88,6 +88,10 @@ impl PluginRegistry {
     /// # Errors
     /// Returns [`RuntimeError::ModeMismatch`] in Replay mode, or
     /// [`RuntimeError::PendingDriverStep`] while a pass is unfinished. Returns
+    /// [`RuntimeError::ScheduledProfile`] before any view is released unless
+    /// every registered Driver is composed participant-bound, and a closed
+    /// authority error for a view of another Participant than its Driver's
+    /// bound one. Returns
     /// [`RuntimeError::NoDriver`] for an unregistered or Driverless Plugin. A
     /// closed authority error covers views out of schedule order, unpaired or
     /// stale authority, views from another base cut, and ambient
@@ -102,9 +106,12 @@ impl PluginRegistry {
     ) -> Result<Vec<EventDraft>, RuntimeError> {
         self.ensure_live_execution()
             .and_then(|()| self.ensure_no_pending_step())
+            .and_then(|()| {
+                self.require_scheduled_profile(ScheduledObservationProfileV1::ParticipantBound)
+            })
             .and_then(|()| self.schedule_indices(views))
             .and_then(|indices| {
-                release_views(timeline, observed_through, views, authorities)
+                self.release_bound_views(timeline, observed_through, views, authorities)
                     .map(|snapshots| (indices, snapshots))
             })
             .and_then(|(indices, snapshots)| {
@@ -122,6 +129,20 @@ impl PluginRegistry {
                     },
                 )
             })
+    }
+
+    /// Release every view and require it to be its own Driver's bound
+    /// Participant's view.
+    fn release_bound_views(
+        &self,
+        timeline: TimelineId,
+        observed_through: Seq,
+        views: &[AuthorizedDriverViewV1],
+        authorities: &[AuthorizedViewAuthorityV1<'_>],
+    ) -> Result<Vec<ObservationSnapshotV1>, RuntimeError> {
+        let snapshots = release_views(timeline, observed_through, views, authorities)?;
+        self.require_bound_participants(views, &snapshots)?;
+        Ok(snapshots)
     }
 
     /// Resolve each view's registered Plugin and require strictly ascending

@@ -572,6 +572,7 @@ mod tests {
                 Box::new(driver),
             )
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
         registry
             .schemas
             .register(EventTypeSchema {

@@ -3457,6 +3457,7 @@ mod tests {
                 )),
             )
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
         registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(4))],
@@ -3548,6 +3549,7 @@ mod tests {
                 ))),
             )
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
         registry
             .restore_driver_state(
                 &[TimelineHistorySegment::new(timeline, Seq::from_u64(2))],
@@ -3590,6 +3592,7 @@ mod tests {
                 ))),
             )
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
         registry
     }
 
@@ -3938,6 +3941,7 @@ mod tests {
                 Some(Box::new(driver)),
             )
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
         (registry, calls)
     }
 

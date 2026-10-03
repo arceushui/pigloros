@@ -71,7 +71,8 @@ pub use registry::{
     HostCatalogueEntryV1, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
     HumanActionReceiptV1, InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
     LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1, LocalAdapterProviderV1,
-    LocalAdapterSessionV1, OperationContext, PluginRegistry, ScheduledPassAdmissionV1,
+    LocalAdapterSessionV1, OperationContext, PluginRegistry, ScheduledDriverBindingV1,
+    ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,

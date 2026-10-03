@@ -870,6 +870,7 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
         None,
         Some(Box::new(FixtureDriver)),
     )?;
+    admitted.compose_non_participant_drivers()?;
     assert!(matches!(
         admitted.step_all_anchored(timeline, pos_core::Seq::ZERO),
         Ok(drafts) if drafts.len() == 1
@@ -885,6 +886,7 @@ fn registry_requires_the_policy_before_a_driver_output_can_stage() -> TestResult
         None,
         Some(Box::new(FixtureDriver)),
     )?;
+    generated.compose_non_participant_drivers()?;
     assert!(matches!(
         generated.step_all_anchored(timeline, pos_core::Seq::ZERO),
         Ok(drafts) if drafts.len() == 1
@@ -1156,7 +1158,60 @@ fn generated_registration_rejects_duplicate_owned_event_types() {
     let mut registry = PluginRegistry::new();
     assert!(matches!(
         registry.register_generated(&plugin, None, None),
+        Err(RuntimeError::Composition(
+            pos_runtime::PluginCompositionErrorV1::DuplicateEventTypeOwner { ref event_type }
+        )) if event_type == "plugin.output"
+    ));
+    assert!(registry.is_empty());
+}
+
+/// A Plugin whose empty version no output policy can record.
+struct EmptyVersionPlugin {
+    id: PluginId,
+}
+
+impl Plugin for EmptyVersionPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        "empty-version-output-admission-fixture"
+    }
+
+    fn version(&self) -> &'static str {
+        ""
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new("plugin.output")],
+            ..Capability::default()
+        }
+    }
+}
+
+/// The duplicate-declaration check runs first; every other malformed policy
+/// still fails at policy construction on the generated and binding paths.
+#[test]
+fn other_malformed_policies_still_fail_at_policy_construction() {
+    let plugin = EmptyVersionPlugin {
+        id: PluginId::new(),
+    };
+    let mut registry = PluginRegistry::new();
+    assert!(matches!(
+        registry.register_generated(&plugin, None, None),
         Err(RuntimeError::CapabilityMismatch { .. })
+    ));
+    assert!(registry.is_empty());
+    assert!(matches!(
+        pos_runtime::OutputPolicyBindingV1::from_source(
+            &plugin,
+            OutputPolicySourceV1::Generated,
+            &[],
+            "deterministic-local-v1",
+        ),
+        Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "EOP1" })
     ));
 }
 
@@ -1225,6 +1280,7 @@ fn registered_with_sized_output(
             payload_bytes,
         })),
     )?;
+    registry.compose_non_participant_drivers()?;
     Ok((registry, limit))
 }
 
@@ -1350,6 +1406,7 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
             stepped: false,
         })),
     )?;
+    registry.compose_non_participant_drivers()?;
     let mut store = gated_store()?;
     let timeline = store.create_timeline("output-admission-mixed-batch")?.id();
 

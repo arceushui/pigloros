@@ -72,6 +72,7 @@ fn registry(
             ))),
         )
         .test_ok();
+    registry.compose_non_participant_drivers().test_ok();
     registry
 }
 

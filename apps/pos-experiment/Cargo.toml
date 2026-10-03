@@ -49,5 +49,9 @@ required-features = ["test-support"]
 name = "scheduled_draft_ownership"
 required-features = ["test-support"]
 
+[[test]]
+name = "scheduled_profile_composition"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

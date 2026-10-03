@@ -21,7 +21,8 @@ use pos_core::{
 };
 use pos_runtime::{
     Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
-    RuntimeError, ScheduledAdmissionStoreV1, ScheduledPassAdmissionV1, StepOutput,
+    RuntimeError, ScheduledAdmissionStoreV1, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
+    StepOutput,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use ulid::Ulid;
@@ -417,6 +418,7 @@ fn register(registry: &mut PluginRegistry, driver: ScriptedDriver) {
     };
     // Registration records the owned type's schema; it is never re-registered.
     ok(registry.register_generated(&plugin, None, Some(Box::new(driver))));
+    ok(registry.compose_non_participant_drivers());
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1206,6 +1208,7 @@ fn register_intruder(registry: &mut PluginRegistry, log: &Log) {
         ..driver("intruder", vec![b"forged"], log)
     };
     ok(registry.register_generated(&plugin, None, Some(Box::new(intruder))));
+    ok(registry.compose_non_participant_drivers());
 }
 
 /// Assert the pass was rejected as an unauthorized source and that every
@@ -1382,6 +1385,7 @@ fn register_probe(registry: &mut PluginRegistry, driver: ProbingDriver) {
         reducer: false,
     };
     ok(registry.register_generated(&plugin, None, Some(Box::new(driver))));
+    ok(registry.compose_non_participant_drivers());
 }
 
 /// Register the counting Projection reducer every probe reads from.
@@ -1651,5 +1655,161 @@ fn public_pass_refuses_subscribers_and_hides_projections_from_the_rest() {
             "{name}: {refused}"
         );
         assert_eq!(entries(&log), ["blind:none,none"], "{name}");
+    }
+}
+
+// ── ADR-021 Revision 3 composition-time profiles (#504) ─────────────────────
+
+/// Register `driver` without composing its scheduled observation profile.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn register_unbound(registry: &mut PluginRegistry, driver: ScriptedDriver) -> PluginId {
+    let plugin = TestPlugin {
+        id: PluginId::new(),
+        name: driver.name,
+        event_type: driver.event_type,
+        reducer: false,
+    };
+    ok(registry.register_generated(&plugin, None, Some(Box::new(driver))));
+    plugin.id
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn composition_error(
+    registry: &mut PluginRegistry,
+    bindings: &[(PluginId, ScheduledDriverBindingV1)],
+) -> String {
+    err(registry.compose_scheduled_profiles(bindings)).to_string()
+}
+
+/// The host fixes exactly one profile per registered Driver, only from its
+/// binding: a binding of anything but a registered Driver, a second binding,
+/// an incomplete composition and a mixed one all assign nothing. A complete
+/// non-participant composition then commits its pass on both stores.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn composition_fixes_one_profile_per_driver_before_any_pass() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        let first = register_unbound(&mut registry, driver("first", vec![b"a1"], &log));
+        let second = register_unbound(&mut registry, driver("second", vec![b"b1"], &log));
+        let projection = PluginId::new();
+        ok(registry.register_generated(
+            &TestPlugin {
+                id: projection,
+                name: "projection",
+                event_type: PROJECTION,
+                reducer: true,
+            },
+            Some(Box::new(CountingReducer)),
+            None,
+        ));
+        let non_participant = ScheduledDriverBindingV1::NonParticipant;
+        let participant = ScheduledDriverBindingV1::Participant(entity(30));
+        let unknown = PluginId::new();
+        let duplicate = [(first, non_participant), (first, participant)];
+        let mixed = [(first, participant), (second, non_participant)];
+        let complete = [(first, non_participant), (second, non_participant)];
+
+        assert_eq!(
+            composition_error(&mut registry, &[(unknown, non_participant)]),
+            format!("plugin {unknown} is not a registered scheduled Driver"),
+            "{name}"
+        );
+        assert_eq!(
+            composition_error(&mut registry, &[(projection, non_participant)]),
+            format!("plugin {projection} is not a registered scheduled Driver"),
+            "{name}"
+        );
+        assert_eq!(
+            composition_error(&mut registry, &duplicate),
+            "scheduled Driver 'first' already has an observation profile",
+            "{name}"
+        );
+        assert_eq!(
+            composition_error(&mut registry, &[(first, non_participant)]),
+            "scheduled Driver 'second' has no observation profile assignment",
+            "{name}"
+        );
+        assert_eq!(
+            composition_error(&mut registry, &mixed),
+            "one composition cannot mix participant-bound and non-participant Drivers",
+            "{name}"
+        );
+        assert_eq!(registry.scheduled_binding(first), None, "{name}");
+        assert_eq!(
+            err(registry.step_all_anchored(host.timeline, Seq::ZERO)).to_string(),
+            "scheduled Driver 'first' has no observation profile assignment",
+            "{name}"
+        );
+        assert!(entries(&log).is_empty(), "{name}");
+
+        ok(registry.compose_scheduled_profiles(&complete));
+        assert_eq!(
+            registry.scheduled_binding(second),
+            Some(non_participant),
+            "{name}"
+        );
+        assert_eq!(
+            composition_error(&mut registry, &[(second, non_participant)]),
+            "scheduled Driver 'second' already has an observation profile",
+            "{name}"
+        );
+        ok(registry.compose_non_participant_drivers());
+        ok(registry.step_all_anchored(host.timeline, Seq::ZERO));
+        receipt(host.admit(&mut registry, store.as_mut(), 1));
+        assert_eq!(
+            committed_events(store.as_ref(), host.timeline).len(),
+            2,
+            "{name}"
+        );
+    }
+}
+
+/// A participant-bound Driver is refused before it runs on every anchored and
+/// unanchored path, a host without Participants cannot compose it, and a
+/// Driver registered beside it cannot be composed non-participant. Nothing
+/// is staged or committed on either store.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn participant_bound_drivers_never_stage_outside_their_authorized_views() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        let first = register_unbound(&mut registry, driver("first", vec![b"a1"], &log));
+        let bound = ScheduledDriverBindingV1::Participant(entity(30));
+        ok(registry.compose_scheduled_profiles(&[(first, bound)]));
+        assert_eq!(registry.scheduled_binding(first), Some(bound), "{name}");
+        assert_eq!(
+            bound.profile(),
+            pos_core::ScheduledObservationProfileV1::ParticipantBound
+        );
+        let refusal = "scheduled Driver 'first' is not composed for the NonParticipant profile";
+        let head = ok(store.logical_head(host.timeline));
+        let refusals = [
+            err(registry.step_all_anchored(host.timeline, head)),
+            err(registry.tick_cadenced_anchored(host.timeline, 0, head)),
+            err(registry.step_all(host.timeline)),
+            err(registry.tick_cadenced(host.timeline, 0)),
+            err(registry.compose_non_participant_drivers()),
+        ];
+        for refused in refusals {
+            assert_eq!(refused.to_string(), refusal, "{name}");
+        }
+
+        let second = register_unbound(&mut registry, driver("second", vec![b"b1"], &log));
+        assert_eq!(
+            err(registry.compose_non_participant_drivers()).to_string(),
+            "one composition cannot mix participant-bound and non-participant Drivers",
+            "{name}"
+        );
+        assert_eq!(registry.scheduled_binding(second), None, "{name}");
+        assert!(entries(&log).is_empty(), "{name}");
+        assert!(
+            committed_events(store.as_ref(), host.timeline).is_empty(),
+            "{name}"
+        );
     }
 }

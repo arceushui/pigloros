@@ -27,8 +27,8 @@ use pos_core::{
     },
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentError, ConsentGate, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
-    ErasureProtectedOperationV1, OwnerIdV1, Plugin, ProposedAction, Reducer, Timeline,
-    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ErasureProtectedOperationV1, OwnerIdV1, Plugin, ProposedAction, Reducer,
+    ScheduledObservationProfileV1, Timeline, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
@@ -59,6 +59,7 @@ mod adapter;
 mod authorized_pass;
 mod catalogue;
 mod human_admission;
+mod profile_composition;
 mod scheduled_admission;
 
 pub use adapter::{
@@ -70,6 +71,7 @@ pub use catalogue::{HostCatalogueEntryV1, InstalledPluginFactoryV1, InstalledPlu
 pub use human_admission::{
     HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
 };
+pub use profile_composition::{ScheduledDriverBindingV1, ScheduledProfileErrorV1};
 pub use scheduled_admission::ScheduledPassAdmissionV1;
 
 /// Stable manifest slot of a Plugin in a registry-derived local catalog.
@@ -1184,6 +1186,8 @@ pub struct PluginRegistry {
     pub schemas: SchemaRegistry,
     projections: ProjectionRegistry,
     pending_step: Option<PendingStep>,
+    /// Composition-time scheduled observation profile of each Driver.
+    scheduled_profiles: profile_composition::ScheduledBindings,
     /// Scheduled pass whose admission outcome is unknown; only an exact
     /// retry of its retained basis or an explicit abort may resolve it. Boxed
     /// so the rarely used retained basis does not enlarge every registry.
@@ -1996,6 +2000,7 @@ impl PluginRegistry {
             // runtime and projection work can proceed.
             projections: ProjectionRegistry::new(),
             pending_step: None,
+            scheduled_profiles: profile_composition::ScheduledBindings::new(),
             in_doubt_admission: None,
             run_mode,
             composition_mode,
@@ -2460,14 +2465,19 @@ impl PluginRegistry {
         committed_events: &[Event],
         operation: &OperationContext,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.ensure_live_execution()?;
-        self.step_anchored_transaction_live(
-            timeline,
-            observed_through,
-            selection,
-            committed_events,
-            operation,
-        )
+        self.ensure_live_execution()
+            .and_then(|()| {
+                self.require_scheduled_profile(ScheduledObservationProfileV1::NonParticipant)
+            })
+            .and_then(|()| {
+                self.step_anchored_transaction_live(
+                    timeline,
+                    observed_through,
+                    selection,
+                    committed_events,
+                    operation,
+                )
+            })
     }
 
     fn step_anchored_transaction_live(
@@ -2904,43 +2914,38 @@ impl PluginRegistry {
     fn generated_output_binding(
         plugin: &dyn Plugin,
     ) -> Result<OutputPolicyBindingV1, RuntimeError> {
-        let plugin_version = plugin.version().to_owned();
-        let (policy, budget) = Self::generated_output_binding_with_budget_input(
-            plugin,
-            &plugin_version,
-            Self::generated_budget_input(plugin),
-        )?;
-        Ok(OutputPolicyBindingV1::from_source_with_policy(
-            plugin,
-            OutputPolicySourceV1::Generated,
-            policy,
-            budget,
-            &[],
-            "deterministic-local-v1",
-        )?)
+        Self::generated_output_binding_with_configuration_details(plugin, &[])
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    /// Build every generated binding. The duplicate-declaration check runs
+    /// before any policy is built, so no generated binding can skip it and a
+    /// type listed twice fails with the closed ownership error rather than as
+    /// a malformed policy (ADR-024 Revision 1).
     fn generated_output_binding_with_configuration_details(
         plugin: &dyn Plugin,
         configuration_details: &[u8],
     ) -> Result<OutputPolicyBindingV1, RuntimeError> {
-        let plugin_version = plugin.version().to_owned();
-        let (policy, budget) = Self::generated_output_binding_with_budget_input_and_details(
-            plugin,
-            &plugin_version,
-            Self::generated_budget_input(plugin),
-            configuration_details,
-        )?;
-        OutputPolicyBindingV1::from_source_with_policy(
-            plugin,
-            OutputPolicySourceV1::Generated,
-            policy,
-            budget,
-            configuration_details,
-            "deterministic-local-v1",
-        )
-        .map_err(RuntimeError::from)
+        crate::output_admission::reject_duplicate_declaration(plugin)
+            .map_err(RuntimeError::from)
+            .and_then(|()| {
+                Self::generated_output_binding_with_budget_input_and_details(
+                    plugin,
+                    plugin.version(),
+                    Self::generated_budget_input(plugin),
+                    configuration_details,
+                )
+            })
+            .and_then(|(policy, budget)| {
+                OutputPolicyBindingV1::from_source_with_policy(
+                    plugin,
+                    OutputPolicySourceV1::Generated,
+                    policy,
+                    budget,
+                    configuration_details,
+                    "deterministic-local-v1",
+                )
+                .map_err(RuntimeError::from)
+            })
     }
 
     fn generated_budget_input(plugin: &dyn Plugin) -> pos_core::ExecutableBudgetPolicyInputV1 {
@@ -2982,6 +2987,7 @@ impl PluginRegistry {
         }
     }
 
+    #[cfg(test)]
     fn generated_output_binding_with_budget_input(
         plugin: &dyn Plugin,
         plugin_version: &str,
@@ -3393,6 +3399,9 @@ impl PluginRegistry {
 
     /// The one shared ownership check of every registration path that
     /// installs owned Event types (ADR-024 Revision 1 Decisions 1-3, 7).
+    ///
+    /// Its within-declaration arm (the first repeat of an earlier `Kind`) has
+    /// the same semantics as `output_admission::reject_duplicate_declaration`.
     ///
     /// It rejects a type listed twice in one declaration, a type another
     /// registration already owns, and a host pre-registered type that no
@@ -3993,12 +4002,15 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         now_ns: u128,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.ensure_live_execution()?;
-        self.with_erasure_mut_fence(
-            timeline,
-            ErasureProtectedOperationV1::PluginInput,
-            |registry| registry.tick_cadenced_live(timeline, now_ns),
-        )
+        self.ensure_live_execution()
+            .and_then(|()| self.reject_participant_bound_drivers())
+            .and_then(|()| {
+                self.with_erasure_mut_fence(
+                    timeline,
+                    ErasureProtectedOperationV1::PluginInput,
+                    |registry| registry.tick_cadenced_live(timeline, now_ns),
+                )
+            })
     }
 
     fn tick_cadenced_live(
@@ -4177,8 +4189,9 @@ impl PluginRegistry {
         &mut self,
         timeline: pos_core::ids::TimelineId,
     ) -> Result<Vec<pos_core::event::EventDraft>, RuntimeError> {
-        self.ensure_live_execution()?;
-        self.step_all_live(timeline)
+        self.ensure_live_execution()
+            .and_then(|()| self.reject_participant_bound_drivers())
+            .and_then(|()| self.step_all_live(timeline))
     }
 
     fn step_all_live(
@@ -4341,6 +4354,7 @@ mod tests {
         driver: Box<dyn Driver>,
     ) {
         try_register_output_driver(registry, event_types, driver).test_ok();
+        registry.compose_non_participant_drivers().test_ok();
     }
 
     fn try_register_output_driver(
@@ -6601,6 +6615,7 @@ mod tests {
         registry
             .register_generated(&plugin, None, Some(Box::new(PanickingDriver)))
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
 
         let error = registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
@@ -6676,6 +6691,7 @@ mod tests {
         registry
             .register_generated(&plugin, None, Some(Box::new(AbortPanickingDriver)))
             .test_ok();
+        registry.compose_non_participant_drivers().test_ok();
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_ok();
@@ -6748,6 +6764,7 @@ mod tests {
             interval: Duration::from_nanos(100),
             fail: false,
         }));
+        registry.compose_non_participant_drivers().test_ok();
 
         assert!(matches!(
             registry.step_all(timeline),
@@ -6812,6 +6829,7 @@ mod tests {
             interval: Duration::from_nanos(1),
             fail: false,
         }));
+        registry.compose_non_participant_drivers().test_ok();
 
         registry
             .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
@@ -6904,6 +6922,7 @@ mod tests {
 
         let mut registry = gated_registry();
         registry.register_test_driver(Box::new(StepCommitPanickingDriver));
+        registry.compose_non_participant_drivers().test_ok();
         registry
             .step_all_anchored(TimelineId::new(), Seq::ZERO)
             .test_ok();
@@ -7024,6 +7043,7 @@ mod tests {
             interval: Duration::from_nanos(1),
             fail: true,
         }));
+        registry.compose_non_participant_drivers().test_ok();
 
         assert!(registry.step_all_anchored(timeline, Seq::ZERO).is_err());
         let first = first.lock().test_ok();
@@ -7046,6 +7066,7 @@ mod tests {
             interval: Duration::from_nanos(100),
             fail: false,
         }));
+        registry.compose_non_participant_drivers().test_ok();
 
         assert!(registry
             .tick_cadenced_anchored_with_events(timeline, 0, Seq::ZERO, &[])
@@ -7377,6 +7398,7 @@ mod tests {
         reg.register_generated(&p, None, Some(Box::new(driver)))
             .test_ok();
         assert_eq!(reg.driver_count(), 1);
+        reg.compose_non_participant_drivers().test_ok();
 
         let drafts = reg.step_all(tl.id()).test_ok();
         assert_eq!(drafts.len(), 1);
@@ -8050,6 +8072,7 @@ mod tests {
         let mut reg = gated_registry().with_consent_authority(authority);
         reg.register_generated(&plugin, None, Some(Box::new(driver)))
             .test_ok();
+        reg.compose_non_participant_drivers().test_ok();
 
         let drafts = reg
             .tick_cadenced_anchored_protected(timeline.id(), 0, Seq::ZERO, token, 0, &[])
@@ -8273,6 +8296,7 @@ mod tests {
             interval: Duration::from_nanos(2),
             steps: Arc::new(AtomicUsize::new(0)),
         }));
+        anchored.compose_non_participant_drivers().test_ok();
         anchored
             .tick_cadenced_anchored(timeline, u128::MAX - 1, Seq::ZERO)
             .test_ok();
@@ -8452,6 +8476,7 @@ mod tests {
             key: shared_key,
             observed: observed.clone(),
         }));
+        reg.compose_non_participant_drivers().test_ok();
 
         let drafts = reg
             .step_all_anchored_protected(timeline.id(), Seq::ZERO, token, 0, &[])
@@ -9158,6 +9183,7 @@ mod coverage_public_error_paths {
         mismatch.register_test_driver(Box::new(MismatchedSensitiveDriver {
             entity: EntityId::new(),
         }));
+        assert!(mismatch.compose_non_participant_drivers().is_ok());
         assert!(mismatch
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_err());
@@ -9172,6 +9198,7 @@ mod coverage_public_error_paths {
         let token = authority.record_grant_on_timeline(timeline, &consent_grant);
         let mut commit = gated_registry().with_consent_authority(authority.clone());
         commit.register_test_driver(Box::new(EmptyDriver));
+        assert!(commit.compose_non_participant_drivers().is_ok());
         assert!(commit
             .step_all_anchored_protected(timeline, Seq::ZERO, token, 0, &[])
             .is_ok());

@@ -2,9 +2,10 @@
 //!
 //! No production host composes a participant-bound Driver yet (the Scenario
 //! Room host is planned for Wave 9). These runners act as the test host the
-//! amendment names: they stage a participant-authorized pass through the
-//! #481 seam and an anchored non-participant pass through the #480 seam,
-//! and offer both to a recording admission port.
+//! amendment names: they compose each Driver's profile from its Participant
+//! binding (#504), stage a participant-authorized pass through the #481 seam
+//! and an anchored non-participant pass through the #480 seam, and offer both
+//! to a recording admission port.
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -29,7 +30,7 @@ use pos_core::{
 };
 use pos_runtime::{
     AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, Driver, ObservationView, PluginRegistry,
-    ProjectionKey, RuntimeError, ScheduledPassAdmissionV1, StepOutput,
+    ProjectionKey, RuntimeError, ScheduledDriverBindingV1, ScheduledPassAdmissionV1, StepOutput,
 };
 use pos_state::{
     AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
@@ -45,23 +46,23 @@ use super::{
 const ANCHORED_DOMAIN: &[u8] = b"PiglorOS.ScheduledObservationSnapshot.v1\0";
 const AUTHORIZED_DOMAIN: &[u8] = b"PiglorOS.AuthorizedScheduledPass.v1\0";
 /// The shared base cut of every pass in these runners.
-const CUT: u64 = 12;
+pub(super) const CUT: u64 = 12;
 const PLANNED: &str = "participant.planned";
 
-const fn digest(byte: u8) -> Hash {
+pub(super) const fn digest(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 
 /// A participant-authorized view and the authority behind it.
-struct Participant {
-    observation: AuthorizedObservationV1,
+pub(super) struct Participant {
+    pub(super) observation: AuthorizedObservationV1,
     knowledge: KnowledgeSnapshotV1,
     state: AuthorityPersistenceStateV1,
-    host: AuthorityPersistenceHostV1,
+    pub(super) host: AuthorityPersistenceHostV1,
     authority_registry: AuthorityRegistrySnapshotV1,
-    grant: CapabilityGrantV1,
-    plugin_id: PluginId,
-    timeline_id: TimelineId,
+    pub(super) grant: CapabilityGrantV1,
+    pub(super) plugin_id: PluginId,
+    pub(super) timeline_id: TimelineId,
 }
 
 struct Ids {
@@ -216,7 +217,9 @@ fn knowledge_snapshot(snapshot: &ObservationSnapshotV1) -> KnowledgeSnapshotV1 {
     .test_ok()
 }
 
-fn observation_evaluation(observation: &AuthorizedObservationV1) -> ReplayClaimEvaluationV1 {
+pub(super) fn observation_evaluation(
+    observation: &AuthorizedObservationV1,
+) -> ReplayClaimEvaluationV1 {
     ReplayClaimEvaluatorV1::evaluate(
         ErasureReplayClaimV1::Exact,
         &[ArtifactClaimInputV1 {
@@ -241,7 +244,7 @@ fn participant() -> Participant {
 }
 
 /// A participant view of `timeline_id` for a fresh participant Plugin.
-fn participant_on(timeline_id: TimelineId) -> Participant {
+pub(super) fn participant_on(timeline_id: TimelineId) -> Participant {
     let ids = Ids {
         principal: PrincipalRefV1::try_new([1; 16], "host.test").test_ok(),
         participant_id: EntityId::new(),
@@ -317,11 +320,11 @@ fn participant_on(timeline_id: TimelineId) -> Participant {
 }
 
 impl Participant {
-    fn current_authority(&self) -> PersistedAuthorityV1 {
+    pub(super) fn current_authority(&self) -> PersistedAuthorityV1 {
         self.state.resolve(self.grant.grant_id()).test_ok()
     }
 
-    fn view(&self) -> AuthorizedDriverViewV1 {
+    pub(super) fn view(&self) -> AuthorizedDriverViewV1 {
         AuthorizedDriverViewV1 {
             plugin_id: self.plugin_id,
             observation: self.observation.clone(),
@@ -329,7 +332,7 @@ impl Participant {
         }
     }
 
-    const fn authority<'a>(
+    pub(super) const fn authority<'a>(
         &'a self,
         evaluation: &'a ReplayClaimEvaluationV1,
         authority: &'a PersistedAuthorityV1,
@@ -393,13 +396,38 @@ impl Driver for PlannedDriver {
     }
 }
 
+/// One participant Driver composed bound to its view's Participant.
 fn participant_registry(
     participant: &Participant,
     ambient: bool,
 ) -> (PluginRegistry, Arc<AtomicUsize>) {
     let mut registry = gated_registry(None);
     let (aborts, _) = register_participant(&mut registry, participant, PLANNED, ambient);
+    bind_participants(&mut registry, &[participant]);
     (registry, aborts)
+}
+
+/// The same Driver in a host that composes it non-participant instead.
+fn non_participant_registry(participant: &Participant) -> (PluginRegistry, Arc<AtomicUsize>) {
+    let mut registry = gated_registry(None);
+    let (aborts, _) = register_participant(&mut registry, participant, PLANNED, false);
+    registry.compose_non_participant_drivers().test_ok();
+    (registry, aborts)
+}
+
+/// Bind each participant's Driver to its view's ADR-059 Participant.
+pub(super) fn bind_participants(registry: &mut PluginRegistry, participants: &[&Participant]) {
+    let bindings: Vec<(PluginId, ScheduledDriverBindingV1)> = participants
+        .iter()
+        .map(|participant| {
+            let id = participant.knowledge.participant_id();
+            (
+                participant.plugin_id,
+                ScheduledDriverBindingV1::Participant(id),
+            )
+        })
+        .collect();
+    registry.compose_scheduled_profiles(&bindings).test_ok();
 }
 
 /// Register one participant Driver owning `event_type`; returns its abort
@@ -459,7 +487,7 @@ fn admission() -> ScheduledPassAdmissionV1 {
     }
 }
 
-fn stage_authorized(
+pub(super) fn stage_authorized(
     registry: &mut PluginRegistry,
     participant: &Participant,
 ) -> Result<usize, RuntimeError> {
@@ -511,13 +539,12 @@ pub fn participant_pass_needs_its_fence() -> Capture {
 ///
 /// An authorized stage while an anchored pass is pending, the authorized
 /// admission of an anchored pass, and a subscription-scoped Driver offered to
-/// the authorized
-/// path all fail closed before anything reaches the store.
+/// the authorized path all fail closed before anything reaches the store.
 #[must_use]
 pub fn one_pass_one_profile() -> Capture {
     let mut capture = Capture::default();
     let participant = participant();
-    let (mut registry, aborts) = participant_registry(&participant, false);
+    let (mut registry, aborts) = non_participant_registry(&participant);
     let mut port = RecordingPort::default();
     let anchored = registry
         .step_all_anchored(participant.timeline_id, Seq::from_u64(CUT))
@@ -556,14 +583,15 @@ fn anchored_digest(timeline: TimelineId, cut: u64) -> Hash {
 pub fn digest_domain_separation() -> Capture {
     let mut capture = Capture::default();
     let participant = participant();
-    let (mut registry, _) = participant_registry(&participant, false);
+    let (mut anchored, _) = non_participant_registry(&participant);
+    let (mut authorized, _) = participant_registry(&participant, false);
     let mut port = RecordingPort::default();
-    registry
+    anchored
         .step_all_anchored(participant.timeline_id, Seq::from_u64(CUT))
         .test_ok();
-    let anchored_refusal = expect_err(registry.admit_scheduled_pass(&mut port, &admission()));
-    stage_authorized(&mut registry, &participant).test_ok();
-    let authorized_refusal = admit_authorized(&mut registry, &participant, &mut port);
+    let anchored_refusal = expect_err(anchored.admit_scheduled_pass(&mut port, &admission()));
+    stage_authorized(&mut authorized, &participant).test_ok();
+    let authorized_refusal = admit_authorized(&mut authorized, &participant, &mut port);
     let digests: Vec<Hash> = port
         .offered
         .iter()
@@ -616,6 +644,7 @@ fn participant_pass(
         register_participant(&mut registry, first, "participant.planned.1", false);
     let (second_aborts, second_observed) =
         register_participant(&mut registry, second, "participant.planned.2", false);
+    bind_participants(&mut registry, &[first, second]);
     ParticipantPass {
         registry,
         aborts: [first_aborts, second_aborts],
