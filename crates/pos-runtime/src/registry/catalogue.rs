@@ -2,10 +2,11 @@
 //!
 //! A trusted composition root selects one reviewed [`HostCatalogueEntryV1`]
 //! for its compiled [`InstalledPluginFactoryV1`] and passes a frozen
-//! configuration. The runtime invokes the factory once, checks the actual
-//! Plugin and approver against the entry's reviewed specification, seals the
-//! product with its CFG1, EPF1, EOP1 and candidate pin links, and commits it
-//! to the [`PluginRegistry`] atomically.
+//! configuration. The runtime invokes the factory once per registration,
+//! checks the actual Plugin and approver against the entry's reviewed
+//! specification, seals the product with its CFG1, EPF1, EOP1 and candidate
+//! pin links, and commits it to the [`PluginRegistry`] atomically. A staged
+//! Reducer entry is also built once per protected candidate (ADR-113 §1).
 //!
 //! Closure over factory types is enforced at runtime: an entry can be
 //! selected for any factory type, and registration rejects a product whose
@@ -13,7 +14,10 @@
 //! before any registry mutation. The catalogue's `compile_fail` doctest
 //! proves only that entry fields are private.
 
-use pos_core::{event::Kind, ActionApprover, Plugin, Reducer};
+use pos_core::{
+    event::{EventDraft, Kind},
+    ActionApprover, ActionRejected, Plugin, ProposedAction, Reducer,
+};
 
 use super::{PendingRegistrationCallbacksV1, PluginRegistry, ReducerSlotV1, RegistrationOptions};
 use crate::{
@@ -31,10 +35,12 @@ const CATALOGUE_PROFILE_ID_V1: &str = "deterministic-local-v1";
 /// host catalogue entry.
 ///
 /// The runtime derives canonical CFG1 from [`Self::configuration_details`]
-/// and invokes [`Self::build`] exactly once per registration, both with the
-/// same frozen configuration. The factory returns only the actual Plugin and
-/// callbacks: it cannot supply CFG1, EOP1, a registration pin, or any
-/// registry or catalogue capability.
+/// and invokes [`Self::build`] once per registration and once per protected
+/// candidate opened by [`pos_state::ProtectedProjectionProviderV1`], from the
+/// same frozen configuration; a candidate build uses only `reducer`. `build`
+/// must therefore be deterministic and free of effects. The factory returns
+/// only the actual Plugin and callbacks: it cannot supply CFG1, EOP1, a
+/// registration pin, or any registry or catalogue capability.
 pub trait InstalledPluginFactoryV1 {
     /// Immutable configuration with every default resolved by the host.
     type Configuration;
@@ -60,6 +66,25 @@ pub struct InstalledPluginProductV1<P, A> {
     pub reducer: Option<Box<dyn Reducer>>,
     /// Action approver for the reviewed action route.
     pub approver: A,
+}
+
+/// Configuration details of a factory whose frozen configuration is empty.
+///
+/// It is a fixed marker rather than no bytes, so the details of an empty
+/// configuration are explicit in every identity derived from them.
+pub const EMPTY_CONFIGURATION_DETAILS_V1: &[u8] = b"pigloros.empty-configuration.v1";
+
+/// Approver built by a catalogue factory whose Plugin owns no action route.
+///
+/// It rejects every proposal, so a reducer-only or Driver Plugin's factory
+/// can satisfy [`InstalledPluginFactoryV1::Approver`] without an action path.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoActionApproverV1;
+
+impl ActionApprover for NoActionApproverV1 {
+    fn approve(&self, _proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
+        Err(ActionRejected::UnknownEventType)
+    }
 }
 
 /// One reviewed entry of the runtime-owned closed host catalogue.

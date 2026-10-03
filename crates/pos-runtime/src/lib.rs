@@ -65,15 +65,25 @@ pub use output_admission::{
     OutputPolicyBindingV1, OutputPolicyClosureV1, OutputPolicySourceV1,
     MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1,
 };
+pub use pos_state::{
+    DetachedProjectionCandidateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1,
+    RecordedConsumerV1,
+};
 pub use recorder::{RecordedOutput, Recorder, RunMode};
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use registry::is_reviewed_staged_factory;
 pub use registry::{
-    recover_local_cut_owner_retry_v1, recover_manifest_owner_admission_retry_v1,
-    AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, ClosedAdapterTranscriptV1,
-    HostCatalogueEntryV1, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
-    HumanActionReceiptV1, InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
+    fold_detached_candidate_v1, recover_local_cut_owner_retry_v1,
+    recover_manifest_owner_admission_retry_v1, AuthorizedDriverViewV1, AuthorizedViewAuthorityV1,
+    ClosedAdapterTranscriptV1, HostCatalogueEntryV1, HostProjectionProviderV1,
+    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
+    InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
     LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1, LocalAdapterProviderV1,
-    LocalAdapterSessionV1, OperationContext, PluginRegistry, ScheduledDriverBindingV1,
-    ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
+    LocalAdapterSessionV1, NoActionApproverV1, OperationContext, PluginRegistry,
+    ScheduledDriverBindingV1, ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
+    StagedGrowthBoundV1, StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1,
+    EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,

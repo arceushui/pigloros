@@ -436,6 +436,8 @@ jobs:
         run: >
           cargo clippy --workspace --all-features --all-targets --locked --
           -D warnings -W clippy::pedantic
+      - name: Staged reducer purity guard (ADR-113 §7)
+        run: bash scripts/check-reducer-purity-guard.sh
 
   coverage:
     name: coverage
