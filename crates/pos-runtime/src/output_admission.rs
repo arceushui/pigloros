@@ -2076,6 +2076,32 @@ mod tests {
         ]
     }
 
+    /// `source`'s entry in `policy_sources`. The match has no wildcard, so a
+    /// new variant fails to compile until it is given an arm here; a constant
+    /// index past the array's length is a compile error (`unconditional_panic`),
+    /// so that arm compiles only once `policy_sources` lists one more entry,
+    /// and `policy_sources_list_every_variant_in_order` checks the position.
+    const fn listed_policy_source(source: OutputPolicySourceV1) -> OutputPolicySourceV1 {
+        let sources = policy_sources();
+        match source {
+            OutputPolicySourceV1::Generated => sources[0],
+            OutputPolicySourceV1::Gateway => sources[1],
+            OutputPolicySourceV1::World => sources[2],
+            OutputPolicySourceV1::RuleAgent => sources[3],
+            OutputPolicySourceV1::Agent => sources[4],
+            OutputPolicySourceV1::SyntheticObservation => sources[5],
+            OutputPolicySourceV1::Society => sources[6],
+            OutputPolicySourceV1::Experiment => sources[7],
+        }
+    }
+
+    #[test]
+    fn policy_sources_list_every_variant_in_order() {
+        for source in policy_sources() {
+            assert_eq!(listed_policy_source(source), source);
+        }
+    }
+
     #[test]
     fn every_installed_source_bundle_fits_the_artifact_limit() {
         let limit = crate::reviewed_policy::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1;
