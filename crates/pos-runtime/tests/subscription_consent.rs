@@ -469,8 +469,13 @@ fn the_panicking_test_support_path_rejects_a_cursor_subscription_too() {
     let mut registry = consent_registry(ConsentAuthority::new());
     let driver = RecordingDriver::new(&[PERSONA], false, &seen);
     let register = AssertUnwindSafe(|| registry.register_test_driver(Box::new(driver)));
+    let message = std::panic::catch_unwind(register)
+        .err()
+        .and_then(|payload| payload.downcast::<String>().ok())
+        .map(|message| *message);
 
-    assert!(std::panic::catch_unwind(register).is_err());
+    let prefix = "generated test-driver registration failed: ";
+    assert_eq!(message, Some(prefix.to_owned() + &rejection(PERSONA)));
     assert_eq!((registry.len(), registry.driver_count()), (0, 0));
 }
 

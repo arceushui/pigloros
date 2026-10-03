@@ -3345,6 +3345,33 @@ pub mod tests {
     use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
     use pos_store::StoreConfig;
 
+    /// ADR-021 Revision 4 Decision 2: the public filter is exactly the shared
+    /// subject-controlled predicate plus the experiment's consent-closed marker.
+    #[test]
+    fn public_event_types_match_the_shared_subject_controlled_predicate() {
+        let table = [
+            (pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, false),
+            (pos_core::GEOGRAPHIC_EVENT_TYPE, false),
+            (pos_core::GEOGRAPHIC_CELL_EVENT_TYPE, false),
+            ("consent.x", false),
+            ("persona.prediction", false),
+            ("timeline.fork.requested", false),
+            ("retention.extended", false),
+            ("world.observation.v1", true),
+            ("ordinary.event", true),
+        ];
+        for (event_type, public) in table {
+            let kind = Kind::new(event_type);
+            assert_eq!(is_public_event_type(&kind), public, "{event_type}");
+            assert_eq!(
+                is_public_event_type(&kind),
+                !pos_core::is_subject_controlled_event_type(&kind)
+                    && event_type != EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE,
+                "{event_type}"
+            );
+        }
+    }
+
     // ── Inline test helpers ───────────────────────────────────────────────
 
     struct TestPlugin {
