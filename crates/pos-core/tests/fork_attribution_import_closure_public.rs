@@ -208,18 +208,16 @@ fn provenance(event: &ForkEventEvidenceV1, table: &ForkClassifierTableV1) -> Fal
         intervention_admission_digest: None,
     };
     let placeholder = ForkAppendOperationV1::new(draft.clone())?;
-    let (origin, intervention) = placeholder.expected_provenance(table, classification);
-    let intervention_digest = intervention
-        .as_ref()
-        .map(ForkInterventionAdmissionV1::digest);
+    let (origin, implied) = placeholder.expected_provenance(table, classification);
+    let implied_digest = implied.as_ref().map(ForkInterventionAdmissionV1::digest);
     let operation = ForkAppendOperationV1::new(ForkAppendOperationInputV1 {
         event_origin_digest: origin.digest(),
-        intervention_admission_digest: intervention_digest,
+        intervention_admission_digest: implied_digest,
         ..draft
     })?;
     Ok(Provenance {
         origin,
-        intervention,
+        intervention: implied,
         operation,
     })
 }
@@ -359,8 +357,8 @@ impl Fixture {
         let binding = binding()?;
         let imported_binding = ImportedPrincipalOwnerBindingV1::from_local(binding.clone(), origin);
         let admission = admission(imported_binding.digest())?;
-        let admission_digest =
-            ImportedForkAdmissionRecordV1::from_local(admission.clone(), origin).digest();
+        let admitted = ImportedForkAdmissionRecordV1::from_local(admission.clone(), origin);
+        let admission_digest = admitted.digest();
         let graph = classifier(admission_digest)?;
         let events = shape
             .sequences()
@@ -898,27 +896,16 @@ fn origins_and_timeline_coordinates_must_match() -> TestResult {
         Shape::Mixed,
         apply_admission,
         &[
-            // FAR1 parent.
             |far| far.parent_timeline_id = timeline_id(3),
-            // FAR1 child.
             |far| far.child_timeline_id = timeline_id(3),
-            // FAR1 cut.
             |far| {
                 far.parent_logical_head = 3;
                 far.completed_fold_cursor = 3;
                 far.post_fold_tick_boundary = 3;
             },
-            // FAR1 parent hash.
             |far| far.parent_chain_head_hash = hash(OTHER),
-            // FAR1 POB1 digest.
-            |far| {
-                far.principal_owner_binding_digest = hash(OTHER);
-            },
-            // FAR1 descriptor.
-            |far| {
-                far.room_revision_descriptor_hash = hash(OTHER);
-            },
-            // FAR1 composition.
+            |far| far.principal_owner_binding_digest = hash(OTHER),
+            |far| far.room_revision_descriptor_hash = hash(OTHER),
             |far| far.plugin_composition_hash = hash(OTHER),
         ],
     )
@@ -930,17 +917,10 @@ fn creator_manifest_and_publication_records_must_match() -> TestResult {
         Shape::Mixed,
         apply_manifest,
         &[
-            // FRM1 FAR1 digest.
             |frm| frm.admission_digest = hash(OTHER),
-            // FRM1 descriptor.
-            |frm| {
-                frm.room_revision_descriptor_hash = hash(OTHER);
-            },
-            // FRM1 final head.
+            |frm| frm.room_revision_descriptor_hash = hash(OTHER),
             |frm| frm.final_fork_logical_head += 1,
-            // FRM1 final hash.
             |frm| frm.final_fork_chain_head_hash = hash(OTHER),
-            // FRM1 interventions.
             |frm| frm.intervention_sequences = vec![8],
         ],
     )?;
@@ -948,17 +928,11 @@ fn creator_manifest_and_publication_records_must_match() -> TestResult {
         Shape::Mixed,
         apply_publication,
         &[
-            // FPO1 child.
             |fpo| fpo.child_timeline_id = timeline_id(3),
-            // FPO1 final head.
             |fpo| fpo.final_logical_head += 1,
-            // FPO1 final hash.
             |fpo| fpo.final_chain_head_hash = hash(OTHER),
-            // FPO1 FAR1 digest.
             |fpo| fpo.admission_digest = hash(OTHER),
-            // FPO1 epoch.
             |fpo| fpo.signing_identity = attribution_identity(2),
-            // FPO1 record ID.
             |fpo| fpo.signed_manifest_record_id = hash(OTHER),
         ],
     )?;
@@ -966,13 +940,9 @@ fn creator_manifest_and_publication_records_must_match() -> TestResult {
         Shape::Mixed,
         apply_publication_binding,
         &[
-            // FPB1 child.
             |fpb| fpb.child_timeline_id = timeline_id(3),
-            // FPB1 final head.
             |fpb| fpb.final_logical_head += 1,
-            // FPB1 operation.
             |fpb| fpb.operation_id = hash(OTHER),
-            // FPB1 record ID.
             |fpb| fpb.signed_manifest_record_id = hash(OTHER),
         ],
     )
@@ -1054,15 +1024,8 @@ fn assert_classifier_rows(shape: Shape) -> TestResult {
         shape,
         apply_source,
         &[
-            // FCS1 descriptor.
-            |fcs| {
-                fcs.room_revision_descriptor_hash = hash(OTHER);
-            },
-            // FCS1 registrar.
-            |fcs| {
-                fcs.registrar_identifier = "registrar-b".to_owned();
-            },
-            // FCS1 routes.
+            |fcs| fcs.room_revision_descriptor_hash = hash(OTHER),
+            |fcs| fcs.registrar_identifier = "registrar-b".to_owned(),
             |fcs| fcs.routes.truncate(1),
         ],
     )?;
@@ -1070,23 +1033,11 @@ fn assert_classifier_rows(shape: Shape) -> TestResult {
         shape,
         apply_table,
         &[
-            // FCT1 child.
             |fct| fct.child_timeline_id = timeline_id(3),
-            // FCT1 FAR1 digest.
             |fct| fct.fork_admission_digest = hash(OTHER),
-            // FCT1 descriptor.
-            |fct| {
-                fct.room_revision_descriptor_hash = hash(OTHER);
-            },
-            // FCT1 registrar.
-            |fct| {
-                fct.registrar_identifier = "registrar-b".to_owned();
-            },
-            // FCT1 FCS1 digest.
-            |fct| {
-                fct.source_configuration_revision_digest = hash(OTHER);
-            },
-            // FCT1 route removed.
+            |fct| fct.room_revision_descriptor_hash = hash(OTHER),
+            |fct| fct.registrar_identifier = "registrar-b".to_owned(),
+            |fct| fct.source_configuration_revision_digest = hash(OTHER),
             |fct| fct.routes.truncate(1),
         ],
     )?;
@@ -1094,18 +1045,10 @@ fn assert_classifier_rows(shape: Shape) -> TestResult {
         shape,
         apply_registration,
         &[
-            // FCR1 child.
             |fcr| fcr.child_timeline_id = timeline_id(3),
-            // FCR1 FAR1 digest.
             |fcr| fcr.fork_admission_digest = hash(OTHER),
-            // FCR1 descriptor.
-            |fcr| {
-                fcr.room_revision_descriptor_hash = hash(OTHER);
-            },
-            // FCR1 FCT1 digest.
-            |fcr| {
-                fcr.classifier_revision_digest = hash(OTHER);
-            },
+            |fcr| fcr.room_revision_descriptor_hash = hash(OTHER),
+            |fcr| fcr.classifier_revision_digest = hash(OTHER),
         ],
     )
 }
@@ -1160,42 +1103,18 @@ fn per_event_operation_rows_must_match() -> TestResult {
         Shape::Mixed,
         apply_operations,
         &[
-            // FOP1 child.
             |ops| ops[1].child_timeline_id = timeline_id(3),
-            // FOP1 sequence.
             |ops| ops[3].logical_seq = 9,
-            // FOP1 Event ID.
-            |ops| {
-                ops[1].event_id = EventId::from_ulid(Ulid::from_parts(99, 7));
-            },
-            // FOP1 payload hash.
+            |ops| ops[1].event_id = EventId::from_ulid(Ulid::from_parts(99, 7)),
             |ops| ops[1].payload_hash = hash(OTHER),
-            // FOP1 wall time.
             |ops| ops[1].wall_time = WallTime::from_micros(9),
-            // FOP1 FCT1 digest.
-            |ops| {
-                ops[1].classifier_revision_digest = hash(OTHER);
-            },
-            // FOP1 FAR1 digest.
+            |ops| ops[1].classifier_revision_digest = hash(OTHER),
             |ops| ops[1].fork_admission_digest = hash(OTHER),
-            // FOP1 EOR1 digest.
             |ops| ops[1].event_origin_digest = hash(OTHER),
-            // FOP1 FIA1 dropped.
-            |ops| {
-                ops[2].intervention_admission_digest = None;
-            },
-            // FOP1 FIA1 added.
-            |ops| {
-                ops[1].intervention_admission_digest = Some(hash(OTHER));
-            },
-            // FOP1 FIA1 value.
-            |ops| {
-                ops[2].intervention_admission_digest = Some(hash(OTHER));
-            },
-            // FOP1 operation ID reused.
-            |ops| {
-                ops[1].operation_id = ops[0].operation_id;
-            },
+            |ops| ops[2].intervention_admission_digest = None,
+            |ops| ops[1].intervention_admission_digest = Some(hash(OTHER)),
+            |ops| ops[2].intervention_admission_digest = Some(hash(OTHER)),
+            |ops| ops[1].operation_id = ops[0].operation_id,
         ],
     )
 }
@@ -1255,33 +1174,19 @@ fn origin_and_intervention_records_must_be_exactly_implied() -> TestResult {
         Shape::Mixed,
         apply_origins,
         &[
-            // EOR1 FCT1 digest.
-            |origins| {
-                origins[0].classifier_revision_digest = hash(OTHER);
-            },
-            // EOR1 classification.
-            |origins| {
-                origins[1].classification = origins[0].classification;
-            },
+            |origins| origins[0].classifier_revision_digest = hash(OTHER),
+            |origins| origins[1].classification = origins[0].classification,
         ],
     )?;
     assert_each_inconsistent::<Vec<ForkInterventionAdmissionInputV1>>(
         Shape::Mixed,
         apply_interventions,
         &[
-            // FIA1 operation ID.
-            |admissions| {
-                admissions[0].operation_id = hash(OTHER);
-            },
-            // FIA1 descriptor.
-            |admissions| {
-                admissions[0].room_revision_descriptor_hash = hash(OTHER);
-            },
-            // FIA1 missing.
+            |admissions| admissions[0].operation_id = hash(OTHER),
+            |admissions| admissions[0].room_revision_descriptor_hash = hash(OTHER),
             |admissions| {
                 admissions.remove(0);
             },
-            // FIA1 for a non-intervention.
             |admissions| {
                 let mut extra = admissions[0].clone();
                 extra.logical_seq = 6;
