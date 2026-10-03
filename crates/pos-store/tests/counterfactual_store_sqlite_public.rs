@@ -5,18 +5,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pos_core::{
-    CanonicalBytes, CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
-    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    EntityId, ErasureContainmentGateV1, EventDraft, EventStore, ForkGenerationV1, Hash,
+    CanonicalBytes, CounterfactualBasisV1, CounterfactualFactsV1,
+    CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
+    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
+    ErasureContainmentGateV1, EventDraft, EventStore, ForkGenerationV1, Hash,
     InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, Seq,
     SuffixInvalidationBytesV1, TimelineId,
 };
-use pos_store::sqlite::{SqliteCounterfactualFactsV1, SqliteStore};
+use pos_store::sqlite::SqliteStore;
 use tempfile::{tempdir, TempDir};
 use ulid::Ulid;
 
 type StoreError = CounterfactualStoreErrorV1;
 type Outcome = CounterfactualInvalidationOutcomeV1;
+type TickOutcome = CounterfactualTickOutcomeV1;
+
+/// One stale-basis case: how the expectation is altered and the conflict.
+type StaleCase<T> = (fn(&mut T), InvalidationConflictV1);
+
+/// One epoch setter and the conflict a different stored epoch reports.
+type EpochSetter = (fn(&mut CounterfactualFactsV1, u64), InvalidationConflictV1);
+
+/// Event types the generic append guard conceals as an absent Fork.
+const GUARDED_KINDS: [&str; 3] = ["geo.location", "geo.cell", "consent.granted.v1"];
 
 const FRONTIER_DOMAIN: &[u8] = b"PiglorOS.RecomputationFrontier.v1";
 const INVALIDATION_DOMAIN: &[u8] = b"PiglorOS.SuffixInvalidation.v1";
@@ -35,8 +47,8 @@ const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 
-const fn facts() -> SqliteCounterfactualFactsV1 {
-    SqliteCounterfactualFactsV1 {
+const fn facts() -> CounterfactualFactsV1 {
+    CounterfactualFactsV1 {
         plan_digest: hash(5),
         dependency_graph_digest: hash(3),
         trust_epoch: 6,
@@ -46,11 +58,27 @@ const fn facts() -> SqliteCounterfactualFactsV1 {
 }
 
 fn draft(value: u8) -> EventDraft {
+    typed_draft("counterfactual.tick", value)
+}
+
+fn typed_draft(kind: &str, value: u8) -> EventDraft {
     EventDraft::new(
         EntityId::from_ulid(Ulid::from(9_u128)),
-        Kind::new("counterfactual.tick"),
+        Kind::new(kind),
         CanonicalBytes::from_vec(vec![value]),
     )
+}
+
+/// Ordinary drafts `values`, optionally ending with a `guarded` one.
+fn tick_drafts(values: &[u8], guarded: Option<&str>) -> PipelineDraftBatchV1 {
+    ok(PipelineDraftBatchV1::try_new(
+        values
+            .iter()
+            .copied()
+            .map(draft)
+            .chain(guarded.map(|kind| typed_draft(kind, 0)))
+            .collect(),
+    ))
 }
 
 /// Encode one shortest-form CBOR unsigned integer.
@@ -139,13 +167,14 @@ fn frame(heads: (u8, u8), prefix: [u8; 6], domain: &[u8], fields: &[u8]) -> Vec<
 /// One invalidation request; every field defaults to the fixture's basis.
 struct Spec {
     fork: TimelineId,
-    facts: SqliteCounterfactualFactsV1,
+    facts: CounterfactualFactsV1,
     head: u64,
     prior: u64,
     frontier_id: u8,
     invalid_artifacts: Vec<Hash>,
     evictions: Vec<Hash>,
     first_tick: u64,
+    guarded: Option<&'static str>,
 }
 
 impl Spec {
@@ -159,6 +188,7 @@ impl Spec {
             invalid_artifacts: vec![hash(10), hash(11)],
             evictions: vec![hash(12)],
             first_tick: 17,
+            guarded: None,
         }
     }
 
@@ -222,7 +252,7 @@ impl Spec {
                 invalid_artifacts,
                 evictions,
                 first_tick: self.first_tick,
-                first_tick_drafts: ok(PipelineDraftBatchV1::try_new(vec![draft(7), draft(8)])),
+                first_tick_drafts: tick_drafts(&[7, 8], self.guarded),
             },
         ))
     }
@@ -468,7 +498,7 @@ fn a_later_generation_quarantines_stored_bytes_permanently() {
 fn every_stale_basis_fact_conflicts_and_commits_nothing() {
     let fixture = fixture();
     let fork = fixture.fork;
-    let cases: [(fn(&mut Spec), InvalidationConflictV1); 7] = [
+    let cases: [StaleCase<Spec>; 7] = [
         (|spec| spec.head = 3, InvalidationConflictV1::LogicalHead),
         (
             |spec| spec.facts.plan_digest = hash(50),
@@ -654,6 +684,18 @@ fn missing_root_and_unpublished_timelines_are_not_forks() {
             store.commit_counterfactual_invalidation(&Spec::new(timeline).command()),
             Err(StoreError::ForkNotFound)
         );
+        assert_eq!(
+            store.append_counterfactual_tick(
+                timeline,
+                &basis(1, 0, facts()),
+                &tick_drafts(&[1], None)
+            ),
+            Err(StoreError::ForkNotFound)
+        );
+        assert_eq!(
+            store.current_counterfactual_basis(timeline),
+            Err(StoreError::ForkNotFound)
+        );
     }
     assert_eq!(written_rows(&fixture.path, unpublished), [0; 4]);
     assert_eq!(
@@ -673,10 +715,7 @@ fn integers_beyond_sqlite_storage_are_out_of_bounds() {
     let fixture = fixture();
     let fork = fixture.fork;
     let mut store = open(&fixture.path);
-    let setters: [(
-        fn(&mut SqliteCounterfactualFactsV1, u64),
-        InvalidationConflictV1,
-    ); 3] = [
+    let setters: [EpochSetter; 3] = [
         (
             |facts, value| facts.trust_epoch = value,
             InvalidationConflictV1::TrustEpoch,
@@ -765,6 +804,18 @@ fn containment_and_admitted_forks_fail_closed() {
         Err(StoreError::StorageFailure)
     );
     assert_eq!(
+        ungated.append_counterfactual_tick(
+            fork,
+            &command.expected_basis(),
+            &tick_drafts(&[1], None)
+        ),
+        Err(StoreError::StorageFailure)
+    );
+    assert_eq!(
+        ungated.current_counterfactual_basis(fork),
+        Err(StoreError::StorageFailure)
+    );
+    assert_eq!(
         ungated.publish_counterfactual_facts(fork, facts()),
         Ok(at(fork, 0))
     );
@@ -788,6 +839,19 @@ fn containment_and_admitted_forks_fail_closed() {
     assert_eq!(
         admitted.commit_counterfactual_invalidation(&command),
         Err(StoreError::StorageFailure)
+    );
+    assert_eq!(
+        admitted.append_counterfactual_tick(
+            fork,
+            &command.expected_basis(),
+            &tick_drafts(&[1], None)
+        ),
+        Err(StoreError::StorageFailure)
+    );
+    // Reading the basis is not an append and stays available.
+    assert_eq!(
+        admitted.current_counterfactual_basis(fork),
+        Ok(command.expected_basis())
     );
     assert_eq!(generation(&admitted, fork), 0);
     assert_eq!(written_rows(&fixture.path, fork), [0; 4]);
@@ -821,6 +885,14 @@ fn a_geographic_evidence_protected_fork_is_not_found() {
         store.commit_counterfactual_invalidation(&Spec::new(fork).command()),
         Err(StoreError::ForkNotFound)
     );
+    assert_eq!(
+        store.append_counterfactual_tick(fork, &basis(2, 0, facts()), &tick_drafts(&[1], None)),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Err(StoreError::ForkNotFound)
+    );
     assert_eq!(written_rows(&fixture.path, fork), [0; 4]);
 }
 
@@ -848,6 +920,11 @@ fn corrupt_persisted_state_is_rejected_closed() {
         let mut store = open(&fixture.path);
         assert_eq!(
             store.current_fork_generation(fork),
+            Err(StoreError::CorruptState),
+            "{column}"
+        );
+        assert_eq!(
+            store.current_counterfactual_basis(fork),
             Err(StoreError::CorruptState),
             "{column}"
         );
@@ -882,7 +959,7 @@ fn corrupt_persisted_state_is_rejected_closed() {
 }
 
 /// Every counterfactual index and guard trigger, with a weakened body.
-const SCHEMA_OBJECTS: [(&str, &str, &str); 9] = [
+const SCHEMA_OBJECTS: [(&str, &str, &str); 13] = [
     (
         "INDEX",
         "idx_counterfactual_quarantine_artifact",
@@ -928,6 +1005,26 @@ const SCHEMA_OBJECTS: [(&str, &str, &str); 9] = [
         "counterfactual_artifacts_immutable",
         "BEFORE UPDATE ON counterfactual_artifacts BEGIN SELECT 1; END",
     ),
+    (
+        "TRIGGER",
+        "counterfactual_forks_not_replaced",
+        "BEFORE INSERT ON counterfactual_forks BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_quarantine_not_replaced",
+        "BEFORE INSERT ON counterfactual_quarantine BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_generations_not_replaced",
+        "BEFORE INSERT ON counterfactual_generations BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_artifacts_not_replaced",
+        "BEFORE INSERT ON counterfactual_artifacts BEGIN SELECT 1; END",
+    ),
 ];
 
 #[test]
@@ -953,7 +1050,7 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
          DROP TABLE counterfactual_quarantine;
          DROP TABLE counterfactual_artifacts;",
     ));
-    assert!(open_read_only().contains("counterfactual_forks table"));
+    assert_eq!(open_read_only(), "");
     assert_eq!(open_writable(), "");
     assert_eq!(open_read_only(), "");
     let mut migrated = open(&fixture.path);
@@ -994,4 +1091,356 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
     ));
     assert!(open_writable().contains("counterfactual_artifacts table"));
     assert!(open_read_only().contains("counterfactual_artifacts table"));
+}
+
+const fn basis(head: u64, generation: u64, facts: CounterfactualFactsV1) -> CounterfactualBasisV1 {
+    CounterfactualBasisV1 {
+        fork_logical_head: Seq::from_u64(head),
+        generation,
+        facts,
+    }
+}
+
+/// Commit the default command and return its receipt.
+fn commit_default(store: &mut SqliteStore, fork: TimelineId) -> CounterfactualGenerationReceiptV1 {
+    match ok(store.commit_counterfactual_invalidation(&Spec::new(fork).command())) {
+        Outcome::Committed(receipt) => receipt,
+        other @ Outcome::InvalidationConflict(_) => {
+            std::panic::resume_unwind(Box::new(format!("expected a commit, got {other:?}")))
+        }
+    }
+}
+
+/// Make the Fork's own head fall back to `reset` once it reaches `reached`,
+/// so the staged Logical Head does not advance.
+fn stall_head(path: &Path, fork: TimelineId, reached: u64, reset: u64) {
+    ok(execute(
+        path,
+        &format!(
+            "CREATE TRIGGER stalled_head AFTER UPDATE OF head_seq ON timelines
+             WHEN NEW.id = '{fork}' AND NEW.head_seq = {reached}
+             BEGIN UPDATE timelines SET head_seq = {reset} WHERE id = NEW.id; END;"
+        ),
+    ));
+}
+
+#[test]
+fn the_basis_reads_the_persisted_head_generation_and_facts() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let mut store = open(&fixture.path);
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Ok(basis(2, 0, facts()))
+    );
+
+    let receipt = commit_default(&mut store, fork);
+    assert_eq!(receipt.facts(), facts());
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Ok(receipt.tick_basis(Seq::from_u64(4)))
+    );
+
+    let mut republished = facts();
+    republished.erasure_epoch = 81;
+    ok(store.publish_counterfactual_facts(fork, republished));
+    drop(store);
+    let reopened = open(&fixture.path);
+    assert_eq!(
+        reopened.current_counterfactual_basis(fork),
+        Ok(basis(4, 1, republished))
+    );
+}
+
+#[test]
+fn later_ticks_commit_on_the_receipt_basis() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let mut store = open(&fixture.path);
+    let receipt = commit_default(&mut store, fork);
+    let first = receipt.tick_basis(receipt.first_tick_head());
+
+    assert_eq!(
+        store.append_counterfactual_tick(fork, &first, &tick_drafts(&[20, 21], None)),
+        Ok(TickOutcome::Committed {
+            head: Seq::from_u64(6)
+        })
+    );
+    assert_eq!(
+        store.append_counterfactual_tick(
+            fork,
+            &receipt.tick_basis(Seq::from_u64(6)),
+            &tick_drafts(&[22], None)
+        ),
+        Ok(TickOutcome::Committed {
+            head: Seq::from_u64(7)
+        })
+    );
+    // Replaying the first Tick on its old basis is stale and commits nothing.
+    assert_eq!(
+        store.append_counterfactual_tick(fork, &first, &tick_drafts(&[20, 21], None)),
+        Ok(TickOutcome::Stale(InvalidationConflictV1::LogicalHead))
+    );
+    assert_eq!(written_rows(&fixture.path, fork), [5, 1, 3, 2]);
+    assert_eq!(ok(store.logical_head(fixture.root)), Seq::from_u64(2));
+    drop(store);
+    let reopened = open(&fixture.path);
+    assert_eq!(generation(&reopened, fork), 1);
+    assert_eq!(
+        reopened.current_counterfactual_basis(fork),
+        Ok(receipt.tick_basis(Seq::from_u64(7)))
+    );
+}
+
+#[test]
+fn every_stale_tick_basis_fact_is_stale_and_commits_nothing() {
+    let cases: [StaleCase<CounterfactualBasisV1>; 7] = [
+        (
+            |basis| basis.fork_logical_head = Seq::from_u64(3),
+            InvalidationConflictV1::LogicalHead,
+        ),
+        (
+            |basis| basis.facts.plan_digest = hash(50),
+            InvalidationConflictV1::PlanDigest,
+        ),
+        (
+            |basis| basis.facts.dependency_graph_digest = hash(51),
+            InvalidationConflictV1::DependencyGraphDigest,
+        ),
+        (
+            |basis| basis.generation = 0,
+            InvalidationConflictV1::PriorGeneration,
+        ),
+        (
+            |basis| basis.facts.trust_epoch = 16,
+            InvalidationConflictV1::TrustEpoch,
+        ),
+        (
+            |basis| basis.facts.revocation_epoch = 17,
+            InvalidationConflictV1::RevocationEpoch,
+        ),
+        (
+            |basis| basis.facts.erasure_epoch = 18,
+            InvalidationConflictV1::ErasureEpoch,
+        ),
+    ];
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let mut store = open(&fixture.path);
+    let receipt = commit_default(&mut store, fork);
+    for (stale, conflict) in cases {
+        let mut expected = receipt.tick_basis(receipt.first_tick_head());
+        stale(&mut expected);
+        assert_eq!(
+            store.append_counterfactual_tick(fork, &expected, &tick_drafts(&[20], None)),
+            Ok(TickOutcome::Stale(conflict))
+        );
+        assert_eq!(written_rows(&fixture.path, fork), [2, 1, 3, 2]);
+        assert_eq!(
+            store.current_counterfactual_basis(fork),
+            Ok(receipt.tick_basis(Seq::from_u64(4)))
+        );
+    }
+}
+
+#[test]
+fn guarded_tick_drafts_are_not_found_and_commit_nothing() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let mut store = open(&fixture.path);
+    for kind in GUARDED_KINDS {
+        let mut spec = Spec::new(fork);
+        spec.guarded = Some(kind);
+        assert_eq!(
+            store.commit_counterfactual_invalidation(&spec.command()),
+            Err(StoreError::ForkNotFound),
+            "{kind}"
+        );
+        assert_eq!(written_rows(&fixture.path, fork), [0; 4], "{kind}");
+        // The basis is rechecked first, so a stale command still conflicts.
+        spec.facts.trust_epoch = 16;
+        assert_eq!(
+            store.commit_counterfactual_invalidation(&spec.command()),
+            Ok(Outcome::InvalidationConflict(
+                InvalidationConflictV1::TrustEpoch
+            )),
+            "{kind}"
+        );
+    }
+    let receipt = commit_default(&mut store, fork);
+    let expected = receipt.tick_basis(receipt.first_tick_head());
+    for kind in GUARDED_KINDS {
+        assert_eq!(
+            store.append_counterfactual_tick(fork, &expected, &tick_drafts(&[20], Some(kind))),
+            Err(StoreError::ForkNotFound),
+            "{kind}"
+        );
+        assert_eq!(written_rows(&fixture.path, fork), [2, 1, 3, 2], "{kind}");
+    }
+    assert_eq!(store.current_counterfactual_basis(fork), Ok(expected));
+}
+
+#[test]
+fn a_head_that_does_not_advance_is_corrupt_and_rolls_back() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let command = Spec::new(fork).command();
+    // The first Tick's two Events reach own head 2; it falls back to 0.
+    stall_head(&fixture.path, fork, 2, 0);
+    let mut store = open(&fixture.path);
+    assert_eq!(
+        store.commit_counterfactual_invalidation(&command),
+        Err(StoreError::CorruptState)
+    );
+    assert_eq!(written_rows(&fixture.path, fork), [0; 4]);
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Ok(command.expected_basis())
+    );
+    drop(store);
+    ok(execute(&fixture.path, "DROP TRIGGER stalled_head;"));
+
+    let mut store = open(&fixture.path);
+    let receipt = commit_default(&mut store, fork);
+    drop(store);
+    // A later Tick's Event reaches own head 3; it falls back to 2.
+    stall_head(&fixture.path, fork, 3, 2);
+    let mut store = open(&fixture.path);
+    let expected = receipt.tick_basis(receipt.first_tick_head());
+    assert_eq!(
+        store.append_counterfactual_tick(fork, &expected, &tick_drafts(&[20], None)),
+        Err(StoreError::CorruptState)
+    );
+    assert_eq!(written_rows(&fixture.path, fork), [2, 1, 3, 2]);
+    assert_eq!(store.current_counterfactual_basis(fork), Ok(expected));
+}
+
+#[test]
+fn a_repeated_frontier_keeps_its_first_artifact_row() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let mut store = open(&fixture.path);
+    let first = commit_default(&mut store, fork);
+    let mut spec = Spec::new(fork);
+    spec.prior = 1;
+    spec.head = 4;
+    spec.invalid_artifacts = Vec::new();
+    spec.evictions = Vec::new();
+    let repeated = spec.command();
+    assert_eq!(repeated.frontier().digest(), first.frontier_digest());
+
+    assert!(matches!(
+        store.commit_counterfactual_invalidation(&repeated),
+        Ok(Outcome::Committed(_))
+    ));
+    assert_eq!(written_rows(&fixture.path, fork), [4, 2, 3, 3]);
+    assert_eq!(
+        count(
+            &fixture.path,
+            "SELECT generation FROM counterfactual_artifacts
+             WHERE fork_id = ?1 AND artifact_digest = (
+                 SELECT frontier_digest FROM counterfactual_generations
+                 WHERE fork_id = ?1 AND generation = 2
+             )",
+            fork
+        ),
+        1
+    );
+    assert_eq!(
+        store.read_generation_artifact(at(fork, 2), first.frontier_digest()),
+        Ok(Some(repeated.frontier().as_bytes().to_vec()))
+    );
+}
+
+#[test]
+fn replacing_inserts_cannot_rewrite_recorded_state() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let mut store = open(&fixture.path);
+    let receipt = commit_default(&mut store, fork);
+    drop(store);
+    for replace in [
+        "INSERT OR REPLACE INTO counterfactual_forks
+         SELECT fork_id, 0, plan_digest, dependency_graph_digest,
+                trust_epoch, revocation_epoch, erasure_epoch
+         FROM counterfactual_forks",
+        "REPLACE INTO counterfactual_generations
+         SELECT fork_id, generation, frontier_digest, X'00', invalidation_digest,
+                invalidation_bytes, first_tick
+         FROM counterfactual_generations",
+        "INSERT OR REPLACE INTO counterfactual_artifacts
+         SELECT fork_id, artifact_digest, generation, X'00' FROM counterfactual_artifacts",
+        "REPLACE INTO counterfactual_quarantine SELECT * FROM counterfactual_quarantine",
+    ] {
+        assert!(execute(&fixture.path, replace).is_err(), "{replace}");
+    }
+
+    let reopened = open(&fixture.path);
+    assert_eq!(generation(&reopened, fork), 1);
+    assert_eq!(written_rows(&fixture.path, fork), [2, 1, 3, 2]);
+    let command = Spec::new(fork).command();
+    assert_eq!(
+        reopened.read_generation_artifact(at(fork, 1), receipt.frontier_digest()),
+        Ok(Some(command.frontier().as_bytes().to_vec()))
+    );
+    assert_eq!(
+        reopened.read_generation_artifact(at(fork, 1), hash(12)),
+        Err(StoreError::InvalidArtifactReuse)
+    );
+    let stored = ok(
+        rusqlite::Connection::open(&fixture.path).and_then(|connection| {
+            connection.query_row(
+                "SELECT frontier_bytes FROM counterfactual_generations WHERE fork_id = ?1",
+                rusqlite::params![fork.to_string()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+        }),
+    );
+    assert_eq!(stored, command.frontier().as_bytes().to_vec());
+}
+
+#[test]
+fn a_pre_schema_file_opens_read_only_without_counterfactual_state() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let path_text = fixture.path.to_str().unwrap_or_default();
+    // Dropping the tables also drops their index and triggers.
+    ok(execute(
+        &fixture.path,
+        "DROP TABLE counterfactual_forks;
+         DROP TABLE counterfactual_generations;
+         DROP TABLE counterfactual_quarantine;
+         DROP TABLE counterfactual_artifacts;",
+    ));
+    let mut read_only = ok(SqliteStore::open_read_only(path_text));
+    ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+    assert_eq!(ok(read_only.logical_head(fork)), Seq::from_u64(2));
+    assert_eq!(
+        read_only.current_fork_generation(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        read_only.current_counterfactual_basis(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        read_only.read_generation_artifact(at(fork, 0), hash(1)),
+        Err(StoreError::ForkNotFound)
+    );
+    drop(read_only);
+
+    // A present but incomplete counterfactual schema is still refused.
+    ok(execute(
+        &fixture.path,
+        "CREATE TABLE counterfactual_forks (fork_id TEXT NOT NULL PRIMARY KEY);",
+    ));
+    assert!(open_error(SqliteStore::open_read_only(path_text)).contains("counterfactual_forks"));
+    ok(execute(&fixture.path, "DROP TABLE counterfactual_forks;"));
+    ok(execute(
+        &fixture.path,
+        "CREATE TABLE unrelated (id INTEGER);
+         CREATE TRIGGER counterfactual_shadow BEFORE INSERT ON unrelated BEGIN SELECT 1; END;",
+    ));
+    // An object on another table is not counterfactual state.
+    assert_eq!(open_error(SqliteStore::open_read_only(path_text)), "");
 }

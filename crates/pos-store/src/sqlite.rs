@@ -132,7 +132,6 @@ use crate::{
 
 mod counterfactual_store;
 mod fork_attribution_issuer_policy;
-pub use counterfactual_store::SqliteCounterfactualFactsV1;
 mod local_cut_owner;
 mod pipeline_admission;
 
@@ -1910,7 +1909,7 @@ impl SqliteStore {
                     self.validate_authority_schema_and_state()
                         .and_then(|()| self.validate_fork_admission_authority_schema())
                         .and_then(|()| self.validate_pipeline_admission_schema())
-                        .and_then(|()| self.validate_counterfactual_schema())
+                        .and_then(|()| self.validate_present_counterfactual_schema())
                 } else {
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
