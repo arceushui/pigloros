@@ -124,20 +124,21 @@ impl Release {
             .iter()
             .map(encode)
             .collect::<BoxResult<Vec<_>>>()?;
+        let members = [
+            (Role::Component, COMPONENT_BYTES),
+            (Role::Wit, WIT_BYTES),
+            (Role::Schema, EVENT_SCHEMA),
+            (Role::Schema, STATE_SCHEMA),
+            (Role::Provenance, PROVENANCE_BYTES),
+            (Role::Sbom, SBOM_BYTES),
+            (Role::Licence, LICENCE_BYTES),
+        ];
         let mut release = Self {
             fields,
-            members: [
-                (Role::Component, COMPONENT_BYTES),
-                (Role::Wit, WIT_BYTES),
-                (Role::Schema, EVENT_SCHEMA),
-                (Role::Schema, STATE_SCHEMA),
-                (Role::Provenance, PROVENANCE_BYTES),
-                (Role::Sbom, SBOM_BYTES),
-                (Role::Licence, LICENCE_BYTES),
-            ]
-            .into_iter()
-            .map(|(role, bytes)| Member::new(role, bytes))
-            .collect(),
+            members: members
+                .into_iter()
+                .map(|(role, blob)| Member::new(role, blob))
+                .collect(),
         };
         release.seal()?;
         Ok(release)
@@ -357,8 +358,8 @@ fn closure(pmf1: Vec<u8>, members: &[Member]) -> BoxResult<Bundle> {
     blobs.insert(pmf1_digest, pmf1);
     for (role, oci, index) in ordered {
         let blob = members[index].bytes.clone();
-        let entry = layer(&role.annotation(&oci), role.media_type(), &oci, blob.len());
-        layers.push(entry);
+        let annotation = role.annotation(&oci);
+        layers.push(layer(&annotation, role.media_type(), &oci, blob.len()));
         blobs.insert(oci, blob);
     }
     let manifest = serde_json::to_vec(&serde_json::json!({
@@ -455,8 +456,8 @@ fn evidence(
     verify_plugin_trust_v1(&anchor, &[&ptr1], &[&prv1], 50, tick).map_err(Into::into)
 }
 
-fn revoked_artifact(revoked: [u8; 32]) -> Value {
-    list(vec![bytes(revoked), unsigned(5), unsigned(1), Value::Null])
+fn revoked_artifact(id: [u8; 32]) -> Value {
+    list(vec![bytes(id), unsigned(5), unsigned(1), Value::Null])
 }
 
 fn authorize(
@@ -592,19 +593,21 @@ fn manifest_interval_is_half_open_at_the_evidence_second() -> TestResult {
     Ok(())
 }
 
+/// A PRV1 revocation of the default publisher key, effective at Tick 5.
+fn key() -> Vec<Value> {
+    vec![list(vec![
+        text("publisher"),
+        unsigned(3),
+        unsigned(1),
+        bytes(publisher_public()),
+        unsigned(5),
+        unsigned(1),
+        Value::Null,
+    ])]
+}
+
 #[test]
 fn publisher_key_revocation_denies_a_real_projection() -> TestResult {
-    let key = || {
-        vec![list(vec![
-            text("publisher"),
-            unsigned(3),
-            unsigned(1),
-            bytes(publisher_public()),
-            unsigned(5),
-            unsigned(1),
-            Value::Null,
-        ])]
-    };
     let release = Release::new()?;
     let before = evidence(key(), Vec::new(), 4)?;
     assert_eq!(authorize(&before, &release)?, Ok(publisher_public()));
@@ -767,7 +770,7 @@ fn every_field_rejects_malformed_cbor_at_its_ordinal() -> TestResult {
     for ordinal in 0..28_u8 {
         for item in malformed {
             let projection = Release::with_raw(usize::from(ordinal), item)?.project()?;
-            assert_eq!(projection, Err(encoding(ordinal)), "{ordinal} {item:02x?}");
+            assert_eq!(projection, Err(encoding(ordinal)), "{item:02x?}");
         }
     }
     Ok(())
@@ -818,9 +821,7 @@ fn plugin_id_has_the_exact_id_grammar_and_bound() -> TestResult {
     for valid in ["0", "a", "0a._/-z9", longest.as_str()] {
         accepted(&Release::sealed_with(2, &text(valid))?)?;
     }
-    for wrong in [
-        "", "-a", ".a", "_a", "/a", "A", "aB", "a b", "a+b", "a\u{e9}",
-    ] {
+    for wrong in ["", "-a", ".a", "_a", "/a", "A", "aB", "a b", "a+b", "é"] {
         expect(&Release::with(2, &text(wrong))?, invalid(2))?;
     }
     expect(&Release::with(2, &text(&"a".repeat(129)))?, bound(2))?;
@@ -1462,13 +1463,13 @@ fn closure_members_must_equal_the_pmf1_descriptors_in_order() -> TestResult {
     let second: &[u8] = b"second licence";
     let mut declared = [LICENCE_BYTES.to_vec(), second.to_vec()];
     declared.sort_by_key(|licence| sha256(licence));
-    let mut missing_last = Release::sealed_with(20, &licence_list(&declared))?;
+    let mut trailing = Release::sealed_with(20, &licence_list(&declared))?;
     let member = Member::new(Role::Licence, second);
-    missing_last.members.push(member);
-    accepted(&missing_last)?;
-    let dropped = closure_index(&missing_last.members, Role::Licence, second)?;
-    missing_last.members.retain(|member| member.bytes != second);
-    expect(&missing_last, mismatch(dropped))?;
+    trailing.members.push(member);
+    accepted(&trailing)?;
+    let dropped = closure_index(&trailing.members, Role::Licence, second)?;
+    trailing.members.retain(|member| member.bytes != second);
+    expect(&trailing, mismatch(dropped))?;
     Ok(())
 }
 
