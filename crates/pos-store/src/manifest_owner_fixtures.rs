@@ -355,8 +355,7 @@ fn fixture_consumer(scope: &ManifestOwnerScopeV1) -> Fallible<WorldConsumerV1> {
     let reducer = reference_leaf(scope, WorldArtifactKindV1::ReducerImplementation)?;
     let schema = reference_leaf(scope, WorldArtifactKindV1::Schema)?;
     let runtime = reference_leaf(scope, WorldArtifactKindV1::RuntimeIdentity)?;
-    WorldConsumerV1::new("local-observer".to_owned(), reducer, schema, runtime)
-        .map_err(Into::into)
+    WorldConsumerV1::new("local-observer".to_owned(), reducer, schema, runtime).map_err(Into::into)
 }
 
 /// WAL1 address of the scope's reference leaf of one kind.
