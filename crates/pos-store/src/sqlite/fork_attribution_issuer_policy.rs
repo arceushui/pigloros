@@ -11,12 +11,13 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use super::SqliteStore;
 use crate::fork_attribution_issuer_policy::{
-    admit_fork_attribution_issuer, pinned_issuer_policy, plan_issuer_policy_install,
-    AuthenticatedOperatorPolicyPinV1, ForkAttributionIssuerAdmissionBasisV1,
-    ForkAttributionIssuerAdmissionQueryV1, ForkAttributionIssuerAdmissionV1,
-    ForkAttributionIssuerPolicyErrorV1, ForkAttributionIssuerPolicyInstallationPortV1,
-    IssuerPolicyFloorV1, IssuerPolicyInstallOutcomeV1, IssuerPolicyInstallReceiptV1,
-    LoadedIssuerPolicyV1, PolicyResultV1,
+    admit_fork_attribution_issuer, checked_retained_policy, pinned_issuer_policy,
+    plan_issuer_policy_install, AuthenticatedOperatorPolicyPinV1,
+    ForkAttributionIssuerAdmissionBasisV1, ForkAttributionIssuerAdmissionQueryV1,
+    ForkAttributionIssuerAdmissionV1, ForkAttributionIssuerPolicyErrorV1,
+    ForkAttributionIssuerPolicyInstallationPortV1, IssuerPolicyFloorV1,
+    IssuerPolicyInstallOutcomeV1, IssuerPolicyInstallReceiptV1, LoadedIssuerPolicyV1,
+    PolicyResultV1,
 };
 
 /// The expected scope, generation, and digest of one stored policy, with its
@@ -142,14 +143,12 @@ fn read_floor_policy(conn: &Connection) -> LoadedIssuerPolicyV1 {
 fn stored_policy_row(
     (scope, generation, digest, bytes): StoredPolicyRowV1,
 ) -> PolicyResultV1<ForkAttributionIssuerPolicyV1> {
-    let policy = bytes.as_deref().map(stored_policy).transpose()?;
-    policy
-        .filter(|policy| {
-            policy.input().scope == scope
-                && u64::try_from(generation) == Ok(policy.input().generation)
-                && policy.digest() == Hash::from_bytes(digest)
-        })
-        .ok_or(ForkAttributionIssuerPolicyErrorV1::CorruptPolicy)
+    let bytes = bytes.ok_or(ForkAttributionIssuerPolicyErrorV1::CorruptPolicy)?;
+    // The table `CHECK` keeps generations in 1..=96; generation 0 matches none.
+    let generation = u64::try_from(generation).unwrap_or(0);
+    let digest = Hash::from_bytes(digest);
+    let policy = stored_policy(&bytes)?;
+    checked_retained_policy(policy, &scope, generation, digest)
 }
 
 /// Read the retained policy at one committed generation, if any, requiring it

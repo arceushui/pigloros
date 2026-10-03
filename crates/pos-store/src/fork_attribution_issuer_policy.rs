@@ -115,9 +115,10 @@ pub enum ForkAttributionIssuerAdmissionBasisV1 {
     /// committed import stays recoverable after retirement or revocation.
     ///
     /// The recorded generation must be one in which the issuer was `Active`,
-    /// because that policy admitted the import. `Retired` or `Revoked` there
-    /// means the committed admission is inconsistent with durable policy, a
-    /// corruption-level failure the import reports as corrupt authority.
+    /// because that policy admitted the import. This port still returns
+    /// `IssuerRetired` or `IssuerRevoked` when the recorded policy says
+    /// otherwise; it does not remap them. The caller (#518) must treat either
+    /// result for a committed import as corrupt authority.
     CommittedImport {
         /// Generation recorded by the committed import admission.
         policy_generation: u64,
@@ -196,8 +197,10 @@ pub enum ForkAttributionIssuerPolicyErrorV1 {
     /// The successor adds no identity and advances no state.
     #[error("Fork attribution issuer policy successor changes nothing")]
     NoOpSuccessor,
-    /// The successor leaves no `Active` identity without revoking one; only
-    /// an emergency revocation may leave zero `Active` issuers.
+    /// The successor leaves no `Active` identity although it retires, rather
+    /// than revokes, an identity `Active` in the predecessor; only an
+    /// emergency successor that revokes every such identity may leave zero
+    /// `Active` issuers.
     #[error("Fork attribution issuer policy leaves no active issuer")]
     NoActiveIssuer,
     /// No issuer policy is installed, so no new import can be admitted.
@@ -409,9 +412,10 @@ fn advance_floor(
 /// `Active`; for one issuer ID only the newest epoch may be `Active`, so a
 /// rotation retires its predecessor in the same policy; and the candidate
 /// must add an identity or advance a state. At least one identity must stay
-/// `Active`, unless the candidate is an emergency successor that revokes an
-/// identity `Active` in the predecessor; zero `Active` identities then fail
-/// every new import closed.
+/// `Active`, unless the candidate is an emergency successor that revokes
+/// every identity `Active` in the predecessor; with the no-op rule it then
+/// revokes at least one, and zero `Active` identities fail every new import
+/// closed.
 fn validate_transition(
     previous: &[ForkAttributionIssuerPolicyEntryV1],
     candidate: &ForkAttributionIssuerPolicyV1,
@@ -422,7 +426,7 @@ fn validate_transition(
             .iter()
             .any(|old| candidate.issuer_state(&old.issuer) != Some(old.state));
     let legal = transition_is_legal(previous, candidate);
-    let keeps_active = keeps_or_revokes_active(previous, candidate);
+    let keeps_active = keeps_active_or_revokes_all(previous, candidate);
     match (legal, advanced, keeps_active) {
         (false, _, _) => Err(ForkAttributionIssuerPolicyErrorV1::IllegalTransition),
         (true, false, _) => Err(ForkAttributionIssuerPolicyErrorV1::NoOpSuccessor),
@@ -454,8 +458,9 @@ fn transition_is_legal(
     retained && entered_active && newest_active
 }
 
-/// The candidate keeps an `Active` identity, or revokes one that was `Active`.
-fn keeps_or_revokes_active(
+/// The candidate keeps an `Active` identity, or revokes every identity that
+/// was `Active` in the predecessor.
+fn keeps_active_or_revokes_all(
     previous: &[ForkAttributionIssuerPolicyEntryV1],
     candidate: &ForkAttributionIssuerPolicyV1,
 ) -> bool {
@@ -466,7 +471,24 @@ fn keeps_or_revokes_active(
     keeps
         || previous
             .iter()
-            .any(|old| old.state == active && candidate.issuer_state(&old.issuer) == revoked)
+            .filter(|old| old.state == active)
+            .all(|old| candidate.issuer_state(&old.issuer) == revoked)
+}
+
+/// Require a retained policy to be exactly the expected scope, generation,
+/// and stored digest; any mismatch is corrupt durable state.
+pub(crate) fn checked_retained_policy(
+    policy: ForkAttributionIssuerPolicyV1,
+    scope: &str,
+    generation: u64,
+    digest: Hash,
+) -> PolicyResultV1<ForkAttributionIssuerPolicyV1> {
+    let input = policy.input();
+    if input.scope == scope && input.generation == generation && policy.digest() == digest {
+        Ok(policy)
+    } else {
+        Err(ForkAttributionIssuerPolicyErrorV1::CorruptPolicy)
+    }
 }
 
 /// Decide one issuer admission against the policy `load` returns for the

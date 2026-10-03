@@ -283,9 +283,9 @@ pub struct MemoryStore {
     fork_publication_operations: HashMap<Hash, ForkPublicationOperationV1>,
     fork_publication_bindings: HashMap<(TimelineId, u64), ForkPublicationBindingV1>,
     fork_publication_artifacts: HashMap<Hash, ForkPublicationArtifactV1>,
-    /// Accepted ADR-105 `FIP1` history; index `g - 1` holds generation `g`,
-    /// and the last entry is the durable floor.
-    fork_attribution_issuer_policies: Vec<pos_core::ForkAttributionIssuerPolicyV1>,
+    /// Accepted ADR-105 `FIP1` history with each digest recorded at install;
+    /// index `g - 1` holds generation `g`, and the last entry is the floor.
+    fork_attribution_issuer_policies: Vec<(Hash, pos_core::ForkAttributionIssuerPolicyV1)>,
     /// Current raw ERCRP1 envelope per request.
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.

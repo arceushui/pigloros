@@ -323,6 +323,7 @@ fn only_an_emergency_revocation_may_leave_no_active_issuer() -> Fallible<()> {
     let partly_retired = successor(&first, &[(&a, ACTIVE), (&b, RETIRED)])?;
     let all_retired = successor(&partly_retired, &[(&a, RETIRED), (&b, RETIRED)])?;
     let second = successor(&partly_retired, &[(&a, REVOKED), (&b, RETIRED)])?;
+    let third = successor(&second, &[(&a, REVOKED), (&b, REVOKED)])?;
     on_both_adapters(|store| {
         assert_eq!(install(store, &first), Ok(installed(&first)));
         let partly = install(store, &partly_retired);
@@ -334,6 +335,23 @@ fn only_an_emergency_revocation_may_leave_no_active_issuer() -> Fallible<()> {
         // A durably committed import stays recoverable under its own policy.
         let recovered = decide(store, &a, &first, committed(1));
         assert_eq!(recovered, Ok(admitted(&first)));
+        // From a zero-Active floor, revoking a Retired identity is accepted.
+        assert_eq!(install(store, &third), Ok(installed(&third)));
+        Ok(())
+    })
+}
+
+#[test]
+fn an_emergency_successor_must_revoke_every_active_identity() -> Fallible<()> {
+    let a = issuer("issuer-a", 1, 1)?;
+    let c = issuer("issuer-c", 1, 3)?;
+    let first = genesis(&[(&a, ACTIVE), (&c, ACTIVE)])?;
+    let mixed = successor(&first, &[(&a, RETIRED), (&c, REVOKED)])?;
+    let revoked = successor(&first, &[(&a, REVOKED), (&c, REVOKED)])?;
+    on_both_adapters(|store| {
+        assert_eq!(install(store, &first), Ok(installed(&first)));
+        refuse(store, &mixed, PolicyError::NoActiveIssuer)?;
+        assert_eq!(install(store, &revoked), Ok(installed(&revoked)));
         Ok(())
     })
 }
