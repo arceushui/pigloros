@@ -8249,9 +8249,11 @@ pub mod tests {
             unknown_edges.frontier.unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
             unknown_edges.frontier.unknown_edge_coordinates = vec![unknown_edge(&later_node)];
             assert!(verify_counterfactual_record_shapes(&unknown_edges));
-            unknown_edges.frontier.unknown_edge_coordinates[0].missing_source_digest = Some([3; 32]);
+            unknown_edges.frontier.unknown_edge_coordinates[0].missing_source_digest =
+                Some([3; 32]);
             assert!(verify_counterfactual_record_shapes(&unknown_edges));
-            unknown_edges.frontier.unknown_edge_coordinates[0].missing_source_digest = Some([0; 32]);
+            unknown_edges.frontier.unknown_edge_coordinates[0].missing_source_digest =
+                Some([0; 32]);
             assert!(!verify_counterfactual_record_shapes(&unknown_edges));
             unknown_edges.frontier.unknown_edge_coordinates.clear();
             assert!(!verify_counterfactual_record_shapes(&unknown_edges));
