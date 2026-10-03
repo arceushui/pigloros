@@ -16,8 +16,8 @@ pub(crate) const PAGE_DOMAIN: &[u8] = b"pigloros.local-cut.page.v1\0";
 pub(crate) const BRANCH_DOMAIN: &[u8] = b"pigloros.local-cut.branch.v1\0";
 const CUT_SCOPE_DOMAIN: &[u8] = b"pigloros.local-cut.scope.v1\0";
 const MANIFEST_BINDING_KIND: u64 = 14;
-const MAX_PAGE_ROWS: usize = 64;
-const MAX_BRANCH_CHILDREN: usize = 240;
+pub(crate) const MAX_PAGE_ROWS: usize = 64;
+pub(crate) const MAX_BRANCH_CHILDREN: usize = 240;
 const MAX_TABLE_NODE_BYTES: usize = 65_536;
 
 /// Closed structural seal and table errors; none represents an owner decision.

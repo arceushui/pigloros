@@ -7,14 +7,13 @@
 
 use crate::local_cut_seal::{
     domain_digest, encode_bytes, encode_head, encode_optional_hash, local_cut_tree_scope_v1,
-    LocalCutBranchChildV1, LocalCutSealErrorV2, LocalCutTableRefV1, BRANCH_DOMAIN, PAGE_DOMAIN,
+    LocalCutBranchChildV1, LocalCutSealErrorV2, LocalCutTableRefV1, BRANCH_DOMAIN,
+    MAX_BRANCH_CHILDREN, MAX_PAGE_ROWS, PAGE_DOMAIN,
 };
 use crate::{Hash, TimelineId};
 
 const EXPECTED_HEADS_KIND: u64 = 4;
 const RESULT_HEADS_KIND: u64 = 5;
-const PAGE_ROWS: usize = 64;
-const BRANCH_CHILDREN: usize = 240;
 
 /// One prospective kind-4 expected Timeline head; not a source-owner observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,8 +176,8 @@ fn pack(
 ) -> Result<LocalCutHeadsTableV1, LocalCutSealErrorV2> {
     let mut node_records = Vec::new();
     let mut level = Vec::new();
-    for (index, chunk) in rows.chunks(PAGE_ROWS).enumerate() {
-        let first_ordinal = (index * PAGE_ROWS) as u64;
+    for (index, chunk) in rows.chunks(MAX_PAGE_ROWS).enumerate() {
+        let first_ordinal = (index * MAX_PAGE_ROWS) as u64;
         let page = encode_page(kind, tree_scope, first_ordinal, chunk);
         level.push(LocalCutBranchChildV1 {
             first_ordinal,
@@ -191,7 +190,7 @@ fn pack(
     while level.len() > 1 {
         height += 1;
         let mut parents = Vec::new();
-        for children in level.chunks(BRANCH_CHILDREN) {
+        for children in level.chunks(MAX_BRANCH_CHILDREN) {
             let branch = encode_branch(kind, tree_scope, height, children);
             parents.push(LocalCutBranchChildV1 {
                 first_ordinal: children[0].first_ordinal,
