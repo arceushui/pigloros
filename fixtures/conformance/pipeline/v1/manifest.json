@@ -1,0 +1,1212 @@
+{
+  "magic": "PPC1",
+  "version": 1,
+  "suite": "pigloros.pipeline-cross-path",
+  "sources": [
+    "#488",
+    "#321",
+    "ADR-021 R3",
+    "ADR-024 R1",
+    "ADR-024 R2",
+    "ADR-062"
+  ],
+  "exclusions": [
+    {
+      "id": "R3-COMPOSITION-UNASSIGNED-DRIVER",
+      "reason": "ADR-021 Revision 3 Decision 2 composition-time profile assignment is not implemented, so no host can reject an unassigned Driver yet",
+      "owner": "#504"
+    },
+    {
+      "id": "R3-COMPOSITION-ANCHORED-PATH",
+      "reason": "Rejecting a participant-bound Driver before anchored staging needs the same assignment; PCF-R3-001 covers only the AuthorityFenceRequired backstop",
+      "owner": "#504"
+    },
+    {
+      "id": "R3-COMPOSITION-MIXED-PASS",
+      "reason": "Rejecting a mixed-profile host at composition needs the same assignment; PCF-R3-002 covers the runtime rule that one pass is one profile",
+      "owner": "#504"
+    },
+    {
+      "id": "R3-PARTICIPANT-COMMIT-RECOVERY",
+      "reason": "Recovery and duplicate-receipt of a committed participant-authorized pass need a published participant authority fence in a store; the test host offers participant passes to a recording port only",
+      "owner": "#507"
+    },
+    {
+      "id": "REG-DUPLICATE-CLOSED-ERROR",
+      "reason": "A type listed twice must fail with DuplicateEventTypeOwner on every path; the generated, pinned and test-support Driver paths reject it earlier with a binding error, so PCF-REG-002 pins only the rejection there",
+      "owner": "#505"
+    },
+    {
+      "id": "GATEWAY-HUMAN-SUCCESS-PATH",
+      "reason": "Wave 8 has no installed Gateway action EPF1, so the authorized Gateway composition fails closed and its human success path is not publicly composable",
+      "owner": "#461"
+    },
+    {
+      "id": "COMMUNITY-PLUGIN-HOST",
+      "reason": "Missing, invalid or over-budget governed Plugins and first-party versus community-replaceable parity need the ADR-061 community host",
+      "owner": "#489"
+    }
+  ],
+  "cases": [
+    {
+      "id": "PCF-ING-001",
+      "title": "Human and AI ingress commit the same action meaning through their own admission paths",
+      "sources": [
+        "#316",
+        "#318",
+        "#319",
+        "ADR-021"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "human.ingress": "HumanProposedAction",
+        "ai.ingress": "ScheduledAiDriver",
+        "human.range": "1..1",
+        "ai.range": "2..2",
+        "ai.tick": "true",
+        "meaning.equivalent": "true",
+        "receipts.name-committed-events": "true",
+        "folded-before-visible": "true",
+        "approvals": "1",
+        "driver.steps": "1"
+      }
+    },
+    {
+      "id": "PCF-ING-002",
+      "title": "A human action commits only through host admission and returns the store receipt",
+      "sources": [
+        "#316",
+        "#319"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "recovered": "false",
+        "receipt.events": "1",
+        "receipt.seq": "1",
+        "receipt.names-event": "true",
+        "entity.is-actor": "true",
+        "approvals": "1"
+      }
+    },
+    {
+      "id": "PCF-ING-003",
+      "title": "A first-party action has no privileged Gateway route and the production composition fails closed",
+      "sources": [
+        "#319",
+        "ADR-021"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "authorized-composition": "fails-closed",
+        "unauthorized-gateway": "human action authorization is unavailable",
+        "committed": "0"
+      }
+    },
+    {
+      "id": "PCF-ING-004",
+      "title": "First-party and third-party Drivers emitting another Plugin's type are rejected identically",
+      "sources": [
+        "#484",
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "first-party": "participant observation authority failed closed: authority source is unauthorized",
+        "third-party": "participant observation authority failed closed: authority source is unauthorized",
+        "identical": "true",
+        "committed": "0"
+      }
+    },
+    {
+      "id": "PCF-FP-001",
+      "title": "Authentication precedes authorization at the Gateway authorization seam",
+      "sources": [
+        "#319",
+        "ADR-021"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "rung.authentication": "authentication unavailable",
+        "rung.authorization": "authorization denied",
+        "authorized": "allowed",
+        "stale-revocation-state": "authorization denied"
+      }
+    },
+    {
+      "id": "PCF-FP-002",
+      "title": "Domain approval precedes revisions, observation and budget; a store write failure is typed",
+      "sources": [
+        "#316",
+        "#319",
+        "ADR-021"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "rung.domain": "domain-rejected",
+        "rung.revisions": "not-admitted:AdmissionConflict",
+        "rung.observation": "not-admitted:InvalidObservation",
+        "rung.budget": "not-admitted:ResourceExhausted",
+        "rung.store-write": "store-failure",
+        "approvals": "5",
+        "committed": "0"
+      }
+    },
+    {
+      "id": "PCF-FP-003",
+      "title": "A failing Driver discards every Driver's output of the scheduled pass",
+      "sources": [
+        "#318",
+        "#480",
+        "ADR-021"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "failed-pass": "payload validation failed for event type 'conformance-second': injected driver failure",
+        "failed-pass.committed": "0",
+        "first.aborted": "1",
+        "next-pass.committed": "2",
+        "next-pass.order": "first.tick@1,second.tick@2"
+      }
+    },
+    {
+      "id": "PCF-REC-001",
+      "title": "After a disconnect following the commit, an exact retry recovers the original receipt",
+      "sources": [
+        "#316",
+        "#319"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "first.recovered": "false",
+        "retry.recovered": "true",
+        "retry.receipt-equal": "true",
+        "retry.approvals": "0",
+        "committed": "1"
+      }
+    },
+    {
+      "id": "PCF-REC-002",
+      "title": "A lost commit acknowledgement is recovered on both ingress paths without rerunning approval or a Driver",
+      "sources": [
+        "#316",
+        "#318",
+        "#319"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "human.lost": "outcome-unknown",
+        "human.committed-before-retry": "1",
+        "human.retry-recovered": "true",
+        "human.approvals": "1",
+        "human.committed": "1",
+        "scheduled.lost": "true",
+        "scheduled.committed-before-recovery": "1",
+        "scheduled.recovered-events": "1",
+        "scheduled.driver-steps": "1",
+        "scheduled.committed": "1"
+      }
+    },
+    {
+      "id": "PCF-REC-003",
+      "title": "An exact retry returns the retained receipt; a reused key is a typed conflict",
+      "sources": [
+        "#316",
+        "#319"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "retry.recovered": "true",
+        "retry.receipt-equal": "true",
+        "conflict": "idempotency key is held by another attempt",
+        "approvals": "2",
+        "committed": "2"
+      }
+    },
+    {
+      "id": "PCF-RPL-001",
+      "title": "Replay folds committed Events without resubmitting a proposal or rerunning a Driver",
+      "sources": [
+        "#318",
+        "#320",
+        "ADR-021"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "live.committed": "2",
+        "replay.step": "true",
+        "replay.submit": "true",
+        "approvals": "1",
+        "driver.steps": "1",
+        "committed-after-replay": "2"
+      }
+    },
+    {
+      "id": "PCF-EVL-001",
+      "title": "Evaluation names its range, carries the non-participant tag and cannot append, approve or change evidence",
+      "sources": [
+        "#320",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "integrity": "checked=1,intact=true",
+        "names-committed-range": "true",
+        "events-unchanged": "true",
+        "evidence-unchanged": "true",
+        "approvals-unchanged": "true",
+        "next-boundary": "true"
+      }
+    },
+    {
+      "id": "PCF-R3-001",
+      "title": "A participant-authorized pass offered to anchored admission fails with AuthorityFenceRequired",
+      "sources": [
+        "#481",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "staged": "1",
+        "anchored-admission": "participant-authorized Driver work requires a fresh authority fence",
+        "offered-to-store": "0",
+        "driver-aborted": "1"
+      }
+    },
+    {
+      "id": "PCF-R3-002",
+      "title": "One scheduled pass is never both observation profiles",
+      "sources": [
+        "#480",
+        "#481",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "anchored.staged": "1",
+        "authorized-stage-while-anchored-pending": "an anchored Driver step is already pending",
+        "authorized-admission-of-anchored-pass": "participant observation authority failed closed: authority source is unauthorized",
+        "anchored.aborted": "1",
+        "subscription-scoped-driver-on-authorized-path": "participant observation authority failed closed: authority source is unauthorized",
+        "offered-to-store": "0"
+      }
+    },
+    {
+      "id": "PCF-R3-003",
+      "title": "Anchored and authorized observation digests come from disjoint domains for the same cut",
+      "sources": [
+        "#480",
+        "#481",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "anchored.refusal": "scheduled pass was not admitted: Rejected",
+        "authorized.refusal": "scheduled pass was not admitted: Rejected",
+        "offered": "2",
+        "cuts": "[12, 12]",
+        "anchored.in-declared-domain": "true",
+        "authorized.outside-anchored-domain": "true",
+        "profiles-differ": "true",
+        "domains-prefix-free": "true"
+      }
+    },
+    {
+      "id": "PCF-R3-004",
+      "title": "End-to-end participant-bound Scenario Room host with an activated observation issuer",
+      "sources": [
+        "ADR-021 R3",
+        "ADR-041",
+        "ADR-082"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "profile-inapplicable",
+        "reason": "No Scenario Room host or activated PreparedAuthorizedObservationV1 issuer exists before Wave 9 (ADR-021 Revision 3 deferral)"
+      },
+      "stores": [],
+      "observation_profile": null,
+      "expected": {}
+    },
+    {
+      "id": "PCF-R3-005",
+      "title": "Each participant Driver observes only its own view; order, view-set digest and Replay",
+      "sources": [
+        "#481",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "both.staged": "2",
+        "both.refusal": "scheduled pass was not admitted: Rejected",
+        "first.observed-only-its-view": "true",
+        "second.observed-only-its-view": "true",
+        "both.order": "participant.planned.1,participant.planned.2",
+        "first-only.staged": "1",
+        "first-only.refusal": "scheduled pass was not admitted: Rejected",
+        "offered": "2",
+        "digest-changes-with-view-set": "true",
+        "replay.stage": "true"
+      }
+    },
+    {
+      "id": "PCF-R3-006",
+      "title": "Commit-boundary revalidation rejects a revoked view and aborts the whole participant pass",
+      "sources": [
+        "#481",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "staged": "2",
+        "revoked-view": "true",
+        "aborted": "1,1",
+        "offered-to-store": "0"
+      }
+    },
+    {
+      "id": "PCF-R3-007",
+      "title": "A non-participant pass shares one base cut, is subscription-scoped, and its digest tracks the observed state",
+      "sources": [
+        "#480",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "staged": "2",
+        "observers": "observer-a@2:a=true,b=false|observer-b@2:a=false,b=false",
+        "offered": "3",
+        "digest.changes-with-state": "true",
+        "digest.stable-without-change": "true"
+      }
+    },
+    {
+      "id": "PCF-R3-008",
+      "title": "A late consent revocation or erasure freeze aborts the whole non-participant pass",
+      "sources": [
+        "#480",
+        "ADR-021 R3",
+        "ADR-039",
+        "ADR-060"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "consent.staged": "2",
+        "consent.refused": "true",
+        "consent.aborted": "1,1",
+        "consent.committed": "1",
+        "erasure.staged": "2",
+        "erasure.refused": "true",
+        "erasure.aborted": "1,1"
+      }
+    },
+    {
+      "id": "PCF-REG-001",
+      "title": "A second claimant of an owned type is rejected on every public registration path",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "generated": "Event type 'shared.type' has more than one owner",
+        "generated.unchanged": "true",
+        "generated-with-approver": "Event type 'shared.type' has more than one owner",
+        "generated-with-approver.unchanged": "true",
+        "pinned": "Event type 'shared.type' has more than one owner",
+        "pinned.unchanged": "true",
+        "pinned-with-approver": "Event type 'shared.type' has more than one owner",
+        "pinned-with-approver.unchanged": "true",
+        "verified": "Event type 'shared.type' has more than one owner",
+        "verified.unchanged": "true",
+        "verified-with-approver": "Event type 'shared.type' has more than one owner",
+        "verified-with-approver.unchanged": "true",
+        "test-driver": "Event type 'shared.type' has more than one owner",
+        "test-driver.unchanged": "true",
+        "installed": "fails-closed:EPF1",
+        "installed.unchanged": "true",
+        "manifest-slot": "fails-closed:EPF1",
+        "manifest-slot.unchanged": "true"
+      }
+    },
+    {
+      "id": "PCF-REG-002",
+      "title": "A declaration listing one type twice is rejected on every public registration path",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "generated": "rejected",
+        "generated.unchanged": "true",
+        "generated-with-approver": "rejected",
+        "generated-with-approver.unchanged": "true",
+        "pinned": "rejected",
+        "pinned.unchanged": "true",
+        "pinned-with-approver": "rejected",
+        "pinned-with-approver.unchanged": "true",
+        "verified": "Event type 'dup.type' has more than one owner",
+        "verified.unchanged": "true",
+        "verified-with-approver": "Event type 'dup.type' has more than one owner",
+        "verified-with-approver.unchanged": "true",
+        "test-driver": "rejected",
+        "test-driver.unchanged": "true",
+        "installed": "fails-closed:EPF1",
+        "installed.unchanged": "true",
+        "manifest-slot": "fails-closed:EPF1",
+        "manifest-slot.unchanged": "true"
+      }
+    },
+    {
+      "id": "PCF-REG-003",
+      "title": "A claim on a non-claimable host type is rejected on every public registration path",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "generated": "plugin 'consent-claimant' cannot claim Gateway-owned consent event type 'consent.revoked.v1'",
+        "generated.unchanged": "true",
+        "generated-with-approver": "plugin 'consent-claimant' cannot claim Gateway-owned consent event type 'consent.revoked.v1'",
+        "generated-with-approver.unchanged": "true",
+        "pinned": "plugin 'consent-claimant' cannot claim Gateway-owned consent event type 'consent.revoked.v1'",
+        "pinned.unchanged": "true",
+        "pinned-with-approver": "plugin 'consent-claimant' cannot claim Gateway-owned consent event type 'consent.revoked.v1'",
+        "pinned-with-approver.unchanged": "true",
+        "verified": "plugin 'consent-claimant' cannot claim Gateway-owned consent event type 'consent.revoked.v1'",
+        "verified.unchanged": "true",
+        "verified-with-approver": "plugin 'consent-claimant' cannot claim Gateway-owned consent event type 'consent.revoked.v1'",
+        "verified-with-approver.unchanged": "true",
+        "test-driver": "Event type 'consent.revoked.v1' has more than one owner",
+        "test-driver.unchanged": "true",
+        "installed": "fails-closed:EPF1",
+        "installed.unchanged": "true",
+        "manifest-slot": "fails-closed:EPF1",
+        "manifest-slot.unchanged": "true"
+      }
+    },
+    {
+      "id": "PCF-REG-004",
+      "title": "Overlapping Plugins fail closed whatever their registration order",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "alpha-first.second": "Event type 'shared.type' has more than one owner",
+        "alpha-first.registered": "alpha",
+        "beta-first.second": "Event type 'shared.type' has more than one owner",
+        "beta-first.registered": "beta"
+      }
+    },
+    {
+      "id": "PCF-REG-005",
+      "title": "Two AgentPlugin registrations and two declarers of world.action.v1 or society.signal fail closed",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "agent.second": "Event type 'agent.action' has more than one owner",
+        "agent.registered": "1",
+        "world.fixture-second": "Event type 'world.action.v1' has more than one owner",
+        "world.world-second": "Event type 'world.action.v1' has more than one owner",
+        "society.fixture-second": "Event type 'society.signal' has more than one owner",
+        "society.society-second": "Event type 'society.signal' has more than one owner"
+      }
+    },
+    {
+      "id": "PCF-REG-006",
+      "title": "One AgentPlugin claims the Recorder type and keeps the host schema; a second claimant is rejected",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "host-schema-present": "true",
+        "agent": "registered",
+        "host-schema-kept": "true",
+        "rival": "Event type 'runtime.recorded_output' has more than one owner",
+        "rival.unchanged": "true"
+      }
+    },
+    {
+      "id": "PCF-EVAL-001",
+      "title": "Persona registers without any eval.* type",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "owns-eval": "false",
+        "owned": "persona.decision,persona.prediction,persona.preference",
+        "registers": "registered"
+      }
+    },
+    {
+      "id": "PCF-EVAL-002",
+      "title": "A committed source yields exactly one whole unit in the next eligible pass",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "passes": "2,4,4,4,4,4",
+        "sources": "6",
+        "exactly-once": "ok",
+        "newest-source.awaits-next-pass": "true",
+        "findings": "0"
+      }
+    },
+    {
+      "id": "PCF-EVAL-003",
+      "title": "Derivation stays exactly once across a discarded pass, a restart and both Fork branches",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "discarded.staged": "4",
+        "discarded.committed": "2",
+        "main.passes": "4,0",
+        "main.exactly-once": "ok",
+        "main.committed": "6",
+        "fork.passes": "4,0",
+        "fork.exactly-once": "ok",
+        "fork.committed": "6"
+      }
+    },
+    {
+      "id": "PCF-EVAL-004",
+      "title": "A budget-capped pass derives whole units for the earliest sources and never splits a pair",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "passes": "2,3,0",
+        "derived": "eval.prediction<-0,eval.outcome<-0,eval.prediction<-1,eval.outcome<-1,eval.prediction<-2",
+        "exactly-once": "ok"
+      }
+    },
+    {
+      "id": "PCF-EVAL-005",
+      "title": "Eval's subscriptions are consent-gated",
+      "sources": [
+        "#486",
+        "ADR-024 R1",
+        "ADR-039"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "subject-pass": "1",
+        "other-pass": "2",
+        "public-pass": "0",
+        "exactly-once": "ok"
+      }
+    },
+    {
+      "id": "PCF-EVAL-006",
+      "title": "Replay never runs the derivation",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "replay.step": "true",
+        "committed-after-replay": "1",
+        "live.next-pass": "2"
+      }
+    },
+    {
+      "id": "PCF-EVAL-007",
+      "title": "Derived outcome evidence carries the predictor-supplied label",
+      "sources": [
+        "#486",
+        "ADR-024 R1",
+        "ADR-062"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "outcome.labels": "Some(PredictorSupplied),Some(PredictorSupplied)",
+        "report.n_resolved": "2",
+        "report.n_predictor_supplied": "2"
+      }
+    },
+    {
+      "id": "PCF-EVAL-008",
+      "title": "An injected orphan outcome is quarantined while other sources and Drivers proceed",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "pass": "3",
+        "a.other-source-derives": "ok",
+        "b.caused-by-orphaned-source": "1",
+        "c.other-driver-commits": "1",
+        "finding": "OrphanOutcome@true",
+        "recurrence.pass": "1",
+        "recurrence.findings": "1"
+      }
+    },
+    {
+      "id": "PCF-EVAL-009",
+      "title": "Legacy Persona-emitted eval.* history folds, reports byte-identically and is never re-derived",
+      "sources": [
+        "#486",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "fold.subject-a": "predictions=3,outcomes=2",
+        "fold.subject-b": "predictions=2,outcomes=2",
+        "rederived": "0,0",
+        "report": "identical",
+        "committed-after-passes": "9"
+      }
+    },
+    {
+      "id": "PCF-EVAL-010",
+      "title": "Derived-evaluation evidence and its Calibration Report carry the non-participant tag",
+      "sources": [
+        "#320",
+        "#486",
+        "ADR-021 R3",
+        "ADR-024 R1"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "first-tick": "2",
+        "second-tick": "4",
+        "evidence.ingress": "ScheduledAiDriver",
+        "report": "resolved=1,predictor_supplied=1",
+        "never-participant-bound": "true"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-001",
+      "title": "An undecodable, unsupported or out-of-range eligible source is quarantined without blocking the pass",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "undecodable.pass": "5",
+        "undecodable.derived": "eval.prediction<-0,eval.outcome<-0,eval.prediction<-2,eval.outcome<-2",
+        "undecodable.witness": "1",
+        "undecodable.finding": "UndecodableSource@1",
+        "undecodable.recurrence.pass": "1",
+        "undecodable.recurrence.finding": "UndecodableSource@1",
+        "unsupported.pass": "5",
+        "unsupported.derived": "eval.prediction<-0,eval.outcome<-0,eval.prediction<-2,eval.outcome<-2",
+        "unsupported.witness": "1",
+        "unsupported.finding": "UnsupportedSourceVersion@1",
+        "unsupported.recurrence.pass": "1",
+        "unsupported.recurrence.finding": "UnsupportedSourceVersion@1",
+        "invalid.pass": "5",
+        "invalid.derived": "eval.prediction<-0,eval.outcome<-0,eval.prediction<-2,eval.outcome<-2",
+        "invalid.witness": "1",
+        "invalid.finding": "InvalidPrediction@1",
+        "invalid.recurrence.pass": "1",
+        "invalid.recurrence.finding": "InvalidPrediction@1"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-002",
+      "title": "NaN, infinities and values outside [0, 1] are InvalidPrediction; the bounds derive",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "pass": "3",
+        "derived": "eval.prediction<-5,eval.prediction<-6",
+        "findings": "InvalidPrediction@0,InvalidPrediction@1,InvalidPrediction@2,InvalidPrediction@3,InvalidPrediction@4"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-003",
+      "title": "A quarantined source derives exactly once under a later supporting mapping",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "v1.pass": "1",
+        "v1.finding": "UnsupportedSourceVersion@0",
+        "v2.passes": "3,1",
+        "v2.derived": "eval.prediction<-0,eval.outcome<-0",
+        "v2.finding": ""
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-004",
+      "title": "A mapping rollback records findings only and never re-derives",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "pass": "1",
+        "derived": "",
+        "findings": "UnsupportedSourceVersion@1,UnsupportedSourceVersion@2",
+        "decoded": "1,2"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-005",
+      "title": "Each source has one outcome per pass in precedence order and a complete pair is never decoded",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "pass": "1",
+        "derived": "",
+        "witness": "1",
+        "findings": "OrphanOutcome@0,MissingOutcome@1,UndecodableSource@3",
+        "decoded": "1,2,3"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-006",
+      "title": "An invalid verified prefix still discards the pass",
+      "sources": [
+        "#493",
+        "ADR-024 R2"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "discarded": "true",
+        "committed": "2",
+        "findings": "0",
+        "decoded": "0"
+      }
+    },
+    {
+      "id": "PCF-EVAL-R2-007",
+      "title": "A source behind the host erasure fence never reaches Eval and never yields UndecodableSource",
+      "sources": [
+        "#493",
+        "ADR-024 R2",
+        "ADR-060"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "frozen.refused": "true",
+        "frozen.findings": "0",
+        "frozen.decoded": "0",
+        "open.pass": "3",
+        "open.findings": "UndecodableSource@1"
+      }
+    },
+    {
+      "id": "PCF-REV-001",
+      "title": "A learned revocation is persisted, moves the fence and is composed at the store",
+      "sources": [
+        "#483"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "learned.records": "1",
+        "stale-basis": "AdmissionConflict",
+        "fence-moved": "true",
+        "refreshed-basis": "Committed",
+        "root-revoked": "AuthorityRevoked",
+        "committed": "1"
+      }
+    },
+    {
+      "id": "PCF-REV-002",
+      "title": "Equal-epoch revocation states yield distinct delegation revisions",
+      "sources": [
+        "#483"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "none"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "epochs-equal": "true",
+        "authority-revisions-equal": "true",
+        "delegation-revisions-distinct": "true",
+        "delegation-edges-bound": "true"
+      }
+    },
+    {
+      "id": "PCF-REV-003",
+      "title": "A revocation persisted on another SQLite connection stales every later admission of the old basis",
+      "sources": [
+        "#483",
+        "#491"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "revocation-persisted": "true",
+        "race.commits-match-store": "true",
+        "stale-view-reloads-revoked-chain": "true",
+        "same-connection": "AuthorityRevoked",
+        "fresh-connection": "AuthorityRevoked",
+        "committed-after-revocation": "true"
+      }
+    }
+  ]
+}
