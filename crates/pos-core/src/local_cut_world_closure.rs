@@ -167,7 +167,9 @@ pub fn validate_local_cut_owner_recordings_v1(
 ///
 /// `latest_binding` reads, inside the commit transaction, the WCB1 digest of
 /// the owner's last visible cut that contained the Timeline. A Timeline that
-/// was removed and later re-added still chains to that binding.
+/// was removed and later re-added still chains to that binding. ADR-081 R2.7
+/// does not name a stale predecessor; it is a conflict with persisted owner
+/// state, like a stale owner pre-state, so a fresh prepare can succeed.
 ///
 /// # Errors
 /// Returns `Conflict` when a predecessor is not the latest stored binding and
