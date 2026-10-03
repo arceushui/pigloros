@@ -354,7 +354,7 @@ const ZERO_IDENTITY_EDITS: [Edit; 11] = [
     },
 ];
 
-fn minimal_nonzero<const LENGTH: usize>() -> [u8; LENGTH] {
+const fn minimal_nonzero<const LENGTH: usize>() -> [u8; LENGTH] {
     let mut value = [0; LENGTH];
     value[LENGTH - 1] = 1;
     value
