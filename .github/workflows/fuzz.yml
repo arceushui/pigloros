@@ -18,6 +18,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_FUZZ_VERSION: 0.13.2
+
 concurrency:
   group: fuzz-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -72,9 +75,10 @@ jobs:
         with:
           toolchain: nightly-2026-07-01
           components: rust-src
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      - name: Install pinned cargo-fuzz
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz@${{ env.CARGO_FUZZ_VERSION }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: fuzz-nightly-2026-07-01-${{ matrix.target }}
