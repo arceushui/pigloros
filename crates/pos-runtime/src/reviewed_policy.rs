@@ -8,14 +8,16 @@
 
 use pos_core::{Hash, Plugin};
 
-/// Maximum bytes accepted for an installed implementation artifact.
+/// Maximum bytes accepted for an installed implementation artifact (2 MiB).
 ///
 /// Implementation artifacts are retained as opaque host-owned leaves in this
 /// bounded admission slice.  They are deliberately capped before any copy is
-/// made; the bound is large enough for the installed source artifacts used by
-/// the composition roots while preventing an unbounded blob from entering a
-/// replay closure.
-pub const MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1: usize = 1_048_576;
+/// made, so an unbounded blob cannot enter a replay closure.  The bound must
+/// hold every installed PSB1 source bundle the composition roots register:
+/// the Gateway bundle, the largest, also carries World's `lib.rs` and
+/// `reducer.rs` so the delegated approver and reducer are covered by its
+/// implementation identity, which outgrew the earlier 1 MiB cap.
+pub const MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1: usize = 2 * 1_048_576;
 
 /// Maximum bytes accepted for one canonical CFG1 configuration artifact.
 pub const MAX_PLUGIN_CONFIGURATION_ARTIFACT_BYTES_V1: usize = 1_048_576;

@@ -216,10 +216,11 @@ static GENERATED_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDesc
     source_files: &[],
 };
 
-// Size note: this bundle is the largest one. At ADR-113 it leaves only about
-// 190 bytes of headroom under `MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1`,
-// so any growth of the gateway sources or `plugins/world/src/lib.rs` can push
-// the implementation artifact over the limit.
+// Size note: this is the largest bundle. It includes World's `lib.rs` and
+// `reducer.rs` so the delegated approver and reducer are covered by the
+// Gateway implementation identity. The test
+// `every_installed_source_bundle_fits_the_artifact_limit` guards its size
+// against `MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1`.
 static GATEWAY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "gateway-world-actions",
@@ -2073,6 +2074,21 @@ mod tests {
             OutputPolicySourceV1::Society,
             OutputPolicySourceV1::Experiment,
         ]
+    }
+
+    #[test]
+    fn every_installed_source_bundle_fits_the_artifact_limit() {
+        let limit = crate::reviewed_policy::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1;
+        let oversized = policy_sources()
+            .into_iter()
+            .filter(|source| !matches!(source, OutputPolicySourceV1::Generated))
+            .map(|source| {
+                let bundle = source_artifact_bundle(source.descriptor().source_files);
+                (source, bundle.len())
+            })
+            .filter(|&(_, len)| len > limit)
+            .collect::<Vec<_>>();
+        assert_eq!(oversized, Vec::new());
     }
 
     #[test]
