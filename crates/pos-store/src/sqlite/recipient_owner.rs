@@ -34,8 +34,39 @@ use super::{
 
 const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
     RecipientExportDecryptionErrorV1::Registry(KeyRegistryErrorV1::RegistryUnavailable);
-/// Never compared: the port rejects absent and destroyed identities first.
+/// Passed to the decryption port for an absent identity, or a destroyed one
+/// whose record carries no digest. The port rejects both before comparing
+/// fingerprints. A pending record keeps its digest, so it never reaches this.
 const ABSENT_MATERIAL_DIGEST: pos_core::Hash = pos_core::Hash::from_bytes([0; 32]);
+
+/// Require the envelope to name the expected export and the owner's recipient.
+fn check_envelope_identity(
+    envelope: &RecipientTimelineExportV1,
+    expected_export_id: [u8; 16],
+    expected_recipient: RecipientKeyDescriptorV1,
+    owner: &RecipientKeyOwnerV1,
+) -> Result<(), RecipientExportDecryptionErrorV1> {
+    if envelope.header.export_id == expected_export_id
+        && envelope.header.recipient == expected_recipient
+        && expected_recipient.is_for_grantee(owner.grantee_id)
+    {
+        Ok(())
+    } else {
+        Err(RecipientExportDecryptionErrorV1::Export(RecipientExportErrorV1::IdentityMismatch))
+    }
+}
+
+/// The registered material fingerprint, or the never-matching placeholder
+/// that leaves absent and destroyed identities to the port's own denial.
+fn registered_material_digest(
+    registry: &KeyRegistryStateV1,
+    identity: KeyIdentityV1,
+) -> pos_core::Hash {
+    registry
+        .key_record(identity)
+        .and_then(|record| record.private_material_digest)
+        .unwrap_or(ABSENT_MATERIAL_DIGEST)
+}
 
 fn storage_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Storage(error.to_string())
@@ -568,16 +599,22 @@ impl SqliteStore {
     /// precedes and denies this call or follows it. An older epoch may decrypt
     /// after rotation, but this never authorizes encryption. The private file
     /// must match the registered material fingerprint and derive the
-    /// descriptor's public key. The transaction only reads and always rolls
-    /// back.
+    /// descriptor's public key. The transaction never commits; any first-use
+    /// custody table or directory-claim writes are rolled back.
+    ///
+    /// ADR-098's "missing live key reports unavailable" is read as missing
+    /// material for a registered identity: an identity the registry never
+    /// registered is a denial ([`KeyRegistryErrorV1::NotFound`]), while a held
+    /// writer lock or an unreadable registry is
+    /// [`KeyRegistryErrorV1::RegistryUnavailable`].
     ///
     /// # Errors
     ///
     /// Returns [`RecipientExportDecryptionErrorV1::Export`] for an invalid,
     /// mismatched, or unauthenticated envelope;
     /// [`RecipientExportDecryptionErrorV1::Registry`] when the registry is
-    /// locked or unavailable, or the identity is absent, pending destruction,
-    /// destroyed, or bound to another public key; and
+    /// locked or unavailable, or the identity is unregistered, pending
+    /// destruction, destroyed, or bound to another public key; and
     /// [`RecipientExportDecryptionErrorV1::MaterialUnavailable`] when the
     /// registered private material is missing, unsafe, or corrupt.
     pub fn decrypt_recipient_export(
@@ -587,19 +624,12 @@ impl SqliteStore {
         expected_export_id: [u8; 16],
         expected_recipient: RecipientKeyDescriptorV1,
     ) -> Result<DecryptedTimelineExportV1, RecipientExportDecryptionErrorV1> {
+        // This decode is a pre-check before any registry or private-key access,
+        // as ADR-098 requires; HPKE decodes again inside the #430 codec API.
         RecipientTimelineExportV1::decode(encoded)
             .map_err(RecipientExportDecryptionErrorV1::Export)
             .and_then(|envelope| {
-                if envelope.header.export_id == expected_export_id
-                    && envelope.header.recipient == expected_recipient
-                    && expected_recipient.is_for_grantee(owner.grantee_id)
-                {
-                    Ok(())
-                } else {
-                    Err(RecipientExportDecryptionErrorV1::Export(
-                        RecipientExportErrorV1::IdentityMismatch,
-                    ))
-                }
+                check_envelope_identity(&envelope, expected_export_id, expected_recipient, owner)
             })
             .and_then(|()| {
                 self.conn
@@ -608,31 +638,27 @@ impl SqliteStore {
             })
             .and_then(|()| {
                 let _rollback = SqliteRollbackOnDrop(&self.conn);
-                self.load_key_registry()
+                // A load failure and an absent registry both deliberately
+                // report the registry unavailable.
+                let mut registry = self
+                    .load_key_registry()
                     .ok()
                     .flatten()
-                    .ok_or(RECIPIENT_REGISTRY_UNAVAILABLE)
-                    .and_then(|mut registry| {
-                        let identity = expected_recipient.identity();
-                        // Absent and destroyed records carry no digest; the
-                        // port rejects both before comparing this placeholder.
-                        let registered_digest = registry
-                            .key_record(identity)
-                            .and_then(|record| record.private_material_digest)
-                            .unwrap_or(ABSENT_MATERIAL_DIGEST);
-                        registry
-                            .with_decryption_authorization(identity, registered_digest, || {
-                                self.decrypt_with_registered_material(
-                                    owner,
-                                    registered_digest,
-                                    encoded,
-                                    expected_export_id,
-                                    expected_recipient,
-                                )
-                            })
-                            .map_err(RecipientExportDecryptionErrorV1::Registry)
-                            .flatten()
+                    .ok_or(RECIPIENT_REGISTRY_UNAVAILABLE)?;
+                let identity = expected_recipient.identity();
+                let registered_digest = registered_material_digest(&registry, identity);
+                registry
+                    .with_decryption_authorization(identity, registered_digest, || {
+                        self.decrypt_with_registered_material(
+                            owner,
+                            registered_digest,
+                            encoded,
+                            expected_export_id,
+                            expected_recipient,
+                        )
                     })
+                    .map_err(RecipientExportDecryptionErrorV1::Registry)
+                    .flatten()
             })
     }
 
@@ -2047,6 +2073,40 @@ mod tests {
         let mut wrong = RecipientPrivateFileIdentityV1::from_metadata(&metadata);
         wrong.inode[0] ^= 1;
         assert!(verify_bound_entry(&owner, name, wrong).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_decryption_placeholder_digest_never_authorizes_material(
+    ) -> Result<(), CoreError> {
+        let (_temporary, mut store, owner) = owner_fixture()?;
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        let mut registry = store
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
+        let registered = registered_material_digest(&registry, descriptor.identity());
+        assert_ne!(registered, ABSENT_MATERIAL_DIGEST);
+        assert_ne!(key_material_digest(&[0; 32]), ABSENT_MATERIAL_DIGEST);
+        let public_key = descriptor.public_key();
+        let absent = RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, 2, public_key)
+            .map_err(|error| CoreError::Storage(error.to_string()))?
+            .identity();
+        assert_eq!(registered_material_digest(&registry, absent), ABSENT_MATERIAL_DIGEST);
+        let called = std::cell::Cell::new(false);
+        let mark = || called.set(true);
+        assert_eq!(
+            registry.with_decryption_authorization(absent, ABSENT_MATERIAL_DIGEST, mark),
+            Err(KeyRegistryErrorV1::NotFound)
+        );
+        assert_eq!(
+            registry.with_decryption_authorization(
+                descriptor.identity(),
+                ABSENT_MATERIAL_DIGEST,
+                mark
+            ),
+            Err(KeyRegistryErrorV1::EncryptionKeyMismatch)
+        );
+        assert!(!called.get());
         Ok(())
     }
 }

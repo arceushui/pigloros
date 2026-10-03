@@ -59,6 +59,10 @@ impl SqliteStore {
 
     /// Refuse decryption on platforms without the required file boundary.
     ///
+    /// No recipient key can be enrolled here, so the Linux adapter's
+    /// envelope-first precedence is skipped: the result is always
+    /// [`RecipientExportDecryptionErrorV1::MaterialUnavailable`].
+    ///
     /// # Errors
     ///
     /// Always reports the recipient private material as unavailable.

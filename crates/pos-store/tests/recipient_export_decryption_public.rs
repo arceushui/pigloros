@@ -99,11 +99,11 @@ fn denied(
         .err()
 }
 
-const fn registry(error: KeyRegistryErrorV1) -> Option<RecipientExportDecryptionErrorV1> {
+const fn registry_denial(error: KeyRegistryErrorV1) -> Option<RecipientExportDecryptionErrorV1> {
     Some(RecipientExportDecryptionErrorV1::Registry(error))
 }
 
-const fn export(error: RecipientExportErrorV1) -> Option<RecipientExportDecryptionErrorV1> {
+const fn export_denial(error: RecipientExportErrorV1) -> Option<RecipientExportDecryptionErrorV1> {
     Some(RecipientExportDecryptionErrorV1::Export(error))
 }
 
@@ -203,20 +203,20 @@ fn recipient_decryption_public_contract_checks_the_envelope_before_the_locked_re
     );
     assert_eq!(
         denied(&store, &owner, &encoded, [6; 16], old),
-        export(RecipientExportErrorV1::IdentityMismatch)
+        export_denial(RecipientExportErrorV1::IdentityMismatch)
     );
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, current),
-        export(RecipientExportErrorV1::IdentityMismatch)
+        export_denial(RecipientExportErrorV1::IdentityMismatch)
     );
     assert_eq!(
         denied(&store, &foreign, &encoded, EXPORT_ID, old),
-        export(RecipientExportErrorV1::IdentityMismatch)
+        export_denial(RecipientExportErrorV1::IdentityMismatch)
     );
     // A held writer reservation leaves the live key unavailable, not denied.
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, old),
-        registry(KeyRegistryErrorV1::RegistryUnavailable)
+        registry_denial(KeyRegistryErrorV1::RegistryUnavailable)
     );
     contender.execute_batch("ROLLBACK")?;
     assert_decrypts(&store, &owner, old, &encrypted)
@@ -232,7 +232,7 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
     let encoded = encrypt(unenrolled, 1)?.encode();
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, unenrolled),
-        registry(KeyRegistryErrorV1::RegistryUnavailable)
+        registry_denial(KeyRegistryErrorV1::RegistryUnavailable)
     );
 
     let grantee = EntityId::new();
@@ -242,7 +242,7 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
     let encoded = encrypt(next_epoch, 1)?.encode();
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, next_epoch),
-        registry(KeyRegistryErrorV1::NotFound)
+        registry_denial(KeyRegistryErrorV1::NotFound)
     );
 
     let encoded = encrypt(enrolled, 1)?.encode();
@@ -250,7 +250,7 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
         .execute_batch("UPDATE key_registry SET state_cbor = X'01'")?;
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, enrolled),
-        registry(KeyRegistryErrorV1::RegistryUnavailable)
+        registry_denial(KeyRegistryErrorV1::RegistryUnavailable)
     );
     Ok(())
 }
@@ -267,7 +267,7 @@ fn recipient_decryption_public_contract_denies_a_public_key_not_bound_to_the_mat
     let encoded = encrypt(forged, 1)?.encode();
     assert_eq!(
         denied(&store, &owner, &encoded, EXPORT_ID, forged),
-        registry(KeyRegistryErrorV1::EncryptionKeyMismatch)
+        registry_denial(KeyRegistryErrorV1::EncryptionKeyMismatch)
     );
     Ok(())
 }
@@ -310,6 +310,35 @@ fn recipient_decryption_public_contract_reports_missing_or_corrupt_material_unav
 }
 
 #[test]
+fn recipient_decryption_public_contract_rolls_back_a_first_use_directory_claim() -> TestResult {
+    let grantee = EntityId::new();
+    let (temporary, mut store, owner) = owner_for(grantee)?;
+    let descriptor = store.enroll_recipient_key(&owner)?;
+    let encoded = encrypt(descriptor, 1)?.encode();
+    // Decrypting through a fresh directory claims it inside the transaction,
+    // then finds no bound file there; the claim must not survive the call.
+    let fresh = private_directory(temporary.path(), "fresh-private")?;
+    let first_use = RecipientKeyOwnerV1::open(fresh.clone(), grantee)?;
+    assert_eq!(
+        denied(&store, &first_use, &encoded, EXPORT_ID, descriptor),
+        Some(RecipientExportDecryptionErrorV1::MaterialUnavailable)
+    );
+    let connection = rusqlite::Connection::open(database(&temporary))?;
+    let claims: i64 = connection.query_row(
+        "SELECT count(*) FROM recipient_custody_directory_claims_v1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(claims, 1);
+    // A persisted claim for the first grantee would refuse this enrollment.
+    let other_grantee = EntityId::new();
+    let other = RecipientKeyOwnerV1::open(fresh, other_grantee)?;
+    let enrolled = store.enroll_recipient_key(&other)?;
+    assert!(enrolled.is_for_grantee(other_grantee));
+    Ok(())
+}
+
+#[test]
 fn recipient_decryption_public_contract_rejects_tampered_ciphertext_without_plaintext(
 ) -> TestResult {
     let (_temporary, mut store, owner) = owner_for(EntityId::new())?;
@@ -323,7 +352,7 @@ fn recipient_decryption_public_contract_rejects_tampered_ciphertext_without_plai
     *byte ^= 1;
     assert_eq!(
         denied(&store, &owner, &envelope.encode(), EXPORT_ID, descriptor),
-        export(RecipientExportErrorV1::AuthenticationFailed)
+        export_denial(RecipientExportErrorV1::AuthenticationFailed)
     );
     Ok(())
 }
@@ -345,7 +374,7 @@ fn recipient_decryption_public_contract_orders_rotation_pending_and_destroyed_ep
     ))?;
     assert_eq!(
         denied(&store, &owner, &old_export.encode(), EXPORT_ID, old),
-        registry(KeyRegistryErrorV1::DestructionPending)
+        registry_denial(KeyRegistryErrorV1::DestructionPending)
     );
     assert_decrypts(&store, &owner, current, &current_export)?;
 
@@ -354,7 +383,7 @@ fn recipient_decryption_public_contract_orders_rotation_pending_and_destroyed_ep
     assert_eq!(std::fs::read_dir(&directory)?.count(), 1);
     assert_eq!(
         denied(&store, &owner, &old_export.encode(), EXPORT_ID, old),
-        registry(KeyRegistryErrorV1::Destroyed)
+        registry_denial(KeyRegistryErrorV1::Destroyed)
     );
     assert_decrypts(&store, &owner, current, &current_export)
 }
