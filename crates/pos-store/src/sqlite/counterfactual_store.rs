@@ -833,9 +833,11 @@ impl CounterfactualStorePortV1 for SqliteStore {
                                             command, generation, first_tick,
                                         )
                                         .map(|head| {
-                                            Ok(CounterfactualInvalidationOutcomeV1::Committed(
-                                                command.committed_receipt(head),
-                                            ))
+                                            // The recheck pinned the prior head and the
+                                            // first Tick is non-empty, so the head advanced.
+                                            command
+                                                .committed_receipt(head)
+                                                .map(CounterfactualInvalidationOutcomeV1::Committed)
                                         })
                                 },
                                 |conflict| {

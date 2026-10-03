@@ -65,6 +65,55 @@ fn uint(value: u64) -> Vec<u8> {
     }
 }
 
+/// Encode one shortest-form CBOR head of `major` with `argument`.
+fn head(major: u8, argument: u64) -> Vec<u8> {
+    let mut encoded = uint(argument);
+    encoded[0] |= major << 5;
+    encoded
+}
+
+fn text_field(value: &str) -> Vec<u8> {
+    [
+        head(3, ok(u64::try_from(value.len()))),
+        value.as_bytes().to_vec(),
+    ]
+    .concat()
+}
+
+/// Encode one six-field dependency-node coordinate.
+fn node_field(tick: u64, owner: &str) -> Vec<u8> {
+    [
+        vec![0x86],
+        uint(tick),
+        uint(0),
+        text_field(owner),
+        uint(0),
+        uint(7),
+        hash_field(hash(21)),
+    ]
+    .concat()
+}
+
+/// Encode `SIV1` fields 8 through 14, as the `pos-core` port tests do.
+fn invalidation_middle() -> Vec<u8> {
+    [
+        node_field(5, "agent-a"),
+        node_field(4_294_967_296, "an-owner-identifier-of-thirty-"),
+        vec![0x81, 0x86],
+        text_field("event"),
+        uint(70_000),
+        hash_field(hash(22)),
+        node_field(5, "agent-a"),
+        uint(300),
+        uint(0),
+        vec![0x81],
+        hash_field(hash(23)),
+        vec![0x80, 0x80],
+        uint(0),
+    ]
+    .concat()
+}
+
 fn id_field(value: [u8; 16]) -> Vec<u8> {
     [&[0x50][..], &value[..]].concat()
 }
@@ -138,7 +187,12 @@ impl Spec {
             uint(self.prior),
             uint(self.prior + 1),
             hash_field(frontier.digest()),
-            vec![0x80],
+            invalidation_middle(),
+            // Commit coordinate: the Fork, its expected head, the first Tick.
+            vec![0x83],
+            id_field(self.fork.inner().to_bytes()),
+            uint(self.head),
+            uint(self.first_tick),
         ]
         .concat();
         ok(SuffixInvalidationBytesV1::try_from_canonical(frame(
@@ -267,9 +321,9 @@ fn commit_persists_the_whole_generation_atomically() {
     let mut store = open(&fixture.path);
     assert_eq!(
         store.commit_counterfactual_invalidation(&command),
-        Ok(Outcome::Committed(
+        Ok(Outcome::Committed(ok(
             command.committed_receipt(Seq::from_u64(4))
-        ))
+        )))
     );
     assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 1)));
     assert_eq!(ok(store.logical_head(fork)), Seq::from_u64(4));
@@ -356,9 +410,9 @@ fn a_later_generation_quarantines_stored_bytes_permanently() {
     let second = spec.command();
     assert_eq!(
         store.commit_counterfactual_invalidation(&second),
-        Ok(Outcome::Committed(
+        Ok(Outcome::Committed(ok(
             second.committed_receipt(Seq::from_u64(6))
-        ))
+        )))
     );
     assert_eq!(generation(&store, fork), 2);
     let current = at(fork, 2);
@@ -514,9 +568,9 @@ fn injected_faults_roll_back_everything_and_recover_after_reopen() {
     let mut recovered = open(&fixture.path);
     assert_eq!(
         recovered.commit_counterfactual_invalidation(&command),
-        Ok(Outcome::Committed(
+        Ok(Outcome::Committed(ok(
             command.committed_receipt(Seq::from_u64(4))
-        ))
+        )))
     );
     drop(recovered);
     let reopened = open(&fixture.path);
