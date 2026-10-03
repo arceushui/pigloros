@@ -504,7 +504,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             .commit_counterfactual_invalidation(command)
             .map_err(CounterfactualAdmissionErrorV1::Store)
             .and_then(|outcome| match outcome {
-                CounterfactualInvalidationOutcomeV1::Committed(receipt) => Ok(receipt),
+                CounterfactualInvalidationOutcomeV1::Committed(receipt) => Ok(*receipt),
                 CounterfactualInvalidationOutcomeV1::InvalidationConflict(conflict) => Err(
                     CounterfactualAdmissionErrorV1::InvalidationConflict(conflict),
                 ),
@@ -780,8 +780,10 @@ fn invalidation_parts(
 
 /// Fill the invalidation digest, then run the standalone `SIV1` validation.
 ///
-/// This is the one place `SIV1` is sealed and encoded; it switches to the
-/// codec's single-pass seal once `pos-conformance` provides one.
+/// This is the one place `SIV1` is sealed and encoded. The coordinator needs
+/// the canonical bytes, and `SuffixInvalidationV1::seal` returns only the
+/// sealed record, so sealing through it and then encoding would encode the
+/// record once more than `digest` followed by `to_canonical_cbor`.
 fn seal_invalidation(
     unsigned: SuffixInvalidationV1,
 ) -> Result<Vec<u8>, CounterfactualAdmissionErrorV1> {
