@@ -4545,6 +4545,130 @@ pub mod strict_codec {
             }
         }
 
+        fn replace_item_field(
+            record: &Value,
+            index: usize,
+            item_index: usize,
+            replacement: Value,
+        ) -> Value {
+            let mut items = record
+                .as_array()
+                .and_then(|fields| fields[index].as_array())
+                .cloned()
+                .unwrap_or_default();
+            items[0] = replace_field(&items[0], item_index, replacement);
+            replace_field(record, index, Value::Array(items))
+        }
+
+        #[test]
+        fn nested_frontier_list_items_name_their_malformed_field() {
+            let mut frontier = super::super::tests::evidence()
+                .contract
+                .counterfactual
+                .frontier;
+            let node = DependencyNodeV1 {
+                tick: 2,
+                scheduler_position: 1,
+                owner_id: "proof".to_owned(),
+                output_ordinal: 0,
+                schema_id: 1,
+                artifact_digest: [7; 32],
+            };
+            frontier.intervention_seed_nodes = vec![node.clone()];
+            frontier.affected_nodes = vec![node.clone()];
+            frontier.owner_frontiers = vec![OwnerFrontierV1 {
+                owner_id: "proof".to_owned(),
+                earliest_tick: 2,
+                earliest_scheduler_position: 1,
+                earliest_output_ordinal: 0,
+                cause_node_digests: vec![[1; 32]],
+            }];
+            frontier.unknown_edge_coordinates = vec![
+                crate::counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1 {
+                    consumer: node,
+                    missing_source_digest: None,
+                },
+            ];
+            let frontier = recomputation_frontier_value(&frontier);
+            let beyond_u32 = uint(u64::from(u32::MAX) + 1);
+            let cases = [
+                (6, 1, beyond_u32.clone(), "node_scheduler"),
+                (7, 2, uint(1), "node_owner"),
+                (8, 0, uint(1), "frontier_owner"),
+                (8, 1, text("2"), "frontier_tick"),
+                (8, 2, beyond_u32.clone(), "frontier_scheduler"),
+                (8, 3, beyond_u32, "frontier_ordinal"),
+                (8, 4, uint(0), "frontier_causes"),
+                (12, 0, uint(1), "dependency_node"),
+                (12, 1, Value::Bytes(vec![8; 31]), "unknown_edge_source"),
+            ];
+            for (index, item_index, replacement, field) in cases {
+                assert_eq!(
+                    decode_frontier(&replace_item_field(
+                        &frontier,
+                        index,
+                        item_index,
+                        replacement
+                    ))
+                    .map(drop),
+                    invalid_field(field),
+                    "frontier list {index} item field {item_index}"
+                );
+            }
+            for (index, field) in [(8, "owner_frontier"), (12, "unknown_edge")] {
+                assert_eq!(
+                    decode_frontier(&replace_field(
+                        &frontier,
+                        index,
+                        Value::Array(vec![uint(1)])
+                    ))
+                    .map(drop),
+                    invalid_field(field)
+                );
+            }
+        }
+
+        #[test]
+        fn nested_invalid_artifact_items_name_their_malformed_field() {
+            let invalidation = suffix_invalidation_value(
+                &super::super::tests::evidence()
+                    .contract
+                    .counterfactual
+                    .invalidation,
+            );
+            let beyond_u32 = uint(u64::from(u32::MAX) + 1);
+            let cases = [
+                (0, uint(1), "artifact_class"),
+                (1, beyond_u32, "artifact_schema"),
+                (2, uint(1), "artifact_digest"),
+                (3, uint(1), "dependency_node"),
+                (4, text("0"), "artifact_generation"),
+                (5, uint(9), "invalidation_reason"),
+            ];
+            for (item_index, replacement, field) in cases {
+                assert_eq!(
+                    decode_invalidation(&replace_item_field(
+                        &invalidation,
+                        10,
+                        item_index,
+                        replacement
+                    ))
+                    .map(drop),
+                    invalid_field(field),
+                    "invalid artifact field {item_index}"
+                );
+            }
+            assert_eq!(
+                decode_invalidation(&replace_field(
+                    &invalidation,
+                    10,
+                    Value::Array(vec![uint(1)])
+                ))
+                .map(drop),
+                invalid_field("invalid_artifact")
+            );
+        }
+
         #[test]
         fn nested_node_errors_name_the_malformed_field() {
             let evidence = super::super::tests::evidence();
@@ -5697,7 +5821,8 @@ fn valid_owner_frontiers(frontiers: &[OwnerFrontierV1], has_intervention: bool) 
                 !owner.owner_id.is_empty()
                     && owner.owner_id.len() <= 128
                     && !owner.cause_node_digests.is_empty()
-                    && owner.cause_node_digests.len() <= 4_096
+                    && owner.cause_node_digests.len()
+                        <= counterfactual::frontier_artifacts::MAX_CAUSE_DIGESTS_V1
                     && owner
                         .cause_node_digests
                         .windows(2)
@@ -5709,16 +5834,20 @@ fn valid_owner_frontiers(frontiers: &[OwnerFrontierV1], has_intervention: bool) 
             }))
 }
 
+/// Unknown edges are bounded, strictly ordered, name a valid consumer, and
+/// never carry an all-zero missing-source digest (an unidentified source is
+/// `None`), matching the standalone `RCF1` rule.
 fn valid_unknown_edge_coordinates(frontier: &RecomputationFrontierV1) -> bool {
-    frontier.unknown_edge_coordinates.len() <= 65_536
+    frontier.unknown_edge_coordinates.len()
+        <= counterfactual::frontier_artifacts::MAX_UNKNOWN_EDGE_COORDINATES_V1
         && frontier
             .unknown_edge_coordinates
             .windows(2)
             .all(|pair| pair[0] < pair[1])
-        && frontier
-            .unknown_edge_coordinates
-            .iter()
-            .all(|edge| valid_contract_node(&edge.consumer, false))
+        && frontier.unknown_edge_coordinates.iter().all(|edge| {
+            valid_contract_node(&edge.consumer, false)
+                && edge.missing_source_digest != Some([0; 32])
+        })
 }
 
 fn valid_digest_list(values: &[[u8; 32]]) -> bool {
@@ -8120,6 +8249,10 @@ pub mod tests {
             unknown_edges.frontier.unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
             unknown_edges.frontier.unknown_edge_coordinates = vec![unknown_edge(&later_node)];
             assert!(verify_counterfactual_record_shapes(&unknown_edges));
+            unknown_edges.frontier.unknown_edge_coordinates[0].missing_source_digest = Some([3; 32]);
+            assert!(verify_counterfactual_record_shapes(&unknown_edges));
+            unknown_edges.frontier.unknown_edge_coordinates[0].missing_source_digest = Some([0; 32]);
+            assert!(!verify_counterfactual_record_shapes(&unknown_edges));
             unknown_edges.frontier.unknown_edge_coordinates.clear();
             assert!(!verify_counterfactual_record_shapes(&unknown_edges));
 
