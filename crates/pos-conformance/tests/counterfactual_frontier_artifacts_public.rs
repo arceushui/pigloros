@@ -464,7 +464,9 @@ fn invalidation_roundtrips_the_exact_eighteen_field_layout_and_every_reason() ->
     ] {
         let mut candidate = unsigned_invalidation();
         candidate.reason = reason;
-        candidate.invalid_artifacts[0].reason = reason;
+        for artifact in &mut candidate.invalid_artifacts {
+            artifact.reason = reason;
+        }
         let invalidation = signed_invalidation(candidate)?;
         let encoded = invalidation.to_canonical_cbor()?;
         assert_eq!(
@@ -1240,4 +1242,121 @@ fn errors_have_distinct_safe_messages() {
     assert!(messages
         .iter()
         .all(|message| message.contains("RCF1") || message.contains("SIV1")));
+}
+
+#[test]
+fn seal_computes_the_digest_once_the_fields_are_valid() -> TestResult {
+    let sealed = unsigned_frontier().seal()?;
+    assert_eq!(sealed, frontier()?);
+    assert_eq!(sealed.validate(), Ok(()));
+    let mut stale = sealed.clone();
+    stale.frontier_digest = [0xaa; 32];
+    assert_eq!(stale.seal()?, sealed);
+    let mut invalid = unsigned_frontier();
+    invalid.affected_nodes.clear();
+    assert_eq!(invalid.seal(), Err(OUT_OF_RANGE));
+
+    let sealed = unsigned_invalidation().seal()?;
+    assert_eq!(sealed, invalidation()?);
+    assert_eq!(sealed.validate(), Ok(()));
+    let mut stale = sealed.clone();
+    stale.invalidation_digest = [0xaa; 32];
+    assert_eq!(stale.seal()?, sealed);
+    let mut invalid = unsigned_invalidation();
+    invalid.new_generation = 3;
+    assert_eq!(
+        invalid.seal(),
+        Err(FrontierArtifactErrorV1::PriorGenerationMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn artifact_nodes_need_a_schema_like_the_nested_verifier() {
+    assert_frontier_rejected(&[
+        (
+            "zero seed schema",
+            |s| s.intervention_seed_nodes[0].schema_id = 0,
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero affected schema",
+            |s| s.affected_nodes[1].schema_id = 0,
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero unknown-edge consumer schema",
+            |s| {
+                full_suffix(s);
+                s.unknown_edge_coordinates[1].consumer.schema_id = 0;
+            },
+            OUT_OF_RANGE,
+        ),
+    ]);
+    assert_invalidation_rejected(&[
+        (
+            "zero producer schema",
+            |s| {
+                s.invalid_artifacts[2].schema_id = 0;
+                s.invalid_artifacts[2].producer.schema_id = 0;
+            },
+            OUT_OF_RANGE,
+        ),
+        (
+            "artifact schema differs from producer",
+            |s| s.invalid_artifacts[2].schema_id = 8,
+            OUT_OF_RANGE,
+        ),
+        (
+            "artifact reason differs from record",
+            |s| s.invalid_artifacts[1].reason = SuffixInvalidationReasonV1::ChangedIntervention,
+            OUT_OF_RANGE,
+        ),
+    ]);
+}
+
+#[test]
+fn invalid_artifacts_order_by_the_full_producer_node() -> TestResult {
+    fn with_schema(schema_id: u32) -> InvalidArtifactV1 {
+        let mut producer = node(5, 0, "agent-a");
+        producer.schema_id = schema_id;
+        let mut artifact = artifact("projection", producer);
+        artifact.schema_id = schema_id;
+        artifact
+    }
+    fn with_producer_digest(fill: u8) -> InvalidArtifactV1 {
+        let mut producer = node(5, 0, "agent-a");
+        producer.artifact_digest = [fill; 32];
+        artifact("projection", producer)
+    }
+    assert_invalidation_accepted(&[
+        ("producer schema ascending", |s| {
+            s.invalid_artifacts = vec![with_schema(7), with_schema(8)];
+        }),
+        ("producer digest ascending", |s| {
+            s.invalid_artifacts = vec![with_producer_digest(9), with_producer_digest(10)];
+        }),
+    ])?;
+    assert_invalidation_rejected(&[
+        (
+            "producer schema descending",
+            |s| s.invalid_artifacts = vec![with_schema(8), with_schema(7)],
+            UNORDERED,
+        ),
+        (
+            "producer before class",
+            |s| {
+                let mut later = with_schema(8);
+                later.artifact_class = "event".to_owned();
+                s.invalid_artifacts = vec![later, with_schema(7)];
+            },
+            UNORDERED,
+        ),
+        (
+            "producer digest descending",
+            |s| s.invalid_artifacts = vec![with_producer_digest(10), with_producer_digest(9)],
+            UNORDERED,
+        ),
+    ]);
+    Ok(())
 }
