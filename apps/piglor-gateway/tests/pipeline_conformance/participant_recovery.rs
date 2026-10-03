@@ -17,7 +17,7 @@ use std::sync::{
 use pos_core::{
     pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
     AppendDedupKey, AppendDedupScope, AppendIdentity, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CoreError, EntityId, ErasureContainmentGateV1, EventDraft, Hash,
+    CapabilityRevocationV1, CoreError, EntityId, ErasureContainmentGateV1, EventDraft,
     PipelineAdmissionBasisV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
     PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineEvidenceRefV1, PipelineOutcomeV1,
     PipelineReceiptLookupV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
@@ -31,8 +31,8 @@ use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use super::{
     harness::Capture,
     profiles::{
-        bind_participants, observation_evaluation, participant_on, stage_authorized, Participant,
-        CUT,
+        bind_participants, digest, observation_evaluation, participant_on, stage_authorized,
+        Participant, CUT,
     },
     support::{draft, events, gated_registry, stage, FixturePlugin, ScriptedDriver, TestOk},
 };
@@ -102,10 +102,6 @@ struct FencedStore {
     store: Box<dyn ScheduledAdmissionStoreV1>,
     participant: Participant,
     revisions: PipelineSecurityRevisionsV1,
-}
-
-const fn digest(value: u8) -> Hash {
-    Hash::from_bytes([value; 32])
 }
 
 fn fenced(mut store: Box<dyn ScheduledAdmissionStoreV1>) -> FencedStore {
@@ -207,13 +203,15 @@ impl FencedStore {
     }
 
     /// Admit the staged participant pass under current view authority.
+    ///
+    /// The caller builds `admission` once per attempt: its commit head is
+    /// part of the basis, so an exact retry must reuse the same value.
     fn admit_participant(
         &mut self,
         registry: &mut PluginRegistry,
-        key: u8,
+        admission: &ScheduledPassAdmissionV1,
         ack: Ack,
     ) -> (Admitted, Vec<PipelineOutcomeV1>) {
-        let admission = self.admission(key);
         let evaluation = observation_evaluation(&self.participant.observation);
         let current = self.participant.current_authority();
         let mut port = AckPort {
@@ -223,7 +221,7 @@ impl FencedStore {
         };
         let result = registry.admit_authorized_scheduled_pass(
             &mut port,
-            &admission,
+            admission,
             &[self.participant.authority(&evaluation, &current)],
         );
         (result, port.outcomes)
@@ -294,6 +292,8 @@ fn participant_registry(fenced: &FencedStore) -> (PluginRegistry, ScriptedCounte
 fn names(outcomes: &[PipelineOutcomeV1]) -> String {
     outcomes
         .iter()
+        // A receipt-carrying outcome is named without its receipt, whose
+        // Debug form holds per-run identities.
         .map(|outcome| match outcome {
             PipelineOutcomeV1::Committed(_) => "Committed".to_owned(),
             PipelineOutcomeV1::RecoveredDuplicate(_) => "RecoveredDuplicate".to_owned(),
@@ -342,7 +342,9 @@ pub fn participant_commit_recovery() -> Capture {
 fn recover_and_retry(capture: &mut Capture, store: &str, fenced: &mut FencedStore) {
     let (mut registry, driver) = participant_registry(fenced);
     stage_authorized(&mut registry, &fenced.participant).test_ok();
-    let (lost, attempted) = fenced.admit_participant(&mut registry, 1, Ack::LostAfterCommit);
+    let admission = fenced.admission(1);
+    let (lost, attempted) =
+        fenced.admit_participant(&mut registry, &admission, Ack::LostAfterCommit);
     let original = receipt(&attempted).cloned();
     capture.record(store, "lost", error_text(lost));
     capture.record(store, "attempt.outcomes", names(&attempted));
@@ -367,7 +369,7 @@ fn recover_and_retry(capture: &mut Capture, store: &str, fenced: &mut FencedStor
     capture.record(store, "second-recovery", error_text(again));
 
     stage_authorized(&mut registry, &fenced.participant).test_ok();
-    let (retried, outcomes) = fenced.admit_participant(&mut registry, 1, Ack::Delivered);
+    let (retried, outcomes) = fenced.admit_participant(&mut registry, &admission, Ack::Delivered);
     capture.record(store, "retry.outcomes", names(&outcomes));
     capture.record(
         store,
@@ -382,12 +384,19 @@ fn recover_and_retry(capture: &mut Capture, store: &str, fenced: &mut FencedStor
 fn revoke_before_recovery(capture: &mut Capture, store: &str, fenced: &mut FencedStore) {
     let (mut committed, _) = participant_registry(fenced);
     stage_authorized(&mut committed, &fenced.participant).test_ok();
-    let (_, attempted) = fenced.admit_participant(&mut committed, 2, Ack::LostAfterCommit);
+    let committed_admission = fenced.admission(2);
+    let (_, attempted) =
+        fenced.admit_participant(&mut committed, &committed_admission, Ack::LostAfterCommit);
     let original = receipt(&attempted).cloned();
 
     let (mut participant, participant_driver) = participant_registry(fenced);
     stage_authorized(&mut participant, &fenced.participant).test_ok();
-    let (lost, _) = fenced.admit_participant(&mut participant, 3, Ack::LostBeforeCommit);
+    let participant_admission = fenced.admission(3);
+    let (lost, _) = fenced.admit_participant(
+        &mut participant,
+        &participant_admission,
+        Ack::LostBeforeCommit,
+    );
     capture.record(store, "uncommitted.lost", error_text(lost));
 
     let (mut anchored, anchored_driver) = scripted_registry(

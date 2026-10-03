@@ -49,7 +49,7 @@ const AUTHORIZED_DOMAIN: &[u8] = b"PiglorOS.AuthorizedScheduledPass.v1\0";
 pub(super) const CUT: u64 = 12;
 const PLANNED: &str = "participant.planned";
 
-const fn digest(byte: u8) -> Hash {
+pub(super) const fn digest(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
 

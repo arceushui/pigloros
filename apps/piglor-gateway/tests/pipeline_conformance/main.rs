@@ -6,9 +6,8 @@
 //! precedence, recovery, Replay and evaluation non-authority (#320), the
 //! ADR-021 Revision 3 observation profiles and their composition-time
 //! assignment (#504), participant-authorized recovery (#507), draft and
-//! exclusive Event-type
-//! ownership (#484, #486, ADR-024 Revision 1), source quarantine (#493,
-//! ADR-024 Revision 2) and revocation persistence
+//! exclusive Event-type ownership (#484, #486, ADR-024 Revision 1), source
+//! quarantine (#493, ADR-024 Revision 2) and revocation persistence
 //! (#483). Each case runs only through public seams, on `MemoryStore` and
 //! `SQLite` wherever a store is involved, and its expected observations are
 //! data in the manifest.
