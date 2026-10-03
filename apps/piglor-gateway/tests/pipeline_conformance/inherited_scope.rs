@@ -16,8 +16,8 @@ use std::{
 
 use pos_core::{
     ConsentAuthority, CoreError, EntityId, ErasureContainmentErrorV1, ErasureContainmentGateV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventReadBounds, Hash, Reducer, Seq,
-    SeqRange, State, TimelineId, TimelineMeta, WorldReplayClosureV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventReadBounds, Hash, Reducer, Seq, SeqRange,
+    State, TimelineId, TimelineMeta, WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, LocalScheduledAdmissionHostV1,
@@ -60,12 +60,12 @@ fn lineages() -> Vec<Lineage> {
             let entity = EntityId::new();
             let root = backend.create_timeline("root").test_ok().id();
             backend
-                .append(root, &[draft(entity, SIGNAL, b"a"), draft(entity, SIGNAL, b"b")])
+                .append(
+                    root,
+                    &[draft(entity, SIGNAL, b"a"), draft(entity, SIGNAL, b"b")],
+                )
                 .test_ok();
-            let child = backend
-                .fork(root, Seq::from_u64(2), "child")
-                .test_ok()
-                .id();
+            let child = backend.fork(root, Seq::from_u64(2), "child").test_ok().id();
             let grandchild = backend
                 .fork(child, Seq::from_u64(2), "grandchild")
                 .test_ok()
@@ -128,9 +128,10 @@ fn decision<T>(result: &Result<T, RuntimeError>) -> String {
 
 /// The closed error of a store read, or the number of Events it returned.
 fn read_outcome(result: &Result<Vec<Event>, CoreError>) -> String {
-    result
-        .as_ref()
-        .map_or_else(|error| format!("{error:?}"), |events| events.len().to_string())
+    result.as_ref().map_or_else(
+        |error| format!("{error:?}"),
+        |events| events.len().to_string(),
+    )
 }
 
 fn own_events(lineage: &Lineage, timeline: TimelineId) -> usize {
@@ -172,7 +173,11 @@ pub fn frozen_ancestor_fails_pass_and_read() -> Capture {
         capture.record(store, "pass.grandchild", decision(&grandchild_pass));
         capture.record(store, "admitted", decision(&admitted));
         capture.record(store, "driver.steps", steps.load(Ordering::SeqCst));
-        capture.record(store, "own-events.child", own_events(&lineage, lineage.child));
+        capture.record(
+            store,
+            "own-events.child",
+            own_events(&lineage, lineage.child),
+        );
         for (key, timeline) in [
             ("read.child", lineage.child),
             ("read.grandchild", lineage.grandchild),

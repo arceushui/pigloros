@@ -901,8 +901,8 @@ fn refold_host_projection_prefix(
     through: pos_core::clock::Seq,
 ) -> Result<Vec<Event>, ExperimentError> {
     let (events, generation, ancestry) = lock_store(store).and_then(|store| {
-        let (events, ancestry) = read_completed_prefix(&**store, timeline, through)
-            .and_then(|events| {
+        let (events, ancestry) =
+            read_completed_prefix(&**store, timeline, through).and_then(|events| {
                 pos_core::fork_ancestry(&**store, timeline)
                     .map(|ancestry| (events, ancestry))
                     .map_err(ExperimentError::from)

@@ -830,7 +830,10 @@ fn failed_scheduler_pass_does_not_advance_earlier_driver_cadence() -> TestResult
             pos_core::AuthorityErrorV1::UnauthorizedSource
         ))
     ));
-    assert_eq!(scheduler.tick(timeline, &root_ancestry(timeline), 0)?.len(), 2);
+    assert_eq!(
+        scheduler.tick(timeline, &root_ancestry(timeline), 0)?.len(),
+        2
+    );
     Ok(())
 }
 
@@ -1000,8 +1003,14 @@ fn successful_unanchored_steps_reset_admission_usage_at_each_call_boundary() -> 
         Some(Box::new(FullBudgetDriver)),
     )?;
     let mut scheduler = TickScheduler::new(scheduled_registry);
-    assert_eq!(scheduler.tick(timeline, &root_ancestry(timeline), 0)?.len(), 1_000);
-    assert_eq!(scheduler.tick(timeline, &root_ancestry(timeline), 1)?.len(), 1_000);
+    assert_eq!(
+        scheduler.tick(timeline, &root_ancestry(timeline), 0)?.len(),
+        1_000
+    );
+    assert_eq!(
+        scheduler.tick(timeline, &root_ancestry(timeline), 1)?.len(),
+        1_000
+    );
 
     let stepped_plugin = FixturePlugin {
         id: PluginId::new(),
@@ -1010,8 +1019,18 @@ fn successful_unanchored_steps_reset_admission_usage_at_each_call_boundary() -> 
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
     stepped_registry.register_generated(&stepped_plugin, None, Some(Box::new(FullBudgetDriver)))?;
-    assert_eq!(stepped_registry.step_all(timeline, &root_ancestry(timeline))?.len(), 1_000);
-    assert_eq!(stepped_registry.step_all(timeline, &root_ancestry(timeline))?.len(), 1_000);
+    assert_eq!(
+        stepped_registry
+            .step_all(timeline, &root_ancestry(timeline))?
+            .len(),
+        1_000
+    );
+    assert_eq!(
+        stepped_registry
+            .step_all(timeline, &root_ancestry(timeline))?
+            .len(),
+        1_000
+    );
     Ok(())
 }
 
@@ -1340,11 +1359,8 @@ fn verified_step_appends_output_at_the_exact_event_byte_limit() -> TestResult {
     let mut store = gated_store()?;
     let timeline = store.create_timeline("output-admission-exact-limit")?.id();
 
-    let drafts = registry.step_all_anchored(
-        timeline,
-        &root_ancestry(timeline),
-        pos_core::Seq::ZERO,
-    )?;
+    let drafts =
+        registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO)?;
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].payload.len(), usize::try_from(limit)?);
     assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
@@ -1422,11 +1438,8 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
     let mut store = gated_store()?;
     let timeline = store.create_timeline("output-admission-mixed-batch")?.id();
 
-    let rejected = registry.step_all_anchored(
-        timeline,
-        &root_ancestry(timeline),
-        pos_core::Seq::ZERO,
-    );
+    let rejected =
+        registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO);
     assert!(matches!(
         rejected,
         Err(RuntimeError::OutputAdmission(OutputAdmissionErrorV1::EventBytesExceeded {
@@ -1437,11 +1450,8 @@ fn verified_step_rejects_a_batch_with_one_overflowing_draft_atomically() -> Test
     ));
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::ZERO);
 
-    let drafts = registry.step_all_anchored(
-        timeline,
-        &root_ancestry(timeline),
-        pos_core::Seq::ZERO,
-    )?;
+    let drafts =
+        registry.step_all_anchored(timeline, &root_ancestry(timeline), pos_core::Seq::ZERO)?;
     assert_eq!(drafts.len(), 1);
     assert_eq!(admit_staged(&mut registry, &mut store, timeline)?, 1);
     assert_eq!(store.logical_head(timeline)?, pos_core::Seq::from_u64(1));

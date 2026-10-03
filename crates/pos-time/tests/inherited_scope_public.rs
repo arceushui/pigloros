@@ -2,9 +2,9 @@
 //! Replay of a Fork fence every inherited ancestor scope (#499).
 
 use pos_core::{
-    CanonicalBytes, CoreError, EntityId, ErasureGate, ErasureRecoveryLimitsV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, Hash, Kind, Reducer,
-    SchemaVersion, Seq, State, TimelineId, WorldReplayClosureV1,
+    CanonicalBytes, CoreError, EntityId, ErasureGate, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, Event, EventDraft, Hash, Kind, Reducer, SchemaVersion, Seq, State,
+    TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -149,7 +149,12 @@ impl Hosted {
     fn snapshot(&mut self, timeline: TimelineId) -> Result<Snapshot, CoreError> {
         let mut registry = self.registry();
         let mut reads = self.host.read_sender().test_ok();
-        snapshot(&mut reads, timeline, &mut registry, &self.closures[&timeline])
+        snapshot(
+            &mut reads,
+            timeline,
+            &mut registry,
+            &self.closures[&timeline],
+        )
     }
 
     fn verify(&mut self, captured: &Snapshot) -> Result<(), SnapshotError> {
@@ -175,7 +180,13 @@ impl Hosted {
     fn replay(&mut self, timeline: TimelineId) -> Result<(), CoreError> {
         let mut registry = self.registry();
         let mut reads = self.host.read_sender().test_ok();
-        replay(&mut reads, timeline, &mut registry, &self.closures[&timeline]).map(|_| ())
+        replay(
+            &mut reads,
+            timeline,
+            &mut registry,
+            &self.closures[&timeline],
+        )
+        .map(|_| ())
     }
 }
 

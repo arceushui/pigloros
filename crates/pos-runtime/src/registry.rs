@@ -2823,7 +2823,10 @@ impl PluginRegistry {
     ) -> Result<(), RuntimeError> {
         let adopted = pos_core::fork_ancestry(&*store, child)
             .map_err(|_| pos_core::AuthorityErrorV1::SourceUnavailable)
-            .and_then(|ancestry| self.projections.adopt_committed_fork(parent, child, &ancestry));
+            .and_then(|ancestry| {
+                self.projections
+                    .adopt_committed_fork(parent, child, &ancestry)
+            });
         if let Err(error) = adopted {
             self.restored_binding = None;
             store.delete_timeline(child)?;

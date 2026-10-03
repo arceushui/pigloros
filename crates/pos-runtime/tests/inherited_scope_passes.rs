@@ -139,7 +139,9 @@ fn every_pass(
 ) -> Vec<(&'static str, PassResult)> {
     let head = Seq::from_u64(2);
     let passes: [(&'static str, PassFn<'_>); 9] = [
-        ("step_all", &|registry| registry.step_all(timeline, ancestry)),
+        ("step_all", &|registry| {
+            registry.step_all(timeline, ancestry)
+        }),
         ("tick_cadenced", &|registry| {
             registry.tick_cadenced(timeline, ancestry, 0)
         }),
@@ -212,8 +214,7 @@ fn every_pass_entry_point_admits_an_open_fork_ancestry() {
         let mut fixture = Fixture::new(store);
         let ancestry = fixture.ancestry(fixture.child);
         let token = fixture.token.clone();
-        for (label, result) in every_pass(&mut fixture.registry, fixture.child, &ancestry, &token)
-        {
+        for (label, result) in every_pass(&mut fixture.registry, fixture.child, &ancestry, &token) {
             // The fence admitted the pass; any later outcome is not erasure's.
             assert!(
                 !matches!(result, Err(RuntimeError::ErasureContainment(_))),
@@ -233,8 +234,7 @@ fn a_frozen_ancestor_fails_every_pass_closed_before_any_driver_runs() {
         let ancestry = fixture.ancestry(fixture.child);
         fixture.gate.freeze_timeline_for_test(fixture.root);
         let token = fixture.token.clone();
-        for (label, result) in every_pass(&mut fixture.registry, fixture.child, &ancestry, &token)
-        {
+        for (label, result) in every_pass(&mut fixture.registry, fixture.child, &ancestry, &token) {
             assert!(is_frozen(&result), "{name}/{label}: {result:?}");
         }
         assert_eq!(fixture.steps.load(Ordering::SeqCst), 0, "{name}");
@@ -329,8 +329,7 @@ fn a_completed_ancestor_erasure_keeps_every_pass_closed() {
             .complete_timeline_erasure_for_test(fixture.root)
             .test_ok();
         let token = fixture.token.clone();
-        for (label, result) in every_pass(&mut fixture.registry, fixture.child, &ancestry, &token)
-        {
+        for (label, result) in every_pass(&mut fixture.registry, fixture.child, &ancestry, &token) {
             assert!(is_frozen(&result), "{name}/{label}: {result:?}");
         }
         assert_eq!(fixture.steps.load(Ordering::SeqCst), 0, "{name}");

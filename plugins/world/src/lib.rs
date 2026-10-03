@@ -4232,13 +4232,12 @@ mod tests {
             .restore_driver_state(&[TimelineHistorySegment::new(timeline, Seq::ZERO)], &[])
             .test_ok();
         assert!(matches!(
-            empty_restored
-                .step_all_anchored_with_events(
-                    other_timeline,
-                    &root_ancestry(other_timeline),
-                    Seq::from_u64(2),
-                    &events,
-                ),
+            empty_restored.step_all_anchored_with_events(
+                other_timeline,
+                &root_ancestry(other_timeline),
+                Seq::from_u64(2),
+                &events,
+            ),
             Err(RuntimeError::SnapshotTimelineMismatch { .. })
         ));
         assert_eq!(empty_calls.load(Ordering::SeqCst), 0);

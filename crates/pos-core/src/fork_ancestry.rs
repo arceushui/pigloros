@@ -112,6 +112,7 @@ pub fn with_fork_ancestry_fence<G: ErasureGate + ?Sized>(
                 effect();
             }
         };
-        gate.with_fence(timeline, operation, &mut gated).and(decision)
+        gate.with_fence(timeline, operation, &mut gated)
+            .and(decision)
     })
 }

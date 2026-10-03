@@ -69,11 +69,7 @@ fn replay_range(
             outcome = replay_in_fence(sender, timeline, range, candidate, closure, &consumer_ids);
         };
         sender
-            .with_protected_ancestry_fence(
-                timeline,
-                ErasureProtectedOperationV1::Read,
-                &mut effect,
-            )
+            .with_protected_ancestry_fence(timeline, ErasureProtectedOperationV1::Read, &mut effect)
             .map_err(crate::host_error_to_core)
             .and(outcome)
     })

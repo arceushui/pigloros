@@ -1079,7 +1079,11 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
     assert!(registry.restore_driver_state(&segments, &events).is_err());
 
     let drafts = registry
-        .step_all_anchored(host.timeline, &root_ancestry(host.timeline), Seq::from_u64(2))
+        .step_all_anchored(
+            host.timeline,
+            &root_ancestry(host.timeline),
+            Seq::from_u64(2),
+        )
         .test_ok();
     assert_eq!(calls.get(), 1);
     let record = DecisionRecordV1::decode(drafts[0].payload.as_slice()).test_ok();

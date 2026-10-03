@@ -1689,11 +1689,8 @@ fn public_pass_refuses_subscribers_and_hides_projections_from_the_rest() {
         );
 
         assert_eq!(
-            ok(registry.step_all_anchored(
-                host.timeline,
-                &root_ancestry(host.timeline),
-                observed,
-            )).len(),
+            ok(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), observed,))
+                .len(),
             1,
             "{name}"
         );
@@ -1716,11 +1713,8 @@ fn public_pass_refuses_subscribers_and_hides_projections_from_the_rest() {
             ),
         );
         let head = ok(store.logical_head(host.timeline));
-        let refused = err(registry.step_all_anchored(
-            host.timeline,
-            &root_ancestry(host.timeline),
-            head,
-        ));
+        let refused =
+            err(registry.step_all_anchored(host.timeline, &root_ancestry(host.timeline), head));
         assert!(
             matches!(
                 refused,
@@ -1817,7 +1811,8 @@ fn composition_fixes_one_profile_per_driver_before_any_pass() {
                 host.timeline,
                 &root_ancestry(host.timeline),
                 Seq::ZERO,
-            )).to_string(),
+            ))
+            .to_string(),
             "scheduled Driver 'first' has no observation profile assignment",
             "{name}"
         );

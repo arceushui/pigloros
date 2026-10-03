@@ -620,15 +620,14 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     );
     let revisions = observe(&registry, &mut store, timeline);
 
-    let drafts =
-        test_ok(registry.step_all_anchored_protected(
-            timeline,
-            &root_ancestry(timeline),
-            Seq::ZERO,
-            token.clone(),
-            1,
-            &[],
-        ));
+    let drafts = test_ok(registry.step_all_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::ZERO,
+        token.clone(),
+        1,
+        &[],
+    ));
     assert_eq!(drafts.len(), 1);
 
     test_ok(authority.record_revocation_on_timeline(
@@ -653,15 +652,14 @@ fn protected_public_seam_checks_timeline_and_rechecks_at_commit_head() {
     ));
 
     let wrong_timeline = TimelineId::new();
-    let error =
-        test_err(registry.step_all_anchored_protected(
-            wrong_timeline,
-            &root_ancestry(wrong_timeline),
-            Seq::ZERO,
-            token,
-            1,
-            &[],
-        ));
+    let error = test_err(registry.step_all_anchored_protected(
+        wrong_timeline,
+        &root_ancestry(wrong_timeline),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert!(matches!(
         error,
         RuntimeError::Consent(ConsentError::NoConsent)
@@ -957,15 +955,14 @@ fn protected_append_fence_rejects_before_store_append() {
         Box::new(ProtectedEventDriver { entity: subject }),
     );
     let revisions = observe(&registry, &mut store, timeline.id());
-    let drafts =
-        test_ok(registry.step_all_anchored_protected(
-            timeline.id(),
-            &root_ancestry(timeline.id()),
-            Seq::ZERO,
-            token,
-            1,
-            &[],
-        ));
+    let drafts = test_ok(registry.step_all_anchored_protected(
+        timeline.id(),
+        &root_ancestry(timeline.id()),
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert_eq!(drafts.len(), 1);
 
     let error = test_err(admit(&mut registry, &mut store, revisions, Seq::ZERO, 2));
@@ -1083,16 +1080,15 @@ fn protected_cadenced_public_seam_stages_and_commits() {
     register_protected_schema(&mut registry);
     let revisions = observe(&registry, &mut store, timeline);
 
-    let drafts =
-        test_ok(registry.tick_cadenced_anchored_protected(
-            timeline,
-            &root_ancestry(timeline),
-            0,
-            Seq::ZERO,
-            token,
-            1,
-            &[],
-        ));
+    let drafts = test_ok(registry.tick_cadenced_anchored_protected(
+        timeline,
+        &root_ancestry(timeline),
+        0,
+        Seq::ZERO,
+        token,
+        1,
+        &[],
+    ));
     assert_eq!(drafts.len(), 1);
     let receipt = test_ok(
         test_ok(admit(&mut registry, &mut store, revisions, Seq::ZERO, 1))
@@ -1128,11 +1124,10 @@ fn public_registry_recovery_and_unprotected_transactions_run() {
         &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
         &[event],
     ));
-    assert!(test_ok(registry.step_all_anchored(
-        timeline,
-        &root_ancestry(timeline),
-        Seq::ZERO,
-    )).is_empty());
+    assert!(
+        test_ok(registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO,))
+            .is_empty()
+    );
     test_ok(registry.commit_step_at(Seq::ZERO, 0));
     assert!(test_ok(registry.tick_cadenced(timeline, &root_ancestry(timeline), 0)).is_empty());
 
@@ -1205,11 +1200,10 @@ fn public_registry_steps_a_registered_driverless_plugin() {
     let mut driverless = PluginRegistry::new();
     let plugin = configured_plugin("driverless", &[], false, false);
     test_ok(driverless.register_generated(&plugin, None, None));
-    assert!(test_ok(driverless.step_all_anchored(
-        timeline,
-        &root_ancestry(timeline),
-        Seq::ZERO,
-    )).is_empty());
+    assert!(
+        test_ok(driverless.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO,))
+            .is_empty()
+    );
     test_ok(driverless.commit_step_at(Seq::ZERO, 0));
     assert!(test_ok(driverless.tick_cadenced(timeline, &root_ancestry(timeline), 0)).is_empty());
 }
@@ -1924,11 +1918,9 @@ fn public_cadence_and_empty_registry_cover_ready_and_overflow_boundaries() {
 
     let mut registry = PluginRegistry::new();
     registry.register_test_driver(Box::new(OverflowCadencedDriver));
-    assert!(test_ok(registry.tick_cadenced(
-        timeline,
-        &root_ancestry(timeline),
-        u128::MAX,
-    )).is_empty());
+    assert!(
+        test_ok(registry.tick_cadenced(timeline, &root_ancestry(timeline), u128::MAX,)).is_empty()
+    );
     assert!(matches!(
         test_err(registry.tick_cadenced(timeline, &root_ancestry(timeline), u128::MAX)),
         RuntimeError::CadenceOverflow { .. }
@@ -2079,7 +2071,8 @@ fn public_registry_commits_and_admits_empty_anchored_steps() {
         &root_ancestry(timeline.id()),
         0,
         Seq::ZERO,
-    )).is_empty());
+    ))
+    .is_empty());
     test_ok(anchored.commit_step_at(Seq::ZERO, 0));
 
     let mut admitted = PluginRegistry::new();
