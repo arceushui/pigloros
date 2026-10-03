@@ -2940,7 +2940,7 @@ mod local_cut_owner_coverage {
         let connection = &fixture.store.conn;
         deny_read(connection, "local_cut_world_recordings", "receipt_cbor", 0)?;
         let recordings = sqlite_local_cut_world_recordings(connection, OWNER, FIRST_CUT.cut_id);
-        assert_eq!(recordings, Err(LocalError::StorageFailure));
+        assert_eq!(recordings.err(), Some(LocalError::StorageFailure));
         clear_authorizer(connection)?;
         deny_read(connection, "local_cut_world_recordings", "binding_hash", 0)?;
         let latest = sqlite_latest_local_cut_world_binding(connection, OWNER, timeline(1));
@@ -3054,7 +3054,12 @@ mod local_cut_owner_coverage {
         // Cut 255 precedes cut 256 only under the big-endian blob encoding that
         // the `cut_id > ?2` later-cut check relies on.
         let mut fixture = admitted()?;
-        let request = cut_request(&fixture.state, &fixture.snapshots, BYTE_EDGE_CUT)?;
+        let request = cut_request(
+            &fixture.store,
+            &fixture.state,
+            &fixture.snapshots,
+            BYTE_EDGE_CUT,
+        )?;
         let batch = prepare_cut(request, None, &fixture.state, &fixture.snapshots)?;
         let applied = fixture.store.commit_local_cut_owner_v1(batch)?;
         assert_eq!(applied.kind, LocalCutOwnerCommitKindV1::Applied);
