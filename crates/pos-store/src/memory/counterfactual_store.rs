@@ -62,11 +62,15 @@
 //!   every other backend failure, including a containment denial or an
 //!   admitted Fork, is `StorageFailure`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use pos_core::{
-    clock::Seq, crypto::Hash, error::CoreError, ids::TimelineId, CounterfactualBasisV1,
-    CounterfactualFactsV1, CounterfactualInvalidationCommandV1,
+    clock::Seq,
+    crypto::Hash,
+    error::CoreError,
+    hasher::Hasher,
+    ids::{EventId, TimelineId},
+    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     CounterfactualTickOutcomeV1, ErasureProtectedOperationV1, ForkGenerationV1,
     PipelineDraftBatchV1, StoredCounterfactualArtifactV1,
@@ -154,6 +158,57 @@ impl CounterfactualForkStateV1 {
     }
 }
 
+/// One visible, published Fork's entries, looked up once so the recheck,
+/// staging, and install all use the same Timeline and counterfactual state.
+struct ForkEntriesV1<'s> {
+    fork: TimelineId,
+    timeline: &'s mut TimelineState,
+    counterfactual: &'s mut CounterfactualForkStateV1,
+    event_ids: &'s mut HashSet<EventId>,
+    hasher: &'s dyn Hasher,
+}
+
+impl ForkEntriesV1<'_> {
+    /// The Fork's committed head, generation, and published facts.
+    fn persisted_basis(&self) -> CounterfactualBasisV1 {
+        self.counterfactual
+            .basis(committed_logical_head(self.timeline))
+    }
+
+    /// Stage one Tick under the generic append guard on a scratch copy of the
+    /// Fork head that holds none of its committed Events. Nothing is
+    /// installed, so a failure leaves no partial state.
+    fn stage_tick(
+        &self,
+        drafts: &PipelineDraftBatchV1,
+    ) -> Result<StagedTickV1, CounterfactualStoreErrorV1> {
+        let mut timeline = TimelineState {
+            timeline: self.timeline.timeline.clone(),
+            events: Vec::new(),
+            chain_head: self.timeline.chain_head,
+        };
+        crate::ensure_non_geographic_drafts(drafts.drafts(), self.fork)
+            .and_then(|()| {
+                drafts.drafts().iter().try_for_each(|draft| {
+                    MemoryStore::append_one_to_state(&mut timeline, draft, self.hasher).map(drop)
+                })
+            })
+            .and_then(|()| staged_tick_head(&timeline))
+            .map(|head| StagedTickV1 { timeline, head })
+            .map_err(|error| store_error(&error))
+    }
+
+    /// Install a staged Tick's Events on the Fork Timeline. Infallible.
+    fn install_tick(&mut self, tick: StagedTickV1) {
+        let staged = tick.timeline;
+        self.event_ids
+            .extend(staged.events.iter().map(|event| event.id));
+        self.timeline.chain_head = staged.chain_head;
+        self.timeline.timeline.head = staged.timeline.head;
+        self.timeline.events.extend(staged.events);
+    }
+}
+
 /// One recomputation Tick staged on a scratch copy of the Fork head.
 struct StagedTickV1 {
     /// The Fork's head metadata with only the Tick's Events appended.
@@ -228,6 +283,33 @@ impl MemoryStore {
         })
     }
 
+    /// Borrow one visible, published Fork's entries for a write.
+    fn fork_entries(
+        &mut self,
+        fork: TimelineId,
+    ) -> Result<ForkEntriesV1<'_>, CounterfactualStoreErrorV1> {
+        self.ensure_visible_fork(fork)?;
+        let Self {
+            ref mut timelines,
+            ref mut counterfactual_forks,
+            ref mut event_ids,
+            ref hasher,
+            ..
+        } = *self;
+        let hasher: &dyn Hasher = hasher.as_ref();
+        timelines
+            .get_mut(&fork)
+            .zip(counterfactual_forks.get_mut(&fork))
+            .map(move |(timeline, counterfactual)| ForkEntriesV1 {
+                fork,
+                timeline,
+                counterfactual,
+                event_ids,
+                hasher,
+            })
+            .ok_or(CounterfactualStoreErrorV1::ForkNotFound)
+    }
+
     /// The Fork's committed head, generation, and published facts.
     fn persisted_counterfactual_basis(
         &self,
@@ -243,21 +325,19 @@ impl MemoryStore {
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
-        let fork = command.fork();
-        let persisted = self.persisted_counterfactual_basis(fork)?;
+        let mut entries = self.fork_entries(command.fork())?;
+        let persisted = entries.persisted_basis();
         if let Some(conflict) = command.expected_basis().first_conflict(&persisted) {
             return Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
                 conflict,
             ));
         }
-        let tick = self.stage_tick(fork, command.first_tick_drafts())?;
+        let tick = entries.stage_tick(command.first_tick_drafts())?;
         // The receipt is built before anything is installed, so even its
         // `CorruptState` rejection commits nothing.
         command.committed_receipt(tick.head).map(|receipt| {
-            self.install_tick(fork, tick);
-            if let Some(state) = self.counterfactual_forks.get_mut(&fork) {
-                state.advance(command);
-            }
+            entries.install_tick(tick);
+            entries.counterfactual.advance(command);
             CounterfactualInvalidationOutcomeV1::Committed(receipt)
         })
     }
@@ -270,55 +350,18 @@ impl MemoryStore {
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
     ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
-        let persisted = self.persisted_counterfactual_basis(fork)?;
+        let mut entries = self.fork_entries(fork)?;
+        let persisted = entries.persisted_basis();
         if let Some(conflict) = expected.first_conflict(&persisted) {
             return Ok(CounterfactualTickOutcomeV1::Stale(conflict));
         }
-        let tick = self.stage_tick(fork, drafts)?;
+        let tick = entries.stage_tick(drafts)?;
         // The outcome is built before the Tick is installed, so even its
         // `CorruptState` rejection commits nothing.
         persisted.committed_tick(tick.head).map(|outcome| {
-            self.install_tick(fork, tick);
+            entries.install_tick(tick);
             outcome
         })
-    }
-
-    /// Stage one Tick under the generic append guard on a scratch copy of the
-    /// Fork head that holds none of its committed Events. Nothing is
-    /// installed, so a failure leaves no partial state.
-    fn stage_tick(
-        &self,
-        fork: TimelineId,
-        drafts: &PipelineDraftBatchV1,
-    ) -> Result<StagedTickV1, CounterfactualStoreErrorV1> {
-        let committed = self.state(fork);
-        let mut timeline = TimelineState {
-            timeline: committed.timeline.clone(),
-            events: Vec::new(),
-            chain_head: committed.chain_head,
-        };
-        let hasher = self.hasher.as_ref();
-        crate::ensure_non_geographic_drafts(drafts.drafts(), fork)
-            .and_then(|()| {
-                drafts.drafts().iter().try_for_each(|draft| {
-                    Self::append_one_to_state(&mut timeline, draft, hasher).map(drop)
-                })
-            })
-            .and_then(|()| staged_tick_head(&timeline))
-            .map(|head| StagedTickV1 { timeline, head })
-            .map_err(|error| store_error(&error))
-    }
-
-    /// Install a staged Tick's Events on the Fork Timeline. Infallible.
-    fn install_tick(&mut self, fork: TimelineId, tick: StagedTickV1) {
-        let staged = tick.timeline;
-        self.event_ids
-            .extend(staged.events.iter().map(|event| event.id));
-        if let Some(state) = self.timelines.get_mut(&fork) {
-            state.chain_head = staged.chain_head;
-            state.timeline.head = staged.timeline.head;
-            state.events.extend(staged.events);
-        }
     }
 }
 
