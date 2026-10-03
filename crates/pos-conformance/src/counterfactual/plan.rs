@@ -45,6 +45,10 @@
 //!   claim may be requested; whether evidence supports it is decided later.
 //! - A plan cannot supersede itself: `previous_plan_digest` must differ from
 //!   `plan_digest`.
+//! - The plan ID and the room, parent-cut, classification-bundle, Plugin
+//!   composition, scheduler, numeric-profile, budget, and failure-policy
+//!   digests are nonzero, and every descriptor names a nonzero schema with
+//!   nonzero digests; an all-zero placeholder is out of bounds.
 //! - The plan carries no operational path: every artifact is a digest, and
 //!   the room, profile, and policy identifiers are 1 through 128 bytes of
 //!   UTF-8 without control characters that neither start with `/`, `~`, or a
@@ -60,6 +64,10 @@
 //! `FixedPolicy` descriptors of 108 bytes, plus fixed fields), below the 16 MiB
 //! bound, which is therefore enforced on untrusted input before allocation.
 
+use super::codec::{
+    bytes_value, decode_canonical, encode_value, text_value, uint_value, CborLimits, FieldReader,
+    WireError,
+};
 use super::intervention::{
     validate_plan_interventions_v1, InterventionContractErrorV1, InterventionV1,
 };
@@ -71,7 +79,6 @@ use crate::{
 use ciborium::value::Value;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::io::Cursor;
 
 /// Magic for the immutable counterfactual-plan record.
 pub const COUNTERFACTUAL_PLAN_MAGIC_V1: &str = "CFP1";
@@ -88,9 +95,14 @@ const EXECUTION_PROFILE_REF_FIELD_COUNT: usize = 3;
 const TRUST_POLICY_REF_FIELD_COUNT: usize = 3;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_SEMANTIC_VERSION_BYTES: usize = 64;
-/// Deepest legal item: a descriptor field (record 0, list 1, descriptor 2, field 3).
-const MAX_NESTING_DEPTH: u8 = 3;
-const MAX_NESTED_ARRAY_ITEMS: u64 = 65_536;
+const LIMITS: CborLimits = CborLimits {
+    maximum_bytes: MAX_COUNTERFACTUAL_PLAN_BYTES_V1,
+    // Deepest legal item: a descriptor field (record 0, list 1, descriptor 2,
+    // field 3).
+    maximum_depth: 3,
+    maximum_items: 65_536,
+    allow_simple_values: true,
+};
 const PLAN_DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.CounterfactualPlan.v1";
 
 /// Closed safe errors exposed by the CFP1 contract.
@@ -294,8 +306,8 @@ impl CounterfactualPlanV1 {
     /// Returns a closed safe error when validation or encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, CounterfactualPlanContractErrorV1> {
         validated_body_fields(self).and_then(|mut fields| {
-            fields.push(byte_string(&self.plan_digest));
-            encode_value(&fields)
+            fields.push(bytes_value(&self.plan_digest));
+            encode_value(&fields).map_err(contract_error)
         })
     }
 
@@ -306,11 +318,10 @@ impl CounterfactualPlanV1 {
     /// Returns a closed safe error for malformed, noncanonical, oversized, or
     /// structurally invalid CFP1 records.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, CounterfactualPlanContractErrorV1> {
-        if bytes.len() > MAX_COUNTERFACTUAL_PLAN_BYTES_V1 {
-            return Err(CounterfactualPlanContractErrorV1::FieldOutOfBounds);
-        }
-        let plan = decode_value(bytes).and_then(|value| decode_plan(&value))?;
-        plan.validate().map(|()| plan)
+        decode_canonical(bytes, LIMITS)
+            .map_err(contract_error)
+            .and_then(|value| decode_plan(&value))
+            .and_then(|plan| plan.validate().map(|()| plan))
     }
 
     /// Compute the CFP1 domain-separated digest over fields 0 through 23.
@@ -355,17 +366,25 @@ fn digested_body_fields(
     plan: &CounterfactualPlanV1,
 ) -> Result<(Vec<Value>, [u8; 32]), CounterfactualPlanContractErrorV1> {
     body_fields(plan).and_then(|fields| {
-        encode_value(&fields).map(|unsigned| {
-            let digest = domain_digest(PLAN_DIGEST_DOMAIN_V1, &unsigned);
-            (fields, digest)
-        })
+        encode_value(&fields)
+            .map_err(contract_error)
+            .map(|unsigned| {
+                let digest = domain_digest(PLAN_DIGEST_DOMAIN_V1, &unsigned);
+                (fields, digest)
+            })
     })
 }
 
 fn validate_bounds(plan: &CounterfactualPlanV1) -> Result<(), CounterfactualPlanContractErrorV1> {
     if valid_identities(plan)
+        && nonzero_digests(plan)
         && valid_tick_range(plan)
         && valid_descriptor_counts(plan)
+        && plan
+            .exogenous_descriptors
+            .iter()
+            .chain(&plan.fixed_policy_descriptors)
+            .all(valid_descriptor)
         && plan.previous_plan_digest != Some(plan.plan_digest)
     {
         Ok(())
@@ -385,6 +404,36 @@ fn valid_identities(plan: &CounterfactualPlanV1) -> bool {
         )
         && plan_identifier(&plan.trust_policy.policy_id)
         && plan.trust_policy.epoch != 0
+}
+
+/// Whether every plan, cut, room, classification, and Plugin identity is
+/// nonzero.
+fn nonzero_digests(plan: &CounterfactualPlanV1) -> bool {
+    [
+        plan.plan_id.as_slice(),
+        plan.room_digest.as_slice(),
+        plan.parent_cut_digest.as_slice(),
+        plan.classification_bundle_digest.as_slice(),
+        plan.plugin_composition_digest.as_slice(),
+        plan.scheduler_digest.as_slice(),
+        plan.numeric_profile_digest.as_slice(),
+        plan.budget_digest.as_slice(),
+        plan.failure_policy_digest.as_slice(),
+    ]
+    .into_iter()
+    .all(nonzero)
+}
+
+/// Whether a descriptor names a schema and carries nonzero digests.
+fn valid_descriptor(descriptor: &FrozenArtifactDescriptorV1) -> bool {
+    descriptor.schema_id != 0
+        && nonzero(&descriptor.artifact_digest)
+        && nonzero(&descriptor.authorization_digest)
+        && nonzero(&descriptor.provenance_digest)
+}
+
+fn nonzero(value: &[u8]) -> bool {
+    value.iter().any(|byte| *byte != 0)
 }
 
 /// Whether the first Tick directly follows the cut and precedes the horizon.
@@ -486,32 +535,31 @@ fn body_fields(
         .map_err(CounterfactualPlanContractErrorV1::Intervention)
         .map(|interventions| {
             vec![
-                Value::Text(COUNTERFACTUAL_PLAN_MAGIC_V1.to_owned()),
-                uint(1),
-                byte_string(&plan.plan_id),
-                Value::Text(plan.room_id.clone()),
-                byte_string(&plan.room_digest),
-                byte_string(&plan.parent_timeline_id),
-                uint(plan.parent_cut_seq),
-                uint(plan.parent_cut_tick),
-                byte_string(&plan.parent_cut_digest),
-                uint(plan.first_tick),
-                uint(plan.horizon_tick),
+                text_value(COUNTERFACTUAL_PLAN_MAGIC_V1),
+                uint_value(1),
+                bytes_value(&plan.plan_id),
+                text_value(&plan.room_id),
+                bytes_value(&plan.room_digest),
+                bytes_value(&plan.parent_timeline_id),
+                uint_value(plan.parent_cut_seq),
+                uint_value(plan.parent_cut_tick),
+                bytes_value(&plan.parent_cut_digest),
+                uint_value(plan.first_tick),
+                uint_value(plan.horizon_tick),
                 Value::Array(interventions),
                 encode_descriptors(&plan.exogenous_descriptors),
                 encode_descriptors(&plan.fixed_policy_descriptors),
-                byte_string(&plan.classification_bundle_digest),
+                bytes_value(&plan.classification_bundle_digest),
                 encode_execution_profile_ref(&plan.execution_profile),
                 encode_trust_policy_ref(&plan.trust_policy),
-                byte_string(&plan.plugin_composition_digest),
-                byte_string(&plan.scheduler_digest),
-                byte_string(&plan.numeric_profile_digest),
-                byte_string(&plan.budget_digest),
-                byte_string(&plan.failure_policy_digest),
-                uint(replay_claim_code(plan.replay_claim)),
+                bytes_value(&plan.plugin_composition_digest),
+                bytes_value(&plan.scheduler_digest),
+                bytes_value(&plan.numeric_profile_digest),
+                bytes_value(&plan.budget_digest),
+                bytes_value(&plan.failure_policy_digest),
+                uint_value(replay_claim_code(plan.replay_claim)),
                 plan.previous_plan_digest
-                    .as_ref()
-                    .map_or(Value::Null, byte_string::<32>),
+                    .map_or(Value::Null, |digest| bytes_value(&digest)),
             ]
         })
 }
@@ -522,10 +570,10 @@ fn encode_descriptors(descriptors: &[FrozenArtifactDescriptorV1]) -> Value {
             .iter()
             .map(|descriptor| {
                 Value::Array(vec![
-                    uint(u64::from(descriptor.schema_id)),
-                    byte_string(&descriptor.artifact_digest),
-                    byte_string(&descriptor.authorization_digest),
-                    byte_string(&descriptor.provenance_digest),
+                    uint_value(descriptor.schema_id.into()),
+                    bytes_value(&descriptor.artifact_digest),
+                    bytes_value(&descriptor.authorization_digest),
+                    bytes_value(&descriptor.provenance_digest),
                 ])
             })
             .collect(),
@@ -534,215 +582,113 @@ fn encode_descriptors(descriptors: &[FrozenArtifactDescriptorV1]) -> Value {
 
 fn encode_execution_profile_ref(profile: &PlanExecutionProfileRefV1) -> Value {
     Value::Array(vec![
-        Value::Text(profile.profile_id.clone()),
-        Value::Text(profile.semantic_version.clone()),
-        byte_string(&profile.profile_digest),
+        text_value(&profile.profile_id),
+        text_value(&profile.semantic_version),
+        bytes_value(&profile.profile_digest),
     ])
 }
 
 fn encode_trust_policy_ref(policy: &PlanTrustPolicyRefV1) -> Value {
     Value::Array(vec![
-        Value::Text(policy.policy_id.clone()),
-        uint(policy.epoch),
-        byte_string(&policy.snapshot_digest),
+        text_value(&policy.policy_id),
+        uint_value(policy.epoch),
+        bytes_value(&policy.snapshot_digest),
     ])
 }
 
-fn uint(value: u64) -> Value {
-    Value::Integer(value.into())
-}
-
-fn byte_string<const LENGTH: usize>(value: &[u8; LENGTH]) -> Value {
-    Value::Bytes(value.to_vec())
-}
-
+/// Read every field straight-line through one reader, then decode the
+/// embedded INT1 records, whose closed errors surface unchanged.
 fn decode_plan(value: &Value) -> Result<CounterfactualPlanV1, CounterfactualPlanContractErrorV1> {
-    let fields = array(value, FIELD_COUNT)?;
-    if !matches!(&fields[0], Value::Text(magic) if magic == COUNTERFACTUAL_PLAN_MAGIC_V1)
-        || uint_value(&fields[1]) != Ok(1)
-    {
-        return Err(CounterfactualPlanContractErrorV1::UnsupportedVersion);
-    }
-    Ok(CounterfactualPlanV1 {
-        plan_id: fixed_bytes(&fields[2])?,
-        room_id: text_value(&fields[3])?,
-        room_digest: fixed_bytes(&fields[4])?,
-        parent_timeline_id: fixed_bytes(&fields[5])?,
-        parent_cut_seq: uint_value(&fields[6])?,
-        parent_cut_tick: uint_value(&fields[7])?,
-        parent_cut_digest: fixed_bytes(&fields[8])?,
-        first_tick: uint_value(&fields[9])?,
-        horizon_tick: uint_value(&fields[10])?,
-        interventions: array_values(&fields[11])?
-            .iter()
-            .map(decode_intervention)
-            .collect::<Result<_, _>>()?,
-        exogenous_descriptors: decode_descriptors(&fields[12])?,
-        fixed_policy_descriptors: decode_descriptors(&fields[13])?,
-        classification_bundle_digest: fixed_bytes(&fields[14])?,
-        execution_profile: decode_execution_profile_ref(&fields[15])?,
-        trust_policy: decode_trust_policy_ref(&fields[16])?,
-        plugin_composition_digest: fixed_bytes(&fields[17])?,
-        scheduler_digest: fixed_bytes(&fields[18])?,
-        numeric_profile_digest: fixed_bytes(&fields[19])?,
-        budget_digest: fixed_bytes(&fields[20])?,
-        failure_policy_digest: fixed_bytes(&fields[21])?,
-        replay_claim: enum_value(&fields[22], &REPLAY_CLAIMS)?,
-        previous_plan_digest: optional(&fields[23], fixed_bytes::<32>)?,
-        plan_digest: fixed_bytes(&fields[24])?,
-    })
-}
-
-fn decode_intervention(value: &Value) -> Result<InterventionV1, CounterfactualPlanContractErrorV1> {
-    match value {
-        Value::Bytes(bytes) => InterventionV1::from_canonical_cbor(bytes)
-            .map_err(CounterfactualPlanContractErrorV1::Intervention),
-        _ => Err(CounterfactualPlanContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn decode_descriptors(
-    value: &Value,
-) -> Result<Vec<FrozenArtifactDescriptorV1>, CounterfactualPlanContractErrorV1> {
-    array_values(value)?.iter().map(decode_descriptor).collect()
-}
-
-fn decode_descriptor(
-    value: &Value,
-) -> Result<FrozenArtifactDescriptorV1, CounterfactualPlanContractErrorV1> {
-    let fields = array(value, DESCRIPTOR_FIELD_COUNT)?;
-    Ok(FrozenArtifactDescriptorV1 {
-        schema_id: u32_value(&fields[0])?,
-        artifact_digest: fixed_bytes(&fields[1])?,
-        authorization_digest: fixed_bytes(&fields[2])?,
-        provenance_digest: fixed_bytes(&fields[3])?,
-    })
-}
-
-fn decode_execution_profile_ref(
-    value: &Value,
-) -> Result<PlanExecutionProfileRefV1, CounterfactualPlanContractErrorV1> {
-    let fields = array(value, EXECUTION_PROFILE_REF_FIELD_COUNT)?;
-    Ok(PlanExecutionProfileRefV1 {
-        profile_id: text_value(&fields[0])?,
-        semantic_version: text_value(&fields[1])?,
-        profile_digest: fixed_bytes(&fields[2])?,
-    })
-}
-
-fn decode_trust_policy_ref(
-    value: &Value,
-) -> Result<PlanTrustPolicyRefV1, CounterfactualPlanContractErrorV1> {
-    let fields = array(value, TRUST_POLICY_REF_FIELD_COUNT)?;
-    Ok(PlanTrustPolicyRefV1 {
-        policy_id: text_value(&fields[0])?,
-        epoch: uint_value(&fields[1])?,
-        snapshot_digest: fixed_bytes(&fields[2])?,
-    })
-}
-
-fn decode_value(bytes: &[u8]) -> Result<Value, CounterfactualPlanContractErrorV1> {
-    crate::preflight_array_cbor(bytes, MAX_NESTING_DEPTH, MAX_NESTED_ARRAY_ITEMS, true)
-        .map_err(preflight_error)?;
-    let value: Value = ciborium::from_reader(Cursor::new(bytes))
-        .map_err(|_| CounterfactualPlanContractErrorV1::InvalidEncoding)?;
-    encode_value(&value).and_then(|canonical| {
-        if canonical == bytes {
-            Ok(value)
-        } else {
-            Err(CounterfactualPlanContractErrorV1::InvalidEncoding)
+    let mut fields = FieldReader::with_header(value, FIELD_COUNT, COUNTERFACTUAL_PLAN_MAGIC_V1, 1);
+    let plan_id = fields.read_bytes();
+    let room_id = fields.read_text();
+    let room_digest = fields.read_bytes();
+    let parent_timeline_id = fields.read_bytes();
+    let parent_cut_seq = fields.read_u64();
+    let parent_cut_tick = fields.read_u64();
+    let parent_cut_digest = fields.read_bytes();
+    let first_tick = fields.read_u64();
+    let horizon_tick = fields.read_u64();
+    let interventions = fields.read_byte_string_list();
+    let exogenous_descriptors = fields.read_array(descriptor_field);
+    let fixed_policy_descriptors = fields.read_array(descriptor_field);
+    let classification_bundle_digest = fields.read_bytes();
+    let execution_profile = fields.read_nested(EXECUTION_PROFILE_REF_FIELD_COUNT, |profile| {
+        PlanExecutionProfileRefV1 {
+            profile_id: profile.read_text(),
+            semantic_version: profile.read_text(),
+            profile_digest: profile.read_bytes(),
         }
-    })
+    });
+    let trust_policy = fields.read_nested(TRUST_POLICY_REF_FIELD_COUNT, |policy| {
+        PlanTrustPolicyRefV1 {
+            policy_id: policy.read_text(),
+            epoch: policy.read_u64(),
+            snapshot_digest: policy.read_bytes(),
+        }
+    });
+    let plugin_composition_digest = fields.read_bytes();
+    let scheduler_digest = fields.read_bytes();
+    let numeric_profile_digest = fields.read_bytes();
+    let budget_digest = fields.read_bytes();
+    let failure_policy_digest = fields.read_bytes();
+    let replay_claim = fields.read_enum(&REPLAY_CLAIMS, ReplayClaimV1::Exact);
+    let previous_plan_digest = fields.read_optional_bytes();
+    let plan_digest = fields.read_bytes();
+    fields
+        .finish()
+        .map_err(contract_error)
+        .and_then(|()| {
+            interventions
+                .iter()
+                .map(Vec::as_slice)
+                .map(InterventionV1::from_canonical_cbor)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(CounterfactualPlanContractErrorV1::Intervention)
+        })
+        .map(|interventions| CounterfactualPlanV1 {
+            plan_id,
+            room_id,
+            room_digest,
+            parent_timeline_id,
+            parent_cut_seq,
+            parent_cut_tick,
+            parent_cut_digest,
+            first_tick,
+            horizon_tick,
+            interventions,
+            exogenous_descriptors,
+            fixed_policy_descriptors,
+            classification_bundle_digest,
+            execution_profile,
+            trust_policy,
+            plugin_composition_digest,
+            scheduler_digest,
+            numeric_profile_digest,
+            budget_digest,
+            failure_policy_digest,
+            replay_claim,
+            previous_plan_digest,
+            plan_digest,
+        })
 }
 
-const fn preflight_error(error: crate::CborPreflightError) -> CounterfactualPlanContractErrorV1 {
+fn descriptor_field(value: &Value) -> Result<FrozenArtifactDescriptorV1, WireError> {
+    let mut fields = FieldReader::new(value, DESCRIPTOR_FIELD_COUNT);
+    let descriptor = FrozenArtifactDescriptorV1 {
+        schema_id: fields.read_u32(),
+        artifact_digest: fields.read_bytes(),
+        authorization_digest: fields.read_bytes(),
+        provenance_digest: fields.read_bytes(),
+    };
+    fields.finish().map(|()| descriptor)
+}
+
+const fn contract_error(error: WireError) -> CounterfactualPlanContractErrorV1 {
     match error {
-        crate::CborPreflightError::InvalidEncoding => {
-            CounterfactualPlanContractErrorV1::InvalidEncoding
-        }
-        crate::CborPreflightError::FieldOutOfBounds => {
-            CounterfactualPlanContractErrorV1::FieldOutOfBounds
-        }
+        WireError::InvalidEncoding => CounterfactualPlanContractErrorV1::InvalidEncoding,
+        WireError::FieldOutOfBounds => CounterfactualPlanContractErrorV1::FieldOutOfBounds,
+        WireError::UnsupportedVersion => CounterfactualPlanContractErrorV1::UnsupportedVersion,
+        WireError::UnknownEnum => CounterfactualPlanContractErrorV1::UnknownEnum,
     }
-}
-
-/// Encode one value as deterministic CBOR.
-///
-/// A `Vec<Value>` encodes exactly like the equivalent `Value::Array`: both
-/// serialize as a definite-length array of the same items.
-fn encode_value<T: serde::Serialize + ?Sized>(
-    value: &T,
-) -> Result<Vec<u8>, CounterfactualPlanContractErrorV1> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)
-        .map(|()| bytes)
-        .or(Err(CounterfactualPlanContractErrorV1::InvalidEncoding))
-}
-
-fn array(value: &Value, length: usize) -> Result<&[Value], CounterfactualPlanContractErrorV1> {
-    match value {
-        Value::Array(values) if values.len() == length => Ok(values),
-        _ => Err(CounterfactualPlanContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn array_values(value: &Value) -> Result<&[Value], CounterfactualPlanContractErrorV1> {
-    match value {
-        Value::Array(values) => Ok(values),
-        _ => Err(CounterfactualPlanContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn text_value(value: &Value) -> Result<String, CounterfactualPlanContractErrorV1> {
-    match value {
-        Value::Text(value) => Ok(value.clone()),
-        _ => Err(CounterfactualPlanContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn uint_value(value: &Value) -> Result<u64, CounterfactualPlanContractErrorV1> {
-    match value {
-        Value::Integer(value) => {
-            u64::try_from(*value).map_err(|_| CounterfactualPlanContractErrorV1::InvalidEncoding)
-        }
-        _ => Err(CounterfactualPlanContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn u32_value(value: &Value) -> Result<u32, CounterfactualPlanContractErrorV1> {
-    uint_value(value).and_then(|value| {
-        u32::try_from(value).map_err(|_| CounterfactualPlanContractErrorV1::FieldOutOfBounds)
-    })
-}
-
-fn fixed_bytes<const LENGTH: usize>(
-    value: &Value,
-) -> Result<[u8; LENGTH], CounterfactualPlanContractErrorV1> {
-    match value {
-        Value::Bytes(value) => value
-            .as_slice()
-            .try_into()
-            .map_err(|_| CounterfactualPlanContractErrorV1::InvalidEncoding),
-        _ => Err(CounterfactualPlanContractErrorV1::InvalidEncoding),
-    }
-}
-
-fn optional<T>(
-    value: &Value,
-    decode: impl Fn(&Value) -> Result<T, CounterfactualPlanContractErrorV1>,
-) -> Result<Option<T>, CounterfactualPlanContractErrorV1> {
-    if matches!(value, Value::Null) {
-        Ok(None)
-    } else {
-        decode(value).map(Some)
-    }
-}
-
-fn enum_value<T: Copy>(value: &Value, codes: &[T]) -> Result<T, CounterfactualPlanContractErrorV1> {
-    uint_value(value).and_then(|code| {
-        usize::try_from(code)
-            .ok()
-            .and_then(|index| codes.get(index).copied())
-            .ok_or(CounterfactualPlanContractErrorV1::UnknownEnum)
-    })
 }
