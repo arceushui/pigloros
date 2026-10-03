@@ -1443,4 +1443,16 @@ fn a_pre_schema_file_opens_read_only_without_counterfactual_state() {
     ));
     // An object on another table is not counterfactual state.
     assert_eq!(open_error(SqliteStore::open_read_only(path_text)), "");
+    // `_` in the prefix is literal, so a lookalike table is not counterfactual
+    // state either.
+    ok(execute(
+        &fixture.path,
+        "CREATE TABLE counterfactualXother (id INTEGER);",
+    ));
+    let mut read_only = ok(SqliteStore::open_read_only(path_text));
+    ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+    assert_eq!(
+        read_only.current_fork_generation(fork),
+        Err(StoreError::ForkNotFound)
+    );
 }
