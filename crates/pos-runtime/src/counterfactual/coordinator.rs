@@ -143,6 +143,11 @@
 //!   recomputation Tick. The shared staging seam rejects a staged draft of
 //!   that type as [`CounterfactualAdmissionErrorV1::ReservedEventType`], for
 //!   the first Tick and every later one.
+//! - **Event type bound.** The shared staging seam rejects a staged draft
+//!   whose Event type exceeds [`pos_core::MAX_FORK_EVENT_TYPE_BYTES_V1`] as
+//!   [`CounterfactualAdmissionErrorV1::StagedTickRejected`] with
+//!   `FieldOutOfBounds`, so every committed Tick stays readable under the
+//!   bounded suffix recovery reads.
 //!
 //! # Deferred
 //!
@@ -173,7 +178,7 @@ use pos_core::{
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1,
     PipelineContractErrorV1, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
-    SuffixInvalidationBytesV1, TimelineId,
+    SuffixInvalidationBytesV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
 
 /// `SIV1` artifact class of every invalidated endogenous output.
@@ -239,7 +244,9 @@ pub enum CounterfactualAdmissionErrorV1 {
     /// The stager failed to stage the first recomputation Tick.
     #[error("counterfactual first Tick staging failed")]
     PluginFailure,
-    /// The staged first-Tick drafts are empty, malformed, or oversized.
+    /// The staged first-Tick drafts are empty, malformed, or oversized, or a
+    /// draft's Event type exceeds [`MAX_FORK_EVENT_TYPE_BYTES_V1`]
+    /// (`FieldOutOfBounds`).
     #[error("counterfactual staged first Tick is invalid")]
     StagedTickRejected(#[source] PipelineContractErrorV1),
     /// A staged draft uses the coordinator-reserved checkpoint Event type.
@@ -912,9 +919,12 @@ fn digest_set(digests: impl Iterator<Item = [u8; 32]>) -> Vec<Hash> {
 /// Stage one recomputation Tick from staged inputs only.
 ///
 /// This is the shared staging seam of every recomputation Tick, the first
-/// one and every later one alike:
-/// it bounds the drafts as one [`PipelineDraftBatchV1`] and then rejects any
-/// draft of the reserved [`COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1`].
+/// one and every later one alike: it bounds the drafts as one
+/// [`PipelineDraftBatchV1`], rejects any draft of the reserved
+/// [`COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1`], and then rejects an Event
+/// type longer than [`MAX_FORK_EVENT_TYPE_BYTES_V1`] as
+/// `StagedTickRejected(FieldOutOfBounds)`, so every committed Tick stays
+/// readable under the suffix recovery read bounds.
 pub(crate) fn stage_tick(
     stager: &mut impl CounterfactualTickStagerV1,
     plan: &CounterfactualPlanV1,
@@ -944,6 +954,14 @@ pub(crate) fn stage_tick(
         .and_then(|batch| {
             if batch.drafts().iter().any(is_reserved_draft) {
                 Err(CounterfactualAdmissionErrorV1::ReservedEventType)
+            } else if batch
+                .drafts()
+                .iter()
+                .any(|draft| draft.event_type.as_str().len() > MAX_FORK_EVENT_TYPE_BYTES_V1)
+            {
+                Err(CounterfactualAdmissionErrorV1::StagedTickRejected(
+                    PipelineContractErrorV1::FieldOutOfBounds,
+                ))
             } else {
                 Ok(batch)
             }

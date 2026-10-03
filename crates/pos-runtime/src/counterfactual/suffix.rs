@@ -93,23 +93,30 @@
 //! - **Recovery.** Recovery reads exactly the Fork Events after the `SIV1`
 //!   commit coordinate through the persisted head with
 //!   [`EventStore::read_bounded`], in pages of at most
-//!   [`MAX_PIPELINE_DRAFTS_PER_BATCH`] Events, each Event's payload and
-//!   Event type bounded by [`MAX_PIPELINE_DRAFT_BATCH_BYTES`]; a page that
-//!   is not exactly the requested range is a
-//!   [`CounterfactualSuffixErrorV1::RecoveryMismatch`], and a failed read is
-//!   `StorageFailure`. The first Tick is the Events through the receipt's
+//!   [`MAX_PIPELINE_DRAFTS_PER_BATCH`] Events whose payload and Event type
+//!   bytes total at most [`MAX_PIPELINE_DRAFT_BATCH_BYTES`], each Event type
+//!   at most [`MAX_FORK_EVENT_TYPE_BYTES_V1`] bytes, the bound the shared
+//!   staging seam enforces. An honest Tick (at most one batch of Events and
+//!   bytes) therefore always fits one read; a page over the byte cap is
+//!   halved until it fits, and a single Event over it, like any other failed
+//!   read, is `StorageFailure`. A page that is not exactly the requested
+//!   range is a [`CounterfactualSuffixErrorV1::RecoveryMismatch`]. The first
+//!   Tick is the Events through the receipt's
 //!   first-Tick head; every later Tick ends with one checkpoint Event, and
 //!   the persisted head must be the last checkpoint Event, so a foreign or
-//!   unmarked trailing Event is a mismatch. Every committed `RCP1` is decoded
-//!   and must be exactly this generation's checkpoint of the next Tick at
-//!   its `Seq` (plan, Tick, `Seq`, scheduler position, lists, cursor, and
-//!   provenance), carrying its own chained state. The first Tick's `RCP1`,
-//!   the first later Tick's, and the last Tick's are re-derived from the
-//!   committed Events (at most one page each) and must match byte for byte:
-//!   the first later link binds the first Tick's content and the receipt's
-//!   first-Tick head, and the last link binds the state the next Tick chains
-//!   on. Recovery therefore resumes from the last checkpoint without
-//!   re-hashing every Tick.
+//!   unmarked trailing Event is a mismatch, and so is a recovered last Tick
+//!   past the plan horizon. Every committed `RCP1` is decoded and must be
+//!   exactly this generation's checkpoint of the next Tick at its `Seq`
+//!   (plan, Tick, `Seq`, scheduler position, lists, cursor, and
+//!   provenance). An intermediate checkpoint's chained state is decoded but
+//!   not verified, except for the Tick immediately before the last, whose
+//!   state the last Tick's re-derived `RCP1` chains on. The first Tick's
+//!   `RCP1`, the first later Tick's, and the last Tick's are re-derived from
+//!   the committed Events (at most one read each) and must match byte for
+//!   byte: the first later link binds the first Tick's content and the
+//!   receipt's first-Tick head, and the last link binds the state the next
+//!   Tick chains on. Recovery therefore resumes from the last checkpoint
+//!   without re-hashing every Tick.
 //! - **`CFR1` content.** The first Tick is the receipt's first recomputation
 //!   Tick; the suffix digest is the final chained state digest; the
 //!   dependency root is the committed `RCF1` frontier digest, which binds the
@@ -156,16 +163,16 @@ use pos_conformance::counterfactual::result::{
 };
 use pos_conformance::{ReplayClaimV1, SuffixInvalidationV1};
 use pos_core::{
-    pipeline_draft_vector_digest_v1, CanonicalBytes, CounterfactualBasisV1, CounterfactualFactsV1,
-    CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    CounterfactualTickOutcomeV1, EntityId, Event, EventDraft, EventReadBounds, EventStore,
-    InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1, Seq, SeqRange,
-    SuffixInvalidationBytesV1, TimelineId, MAX_PIPELINE_DRAFTS_PER_BATCH,
-    MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualBasisV1,
+    CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1,
+    CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId, Event, EventDraft,
+    EventReadBounds, EventStore, InvalidationConflictV1, Kind, PipelineContractErrorV1,
+    PipelineDraftBatchV1, Seq, SeqRange, SuffixInvalidationBytesV1, TimelineId,
+    MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 
 use super::coordinator::{
-    stage_first_tick, CounterfactualAdmissionErrorV1, CounterfactualCoordinatorV1,
+    stage_tick, CounterfactualAdmissionErrorV1, CounterfactualCoordinatorV1,
     CounterfactualTickStagerV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
 };
 
@@ -178,12 +185,18 @@ const MAX_SUFFIX_TICK_SPAN: u64 = 65_535;
 const SUFFIX_STATE_DOMAIN: &[u8] = b"PiglorOS.CounterfactualSuffixState.v1\0";
 /// Events per recovery read: one Tick batch, so a Tick never needs two.
 const PAGE_EVENTS: u64 = MAX_PIPELINE_DRAFTS_PER_BATCH as u64;
-/// Bounds of one recovery read: one page of Events, each within one batch.
-const PAGE_BOUNDS: EventReadBounds = EventReadBounds::new(
+/// Total payload and Event type bytes of one recovery read: one Tick batch,
+/// whose content bytes already count every payload and Event type, so one
+/// honest Tick always fits one read.
+const PAGE_TOTAL_BYTES: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES;
+/// Bounds of one recovery read: one page of Events within one batch's bytes,
+/// each Event type within the bound the staging seam enforces.
+const PAGE_BOUNDS: EventReadBounds = EventReadBounds::new_with_total_bytes(
     MAX_PIPELINE_DRAFT_BATCH_BYTES,
-    MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    MAX_FORK_EVENT_TYPE_BYTES_V1,
     usize::MAX,
     MAX_PIPELINE_DRAFTS_PER_BATCH,
+    PAGE_TOTAL_BYTES,
 );
 /// A failed Event Store read; the store reports nothing more specific.
 const STORAGE_FAILURE: CounterfactualSuffixErrorV1 =
@@ -364,6 +377,9 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         };
         let head = basis.fork_logical_head;
         let mut progress = self.recover(&context, invalidation.commit_seq, head.as_u64())?;
+        if progress.tick > plan.horizon_tick {
+            return Err(CounterfactualSuffixErrorV1::RecoveryMismatch);
+        }
         if progress.tick >= plan.horizon_tick {
             if let Some(conflict) = context.receipt.tick_basis(head).first_conflict(&basis) {
                 return Err(CounterfactualSuffixErrorV1::InvalidationConflict(conflict));
@@ -436,7 +452,8 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         let mut next = first_head.saturating_add(1);
         while next <= head {
             let to = head.min(next.saturating_add(PAGE_EVENTS - 1));
-            for (seq, event) in (next..).zip(self.read_exact(context.fork(), next, to)?) {
+            let page = self.read_page(context.fork(), next, to)?;
+            for (seq, event) in (next..).zip(&page) {
                 if event.event_type.as_str() == COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1 {
                     let tick = progress.tick.saturating_add(1);
                     let payload = event.payload.as_slice();
@@ -448,7 +465,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
                     progress.advance(tick, seq, checkpoint);
                 }
             }
-            next = to.saturating_add(1);
+            next = next.saturating_add(page.len() as u64);
         }
         // Every Event after the first Tick belongs to a checkpointed Tick.
         if progress.head == head {
@@ -458,7 +475,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         }
     }
 
-    /// Read exactly the non-empty Fork range `from..=to`, at most one page.
+    /// Read exactly the non-empty Fork range `from..=to` in one read.
     ///
     /// A shorter or longer answer, and an empty range (`to < from`), are a
     /// mismatch: every Tick commits at least one Event.
@@ -468,15 +485,35 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         from: u64,
         to: u64,
     ) -> Result<Vec<Event>, CounterfactualSuffixErrorV1> {
-        let range = SeqRange::bounded(Seq::from_u64(from), Seq::from_u64(to));
-        let events = self
-            .store
-            .read_bounded(fork, range, PAGE_BOUNDS)
-            .or(Err(STORAGE_FAILURE))?;
-        if events.len() as u64 == to.saturating_sub(from).saturating_add(1) {
-            Ok(events)
-        } else {
-            Err(CounterfactualSuffixErrorV1::RecoveryMismatch)
+        exact_page(
+            self.store
+                .read_bounded(fork, page_range(from, to), PAGE_BOUNDS),
+            from,
+            to,
+        )
+    }
+
+    /// Read exactly a non-empty prefix of the Fork range `from..=to`.
+    ///
+    /// A read over [`PAGE_TOTAL_BYTES`] is halved until it fits; a single
+    /// Event over it is a failed read.
+    fn read_page(
+        &self,
+        fork: TimelineId,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<Event>, CounterfactualSuffixErrorV1> {
+        let mut to = to;
+        loop {
+            match self
+                .store
+                .read_bounded(fork, page_range(from, to), PAGE_BOUNDS)
+            {
+                Err(CoreError::ReadBytesTooLarge { .. }) if to > from => {
+                    to = from + (to - from) / 2;
+                }
+                read => return exact_page(read, from, to),
+            }
         }
     }
 
@@ -529,11 +566,10 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         stager: &mut impl CounterfactualTickStagerV1,
     ) -> Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1> {
         let tick = progress.tick.saturating_add(1);
-        let staged =
-            match stage_first_tick(stager, context.plan, context.receipt.generation(), tick) {
-                Ok(staged) => staged,
-                Err(error) => return Ok(Some(staging_failure(&error))),
-            };
+        let staged = match stage_tick(stager, context.plan, context.receipt.generation(), tick) {
+            Ok(staged) => staged,
+            Err(error) => return Ok(Some(staging_failure(&error))),
+        };
         let drafts = staged.drafts();
         let content: Vec<EventDraft> = drafts.iter().map(content_draft).collect();
         let seq = progress.head.saturating_add(drafts.len() as u64);
@@ -592,6 +628,25 @@ const fn staging_failure(error: &CounterfactualAdmissionErrorV1) -> Counterfactu
             CounterfactualSuffixFailureV1::ReservedEventType
         }
         _ => CounterfactualSuffixFailureV1::PluginFailure,
+    }
+}
+
+/// The Fork range `from..=to`.
+const fn page_range(from: u64, to: u64) -> SeqRange {
+    SeqRange::bounded(Seq::from_u64(from), Seq::from_u64(to))
+}
+
+/// Require a read of `from..=to` to have succeeded with exactly its Events.
+fn exact_page(
+    read: Result<Vec<Event>, CoreError>,
+    from: u64,
+    to: u64,
+) -> Result<Vec<Event>, CounterfactualSuffixErrorV1> {
+    let events = read.or(Err(STORAGE_FAILURE))?;
+    if events.len() as u64 == to.saturating_sub(from).saturating_add(1) {
+        Ok(events)
+    } else {
+        Err(CounterfactualSuffixErrorV1::RecoveryMismatch)
     }
 }
 
@@ -714,20 +769,21 @@ fn committed_checkpoint(
     RecomputeCheckpointV1::from_canonical_cbor(payload)
         .ok()
         .and_then(|decoded| {
-            // A decoded `RCP1` has at least one state digest.
-            let state = decoded
+            decoded
                 .state_digests
                 .first()
-                .map_or([0; 32], |entry| entry.digest);
-            let expected = RecomputeCheckpointV1 {
-                checkpoint_digest: decoded.checkpoint_digest,
-                ..unsealed_checkpoint(context, tick, seq, state)
-            };
-            (decoded == expected).then(|| CheckpointV1 {
-                state,
-                bytes: payload.to_vec(),
-                digest: decoded.checkpoint_digest,
-            })
+                .map(|entry| entry.digest)
+                .and_then(|state| {
+                    let expected = RecomputeCheckpointV1 {
+                        checkpoint_digest: decoded.checkpoint_digest,
+                        ..unsealed_checkpoint(context, tick, seq, state)
+                    };
+                    (decoded == expected).then(|| CheckpointV1 {
+                        state,
+                        bytes: payload.to_vec(),
+                        digest: decoded.checkpoint_digest,
+                    })
+                })
         })
         .ok_or(CounterfactualSuffixErrorV1::RecoveryMismatch)
 }

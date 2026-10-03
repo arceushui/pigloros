@@ -32,7 +32,8 @@ use pos_core::{
     CounterfactualTickOutcomeV1, EntityId, ErasureContainmentGateV1, Event, EventDraft,
     EventReadBounds, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
     PipelineContractErrorV1, PipelineDraftBatchV1, Seq, SeqRange, Timeline, TimelineId,
-    TimelineMeta, MAX_PIPELINE_DRAFTS_PER_BATCH,
+    TimelineMeta, MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_PIPELINE_DRAFTS_PER_BATCH,
+    MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
@@ -120,6 +121,12 @@ const EVALUATOR: [u8; 32] = [0xa2; 32];
 /// The largest suffix Tick span one result can checkpoint.
 const MAX_SPAN: u64 = 65_535;
 const STATE_DOMAIN: &[u8] = b"PiglorOS.CounterfactualSuffixState.v1\0";
+/// The byte cap of one recovery read: one Tick batch.
+const PAGE_CAP: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES;
+/// A payload that leaves just room for one world Event's and the checkpoint
+/// Event's other content bytes in one batch.
+const HEAVY_PAYLOAD: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES - 1_024;
+const WORLD_TYPE: &str = "counterfactual.world";
 
 fn root_id() -> TimelineId {
     TimelineId::from_ulid(Ulid::from(0x5100_u128))
@@ -652,6 +659,13 @@ enum Fault {
     Wide,
     /// A full batch: the checkpoint Event no longer fits.
     Full,
+    /// One Event of [`HEAVY_PAYLOAD`] bytes: the Tick fits one batch, but a
+    /// recovery page with the Ticks after it exceeds [`PAGE_CAP`].
+    Heavy,
+    /// One Event whose type has exactly the largest accepted length.
+    LongestType,
+    /// One Event whose type is one byte longer than accepted.
+    LongType,
 }
 
 /// What the stager saw: only its staged inputs.
@@ -716,6 +730,15 @@ impl CounterfactualTickStagerV1 for Stager {
             Some(Fault::Consent) => Ok(vec![event_draft("consent.grant", vec![1])]),
             Some(Fault::Wide) => Ok(world_drafts(tick, MAX_PIPELINE_DRAFTS_PER_BATCH - 1)),
             Some(Fault::Full) => Ok(world_drafts(tick, MAX_PIPELINE_DRAFTS_PER_BATCH)),
+            Some(Fault::Heavy) => Ok(vec![event_draft(WORLD_TYPE, vec![0x5a; HEAVY_PAYLOAD])]),
+            Some(Fault::LongestType) => Ok(vec![event_draft(
+                &"t".repeat(MAX_FORK_EVENT_TYPE_BYTES_V1),
+                vec![1],
+            )]),
+            Some(Fault::LongType) => Ok(vec![event_draft(
+                &"t".repeat(MAX_FORK_EVENT_TYPE_BYTES_V1 + 1),
+                vec![1],
+            )]),
         }
     }
 }
@@ -1133,7 +1156,7 @@ fn runs_are_repeatable_across_calls_and_backends() -> TestResult {
 /// One stager fault with the Tick failure and `CFR1` code it causes.
 type TickFault = (Fault, Failure, CounterfactualTerminalErrorCodeV1);
 
-const TICK_FAULTS: [TickFault; 5] = [
+const TICK_FAULTS: [TickFault; 6] = [
     (
         Fault::Error,
         Failure::PluginFailure,
@@ -1152,6 +1175,12 @@ const TICK_FAULTS: [TickFault; 5] = [
     (
         Fault::Full,
         Failure::StagedTickRejected(PipelineContractErrorV1::BatchCountExceeded),
+        CounterfactualTerminalErrorCodeV1::PluginFailure,
+    ),
+    // An Event type recovery could not read back is rejected while staging.
+    (
+        Fault::LongType,
+        Failure::StagedTickRejected(PipelineContractErrorV1::FieldOutOfBounds),
         CounterfactualTerminalErrorCodeV1::PluginFailure,
     ),
     (
@@ -1347,14 +1376,27 @@ fn sqlite_coordinator_recovers_after_reopening_the_database() -> TestResult {
     Ok(())
 }
 
-fn recovery_pages_through_the_widest_ticks<B: Backend>() -> TestResult {
+/// Every widest honest Tick, as the first later or the last Tick.
+const WIDEST_TICKS: [(Fault, u64); 4] = [
     // A widest Tick fills one batch with its checkpoint Event and pushes the
-    // suffix past one recovery page, as the first later or the last Tick.
-    for wide in [FRONTIER_TICK + 1, HORIZON_TICK] {
+    // suffix past one recovery page.
+    (Fault::Wide, FRONTIER_TICK + 1),
+    (Fault::Wide, HORIZON_TICK),
+    // A heaviest Tick pushes the first recovery page past its byte cap, so
+    // the page is halved until it fits.
+    (Fault::Heavy, FRONTIER_TICK + 1),
+    // The longest accepted Event type is read back.
+    (Fault::LongestType, HORIZON_TICK),
+];
+
+fn recovery_pages_through_the_widest_ticks<B: Backend>() -> TestResult {
+    for (fault, wide) in WIDEST_TICKS {
         let mut setup = prepare::<B>()?;
-        let completed = run(&mut setup, &mut Stager::failing(wide, Fault::Wide))?;
+        let completed = run(&mut setup, &mut Stager::failing(wide, fault))?;
         assert_eq!(completed.failure, None);
-        assert!(head(&setup)? > FIRST_TICK_HEAD + MAX_PIPELINE_DRAFTS_PER_BATCH as u64);
+        if fault == Fault::Wide {
+            assert!(head(&setup)? > FIRST_TICK_HEAD + MAX_PIPELINE_DRAFTS_PER_BATCH as u64);
+        }
         let mut stager = Stager::default();
         assert_eq!(run(&mut setup, &mut stager)?, completed);
         assert!(stager.seen.is_empty());
@@ -1362,6 +1404,61 @@ fn recovery_pages_through_the_widest_ticks<B: Backend>() -> TestResult {
     Ok(())
 }
 both_backends!(recovery_pages_through_the_widest_ticks);
+
+/// A foreign trailing Event's type and payload length, with the error it
+/// causes.
+type ForeignEvent = (String, usize, SuffixError);
+
+/// Within the recovery read bounds a foreign trailing Event is a mismatch;
+/// past them, at one byte over the page cap or the Event type bound, the
+/// read fails.
+fn foreign_events() -> [ForeignEvent; 4] {
+    let longest = "t".repeat(MAX_FORK_EVENT_TYPE_BYTES_V1);
+    let at_cap = PAGE_CAP - WORLD_TYPE.len();
+    [
+        (WORLD_TYPE.to_owned(), at_cap, SuffixError::RecoveryMismatch),
+        (WORLD_TYPE.to_owned(), at_cap + 1, STORAGE),
+        (longest.clone(), 1, SuffixError::RecoveryMismatch),
+        (longest + "t", 1, STORAGE),
+    ]
+}
+
+fn recovery_reads_are_bounded<B: Backend>() -> TestResult {
+    for (kind, payload, expected) in foreign_events() {
+        let mut setup = prepare::<B>()?;
+        run(&mut setup, &mut Stager::failing(14, Fault::Error))?;
+        let mut setup = reopen(setup, |store| {
+            store.append(fork_id(), &[event_draft(&kind, vec![0x5b; payload])])?;
+            Ok(())
+        })?;
+        assert_rejected(&mut setup, expected);
+    }
+    Ok(())
+}
+both_backends!(recovery_reads_are_bounded);
+
+fn recovered_tick_past_the_horizon_is_rejected<B: Backend>() -> TestResult {
+    let mut setup = prepare::<B>()?;
+    assert_eq!(run(&mut setup, &mut Stager::default())?.failure, None);
+    // A well-formed Tick past the horizon, with its own exact checkpoint.
+    let past = HORIZON_TICK + 1;
+    let checkpoint = expected_checkpoints(&setup.fixture, past)?
+        .pop()
+        .ok_or("no checkpoint")?;
+    let mut drafts = tick_drafts(past);
+    drafts.push(EventDraft::new(
+        EntityId::from_ulid(fork_id().inner()),
+        Kind::new(COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1),
+        CanonicalBytes::from_vec(checkpoint.to_canonical_cbor()?),
+    ));
+    let mut setup = reopen(setup, |store| {
+        store.append(fork_id(), &drafts)?;
+        Ok(())
+    })?;
+    assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+    Ok(())
+}
+both_backends!(recovered_tick_past_the_horizon_is_rejected);
 
 fn stale_generation_and_foreign_plans_are_rejected<B: Backend>() -> TestResult {
     let mut setup = prepare::<B>()?;
