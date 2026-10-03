@@ -36,6 +36,7 @@ use super::codec::{
     bytes_value, decode_canonical, encode_value, nonzero, text_value, uint_value, CborLimits,
     FieldReader, WireError,
 };
+use super::replay_claim::{replay_claim_code, REPLAY_CLAIMS};
 use crate::{domain_digest, ReplayClaimV1};
 use ciborium::value::Value;
 use std::collections::BTreeSet;
@@ -57,13 +58,6 @@ const LIMITS: CborLimits = CborLimits {
     allow_simple_values: true,
 };
 const RESULT_DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.CounterfactualResult.v1";
-const REPLAY_CLAIMS: [ReplayClaimV1; 5] = [
-    ReplayClaimV1::Exact,
-    ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
-    ReplayClaimV1::StructuralOnly,
-    ReplayClaimV1::UnverifiableArtifactsMissing,
-    ReplayClaimV1::IncompatibleProfile,
-];
 
 /// Closed safe errors exposed by the CFR1 contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -560,16 +554,6 @@ fn encode_terminal_error(error: &CounterfactualTerminalErrorV1) -> Value {
             .safe_digest
             .map_or(Value::Null, |digest| bytes_value(&digest)),
     ])
-}
-
-const fn replay_claim_code(claim: ReplayClaimV1) -> u64 {
-    match claim {
-        ReplayClaimV1::Exact => 0,
-        ReplayClaimV1::ExactAuthoritativeWithRedactedViews => 1,
-        ReplayClaimV1::StructuralOnly => 2,
-        ReplayClaimV1::UnverifiableArtifactsMissing => 3,
-        ReplayClaimV1::IncompatibleProfile => 4,
-    }
 }
 
 fn decode_result(

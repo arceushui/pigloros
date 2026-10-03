@@ -163,9 +163,6 @@ fn plan_roundtrips_exact_wire_fields_and_domain_digest() -> TestResult {
     let bytes = plan.to_canonical_cbor()?;
     assert_eq!(decoded(&bytes)?, plan);
 
-    let descriptor_value = |schema: u64, seed: u8| {
-        Value::Array(vec![uint(schema), digest(seed), digest(0x61), digest(0x62)])
-    };
     let mut expected = vec![
         text("CFP1"),
         uint(1),
@@ -182,8 +179,11 @@ fn plan_roundtrips_exact_wire_fields_and_domain_digest() -> TestResult {
             Value::Bytes(plan.interventions[0].to_canonical_cbor()?),
             Value::Bytes(plan.interventions[1].to_canonical_cbor()?),
         ]),
-        Value::Array(vec![descriptor_value(1, 0x50), descriptor_value(2, 0x40)]),
-        Value::Array(vec![descriptor_value(3, 0x30)]),
+        Value::Array(vec![
+            descriptor_value(&descriptor(1, 0x50)),
+            descriptor_value(&descriptor(2, 0x40)),
+        ]),
+        Value::Array(vec![descriptor_value(&descriptor(3, 0x30))]),
         digest(5),
         Value::Array(vec![
             text(&plan.execution_profile.profile_id),
@@ -361,13 +361,18 @@ fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
     Ok(())
 }
 
-fn identifier_cases() -> [(String, bool); 12] {
+fn identifier_cases() -> [(String, bool); 24] {
     [
         ("a".to_owned(), true),
         ("x".repeat(128), true),
         ("a/b".to_owned(), true),
         ("..a".to_owned(), true),
+        ("a.b".to_owned(), true),
+        ("a./.b".to_owned(), true),
         ("a~".to_owned(), true),
+        ("ab:c".to_owned(), true),
+        ("1:a".to_owned(), true),
+        ("a/C:b".to_owned(), true),
         (String::new(), false),
         ("x".repeat(129), false),
         ("a\u{7}b".to_owned(), false),
@@ -375,6 +380,13 @@ fn identifier_cases() -> [(String, bool); 12] {
         ("~home".to_owned(), false),
         ("a\\b".to_owned(), false),
         ("a/../b".to_owned(), false),
+        ("C:room".to_owned(), false),
+        ("z:".to_owned(), false),
+        ("C:\\room".to_owned(), false),
+        (".".to_owned(), false),
+        ("./a".to_owned(), false),
+        ("a/./b".to_owned(), false),
+        ("a/.".to_owned(), false),
     ]
 }
 
@@ -400,16 +412,24 @@ fn identifiers_are_bounded_and_carry_no_operational_path() -> TestResult {
             );
         }
     }
+    // `1.0.0+` is six bytes, so the build suffix sets the total length.
     for (version, expected) in [
-        ("2.0.0", Ok(())),
-        ("1.0", Err(PlanError::FieldOutOfBounds)),
-        ("", Err(PlanError::FieldOutOfBounds)),
+        ("2.0.0".to_owned(), Ok(())),
+        (format!("1.0.0+{}", "a".repeat(58)), Ok(())),
+        (
+            format!("1.0.0+{}", "a".repeat(59)),
+            Err(PlanError::FieldOutOfBounds),
+        ),
+        ("1.0".to_owned(), Err(PlanError::FieldOutOfBounds)),
+        (String::new(), Err(PlanError::FieldOutOfBounds)),
     ] {
         assert_eq!(
             resealed_validation(&base, |plan| {
-                plan.execution_profile.semantic_version = version.to_owned();
+                plan.execution_profile.semantic_version.clone_from(&version);
             }),
-            expected
+            expected,
+            "{} bytes",
+            version.len()
         );
     }
     let bytes = with_field(
@@ -473,6 +493,28 @@ fn scalar_bounds_are_enforced_at_each_edge() -> TestResult {
         }),
         Ok(())
     );
+    Ok(())
+}
+
+#[test]
+fn a_plan_cannot_supersede_itself() -> TestResult {
+    let base = plan()?;
+    let mut self_superseding = base.clone();
+    self_superseding.previous_plan_digest = Some(base.plan_digest);
+    assert_eq!(
+        self_superseding.validate(),
+        Err(PlanError::FieldOutOfBounds)
+    );
+    assert_eq!(
+        self_superseding.to_canonical_cbor(),
+        Err(PlanError::FieldOutOfBounds)
+    );
+    let bytes = with_field(
+        &base.to_canonical_cbor()?,
+        FIELD_PREVIOUS,
+        Value::Bytes(base.plan_digest.to_vec()),
+    )?;
+    assert_eq!(decoded(&bytes), Err(PlanError::FieldOutOfBounds));
     Ok(())
 }
 
@@ -622,43 +664,38 @@ fn descriptor_lists_accept_exactly_their_bounds() -> TestResult {
     let mut plan = plan()?;
     plan.exogenous_descriptors = descriptors(1, MAX_EXOGENOUS_DESCRIPTORS_PER_PLAN_V1)?;
     plan.fixed_policy_descriptors = descriptors(2, MAX_FIXED_POLICY_DESCRIPTORS_PER_PLAN_V1)?;
-    let plan = sealed(plan)?;
+    let mut plan = sealed(plan)?;
     let bytes = plan.to_canonical_cbor()?;
     assert!(bytes.len() <= MAX_COUNTERFACTUAL_PLAN_BYTES_V1);
     assert_eq!(decoded(&bytes)?, plan);
 
-    let mut exogenous = plan.clone();
-    exogenous.exogenous_descriptors.push(descriptor(1, 0xff));
-    let exogenous = sealed(exogenous)?;
-    assert_eq!(exogenous.validate(), Err(PlanError::FieldOutOfBounds));
-    let mut fields = fields_of(&bytes)?;
-    fields[FIELD_EXOGENOUS] = Value::Array(
-        exogenous
-            .exogenous_descriptors
-            .iter()
-            .map(descriptor_value)
-            .collect(),
-    );
+    // The oversized variants share the one at-bound fixture and its decoded
+    // wire fields. Bounds are checked before the digest, so they are not
+    // resealed: a stale digest cannot mask the bound error.
+    let fields = fields_of(&bytes)?;
+    let mut exogenous_fields = fields.clone();
+    let Value::Array(values) = &mut exogenous_fields[FIELD_EXOGENOUS] else {
+        return Err("CFP1 exogenous descriptors must be an array".into());
+    };
+    values.push(descriptor_value(&descriptor(1, 0xff)));
+    plan.exogenous_descriptors.push(descriptor(1, 0xff));
+    assert_eq!(plan.validate(), Err(PlanError::FieldOutOfBounds));
     assert_eq!(
-        decoded(&encode(&Value::Array(fields))?),
+        decoded(&encode(&Value::Array(exogenous_fields))?),
         Err(PlanError::FieldOutOfBounds)
     );
+    plan.exogenous_descriptors
+        .truncate(MAX_EXOGENOUS_DESCRIPTORS_PER_PLAN_V1);
 
-    let mut fixed = plan;
-    fixed.fixed_policy_descriptors.push(descriptor(2, 0xff));
-    let fixed = sealed(fixed)?;
-    assert_eq!(fixed.validate(), Err(PlanError::FieldOutOfBounds));
-    let mut fields = fields_of(&bytes)?;
-    fields[FIELD_FIXED_POLICY] = Value::Array(
-        fixed
-            .fixed_policy_descriptors
-            .iter()
-            .map(descriptor_value)
-            .collect(),
-    );
-    fields[FIELD_PLAN_DIGEST] = Value::Bytes(fixed.plan_digest.to_vec());
+    let mut fixed_fields = fields;
+    let Value::Array(values) = &mut fixed_fields[FIELD_FIXED_POLICY] else {
+        return Err("CFP1 FixedPolicy descriptors must be an array".into());
+    };
+    values.push(descriptor_value(&descriptor(2, 0xff)));
+    plan.fixed_policy_descriptors.push(descriptor(2, 0xff));
+    assert_eq!(plan.validate(), Err(PlanError::FieldOutOfBounds));
     assert_eq!(
-        decoded(&encode(&Value::Array(fields))?),
+        decoded(&encode(&Value::Array(fixed_fields))?),
         Err(PlanError::FieldOutOfBounds)
     );
     Ok(())
@@ -686,12 +723,20 @@ fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
     let noncanonical = [&valid[..7], &[0x18_u8, 0x01][..], &valid[8..]].concat();
     let mut invalid_utf8 = valid.clone();
     invalid_utf8[3..7].copy_from_slice(&[0xff; 4]);
-    let nested = Value::Array(vec![Value::Array(vec![
-        Value::Array(vec![uint(1)]),
-        digest(1),
-        digest(2),
-        digest(3),
-    ])]);
+    // The deepest legal items are descriptor fields at depth 3 (record 0,
+    // descriptor list 1, descriptor 2). An empty array in a descriptor field
+    // sits at depth 3 and passes the preflight, failing only on its type; one
+    // more item inside it reaches depth 4 and is rejected as too deep.
+    let descriptor_with_field = |field: Value| {
+        Value::Array(vec![Value::Array(vec![
+            field,
+            digest(1),
+            digest(2),
+            digest(3),
+        ])])
+    };
+    let at_depth_limit = descriptor_with_field(Value::Array(Vec::new()));
+    let beyond_depth_limit = descriptor_with_field(Value::Array(vec![uint(1)]));
     for (bytes, expected) in [
         (trailing, PlanError::InvalidEncoding),
         (encode(&Value::Array(short))?, PlanError::InvalidEncoding),
@@ -717,7 +762,11 @@ fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
             PlanError::UnsupportedVersion,
         ),
         (
-            with_field(&valid, FIELD_EXOGENOUS, nested)?,
+            with_field(&valid, FIELD_EXOGENOUS, at_depth_limit)?,
+            PlanError::InvalidEncoding,
+        ),
+        (
+            with_field(&valid, FIELD_EXOGENOUS, beyond_depth_limit)?,
             PlanError::FieldOutOfBounds,
         ),
     ] {
