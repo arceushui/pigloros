@@ -601,7 +601,7 @@ impl Source {
             self.nodes.clone(),
             self.edges.clone(),
         )?;
-        Ok(dependency_graph_digest_v1(&graph)?)
+        Ok(dependency_graph_digest_v1(&graph))
     }
 }
 
