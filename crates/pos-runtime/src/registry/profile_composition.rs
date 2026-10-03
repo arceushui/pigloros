@@ -160,17 +160,25 @@ impl PluginRegistry {
         views: &[AuthorizedDriverViewV1],
         snapshots: &[ObservationSnapshotV1],
     ) -> Result<(), RuntimeError> {
+        // A Driverless Plugin is left to staging, which reports `NoDriver`.
         let bound = views.iter().zip(snapshots).all(|(view, snapshot)| {
-            self.scheduled_binding(view.plugin_id)
-                == Some(ScheduledDriverBindingV1::Participant(
-                    snapshot.participant_id(),
-                ))
+            self.is_driverless(view.plugin_id)
+                || self.scheduled_binding(view.plugin_id)
+                    == Some(ScheduledDriverBindingV1::Participant(
+                        snapshot.participant_id(),
+                    ))
         });
         if bound {
             Ok(())
         } else {
             Err(unauthorized())
         }
+    }
+
+    fn is_driverless(&self, plugin_id: PluginId) -> bool {
+        self.plugins
+            .get(&plugin_id)
+            .is_some_and(|entry| entry.driver.is_none())
     }
 
     fn profile_of(&self, plugin_id: PluginId) -> Option<ScheduledObservationProfileV1> {
