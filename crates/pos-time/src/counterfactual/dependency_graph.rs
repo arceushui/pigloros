@@ -210,6 +210,8 @@ pub struct DependencyGraphNodeV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedDependencyGraphV1 {
     plan_digest: [u8; 32],
+    parent_cut_digest: [u8; 32],
+    classification_bundle_digest: [u8; 32],
     first_tick: u64,
     horizon_tick: u64,
     unknown_edge_policy: UnknownEdgePolicyV1,
@@ -226,6 +228,18 @@ impl ValidatedDependencyGraphV1 {
     #[must_use]
     pub const fn plan_digest(&self) -> [u8; 32] {
         self.plan_digest
+    }
+
+    /// Parent-cut digest of the validated plan.
+    #[must_use]
+    pub const fn parent_cut_digest(&self) -> [u8; 32] {
+        self.parent_cut_digest
+    }
+
+    /// Dependency-classification bundle digest of the validated plan.
+    #[must_use]
+    pub const fn classification_bundle_digest(&self) -> [u8; 32] {
+        self.classification_bundle_digest
     }
 
     /// First recomputed Tick of the plan, right after the parent cut.
@@ -335,6 +349,8 @@ pub fn validate_dependency_graph_v1(
         missing_edges(unknown_edge_policy, &nodes, &outgoing, first_error)?;
     Ok(ValidatedDependencyGraphV1 {
         plan_digest: plan.plan_digest,
+        parent_cut_digest: plan.parent_cut_digest,
+        classification_bundle_digest: plan.classification_bundle_digest,
         first_tick: plan.first_tick,
         horizon_tick: plan.horizon_tick,
         unknown_edge_policy,
