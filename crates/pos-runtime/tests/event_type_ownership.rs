@@ -9,8 +9,8 @@ use pos_core::{
     Capability, Event, Kind, Plugin, PluginId,
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, Driver, InstalledOutputPolicySourceV1, ObservationView,
-    OutputPolicyBindingV1, PluginComposition, PluginCompositionErrorV1, PluginRegistry,
+    recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, OutputPolicyBindingV1,
+    OutputPolicySourceV1, PluginComposition, PluginCompositionErrorV1, PluginRegistry,
     RuntimeError, StepOutput,
 };
 
@@ -137,9 +137,9 @@ fn owner_error(event_type: &str) -> String {
 }
 
 fn generated_binding<P: Plugin>(plugin: &P) -> OutputPolicyBindingV1 {
-    OutputPolicyBindingV1::from_installed_source(
+    OutputPolicyBindingV1::from_source(
         plugin,
-        InstalledOutputPolicySourceV1::Generated,
+        OutputPolicySourceV1::Generated,
         &[],
         "deterministic-local-v1",
     )

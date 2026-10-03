@@ -4,7 +4,8 @@
 //! Events, source chains, Fork lineage, native dependencies, or Replay use.
 
 use crate::{
-    CanonicalBytes, CorrelationId, EntityId, EventId, Hash, SchemaVersion, Signature, TimelineId,
+    encode_bytes, encode_hash, encode_head, CanonicalBytes, CorrelationId, EntityId, EventId, Hash,
+    SchemaVersion, Signature, TimelineId,
 };
 use ulid::Ulid;
 
@@ -14,6 +15,8 @@ pub const MAX_WORLD_EVENT_PAGE_BYTES_V1: usize = 65_536;
 pub const MAX_WORLD_EVENT_PAGE_ROWS_V1: usize = 64;
 /// Maximum UTF-8 byte length of one source-event type.
 pub const MAX_WORLD_EVENT_TYPE_BYTES_V1: usize = 128;
+/// Maximum canonical WOR1 source-Event occurrence size.
+pub const MAX_WORLD_EVENT_OCCURRENCE_BYTES_V1: usize = 1024;
 /// Maximum canonical WHB1 record size.
 pub const MAX_WORLD_HISTORY_BRANCH_BYTES_V1: usize = 65_536;
 /// Maximum child references in one WHB1 branch.
@@ -22,12 +25,14 @@ pub const MAX_WORLD_HISTORY_BRANCH_CHILDREN_V1: usize = 256;
 pub const MAX_WORLD_HISTORY_HEIGHT_V1: u8 = 8;
 
 const WEP1_MAGIC: &[u8; 4] = b"WEP1";
+const WOR1_MAGIC: &[u8; 4] = b"WOR1";
 const WHB1_MAGIC: &[u8; 4] = b"WHB1";
 const VERSION: u64 = 1;
 const EVENT_PAGE_DOMAIN: &[u8] = b"pigloros.world-evidence.event-page.v1\0";
+const EVENT_OCCURRENCE_DOMAIN: &[u8] = b"pigloros.world-evidence.event-occurrence.v1\0";
 const HISTORY_BRANCH_DOMAIN: &[u8] = b"pigloros.world-evidence.history-branch.v1\0";
 
-/// Closed structural WEP1/WHB1 codec errors.
+/// Closed structural WEP1/WHB1/WOR1 codec errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum WorldHistoryErrorV1 {
     /// A record is malformed or has an unexpected CBOR type or field width.
@@ -124,6 +129,80 @@ impl WorldEventRowV1 {
     }
 }
 
+/// One immutable occurrence of a source Event in a queried Timeline.
+///
+/// This structural record does not authenticate the source Event, its owner,
+/// or its required native dependencies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorldEventOccurrenceV1 {
+    queried_timeline_id: TimelineId,
+    row: WorldEventRowV1,
+}
+
+impl WorldEventOccurrenceV1 {
+    /// Bind one validated source row to the queried Timeline.
+    #[must_use]
+    pub const fn new(queried_timeline_id: TimelineId, row: WorldEventRowV1) -> Self {
+        Self {
+            queried_timeline_id,
+            row,
+        }
+    }
+
+    /// Decode and validate exact preferred WOR1 bytes.
+    ///
+    /// # Errors
+    /// Rejects malformed, oversized, noncanonical, or invalid source rows.
+    pub fn decode(bytes: &CanonicalBytes) -> Result<Self, WorldHistoryErrorV1> {
+        if bytes.len() > MAX_WORLD_EVENT_OCCURRENCE_BYTES_V1 {
+            return Err(WorldHistoryErrorV1::FieldOutOfBounds);
+        }
+        let mut parser = Parser::new(bytes.as_slice());
+        parser.event_occurrence().and_then(|occurrence| {
+            ensure_finished(&parser).and_then(|()| {
+                if occurrence.encode().as_slice() == bytes.as_slice() {
+                    Ok(occurrence)
+                } else {
+                    Err(WorldHistoryErrorV1::NonCanonicalEncoding)
+                }
+            })
+        })
+    }
+
+    /// Encode the exact four-field preferred WOR1 record.
+    #[must_use]
+    pub fn encode(&self) -> CanonicalBytes {
+        let mut output = Vec::new();
+        encode_array(&mut output, 4);
+        encode_bytes(&mut output, WOR1_MAGIC, 2);
+        encode_unsigned(&mut output, VERSION);
+        encode_id(&mut output, self.queried_timeline_id.inner());
+        encode_event_row(&mut output, self.row.as_input());
+        CanonicalBytes::from_vec(output)
+    }
+
+    /// ADR-081 occurrence digest over raw queried Timeline ID and exact row.
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(&u128::from(self.queried_timeline_id.inner()).to_be_bytes());
+        encode_event_row(&mut preimage, self.row.as_input());
+        digest(EVENT_OCCURRENCE_DOMAIN, &preimage)
+    }
+
+    /// Queried Timeline in which this source Event occurs.
+    #[must_use]
+    pub const fn queried_timeline_id(&self) -> TimelineId {
+        self.queried_timeline_id
+    }
+
+    /// The exact source Event row carried by this occurrence.
+    #[must_use]
+    pub const fn row(&self) -> &WorldEventRowV1 {
+        &self.row
+    }
+}
+
 /// Immutable WEP1 page covering a contiguous non-empty logical source range.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorldEventPageV1 {
@@ -176,7 +255,7 @@ impl WorldEventPageV1 {
     pub fn encode(&self) -> CanonicalBytes {
         let mut output = Vec::new();
         encode_array(&mut output, 6);
-        encode_bytes(&mut output, WEP1_MAGIC);
+        encode_bytes(&mut output, WEP1_MAGIC, 2);
         encode_unsigned(&mut output, VERSION);
         encode_id(&mut output, self.timeline_id.inner());
         encode_unsigned(&mut output, self.first_logical_seq);
@@ -331,7 +410,7 @@ impl WorldHistoryBranchV1 {
         let input = &self.0;
         let mut output = Vec::new();
         encode_array(&mut output, 8);
-        encode_bytes(&mut output, WHB1_MAGIC);
+        encode_bytes(&mut output, WHB1_MAGIC, 2);
         encode_unsigned(&mut output, VERSION);
         encode_id(&mut output, input.timeline_id.inner());
         encode_unsigned(&mut output, u64::from(input.height));
@@ -635,7 +714,7 @@ fn encode_optional_correlation(output: &mut Vec<u8>, id: Option<CorrelationId>) 
 
 fn encode_optional_signature(output: &mut Vec<u8>, signature: Option<Signature>) {
     if let Some(signature) = signature {
-        encode_bytes(output, signature.as_bytes());
+        encode_bytes(output, signature.as_bytes(), 2);
     } else {
         output.push(0xf6);
     }
@@ -650,20 +729,11 @@ fn encode_optional_hash(output: &mut Vec<u8>, hash: Option<Hash>) {
 }
 
 fn encode_id(output: &mut Vec<u8>, id: Ulid) {
-    encode_bytes(output, &u128::from(id).to_be_bytes());
-}
-
-fn encode_hash(output: &mut Vec<u8>, hash: Hash) {
-    encode_bytes(output, hash.as_bytes());
+    encode_bytes(output, &u128::from(id).to_be_bytes(), 2);
 }
 
 fn encode_array(output: &mut Vec<u8>, length: usize) {
     encode_head(output, 4, length as u64);
-}
-
-fn encode_bytes(output: &mut Vec<u8>, value: &[u8]) {
-    encode_head(output, 2, value.len() as u64);
-    output.extend_from_slice(value);
 }
 
 fn encode_text(output: &mut Vec<u8>, value: &str) {
@@ -673,29 +743,6 @@ fn encode_text(output: &mut Vec<u8>, value: &str) {
 
 fn encode_unsigned(output: &mut Vec<u8>, value: u64) {
     encode_head(output, 0, value);
-}
-
-fn encode_head(output: &mut Vec<u8>, major_type: u8, value: u64) {
-    let bytes = value.to_be_bytes();
-    let prefix = major_type << 5;
-    match value {
-        0..=23 => output.push(prefix | bytes[7]),
-        24..=0xff => {
-            output.extend_from_slice(&[prefix | 0x18, bytes[7]]);
-        }
-        0x100..=0xffff => {
-            output.push(prefix | 0x19);
-            output.extend_from_slice(&bytes[6..]);
-        }
-        0x1_0000..=0xffff_ffff => {
-            output.push(prefix | 0x1a);
-            output.extend_from_slice(&bytes[4..]);
-        }
-        _ => {
-            output.push(prefix | 0x1b);
-            output.extend_from_slice(&bytes);
-        }
-    }
 }
 
 fn digest(domain: &[u8], bytes: &[u8]) -> Hash {
@@ -722,17 +769,29 @@ fn correlation_id_from_bytes(bytes: [u8; 16]) -> CorrelationId {
 }
 
 struct Parser<'a> {
-    bytes: &'a [u8],
-    position: usize,
+    cursor: crate::CborCursor<'a>,
 }
 
 impl<'a> Parser<'a> {
     const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
+        Self {
+            cursor: crate::CborCursor::new(bytes),
+        }
     }
 
     const fn finished(&self) -> bool {
-        self.position == self.bytes.len()
+        self.cursor.is_finished()
+    }
+
+    fn event_occurrence(&mut self) -> Result<WorldEventOccurrenceV1, WorldHistoryErrorV1> {
+        self.array_exact(4)
+            .and_then(|()| self.magic(*WOR1_MAGIC))
+            .and_then(|()| self.version())
+            .and_then(|()| self.fixed::<16>(2, 16).map(timeline_id_from_bytes))
+            .and_then(|queried_timeline_id| {
+                self.event_row()
+                    .map(|row| WorldEventOccurrenceV1::new(queried_timeline_id, row))
+            })
     }
 
     fn event_page(&mut self) -> Result<WorldEventPageV1, WorldHistoryErrorV1> {
@@ -1032,8 +1091,7 @@ impl<'a> Parser<'a> {
         major_type: u8,
         expected_length: usize,
     ) -> Result<Option<[u8; N]>, WorldHistoryErrorV1> {
-        if self.bytes.get(self.position) == Some(&0xf6) {
-            self.position += 1;
+        if self.cursor.consume_if(0xf6) {
             Ok(None)
         } else {
             self.fixed(major_type, expected_length).map(Some)
@@ -1041,49 +1099,14 @@ impl<'a> Parser<'a> {
     }
 
     fn header(&mut self, expected_major_type: u8) -> Result<u64, WorldHistoryErrorV1> {
-        self.raw::<1>().and_then(|[first]| {
-            if first >> 5 == expected_major_type {
-                self.additional(first & 0x1f)
-            } else {
-                Err(WorldHistoryErrorV1::InvalidEncoding)
-            }
-        })
-    }
-
-    fn additional(&mut self, additional: u8) -> Result<u64, WorldHistoryErrorV1> {
-        match additional {
-            0..=23 => Ok(u64::from(additional)),
-            24 => self.raw::<1>().map(|[byte]| u64::from(byte)),
-            25 => self
-                .raw::<2>()
-                .map(|bytes| u64::from(u16::from_be_bytes(bytes))),
-            26 => self
-                .raw::<4>()
-                .map(|bytes| u64::from(u32::from_be_bytes(bytes))),
-            27 => self.raw::<8>().map(u64::from_be_bytes),
-            _ => Err(WorldHistoryErrorV1::InvalidEncoding),
-        }
-    }
-
-    fn raw<const N: usize>(&mut self) -> Result<[u8; N], WorldHistoryErrorV1> {
-        self.take(N).and_then(|bytes| {
-            bytes
-                .try_into()
-                .map_err(|_| WorldHistoryErrorV1::InvalidEncoding)
-        })
+        self.cursor
+            .head(expected_major_type)
+            .map_err(|_| WorldHistoryErrorV1::InvalidEncoding)
     }
 
     fn take(&mut self, length: usize) -> Result<&'a [u8], WorldHistoryErrorV1> {
-        // All calls follow a parser bound: fixed widths are at most 64 bytes,
-        // text is at most 128 bytes, and the enclosing record is capped at 64
-        // KiB, so this sum cannot overflow `usize`.
-        let end = self.position + length;
-        match self.bytes.get(self.position..end) {
-            Some(value) => {
-                self.position = end;
-                Ok(value)
-            }
-            None => Err(WorldHistoryErrorV1::InvalidEncoding),
-        }
+        self.cursor
+            .take(length)
+            .map_err(|_| WorldHistoryErrorV1::InvalidEncoding)
     }
 }

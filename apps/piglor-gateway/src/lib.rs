@@ -98,9 +98,9 @@ fn gateway_output_binding<P: Plugin>(
     plugin: &P,
     configuration_details: &[u8],
 ) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
-    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    pos_runtime::OutputPolicyBindingV1::from_source(
         plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Gateway,
+        pos_runtime::OutputPolicySourceV1::Gateway,
         configuration_details,
         "deterministic-local-v1",
     )
@@ -113,9 +113,9 @@ fn gateway_output_binding_with_profile<P: Plugin>(
     configuration_details: &[u8],
     profile_id: &str,
 ) -> Result<pos_runtime::OutputPolicyBindingV1, pos_runtime::RuntimeError> {
-    pos_runtime::OutputPolicyBindingV1::from_installed_source(
+    pos_runtime::OutputPolicyBindingV1::from_source(
         plugin,
-        pos_runtime::InstalledOutputPolicySourceV1::Gateway,
+        pos_runtime::OutputPolicySourceV1::Gateway,
         configuration_details,
         profile_id,
     )
@@ -258,9 +258,9 @@ mod coverage_tests {
             gateway_output_binding(&plugin, &[]),
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
-        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        let binding = pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            pos_runtime::OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -302,9 +302,9 @@ mod coverage_tests {
             gateway_output_binding(&plugin, &[]),
             Err(RuntimeError::CapabilityMismatch { .. })
         ));
-        let bound = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        let bound = pos_runtime::OutputPolicyBindingV1::from_source(
             &plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            pos_runtime::OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )
@@ -322,9 +322,9 @@ mod coverage_tests {
             Err(OutputAdmissionErrorV1::CallbackMismatch { kind: "approver" })
         ));
         assert!(matches!(
-            pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            pos_runtime::OutputPolicyBindingV1::from_source(
                 &plugin,
-                pos_runtime::InstalledOutputPolicySourceV1::Generated,
+                pos_runtime::OutputPolicySourceV1::Generated,
                 &[],
                 "deterministic-local-v1",
             )
@@ -341,9 +341,9 @@ mod coverage_tests {
     fn draft_world_approver_cannot_be_installed_without_qualified_profile() {
         let world = super::WorldPlugin::new();
         assert!(matches!(
-            pos_runtime::OutputPolicyBindingV1::from_installed_source(
+            pos_runtime::OutputPolicyBindingV1::from_source(
                 &world,
-                pos_runtime::InstalledOutputPolicySourceV1::World,
+                pos_runtime::OutputPolicySourceV1::World,
                 &[],
                 "deterministic-local-v1",
             ),
@@ -691,9 +691,9 @@ mod coverage_tests {
             id: PluginId::new(),
         });
         let plugin = &wrapped.0;
-        let binding = pos_runtime::OutputPolicyBindingV1::from_installed_source(
+        let binding = pos_runtime::OutputPolicyBindingV1::from_source(
             plugin,
-            pos_runtime::InstalledOutputPolicySourceV1::Generated,
+            pos_runtime::OutputPolicySourceV1::Generated,
             &[],
             "deterministic-local-v1",
         )

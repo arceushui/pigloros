@@ -24,12 +24,12 @@
 //! use pos_plugin_society::{
 //!     draft_signal, SocietyDimension, SocietyPlugin, SocietyReducer, SocietySignal,
 //! };
-//! use pos_runtime::{InstalledOutputPolicySourceV1, OutputPolicyBindingV1};
+//! use pos_runtime::{OutputPolicySourceV1, OutputPolicyBindingV1};
 //!
 //! let plugin = SocietyPlugin::new();
-//! let binding = OutputPolicyBindingV1::from_installed_source(
+//! let binding = OutputPolicyBindingV1::from_source(
 //!     &plugin,
-//!     InstalledOutputPolicySourceV1::Society,
+//!     OutputPolicySourceV1::Society,
 //!     &[],
 //!     "deterministic-local-v1",
 //! );
