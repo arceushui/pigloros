@@ -15,13 +15,17 @@
 //!    order, through the host [`CounterfactualInterventionAuthorityV1`];
 //! 4. the EPF1 execution-profile and TPS1 trust-policy identities bound by
 //!    the plan against the host-admitted records;
-//! 5. the Fork: its committed generation, its recorded parent cut against
-//!    the CFP1 parent Timeline and cut `Seq`, and its committed Logical Head;
+//! 5. the Fork: its persisted counterfactual basis (committed Logical Head,
+//!    generation, and published facts, read at one consistent point) and its
+//!    recorded parent cut against the CFP1 parent Timeline and cut `Seq`;
 //! 6. the closed dependency graph and the derived `RCF1` frontier, supplied
 //!    by the host [`CounterfactualFrontierSourceV1`] and re-validated here;
-//! 7. the `SIV1` invalidation built here, with its invalid-artifact index and
+//! 7. the expected facts (plan digest, frontier dependency-graph digest, and
+//!    trust, revocation, and erasure epochs) against the persisted basis, so
+//!    a stale epoch fails fast before anything is staged;
+//! 8. the `SIV1` invalidation built here, with its invalid-artifact index and
 //!    cache/checkpoint eviction set;
-//! 8. the first recomputation Tick, staged by the
+//! 9. the first recomputation Tick, staged by the
 //!    [`CounterfactualTickStagerV1`] from staged inputs only.
 //!
 //! Only then does it make exactly one
@@ -46,8 +50,14 @@
 //!   derivation: it re-runs the standalone `RCF1` validation, binds the
 //!   frontier ID, plan, parent cut, classification bundle, provenance, and
 //!   horizon, and checks the global frontier range. The dependency-graph
-//!   digest is bound by the store, which rechecks it against the persisted
-//!   graph digest.
+//!   digest is compared with the persisted graph digest before staging and
+//!   rechecked by the store at commit.
+//! - **Intervention seeds.** Following the dependency-graph convention, an
+//!   `InterventionAssigned` node's artifact digest is its INT1 record digest.
+//!   The `RCF1` seeds must therefore be exactly one node per plan
+//!   Intervention, with that Intervention's INT1 digest, its effective Tick,
+//!   and its target schema, and every seed must be an affected node;
+//!   otherwise the frontier is `FrontierBindingMismatch`.
 //! - **ADR-099 classified Forks.** Both store adapters reserve every Event
 //!   append to a FAR1-admitted Fork for the classifier append authority and
 //!   would fail closed with `StorageFailure`. Classified provenance for the
@@ -59,14 +69,17 @@
 //!   exists, so the coordinator validates the CFP1 parent Timeline and cut
 //!   `Seq` against the Fork's recorded parent cut and reads the Fork's moving
 //!   committed Logical Head, which the store rechecks atomically. A failed
-//!   Timeline or Logical Head read is `Store(StorageFailure)`; an absent
-//!   Timeline, a Timeline without a parent cut, or another parent cut is
+//!   Timeline read is `Store(StorageFailure)`; an absent Timeline, a
+//!   Timeline without a parent cut, or another parent cut is
 //!   `ParentCutNotFound`. The new generation is the prior generation plus
-//!   one; an overflow is `Invalidation(PriorGenerationMismatch)`.
+//!   one; an exhausted generation wraps and is rejected by the `SIV1`
+//!   validation as `Invalidation(PriorGenerationMismatch)`.
 //! - **Epochs.** The trust epoch is the TPS1 epoch of the plan, after the
 //!   host TPS1 snapshot is proven to be the plan's. The revocation and erasure
-//!   epochs are the host's current epochs. All three are rechecked by the
-//!   store inside the transaction.
+//!   epochs are the host's current epochs. All three, with the plan and
+//!   dependency-graph digests, are compared with the persisted basis before
+//!   staging (`InvalidationConflict` on the first difference, in the port's
+//!   canonical order) and rechecked by the store inside the transaction.
 //! - **First recomputation Tick.** It is the `RCF1` global frontier Tick:
 //!   Ticks between the parent cut and the frontier are unaffected and are not
 //!   invalidated. The frontier must lie in `first_tick..=` the earliest
@@ -91,7 +104,8 @@
 //!   global frontier `(tick, scheduler_position)` through the endogenous
 //!   suffix end Tick, with artifact class `EndogenousRecomputed`, in
 //!   canonical producer order, duplicates merged.
-//!   `PresentationOnly` outputs are excluded from the suffix claim. The
+//!   `PresentationOnly` outputs are excluded from the suffix claim, so
+//!   `SIV1` field 10 never lists them. The
 //!   retained descriptors are the ascending unique artifact digests of every
 //!   `ExogenousFrozen` and `FixedPolicy` descriptor of the plan. The reason
 //!   is `UnknownEdgeFallback` under `FullSuffixFromCut`, otherwise
@@ -101,23 +115,34 @@
 //!   `RCF1` and `SIV1` share the request's provenance digest.
 //! - **Index and eviction set.** The eviction set is the ascending union of
 //!   the prior generation's checkpoint and Projection/snapshot digests of the
-//!   request, while the invalidated artifacts are quarantined through the
-//!   index, the ascending unique digests of the invalid artifacts.
+//!   request. The index is the ascending unique digests of the `SIV1` invalid
+//!   artifacts and of every provisional `PresentationOnly` output of the
+//!   prior generation in the same suffix range (at or after the global
+//!   frontier through the endogenous suffix end Tick). Those presentation
+//!   outputs were rendered from state this generation invalidates, so ADR-064
+//!   forbids exposing them as Fork state, cache hits, or export members; they
+//!   are not part of the suffix claim, so they are quarantined through the
+//!   index rather than listed in `SIV1`. They are artifacts, not caches or
+//!   checkpoints, so they do not join the eviction set, whose bound is the
+//!   sum of the `SIV1` checkpoint and Projection/snapshot limits.
 //! - **Staged inputs.** The stager receives only an immutable
 //!   [`CounterfactualTickInputsV1`]: the new generation coordinate, the Tick,
 //!   the Interventions effective at that Tick, and the plan's frozen
 //!   descriptors. It never receives the store, a prior-generation artifact,
 //!   or uncommitted state, and its drafts become visible only through the
 //!   atomic commit.
+//! - **Reserved Event type.** [`COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1`] is
+//!   reserved for the coordinator-owned checkpoint Event of every
+//!   recomputation Tick. The shared staging seam rejects a staged draft of
+//!   that type as [`CounterfactualAdmissionErrorV1::ReservedEventType`], for
+//!   the first Tick and every later one.
 //!
 //! # Deferred
 //!
 //! These ADR-064 admission step-1 checks are not done here and are deferred
 //! to a follow-up: the room, Plugin composition, frozen-artifact
-//! availability, and `ReplayClaim` sufficiency checks; reading the current
-//! trust, revocation, and erasure epochs from the store before staging
-//! (today they are host-supplied and rechecked only at commit); and proving
-//! the committed coverage of the Ticks from `first_tick` up to the global
+//! availability, and `ReplayClaim` sufficiency checks; and proving the
+//! committed coverage of the Ticks from `first_tick` up to the global
 //! frontier.
 
 use std::collections::BTreeSet;
@@ -136,15 +161,20 @@ use pos_conformance::{
     TrustPolicySnapshotV1, UnknownEdgePolicyV1,
 };
 use pos_core::{
-    CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
-    CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualStoreErrorV1, CounterfactualStorePortV1, EventDraft, EventStore,
-    ForkGenerationV1, Hash, InvalidationConflictV1, PipelineContractErrorV1, PipelineDraftBatchV1,
-    RecomputationFrontierBytesV1, Seq, SuffixInvalidationBytesV1, TimelineId,
+    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
+    CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
+    EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1,
+    PipelineContractErrorV1, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
+    SuffixInvalidationBytesV1, TimelineId,
 };
 
 /// `SIV1` artifact class of every invalidated endogenous output.
 pub const ENDOGENOUS_ARTIFACT_CLASS_V1: &str = "EndogenousRecomputed";
+
+/// Event type reserved for the coordinator-owned checkpoint Event that
+/// carries one recomputation Tick's `RCP1`; no stager may draft it.
+pub const COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1: &str = "counterfactual.checkpoint";
 
 /// Closed safe errors of counterfactual admission.
 ///
@@ -205,6 +235,9 @@ pub enum CounterfactualAdmissionErrorV1 {
     /// The staged first-Tick drafts are empty, malformed, or oversized.
     #[error("counterfactual staged first Tick is invalid")]
     StagedTickRejected(#[source] PipelineContractErrorV1),
+    /// A staged draft uses the coordinator-reserved checkpoint Event type.
+    #[error("counterfactual staged Tick uses a reserved Event type")]
+    ReservedEventType,
     /// A persisted fact changed before commit; nothing was committed.
     #[error("counterfactual invalidation conflicts with committed state")]
     InvalidationConflict(InvalidationConflictV1),
@@ -376,14 +409,6 @@ pub struct CounterfactualCoordinatorV1<S> {
     store: S,
 }
 
-/// The Fork facts read before derivation.
-#[derive(Clone, Copy)]
-struct ForkBasisV1 {
-    prior_generation: u64,
-    new_generation: u64,
-    head: Seq,
-}
-
 /// The validated `SIV1` bytes with the index and eviction set derived from it.
 struct InvalidationPartsV1 {
     bytes: Vec<u8>,
@@ -434,11 +459,12 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             request.provenance_digest,
         )?;
         let frontier = frontier_cbor(request, &derivation)?;
-        let invalidation = invalidation_parts(request, basis, &derivation)?;
+        check_persisted_facts(request, &basis, &derivation.frontier)?;
+        let invalidation = invalidation_parts(request, &basis, &derivation)?;
         let tick = derivation.frontier.global_frontier_tick;
         let generation = ForkGenerationV1 {
             fork: request.fork,
-            generation: basis.new_generation,
+            generation: next_generation(&basis),
         };
         let drafts = stage_first_tick(stager, plan, generation, tick)?;
         // Both records were validated above, so only the command's own
@@ -450,7 +476,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
                         CounterfactualInvalidationCommandV1::try_new(
                             CounterfactualInvalidationInputV1 {
                                 fork: request.fork,
-                                fork_logical_head: basis.head,
+                                fork_logical_head: basis.fork_logical_head,
                                 trust_epoch: plan.trust_policy.epoch,
                                 revocation_epoch: request.revocation_epoch,
                                 erasure_epoch: request.erasure_epoch,
@@ -523,35 +549,54 @@ fn check_profile(
     Ok(())
 }
 
-/// Read the Fork generation, check its parent cut, and read its head.
+/// Read the Fork's persisted basis and check its recorded parent cut.
 fn fork_basis<S: EventStore + CounterfactualStorePortV1>(
     store: &S,
     request: &CounterfactualAdmissionRequestV1<'_>,
-) -> Result<ForkBasisV1, CounterfactualAdmissionErrorV1> {
+) -> Result<CounterfactualBasisV1, CounterfactualAdmissionErrorV1> {
     let fork = request.fork;
-    let prior_generation = store
-        .current_fork_generation(fork)
-        .map_err(CounterfactualAdmissionErrorV1::Store)?
-        .generation;
+    let basis = store
+        .current_counterfactual_basis(fork)
+        .map_err(CounterfactualAdmissionErrorV1::Store)?;
     let parent_cut = store
         .get_timeline(fork)
         .or(Err(STORAGE_FAILURE))?
         .and_then(|timeline| timeline.meta.fork_point)
         .map(|(parent, seq)| (parent.inner().to_bytes(), seq.as_u64()));
-    if parent_cut != Some((request.plan.parent_timeline_id, request.plan.parent_cut_seq)) {
-        return Err(CounterfactualAdmissionErrorV1::ParentCutNotFound);
+    if parent_cut == Some((request.plan.parent_timeline_id, request.plan.parent_cut_seq)) {
+        Ok(basis)
+    } else {
+        Err(CounterfactualAdmissionErrorV1::ParentCutNotFound)
     }
-    let head = store.logical_head(fork).or(Err(STORAGE_FAILURE))?;
-    let new_generation =
-        prior_generation
-            .checked_add(1)
-            .ok_or(CounterfactualAdmissionErrorV1::Invalidation(
-                FrontierArtifactErrorV1::PriorGenerationMismatch,
-            ))?;
-    Ok(ForkBasisV1 {
-        prior_generation,
-        new_generation,
-        head,
+}
+
+/// The generation this admission commits. An exhausted generation wraps to
+/// zero, which the `SIV1` validation rejects as `PriorGenerationMismatch`.
+const fn next_generation(basis: &CounterfactualBasisV1) -> u64 {
+    basis.generation.wrapping_add(1)
+}
+
+/// Fail fast, before staging, when a persisted fact already differs from
+/// the facts this admission derives; the store rechecks them at commit.
+fn check_persisted_facts(
+    request: &CounterfactualAdmissionRequestV1<'_>,
+    basis: &CounterfactualBasisV1,
+    frontier: &RecomputationFrontierV1,
+) -> Result<(), CounterfactualAdmissionErrorV1> {
+    let expected = CounterfactualBasisV1 {
+        facts: CounterfactualFactsV1 {
+            plan_digest: Hash::from_bytes(request.plan.plan_digest),
+            dependency_graph_digest: Hash::from_bytes(frontier.dependency_graph_digest),
+            trust_epoch: request.plan.trust_policy.epoch,
+            revocation_epoch: request.revocation_epoch,
+            erasure_epoch: request.erasure_epoch,
+        },
+        ..*basis
+    };
+    expected.first_conflict(basis).map_or(Ok(()), |conflict| {
+        Err(CounterfactualAdmissionErrorV1::InvalidationConflict(
+            conflict,
+        ))
     })
 }
 
@@ -592,7 +637,7 @@ fn check_frontier(
         request.provenance_digest,
         plan.horizon_tick,
     );
-    if bound != expected {
+    if bound != expected || !seeds_are_the_interventions(plan, frontier) {
         return Err(CounterfactualAdmissionErrorV1::FrontierBindingMismatch);
     }
     let global = (
@@ -610,6 +655,45 @@ fn check_frontier(
     } else {
         Err(CounterfactualAdmissionErrorV1::FrontierOutOfRange)
     }
+}
+
+/// Whether the `RCF1` seeds are exactly one affected node per plan
+/// Intervention, each with that Intervention's INT1 digest, effective Tick,
+/// and target schema.
+///
+/// Both sides are compared as sorted `(tick, schema, digest)` lists, so a
+/// missing, extra, or repeated seed is a mismatch. The plan was validated, so
+/// every INT1 digest exists; a failing one would only shorten the list.
+fn seeds_are_the_interventions(
+    plan: &CounterfactualPlanV1,
+    frontier: &RecomputationFrontierV1,
+) -> bool {
+    let mut expected: Vec<(u64, u32, [u8; 32])> = plan
+        .interventions
+        .iter()
+        .filter_map(|intervention| {
+            intervention.digest().ok().map(|digest| {
+                (
+                    intervention.effective_tick,
+                    intervention.target_schema_id,
+                    digest,
+                )
+            })
+        })
+        .collect();
+    let mut seeds: Vec<(u64, u32, [u8; 32])> = frontier
+        .intervention_seed_nodes
+        .iter()
+        .map(|seed| (seed.tick, seed.schema_id, seed.artifact_digest))
+        .collect();
+    expected.sort_unstable();
+    seeds.sort_unstable();
+    // `RCF1` validation proved the affected nodes strictly ascending.
+    expected == seeds
+        && frontier
+            .intervention_seed_nodes
+            .iter()
+            .all(|seed| frontier.affected_nodes.binary_search(seed).is_ok())
 }
 
 /// Reject a provisional output after the endogenous suffix end Tick: the
@@ -632,16 +716,24 @@ fn check_provisional_outputs(
 /// Build and seal `SIV1`, and derive its index and eviction set.
 fn invalidation_parts(
     request: &CounterfactualAdmissionRequestV1<'_>,
-    basis: ForkBasisV1,
+    basis: &CounterfactualBasisV1,
     derivation: &CounterfactualFrontierDerivationV1,
 ) -> Result<InvalidationPartsV1, CounterfactualAdmissionErrorV1> {
     let plan = request.plan;
     let frontier = &derivation.frontier;
     let fork_id = request.fork.inner().to_bytes();
     let reason = invalidation_reason(plan, frontier);
-    let artifacts = invalid_artifacts(derivation, basis.prior_generation, reason);
+    let artifacts = invalid_artifacts(derivation, basis.generation, reason);
     let (invalid_start, invalid_end) = invalid_range(frontier, &artifacts)?;
-    let index = digest_set(artifacts.iter().map(|artifact| artifact.artifact_digest));
+    let index = digest_set(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_digest)
+            .chain(
+                suffix_outputs(derivation, DependencyClassV1::PresentationOnly)
+                    .map(|node| node.artifact_digest),
+            ),
+    );
     let evictions = digest_set(
         request
             .invalid_checkpoint_digests
@@ -653,8 +745,8 @@ fn invalidation_parts(
         invalidation_id: request.invalidation_id,
         plan_digest: plan.plan_digest,
         fork_id,
-        prior_generation: basis.prior_generation,
-        new_generation: basis.new_generation,
+        prior_generation: basis.generation,
+        new_generation: next_generation(basis),
         frontier_digest: frontier.frontier_digest,
         invalid_start,
         invalid_end,
@@ -664,7 +756,7 @@ fn invalidation_parts(
         retained_exogenous_digests: retained_descriptors(plan),
         reason,
         commit_timeline_id: fork_id,
-        commit_seq: basis.head.as_u64(),
+        commit_seq: basis.fork_logical_head.as_u64(),
         commit_tick: frontier.global_frontier_tick,
         provenance_digest: request.provenance_digest,
         invalidation_digest: [0; 32],
@@ -677,6 +769,9 @@ fn invalidation_parts(
 }
 
 /// Fill the invalidation digest, then run the standalone `SIV1` validation.
+///
+/// This is the one place `SIV1` is sealed and encoded; it switches to the
+/// codec's single-pass seal once `pos-conformance` provides one.
 fn seal_invalidation(
     unsigned: SuffixInvalidationV1,
 ) -> Result<Vec<u8>, CounterfactualAdmissionErrorV1> {
@@ -735,14 +830,13 @@ fn invalid_range(
     }
 }
 
-/// Every provisional endogenous output at or after the global frontier, in
-/// canonical producer order with duplicates merged. Outputs after the
-/// endogenous suffix end Tick were already rejected.
-fn invalid_artifacts(
+/// The producer of every provisional output of `class` at or after the
+/// global frontier. Outputs after the endogenous suffix end Tick were
+/// already rejected.
+fn suffix_outputs(
     derivation: &CounterfactualFrontierDerivationV1,
-    prior_generation: u64,
-    reason: SuffixInvalidationReasonV1,
-) -> Vec<InvalidArtifactV1> {
+    class: DependencyClassV1,
+) -> impl Iterator<Item = &DependencyNodeV1> {
     let global = (
         derivation.frontier.global_frontier_tick,
         derivation.frontier.global_frontier_scheduler_position,
@@ -750,11 +844,20 @@ fn invalid_artifacts(
     derivation
         .provisional_outputs
         .iter()
-        .filter(|output| {
-            output.class == DependencyClassV1::EndogenousRecomputed
-                && (output.node.tick, output.node.scheduler_position) >= global
+        .filter(move |output| {
+            output.class == class && (output.node.tick, output.node.scheduler_position) >= global
         })
         .map(|output| &output.node)
+}
+
+/// Every provisional endogenous output in the suffix, in canonical producer
+/// order with duplicates merged.
+fn invalid_artifacts(
+    derivation: &CounterfactualFrontierDerivationV1,
+    prior_generation: u64,
+    reason: SuffixInvalidationReasonV1,
+) -> Vec<InvalidArtifactV1> {
+    suffix_outputs(derivation, DependencyClassV1::EndogenousRecomputed)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .map(|producer| InvalidArtifactV1 {
@@ -787,8 +890,12 @@ fn digest_set(digests: impl Iterator<Item = [u8; 32]>) -> Vec<Hash> {
         .collect()
 }
 
-/// Stage the first recomputation Tick from staged inputs only.
-fn stage_first_tick(
+/// Stage one recomputation Tick from staged inputs only.
+///
+/// This is the shared staging seam of the first Tick and every later one:
+/// it bounds the drafts as one [`PipelineDraftBatchV1`] and then rejects any
+/// draft of the reserved [`COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1`].
+pub(crate) fn stage_first_tick(
     stager: &mut impl CounterfactualTickStagerV1,
     plan: &CounterfactualPlanV1,
     generation: ForkGenerationV1,
@@ -814,4 +921,16 @@ fn stage_first_tick(
             PipelineDraftBatchV1::try_new(drafts)
                 .map_err(CounterfactualAdmissionErrorV1::StagedTickRejected)
         })
+        .and_then(|batch| {
+            if batch.drafts().iter().any(is_reserved_draft) {
+                Err(CounterfactualAdmissionErrorV1::ReservedEventType)
+            } else {
+                Ok(batch)
+            }
+        })
+}
+
+/// Whether `draft` uses the coordinator-reserved checkpoint Event type.
+pub(crate) fn is_reserved_draft(draft: &EventDraft) -> bool {
+    draft.event_type.as_str() == COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1
 }
