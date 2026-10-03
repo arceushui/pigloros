@@ -203,9 +203,9 @@ fn unsealed_frontier(
                 UnknownEdgePolicyV1::Reject,
             )
         };
-    // `frontier_id`, `dependency_graph_digest`, `provenance_digest` and
-    // `frontier_digest` are placeholders that the caller overwrites before
-    // sealing; `seal` rejects a record whose digest does not match.
+    // `frontier_id`, `dependency_graph_digest` and `provenance_digest` are
+    // placeholders the caller overwrites, and `seal` computes
+    // `frontier_digest`.
     RecomputationFrontierV1 {
         frontier_id: [0; 16],
         plan_digest: plan.plan_digest,
