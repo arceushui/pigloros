@@ -3760,6 +3760,9 @@ mod tests {
         event.origin = None;
     }
 
+    /// One named Event tamper for the per-field shared-rule table.
+    type EventTamperCaseV1 = (&'static str, fn(&mut Event));
+
     /// ADR-105 r6 R6.5 P8/P9: the shared rule rejects each field on its own.
     #[test]
     fn classified_event_rule_rejects_each_mismatched_field() -> Result<(), Box<dyn Error>> {
@@ -3770,7 +3773,7 @@ mod tests {
             &receipt.event,
             &receipt.operation
         ));
-        let tampers: [(&str, fn(&mut Event)); 6] = [
+        let tampers: [EventTamperCaseV1; 6] = [
             ("wall-time", tamper_wall_time),
             ("payload-hash", tamper_payload_hash),
             ("origin-child", tamper_origin_child),
