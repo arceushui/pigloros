@@ -471,8 +471,8 @@ pub mod test_support {
         }
     }
 
-    /// One admitted staged consumer and the executor, held under the lock
-    /// that serializes folds in this test process.
+    /// One admitted staged consumer and the executor, held under the flag
+    /// guard that serializes folds in this test process.
     pub(crate) struct ProtectedFixture {
         _serial: Option<SerialGuard>,
         executor: StagedFoldExecutorV1,
@@ -499,7 +499,7 @@ pub mod test_support {
         }
 
         /// Another admission of the same reducer under its own provider and
-        /// Plugin identity, serialized by this fixture's lock.
+        /// Plugin identity, serialized by this fixture's flag guard.
         pub(crate) fn rival(&self) -> Self {
             Self::admitted(None, self.name, self.reducer, self.policy.clone())
         }

@@ -22,6 +22,7 @@ fn worker_threads() -> usize {
     seen
 }
 
+/// Linux-only: reads `/proc/self/task`, and reports 0 where it is absent.
 fn named_worker_threads() -> usize {
     std::fs::read_dir("/proc/self/task").map_or(0, |tasks| {
         tasks
