@@ -7087,16 +7087,16 @@ fn sqlite_manifest_owner_lease(
 
 /// Raw `manifest_owner_admission_read_limits` columns before decoding.
 struct SqliteReadLimitsRow {
-    max_node_visits: Vec<u8>,
-    max_native_bytes: Vec<u8>,
-    max_combined_depth: u8,
+    node_visits: Vec<u8>,
+    native_bytes: Vec<u8>,
+    combined_depth: u8,
 }
 
 fn sqlite_read_limits_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SqliteReadLimitsRow> {
     Ok(SqliteReadLimitsRow {
-        max_node_visits: row.get(0)?,
-        max_native_bytes: row.get(1)?,
-        max_combined_depth: row.get(2)?,
+        node_visits: row.get(0)?,
+        native_bytes: row.get(1)?,
+        combined_depth: row.get(2)?,
     })
 }
 
@@ -7739,9 +7739,9 @@ fn sqlite_read_manifest_owner_read_limits(
         .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
     let row = row.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
     Ok(WorldClosureReadLimitsV1 {
-        max_node_visits: manifest_owner_generation(row.max_node_visits)?,
-        max_native_bytes: manifest_owner_generation(row.max_native_bytes)?,
-        max_combined_depth: row.max_combined_depth,
+        max_node_visits: manifest_owner_generation(row.node_visits)?,
+        max_native_bytes: manifest_owner_generation(row.native_bytes)?,
+        max_combined_depth: row.combined_depth,
     })
 }
 
