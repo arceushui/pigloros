@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  CARGO_FUZZ_VERSION: "0.13.2"
+  CARGO_FUZZ_VERSION: 0.13.2
 
 concurrency:
   group: fuzz-${{ github.workflow }}-${{ github.ref }}
