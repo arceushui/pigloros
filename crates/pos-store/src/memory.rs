@@ -11524,7 +11524,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
 /// Borrow, in one fixed order, the ten fields an LCC1 commit record copies from
 /// its local-cut owner request.
 macro_rules! local_cut_commit_bindings {
-    ($source:expr) => {
+    ($source:ident) => {
         (
             &$source.partition_ledger_seq,
             &$source.manifest_hash,
