@@ -52,7 +52,9 @@ fn check_envelope_identity(
     {
         Ok(())
     } else {
-        Err(RecipientExportDecryptionErrorV1::Export(RecipientExportErrorV1::IdentityMismatch))
+        Err(RecipientExportDecryptionErrorV1::Export(
+            RecipientExportErrorV1::IdentityMismatch,
+        ))
     }
 }
 
@@ -2077,8 +2079,8 @@ mod tests {
     }
 
     #[test]
-    fn recipient_decryption_placeholder_digest_never_authorizes_material(
-    ) -> Result<(), CoreError> {
+    fn recipient_decryption_placeholder_digest_never_authorizes_material() -> Result<(), CoreError>
+    {
         let (_temporary, mut store, owner) = owner_fixture()?;
         let descriptor = store.enroll_recipient_key(&owner)?;
         let mut registry = store
@@ -2091,7 +2093,10 @@ mod tests {
         let absent = RecipientKeyDescriptorV1::for_grantee(owner.grantee_id, 2, public_key)
             .map_err(|error| CoreError::Storage(error.to_string()))?
             .identity();
-        assert_eq!(registered_material_digest(&registry, absent), ABSENT_MATERIAL_DIGEST);
+        assert_eq!(
+            registered_material_digest(&registry, absent),
+            ABSENT_MATERIAL_DIGEST
+        );
         let called = std::cell::Cell::new(false);
         let mark = || called.set(true);
         assert_eq!(

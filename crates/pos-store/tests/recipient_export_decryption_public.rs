@@ -256,8 +256,8 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
 }
 
 #[test]
-fn recipient_decryption_public_contract_denies_a_public_key_not_bound_to_the_material(
-) -> TestResult {
+fn recipient_decryption_public_contract_denies_a_public_key_not_bound_to_the_material() -> TestResult
+{
     let grantee = EntityId::new();
     let (_temporary, mut store, owner) = owner_for(grantee)?;
     let enrolled = store.enroll_recipient_key(&owner)?;
@@ -347,8 +347,8 @@ fn recipient_decryption_public_contract_rolls_back_a_first_use_directory_claim()
 }
 
 #[test]
-fn recipient_decryption_public_contract_rejects_tampered_ciphertext_without_plaintext(
-) -> TestResult {
+fn recipient_decryption_public_contract_rejects_tampered_ciphertext_without_plaintext() -> TestResult
+{
     let (_temporary, mut store, owner) = owner_for(EntityId::new())?;
     let descriptor = store.enroll_recipient_key(&owner)?;
     let mut envelope = encrypt(descriptor, 1)?.envelope;
@@ -366,8 +366,8 @@ fn recipient_decryption_public_contract_rejects_tampered_ciphertext_without_plai
 }
 
 #[test]
-fn recipient_decryption_public_contract_orders_rotation_pending_and_destroyed_epochs(
-) -> TestResult {
+fn recipient_decryption_public_contract_orders_rotation_pending_and_destroyed_epochs() -> TestResult
+{
     let (temporary, mut store, owner) = owner_for(EntityId::new())?;
     let old = store.enroll_recipient_key(&owner)?;
     let old_export = encrypt(old, 1)?;
