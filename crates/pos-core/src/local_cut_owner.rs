@@ -722,6 +722,7 @@ fn validate_seal_prestate(
         }
         return Ok(());
     };
+    let last_visible_cut_id = state.last_visible_cut_id;
     let expected_tick = state
         .last_visible_tick
         .checked_add(1)
@@ -731,7 +732,7 @@ fn validate_seal_prestate(
         || state.configuration_generation != admission_state.configuration_generation
         || state.inventory_generation != admission_state.inventory_generation
         || state.timelines != admission_state.timelines
-        || seal.cut_id <= state.last_visible_cut_id
+        || seal.cut_id <= last_visible_cut_id
         || seal.tick != expected_tick
         || seal.membership_epoch != state.membership_epoch
     {
