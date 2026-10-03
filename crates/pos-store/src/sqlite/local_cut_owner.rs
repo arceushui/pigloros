@@ -2927,8 +2927,8 @@ mod local_cut_owner_coverage {
             first_recording_update("timeline_id = X'09090909090909090909090909090909'"),
             first_recording_update("binding_hash = zeroblob(32)"),
             first_recording_update("head_rows = X'01'"),
-            first_recording_update("head_rows = head_rows || X'00'"),
-            first_recording_update("head_rows = X'01' || substr(head_rows, 2)"),
+            first_recording_update("head_rows = CAST(head_rows || X'00' AS BLOB)"),
+            first_recording_update("head_rows = CAST(X'01' || substr(head_rows, 2) AS BLOB)"),
             format!("DELETE FROM local_cut_world_recordings {FIRST_TIMELINE_ROW}"),
             "DELETE FROM world_dependency_branches".to_owned(),
         ] {
