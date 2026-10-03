@@ -1,10 +1,11 @@
 //! Wire codes for [`ReplayClaimV1`] shared by the CFP1 plan and CFR1 result
-//! codecs, so both records encode a replay claim identically.
+//! codecs and the nested evidence codec, so every record encodes a replay
+//! claim identically through this one table.
 
 use crate::ReplayClaimV1;
 
 /// Every replay claim, indexed by its wire code.
-pub(super) const REPLAY_CLAIMS: [ReplayClaimV1; 5] = [
+pub(crate) const REPLAY_CLAIMS: [ReplayClaimV1; 5] = [
     ReplayClaimV1::Exact,
     ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
     ReplayClaimV1::StructuralOnly,
@@ -13,7 +14,7 @@ pub(super) const REPLAY_CLAIMS: [ReplayClaimV1; 5] = [
 ];
 
 /// The wire code of one replay claim; the inverse of indexing [`REPLAY_CLAIMS`].
-pub(super) const fn replay_claim_code(claim: ReplayClaimV1) -> u64 {
+pub(crate) const fn replay_claim_code(claim: ReplayClaimV1) -> u64 {
     match claim {
         ReplayClaimV1::Exact => 0,
         ReplayClaimV1::ExactAuthoritativeWithRedactedViews => 1,

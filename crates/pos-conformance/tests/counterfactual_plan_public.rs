@@ -14,7 +14,7 @@ use pos_conformance::counterfactual::{
 use pos_conformance::{
     draft_execution_profile_bytes_v1, draft_trust_policy_snapshot_bytes_v1,
     ExecutionProfileContractErrorV1, ExecutionProfileV1, ReplayClaimV1,
-    TrustPolicySnapshotContractErrorV1, TrustPolicySnapshotV1,
+    TrustPolicySnapshotContractErrorV1, TrustPolicySnapshotV1, UnknownEdgePolicyV1,
 };
 use std::collections::BTreeSet;
 use std::error::Error as _;
@@ -27,11 +27,12 @@ const FIELD_ROOM_ID: usize = 3;
 const FIELD_INTERVENTIONS: usize = 11;
 const FIELD_EXOGENOUS: usize = 12;
 const FIELD_FIXED_POLICY: usize = 13;
-const FIELD_EXECUTION_PROFILE: usize = 15;
-const FIELD_TRUST_POLICY: usize = 16;
-const FIELD_REPLAY_CLAIM: usize = 22;
-const FIELD_PREVIOUS: usize = 23;
-const FIELD_PLAN_DIGEST: usize = 24;
+const FIELD_UNKNOWN_EDGE_POLICY: usize = 15;
+const FIELD_EXECUTION_PROFILE: usize = 16;
+const FIELD_TRUST_POLICY: usize = 17;
+const FIELD_REPLAY_CLAIM: usize = 23;
+const FIELD_PREVIOUS: usize = 24;
+const FIELD_PLAN_DIGEST: usize = 25;
 
 fn intervention(effective_tick: u64, ordinal: u32, id_seed: u32) -> InterventionV1 {
     let mut intervention_id = [0xff; 16];
@@ -99,6 +100,7 @@ fn plan() -> TestResult<CounterfactualPlanV1> {
         exogenous_descriptors: vec![descriptor(1, 0x50), descriptor(2, 0x40)],
         fixed_policy_descriptors: vec![descriptor(3, 0x30)],
         classification_bundle_digest: [5; 32],
+        unknown_edge_policy: UnknownEdgePolicyV1::FullSuffixFromCut,
         execution_profile: PlanExecutionProfileRefV1::from_execution_profile_v1(&draft_profile()?)?,
         trust_policy: PlanTrustPolicyRefV1::from_trust_policy_snapshot_v1(&draft_snapshot()?)?,
         plugin_composition_digest: [6; 32],
@@ -185,6 +187,7 @@ fn plan_roundtrips_exact_wire_fields_and_domain_digest() -> TestResult {
         ]),
         Value::Array(vec![descriptor_value(&descriptor(3, 0x30))]),
         digest(5),
+        uint(1),
         Value::Array(vec![
             text(&plan.execution_profile.profile_id),
             text(&plan.execution_profile.semantic_version),
@@ -293,9 +296,59 @@ fn every_replay_claim_has_one_exact_wire_code() -> TestResult {
 }
 
 #[test]
+fn every_unknown_edge_policy_has_one_exact_wire_code() -> TestResult {
+    assert_eq!(
+        UnknownEdgePolicyV1::ALL_V1,
+        [
+            UnknownEdgePolicyV1::Reject,
+            UnknownEdgePolicyV1::FullSuffixFromCut
+        ]
+    );
+    for (index, policy) in UnknownEdgePolicyV1::ALL_V1.into_iter().enumerate() {
+        assert_eq!(usize::from(policy.wire_code()), index);
+        let mut plan = plan()?;
+        plan.unknown_edge_policy = policy;
+        let plan = sealed(plan)?;
+        let bytes = plan.to_canonical_cbor()?;
+        assert_eq!(
+            fields_of(&bytes)?[FIELD_UNKNOWN_EDGE_POLICY],
+            uint(u64::try_from(index)?)
+        );
+        assert_eq!(decoded(&bytes)?, plan);
+    }
+    let valid = plan()?.to_canonical_cbor()?;
+    for code in [2, u64::MAX] {
+        let bytes = with_field(&valid, FIELD_UNKNOWN_EDGE_POLICY, uint(code))?;
+        assert_eq!(decoded(&bytes), Err(PlanError::UnknownEnum));
+    }
+    let bytes = with_field(&valid, FIELD_UNKNOWN_EDGE_POLICY, text("reject"))?;
+    assert_eq!(decoded(&bytes), Err(PlanError::InvalidEncoding));
+    Ok(())
+}
+
+#[test]
+fn header_is_checked_before_the_field_count() -> TestResult {
+    let mut short = fields_of(&plan()?.to_canonical_cbor()?)?;
+    short.truncate(FIELD_UNKNOWN_EDGE_POLICY);
+    for (index, value) in [(0, text("CFP2")), (1, uint(2))] {
+        let mut future = short.clone();
+        future[index] = value;
+        assert_eq!(
+            decoded(&encode(&Value::Array(future))?),
+            Err(PlanError::UnsupportedVersion)
+        );
+    }
+    assert_eq!(
+        decoded(&encode(&Value::Array(short))?),
+        Err(PlanError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
 fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
     let base = plan()?;
-    let edits: [Edit; 27] = [
+    let edits: [Edit; 28] = [
         |plan| plan.plan_id[0] ^= 1,
         |plan| plan.room_id.push('x'),
         |plan| plan.room_digest[0] ^= 1,
@@ -311,6 +364,7 @@ fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
         |plan| plan.exogenous_descriptors[0].provenance_digest[0] ^= 1,
         |plan| plan.fixed_policy_descriptors[0].provenance_digest[0] ^= 1,
         |plan| plan.classification_bundle_digest[0] ^= 1,
+        |plan| plan.unknown_edge_policy = UnknownEdgePolicyV1::Reject,
         |plan| plan.execution_profile.profile_id.push('x'),
         |plan| plan.execution_profile.semantic_version = "1.0.1".to_owned(),
         |plan| plan.execution_profile.profile_digest[0] ^= 1,
@@ -444,11 +498,15 @@ fn identifiers_are_bounded_and_carry_no_operational_path() -> TestResult {
 #[test]
 fn every_identity_digest_and_descriptor_is_nonzero() -> TestResult {
     let base = plan()?;
-    let rejected: [Edit; 17] = [
+    let rejected: [Edit; 21] = [
         |plan| plan.plan_id = [0; 16],
         |plan| plan.room_digest = [0; 32],
+        |plan| plan.parent_timeline_id = [0; 16],
         |plan| plan.parent_cut_digest = [0; 32],
         |plan| plan.classification_bundle_digest = [0; 32],
+        |plan| plan.execution_profile.profile_digest = [0; 32],
+        |plan| plan.trust_policy.snapshot_digest = [0; 32],
+        |plan| plan.previous_plan_digest = Some([0; 32]),
         |plan| plan.plugin_composition_digest = [0; 32],
         |plan| plan.scheduler_digest = [0; 32],
         |plan| plan.numeric_profile_digest = [0; 32],
@@ -472,8 +530,16 @@ fn every_identity_digest_and_descriptor_is_nonzero() -> TestResult {
     let bytes = with_field(&base.to_canonical_cbor()?, 4, Value::Bytes(vec![0; 32]))?;
     assert_eq!(decoded(&bytes), Err(PlanError::FieldOutOfBounds));
     // One nonzero byte is enough: only the all-zero placeholder is rejected.
-    let accepted: [Edit; 3] = [
+    let accepted: [Edit; 4] = [
         |plan| plan.plan_id = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        |plan| {
+            let mut digest = [0; 32];
+            digest[31] = 1;
+            plan.parent_timeline_id = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+            plan.execution_profile.profile_digest = digest;
+            plan.trust_policy.snapshot_digest = digest;
+            plan.previous_plan_digest = Some(digest);
+        },
         |plan| {
             let mut digest = [0; 32];
             digest[31] = 1;

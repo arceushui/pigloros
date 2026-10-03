@@ -1028,8 +1028,8 @@ pub struct InvalidArtifactV1 {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnknownEdgePolicyV1 {
-    Reject,
-    FullSuffixFromCut,
+    Reject = 0,
+    FullSuffixFromCut = 1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -1933,6 +1933,7 @@ pub mod strict_codec {
         decode_suffix_invalidation_value, dependency_node_value, recomputation_frontier_value,
         suffix_invalidation_value, FrontierArtifactErrorV1,
     };
+    use crate::counterfactual::replay_claim::{replay_claim_code, REPLAY_CLAIMS};
 
     #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
     pub enum StrictCborError {
@@ -2876,27 +2877,21 @@ pub mod strict_codec {
         }
     }
 
+    /// Encode a replay claim through the shared counterfactual wire table.
     fn enum_replay_claim(value: ReplayClaimV1) -> Value {
-        uint(match value {
-            ReplayClaimV1::Exact => 0,
-            ReplayClaimV1::ExactAuthoritativeWithRedactedViews => 1,
-            ReplayClaimV1::StructuralOnly => 2,
-            ReplayClaimV1::UnverifiableArtifactsMissing => 3,
-            ReplayClaimV1::IncompatibleProfile => 4,
-        })
+        uint(replay_claim_code(value))
     }
 
+    /// Decode a replay claim through the shared counterfactual wire table.
     fn decode_replay_claim(value: &Value) -> Result<ReplayClaimV1, StrictCborError> {
-        match uint_value(value, "replay_claim")? {
-            0 => Ok(ReplayClaimV1::Exact),
-            1 => Ok(ReplayClaimV1::ExactAuthoritativeWithRedactedViews),
-            2 => Ok(ReplayClaimV1::StructuralOnly),
-            3 => Ok(ReplayClaimV1::UnverifiableArtifactsMissing),
-            4 => Ok(ReplayClaimV1::IncompatibleProfile),
-            _ => Err(StrictCborError::InvalidField {
+        let code = uint_value(value, "replay_claim")?;
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| REPLAY_CLAIMS.get(index))
+            .copied()
+            .ok_or_else(|| StrictCborError::InvalidField {
                 field: "replay_claim".to_owned(),
-            }),
-        }
+            })
     }
 
     fn encode_manifest(manifest: &ReproManifestV1) -> Value {
@@ -4694,6 +4689,19 @@ pub mod strict_codec {
             assert_eq!(
                 decode_node(&node).map(|decoded| dependency_node_value(&decoded)),
                 Ok(node)
+            );
+        }
+
+        #[test]
+        fn replay_claim_codes_use_the_shared_table() {
+            for claim in REPLAY_CLAIMS {
+                assert_eq!(decode_replay_claim(&enum_replay_claim(claim)), Ok(claim));
+            }
+            assert_eq!(
+                decode_replay_claim(&uint(5)),
+                Err(StrictCborError::InvalidField {
+                    field: "replay_claim".to_owned(),
+                })
             );
         }
 
