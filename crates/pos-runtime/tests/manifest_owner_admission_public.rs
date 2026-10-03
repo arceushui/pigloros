@@ -735,11 +735,11 @@ fn derived_result_heads(
 /// Replace the seal and re-derive the kind-5 rows that name its WCB1s.
 fn resealed(
     request: &pos_core::LocalCutOwnerRequestV1,
-    seal: pos_core::LocalCutSealInputV2,
+    seal: &pos_core::LocalCutSealInputV2,
     snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
 ) -> Result<pos_core::LocalCutOwnerRequestV1, Box<dyn Error>> {
     let mut rebound = request.clone();
-    rebound.seal = pos_core::LocalCutSealV2::new(seal)?;
+    rebound.seal = pos_core::LocalCutSealV2::new(*seal)?;
     rebound.result_head_rows = derived_result_heads(&rebound, snapshots)?;
     let table = pos_core::LocalCutHeadsTableV1::result_heads(
         seal.owner_id,
@@ -783,6 +783,64 @@ fn local_cut_request(
     )
 }
 
+fn local_cut_composition_rows(
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+) -> Vec<pos_core::LocalCutCompositionBindingRowV1> {
+    let mut composition_rows = Vec::new();
+    for snapshot in snapshots {
+        composition_rows.extend(snapshot.catalog.as_input().rows.iter().map(|row| {
+            pos_core::LocalCutCompositionBindingRowV1 {
+                plugin_id: row.plugin_id,
+                timeline_id: snapshot.timeline.timeline_id,
+                plugin_version: row.plugin_version.clone(),
+                implementation_hash: row.implementation_hash,
+                eop1_native_digest: row.eop1_native_digest,
+                driver_interval_ns: Some(0),
+                last_due_ns: None,
+                event_cursor: 0,
+                participant_native_state_hash: hash(91),
+            }
+        }));
+    }
+    composition_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
+    composition_rows
+}
+
+type LocalCutContextAndHeadRows = (
+    Vec<pos_core::LocalCutRecordingContextRowV1>,
+    Vec<pos_core::LocalCutExpectedHeadRowV1>,
+);
+
+fn local_cut_context_and_head_rows(
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+    transition: &LocalCutTransition,
+) -> Result<LocalCutContextAndHeadRows, Box<dyn Error>> {
+    let mut recording_context_rows = Vec::with_capacity(snapshots.len());
+    let mut expected_head_rows = Vec::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        let timeline_id = snapshot.timeline.timeline_id;
+        let predecessor_wcb_hash = predecessor_in(&transition.previous_recordings, timeline_id);
+        recording_context_rows.push(pos_core::LocalCutRecordingContextRowV1 {
+            timeline_id,
+            wcs_hash: snapshot.timeline.wcs1.digest(),
+            retention_lease_hash: recorded_lease(snapshot)?,
+            predecessor_wcb_hash,
+        });
+        expected_head_rows.push(pos_core::LocalCutExpectedHeadRowV1 {
+            timeline_id,
+            logical_head: 0,
+            stitched_chain_hash: SOURCE_GENESIS,
+            source_timeline_id: timeline_id,
+            source_segment_head: 0,
+            source_chain_hash: SOURCE_GENESIS,
+            logical_prefix: 0,
+            lineage_proof_hash: None,
+            predecessor_wcb_hash,
+        });
+    }
+    Ok((recording_context_rows, expected_head_rows))
+}
+
 fn local_cut_request_for_admissions(
     owner_id: [u8; 32],
     state: &pos_core::ManifestOwnerAdmissionOwnerStateV1,
@@ -809,46 +867,9 @@ fn local_cut_request_for_admissions(
             })
             .collect(),
     )?;
-    let mut composition_rows = Vec::new();
-    for snapshot in &snapshots {
-        composition_rows.extend(snapshot.catalog.as_input().rows.iter().map(|row| {
-            pos_core::LocalCutCompositionBindingRowV1 {
-                plugin_id: row.plugin_id,
-                timeline_id: snapshot.timeline.timeline_id,
-                plugin_version: row.plugin_version.clone(),
-                implementation_hash: row.implementation_hash,
-                eop1_native_digest: row.eop1_native_digest,
-                driver_interval_ns: Some(0),
-                last_due_ns: None,
-                event_cursor: 0,
-                participant_native_state_hash: hash(91),
-            }
-        }));
-    }
-    composition_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
-    let mut recording_context_rows = Vec::with_capacity(snapshots.len());
-    let mut expected_head_rows = Vec::with_capacity(snapshots.len());
-    for snapshot in &snapshots {
-        let timeline_id = snapshot.timeline.timeline_id;
-        let predecessor_wcb_hash = predecessor_in(&transition.previous_recordings, timeline_id);
-        recording_context_rows.push(pos_core::LocalCutRecordingContextRowV1 {
-            timeline_id,
-            wcs_hash: snapshot.timeline.wcs1.digest(),
-            retention_lease_hash: recorded_lease(snapshot)?,
-            predecessor_wcb_hash,
-        });
-        expected_head_rows.push(pos_core::LocalCutExpectedHeadRowV1 {
-            timeline_id,
-            logical_head: 0,
-            stitched_chain_hash: SOURCE_GENESIS,
-            source_timeline_id: timeline_id,
-            source_segment_head: 0,
-            source_chain_hash: SOURCE_GENESIS,
-            logical_prefix: 0,
-            lineage_proof_hash: None,
-            predecessor_wcb_hash,
-        });
-    }
+    let composition_rows = local_cut_composition_rows(&snapshots);
+    let (recording_context_rows, expected_head_rows) =
+        local_cut_context_and_head_rows(&snapshots, transition)?;
     let expected_heads = pos_core::LocalCutHeadsTableV1::expected_heads(
         owner_id,
         transition.cut_id,
@@ -898,7 +919,7 @@ fn local_cut_request_for_admissions(
         result_inventory_generation: transition.result_inventory_generation,
         release_fence_proof_digest: hash(112),
     };
-    resealed(&request, *request.seal.as_input(), &snapshots)
+    resealed(&request, request.seal.as_input(), &snapshots)
 }
 
 fn admitted_snapshot<S: ManifestOwnerAdmissionPersistencePortV1>(
@@ -2743,7 +2764,7 @@ fn with_composition_rows(
 ) -> Result<pos_core::LocalCutOwnerRequestV1, Box<dyn Error>> {
     let mut seal = *request.seal.as_input();
     seal.composition_table = local_cut_table(u64::try_from(rows.len())?, 92)?;
-    let mut rebound = resealed(request, seal, std::slice::from_ref(snapshot))?;
+    let mut rebound = resealed(request, &seal, std::slice::from_ref(snapshot))?;
     rebound.composition_rows = rows;
     Ok(rebound)
 }
