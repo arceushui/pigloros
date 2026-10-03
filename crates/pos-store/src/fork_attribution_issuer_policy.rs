@@ -93,7 +93,7 @@ pub enum IssuerPolicyInstallOutcomeV1 {
     /// The candidate was appended to the history and is the new floor.
     Installed,
     /// The candidate is byte-identical to the current floor, so a retry after
-    /// an indeterminate commit changed nothing.
+    /// an indeterminate commit changed nothing (ADR-105 r6 erratum E7).
     AlreadyInstalled,
 }
 
@@ -254,7 +254,8 @@ pub trait ForkAttributionIssuerPolicyInstallationPortV1 {
     /// it with the pin, requires valid Ed25519 issuer keys, and checks
     /// continuity, the ceilings, and the transition rules against the floor.
     /// A byte-identical retry of the current floor returns
-    /// [`IssuerPolicyInstallOutcomeV1::AlreadyInstalled`].
+    /// [`IssuerPolicyInstallOutcomeV1::AlreadyInstalled`] (ADR-105 r6
+    /// erratum E7).
     ///
     /// # Errors
     /// Returns a closed policy error, and changes nothing, when any check or
@@ -371,6 +372,8 @@ fn install_successor(
     }
     match next.generation.cmp(&floor.generation) {
         Ordering::Less => Err(ForkAttributionIssuerPolicyErrorV1::Rollback),
+        // ADR-105 r6 erratum E7: an exact retry of the floor recovers an
+        // indeterminate install instead of being refused as a rollback.
         Ordering::Equal if candidate == current => {
             Ok(IssuerPolicyInstallOutcomeV1::AlreadyInstalled)
         }

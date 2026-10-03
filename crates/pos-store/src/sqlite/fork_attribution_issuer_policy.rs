@@ -21,7 +21,7 @@ use crate::fork_attribution_issuer_policy::{
 
 /// The expected scope, generation, and digest of one stored policy, with its
 /// bytes when the history row exists.
-type StoredPolicyRowV1 = (String, u64, [u8; 32], Option<Vec<u8>>);
+type StoredPolicyRowV1 = (String, i64, [u8; 32], Option<Vec<u8>>);
 
 impl From<rusqlite::Error> for ForkAttributionIssuerPolicyErrorV1 {
     /// Deliberately conservative: no `SQLite` failure is trusted to prove what
@@ -102,10 +102,11 @@ fn persist_floor_policy(
     floor: &IssuerPolicyFloorV1,
 ) -> PolicyResultV1<()> {
     let digest = floor.digest.as_bytes().as_slice();
+    let generation = sqlite_generation(floor.generation);
     conn.execute(
         "INSERT INTO fork_attribution_issuer_policies (policy_digest, generation, fip1_cbor)
          VALUES (?1, ?2, ?3)",
-        params![digest, floor.generation, candidate.to_canonical_cbor()],
+        params![digest, generation, candidate.to_canonical_cbor()],
     )?;
     conn.execute(
         "INSERT INTO fork_attribution_issuer_policy_floor
@@ -115,7 +116,7 @@ fn persist_floor_policy(
              scope = excluded.scope,
              generation = excluded.generation,
              policy_digest = excluded.policy_digest",
-        params![floor.scope, floor.generation, digest],
+        params![floor.scope, generation, digest],
     )?;
     Ok(())
 }
@@ -145,7 +146,7 @@ fn stored_policy_row(
     policy
         .filter(|policy| {
             policy.input().scope == scope
-                && policy.input().generation == generation
+                && u64::try_from(generation) == Ok(policy.input().generation)
                 && policy.digest() == Hash::from_bytes(digest)
         })
         .ok_or(ForkAttributionIssuerPolicyErrorV1::CorruptPolicy)
@@ -154,8 +155,7 @@ fn stored_policy_row(
 /// Read the retained policy at one committed generation, if any, requiring it
 /// to be in the floor's scope, at its row generation, and at its row digest.
 fn read_retained_policy(conn: &Connection, generation: u64) -> LoadedIssuerPolicyV1 {
-    // Stored generations are 1..=96, so an unrepresentable one matches nothing.
-    let generation = i64::try_from(generation).unwrap_or(-1);
+    let generation = sqlite_generation(generation);
     let row = conn
         .query_row(
             "SELECT floor.scope, history.generation, history.policy_digest, history.fip1_cbor
@@ -167,6 +167,13 @@ fn read_retained_policy(conn: &Connection, generation: u64) -> LoadedIssuerPolic
         )
         .optional()?;
     row.map(stored_policy_row).transpose()
+}
+
+/// `SQLite` stores generations as signed integers. Stored generations are
+/// 1..=96, so an unrepresentable one becomes `-1`, which matches no row and
+/// fails the table's `CHECK` on insert.
+fn sqlite_generation(generation: u64) -> i64 {
+    i64::try_from(generation).unwrap_or(-1)
 }
 
 /// Decode stored policy bytes; any failure is corrupt durable state.
