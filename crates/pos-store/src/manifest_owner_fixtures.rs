@@ -368,3 +368,79 @@ fn reference_leaf(scope: &ManifestOwnerScopeV1, kind: WorldArtifactKindV1) -> Fa
         .map(|member| member.leaf.digest())
         .ok_or_else(|| "missing fixture reference leaf".into())
 }
+
+type ContextRows = Vec<pos_core::LocalCutRecordingContextRowV1>;
+type ExpectedHeadRows = Vec<pos_core::LocalCutExpectedHeadRowV1>;
+
+/// Genesis chain hash attested by every fixture local-cut source owner.
+pub(crate) const SOURCE_GENESIS: Hash = hash(0x47);
+
+/// Zero-Event kind-8 and kind-4 rows for `snapshots`, in snapshot order.
+///
+/// Each row names the scope's recorded RLS1 and chains to `predecessor`.
+pub(crate) fn zero_event_inputs(
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+    predecessor: &dyn Fn(TimelineId) -> Option<Hash>,
+) -> Fallible<(ContextRows, ExpectedHeadRows)> {
+    let mut contexts = Vec::with_capacity(snapshots.len());
+    let mut heads = Vec::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        let timeline = &snapshot.timeline;
+        let lease = timeline
+            .members
+            .leaves
+            .iter()
+            .find(|member| member.leaf.as_input().kind == WorldArtifactKindV1::RetentionLease)
+            .ok_or("missing recorded lease leaf")?;
+        let predecessor_wcb_hash = predecessor(timeline.timeline_id);
+        contexts.push(pos_core::LocalCutRecordingContextRowV1 {
+            timeline_id: timeline.timeline_id,
+            wcs_hash: timeline.wcs1.digest(),
+            retention_lease_hash: lease.leaf.as_input().native_digest,
+            predecessor_wcb_hash,
+        });
+        heads.push(pos_core::LocalCutExpectedHeadRowV1 {
+            timeline_id: timeline.timeline_id,
+            logical_head: 0,
+            stitched_chain_hash: SOURCE_GENESIS,
+            source_timeline_id: timeline.timeline_id,
+            source_segment_head: 0,
+            source_chain_hash: SOURCE_GENESIS,
+            logical_prefix: 0,
+            lineage_proof_hash: None,
+            predecessor_wcb_hash,
+        });
+    }
+    Ok((contexts, heads))
+}
+
+/// Kind-5 rows naming the WCB1 the owner derives for each Timeline.
+pub(crate) fn zero_event_results(
+    operation_id: Hash,
+    seal: &pos_core::LocalCutSealV2,
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+    contexts: &[pos_core::LocalCutRecordingContextRowV1],
+) -> Fallible<Vec<pos_core::LocalCutResultHeadRowV1>> {
+    let mut rows = Vec::with_capacity(snapshots.len());
+    for (snapshot, context) in snapshots.iter().zip(contexts) {
+        let source = pos_core::LocalCutWorldClosureSourceV1 {
+            operation_id,
+            seal,
+            admission: snapshot,
+            retention_lease_hash: context.retention_lease_hash,
+            predecessor_binding_hash: context.predecessor_wcb_hash,
+            genesis_hash: SOURCE_GENESIS,
+        };
+        let closure = pos_core::derive_local_cut_world_closure_v1(&source)?;
+        rows.push(pos_core::LocalCutResultHeadRowV1 {
+            timeline_id: context.timeline_id,
+            result_logical_head: 0,
+            result_stitched_hash: SOURCE_GENESIS,
+            result_source_segment_head: 0,
+            result_source_chain_hash: SOURCE_GENESIS,
+            successor_wcb_hash: closure.binding().digest(),
+            event_count: 0,
+        });
+    }
+    Ok(rows)
+}

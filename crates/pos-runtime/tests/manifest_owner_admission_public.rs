@@ -54,6 +54,9 @@ const READ_LIMITS: WorldClosureReadLimitsV1 = WorldClosureReadLimitsV1 {
     max_combined_depth: 32,
 };
 
+/// Genesis chain hash attested by the fixture local-cut source owner.
+const SOURCE_GENESIS: Hash = hash(0x47);
+
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
 }
@@ -454,15 +457,16 @@ impl pos_core::LocalCutOwnerVerifierV1 for FixtureOwner {
                 && row.event_cursor == 0
                 && row.participant_native_state_hash == hash(91)
         });
-        let recording_contexts_are_current = request
-            .recording_context_rows
-            .iter()
-            .all(|row| row.retention_lease_hash == hash(104) && row.predecessor_wcb_hash.is_none());
-        (!self.rejected.load(Ordering::Relaxed)
-            && composition_is_current
-            && recording_contexts_are_current)
+        (!self.rejected.load(Ordering::Relaxed) && composition_is_current)
             .then_some(())
             .ok_or(pos_core::LocalCutOwnerErrorV1::OwnerRejected)
+    }
+
+    fn source_genesis_hash(
+        &self,
+        _timeline_id: TimelineId,
+    ) -> Result<Hash, pos_core::LocalCutOwnerErrorV1> {
+        Ok(SOURCE_GENESIS)
     }
 
     fn sign_local_cut_receipt(
@@ -684,7 +688,79 @@ struct LocalCutTransition {
     membership_epoch: u32,
     operation_id: Hash,
     result_inventory_generation: Hash,
-    result_heads_table: pos_core::LocalCutTableRefV1,
+    /// Recordings of earlier visible cuts, newest last, that name predecessors.
+    previous_recordings: Vec<pos_core::LocalCutWorldRecordingV1>,
+}
+
+fn predecessor_in(
+    recordings: &[pos_core::LocalCutWorldRecordingV1],
+    timeline_id: TimelineId,
+) -> Option<Hash> {
+    recordings
+        .iter()
+        .rev()
+        .find(|recording| recording.binding.as_input().timeline_id == timeline_id)
+        .map(|recording| recording.binding.digest())
+}
+
+/// Kind-5 rows naming the WCB1 the owner derives for each sealed Timeline.
+fn derived_result_heads(
+    request: &pos_core::LocalCutOwnerRequestV1,
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+) -> Result<Vec<pos_core::LocalCutResultHeadRowV1>, Box<dyn Error>> {
+    let mut rows = Vec::with_capacity(snapshots.len());
+    for (snapshot, context) in snapshots.iter().zip(&request.recording_context_rows) {
+        let source = pos_core::LocalCutWorldClosureSourceV1 {
+            operation_id: request.operation_id,
+            seal: &request.seal,
+            admission: snapshot,
+            retention_lease_hash: context.retention_lease_hash,
+            predecessor_binding_hash: context.predecessor_wcb_hash,
+            genesis_hash: SOURCE_GENESIS,
+        };
+        let closure = pos_core::derive_local_cut_world_closure_v1(&source)?;
+        rows.push(pos_core::LocalCutResultHeadRowV1 {
+            timeline_id: context.timeline_id,
+            result_logical_head: 0,
+            result_stitched_hash: SOURCE_GENESIS,
+            result_source_segment_head: 0,
+            result_source_chain_hash: SOURCE_GENESIS,
+            successor_wcb_hash: closure.binding().digest(),
+            event_count: 0,
+        });
+    }
+    Ok(rows)
+}
+
+/// Replace the seal and re-derive the kind-5 rows that name its WCB1s.
+fn resealed(
+    request: &pos_core::LocalCutOwnerRequestV1,
+    seal: pos_core::LocalCutSealInputV2,
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+) -> Result<pos_core::LocalCutOwnerRequestV1, Box<dyn Error>> {
+    let mut rebound = request.clone();
+    rebound.seal = pos_core::LocalCutSealV2::new(seal)?;
+    rebound.result_head_rows = derived_result_heads(&rebound, snapshots)?;
+    let table = pos_core::LocalCutHeadsTableV1::result_heads(
+        seal.owner_id,
+        seal.cut_id,
+        &rebound.result_head_rows,
+    )?;
+    rebound.result_heads_table = table.table_ref();
+    Ok(rebound)
+}
+
+fn recorded_lease(
+    snapshot: &pos_core::ManifestOwnerAdmissionSnapshotV1,
+) -> Result<Hash, Box<dyn Error>> {
+    let lease = snapshot
+        .timeline
+        .members
+        .leaves
+        .iter()
+        .find(|member| member.leaf.as_input().kind == WorldArtifactKindV1::RetentionLease)
+        .ok_or("missing recorded lease leaf")?;
+    Ok(lease.leaf.as_input().native_digest)
 }
 
 fn local_cut_request(
@@ -702,7 +778,7 @@ fn local_cut_request(
             membership_epoch: 0,
             operation_id: hash(102),
             result_inventory_generation: hash(111),
-            result_heads_table: local_cut_table(1, 105)?,
+            previous_recordings: Vec::new(),
         },
     )
 }
@@ -750,16 +826,34 @@ fn local_cut_request_for_admissions(
         }));
     }
     composition_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
-    let mut recording_context_rows = snapshots
-        .iter()
-        .map(|snapshot| pos_core::LocalCutRecordingContextRowV1 {
-            timeline_id: snapshot.timeline.timeline_id,
+    let mut recording_context_rows = Vec::with_capacity(snapshots.len());
+    let mut expected_head_rows = Vec::with_capacity(snapshots.len());
+    for snapshot in &snapshots {
+        let timeline_id = snapshot.timeline.timeline_id;
+        let predecessor_wcb_hash = predecessor_in(&transition.previous_recordings, timeline_id);
+        recording_context_rows.push(pos_core::LocalCutRecordingContextRowV1 {
+            timeline_id,
             wcs_hash: snapshot.timeline.wcs1.digest(),
-            retention_lease_hash: hash(104),
-            predecessor_wcb_hash: None,
-        })
-        .collect::<Vec<_>>();
-    recording_context_rows.sort_unstable_by_key(|row| row.timeline_id);
+            retention_lease_hash: recorded_lease(snapshot)?,
+            predecessor_wcb_hash,
+        });
+        expected_head_rows.push(pos_core::LocalCutExpectedHeadRowV1 {
+            timeline_id,
+            logical_head: 0,
+            stitched_chain_hash: SOURCE_GENESIS,
+            source_timeline_id: timeline_id,
+            source_segment_head: 0,
+            source_chain_hash: SOURCE_GENESIS,
+            logical_prefix: 0,
+            lineage_proof_hash: None,
+            predecessor_wcb_hash,
+        });
+    }
+    let expected_heads = pos_core::LocalCutHeadsTableV1::expected_heads(
+        owner_id,
+        transition.cut_id,
+        &expected_head_rows,
+    )?;
     let composition_table = local_cut_table(u64::try_from(composition_rows.len())?, 92)?;
     let recording_context_table =
         local_cut_table(u64::try_from(recording_context_rows.len())?, 93)?;
@@ -776,7 +870,7 @@ fn local_cut_request_for_admissions(
         composition_table,
         inbox_table: local_cut_table(0, 95)?,
         invocation_table: local_cut_table(0, 96)?,
-        expected_heads_table: transition.result_heads_table,
+        expected_heads_table: expected_heads.table_ref(),
         ebp_native_hash: hash(98),
         execution_profile_native_hash: hash(99),
         recording_context_table,
@@ -785,15 +879,17 @@ fn local_cut_request_for_admissions(
         ingress_preallocation_native_hash: hash(101),
         manifest_binding_table: manifest_binding_table.table_ref(),
     })?;
-    Ok(pos_core::LocalCutOwnerRequestV1 {
+    let request = pos_core::LocalCutOwnerRequestV1 {
         operation_id: transition.operation_id,
         seal,
         manifest_hash: hash(103),
         manifest_binding_table,
         composition_rows,
         recording_context_rows,
+        expected_head_rows,
+        result_head_rows: Vec::new(),
         partition_ledger_seq: transition.cut_id,
-        result_heads_table: transition.result_heads_table,
+        result_heads_table: local_cut_table(0, 105)?,
         participant_successor_table: local_cut_table(1, 106)?,
         cpu_completion_table: local_cut_table(0, 107)?,
         action_disposition_table: local_cut_table(1, 108)?,
@@ -801,7 +897,8 @@ fn local_cut_request_for_admissions(
         invocation_bridges_table: local_cut_table(0, 110)?,
         result_inventory_generation: transition.result_inventory_generation,
         release_fence_proof_digest: hash(112),
-    })
+    };
+    resealed(&request, *request.seal.as_input(), &snapshots)
 }
 
 fn admitted_snapshot<S: ManifestOwnerAdmissionPersistencePortV1>(
@@ -905,6 +1002,8 @@ fn registry_commits_local_cut_owner_and_recovers_without_authority() -> TestResu
     assert_eq!(recovered.kind, LocalCutOwnerCommitKindV1::ExactRetry);
     assert_eq!(recovered.commit, applied.commit);
     assert_eq!(recovered.receipt, applied.receipt);
+    assert_eq!(recovered.recordings, applied.recordings);
+    assert_eq!(applied.recordings.len(), 1);
 
     let without_authority = PluginRegistry::new().commit_admitted_local_cut_owner_v1(
         &admitted,
@@ -978,6 +1077,8 @@ fn sqlite_local_cut_owner_retry_survives_reopen_without_registry_authority() -> 
         .ok_or("SQLite local-cut owner record was not retained")?;
     assert_eq!(stored.commit, applied.commit);
     assert_eq!(stored.receipt, applied.receipt);
+    assert_eq!(stored.recordings, applied.recordings);
+    assert_eq!(retry.recordings, applied.recordings);
 
     let without_authority = PluginRegistry::new().commit_admitted_local_cut_owner_v1(
         &admitted,
@@ -1028,12 +1129,16 @@ fn commit_two_zero_output_cuts(
             membership_epoch: 0,
             operation_id: hash(124),
             result_inventory_generation: hash(125),
-            result_heads_table: local_cut_table(0, 105)?,
+            previous_recordings: Vec::new(),
         },
     )?;
     let first = registry.commit_admitted_local_cut_owner_v1(admitted, first_request, store)?;
     assert_eq!(first.kind, LocalCutOwnerCommitKindV1::Applied);
-    assert_eq!(first.commit.as_input().result_heads_table.row_count(), 0);
+    let result_heads = first.commit.as_input().result_heads_table;
+    assert_eq!(
+        result_heads.row_count(),
+        u64::try_from(expected_timelines.len())?
+    );
 
     let after_first = store
         .read_local_cut_owner_state_v1(owner_id)?
@@ -1058,15 +1163,15 @@ fn commit_two_zero_output_cuts(
             membership_epoch: after_first.membership_epoch,
             operation_id: hash(126),
             result_inventory_generation: hash(127),
-            result_heads_table: local_cut_table(0, 105)?,
+            previous_recordings: first.recordings.clone(),
         },
     )?;
     let second = registry.commit_admitted_local_cut_owner_v1(admitted, second_request, store)?;
     assert_eq!(second.kind, LocalCutOwnerCommitKindV1::Applied);
-    assert_eq!(
-        second.commit.as_input().result_heads_table,
-        first.commit.as_input().result_heads_table
-    );
+    for (earlier, later) in first.recordings.iter().zip(&second.recordings) {
+        let predecessor = later.binding.as_input().predecessor_binding_hash;
+        assert_eq!(predecessor, Some(earlier.binding.digest()));
+    }
     assert_ne!(second.commit.digest(), first.commit.digest());
     Ok((first, second))
 }
@@ -1150,7 +1255,7 @@ fn replace_scope_and_commit_third_cut(
             membership_epoch: after_replacement.membership_epoch,
             operation_id: hash(129),
             result_inventory_generation: hash(130),
-            result_heads_table: local_cut_table(0, 105)?,
+            previous_recordings: context.second.recordings.clone(),
         },
     )?;
     let third =
@@ -1285,7 +1390,7 @@ fn commit_sqlite_successor_and_reopen(
             membership_epoch: successor_state.membership_epoch,
             operation_id: hash(138),
             result_inventory_generation: hash(139),
-            result_heads_table: local_cut_table(0, 105)?,
+            previous_recordings: first.recordings.clone(),
         },
     )?;
     let second = input.registry.commit_admitted_local_cut_owner_v1(
@@ -1483,7 +1588,7 @@ fn assert_structural_local_cut_rejections(
             std::slice::from_ref(context.snapshot),
             context.verifier,
         ),
-        Err(pos_core::LocalCutOwnerErrorV1::OwnerRejected)
+        Err(pos_core::LocalCutOwnerErrorV1::Conflict)
     );
 }
 
@@ -2218,6 +2323,10 @@ impl pos_core::LocalCutOwnerVerifierV1 for FaultingCutVerifier {
         )
     }
 
+    fn source_genesis_hash(&self, timeline_id: TimelineId) -> CutResult<Hash> {
+        pos_core::LocalCutOwnerVerifierV1::source_genesis_hash(&self.inner, timeline_id)
+    }
+
     fn sign_local_cut_receipt(
         &self,
         commit: &pos_core::LocalCutCommitV1,
@@ -2630,11 +2739,11 @@ fn local_cut_preparation_rejects_unbound_manifest_rows() -> TestResult {
 fn with_composition_rows(
     request: &pos_core::LocalCutOwnerRequestV1,
     rows: Vec<pos_core::LocalCutCompositionBindingRowV1>,
+    snapshot: &pos_core::ManifestOwnerAdmissionSnapshotV1,
 ) -> Result<pos_core::LocalCutOwnerRequestV1, Box<dyn Error>> {
-    let mut rebound = request.clone();
-    let mut seal = *rebound.seal.as_input();
+    let mut seal = *request.seal.as_input();
     seal.composition_table = local_cut_table(u64::try_from(rows.len())?, 92)?;
-    rebound.seal = pos_core::LocalCutSealV2::new(seal)?;
+    let mut rebound = resealed(request, seal, std::slice::from_ref(snapshot))?;
     rebound.composition_rows = rows;
     Ok(rebound)
 }
@@ -2680,7 +2789,7 @@ fn local_cut_commits_without_kind_one_row_for_reducer_only_plugin() -> TestResul
     let mut unknown_rows = fixture.request.composition_rows.clone();
     unknown_rows.push(unknown_row);
     unknown_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
-    let unknown_plugin = with_composition_rows(&fixture.request, unknown_rows)?;
+    let unknown_plugin = with_composition_rows(&fixture.request, unknown_rows, &fixture.snapshot)?;
     let mut store = fixture.store;
     assert_eq!(
         fixture.registry.commit_admitted_local_cut_owner_v1(
@@ -2702,7 +2811,8 @@ fn local_cut_commits_without_kind_one_row_for_reducer_only_plugin() -> TestResul
         producer_rows.len() + 1,
         fixture.request.composition_rows.len()
     );
-    let reducer_omitted = with_composition_rows(&fixture.request, producer_rows)?;
+    let reducer_omitted =
+        with_composition_rows(&fixture.request, producer_rows, &fixture.snapshot)?;
     let applied = fixture.registry.commit_admitted_local_cut_owner_v1(
         &fixture.admitted,
         reducer_omitted.clone(),
@@ -2726,7 +2836,8 @@ fn local_cut_preparation_rejects_unknown_composition_and_partial_recording_rows(
 
     let mut omitted_rows = fixture.request.composition_rows.clone();
     omitted_rows.pop();
-    let omitted_composition = with_composition_rows(&fixture.request, omitted_rows)?;
+    let omitted_composition =
+        with_composition_rows(&fixture.request, omitted_rows, &fixture.snapshot)?;
     assert!(prepare_request(&fixture, omitted_composition, None).is_ok());
 
     let mut unknown_plugin = fixture.request.clone();

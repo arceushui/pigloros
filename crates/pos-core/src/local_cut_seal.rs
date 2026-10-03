@@ -12,8 +12,8 @@ pub const MAX_LOCAL_CUT_SEAL_BYTES_V2: usize = 16_384;
 pub const MAX_LOCAL_CUT_TABLE_ROWS_V1: u64 = 1_048_576;
 
 const DOMAIN: &[u8] = b"pigloros.local-cut.seal.v2\0";
-const PAGE_DOMAIN: &[u8] = b"pigloros.local-cut.page.v1\0";
-const BRANCH_DOMAIN: &[u8] = b"pigloros.local-cut.branch.v1\0";
+pub(crate) const PAGE_DOMAIN: &[u8] = b"pigloros.local-cut.page.v1\0";
+pub(crate) const BRANCH_DOMAIN: &[u8] = b"pigloros.local-cut.branch.v1\0";
 const CUT_SCOPE_DOMAIN: &[u8] = b"pigloros.local-cut.scope.v1\0";
 const MANIFEST_BINDING_KIND: u64 = 14;
 const MAX_PAGE_ROWS: usize = 64;
@@ -422,7 +422,7 @@ impl LocalCutManifestBindingBranchV1 {
     }
 }
 
-fn domain_digest(domain: &[u8], bytes: &[u8]) -> Hash {
+pub(crate) fn domain_digest(domain: &[u8], bytes: &[u8]) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(domain);
     hasher.update(bytes);
@@ -777,7 +777,7 @@ fn encode_table_ref(out: &mut Vec<u8>, reference: LocalCutTableRefV1) {
     encode_optional_hash(out, reference.root_hash);
 }
 
-fn encode_optional_hash(out: &mut Vec<u8>, hash: Option<Hash>) {
+pub(crate) fn encode_optional_hash(out: &mut Vec<u8>, hash: Option<Hash>) {
     if let Some(hash) = hash {
         encode_bytes(out, hash.as_bytes());
     } else {
@@ -785,12 +785,12 @@ fn encode_optional_hash(out: &mut Vec<u8>, hash: Option<Hash>) {
     }
 }
 
-fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     encode_head(out, 2, bytes.len() as u64);
     out.extend_from_slice(bytes);
 }
 
-fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
+pub(crate) fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     if value < 24 {
         // The low byte is exact here because the value is below 24.
         out.push((major << 5) | value.to_be_bytes()[7]);

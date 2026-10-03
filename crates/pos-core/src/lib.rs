@@ -38,8 +38,10 @@ pub mod hasher;
 pub mod ids;
 pub mod key_registry;
 pub mod local_cut_commit;
+pub mod local_cut_heads;
 pub mod local_cut_owner;
 pub mod local_cut_seal;
+pub mod local_cut_world_closure;
 pub mod manifest;
 pub mod manifest_owner_admission;
 pub mod manifest_owner_link;
@@ -235,6 +237,7 @@ pub use local_cut_commit::{
     LocalCutCommitV1, LocalCutReceiptInputV1, LocalCutReceiptV1, MAX_LOCAL_CUT_COMMIT_BYTES_V1,
     MAX_LOCAL_CUT_RECEIPT_BYTES_V1,
 };
+pub use local_cut_heads::{LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1, LocalCutResultHeadRowV1};
 pub use local_cut_owner::{
     local_cut_owner_intent_digest_v1, prepare_local_cut_owner_commit_v1,
     validate_local_cut_owner_result_v1, validate_local_cut_owner_successor_v1,
@@ -248,6 +251,11 @@ pub use local_cut_seal::{
     LocalCutManifestBindingPageV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
     LocalCutSealErrorV2, LocalCutSealInputV2, LocalCutSealV2, LocalCutTableRefV1,
     MAX_LOCAL_CUT_SEAL_BYTES_V2, MAX_LOCAL_CUT_TABLE_ROWS_V1,
+};
+pub use local_cut_world_closure::{
+    derive_local_cut_world_closure_v1, validate_local_cut_owner_predecessors_v1,
+    validate_local_cut_owner_recordings_v1, LocalCutWorldClosureSourceV1, LocalCutWorldClosureV1,
+    LocalCutWorldRecordingV1,
 };
 pub use manifest_owner_admission::{
     manifest_owner_admission_intent_digest_v1, prepare_manifest_owner_admission_v1,
