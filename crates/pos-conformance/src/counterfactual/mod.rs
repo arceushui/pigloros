@@ -7,8 +7,8 @@
 //! records. IDP1 items are reached through the [`dependency`] path. The
 //! crate-private CBOR helpers the schemas share live in `codec`.
 
-mod codec;
 pub mod checkpoint;
+mod codec;
 pub mod dependency;
 pub mod intervention;
 

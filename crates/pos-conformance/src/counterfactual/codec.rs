@@ -253,6 +253,20 @@ impl<'a> FieldReader<'a> {
         )
     }
 
+    /// Read a field that is either `null` or a byte string of exactly
+    /// `LENGTH` bytes.
+    pub(super) fn read_optional_bytes<const LENGTH: usize>(&mut self) -> Option<[u8; LENGTH]> {
+        self.read_with(optional_bytes_field::<LENGTH>, None)
+    }
+
+    /// Read a variable-length array field, decoding every item with `decode`.
+    ///
+    /// Item-count bounds are enforced by the [`CborLimits`] preflight and by
+    /// the contract's validation, not here.
+    pub(super) fn read_array<T>(&mut self, decode: fn(&Value) -> Result<T, WireError>) -> Vec<T> {
+        self.read_with(|value| array_values(value, decode), Vec::new())
+    }
+
     /// Read a node coordinate encoded by [`node_value`].
     pub(super) fn read_node(&mut self) -> DependencyNodeV1 {
         self.read_with(
@@ -307,6 +321,25 @@ fn enum_code<T: Copy>(code: u64, codes: &[T]) -> Result<T, WireError> {
         .and_then(|index| codes.get(index))
         .copied()
         .ok_or(WireError::UnknownEnum)
+}
+
+fn optional_bytes_field<const LENGTH: usize>(
+    value: &Value,
+) -> Result<Option<[u8; LENGTH]>, WireError> {
+    match value {
+        Value::Null => Ok(None),
+        value => fixed_bytes_field::<LENGTH>(value).map(Some),
+    }
+}
+
+fn array_values<T>(
+    value: &Value,
+    decode: fn(&Value) -> Result<T, WireError>,
+) -> Result<Vec<T>, WireError> {
+    match value {
+        Value::Array(values) => values.iter().map(decode).collect(),
+        _ => Err(WireError::InvalidEncoding),
+    }
 }
 
 fn node_field(value: &Value) -> Result<DependencyNodeV1, WireError> {
