@@ -11533,20 +11533,43 @@ fn validate_memory_local_cut_operation(
     let cut_id = operation.request.seal.as_input().cut_id;
     validate_local_cut_owner_result_v1(owner_id, cut_id, &operation.result)?;
     let commit = operation.result.commit.as_input();
-    if operation.request.operation_id != operation_id
-        || operation.result.seal != operation.request.seal
-        || commit.partition_ledger_seq != operation.request.partition_ledger_seq
-        || commit.manifest_hash != operation.request.manifest_hash
-        || commit.result_heads_table != operation.request.result_heads_table
-        || commit.participant_successor_table != operation.request.participant_successor_table
-        || commit.cpu_completion_table != operation.request.cpu_completion_table
-        || commit.action_disposition_table != operation.request.action_disposition_table
-        || commit.candidate_bases_table != operation.request.candidate_bases_table
-        || commit.invocation_bridges_table != operation.request.invocation_bridges_table
-        || commit.result_inventory_generation != operation.request.result_inventory_generation
-        || commit.release_fence_proof_digest != operation.request.release_fence_proof_digest
-        || cuts.get(&(owner_id, cut_id)) != Some(&operation_id)
-    {
+    let request = &operation.request;
+    // One tuple comparison keeps this exact-binding check branch-free.
+    let stored = (
+        (
+            &request.operation_id,
+            &operation.result.seal,
+            cuts.get(&(owner_id, cut_id)),
+        ),
+        (
+            &commit.partition_ledger_seq,
+            &commit.manifest_hash,
+            &commit.result_heads_table,
+            &commit.participant_successor_table,
+            &commit.cpu_completion_table,
+            &commit.action_disposition_table,
+            &commit.candidate_bases_table,
+            &commit.invocation_bridges_table,
+            &commit.result_inventory_generation,
+            &commit.release_fence_proof_digest,
+        ),
+    );
+    let expected = (
+        (&operation_id, &request.seal, Some(&operation_id)),
+        (
+            &request.partition_ledger_seq,
+            &request.manifest_hash,
+            &request.result_heads_table,
+            &request.participant_successor_table,
+            &request.cpu_completion_table,
+            &request.action_disposition_table,
+            &request.candidate_bases_table,
+            &request.invocation_bridges_table,
+            &request.result_inventory_generation,
+            &request.release_fence_proof_digest,
+        ),
+    );
+    if stored != expected {
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
     Ok(())
