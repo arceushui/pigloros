@@ -2,7 +2,6 @@
 //! the first atomic Tick, against both `MemoryStore` and `SqliteStore`.
 #![cfg(target_os = "linux")]
 
-use std::cell::Cell;
 use std::error::Error as _;
 use std::sync::Arc;
 
@@ -27,11 +26,13 @@ use pos_conformance::{
     UnknownEdgePolicyV1,
 };
 use pos_core::{
-    pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualGenerationReceiptV1,
-    CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualStoreErrorV1, CounterfactualStorePortV1, EntityId, ErasureContainmentGateV1,
-    Event, EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
-    PipelineContractErrorV1, Seq, SeqRange, Timeline, TimelineId, TimelineMeta,
+    pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualBasisV1,
+    CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
+    CounterfactualTickOutcomeV1, EntityId, ErasureContainmentGateV1, Event, EventDraft,
+    EventReadBounds, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
+    PipelineContractErrorV1, PipelineDraftBatchV1, Seq, SeqRange, Timeline, TimelineId,
+    TimelineMeta, MAX_PIPELINE_DRAFTS_PER_BATCH,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
@@ -39,16 +40,14 @@ use pos_runtime::counterfactual::coordinator::{
     CounterfactualFrontierDerivationV1, CounterfactualFrontierSourceV1,
     CounterfactualInterventionAuthorityV1, CounterfactualProvisionalOutputV1,
     CounterfactualTickFailureV1, CounterfactualTickInputsV1, CounterfactualTickStagerV1,
-    InterventionDecisionV1,
+    InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
 };
 use pos_runtime::counterfactual::suffix::{
-    CounterfactualAttestedEpochsV1, CounterfactualEpochSourceV1, CounterfactualEpochsV1,
     CounterfactualSuffixErrorV1 as SuffixError, CounterfactualSuffixFailureV1 as Failure,
-    CounterfactualSuffixRequestV1, CounterfactualSuffixRunV1,
-    COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1, SUFFIX_STATE_OWNER_V1,
+    CounterfactualSuffixRequestV1, CounterfactualSuffixRunV1, SUFFIX_STATE_OWNER_V1,
 };
-use pos_store::memory::{counterfactual_store::MemoryCounterfactualFactsV1, MemoryStore};
-use pos_store::sqlite::{SqliteCounterfactualFactsV1, SqliteStore};
+use pos_store::memory::MemoryStore;
+use pos_store::sqlite::SqliteStore;
 use pos_time::counterfactual::dependency_graph::{
     validate_dependency_graph_v1, DependencyGraphBoundsV1, DependencyGraphNodeOriginV1 as Origin,
     DependencyGraphNodeV1 as Node,
@@ -60,6 +59,12 @@ use ulid::Ulid;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type Suffix = Result<CounterfactualSuffixRunV1, SuffixError>;
+/// One change to the published facts of the Fork.
+type FactsChange = fn(&mut CounterfactualFactsV1);
+/// A published-facts change with the conflict it reports.
+type FactCase = (FactsChange, InvalidationConflictV1);
+/// The committed `(entity, type, payload)` of one Event.
+type CommittedEvent = (EntityId, Kind, Vec<u8>);
 
 const ENV: usize = 0;
 const WORLD_9: usize = 1;
@@ -132,15 +137,20 @@ fn event_draft(kind: &str, payload: Vec<u8>) -> EventDraft {
     )
 }
 
-/// The two deterministic Events every successful Tick stages.
-fn tick_drafts(tick: u64) -> Vec<EventDraft> {
-    (0..2_u8)
+/// `count` deterministic Events of `tick`.
+fn world_drafts(tick: u64, count: usize) -> Vec<EventDraft> {
+    (0..count)
         .map(|ordinal| {
             let mut payload = tick.to_be_bytes().to_vec();
-            payload.push(ordinal);
+            payload.extend_from_slice(&ordinal.to_be_bytes());
             event_draft("counterfactual.world", payload)
         })
         .collect()
+}
+
+/// The two deterministic Events every successful Tick stages.
+fn tick_drafts(tick: u64) -> Vec<EventDraft> {
+    world_drafts(tick, 2)
 }
 
 /// Fork `Seq` of the last recomputed Event of `tick`: the first Tick ends at
@@ -166,17 +176,8 @@ const fn committed_head(last: u64) -> u64 {
 // Backends
 // ---------------------------------------------------------------------------
 
-/// Host-published counterfactual facts of one Fork.
-#[derive(Clone, Copy)]
-struct Facts {
-    plan_digest: Hash,
-    dependency_graph_digest: Hash,
-    trust_epoch: u64,
-}
-
 trait Backend: EventStore + CounterfactualStorePortV1 + Sized {
     fn open() -> TestResult<Self>;
-    fn publish(&mut self, fork: TimelineId, facts: Facts) -> TestResult;
 }
 
 fn open_gate() -> Arc<ErasureContainmentGateV1> {
@@ -188,20 +189,6 @@ impl Backend for MemoryStore {
         let mut store = Self::new();
         store.bind_erasure_gate(open_gate())?;
         Ok(store)
-    }
-
-    fn publish(&mut self, fork: TimelineId, facts: Facts) -> TestResult {
-        self.publish_counterfactual_facts(
-            fork,
-            MemoryCounterfactualFactsV1 {
-                plan_digest: facts.plan_digest,
-                dependency_graph_digest: facts.dependency_graph_digest,
-                trust_epoch: facts.trust_epoch,
-                revocation_epoch: REVOCATION_EPOCH,
-                erasure_epoch: ERASURE_EPOCH,
-            },
-        )?;
-        Ok(())
     }
 }
 
@@ -217,42 +204,56 @@ impl Backend for SqliteStore {
         store.bind_erasure_gate(open_gate())?;
         Ok(store)
     }
-
-    fn publish(&mut self, fork: TimelineId, facts: Facts) -> TestResult {
-        self.publish_counterfactual_facts(
-            fork,
-            SqliteCounterfactualFactsV1 {
-                plan_digest: facts.plan_digest,
-                dependency_graph_digest: facts.dependency_graph_digest,
-                trust_epoch: facts.trust_epoch,
-                revocation_epoch: REVOCATION_EPOCH,
-                erasure_epoch: ERASURE_EPOCH,
-            },
-        )?;
-        Ok(())
-    }
 }
 
-/// Which read a [`Faulty`] store fails.
+/// Which read a [`Faulty`] store falsifies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StoreFault {
     None,
-    Generation,
+    /// The persisted basis read fails.
+    Basis,
     ArtifactError,
     ArtifactMissing,
     ArtifactGarbage,
-    EventRead,
-    FirstEventDropped,
-    FirstEventAltered,
+    /// Every artifact read serves this other committed artifact.
+    ArtifactSwapped(Hash),
+    /// Every Event read from this `Seq` on fails.
+    ReadFailsFrom(u64),
+    /// Every Event read omits the Event at this `Seq`.
+    Dropped(u64),
+    /// Every Event read alters the payload of the Event at this `Seq`.
+    Altered(u64),
 }
 
-/// A `MemoryStore` whose reads fail as configured.
-struct Faulty {
-    inner: MemoryStore,
+/// What a [`Faulty`] store does right before its `n`th later Tick append.
+#[derive(Clone, Copy)]
+enum Interference {
+    None,
+    /// Republish the Fork's facts with one change.
+    Republish(usize, FactsChange),
+    /// Append one foreign Event to the Fork.
+    ForeignAppend(usize),
+}
+
+/// A store whose reads and Tick appends are falsified as configured.
+struct Faulty<B> {
+    inner: B,
     fault: StoreFault,
+    interference: Interference,
+    appends: usize,
 }
 
-impl EventStore for Faulty {
+impl<B> Faulty<B> {
+    fn falsify(&self, mut event: Event) -> Option<Event> {
+        let seq = event.seq.as_u64();
+        if self.fault == StoreFault::Altered(seq) {
+            event.payload = CanonicalBytes::from_vec(vec![0xee]);
+        }
+        (self.fault != StoreFault::Dropped(seq)).then_some(event)
+    }
+}
+
+impl<B: Backend> EventStore for Faulty<B> {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         self.inner.create_timeline(name)
     }
@@ -270,23 +271,23 @@ impl EventStore for Faulty {
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        if self.fault == StoreFault::EventRead {
+        self.inner.read(timeline, range)
+    }
+
+    fn read_bounded(
+        &self,
+        timeline: TimelineId,
+        range: SeqRange,
+        bounds: EventReadBounds,
+    ) -> Result<Vec<Event>, CoreError> {
+        if matches!(self.fault, StoreFault::ReadFailsFrom(seq) if range.from.as_u64() >= seq) {
             return Err(CoreError::Storage("injected read failure".to_owned()));
         }
-        let skip = usize::from(self.fault == StoreFault::FirstEventDropped);
-        let alter = self.fault == StoreFault::FirstEventAltered;
         Ok(self
             .inner
-            .read(timeline, range)?
+            .read_bounded(timeline, range, bounds)?
             .into_iter()
-            .skip(skip)
-            .enumerate()
-            .map(|(position, mut event)| {
-                if alter && position == 0 {
-                    event.payload = CanonicalBytes::from_vec(vec![0xee]);
-                }
-                event
-            })
+            .filter_map(|event| self.falsify(event))
             .collect())
     }
 
@@ -307,7 +308,15 @@ impl EventStore for Faulty {
     }
 }
 
-impl CounterfactualStorePortV1 for Faulty {
+impl<B: Backend> CounterfactualStorePortV1 for Faulty<B> {
+    fn publish_counterfactual_facts(
+        &mut self,
+        fork: TimelineId,
+        facts: CounterfactualFactsV1,
+    ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1> {
+        self.inner.publish_counterfactual_facts(fork, facts)
+    }
+
     fn commit_counterfactual_invalidation(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
@@ -315,14 +324,45 @@ impl CounterfactualStorePortV1 for Faulty {
         self.inner.commit_counterfactual_invalidation(command)
     }
 
+    fn append_counterfactual_tick(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
+        self.appends += 1;
+        match self.interference {
+            Interference::Republish(at, change) if at == self.appends => {
+                let mut facts = self.inner.current_counterfactual_basis(fork)?.facts;
+                change(&mut facts);
+                self.inner.publish_counterfactual_facts(fork, facts)?;
+            }
+            Interference::ForeignAppend(at) if at == self.appends => {
+                self.inner
+                    .append(fork, &[event_draft("counterfactual.world", vec![1])])
+                    .or(Err(CounterfactualStoreErrorV1::StorageFailure))?;
+            }
+            _ => {}
+        }
+        self.inner
+            .append_counterfactual_tick(fork, expected, drafts)
+    }
+
     fn current_fork_generation(
         &self,
         fork: TimelineId,
     ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1> {
-        if self.fault == StoreFault::Generation {
+        self.inner.current_fork_generation(fork)
+    }
+
+    fn current_counterfactual_basis(
+        &self,
+        fork: TimelineId,
+    ) -> Result<CounterfactualBasisV1, CounterfactualStoreErrorV1> {
+        if self.fault == StoreFault::Basis {
             Err(CounterfactualStoreErrorV1::CorruptState)
         } else {
-            self.inner.current_fork_generation(fork)
+            self.inner.current_counterfactual_basis(fork)
         }
     }
 
@@ -335,21 +375,20 @@ impl CounterfactualStorePortV1 for Faulty {
             StoreFault::ArtifactError => Err(CounterfactualStoreErrorV1::StorageFailure),
             StoreFault::ArtifactMissing => Ok(None),
             StoreFault::ArtifactGarbage => Ok(Some(vec![0])),
+            StoreFault::ArtifactSwapped(other) => self.inner.read_generation_artifact(at, other),
             _ => self.inner.read_generation_artifact(at, artifact_digest),
         }
     }
 }
 
-impl Backend for Faulty {
+impl<B: Backend> Backend for Faulty<B> {
     fn open() -> TestResult<Self> {
         Ok(Self {
-            inner: <MemoryStore as Backend>::open()?,
+            inner: B::open()?,
             fault: StoreFault::None,
+            interference: Interference::None,
+            appends: 0,
         })
-    }
-
-    fn publish(&mut self, fork: TimelineId, facts: Facts) -> TestResult {
-        Backend::publish(&mut self.inner, fork, facts)
     }
 }
 
@@ -602,13 +641,17 @@ impl CounterfactualInterventionAuthorityV1 for Authority {
     }
 }
 
-/// How a [`Stager`] fails one Tick.
+/// How a [`Stager`] stages one Tick differently.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     Error,
     Empty,
     Reserved,
     Consent,
+    /// One draft fewer than a batch holds: the checkpoint Event fills it.
+    Wide,
+    /// A full batch: the checkpoint Event no longer fits.
+    Full,
 }
 
 /// What the stager saw: only its staged inputs.
@@ -621,7 +664,7 @@ struct Seen {
     fixed_policy: Vec<FrozenArtifactDescriptorV1>,
 }
 
-/// Stages [`tick_drafts`], or fails one Tick with `fault`.
+/// Stages [`tick_drafts`], or stages one Tick with `fault`.
 #[derive(Default)]
 struct Stager {
     fault: Option<(u64, Fault)>,
@@ -671,46 +714,9 @@ impl CounterfactualTickStagerV1 for Stager {
                 vec![1],
             )]),
             Some(Fault::Consent) => Ok(vec![event_draft("consent.grant", vec![1])]),
+            Some(Fault::Wide) => Ok(world_drafts(tick, MAX_PIPELINE_DRAFTS_PER_BATCH - 1)),
+            Some(Fault::Full) => Ok(world_drafts(tick, MAX_PIPELINE_DRAFTS_PER_BATCH)),
         }
-    }
-}
-
-/// Reports the admitted epochs for `stable_calls` calls, then `change`d ones.
-struct Epochs {
-    admitted: CounterfactualEpochsV1,
-    stable_calls: usize,
-    change: fn(&mut CounterfactualEpochsV1),
-    calls: Cell<usize>,
-}
-
-impl Epochs {
-    fn stable(fixture: &Fixture) -> Self {
-        Self::changing(fixture, usize::MAX, |_| {})
-    }
-
-    fn changing(
-        fixture: &Fixture,
-        stable_calls: usize,
-        change: fn(&mut CounterfactualEpochsV1),
-    ) -> Self {
-        Self {
-            admitted: admitted_epochs(fixture),
-            stable_calls,
-            change,
-            calls: Cell::new(0),
-        }
-    }
-}
-
-impl CounterfactualEpochSourceV1 for Epochs {
-    fn current_epochs(&self) -> CounterfactualEpochsV1 {
-        let calls = self.calls.get();
-        self.calls.set(calls + 1);
-        let mut epochs = self.admitted;
-        if calls >= self.stable_calls {
-            (self.change)(&mut epochs);
-        }
-        epochs
     }
 }
 
@@ -722,6 +728,7 @@ struct Fixture {
     plan: CounterfactualPlanV1,
     profile: ExecutionProfileV1,
     snapshot: TrustPolicySnapshotV1,
+    facts: CounterfactualFactsV1,
     receipt: CounterfactualGenerationReceiptV1,
 }
 
@@ -729,14 +736,6 @@ struct Setup<B> {
     coordinator: CounterfactualCoordinatorV1<B>,
     source: Source,
     fixture: Fixture,
-}
-
-fn admitted_epochs(fixture: &Fixture) -> CounterfactualEpochsV1 {
-    CounterfactualEpochsV1 {
-        trust: fixture.snapshot.epoch,
-        revocation: REVOCATION_EPOCH,
-        erasure: ERASURE_EPOCH,
-    }
 }
 
 fn admission_request<'a>(
@@ -785,14 +784,14 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_trust_policy_snapshot_bytes_v1()?)?;
     let plan = plan(&profile, &snapshot, edit)?;
     let mut source = Source::new(&plan)?;
-    store.publish(
-        fork_id(),
-        Facts {
-            plan_digest: Hash::from_bytes(plan.plan_digest),
-            dependency_graph_digest: Hash::from_bytes(source.graph_digest(&plan)?),
-            trust_epoch: snapshot.epoch,
-        },
-    )?;
+    let facts = CounterfactualFactsV1 {
+        plan_digest: Hash::from_bytes(plan.plan_digest),
+        dependency_graph_digest: Hash::from_bytes(source.graph_digest(&plan)?),
+        trust_epoch: snapshot.epoch,
+        revocation_epoch: REVOCATION_EPOCH,
+        erasure_epoch: ERASURE_EPOCH,
+    };
+    store.publish_counterfactual_facts(fork_id(), facts)?;
     let mut coordinator = CounterfactualCoordinatorV1::new(store);
     let receipt = coordinator.admit(
         &admission_request(&plan, &profile, &snapshot),
@@ -807,6 +806,7 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
             plan,
             profile,
             snapshot,
+            facts,
             receipt,
         },
     })
@@ -829,28 +829,50 @@ fn reopen<B: Backend>(
     })
 }
 
+/// Republish the admitted facts with `change` applied.
+fn republish<B: Backend>(setup: Setup<B>, change: FactsChange) -> TestResult<Setup<B>> {
+    let mut facts = setup.fixture.facts;
+    change(&mut facts);
+    reopen(setup, |store| {
+        store.publish_counterfactual_facts(fork_id(), facts)?;
+        Ok(())
+    })
+}
+
+/// Configure a [`Faulty`] store from now on.
+fn configure<B: Backend>(
+    setup: Setup<Faulty<B>>,
+    fault: StoreFault,
+    interference: Interference,
+) -> TestResult<Setup<Faulty<B>>> {
+    reopen(setup, |store| {
+        store.fault = fault;
+        store.interference = interference;
+        store.appends = 0;
+        Ok(())
+    })
+}
+
 fn suffix_request(fixture: &Fixture) -> CounterfactualSuffixRequestV1<'_> {
     CounterfactualSuffixRequestV1 {
         plan: &fixture.plan,
         receipt: fixture.receipt,
-        attested_epochs: CounterfactualAttestedEpochsV1 {
-            revocation: REVOCATION_EPOCH,
-            erasure: ERASURE_EPOCH,
-        },
         result_id: RESULT_ID,
         evaluator_identity_digest: EVALUATOR,
     }
 }
 
-fn run_with<B: Backend>(setup: &mut Setup<B>, epochs: &Epochs, stager: &mut Stager) -> Suffix {
+fn run<B: Backend>(setup: &mut Setup<B>, stager: &mut Stager) -> Suffix {
     setup
         .coordinator
-        .recompute_suffix(&suffix_request(&setup.fixture), epochs, stager)
+        .recompute_suffix(&suffix_request(&setup.fixture), stager)
 }
 
-fn run<B: Backend>(setup: &mut Setup<B>, stager: &mut Stager) -> Suffix {
-    let epochs = Epochs::stable(&setup.fixture);
-    run_with(setup, &epochs, stager)
+/// Run with a stager that must not be called and expect `error`.
+fn assert_rejected<B: Backend>(setup: &mut Setup<B>, error: SuffixError) {
+    let mut stager = Stager::default();
+    assert_eq!(run(setup, &mut stager), Err(error));
+    assert!(stager.seen.is_empty());
 }
 
 fn head<B: Backend>(setup: &Setup<B>) -> TestResult<u64> {
@@ -961,19 +983,18 @@ fn decoded_checkpoints(run: &CounterfactualSuffixRunV1) -> TestResult<Vec<Recomp
         .collect()
 }
 
-/// Assert `run` failed with `failure` at `tick` and committed nothing of it.
-fn assert_failed_at<B: Backend>(
+/// Assert `run` failed with `failure` at `tick` after the Ticks before it.
+fn assert_run_failed_at<B: Backend>(
     setup: &Setup<B>,
     run: &CounterfactualSuffixRunV1,
     failure: Failure,
-    code: CounterfactualTerminalErrorCodeV1,
     tick: u64,
 ) -> TestResult {
     let checkpoints = expected_checkpoints(&setup.fixture, tick - 1)?;
     assert_eq!(run.failure, Some(failure));
     assert_eq!(decoded_checkpoints(run)?, checkpoints);
     let terminal = CounterfactualTerminalErrorV1 {
-        code,
+        code: failure.code(),
         tick,
         scheduler_position: 0,
         safe_digest: None,
@@ -982,6 +1003,20 @@ fn assert_failed_at<B: Backend>(
         CounterfactualResultV1::from_canonical_cbor(&run.result)?,
         expected_result(&setup.fixture, &checkpoints, Some(terminal))?
     );
+    Ok(())
+}
+
+/// Assert `run` failed with `failure` and `code` at `tick` and committed
+/// nothing of it.
+fn assert_failed_at<B: Backend>(
+    setup: &Setup<B>,
+    run: &CounterfactualSuffixRunV1,
+    failure: Failure,
+    code: CounterfactualTerminalErrorCodeV1,
+    tick: u64,
+) -> TestResult {
+    assert_eq!(failure.code(), code);
+    assert_run_failed_at(setup, run, failure, tick)?;
     assert_eq!(head(setup)?, committed_head(tick - 1));
     Ok(())
 }
@@ -1004,6 +1039,23 @@ macro_rules! both_backends {
             }
         }
     };
+}
+
+/// The committed `(entity, type, payload)` of every Event after the cut.
+fn committed_events<B: Backend>(setup: &Setup<B>) -> TestResult<Vec<CommittedEvent>> {
+    Ok(setup
+        .coordinator
+        .store()
+        .read(fork_id(), SeqRange::from_seq(Seq::from_u64(CUT_SEQ + 1)))?
+        .into_iter()
+        .map(|event| {
+            (
+                event.entity,
+                event.event_type,
+                event.payload.as_slice().to_vec(),
+            )
+        })
+        .collect())
 }
 
 fn recomputes_every_tick_through_the_horizon<B: Backend>() -> TestResult {
@@ -1039,7 +1091,6 @@ fn recomputes_every_tick_through_the_horizon<B: Backend>() -> TestResult {
     assert!(result.is_complete());
 
     // Each later Tick committed its Events and then its exact RCP1 bytes.
-    let events = store.read(fork_id(), SeqRange::from_seq(Seq::from_u64(CUT_SEQ + 1)))?;
     let mut expected_events = tick_drafts(FRONTIER_TICK);
     for (tick, bytes) in (FRONTIER_TICK + 1..).zip(&run.checkpoints[1..]) {
         expected_events.extend(tick_drafts(tick));
@@ -1049,21 +1100,17 @@ fn recomputes_every_tick_through_the_horizon<B: Backend>() -> TestResult {
             CanonicalBytes::from_vec(bytes.clone()),
         ));
     }
-    let committed: Vec<_> = events
-        .iter()
-        .map(|event| {
+    let staged: Vec<_> = expected_events
+        .into_iter()
+        .map(|draft| {
             (
-                event.entity,
-                event.event_type.clone(),
-                event.payload.clone(),
+                draft.entity,
+                draft.event_type,
+                draft.payload.as_slice().to_vec(),
             )
         })
         .collect();
-    let staged: Vec<_> = expected_events
-        .into_iter()
-        .map(|draft| (draft.entity, draft.event_type, draft.payload))
-        .collect();
-    assert_eq!(committed, staged);
+    assert_eq!(committed_events(&setup)?, staged);
     Ok(())
 }
 both_backends!(recomputes_every_tick_through_the_horizon);
@@ -1083,7 +1130,10 @@ fn runs_are_repeatable_across_calls_and_backends() -> TestResult {
     Ok(())
 }
 
-const TICK_FAULTS: [(Fault, Failure, CounterfactualTerminalErrorCodeV1); 4] = [
+/// One stager fault with the Tick failure and `CFR1` code it causes.
+type TickFault = (Fault, Failure, CounterfactualTerminalErrorCodeV1);
+
+const TICK_FAULTS: [TickFault; 5] = [
     (
         Fault::Error,
         Failure::PluginFailure,
@@ -1097,6 +1147,11 @@ const TICK_FAULTS: [(Fault, Failure, CounterfactualTerminalErrorCodeV1); 4] = [
     (
         Fault::Reserved,
         Failure::ReservedEventType,
+        CounterfactualTerminalErrorCodeV1::PluginFailure,
+    ),
+    (
+        Fault::Full,
+        Failure::StagedTickRejected(PipelineContractErrorV1::BatchCountExceeded),
         CounterfactualTerminalErrorCodeV1::PluginFailure,
     ),
     (
@@ -1128,90 +1183,99 @@ fn failed_tick_commits_nothing_and_retries_deterministically<B: Backend>() -> Te
 }
 both_backends!(failed_tick_commits_nothing_and_retries_deterministically);
 
-fn epoch_change_stops_before_the_next_tick<B: Backend>() -> TestResult {
-    let reference = reference()?;
-    let changes: [(fn(&mut CounterfactualEpochsV1), InvalidationConflictV1); 3] = [
+/// Every published fact the Tick basis binds, with the conflict it reports.
+fn fact_changes() -> [FactCase; 5] {
+    [
         (
-            |epochs| epochs.trust += 1,
+            |facts| facts.plan_digest = Hash::from_bytes([0xe1; 32]),
+            InvalidationConflictV1::PlanDigest,
+        ),
+        (
+            |facts| facts.dependency_graph_digest = Hash::from_bytes([0xe2; 32]),
+            InvalidationConflictV1::DependencyGraphDigest,
+        ),
+        (
+            |facts| facts.trust_epoch += 1,
             InvalidationConflictV1::TrustEpoch,
         ),
         (
-            |epochs| epochs.revocation += 1,
+            |facts| facts.revocation_epoch += 1,
             InvalidationConflictV1::RevocationEpoch,
         ),
         (
-            |epochs| epochs.erasure += 1,
+            |facts| facts.erasure_epoch += 1,
             InvalidationConflictV1::ErasureEpoch,
         ),
-    ];
-    for (change, conflict) in changes {
-        let mut setup = prepare::<B>()?;
-        let epochs = Epochs::changing(&setup.fixture, 2, change);
+    ]
+}
+
+fn changed_facts_make_the_next_tick_stale<B: Backend>() -> TestResult {
+    let reference = reference()?;
+    for (change, conflict) in fact_changes() {
+        let setup = prepare::<Faulty<B>>()?;
+        // The facts change right before Tick 14's append, after staging it.
+        let mut setup = configure(setup, StoreFault::None, Interference::Republish(3, change))?;
         let mut stager = Stager::default();
-        let failed = run_with(&mut setup, &epochs, &mut stager)?;
-        // The epochs are checked after staging, immediately before the commit.
+        let failed = run(&mut setup, &mut stager)?;
         assert_eq!(stager.ticks(), vec![12, 13, 14]);
         assert_failed_at(
             &setup,
             &failed,
-            Failure::EpochChanged(conflict),
+            Failure::InvalidationConflict(conflict),
             CounterfactualTerminalErrorCodeV1::InvalidationConflict,
             14,
         )?;
+        // While the facts stay changed, every retry is stale too.
+        let mut stager = Stager::default();
+        assert_eq!(run(&mut setup, &mut stager)?, failed);
+        assert_eq!(stager.ticks(), vec![14]);
+
+        let mut setup = republish(setup, |_| {})?;
         assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
     }
     Ok(())
 }
-both_backends!(epoch_change_stops_before_the_next_tick);
+both_backends!(changed_facts_make_the_next_tick_stale);
 
-fn completed_generation_rechecks_epochs<B: Backend>() -> TestResult {
+fn another_writer_is_fenced_out<B: Backend>() -> TestResult {
+    let setup = prepare::<Faulty<B>>()?;
+    let mut setup = configure(setup, StoreFault::None, Interference::ForeignAppend(2))?;
+    let failed = run(&mut setup, &mut Stager::default())?;
+    // The foreign Event moved the Fork head, so Tick 13 committed nothing.
+    assert_run_failed_at(
+        &setup,
+        &failed,
+        Failure::InvalidationConflict(InvalidationConflictV1::LogicalHead),
+        13,
+    )?;
+    assert_eq!(head(&setup)?, committed_head(12) + 1);
+    // The foreign Event closes no Tick, so the suffix no longer recovers.
+    assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+    Ok(())
+}
+both_backends!(another_writer_is_fenced_out);
+
+fn completed_generation_rechecks_the_persisted_basis<B: Backend>() -> TestResult {
     let reference = reference()?;
-    let mut setup = prepare::<B>()?;
-    assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
-    let epochs = Epochs::changing(&setup.fixture, 0, |epochs| epochs.revocation += 1);
-    let mut stager = Stager::default();
-    assert_eq!(
-        run_with(&mut setup, &epochs, &mut stager),
-        Err(SuffixError::EpochChanged(
-            InvalidationConflictV1::RevocationEpoch
-        ))
-    );
-    assert!(stager.seen.is_empty());
-    assert_eq!(head(&setup)?, committed_head(HORIZON_TICK));
-    assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
+    for (change, conflict) in fact_changes() {
+        let mut setup = prepare::<B>()?;
+        assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
+        let mut setup = republish(setup, change)?;
+        assert_rejected(&mut setup, SuffixError::InvalidationConflict(conflict));
+        assert_eq!(head(&setup)?, committed_head(HORIZON_TICK));
+        let mut setup = republish(setup, |_| {})?;
+        assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
+    }
     Ok(())
 }
-both_backends!(completed_generation_rechecks_epochs);
+both_backends!(completed_generation_rechecks_the_persisted_basis);
 
-#[test]
-fn attested_epochs_are_bound_by_committed_checkpoints() -> TestResult {
-    let mut setup = prepare::<MemoryStore>()?;
-    run(&mut setup, &mut Stager::failing(13, Fault::Error))?;
-    // A host attesting its new epochs cannot resume a stale generation once a
-    // later Tick committed: its chained state covers the admitted epochs.
-    let change: fn(&mut CounterfactualEpochsV1) = |epochs| epochs.revocation += 1;
-    let epochs = Epochs::changing(&setup.fixture, 0, change);
-    let request = CounterfactualSuffixRequestV1 {
-        attested_epochs: CounterfactualAttestedEpochsV1 {
-            revocation: REVOCATION_EPOCH + 1,
-            erasure: ERASURE_EPOCH,
-        },
-        ..suffix_request(&setup.fixture)
-    };
-    let mut stager = Stager::default();
-    assert_eq!(
-        setup
-            .coordinator
-            .recompute_suffix(&request, &epochs, &mut stager),
-        Err(SuffixError::RecoveryMismatch)
-    );
-    assert!(stager.seen.is_empty());
-    Ok(())
-}
+/// A plan edit with the declared and the incomplete replay claim.
+type ClaimCase = (fn(&mut CounterfactualPlanV1), ReplayClaimV1, ReplayClaimV1);
 
 #[test]
 fn incomplete_results_weaken_only_exact_claims() -> TestResult {
-    let cases: [(fn(&mut CounterfactualPlanV1), ReplayClaimV1, ReplayClaimV1); 5] = [
+    let cases: [ClaimCase; 5] = [
         (|_| {}, ReplayClaimV1::Exact, ReplayClaimV1::StructuralOnly),
         (
             |plan| plan.replay_claim = ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
@@ -1283,6 +1347,22 @@ fn sqlite_coordinator_recovers_after_reopening_the_database() -> TestResult {
     Ok(())
 }
 
+fn recovery_pages_through_the_widest_ticks<B: Backend>() -> TestResult {
+    // A widest Tick fills one batch with its checkpoint Event and pushes the
+    // suffix past one recovery page, as the first later or the last Tick.
+    for wide in [FRONTIER_TICK + 1, HORIZON_TICK] {
+        let mut setup = prepare::<B>()?;
+        let completed = run(&mut setup, &mut Stager::failing(wide, Fault::Wide))?;
+        assert_eq!(completed.failure, None);
+        assert!(head(&setup)? > FIRST_TICK_HEAD + MAX_PIPELINE_DRAFTS_PER_BATCH as u64);
+        let mut stager = Stager::default();
+        assert_eq!(run(&mut setup, &mut stager)?, completed);
+        assert!(stager.seen.is_empty());
+    }
+    Ok(())
+}
+both_backends!(recovery_pages_through_the_widest_ticks);
+
 fn stale_generation_and_foreign_plans_are_rejected<B: Backend>() -> TestResult {
     let mut setup = prepare::<B>()?;
     let Setup {
@@ -1296,12 +1376,9 @@ fn stale_generation_and_foreign_plans_are_rejected<B: Backend>() -> TestResult {
         source,
         &mut Stager::default(),
     )?;
-    let mut stager = Stager::default();
-    assert_eq!(
-        run(&mut setup, &mut stager),
-        Err(SuffixError::Store(
-            CounterfactualStoreErrorV1::MixedForkGeneration
-        ))
+    assert_rejected(
+        &mut setup,
+        SuffixError::Store(CounterfactualStoreErrorV1::MixedForkGeneration),
     );
 
     let mut setup = prepare::<B>()?;
@@ -1317,15 +1394,13 @@ fn stale_generation_and_foreign_plans_are_rejected<B: Backend>() -> TestResult {
             SuffixError::Plan(CounterfactualPlanContractErrorV1::DigestMismatch),
         ),
     ];
-    let epochs = Epochs::stable(&setup.fixture);
+    let mut stager = Stager::default();
     for (plan, expected) in cases {
         let request = CounterfactualSuffixRequestV1 {
             plan: &plan,
             ..suffix_request(&setup.fixture)
         };
-        let result = setup
-            .coordinator
-            .recompute_suffix(&request, &epochs, &mut stager);
+        let result = setup.coordinator.recompute_suffix(&request, &mut stager);
         assert_eq!(result, Err(expected));
     }
     assert!(stager.seen.is_empty());
@@ -1333,6 +1408,30 @@ fn stale_generation_and_foreign_plans_are_rejected<B: Backend>() -> TestResult {
     Ok(())
 }
 both_backends!(stale_generation_and_foreign_plans_are_rejected);
+
+#[test]
+fn another_generations_invalidation_is_rejected() -> TestResult {
+    let mut setup = prepare::<Faulty<MemoryStore>>()?;
+    let earlier = setup.fixture.receipt;
+    let Setup {
+        coordinator,
+        source,
+        fixture,
+    } = &mut setup;
+    fixture.receipt = coordinator.admit(
+        &admission_request(&fixture.plan, &fixture.profile, &fixture.snapshot),
+        &Authority,
+        source,
+        &mut Stager::default(),
+    )?;
+    // The store serves generation 1's retained `SIV1` for generation 2's.
+    let swapped = StoreFault::ArtifactSwapped(earlier.invalidation_digest());
+    let mut setup = configure(setup, swapped, Interference::None)?;
+    assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+    let mut setup = configure(setup, StoreFault::None, Interference::None)?;
+    assert_eq!(run(&mut setup, &mut Stager::default())?.failure, None);
+    Ok(())
+}
 
 fn tampered_suffix_events_are_rejected<B: Backend>() -> TestResult {
     let forged = event_draft(COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1, vec![0]);
@@ -1351,65 +1450,76 @@ fn tampered_suffix_events_are_rejected<B: Backend>() -> TestResult {
             store.append(fork_id(), drafts)?;
             Ok(())
         })?;
-        let mut stager = Stager::default();
-        assert_eq!(
-            run(&mut setup, &mut stager),
-            Err(SuffixError::RecoveryMismatch)
-        );
-        assert!(stager.seen.is_empty());
+        assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
     }
     Ok(())
 }
 both_backends!(tampered_suffix_events_are_rejected);
 
-#[test]
-fn store_read_faults_are_closed() -> TestResult {
-    let cases = [
-        (
-            StoreFault::Generation,
-            SuffixError::Store(CounterfactualStoreErrorV1::CorruptState),
-        ),
-        (
-            StoreFault::ArtifactError,
-            SuffixError::Store(CounterfactualStoreErrorV1::StorageFailure),
-        ),
-        (StoreFault::ArtifactMissing, SuffixError::RecoveryMismatch),
-        (StoreFault::ArtifactGarbage, SuffixError::RecoveryMismatch),
-        (
-            StoreFault::EventRead,
-            SuffixError::Store(CounterfactualStoreErrorV1::StorageFailure),
-        ),
-        // Only the first Tick is committed: its Event count is bound.
-        (StoreFault::FirstEventDropped, SuffixError::RecoveryMismatch),
-    ];
-    for (fault, expected) in cases {
-        let setup = prepare::<Faulty>()?;
-        let mut setup = reopen(setup, |store| {
-            store.fault = fault;
-            Ok(())
-        })?;
-        let mut stager = Stager::default();
-        assert_eq!(run(&mut setup, &mut stager), Err(expected));
-        assert!(stager.seen.is_empty());
-    }
-    Ok(())
-}
+/// A store fault with the error recovery reports for it.
+type FaultCase = (StoreFault, SuffixError);
+
+const STORAGE: SuffixError = SuffixError::Store(CounterfactualStoreErrorV1::StorageFailure);
+
+/// Faults while only the first Tick is committed.
+const FIRST_TICK_FAULTS: [FaultCase; 6] = [
+    (
+        StoreFault::Basis,
+        SuffixError::Store(CounterfactualStoreErrorV1::CorruptState),
+    ),
+    (StoreFault::ArtifactError, STORAGE),
+    (StoreFault::ArtifactMissing, SuffixError::RecoveryMismatch),
+    (StoreFault::ArtifactGarbage, SuffixError::RecoveryMismatch),
+    (StoreFault::ReadFailsFrom(CUT_SEQ + 1), STORAGE),
+    // The first Tick's exact Event range is bound.
+    (
+        StoreFault::Dropped(CUT_SEQ + 1),
+        SuffixError::RecoveryMismatch,
+    ),
+];
+
+/// Faults once Ticks 12 through 14 are committed.
+const LATER_TICK_FAULTS: [FaultCase; 6] = [
+    (StoreFault::ReadFailsFrom(FIRST_TICK_HEAD + 1), STORAGE),
+    (
+        StoreFault::Dropped(tick_seq(13)),
+        SuffixError::RecoveryMismatch,
+    ),
+    // Tick 13's checkpoint is decoded and must be exactly its own `RCP1`.
+    (
+        StoreFault::Altered(committed_head(13)),
+        SuffixError::RecoveryMismatch,
+    ),
+    // Tick 12's re-derived `RCP1` binds the first Tick's content.
+    (
+        StoreFault::Altered(FIRST_TICK_HEAD),
+        SuffixError::RecoveryMismatch,
+    ),
+    // ...and its own content.
+    (
+        StoreFault::Altered(tick_seq(12)),
+        SuffixError::RecoveryMismatch,
+    ),
+    // The last Tick's re-derived `RCP1` binds its content.
+    (
+        StoreFault::Altered(tick_seq(14)),
+        SuffixError::RecoveryMismatch,
+    ),
+];
 
 #[test]
-fn altered_first_tick_events_are_rejected() -> TestResult {
-    let mut setup = prepare::<Faulty>()?;
-    run(&mut setup, &mut Stager::failing(13, Fault::Error))?;
-    // Tick 12's committed RCP1 chains the first Tick's state.
-    let mut setup = reopen(setup, |store| {
-        store.fault = StoreFault::FirstEventAltered;
-        Ok(())
-    })?;
-    let mut stager = Stager::default();
-    assert_eq!(
-        run(&mut setup, &mut stager),
-        Err(SuffixError::RecoveryMismatch)
-    );
-    assert!(stager.seen.is_empty());
+fn store_read_faults_are_closed() -> TestResult {
+    for (fault, expected) in FIRST_TICK_FAULTS {
+        let setup = prepare::<Faulty<MemoryStore>>()?;
+        let mut setup = configure(setup, fault, Interference::None)?;
+        assert_rejected(&mut setup, expected);
+    }
+    for (fault, expected) in LATER_TICK_FAULTS {
+        let mut setup = prepare::<Faulty<MemoryStore>>()?;
+        run(&mut setup, &mut Stager::failing(15, Fault::Error))?;
+        let mut setup = configure(setup, fault, Interference::None)?;
+        assert_rejected(&mut setup, expected);
+    }
     Ok(())
 }
 
@@ -1426,12 +1536,7 @@ fn suffix_length_is_bounded_by_the_checkpoint_limit() -> TestResult {
     let mut beyond = setup_in(<MemoryStore as Backend>::open()?, |plan| {
         plan.horizon_tick = FRONTIER_TICK + MAX_SPAN + 1;
     })?;
-    let mut stager = Stager::default();
-    assert_eq!(
-        run(&mut beyond, &mut stager),
-        Err(SuffixError::SuffixTooLong)
-    );
-    assert!(stager.seen.is_empty());
+    assert_rejected(&mut beyond, SuffixError::SuffixTooLong);
     Ok(())
 }
 
@@ -1442,9 +1547,9 @@ fn every_error_has_a_distinct_safe_message() {
         SuffixError::SuffixTooLong,
         SuffixError::PlanMismatch,
         SuffixError::RecoveryMismatch,
-        SuffixError::EpochChanged(InvalidationConflictV1::TrustEpoch),
+        SuffixError::InvalidationConflict(InvalidationConflictV1::TrustEpoch),
         SuffixError::ArtifactEncoding,
-        SuffixError::Store(CounterfactualStoreErrorV1::StorageFailure),
+        STORAGE,
     ];
     let messages: std::collections::BTreeSet<String> =
         errors.iter().map(ToString::to_string).collect();
@@ -1454,23 +1559,4 @@ fn every_error_has_a_distinct_safe_message() {
     for (position, error) in errors.iter().enumerate() {
         assert_eq!(error.source().is_some(), with_source.contains(&position));
     }
-}
-
-#[test]
-fn unchanged_epochs_report_no_change() {
-    let epochs = CounterfactualEpochsV1 {
-        trust: 1,
-        revocation: 2,
-        erasure: 3,
-    };
-    assert_eq!(epochs.first_change(&epochs), None);
-    let all_changed = CounterfactualEpochsV1 {
-        trust: 4,
-        revocation: 5,
-        erasure: 6,
-    };
-    assert_eq!(
-        epochs.first_change(&all_changed),
-        Some(InvalidationConflictV1::TrustEpoch)
-    );
 }
