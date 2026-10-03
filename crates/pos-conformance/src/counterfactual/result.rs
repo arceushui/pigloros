@@ -33,8 +33,8 @@
 //! is therefore enforced on untrusted input before any allocation.
 
 use super::codec::{
-    bytes_value, decode_canonical, encode_value, text_value, uint_value, CborLimits, FieldReader,
-    WireError,
+    bytes_value, decode_canonical, encode_value, nonzero, text_value, uint_value, CborLimits,
+    FieldReader, WireError,
 };
 use crate::{domain_digest, ReplayClaimV1};
 use ciborium::value::Value;
@@ -254,6 +254,8 @@ pub struct CounterfactualCheckpointRefV1 {
 /// The exact deterministic-CBOR array has 20 fields in declaration order,
 /// preceded by the `CFR1` magic and version `1`. The result digest covers
 /// fields 0 through 18 under the `PiglorOS.CounterfactualResult.v1\0` domain.
+/// Every identity and digest, including each checkpoint digest and a present
+/// terminal-error safe digest, is nonzero; an all-zero value is out of bounds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CounterfactualResultV1 {
     /// Result identifier.
@@ -391,7 +393,8 @@ fn validate_range(
     let committed_in_range = result
         .committed_through_tick
         .is_none_or(|tick| (result.first_tick..=result.horizon_tick).contains(&tick));
-    if result.fork_generation == 0
+    if !nonzero_identities(result)
+        || result.fork_generation == 0
         || result.horizon_tick < result.first_tick
         || !committed_in_range
         || result.checkpoints.len() > MAX_COUNTERFACTUAL_RESULT_CHECKPOINTS_V1
@@ -400,6 +403,35 @@ fn validate_range(
     } else {
         Ok(())
     }
+}
+
+/// Whether every identity and digest is nonzero: the result and Fork IDs,
+/// the plan digest, the suffix/dependency/provenance roots, the profile,
+/// trust-policy, and evaluator digests, every checkpoint digest, and a present
+/// terminal-error safe digest.
+fn nonzero_identities(result: &CounterfactualResultV1) -> bool {
+    nonzero(&result.result_id)
+        && nonzero(&result.fork_id)
+        && [
+            result.plan_digest,
+            result.suffix_digest,
+            result.dependency_root,
+            result.provenance_root,
+            result.execution_profile_digest,
+            result.trust_policy_snapshot_digest,
+            result.evaluator_identity_digest,
+        ]
+        .iter()
+        .all(nonzero)
+        && result
+            .checkpoints
+            .iter()
+            .all(|checkpoint| nonzero(&checkpoint.checkpoint_digest))
+        && result
+            .terminal_error
+            .as_ref()
+            .and_then(|error| error.safe_digest)
+            .is_none_or(|digest| nonzero(&digest))
 }
 
 fn validate_checkpoints(
