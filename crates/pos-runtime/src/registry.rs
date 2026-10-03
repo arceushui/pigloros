@@ -2571,7 +2571,7 @@ impl PluginRegistry {
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        let binding = Self::generated_output_binding(plugin)?;
+        let binding = Self::checked_generated_output_binding(plugin)?;
         self.register_with_verified_output_policy_inner(
             plugin,
             binding,
@@ -2606,7 +2606,7 @@ impl PluginRegistry {
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        let binding = Self::generated_output_binding(plugin)?;
+        let binding = Self::checked_generated_output_binding(plugin)?;
         let pin = crate::PluginPinV1::try_new(
             DomainImplementationKindV1::Plugin,
             PluginIsolationV1::OperatorTrustedNative,
@@ -2632,6 +2632,17 @@ impl PluginRegistry {
                 manifest_slot: None,
             },
         )
+    }
+
+    /// Build the generated binding only after the duplicate-declaration
+    /// check, so a type listed twice fails with the closed ownership error
+    /// rather than as a malformed policy (ADR-024 Revision 1).
+    fn checked_generated_output_binding(
+        plugin: &dyn Plugin,
+    ) -> Result<OutputPolicyBindingV1, RuntimeError> {
+        crate::output_admission::reject_duplicate_declaration(plugin)
+            .map_err(RuntimeError::from)
+            .and_then(|()| Self::generated_output_binding(plugin))
     }
 
     fn generated_output_binding(
@@ -2840,7 +2851,7 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
-        let binding = Self::generated_output_binding(plugin)?;
+        let binding = Self::checked_generated_output_binding(plugin)?;
         self.register_with_verified_output_policy_inner(
             plugin,
             binding,
@@ -2871,7 +2882,7 @@ impl PluginRegistry {
         approver: Option<Box<dyn ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = Kind>,
     ) -> Result<(), RuntimeError> {
-        let binding = Self::generated_output_binding(plugin)?;
+        let binding = Self::checked_generated_output_binding(plugin)?;
         self.register_with_verified_output_policy_inner(
             plugin,
             binding,

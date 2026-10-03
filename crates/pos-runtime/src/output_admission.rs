@@ -67,6 +67,33 @@ pub enum OutputAdmissionErrorV1 {
     ArtifactIdentityMismatch { kind: &'static str },
     #[error("{kind} callback is not the installed implementation")]
     CallbackMismatch { kind: &'static str },
+    /// A closed composition failure found while building a binding, such as
+    /// a declaration that lists one Event type twice (ADR-024 Revision 1).
+    /// [`crate::RuntimeError`] reports it as [`crate::RuntimeError::Composition`].
+    #[error(transparent)]
+    Composition(crate::PluginCompositionErrorV1),
+}
+
+/// Reject a Plugin declaration that lists one Event type more than once.
+///
+/// Every binding constructor runs this before it builds an output policy, so
+/// a duplicate declaration fails with the closed ownership error on every
+/// registration path instead of as a malformed policy (ADR-024 Revision 1).
+pub(crate) fn reject_duplicate_declaration<P: Plugin + ?Sized>(
+    plugin: &P,
+) -> Result<(), OutputAdmissionErrorV1> {
+    let owned_event_types = plugin.capability().owned_event_types;
+    owned_event_types
+        .iter()
+        .enumerate()
+        .find(|&(index, kind)| owned_event_types[..index].contains(kind))
+        .map_or(Ok(()), |(_, kind)| {
+            Err(OutputAdmissionErrorV1::Composition(
+                crate::PluginCompositionErrorV1::DuplicateEventTypeOwner {
+                    event_type: kind.as_str().to_owned(),
+                },
+            ))
+        })
 }
 
 /// Local or installed implementation source selected by a composition root.
@@ -649,8 +676,20 @@ impl OutputPolicyBindingV1 {
     ///
     /// # Errors
     /// Returns a closed source, artifact, or profile error before registration
-    /// can mutate the registry.
+    /// can mutate the registry. A declaration that lists one Event type twice
+    /// fails first with [`OutputAdmissionErrorV1::Composition`] carrying
+    /// [`crate::PluginCompositionErrorV1::DuplicateEventTypeOwner`].
     pub fn from_source<P: Plugin>(
+        plugin: &P,
+        source: OutputPolicySourceV1,
+        configuration_details: &[u8],
+        profile_id: &str,
+    ) -> Result<Self, OutputAdmissionErrorV1> {
+        reject_duplicate_declaration(plugin)
+            .and_then(|()| Self::resolve(plugin, source, configuration_details, profile_id))
+    }
+
+    fn resolve<P: Plugin>(
         plugin: &P,
         source: OutputPolicySourceV1,
         configuration_details: &[u8],

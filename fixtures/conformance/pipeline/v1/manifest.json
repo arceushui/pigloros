@@ -32,11 +32,6 @@
       "owner": "#507"
     },
     {
-      "id": "REG-DUPLICATE-CLOSED-ERROR",
-      "reason": "A type listed twice must fail with DuplicateEventTypeOwner on every path; the generated, pinned and test-support Driver paths reject it earlier with a binding error, so PCF-REG-002 pins only the rejection there",
-      "owner": "#505"
-    },
-    {
       "id": "GATEWAY-HUMAN-SUCCESS-PATH",
       "reason": "Wave 8 has no installed Gateway action EPF1, so the authorized Gateway composition fails closed and its human success path is not publicly composable",
       "owner": "#461"
@@ -597,19 +592,19 @@
       ],
       "observation_profile": null,
       "expected": {
-        "generated": "rejected",
+        "generated": "Event type 'dup.type' has more than one owner",
         "generated.unchanged": "true",
-        "generated-with-approver": "rejected",
+        "generated-with-approver": "Event type 'dup.type' has more than one owner",
         "generated-with-approver.unchanged": "true",
-        "pinned": "rejected",
+        "pinned": "Event type 'dup.type' has more than one owner",
         "pinned.unchanged": "true",
-        "pinned-with-approver": "rejected",
+        "pinned-with-approver": "Event type 'dup.type' has more than one owner",
         "pinned-with-approver.unchanged": "true",
         "verified": "Event type 'dup.type' has more than one owner",
         "verified.unchanged": "true",
         "verified-with-approver": "Event type 'dup.type' has more than one owner",
         "verified-with-approver.unchanged": "true",
-        "test-driver": "rejected",
+        "test-driver": "Event type 'dup.type' has more than one owner",
         "test-driver.unchanged": "true",
         "installed": "fails-closed:EPF1",
         "installed.unchanged": "true",

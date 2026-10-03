@@ -58,7 +58,7 @@ pub enum RuntimeError {
     #[error(transparent)]
     ManifestRegistration(#[from] crate::ManifestRegistrationErrorV1),
     #[error(transparent)]
-    OutputAdmission(#[from] crate::OutputAdmissionErrorV1),
+    OutputAdmission(crate::OutputAdmissionErrorV1),
     #[error(transparent)]
     WorldInstallation(#[from] WorldInstallationErrorV1),
 
@@ -190,6 +190,17 @@ pub enum RuntimeError {
 
     #[error("recorder mode mismatch: expected {expected}, got {got}")]
     ModeMismatch { expected: String, got: String },
+}
+
+/// A composition failure found while building an output binding is the same
+/// closed composition error on every registration path (ADR-024 Revision 1).
+impl From<crate::OutputAdmissionErrorV1> for RuntimeError {
+    fn from(error: crate::OutputAdmissionErrorV1) -> Self {
+        match error {
+            crate::OutputAdmissionErrorV1::Composition(error) => Self::Composition(error),
+            error => Self::OutputAdmission(error),
+        }
+    }
 }
 
 /// Name only the outcome discriminant so a rendered error never carries

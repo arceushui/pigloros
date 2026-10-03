@@ -37,7 +37,7 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "66cb10574396720c841b9704a750061fbbc3810c5e7a19797224735385353052";
+const MANIFEST_SHA256: &str = "3650a409f44df686d270f03cc4e4d7f39b8b63da52be4947addcf5b73760cfec";
 
 /// Every runner of profile version 1, by case identifier.
 const RUNNERS: [(&str, Runner); 45] = [
@@ -144,7 +144,7 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
         .cases
         .iter()
         .all(|case| case.mandatory && !case.id.is_empty()));
-    assert_eq!(manifest.exclusions.len(), 7);
+    assert_eq!(manifest.exclusions.len(), 6);
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────
