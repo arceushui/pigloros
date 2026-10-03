@@ -305,7 +305,7 @@ fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
         |plan| plan.horizon_tick += 1,
         |plan| plan.interventions[1].value_digest[0] ^= 1,
         |plan| plan.interventions[1].effective_tick += 1,
-        |plan| plan.exogenous_descriptors[0].schema_id = 0,
+        |plan| plan.exogenous_descriptors[1].schema_id = 3,
         |plan| plan.exogenous_descriptors[0].artifact_digest[0] ^= 1,
         |plan| plan.exogenous_descriptors[0].authorization_digest[0] ^= 1,
         |plan| plan.exogenous_descriptors[0].provenance_digest[0] ^= 1,
@@ -438,6 +438,58 @@ fn identifiers_are_bounded_and_carry_no_operational_path() -> TestResult {
         text("/var/lib/room"),
     )?;
     assert_eq!(decoded(&bytes), Err(PlanError::FieldOutOfBounds));
+    Ok(())
+}
+
+#[test]
+fn every_identity_digest_and_descriptor_is_nonzero() -> TestResult {
+    let base = plan()?;
+    let rejected: [Edit; 17] = [
+        |plan| plan.plan_id = [0; 16],
+        |plan| plan.room_digest = [0; 32],
+        |plan| plan.parent_cut_digest = [0; 32],
+        |plan| plan.classification_bundle_digest = [0; 32],
+        |plan| plan.plugin_composition_digest = [0; 32],
+        |plan| plan.scheduler_digest = [0; 32],
+        |plan| plan.numeric_profile_digest = [0; 32],
+        |plan| plan.budget_digest = [0; 32],
+        |plan| plan.failure_policy_digest = [0; 32],
+        |plan| plan.exogenous_descriptors[0].schema_id = 0,
+        |plan| plan.exogenous_descriptors[1].artifact_digest = [0; 32],
+        |plan| plan.exogenous_descriptors[0].authorization_digest = [0; 32],
+        |plan| plan.exogenous_descriptors[1].provenance_digest = [0; 32],
+        |plan| plan.fixed_policy_descriptors[0].schema_id = 0,
+        |plan| plan.fixed_policy_descriptors[0].artifact_digest = [0; 32],
+        |plan| plan.fixed_policy_descriptors[0].authorization_digest = [0; 32],
+        |plan| plan.fixed_policy_descriptors[0].provenance_digest = [0; 32],
+    ];
+    for edit in rejected {
+        assert_eq!(
+            resealed_validation(&base, edit),
+            Err(PlanError::FieldOutOfBounds)
+        );
+    }
+    let bytes = with_field(&base.to_canonical_cbor()?, 4, Value::Bytes(vec![0; 32]))?;
+    assert_eq!(decoded(&bytes), Err(PlanError::FieldOutOfBounds));
+    // One nonzero byte is enough: only the all-zero placeholder is rejected.
+    let accepted: [Edit; 3] = [
+        |plan| plan.plan_id = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        |plan| {
+            let mut digest = [0; 32];
+            digest[31] = 1;
+            plan.scheduler_digest = digest;
+            plan.fixed_policy_descriptors[0].provenance_digest = digest;
+        },
+        |plan| {
+            let mut digest = [0; 32];
+            digest[0] = 1;
+            plan.failure_policy_digest = digest;
+            plan.exogenous_descriptors[0].authorization_digest = digest;
+        },
+    ];
+    for edit in accepted {
+        assert_eq!(resealed_validation(&base, edit), Ok(()));
+    }
     Ok(())
 }
 
@@ -754,7 +806,7 @@ fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
         ),
         (
             with_field(&valid, 0, Value::Bytes(b"CFP1".to_vec()))?,
-            PlanError::UnsupportedVersion,
+            PlanError::InvalidEncoding,
         ),
         (
             with_field(&valid, 1, uint(2))?,
@@ -762,7 +814,7 @@ fn decoder_rejects_closed_schema_and_malformed_cbor_forms() -> TestResult {
         ),
         (
             with_field(&valid, 1, text("1"))?,
-            PlanError::UnsupportedVersion,
+            PlanError::InvalidEncoding,
         ),
         (
             with_field(&valid, FIELD_EXOGENOUS, at_depth_limit)?,
