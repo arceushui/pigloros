@@ -2030,8 +2030,9 @@ fn authorized_staging_requires_each_driver_bound_to_its_views_participant() {
     assert!(stage(&mut unassigned).contains("has no observation profile assignment"));
 
     let (mut non_participant, non_participant_state) = non_participant_registry(&fixture);
-    assert!(stage(&mut non_participant)
-        .contains("is not composed for the ParticipantBound profile"));
+    assert!(
+        stage(&mut non_participant).contains("is not composed for the ParticipantBound profile")
+    );
 
     let mut foreign = gated_registry();
     let foreign_state = register_driver(&mut foreign, &fixture, false, "participant.planned");

@@ -67,9 +67,10 @@ fn invocations(drivers: &[&Registered]) -> String {
 
 /// The profile fixed for `driver`, or `unassigned`.
 fn binding(registry: &PluginRegistry, driver: &Registered) -> String {
-    registry
-        .scheduled_binding(driver.id)
-        .map_or_else(|| "unassigned".to_owned(), |binding| format!("{:?}", binding.profile()))
+    registry.scheduled_binding(driver.id).map_or_else(
+        || "unassigned".to_owned(),
+        |binding| format!("{:?}", binding.profile()),
+    )
 }
 
 fn create_timeline(backend: &mut dyn ScheduledAdmissionStoreV1, name: &str) -> TimelineId {
@@ -123,7 +124,11 @@ pub fn unassigned_driver_is_rejected() -> Capture {
             "authorized",
             authorized(&mut registry, backend.as_ref(), timeline),
         );
-        capture.record(store, "driver.steps/aborts", invocations(&[&first, &second]));
+        capture.record(
+            store,
+            "driver.steps/aborts",
+            invocations(&[&first, &second]),
+        );
         capture.record(store, "committed", events(backend.as_ref(), timeline).len());
     }
     capture

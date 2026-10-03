@@ -162,7 +162,9 @@ impl PluginRegistry {
     ) -> Result<(), RuntimeError> {
         let bound = views.iter().zip(snapshots).all(|(view, snapshot)| {
             self.scheduled_binding(view.plugin_id)
-                == Some(ScheduledDriverBindingV1::Participant(snapshot.participant_id()))
+                == Some(ScheduledDriverBindingV1::Participant(
+                    snapshot.participant_id(),
+                ))
         });
         if bound {
             Ok(())

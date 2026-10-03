@@ -419,7 +419,10 @@ fn bind_participants(registry: &mut PluginRegistry, participants: &[&Participant
         .iter()
         .map(|participant| {
             let id = participant.knowledge.participant_id();
-            (participant.plugin_id, ScheduledDriverBindingV1::Participant(id))
+            (
+                participant.plugin_id,
+                ScheduledDriverBindingV1::Participant(id),
+            )
         })
         .collect();
     registry.compose_scheduled_profiles(&bindings).test_ok();
