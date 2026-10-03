@@ -13,6 +13,10 @@
 //! `TrustedClockFixtureV1` is a single-threaded `test-support` fixture that
 //! injects one-shot port faults. Both exist because the fence must be proven
 //! against a truthful adapter and against every port failure path.
+//!
+//! Coverage rule for both adapters: an error that tests cannot provoke is
+//! mapped with `.or(Err(..))` rather than `.map_err(|_| ..)`, because the
+//! closure would be a region that never runs.
 
 use pos_core::trusted_clock::{
     ReleaseGuardPortV1, TrustedClockAcknowledgementRowV1, TrustedClockHighWaterRowV1,
@@ -31,8 +35,6 @@ pub use sqlite::SqliteTrustedClockAuthorityV1;
 fn fresh_clock_domain() -> Result<[u8; 16], TrustedClockPortErrorV1> {
     let mut domain = [0; 16];
     let filled = SysRng.try_fill_bytes(&mut domain);
-    // `.or(Err(..))` instead of `.map_err(|_| ..)`: the error arm cannot be
-    // provoked in tests, and a closure would leave an uncovered region.
     filled
         .map(|()| domain)
         .or(Err(TrustedClockPortErrorV1::Storage))

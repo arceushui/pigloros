@@ -6,7 +6,10 @@ interfaces: an implementation that reports rows or lock state untruthfully
 can obtain a real handoff token. Implementations may live only in
 `crates/pos-store`, `crates/pos-runtime`, or a `test-support` fixture file
 whose module is gated by the inner attribute
-`#![cfg(any(test, feature = "test-support"))]`.
+`#![cfg(any(test, feature = "test-support"))]`. The gate is matched against
+the comment-stripped source and must sit among the file's leading inner
+attributes, so a gate written in a comment, inside a string literal, or after
+the first item does not exempt a file.
 
 Renaming a port with `use ... as` outside those paths is rejected too, so an
 alias cannot hide an implementation from the `impl` pattern. Only top-level
@@ -23,7 +26,8 @@ from pathlib import Path
 PORTS = ("TrustedClockStorePortV1", "ReleaseGuardPortV1")
 ALLOWED_PREFIXES = ("crates/pos-store/", "crates/pos-runtime/")
 FIXTURE_GATE = re.compile(
-    r'^#!\[cfg\(any\(test,\s*feature\s*=\s*"test-support"\)\)\]\s*$', re.MULTILINE
+    r"\A\s*(?:#!\[[^\]]*\]\s*)*?"
+    r'#!\[cfg\(any\(test,\s*feature\s*=\s*"test-support"\)\)\]'
 )
 IMPL = re.compile(
     r"\bimpl\b(?:\s*<[^{;]*?>)?[^{;]*?\b(?:" + "|".join(PORTS) + r")\b(?:\s*<[^{;]*?>)?\s+for\b",
@@ -116,10 +120,15 @@ def strip_comments(text: str) -> str:
     return "".join(kept)
 
 
-def allowed(relative: str, text: str) -> bool:
+def allowed(relative: str, code: str) -> bool:
+    """Return whether `relative` may implement a port.
+
+    `code` must already be comment-stripped: the fixture gate counts only as
+    a leading inner attribute of real code.
+    """
     if relative.startswith(ALLOWED_PREFIXES):
         return True
-    return FIXTURE_GATE.search(text) is not None
+    return FIXTURE_GATE.match(code) is not None
 
 
 def violations(root: Path) -> list[str]:
@@ -131,7 +140,7 @@ def violations(root: Path) -> list[str]:
         relative = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8", errors="replace")
         code = strip_comments(text)
-        if allowed(relative, text):
+        if allowed(relative, code):
             continue
         if IMPL.search(code):
             found.append(f"{relative}: trusted-clock port implemented outside the trusted host")

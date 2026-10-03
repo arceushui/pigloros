@@ -454,7 +454,7 @@ fn reservation_faults_fail_closed_without_changing_rows() {
         (Fault::BeginBusy, RESERVATION_WAIT),
         (Fault::BeginStorage, DURABILITY),
         (Fault::ReadError, DURABILITY),
-        (Fault::ReadBusy, RESERVATION_WAIT),
+        (Fault::ReadBusy, DURABILITY),
         (Fault::ReadCorrupt, CORRUPT),
         (Fault::WriteHighWater, COMMIT_FAILED),
         (Fault::Commit, COMMIT_FAILED),
@@ -716,7 +716,7 @@ fn guard_wait_and_port_faults_release_the_lock() -> TestResult {
         (Fault::GuardBusy, GUARD_WAIT),
         (Fault::GuardStorage, DURABILITY),
         (Fault::GuardRead, DURABILITY),
-        (Fault::GuardReadBusy, GUARD_WAIT),
+        (Fault::GuardReadBusy, DURABILITY),
     ];
     for (fault, expected) in cases {
         let fixture = TrustedClockFixtureV1::new();
@@ -1010,7 +1010,7 @@ fn acknowledgement_faults_fail_closed() {
         (Fault::DurabilityMismatch, DURABILITY),
         (Fault::BeginBusy, RESERVATION_WAIT),
         (Fault::ReadError, DURABILITY),
-        (Fault::ReadBusy, RESERVATION_WAIT),
+        (Fault::ReadBusy, DURABILITY),
         (Fault::WriteLatch, COMMIT_FAILED),
         (Fault::AppendAcknowledgement, COMMIT_FAILED),
         (Fault::Commit, DURABILITY),

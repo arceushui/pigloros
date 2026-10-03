@@ -24,6 +24,9 @@ ALLOWED = {
     "crates/pos-store/src/trusted_clock.rs": STORE_IMPL,
     "crates/pos-runtime/src/host.rs": GUARD_IMPL,
     "crates/pos-core/src/trusted_clock_fixture.rs": GATE + STORE_IMPL + GUARD_IMPL,
+    "crates/pos-core/src/documented_fixture.rs": (
+        "//! Fixture.\n//!\n/* note */\n#![forbid(unsafe_code)]\n" + GATE + STORE_IMPL
+    ),
     "crates/pos-state/src/docs.rs": "// impl ReleaseGuardPortV1 for Forged {}\n",
     "crates/pos-state/src/block.rs": "/* impl TrustedClockStorePortV1 for Forged {} */\n",
     "crates/pos-state/src/uses.rs": "fn f(_: &mut dyn ReleaseGuardPortV1) {}\n",
@@ -68,6 +71,15 @@ REJECTED = {
     "crates/pos-state/src/char_escape.rs": (
         "const C: char = '\\''; const S: &str = \"/*\"; " + GUARD_IMPL.rstrip("\n") + " // */\n"
     ),
+    "crates/pos-state/src/gate_in_block_comment.rs": "/*\n" + GATE + "*/\n" + STORE_IMPL,
+    "crates/pos-state/src/gate_in_line_comment.rs": "// " + GATE + GUARD_IMPL,
+    "crates/pos-state/src/gate_in_string.rs": (
+        'const S: &str = "\n' + GATE.rstrip("\n").replace('"', '\\"') + '\n";\n' + STORE_IMPL
+    ),
+    "crates/pos-state/src/gate_in_raw_string.rs": (
+        'const S: &str = r#"\n' + GATE + '"#;\n' + GUARD_IMPL
+    ),
+    "crates/pos-state/src/gate_after_item.rs": "fn f() {}\n" + GATE + STORE_IMPL,
     "crates/pos-state/src/byte_char.rs": (
         "const C: u8 = b'\"'; const S: &str = \"/*\"; " + GUARD_IMPL.rstrip("\n") + " // */\n"
     ),

@@ -44,9 +44,22 @@ pub enum TrustedClockFixtureFaultV1 {
 impl TrustedClockFixtureFaultV1 {
     const fn port_error(self) -> TrustedClockPortErrorV1 {
         match self {
-            Self::ReadBusy | Self::GuardReadBusy => TrustedClockPortErrorV1::Busy,
+            Self::BeginBusy | Self::GuardBusy | Self::ReadBusy | Self::GuardReadBusy => {
+                TrustedClockPortErrorV1::Busy
+            }
             Self::ReadCorrupt => TrustedClockPortErrorV1::Corrupt,
-            _ => TrustedClockPortErrorV1::Storage,
+            Self::DurabilityMismatch
+            | Self::DurabilityError
+            | Self::BeginStorage
+            | Self::CatalogError
+            | Self::ReadError
+            | Self::DomainError
+            | Self::WriteHighWater
+            | Self::WriteLatch
+            | Self::AppendAcknowledgement
+            | Self::Commit
+            | Self::GuardStorage
+            | Self::GuardRead => TrustedClockPortErrorV1::Storage,
         }
     }
 }

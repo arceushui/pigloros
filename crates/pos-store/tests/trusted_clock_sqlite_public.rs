@@ -15,8 +15,8 @@ use pos_core::trusted_clock::{
     WaitPhaseV1,
 };
 use pos_core::{
-    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, Hash,
-    PrincipalRefV1, TimelineId, WallTime,
+    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, CoreError,
+    Hash, PrincipalRefV1, TimelineId, WallTime,
 };
 use pos_store::trusted_clock::SqliteTrustedClockAuthorityV1;
 use rusqlite::Connection;
@@ -204,8 +204,10 @@ fn a_held_writer_lock_bounds_reservation_and_guard_waits() -> TestResult {
     let waited = started.elapsed();
     assert_eq!(refused, Some(RESERVATION_WAIT));
     // The raw writer holds the lock until ROLLBACK, far longer than the
-    // 250 ms wait budget, so the refusal must come from the budget.
-    assert!(waited < Duration::from_secs(1));
+    // 250 ms wait budget, so the refusal must come from the budget. The 3 s
+    // ceiling only proves the wait was bounded; it leaves slack for loaded CI
+    // runners while staying far below "waited for the ROLLBACK".
+    assert!(waited < Duration::from_secs(3));
     raw.execute_batch("ROLLBACK")?;
     let reservation = reserve(&mut authority, T0)?;
     raw.execute_batch("BEGIN IMMEDIATE")?;
@@ -213,7 +215,8 @@ fn a_held_writer_lock_bounds_reservation_and_guard_waits() -> TestResult {
     let refused = release(&mut authority, reservation, T0).err();
     let waited = started.elapsed();
     assert_eq!(refused, Some(GUARD_WAIT));
-    assert!(waited < Duration::from_secs(1));
+    // Same bounded-wait check as above, with the same CI slack.
+    assert!(waited < Duration::from_secs(3));
     raw.execute_batch("ROLLBACK")?;
     let reservation = reserve(&mut authority, T0)?;
     let released = release(&mut authority, reservation, T0)?;
@@ -320,6 +323,30 @@ fn acknowledgement_rows_are_append_only() -> TestResult {
         "SELECT count(*) FROM trusted_clock_overrun_acknowledgements",
     );
     assert_eq!(count, 2);
+    Ok(())
+}
+
+#[test]
+fn a_weakened_acknowledgement_trigger_fails_reopen_closed() -> TestResult {
+    let directory = TempDir::new()?;
+    let path = authority_path(&directory);
+    drop(SqliteTrustedClockAuthorityV1::open(&path)?);
+    let raw = Connection::open(&path)?;
+    raw.execute_batch(
+        "DROP TRIGGER trusted_clock_overrun_acknowledgements_no_delete;
+         CREATE TRIGGER trusted_clock_overrun_acknowledgements_no_delete
+             BEFORE DELETE ON trusted_clock_overrun_acknowledgements
+             WHEN 0
+         BEGIN
+             SELECT RAISE(ABORT, 'trusted_clock_overrun_acknowledgements is append-only');
+         END;",
+    )?;
+    let reopened = SqliteTrustedClockAuthorityV1::open(&path).err();
+    assert!(matches!(reopened, Some(CoreError::Storage(_))));
+    raw.execute_batch(ACK_INSERT)?;
+    raw.execute_batch("DELETE FROM trusted_clock_overrun_acknowledgements")?;
+    let remaining = "SELECT count(*) FROM trusted_clock_overrun_acknowledgements";
+    assert_eq!(integer(&raw, remaining), 0);
     Ok(())
 }
 

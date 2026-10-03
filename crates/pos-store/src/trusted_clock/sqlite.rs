@@ -15,8 +15,9 @@ use pos_core::trusted_clock::{
     TrustedClockStorePortV1, TRUSTED_CLOCK_WAIT_BUDGET,
 };
 use pos_core::CoreError;
+use rusqlite::types::Value::{Blob, Integer as Int};
 use rusqlite::types::{FromSql, Value};
-use rusqlite::{params, Connection, ErrorCode, OpenFlags, Row, Statement};
+use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension, Row, Statement};
 use std::time::Duration;
 
 type PortResult<T> = Result<T, TrustedClockPortErrorV1>;
@@ -41,8 +42,23 @@ CREATE TABLE IF NOT EXISTS trusted_clock_overrun_latch (
     last_overrun_reservation INTEGER NOT NULL CHECK (last_overrun_reservation >= 0),
     last_overrun_kind        INTEGER NOT NULL CHECK (last_overrun_kind IN (0, 1, 2, 3)),
     last_overrun_at_micros   INTEGER NOT NULL CHECK (last_overrun_at_micros >= 0)
-) STRICT;
-CREATE TABLE IF NOT EXISTS trusted_clock_overrun_acknowledgements (
+) STRICT;";
+
+/// Statement that reads one schema object's stored definition.
+const STORED_SQL: &str = "SELECT sql FROM sqlite_master WHERE name = ?1";
+
+const TAMPERED_SCHEMA: &str =
+    "trusted-clock acknowledgement schema differs from its reviewed definition";
+
+/// The append-only acknowledgement table and its three guard triggers, as
+/// `(name, CREATE statement)`. `CREATE ... IF NOT EXISTS` would keep a weaker
+/// object of the same name, so `open` creates each missing object and
+/// otherwise requires its stored definition to equal this one, ignoring
+/// whitespace.
+const ACKNOWLEDGEMENT_SCHEMA: [(&str, &str); 4] = [
+    (
+        "trusted_clock_overrun_acknowledgements",
+        "CREATE TABLE trusted_clock_overrun_acknowledgements (
     ack_seq                         INTEGER PRIMARY KEY CHECK (ack_seq >= 1),
     acknowledged_overrun_count      INTEGER NOT NULL CHECK (acknowledged_overrun_count >= 1),
     operator_principal_digest       BLOB NOT NULL CHECK (length(operator_principal_digest) = 32),
@@ -51,24 +67,34 @@ CREATE TABLE IF NOT EXISTS trusted_clock_overrun_acknowledgements (
     trust_revision_digest           BLOB NOT NULL CHECK (length(trust_revision_digest) = 32),
     acknowledged_at_micros          INTEGER NOT NULL CHECK (acknowledged_at_micros >= 0),
     reason_code                     INTEGER NOT NULL CHECK (reason_code IN (1, 2, 3))
-) STRICT;
-CREATE TRIGGER IF NOT EXISTS trusted_clock_overrun_acknowledgements_no_replace
+) STRICT",
+    ),
+    (
+        "trusted_clock_overrun_acknowledgements_no_replace",
+        "CREATE TRIGGER trusted_clock_overrun_acknowledgements_no_replace
     BEFORE INSERT ON trusted_clock_overrun_acknowledgements
     WHEN EXISTS (SELECT 1 FROM trusted_clock_overrun_acknowledgements WHERE ack_seq = NEW.ack_seq)
 BEGIN
     SELECT RAISE(ABORT, 'trusted_clock_overrun_acknowledgements is append-only');
-END;
-CREATE TRIGGER IF NOT EXISTS trusted_clock_overrun_acknowledgements_no_update
+END",
+    ),
+    (
+        "trusted_clock_overrun_acknowledgements_no_update",
+        "CREATE TRIGGER trusted_clock_overrun_acknowledgements_no_update
     BEFORE UPDATE ON trusted_clock_overrun_acknowledgements
 BEGIN
     SELECT RAISE(ABORT, 'trusted_clock_overrun_acknowledgements is append-only');
-END;
-CREATE TRIGGER IF NOT EXISTS trusted_clock_overrun_acknowledgements_no_delete
+END",
+    ),
+    (
+        "trusted_clock_overrun_acknowledgements_no_delete",
+        "CREATE TRIGGER trusted_clock_overrun_acknowledgements_no_delete
     BEFORE DELETE ON trusted_clock_overrun_acknowledgements
 BEGIN
     SELECT RAISE(ABORT, 'trusted_clock_overrun_acknowledgements is append-only');
-END;
-COMMIT;";
+END",
+    ),
+];
 
 const HIGH_WATER_SELECT: &str = "SELECT format_version, clock_domain, high_water_micros,
     reserved_until_micros, reservation_seq FROM trusted_clock_high_water";
@@ -105,8 +131,9 @@ impl SqliteTrustedClockAuthorityV1 {
     /// reservation's one-time migration.
     ///
     /// # Errors
-    /// Returns [`CoreError::Storage`] when the file cannot be opened or the
-    /// tables cannot be created.
+    /// Returns [`CoreError::Storage`] when the file cannot be opened, the
+    /// tables cannot be created, or an existing acknowledgement table or
+    /// trigger differs from its reviewed definition.
     pub fn open(path: &str) -> Result<Self, CoreError> {
         let connections = connect(path)
             .and_then(|reservation| connect(path).map(|guard| Self { reservation, guard }));
@@ -114,13 +141,57 @@ impl SqliteTrustedClockAuthorityV1 {
     }
 
     fn with_schema(self) -> Result<Self, CoreError> {
-        let created = self
+        let verified = self
             .reservation
             .busy_timeout(TRUSTED_CLOCK_WAIT_BUDGET)
-            .and_then(|()| self.reservation.execute_batch(SCHEMA));
-        created
-            .map(|()| self)
-            .map_err(|error| CoreError::Storage(error.to_string()))
+            .and_then(|()| self.reservation.execute_batch(SCHEMA))
+            .and_then(|()| acknowledgement_schema_intact(&self.reservation))
+            .and_then(|intact| commit_if(&self.reservation, intact));
+        match verified {
+            Ok(true) => Ok(self),
+            Ok(false) => {
+                rollback_on(&self.reservation);
+                Err(CoreError::Storage(TAMPERED_SCHEMA.to_owned()))
+            }
+            Err(error) => Err(CoreError::Storage(error.to_string())),
+        }
+    }
+}
+
+fn normalized(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn stored_sql(connection: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
+    connection
+        .query_row(STORED_SQL, [name], |row| row.get(0))
+        .optional()
+}
+
+/// Create the named object when it is missing, and report whether the
+/// stored definition is the reviewed one.
+fn ensure_object(connection: &Connection, (name, sql): (&str, &str)) -> rusqlite::Result<bool> {
+    stored_sql(connection, name).and_then(|stored| {
+        stored.map_or_else(
+            || connection.execute_batch(sql).map(|()| true),
+            |stored| Ok(normalized(&stored) == normalized(sql)),
+        )
+    })
+}
+
+fn acknowledgement_schema_intact(connection: &Connection) -> rusqlite::Result<bool> {
+    ACKNOWLEDGEMENT_SCHEMA
+        .into_iter()
+        .try_fold(true, |intact, object| {
+            ensure_object(connection, object).map(|matches| intact && matches)
+        })
+}
+
+fn commit_if(connection: &Connection, intact: bool) -> rusqlite::Result<bool> {
+    if intact {
+        connection.execute_batch("COMMIT").map(|()| true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -139,8 +210,6 @@ fn port_error(error: &rusqlite::Error) -> TrustedClockPortErrorV1 {
 }
 
 fn storage<T>(result: rusqlite::Result<T>) -> PortResult<T> {
-    // `.or(Err(..))` instead of `.map_err(|_| ..)`: a closure would add a
-    // region that is uncovered whenever a caller's error arm is unreachable.
     result.or(Err(TrustedClockPortErrorV1::Storage))
 }
 
@@ -192,31 +261,33 @@ fn select(connection: &Connection, sql: &str) -> PortResult<Vec<Vec<Value>>> {
         .map_err(|error| port_error(&error))
 }
 
+/// Decode one high-water row; any other width or column type is corrupt.
 fn high_water_row(values: &[Value]) -> PortResult<TrustedClockHighWaterRowV1> {
     match *values {
-        [Value::Integer(format_version), Value::Blob(ref clock_domain), Value::Integer(high_water_micros), Value::Integer(reserved_until_micros), Value::Integer(reservation_seq)] => {
+        [Int(version), Blob(ref domain), Int(high_water), Int(reserved_until), Int(seq)] => {
             Ok(TrustedClockHighWaterRowV1 {
-                format_version,
-                clock_domain: clock_domain.clone(),
-                high_water_micros,
-                reserved_until_micros,
-                reservation_seq,
+                format_version: version,
+                clock_domain: domain.clone(),
+                high_water_micros: high_water,
+                reserved_until_micros: reserved_until,
+                reservation_seq: seq,
             })
         }
         _ => Err(TrustedClockPortErrorV1::Corrupt),
     }
 }
 
+/// Decode one overrun-latch row; any other width or column type is corrupt.
 const fn latch_row(values: &[Value]) -> PortResult<TrustedClockOverrunLatchRowV1> {
     match *values {
-        [Value::Integer(format_version), Value::Integer(latched), Value::Integer(overrun_count), Value::Integer(last_overrun_reservation), Value::Integer(last_overrun_kind), Value::Integer(last_overrun_at_micros)] => {
+        [Int(version), Int(latched), Int(count), Int(reservation), Int(kind), Int(at)] => {
             Ok(TrustedClockOverrunLatchRowV1 {
-                format_version,
+                format_version: version,
                 latched,
-                overrun_count,
-                last_overrun_reservation,
-                last_overrun_kind,
-                last_overrun_at_micros,
+                overrun_count: count,
+                last_overrun_reservation: reservation,
+                last_overrun_kind: kind,
+                last_overrun_at_micros: at,
             })
         }
         _ => Err(TrustedClockPortErrorV1::Corrupt),
