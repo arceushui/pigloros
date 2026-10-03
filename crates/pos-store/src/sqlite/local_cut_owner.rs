@@ -662,7 +662,7 @@ pub(super) fn sqlite_validate_local_cut_owner_admission(
 /// This hot path checks the admitted header, rejects any retained cut after
 /// the last visible cut, and decodes only that last cut. Older cuts are decoded
 /// when a read or retry returns one, and by
-/// [`SqliteStore::verify_local_cut_owner_history_v1`].
+/// [`LocalCutOwnerPersistencePortV1::verify_local_cut_owner_history_v1`].
 fn sqlite_read_local_cut_owner_state(
     connection: &Connection,
     owner_id: [u8; 32],
@@ -679,7 +679,8 @@ fn sqlite_read_local_cut_owner_state(
     // missing admitted row corrupt there, so it never returns `None` here.
     sqlite_read_manifest_owner_current_state(connection, owner_id)?;
     let last_visible_cut_id = state.last_visible_cut_id.to_be_bytes();
-    // Big-endian cut identities compare as blobs in numeric order.
+    // Cut identities are stored big-endian, so SQLite's bytewise blob order is
+    // their numeric order and `cut_id > ?2` selects exactly the later cuts.
     let has_later_cut: bool = connection
         .query_row(
             "SELECT EXISTS(
@@ -701,6 +702,11 @@ fn sqlite_read_local_cut_owner_state(
     Ok(Some(state))
 }
 
+/// List one owner's raw retained cut identities in ascending order.
+///
+/// A retained `cut_id` that is not a blob fails the typed `Vec<u8>` read with
+/// `rusqlite::Error::InvalidColumnType`. That is the signal for a corrupt row,
+/// so it maps to `CorruptState`; every other error is a `StorageFailure`.
 fn sqlite_local_cut_owner_cut_ids(
     connection: &Connection,
     owner_id: [u8; 32],
@@ -1008,21 +1014,10 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
             .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
         Ok(cut.map(|cut| cut.result))
     }
-}
 
-impl SqliteStore {
-    /// Fully verify one owner's retained local-cut history.
-    ///
-    /// Owner-state reads, retries, and commits decode only the current visible
-    /// cut and any cut they return. This integrity pass decodes every retained
-    /// cut as well, and every read-write open runs it for each owner with
-    /// local-cut rows. A read-only open does not run it; callers of a read-only
-    /// store invoke this method explicitly.
-    ///
-    /// # Errors
-    /// Returns `CorruptState` for an invalid owner state or any invalid retained
-    /// cut, and `StorageFailure` when the backend cannot provide a snapshot.
-    pub fn verify_local_cut_owner_history_v1(
+    // Every read-write open runs this pass for each owner with local-cut rows.
+    // A read-only open does not, so its callers invoke the port method directly.
+    fn verify_local_cut_owner_history_v1(
         &self,
         owner_id: [u8; 32],
     ) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
@@ -1036,7 +1031,9 @@ impl SqliteStore {
             .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
         Ok(state)
     }
+}
 
+impl SqliteStore {
     /// Verify the complete local-cut history of every owner with local-cut rows.
     pub(super) fn verify_local_cut_owner_histories(&self) -> Result<(), CoreError> {
         let owners = self
@@ -1205,6 +1202,19 @@ mod local_cut_owner_coverage {
         tick: 3,
         operation_id: hash(116),
         result_inventory: hash(114),
+    };
+    // Cut identities 255 and 256 order oppositely as little-endian bytes.
+    const BYTE_EDGE_CUT: CutShape = CutShape {
+        cut_id: 255,
+        tick: 1,
+        operation_id: hash(140),
+        result_inventory: hash(141),
+    };
+    const BYTE_CARRY_CUT: CutShape = CutShape {
+        cut_id: 256,
+        tick: 2,
+        operation_id: hash(142),
+        result_inventory: hash(143),
     };
     const OLD_CUT: &str = "WHERE cut_id = X'0000000000000005'";
     const CORRUPTION_PRAGMAS: &str =
@@ -2676,6 +2686,28 @@ mod local_cut_owner_coverage {
         ] {
             assert!(with_rollback(&store.conn, setup, rejected)?, "{setup}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn later_cut_check_orders_cut_ids_numerically() -> TestResult {
+        // Cut 255 precedes cut 256 only under the big-endian blob encoding that
+        // the `cut_id > ?2` later-cut check relies on.
+        let mut fixture = admitted()?;
+        let request = cut_request(&fixture.state, &fixture.snapshots, BYTE_EDGE_CUT)?;
+        let batch = prepare_cut(request, None, &fixture.state, &fixture.snapshots)?;
+        let applied = fixture.store.commit_local_cut_owner_v1(batch)?;
+        assert_eq!(applied.kind, LocalCutOwnerCommitKindV1::Applied);
+        commit_next(&mut fixture.store, &fixture.snapshots, BYTE_CARRY_CUT)?;
+        let current = fixture.store.read_local_cut_owner_state_v1(OWNER)?;
+        assert_eq!(
+            current.as_ref().map(|state| state.last_visible_cut_id),
+            Some(BYTE_CARRY_CUT.cut_id)
+        );
+        assert_eq!(
+            fixture.store.verify_local_cut_owner_history_v1(OWNER)?,
+            current
+        );
         Ok(())
     }
 

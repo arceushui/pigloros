@@ -11521,6 +11521,29 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
     }
 }
 
+/// Borrow, in one fixed order, the ten fields an LCC1 commit record copies from
+/// its local-cut owner request.
+macro_rules! local_cut_commit_bindings {
+    ($source:expr) => {
+        (
+            &$source.partition_ledger_seq,
+            &$source.manifest_hash,
+            &$source.result_heads_table,
+            &$source.participant_successor_table,
+            &$source.cpu_completion_table,
+            &$source.action_disposition_table,
+            &$source.candidate_bases_table,
+            &$source.invocation_bridges_table,
+            &$source.result_inventory_generation,
+            &$source.release_fence_proof_digest,
+        )
+    };
+}
+
+/// Largest operation identity: the inclusive upper bound of one owner's
+/// operation-key range.
+const MAX_LOCAL_CUT_OPERATION_ID: Hash = Hash::from_bytes([u8::MAX; 32]);
+
 fn validate_memory_local_cut_operation(
     owner_id: [u8; 32],
     operation_id: Hash,
@@ -11534,41 +11557,19 @@ fn validate_memory_local_cut_operation(
     validate_local_cut_owner_result_v1(owner_id, cut_id, &operation.result)?;
     let commit = operation.result.commit.as_input();
     let request = &operation.request;
-    // Stored and expected bindings are compared pairwise, so both tuples must
-    // list their fields in the same order.
+    // Stored and expected bindings are compared pairwise. One macro projects the
+    // copied LCC1 fields from both sides, so their order cannot diverge.
     let stored = (
         (
             &request.operation_id,
             &operation.result.seal,
             cuts.get(&(owner_id, cut_id)),
         ),
-        (
-            &commit.partition_ledger_seq,
-            &commit.manifest_hash,
-            &commit.result_heads_table,
-            &commit.participant_successor_table,
-            &commit.cpu_completion_table,
-            &commit.action_disposition_table,
-            &commit.candidate_bases_table,
-            &commit.invocation_bridges_table,
-            &commit.result_inventory_generation,
-            &commit.release_fence_proof_digest,
-        ),
+        local_cut_commit_bindings!(commit),
     );
     let expected = (
         (&operation_id, &request.seal, Some(&operation_id)),
-        (
-            &request.partition_ledger_seq,
-            &request.manifest_hash,
-            &request.result_heads_table,
-            &request.participant_successor_table,
-            &request.cpu_completion_table,
-            &request.action_disposition_table,
-            &request.candidate_bases_table,
-            &request.invocation_bridges_table,
-            &request.result_inventory_generation,
-            &request.release_fence_proof_digest,
-        ),
+        local_cut_commit_bindings!(request),
     );
     if stored != expected {
         return Err(LocalCutOwnerErrorV1::CorruptState);
@@ -11639,44 +11640,6 @@ fn memory_resolve_local_cut_owner_retry(
     let mut retry = operation.result.clone();
     retry.kind = LocalCutOwnerCommitKindV1::ExactRetry;
     Ok(Some(retry))
-}
-
-impl MemoryStore {
-    /// Fully verify one owner's retained local-cut history.
-    ///
-    /// Owner-state reads, retries, and commits validate only the current
-    /// visible cut and any cut they return. This integrity pass also validates
-    /// every older cut and rejects any unlinked operation.
-    ///
-    /// # Errors
-    /// Returns `CorruptState` for an invalid owner state or any invalid retained
-    /// cut or operation.
-    pub fn verify_local_cut_owner_history_v1(
-        &self,
-        owner_id: [u8; 32],
-    ) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
-        let state = self.read_local_cut_owner_state_v1(owner_id)?;
-        let linked_operations = self
-            .local_cut_owner_cuts
-            .range((owner_id, 0)..=(owner_id, u64::MAX))
-            .map(|(&(_, cut_id), &operation_id)| {
-                memory_linked_local_cut_operation(self, owner_id, cut_id, operation_id)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        // Each validated cut links a distinct operation sealed for that cut, so
-        // any further retained operation is unlinked.
-        let owner_operations =
-            (owner_id, Hash::zero())..=(owner_id, Hash::from_bytes([u8::MAX; 32]));
-        if self
-            .local_cut_owner_operations
-            .range(owner_operations)
-            .count()
-            != linked_operations.len()
-        {
-            return Err(LocalCutOwnerErrorV1::CorruptState);
-        }
-        Ok(state)
-    }
 }
 
 impl LocalCutOwnerPersistencePortV1 for MemoryStore {
@@ -11785,6 +11748,32 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         self.read_local_cut_owner_state_v1(owner_id)?;
         memory_local_cut_owner_cut(self, owner_id, cut_id)
             .map(|cut| cut.map(|operation| operation.result.clone()))
+    }
+
+    fn verify_local_cut_owner_history_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
+        let state = self.read_local_cut_owner_state_v1(owner_id)?;
+        let linked_operations = self
+            .local_cut_owner_cuts
+            .range((owner_id, 0)..=(owner_id, u64::MAX))
+            .map(|(&(_, cut_id), &operation_id)| {
+                memory_linked_local_cut_operation(self, owner_id, cut_id, operation_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Each validated cut links a distinct operation sealed for that cut, so
+        // any further retained operation is unlinked.
+        let owner_operations = (owner_id, Hash::zero())..=(owner_id, MAX_LOCAL_CUT_OPERATION_ID);
+        if self
+            .local_cut_owner_operations
+            .range(owner_operations)
+            .count()
+            != linked_operations.len()
+        {
+            return Err(LocalCutOwnerErrorV1::CorruptState);
+        }
+        Ok(state)
     }
 }
 
@@ -14102,6 +14091,7 @@ mod local_cut_owner_coverage {
     type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
     type TestResult = FixtureResult<()>;
     type PolicySource = (OutputPolicyV1, Vec<u8>);
+    type CutCorruption = fn(&mut MemoryStore) -> TestResult;
 
     const CUT_OWNER: [u8; 32] = [0x41; 32];
     const IDLE_OWNER: [u8; 32] = [0x42; 32];
@@ -15030,6 +15020,88 @@ mod local_cut_owner_coverage {
             store.verify_local_cut_owner_history_v1(CUT_OWNER),
             Err(LocalCutOwnerErrorV1::CorruptState)
         );
+        Ok(())
+    }
+
+    fn first_request(store: &mut MemoryStore) -> FixtureResult<&mut LocalCutOwnerRequestV1> {
+        Ok(&mut local_operation(store, FIRST_CUT.operation_id)?.request)
+    }
+
+    #[test]
+    fn local_cut_retry_rejects_each_mismatched_stored_binding() -> TestResult {
+        // Each case breaks exactly one of the 13 compared bindings of the older
+        // cut, then re-derives its intent digest, so only the binding comparison
+        // can reject the retained operation.
+        let corruptions: [CutCorruption; 13] = [
+            |store| {
+                first_request(store)?.operation_id = hash(0x95);
+                Ok(())
+            },
+            |store| {
+                let request = first_request(store)?;
+                let mut seal = *request.seal.as_input();
+                seal.schedule_ns = 1;
+                request.seal = LocalCutSealV2::new(seal)?;
+                Ok(())
+            },
+            |store| {
+                let cuts = &mut store.local_cut_owner_cuts;
+                cuts.insert((CUT_OWNER, FIRST_CUT.cut_id), SECOND_CUT.operation_id);
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.partition_ledger_seq = 9;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.manifest_hash = hash(0x99);
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.result_heads_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.participant_successor_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.cpu_completion_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.action_disposition_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.candidate_bases_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.invocation_bridges_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.result_inventory_generation = hash(0x99);
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.release_fence_proof_digest = hash(0x99);
+                Ok(())
+            },
+        ];
+        for corrupt in corruptions {
+            let (mut store, _) = cut_store()?;
+            commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
+            corrupt(&mut store)?;
+            let operation = local_operation(&mut store, FIRST_CUT.operation_id)?;
+            operation.intent_digest = local_cut_owner_intent_digest_v1(&operation.request)?;
+            let intent = operation.intent_digest;
+            assert_eq!(
+                store.resolve_local_cut_owner_retry_v1(CUT_OWNER, FIRST_CUT.operation_id, intent),
+                Err(LocalCutOwnerErrorV1::CorruptState)
+            );
+        }
         Ok(())
     }
 }

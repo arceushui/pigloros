@@ -815,10 +815,7 @@ fn registry_commits_local_cut_owner_and_recovers_without_authority() -> TestResu
         local_state.inventory_generation,
         local_cut.result_inventory_generation
     );
-    assert_eq!(
-        store.verify_local_cut_owner_history_v1(owner_id)?.as_ref(),
-        Some(&local_state)
-    );
+    assert_eq!(verified_local_cut_state(&store, owner_id)?, local_state);
     let current_admission = store
         .read_manifest_owner_state_v1(owner_id)?
         .ok_or("missing synchronized admitted owner state")?;
@@ -898,9 +895,7 @@ fn sqlite_local_cut_owner_retry_survives_reopen_without_registry_authority() -> 
     drop(store);
 
     let mut reopened = pos_store::sqlite::SqliteStore::open(database)?;
-    let verified = reopened
-        .verify_local_cut_owner_history_v1(owner_id)?
-        .ok_or("SQLite local-cut owner history was not retained")?;
+    let verified = verified_local_cut_state(&reopened, owner_id)?;
     assert_eq!(
         verified.previous_visible_lcq1_hash,
         Some(applied.receipt.digest())
@@ -2294,6 +2289,22 @@ impl LocalCutOwnerPersistencePortV1 for FaultStore {
     ) -> CutResult<Option<pos_core::LocalCutOwnerCommitV1>> {
         self.inner.read_local_cut_owner_commit_v1(owner, cut)
     }
+
+    fn verify_local_cut_owner_history_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> CutResult<Option<pos_core::LocalCutOwnerStateV1>> {
+        self.inner.verify_local_cut_owner_history_v1(owner_id)
+    }
+}
+
+/// Verify an owner's complete local-cut history through the persistence port.
+fn verified_local_cut_state<S: LocalCutOwnerPersistencePortV1>(
+    store: &S,
+    owner_id: [u8; 32],
+) -> Result<pos_core::LocalCutOwnerStateV1, Box<dyn Error>> {
+    let state = store.verify_local_cut_owner_history_v1(owner_id)?;
+    state.ok_or_else(|| "local-cut owner history was not retained".into())
 }
 
 struct LocalCutFixture {
@@ -2768,6 +2779,11 @@ fn registry_local_cut_commit_maps_store_faults_before_signing() -> TestResult {
     let applied =
         registry.commit_admitted_local_cut_owner_v1(admitted, local_cut.clone(), &mut store)?;
     assert_eq!(applied.kind, LocalCutOwnerCommitKindV1::Applied);
+    let verified = verified_local_cut_state(&store, fixture.state.owner_id)?;
+    assert_eq!(
+        verified.previous_visible_lcq1_hash,
+        Some(applied.receipt.digest())
+    );
     Ok(())
 }
 
