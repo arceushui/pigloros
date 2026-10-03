@@ -1160,6 +1160,36 @@ impl OutputPolicyClosureV1 {
         }
         output
     }
+
+    /// Decode and validate one exact OPC1 envelope and every native member.
+    ///
+    /// The expected EOP1 bytes must equal member zero. Each remaining member
+    /// is checked by its native decoder, including canonical encoding and
+    /// recorded identity, before this method returns the retained closure.
+    ///
+    /// # Errors
+    /// Returns an artifact error when the envelope, member schemas, identities,
+    /// or canonical encoding are invalid.
+    pub fn from_manifest_canonical_bytes_v1(
+        bytes: &[u8],
+        expected_eop1: &[u8],
+    ) -> Result<Self, OutputAdmissionErrorV1> {
+        if bytes.len() > MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 {
+            return Err(OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" });
+        }
+        let envelope =
+            pos_core::OutputPolicyClosureEnvelopeV1::from_canonical_bytes_v1(bytes, expected_eop1)
+                .map_err(|_| OutputAdmissionErrorV1::ArtifactInvalid { kind: "OPC1" })?;
+        let closure = Self::from_artifacts_inner(
+            envelope.eop1_bytes(),
+            envelope.executable_budget_bytes(),
+            envelope.implementation_artifact(),
+            envelope.configuration_artifact(),
+            envelope.execution_profile_artifact(),
+            envelope.retention_policy_artifact(),
+        )?;
+        Ok(closure)
+    }
 }
 
 /// Validate a complete host artifact set without minting an admission closure.

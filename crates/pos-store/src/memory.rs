@@ -45,9 +45,10 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta},
     validate_artifact_registration_catalog_graph_v1, validate_closed_adapter_recording_v1,
-    AdapterCallReservationOutcomeV1, AdapterCallReservationV1, AdapterRecordingSessionV1,
-    AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1, AdapterTranscriptCallV1,
-    AdapterTranscriptV1, ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
+    validate_manifest_owner_admission_snapshot_v1, AdapterCallReservationOutcomeV1,
+    AdapterCallReservationV1, AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1,
+    AdapterRecordingStoreV1, AdapterTranscriptCallV1, AdapterTranscriptV1,
+    ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
     ArtifactRegistrationGraphNodeV1, ArtifactRegistrationPersistenceErrorV1,
     ArtifactRegistrationPersistencePortV1, AuthorityCommitOutcomeV1, AuthorityMutationPermitV1,
     AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
@@ -68,10 +69,13 @@ use pos_core::{
     ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1,
     ForkPublicationArtifactV1, ForkPublicationBindingV1, ForkPublicationOperationV1,
     ForkPublicationReceiptV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, OwnerIdV1, PersistedAuthorityV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, ManifestOwnerAdmissionCommitKindV1,
+    ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1,
+    ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
+    ManifestOwnerAdmissionSnapshotV1, OwnerIdV1, PersistedAuthorityV1,
     PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
+    PreparedErasureRecoveryErrorV1, PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1,
+    PrincipalOwnerBindingV1, PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
     ERASURE_MAX_INVENTORY_REQUESTS, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
@@ -284,6 +288,14 @@ pub struct MemoryStore {
     artifact_registration_identities: BTreeMap<(OwnerIdV1, ErasureArtifactClassV1, Hash), Hash>,
     /// Immutable `(owner, MRM1 operation ID) -> root registration` index.
     artifact_registration_operations: BTreeMap<(OwnerIdV1, Hash), Hash>,
+    /// Current local manifest-owner generation and complete owned Timeline set.
+    manifest_owner_admission_states: BTreeMap<[u8; 32], MemoryManifestOwnerAdmissionStateV1>,
+    /// Immutable historical MCA1/MSB1/MSR1 rows and exact scoped native copies.
+    manifest_owner_admission_snapshots:
+        BTreeMap<([u8; 32], u64, TimelineId), ManifestOwnerAdmissionSnapshotV1>,
+    /// Idempotent operation outcomes, including the original receipt digests.
+    manifest_owner_admission_operations:
+        BTreeMap<([u8; 32], Hash), MemoryManifestOwnerAdmissionOperationV1>,
     /// Crash-recoverable local adapter recorder sessions by owner/run ID.
     adapter_recording_sessions: BTreeMap<(Hash, Hash), MemoryAdapterRecordingSessionV1>,
     /// Canonical ERS1 history needed to validate predecessor links after restart.
@@ -321,6 +333,20 @@ struct MemoryAdapterRecordingSessionV1 {
     status: MemoryAdapterRecordingStatusV1,
     calls: BTreeMap<u64, MemoryAdapterRecordingCallV1>,
     transcript_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryManifestOwnerAdmissionStateV1 {
+    configuration_generation: u64,
+    previous_visible_lcq1_hash: Option<Hash>,
+    inventory_generation: Hash,
+    timelines: BTreeSet<TimelineId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryManifestOwnerAdmissionOperationV1 {
+    intent_digest: Hash,
+    result: ManifestOwnerAdmissionCommitV1,
 }
 
 #[derive(Clone, Copy)]
@@ -668,6 +694,9 @@ impl MemoryStore {
             artifact_registrations: BTreeMap::new(),
             artifact_registration_identities: BTreeMap::new(),
             artifact_registration_operations: BTreeMap::new(),
+            manifest_owner_admission_states: BTreeMap::new(),
+            manifest_owner_admission_snapshots: BTreeMap::new(),
+            manifest_owner_admission_operations: BTreeMap::new(),
             adapter_recording_sessions: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
             erasure_attempt_pages: BTreeMap::new(),
@@ -11007,6 +11036,326 @@ impl ArtifactRegistrationPersistencePortV1 for MemoryStore {
     }
 }
 
+impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
+    fn read_manifest_owner_state_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<ManifestOwnerAdmissionOwnerStateV1>, ManifestOwnerAdmissionErrorV1> {
+        let Some(state) = self.manifest_owner_admission_states.get(&owner_id) else {
+            let has_rows = self
+                .manifest_owner_admission_snapshots
+                .keys()
+                .any(|(stored_owner, _, _)| *stored_owner == owner_id)
+                || self
+                    .manifest_owner_admission_operations
+                    .keys()
+                    .any(|(stored_owner, _)| *stored_owner == owner_id);
+            return if has_rows {
+                Err(ManifestOwnerAdmissionErrorV1::CorruptState)
+            } else {
+                Ok(None)
+            };
+        };
+        if state.configuration_generation == 0
+            || state.timelines.is_empty()
+            || state.inventory_generation == Hash::zero()
+            || state.previous_visible_lcq1_hash == Some(Hash::zero())
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let current_generation_rows = self
+            .manifest_owner_admission_snapshots
+            .keys()
+            .filter(|(stored_owner, generation, _)| {
+                *stored_owner == owner_id && *generation == state.configuration_generation
+            })
+            .count();
+        if current_generation_rows != state.timelines.len() {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut owner_operation = None;
+        let mut owner_catalog = None;
+        let mut scopes = HashSet::with_capacity(state.timelines.len());
+        let mut receipt_hashes = Vec::with_capacity(state.timelines.len());
+        for timeline_id in &state.timelines {
+            let snapshot = self
+                .manifest_owner_admission_snapshots
+                .get(&(owner_id, state.configuration_generation, *timeline_id))
+                .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+            if snapshot.resulting_inventory_generation != state.inventory_generation
+                || snapshot.timeline.timeline_id != *timeline_id
+                || snapshot
+                    .timeline
+                    .receipt
+                    .as_input()
+                    .previous_visible_lcq1_hash
+                    != state.previous_visible_lcq1_hash
+                || owner_operation.is_some_and(|operation| operation != snapshot.operation_id)
+                || owner_catalog.is_some_and(|catalog| catalog != snapshot.catalog.digest())
+                || !scopes.insert(snapshot.timeline.scope)
+                || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+            owner_operation = Some(snapshot.operation_id);
+            owner_catalog = Some(snapshot.catalog.digest());
+            receipt_hashes.push(snapshot.timeline.receipt.digest());
+        }
+        let operation_id = owner_operation.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        let operation = self
+            .manifest_owner_admission_operations
+            .get(&(owner_id, operation_id))
+            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        if operation.result.kind != ManifestOwnerAdmissionCommitKindV1::Applied
+            || operation.result.configuration_generation != state.configuration_generation
+            || operation.result.inventory_generation != state.inventory_generation
+            || operation.result.receipt_hashes != receipt_hashes
+            || self
+                .manifest_owner_admission_operations
+                .iter()
+                .filter(|((stored_owner, _), operation)| {
+                    *stored_owner == owner_id
+                        && operation.result.configuration_generation
+                            == state.configuration_generation
+                })
+                .count()
+                != 1
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        Ok(Some(ManifestOwnerAdmissionOwnerStateV1 {
+            owner_id,
+            configuration_generation: state.configuration_generation,
+            previous_visible_lcq1_hash: state.previous_visible_lcq1_hash,
+            inventory_generation: state.inventory_generation,
+            timelines: state.timelines.iter().copied().collect(),
+        }))
+    }
+
+    fn resolve_manifest_owner_admission_retry_v1(
+        &self,
+        owner_id: [u8; 32],
+        operation_id: Hash,
+        intent_digest: Hash,
+    ) -> Result<Option<ManifestOwnerAdmissionCommitV1>, ManifestOwnerAdmissionErrorV1> {
+        self.read_manifest_owner_state_v1(owner_id)?;
+        let Some(operation) = self
+            .manifest_owner_admission_operations
+            .get(&(owner_id, operation_id))
+        else {
+            return Ok(None);
+        };
+        if operation.intent_digest != intent_digest {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+        let result = &operation.result;
+        if result.kind != ManifestOwnerAdmissionCommitKindV1::Applied
+            || result.configuration_generation == 0
+            || result.inventory_generation == Hash::zero()
+            || result.receipt_hashes.is_empty()
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut receipt_hashes = Vec::with_capacity(result.receipt_hashes.len());
+        let mut row_count = 0;
+        for ((stored_owner, generation, timeline_id), snapshot) in
+            &self.manifest_owner_admission_snapshots
+        {
+            if *stored_owner == owner_id && *generation == result.configuration_generation {
+                row_count += 1;
+                if snapshot.operation_id != operation_id
+                    || snapshot.timeline.timeline_id != *timeline_id
+                    || snapshot.resulting_inventory_generation != result.inventory_generation
+                    || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+                {
+                    return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+                }
+                receipt_hashes.push(snapshot.timeline.receipt.digest());
+            }
+        }
+        if row_count != result.receipt_hashes.len() || receipt_hashes != result.receipt_hashes {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut retry = result.clone();
+        retry.kind = ManifestOwnerAdmissionCommitKindV1::ExactRetry;
+        Ok(Some(retry))
+    }
+
+    fn commit_manifest_owner_admission_v1(
+        &mut self,
+        batch: PreparedManifestOwnerAdmissionV1,
+    ) -> Result<ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1> {
+        let input = batch.input();
+        let owner_id = input.catalog.as_input().owner_id;
+        let current_state = self.read_manifest_owner_state_v1(owner_id)?;
+        if let Some(result) = self.resolve_manifest_owner_admission_retry_v1(
+            owner_id,
+            input.operation_id,
+            batch.intent_digest(),
+        )? {
+            return Ok(result);
+        }
+
+        match (input.expected_configuration_generation, current_state) {
+            (None, None) => {}
+            (Some(expected_generation), Some(state))
+                if state.configuration_generation == expected_generation
+                    && state.previous_visible_lcq1_hash == input.previous_visible_lcq1_hash
+                    && Some(state.inventory_generation) == input.expected_inventory_generation
+                    && !state.timelines.is_empty()
+                    && expected_generation.checked_add(1)
+                        == Some(input.catalog.as_input().configuration_generation) => {}
+            _ => return Err(ManifestOwnerAdmissionErrorV1::Conflict),
+        }
+
+        let configuration_generation = input.catalog.as_input().configuration_generation;
+        if input.timelines.iter().any(|timeline| {
+            self.manifest_owner_admission_snapshots.contains_key(&(
+                owner_id,
+                configuration_generation,
+                timeline.timeline_id,
+            ))
+        }) {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+
+        let result = ManifestOwnerAdmissionCommitV1 {
+            kind: ManifestOwnerAdmissionCommitKindV1::Applied,
+            configuration_generation,
+            inventory_generation: input.resulting_inventory_generation,
+            receipt_hashes: input
+                .timelines
+                .iter()
+                .map(|timeline| timeline.receipt.digest())
+                .collect(),
+        };
+        let snapshots: Vec<_> = input
+            .timelines
+            .iter()
+            .map(|timeline| {
+                (
+                    (owner_id, configuration_generation, timeline.timeline_id),
+                    ManifestOwnerAdmissionSnapshotV1 {
+                        catalog: input.catalog.clone(),
+                        timeline: timeline.clone(),
+                        operation_id: input.operation_id,
+                        expected_inventory_generation: input.expected_inventory_generation,
+                        resulting_inventory_generation: input.resulting_inventory_generation,
+                    },
+                )
+            })
+            .collect();
+        let next_state = MemoryManifestOwnerAdmissionStateV1 {
+            configuration_generation,
+            previous_visible_lcq1_hash: input.previous_visible_lcq1_hash,
+            inventory_generation: input.resulting_inventory_generation,
+            timelines: input
+                .timelines
+                .iter()
+                .map(|timeline| timeline.timeline_id)
+                .collect(),
+        };
+        let operation = MemoryManifestOwnerAdmissionOperationV1 {
+            intent_digest: batch.intent_digest(),
+            result: result.clone(),
+        };
+
+        for (key, snapshot) in snapshots {
+            self.manifest_owner_admission_snapshots
+                .insert(key, snapshot);
+        }
+        self.manifest_owner_admission_states
+            .insert(owner_id, next_state);
+        self.manifest_owner_admission_operations
+            .insert((owner_id, input.operation_id), operation);
+        Ok(result)
+    }
+
+    fn read_manifest_owner_admission_v1(
+        &self,
+        owner_id: [u8; 32],
+        configuration_generation: u64,
+        timeline_id: TimelineId,
+    ) -> Result<Option<ManifestOwnerAdmissionSnapshotV1>, ManifestOwnerAdmissionErrorV1> {
+        let Some(snapshot) = self.manifest_owner_admission_snapshots.get(&(
+            owner_id,
+            configuration_generation,
+            timeline_id,
+        )) else {
+            return Ok(None);
+        };
+        if snapshot.catalog.as_input().owner_id != owner_id
+            || snapshot.catalog.as_input().configuration_generation != configuration_generation
+            || snapshot.timeline.timeline_id != timeline_id
+            || snapshot.timeline.receipt.digest() == Hash::zero()
+            || snapshot.resulting_inventory_generation == Hash::zero()
+            || validate_manifest_owner_admission_snapshot_v1(snapshot).is_err()
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let operation = self
+            .manifest_owner_admission_operations
+            .get(&(owner_id, snapshot.operation_id))
+            .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+        if operation.result.configuration_generation != configuration_generation
+            || operation.result.inventory_generation != snapshot.resulting_inventory_generation
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        let mut generation_receipts = Vec::new();
+        let mut generation_operations = 0_usize;
+        for ((stored_owner, stored_operation_id), stored_operation) in
+            &self.manifest_owner_admission_operations
+        {
+            if *stored_owner == owner_id
+                && stored_operation.result.configuration_generation == configuration_generation
+            {
+                generation_operations += 1;
+                if *stored_operation_id != snapshot.operation_id {
+                    return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+                }
+            }
+        }
+        for ((stored_owner, stored_generation, stored_timeline), stored_snapshot) in
+            &self.manifest_owner_admission_snapshots
+        {
+            if *stored_owner != owner_id || *stored_generation != configuration_generation {
+                continue;
+            }
+            if stored_snapshot.operation_id != snapshot.operation_id
+                || stored_snapshot.resulting_inventory_generation
+                    != snapshot.resulting_inventory_generation
+                || stored_snapshot
+                    .timeline
+                    .receipt
+                    .as_input()
+                    .previous_visible_lcq1_hash
+                    != snapshot
+                        .timeline
+                        .receipt
+                        .as_input()
+                        .previous_visible_lcq1_hash
+                || validate_manifest_owner_admission_snapshot_v1(stored_snapshot).is_err()
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+            generation_receipts.push(stored_snapshot.timeline.receipt.digest());
+            if *stored_timeline == timeline_id
+                && stored_snapshot.timeline.receipt.digest() != snapshot.timeline.receipt.digest()
+            {
+                return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+            }
+        }
+        if generation_operations != 1
+            || generation_receipts.is_empty()
+            || generation_receipts != operation.result.receipt_hashes
+        {
+            return Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+        }
+        Ok(Some(snapshot.clone()))
+    }
+}
+
 impl AdapterRecordingStoreV1 for MemoryStore {
     fn open_adapter_recording_session(
         &mut self,
@@ -12919,6 +13268,381 @@ mod coverage_entrypoints {
             store.reserve_adapter_call(owner_reference, run_operation_id, next_ordinal),
             Ok(expected)
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod manifest_owner_admission_coverage {
+    use super::*;
+    use crate::manifest_owner_fixtures::{
+        catalog, hash, plugin, policy_copies, AcceptingOwner, PolicySource,
+    };
+    use pos_core::{
+        prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerTimelineAdmissionRequestV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
+        WorldConsumerV1, WorldProducerV1,
+    };
+
+    type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
+    type TestResult = FixtureResult<()>;
+    type Corruption = fn(&mut MemoryStore) -> TestResult;
+
+    const OWNER: [u8; 32] = [0x4d; 32];
+    const CORRUPT_STATE: Result<(), ManifestOwnerAdmissionErrorV1> =
+        Err(ManifestOwnerAdmissionErrorV1::CorruptState);
+
+    const fn owned_timeline(byte: u8) -> TimelineId {
+        TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+    }
+
+    fn timeline_request(
+        index: usize,
+        timeline_id: TimelineId,
+        sources: &[PolicySource],
+    ) -> FixtureResult<ManifestOwnerTimelineAdmissionRequestV1> {
+        let offset = u8::try_from(index).unwrap_or(u8::MAX);
+        let scope = hash(70 + offset);
+        let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+            scope,
+            consumers: vec![WorldConsumerV1::new(
+                "local-observer".to_owned(),
+                hash(130),
+                hash(131),
+                hash(132),
+            )?],
+            producers: vec![WorldProducerV1::new(plugin(1), sources[0].0.digest())?],
+            optional_view_roots: Vec::new(),
+        })?;
+        Ok(ManifestOwnerTimelineAdmissionRequestV1 {
+            timeline_id,
+            scope,
+            wcs1,
+            policy_copies: policy_copies(OWNER, scope, sources, hash(80 + offset))?,
+        })
+    }
+
+    /// Prepare the successor of `current` (or genesis) owning `timeline_ids`.
+    fn prepared(
+        current: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+        timeline_ids: &[TimelineId],
+    ) -> FixtureResult<PreparedManifestOwnerAdmissionV1> {
+        let generation = current.map_or(1, |state| state.configuration_generation + 1);
+        let seed = u8::try_from(generation).unwrap_or(u8::MAX);
+        let (catalog, sources) = catalog(OWNER, generation)?;
+        let timelines = timeline_ids
+            .iter()
+            .enumerate()
+            .map(|(index, timeline_id)| timeline_request(index, *timeline_id, &sources))
+            .collect::<FixtureResult<Vec<_>>>()?;
+        let request = ManifestOwnerAdmissionRequestV1 {
+            operation_id: hash(40 + seed),
+            catalog,
+            expected_configuration_generation: current.map(|state| state.configuration_generation),
+            previous_visible_lcq1_hash: current.and_then(|state| state.previous_visible_lcq1_hash),
+            expected_inventory_generation: current.map(|state| state.inventory_generation),
+            resulting_inventory_generation: hash(50 + seed),
+            timelines,
+        };
+        let batch = prepare_manifest_owner_admission_v1(request, &AcceptingOwner, current)?;
+        Ok(batch)
+    }
+
+    const fn genesis_timelines() -> [TimelineId; 2] {
+        [owned_timeline(1), owned_timeline(2)]
+    }
+
+    /// Store holding generation 1 (operation `hash(41)`, Timelines 1 and 2).
+    fn genesis_store() -> FixtureResult<MemoryStore> {
+        let mut store = MemoryStore::new();
+        store.commit_manifest_owner_admission_v1(prepared(None, &genesis_timelines())?)?;
+        Ok(store)
+    }
+
+    /// Store holding generation 1 and its replacement generation 2
+    /// (operation `hash(42)`, Timelines 3 and 4).
+    fn replaced_store() -> FixtureResult<MemoryStore> {
+        let mut store = genesis_store()?;
+        let current = store
+            .read_manifest_owner_state_v1(OWNER)?
+            .ok_or("missing genesis owner state")?;
+        let replacement = prepared(Some(&current), &[owned_timeline(3), owned_timeline(4)])?;
+        store.commit_manifest_owner_admission_v1(replacement)?;
+        Ok(store)
+    }
+
+    fn genesis_with(corrupt: Corruption) -> FixtureResult<MemoryStore> {
+        let mut store = genesis_store()?;
+        corrupt(&mut store)?;
+        Ok(store)
+    }
+
+    fn state_mut(
+        store: &mut MemoryStore,
+    ) -> FixtureResult<&mut MemoryManifestOwnerAdmissionStateV1> {
+        store
+            .manifest_owner_admission_states
+            .get_mut(&OWNER)
+            .ok_or_else(|| "missing owner state".into())
+    }
+
+    fn operation_mut(
+        store: &mut MemoryStore,
+        operation_id: Hash,
+    ) -> FixtureResult<&mut MemoryManifestOwnerAdmissionOperationV1> {
+        store
+            .manifest_owner_admission_operations
+            .get_mut(&(OWNER, operation_id))
+            .ok_or_else(|| "missing owner operation".into())
+    }
+
+    fn snapshot_mut(
+        store: &mut MemoryStore,
+        generation: u64,
+        timeline_id: TimelineId,
+    ) -> FixtureResult<&mut ManifestOwnerAdmissionSnapshotV1> {
+        store
+            .manifest_owner_admission_snapshots
+            .get_mut(&(OWNER, generation, timeline_id))
+            .ok_or_else(|| "missing owner snapshot".into())
+    }
+
+    fn drop_state(store: &mut MemoryStore) -> TestResult {
+        store
+            .manifest_owner_admission_states
+            .remove(&OWNER)
+            .ok_or("missing owner state")?;
+        Ok(())
+    }
+
+    fn drop_operation(store: &mut MemoryStore, operation_id: Hash) -> TestResult {
+        store
+            .manifest_owner_admission_operations
+            .remove(&(OWNER, operation_id))
+            .ok_or("missing owner operation")?;
+        Ok(())
+    }
+
+    fn insert_operation(
+        store: &mut MemoryStore,
+        operation_id: Hash,
+        operation: MemoryManifestOwnerAdmissionOperationV1,
+    ) {
+        store
+            .manifest_owner_admission_operations
+            .insert((OWNER, operation_id), operation);
+    }
+
+    fn drop_snapshot(
+        store: &mut MemoryStore,
+        generation: u64,
+        timeline_id: TimelineId,
+    ) -> TestResult {
+        store
+            .manifest_owner_admission_snapshots
+            .remove(&(OWNER, generation, timeline_id))
+            .ok_or("missing owner snapshot")?;
+        Ok(())
+    }
+
+    fn insert_snapshot(
+        store: &mut MemoryStore,
+        generation: u64,
+        timeline_id: TimelineId,
+        snapshot: ManifestOwnerAdmissionSnapshotV1,
+    ) {
+        store
+            .manifest_owner_admission_snapshots
+            .insert((OWNER, generation, timeline_id), snapshot);
+    }
+
+    fn clear_snapshots(store: &mut MemoryStore) {
+        store.manifest_owner_admission_snapshots.clear();
+    }
+
+    fn intent(store: &MemoryStore, operation_id: Hash) -> FixtureResult<Hash> {
+        store
+            .manifest_owner_admission_operations
+            .get(&(OWNER, operation_id))
+            .map(|operation| operation.intent_digest)
+            .ok_or_else(|| "missing owner operation".into())
+    }
+
+    #[test]
+    fn owner_rows_without_a_state_row_are_corrupt() -> TestResult {
+        let mut store = genesis_store()?;
+        assert_eq!(store.read_manifest_owner_state_v1([0x4e; 32]), Ok(None));
+
+        drop_state(&mut store)?;
+        assert_eq!(
+            store.read_manifest_owner_state_v1(OWNER).map(drop),
+            CORRUPT_STATE
+        );
+
+        clear_snapshots(&mut store);
+        assert_eq!(
+            store.read_manifest_owner_state_v1(OWNER).map(drop),
+            CORRUPT_STATE
+        );
+        let genesis_intent = intent(&store, hash(41))?;
+        assert_eq!(
+            store
+                .resolve_manifest_owner_admission_retry_v1(OWNER, hash(41), genesis_intent)
+                .map(drop),
+            CORRUPT_STATE
+        );
+        let retry = prepared(None, &genesis_timelines())?;
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(retry).map(drop),
+            CORRUPT_STATE
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn current_owner_state_rejects_each_inconsistent_retained_row() -> TestResult {
+        let corruptions: [Corruption; 6] = [
+            |store| {
+                state_mut(store)?.timelines.clear();
+                Ok(())
+            },
+            |store| {
+                state_mut(store)?.timelines.insert(owned_timeline(9));
+                Ok(())
+            },
+            |store| {
+                let state = state_mut(store)?;
+                state.timelines.remove(&owned_timeline(2));
+                state.timelines.insert(owned_timeline(9));
+                Ok(())
+            },
+            |store| {
+                state_mut(store)?.inventory_generation = hash(99);
+                Ok(())
+            },
+            |store| drop_operation(store, hash(41)),
+            |store| {
+                operation_mut(store, hash(41))?.result.kind =
+                    ManifestOwnerAdmissionCommitKindV1::ExactRetry;
+                Ok(())
+            },
+        ];
+        for corrupt in corruptions {
+            let store = genesis_with(corrupt)?;
+            assert_eq!(
+                store.read_manifest_owner_state_v1(OWNER).map(drop),
+                CORRUPT_STATE
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retry_resolves_and_rejects_historical_generation_rows() -> TestResult {
+        let store = replaced_store()?;
+        for operation_id in [hash(41), hash(42)] {
+            let retry = store
+                .resolve_manifest_owner_admission_retry_v1(
+                    OWNER,
+                    operation_id,
+                    intent(&store, operation_id)?,
+                )?
+                .ok_or("missing exact retry")?;
+            assert_eq!(retry.kind, ManifestOwnerAdmissionCommitKindV1::ExactRetry);
+        }
+
+        let corruptions: [Corruption; 3] = [
+            |store| {
+                operation_mut(store, hash(41))?
+                    .result
+                    .receipt_hashes
+                    .clear();
+                Ok(())
+            },
+            |store| {
+                snapshot_mut(store, 1, owned_timeline(1))?.resulting_inventory_generation =
+                    hash(99);
+                Ok(())
+            },
+            |store| drop_snapshot(store, 1, owned_timeline(2)),
+        ];
+        for corrupt in corruptions {
+            let mut damaged_store = replaced_store()?;
+            corrupt(&mut damaged_store)?;
+            let genesis_intent = intent(&damaged_store, hash(41))?;
+            assert_eq!(
+                damaged_store
+                    .resolve_manifest_owner_admission_retry_v1(OWNER, hash(41), genesis_intent)
+                    .map(drop),
+                CORRUPT_STATE
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn commit_rejects_an_occupied_successor_generation_row() -> TestResult {
+        let mut store = genesis_store()?;
+        let current = store
+            .read_manifest_owner_state_v1(OWNER)?
+            .ok_or("missing genesis owner state")?;
+        let stray = snapshot_mut(&mut store, 1, owned_timeline(1))?.clone();
+        insert_snapshot(&mut store, 2, owned_timeline(3), stray);
+        let replacement = prepared(Some(&current), &[owned_timeline(3), owned_timeline(4)])?;
+        assert_eq!(
+            store.commit_manifest_owner_admission_v1(replacement),
+            Err(ManifestOwnerAdmissionErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn historical_read_rejects_each_inconsistent_generation_row() -> TestResult {
+        let store = genesis_store()?;
+        assert_eq!(
+            store.read_manifest_owner_admission_v1(OWNER, 3, owned_timeline(1)),
+            Ok(None)
+        );
+
+        let corruptions: [Corruption; 6] = [
+            |store| {
+                snapshot_mut(store, 1, owned_timeline(1))?.resulting_inventory_generation =
+                    Hash::zero();
+                Ok(())
+            },
+            |store| drop_operation(store, hash(41)),
+            |store| {
+                operation_mut(store, hash(41))?.result.inventory_generation = hash(99);
+                Ok(())
+            },
+            |store| {
+                let duplicate = operation_mut(store, hash(41))?.clone();
+                insert_operation(store, hash(77), duplicate);
+                Ok(())
+            },
+            |store| {
+                snapshot_mut(store, 1, owned_timeline(2))?.resulting_inventory_generation =
+                    hash(99);
+                Ok(())
+            },
+            |store| {
+                operation_mut(store, hash(41))?
+                    .result
+                    .receipt_hashes
+                    .reverse();
+                Ok(())
+            },
+        ];
+        for corrupt in corruptions {
+            let store = genesis_with(corrupt)?;
+            assert_eq!(
+                store
+                    .read_manifest_owner_admission_v1(OWNER, 1, owned_timeline(1))
+                    .map(drop),
+                CORRUPT_STATE
+            );
+        }
         Ok(())
     }
 }
