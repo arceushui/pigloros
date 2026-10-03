@@ -317,13 +317,13 @@ pub use consent::{
     MODALITY_MODEL_FIT, MODALITY_PERSONA,
 };
 pub use counterfactual_store::{
-    CounterfactualBasisV1, CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
-    CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualStoreErrorV1, CounterfactualStorePortV1, ForkGenerationV1,
-    InvalidationConflictV1, RecomputationFrontierBytesV1, StoredCounterfactualArtifactV1,
-    SuffixInvalidationBytesV1, MAX_COUNTERFACTUAL_EVICTIONS_V1,
-    MAX_COUNTERFACTUAL_FRONTIER_BYTES_V1, MAX_COUNTERFACTUAL_INVALIDATION_BYTES_V1,
-    MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1,
+    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
+    CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
+    CounterfactualTickOutcomeV1, ForkGenerationV1, InvalidationConflictV1,
+    RecomputationFrontierBytesV1, StoredCounterfactualArtifactV1, SuffixInvalidationBytesV1,
+    MAX_COUNTERFACTUAL_EVICTIONS_V1, MAX_COUNTERFACTUAL_FRONTIER_BYTES_V1,
+    MAX_COUNTERFACTUAL_INVALIDATION_BYTES_V1, MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1,
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
