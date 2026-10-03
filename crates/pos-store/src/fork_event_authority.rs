@@ -541,6 +541,29 @@ pub(crate) fn fork_append_request(
     .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
 }
 
+/// Whether a stored classified Event carries exactly the content its `FOP1` binds.
+///
+/// ADR-105 r6 R6.5 P8 and R6.9: every adapter requires the `FOP1` `WallTime`,
+/// payload hash, and origin (this child at the `FOP1` logical sequence).
+///
+/// The signature arm is currently local-only: authority-origin code 1 is the
+/// only active origin, and ADR-099 local append inserts one unsigned Event,
+/// so every classified Event must be unsigned. #519 (ADR-105 r6 P9) adds the
+/// code-2 arm, which instead requires the stored verified signature.
+pub(crate) fn classified_event_matches_operation(
+    event: &Event,
+    operation: &ForkAppendOperationV1,
+) -> bool {
+    let input = operation.input();
+    event.wall_time == input.wall_time
+        && event.payload_hash == input.payload_hash
+        && event.signature.is_none()
+        && event.origin.is_some_and(|origin| {
+            origin.origin_timeline_id == input.child_timeline_id
+                && origin.origin_logical_seq.as_u64() == input.logical_seq
+        })
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -2031,6 +2054,9 @@ mod tests {
         Ok(registration)
     }
 
+    /// The operation id of the host-internal append in every lifecycle fixture.
+    const HOST_OPERATION_ID: Hash = Hash::from_bytes([47; 32]);
+
     fn assert_host_append<S>(
         store: &mut S,
         fixture: &LifecycleFixtureV1,
@@ -2052,7 +2078,7 @@ mod tests {
                     fork_admission_digest: Hash::from_bytes([55; 32]),
                     ..append_permit(fixture, ForkAppendSourceIdentityV1::HostInternal,)
                 },
-                Hash::from_bytes([47; 32]),
+                HOST_OPERATION_ID,
                 draft(b"wrong-admission"),
             ),
             Err(ForkEventAuthorityErrorV1::Unauthenticated)
@@ -2064,7 +2090,7 @@ mod tests {
                     registrar_identifier: "foreign-registrar".to_owned(),
                     ..append_permit(fixture, ForkAppendSourceIdentityV1::HostInternal,)
                 },
-                Hash::from_bytes([47; 32]),
+                HOST_OPERATION_ID,
                 draft(b"wrong-registrar"),
             ),
             Err(ForkEventAuthorityErrorV1::Unauthenticated)
@@ -2073,7 +2099,7 @@ mod tests {
         let receipt = store.append_classified(
             &fixture.session,
             &host_permit,
-            Hash::from_bytes([47; 32]),
+            HOST_OPERATION_ID,
             host_draft.clone(),
         )?;
         let registrar = store.issue_classifier_registrar_permit(
@@ -2095,7 +2121,7 @@ mod tests {
             store.append_classified(
                 &fixture.session,
                 &host_permit,
-                Hash::from_bytes([47; 32]),
+                HOST_OPERATION_ID,
                 host_draft.clone(),
             )?,
             receipt
@@ -3703,6 +3729,257 @@ mod tests {
             sqlite_store_at(&path)?.read_fork_event_suffix(fixture.fork.child_id, 1),
             Err(ForkEventAuthorityErrorV1::CorruptAuthority)
         );
+        Ok(())
+    }
+
+    const fn tamper_wall_time(event: &mut Event) {
+        event.wall_time = WallTime::from_micros(11);
+    }
+
+    const fn tamper_signature(event: &mut Event) {
+        event.signature = Some(Signature::from_bytes([0; 64]));
+    }
+
+    const fn tamper_payload_hash(event: &mut Event) {
+        event.payload_hash = Hash::from_bytes([9; 32]);
+    }
+
+    const fn tamper_origin(event: &mut Event) {
+        if let Some(origin) = &mut event.origin {
+            origin.origin_logical_seq = pos_core::Seq::from_u64(999_999);
+        }
+    }
+
+    fn tamper_origin_child(event: &mut Event) {
+        if let Some(origin) = &mut event.origin {
+            origin.origin_timeline_id = TimelineId::new();
+        }
+    }
+
+    const fn remove_origin(event: &mut Event) {
+        event.origin = None;
+    }
+
+    /// One named Event tamper for the per-field shared-rule table.
+    type EventTamperCaseV1 = (&'static str, fn(&mut Event));
+
+    /// ADR-105 r6 R6.5 P8/P9: the shared rule rejects each field on its own.
+    #[test]
+    fn classified_event_rule_rejects_each_mismatched_field() -> Result<(), Box<dyn Error>> {
+        let mut store = MemoryStore::new();
+        let fixture = create_lifecycle(&mut store)?;
+        let receipt = assert_host_append(&mut store, &fixture)?;
+        assert!(classified_event_matches_operation(
+            &receipt.event,
+            &receipt.operation
+        ));
+        let tampers: [EventTamperCaseV1; 6] = [
+            ("wall-time", tamper_wall_time),
+            ("payload-hash", tamper_payload_hash),
+            ("origin-child", tamper_origin_child),
+            ("origin-seq", tamper_origin),
+            ("origin-missing", remove_origin),
+            ("signature", tamper_signature),
+        ];
+        for (name, tamper) in tampers {
+            let mut event = receipt.event.clone();
+            tamper(&mut event);
+            assert!(
+                !classified_event_matches_operation(&event, &receipt.operation),
+                "{name} must not match its FOP1"
+            );
+        }
+        Ok(())
+    }
+
+    /// One local classified-Event tamper, expressed for each adapter.
+    struct ClassifiedEventTamperV1 {
+        name: &'static str,
+        memory: fn(&mut Event),
+        #[cfg(feature = "sqlite")]
+        sqlite: &'static str,
+    }
+
+    /// ADR-105 r6 R6.5 P8/P9: the stored Event keeps the `FOP1` `WallTime`,
+    /// payload hash, and origin, and ADR-099 local append stores it unsigned.
+    ///
+    /// Each tamper touches only the committed Timeline Event, never the `FOP1`.
+    const CLASSIFIED_EVENT_TAMPERS: [ClassifiedEventTamperV1; 4] = [
+        ClassifiedEventTamperV1 {
+            name: "wall-time",
+            memory: tamper_wall_time,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET wall_time = 11 WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "signature",
+            memory: tamper_signature,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET signature = zeroblob(64) WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "payload-hash",
+            memory: tamper_payload_hash,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET payload_hash = zeroblob(32) WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+        ClassifiedEventTamperV1 {
+            name: "origin",
+            memory: tamper_origin,
+            #[cfg(feature = "sqlite")]
+            sqlite: "UPDATE events SET origin_logical_seq = 999999 WHERE event_id = (\
+                     SELECT event_id FROM fork_append_operations WHERE operation_id = ?1)",
+        },
+    ];
+
+    /// A host-internal append with its live permit and exact replay draft.
+    struct HostAppendFixtureV1 {
+        lifecycle: LifecycleFixtureV1,
+        permit: ForkAppendSourcePermitV1,
+        draft: EventDraft,
+    }
+
+    /// Append the host Event and prove each read entry point accepts it.
+    fn host_append_fixture<S>(store: &mut S) -> Result<HostAppendFixtureV1, Box<dyn Error>>
+    where
+        S: EventStore
+            + ForkAdmissionAuthorityBootstrapPortV1
+            + ForkAdmissionAuthorityPortV1
+            + ForkEventProvenanceAuthorityPortV1
+            + ForkEventPermitIssuerPortV1,
+    {
+        let lifecycle = create_lifecycle(store)?;
+        let receipt = assert_host_append(store, &lifecycle)?;
+        let permit = store.issue_append_source_permit(
+            &lifecycle.issuer,
+            &lifecycle.session,
+            lifecycle.fork.child_id,
+            &lifecycle.source,
+            ForkAppendSourceIdentityV1::HostInternal,
+        )?;
+        let event = &receipt.event;
+        let draft = EventDraft::new(
+            event.entity,
+            event.event_type.clone(),
+            event.payload.clone(),
+        )
+        .with_wall_time(event.wall_time);
+        assert_eq!(
+            store
+                .read_fork_event_suffix(lifecycle.fork.child_id, 1)?
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.append_classified(
+                &lifecycle.session,
+                &permit,
+                HOST_OPERATION_ID,
+                draft.clone()
+            )?,
+            receipt
+        );
+        assert_eq!(
+            store.recover_classified_append(
+                &lifecycle.session,
+                &permit,
+                HOST_OPERATION_ID,
+                &draft
+            )?,
+            Some(receipt)
+        );
+        Ok(HostAppendFixtureV1 {
+            lifecycle,
+            permit,
+            draft,
+        })
+    }
+
+    /// The suffix-read, append-replay, and recovery errors for the host Event.
+    fn classified_entry_point_errors<S>(
+        store: &mut S,
+        fixture: &HostAppendFixtureV1,
+    ) -> [Option<ForkEventAuthorityErrorV1>; 3]
+    where
+        S: ForkEventProvenanceAuthorityPortV1,
+    {
+        let session = &fixture.lifecycle.session;
+        [
+            store
+                .read_fork_event_suffix(fixture.lifecycle.fork.child_id, 1)
+                .err(),
+            store
+                .append_classified(
+                    session,
+                    &fixture.permit,
+                    HOST_OPERATION_ID,
+                    fixture.draft.clone(),
+                )
+                .err(),
+            store
+                .recover_classified_append(
+                    session,
+                    &fixture.permit,
+                    HOST_OPERATION_ID,
+                    &fixture.draft,
+                )
+                .err(),
+        ]
+    }
+
+    /// Run one tamper through every `MemoryStore` classified read entry point.
+    fn memory_tampered_entry_points(
+        tamper: fn(&mut Event),
+    ) -> Result<[Option<ForkEventAuthorityErrorV1>; 3], Box<dyn Error>> {
+        let mut store = MemoryStore::new();
+        let fixture = host_append_fixture(&mut store)?;
+        store.test_tamper_classified_event(HOST_OPERATION_ID, tamper);
+        Ok(classified_entry_point_errors(&mut store, &fixture))
+    }
+
+    #[test]
+    fn memory_classified_reads_reject_tampered_timeline_event() -> Result<(), Box<dyn Error>> {
+        for tamper in CLASSIFIED_EVENT_TAMPERS {
+            let name = tamper.name;
+            assert_eq!(
+                memory_tampered_entry_points(tamper.memory)?,
+                [Some(ForkEventAuthorityErrorV1::CorruptAuthority); 3],
+                "{name} must make every MemoryStore classified read unavailable"
+            );
+        }
+        Ok(())
+    }
+
+    /// ADR-105 r6 R6.9 adapter parity: the same tampered durable graph gives
+    /// the same suffix, replay, and recovery results on both adapters.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_classified_reads_match_memory_for_tampered_timeline_event(
+    ) -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let operation_id = HOST_OPERATION_ID.as_bytes().to_vec();
+        for tamper in CLASSIFIED_EVENT_TAMPERS {
+            let name = tamper.name;
+            let path = directory.path().join(format!("tampered-{name}.sqlite"));
+            let mut store = sqlite_store_at(&path)?;
+            let fixture = host_append_fixture(&mut store)?;
+            let connection = Connection::open(&path)?;
+            let changed = connection.execute(tamper.sqlite, params![operation_id])?;
+            assert_eq!(changed, 1, "{name} fixture must be present");
+            let memory = memory_tampered_entry_points(tamper.memory)?;
+            assert_eq!(
+                memory,
+                [Some(ForkEventAuthorityErrorV1::CorruptAuthority); 3]
+            );
+            assert_eq!(
+                classified_entry_point_errors(&mut store, &fixture),
+                memory,
+                "{name} must give the same results on SQLite as on MemoryStore"
+            );
+        }
         Ok(())
     }
 
