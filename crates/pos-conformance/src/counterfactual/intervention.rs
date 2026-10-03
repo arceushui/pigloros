@@ -9,8 +9,8 @@
 //! invalidation, and execution belong to later ADR-064 contracts.
 
 use super::codec::{
-    bytes_value, decode_canonical, encode_value, text_value, uint_value, CborLimits, FieldReader,
-    WireError,
+    bytes_value, decode_canonical, encode_value, nonzero, text_value, uint_value, CborLimits,
+    FieldReader, WireError,
 };
 use crate::domain_digest;
 use ciborium::value::Value;
@@ -193,7 +193,7 @@ impl InterventionV1 {
     /// zero, or a text field is empty, too long, or contains a control
     /// character.
     pub fn validate(&self) -> Result<(), InterventionContractErrorV1> {
-        if self.intervention_id != [0; 16]
+        if nonzero(&self.intervention_id)
             && self.target_schema_id != 0
             && [
                 self.value_digest,
@@ -201,7 +201,7 @@ impl InterventionV1 {
                 self.provenance_digest,
             ]
             .iter()
-            .all(|digest| *digest != [0; 32])
+            .all(nonzero)
             && [
                 &self.target_entity_id,
                 &self.target_field,
