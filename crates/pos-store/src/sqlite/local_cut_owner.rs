@@ -2884,6 +2884,30 @@ mod local_cut_owner_coverage {
     }
 
     #[test]
+    fn stored_world_recordings_report_mistyped_columns() -> TestResult {
+        let fixture = committed()?;
+        let connection = &fixture.store.conn;
+        let cut = FIRST_CUT.cut_id;
+        let by_id = |conn: &Connection| sqlite_local_cut_owner_cut_by_id(conn, OWNER, cut).err();
+        for column in [
+            "timeline_id",
+            "scope",
+            "binding_hash",
+            "binding_cbor",
+            "receipt_cbor",
+            "expected_head_cbor",
+            "result_head_cbor",
+        ] {
+            // Same-length TEXT keeps every CHECK satisfied while breaking the BLOB type.
+            let text = format!("{column} = substr(hex({column}), 1, length({column}))");
+            let setup = first_recording_update(&text);
+            let outcome = with_rollback(connection, &setup, by_id)?;
+            assert_eq!(outcome, Some(LocalError::StorageFailure), "{column}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn stored_world_recordings_reject_each_unlinked_column() -> TestResult {
         let fixture = committed()?;
         let connection = &fixture.store.conn;

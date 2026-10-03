@@ -134,6 +134,7 @@ impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
 
 /// Installed local-cut owner whose source owner attests `genesis`.
 struct CutOwner {
+    authenticated: Result<(), LocalCutOwnerErrorV1>,
     genesis: Result<Hash, LocalCutOwnerErrorV1>,
 }
 
@@ -145,7 +146,7 @@ impl LocalCutOwnerVerifierV1 for CutOwner {
         _admission_state: &ManifestOwnerAdmissionOwnerStateV1,
         _admissions: &[ManifestOwnerAdmissionSnapshotV1],
     ) -> Result<(), LocalCutOwnerErrorV1> {
-        Ok(())
+        self.authenticated
     }
 
     fn source_genesis_hash(&self, _timeline_id: TimelineId) -> Result<Hash, LocalCutOwnerErrorV1> {
@@ -175,6 +176,7 @@ impl LocalCutOwnerVerifierV1 for CutOwner {
 }
 
 const ATTESTED: CutOwner = CutOwner {
+    authenticated: Ok(()),
     genesis: Ok(GENESIS),
 };
 
@@ -802,11 +804,21 @@ fn source_genesis_failures_and_closure_limits_stop_preparation() -> TestResult {
     let admitted = two_timelines()?;
     let request = cut_request(&admitted, KEEP_INPUTS, KEEP_RESULTS)?;
     let unattested = CutOwner {
+        authenticated: Ok(()),
         genesis: Err(LocalCutOwnerErrorV1::StorageFailure),
     };
     assert_eq!(
-        prepare(&admitted, request, &unattested),
+        prepare(&admitted, request.clone(), &unattested),
         Err(LocalCutOwnerErrorV1::StorageFailure)
+    );
+    // Authentication runs before any genesis lookup or WCB1 derivation.
+    let unauthenticated = CutOwner {
+        authenticated: Err(LocalCutOwnerErrorV1::OwnerRejected),
+        ..unattested
+    };
+    assert_eq!(
+        prepare(&admitted, request, &unauthenticated),
+        Err(LocalCutOwnerErrorV1::OwnerRejected)
     );
 
     let narrow = WorldClosureReadLimitsV1 {
