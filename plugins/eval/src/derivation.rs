@@ -39,7 +39,7 @@
 //! [#493]: https://redmine.piglor.com/issues/493
 
 use std::collections::{BTreeSet, HashSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, PoisonError};
 
 use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
@@ -407,7 +407,11 @@ struct EvalPassDiagnosticsV1 {
 /// discarded pass publishes nothing. Nothing here is persisted or appended.
 #[derive(Clone, Debug, Default)]
 pub struct EvalDiagnosticsV1 {
-    pass: Arc<Mutex<EvalPassDiagnosticsV1>>,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "host-side diagnostics channel, not reducer code"
+    )]
+    pass: Arc<std::sync::Mutex<EvalPassDiagnosticsV1>>,
 }
 
 impl EvalDiagnosticsV1 {
