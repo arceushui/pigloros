@@ -61,6 +61,55 @@ fn uint(value: u64) -> Vec<u8> {
     }
 }
 
+/// Encode one shortest-form CBOR head of `major` with `argument`.
+fn head(major: u8, argument: u64) -> Vec<u8> {
+    let mut encoded = uint(argument);
+    encoded[0] |= major << 5;
+    encoded
+}
+
+fn text_field(value: &str) -> Vec<u8> {
+    [
+        head(3, ok(u64::try_from(value.len()))),
+        value.as_bytes().to_vec(),
+    ]
+    .concat()
+}
+
+/// Encode one six-field dependency-node coordinate.
+fn node_field(tick: u64, owner: &str) -> Vec<u8> {
+    [
+        vec![0x86],
+        uint(tick),
+        uint(0),
+        text_field(owner),
+        uint(0),
+        uint(7),
+        hash_field(hash(21)),
+    ]
+    .concat()
+}
+
+/// Encode `SIV1` fields 8 through 14, crossing every CBOR argument width.
+fn invalidation_middle() -> Vec<u8> {
+    [
+        node_field(5, "agent-a"),
+        node_field(4_294_967_296, "an-owner-identifier-of-thirty-"),
+        vec![0x81, 0x86],
+        text_field("event"),
+        uint(70_000),
+        hash_field(hash(22)),
+        node_field(5, "agent-a"),
+        uint(300),
+        uint(0),
+        vec![0x81],
+        hash_field(hash(23)),
+        vec![0x80, 0x80],
+        uint(0),
+    ]
+    .concat()
+}
+
 fn id_field(value: [u8; 16]) -> Vec<u8> {
     [&[0x50][..], &value[..]].concat()
 }
@@ -130,6 +179,11 @@ struct InvalidationFields {
     prior: Vec<u8>,
     new: Vec<u8>,
     frontier_digest: Hash,
+    middle: Vec<u8>,
+    commit_head: u8,
+    commit_timeline: [u8; 16],
+    commit_seq: u64,
+    commit_tick: u64,
 }
 
 impl InvalidationFields {
@@ -140,6 +194,11 @@ impl InvalidationFields {
             prior: uint(prior),
             new: uint(prior + 1),
             frontier_digest: frontier.digest(),
+            middle: invalidation_middle(),
+            commit_head: 0x83,
+            commit_timeline: fork().inner().to_bytes(),
+            commit_seq: 41,
+            commit_tick: 17,
         }
     }
 
@@ -151,7 +210,11 @@ impl InvalidationFields {
             self.prior.clone(),
             self.new.clone(),
             hash_field(self.frontier_digest),
-            vec![0x80],
+            self.middle.clone(),
+            vec![self.commit_head],
+            id_field(self.commit_timeline),
+            uint(self.commit_seq),
+            uint(self.commit_tick),
         ]
         .concat()
     }
@@ -366,6 +429,40 @@ fn invalidation_bytes_expose_verified_header() {
     assert_eq!(invalidation.prior_generation(), 3);
     assert_eq!(invalidation.new_generation(), 4);
     assert_eq!(invalidation.frontier_digest(), frontier.digest());
+    assert_eq!(invalidation.commit_timeline_id(), fork().inner().to_bytes());
+    assert_eq!(invalidation.commit_seq(), 41);
+    assert_eq!(invalidation.commit_tick(), 17);
+}
+
+#[test]
+fn invalidation_walks_middle_fields_structurally() {
+    let frontier = frontier(hash(5));
+    let first_node = node_field(5, "agent-a").len();
+    let rest = invalidation_middle()[first_node..].to_vec();
+    let with_field_eight = |item: &[u8]| {
+        let mut fields = InvalidationFields::valid(&frontier, 3);
+        fields.middle = [item, rest.as_slice()].concat();
+        fields.parse()
+    };
+    let invalidation = ok(with_field_eight(&[0x81, 0x81, 0x81, 0x00][..]));
+    assert_eq!(invalidation.commit_tick(), 17);
+    for item in [
+        &[0x81, 0x81, 0x81, 0x81, 0x00][..],
+        &[0x1c][..],
+        &[0x20][..],
+        &[0xa0][..],
+        &[0xf6][..],
+        &[0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff][..],
+    ] {
+        assert_eq!(
+            err(with_field_eight(item)),
+            StoreError::InvalidEncoding,
+            "field 8 {item:02x?}"
+        );
+    }
+    let mut fields = InvalidationFields::valid(&frontier, 3);
+    fields.commit_head = 0x82;
+    assert_eq!(err(fields.parse()), StoreError::InvalidEncoding);
 }
 
 #[test]
@@ -426,7 +523,7 @@ fn invalidation_header_truncation_and_framing_are_rejected() {
     let frontier = frontier(hash(5));
     let fields = InvalidationFields::valid(&frontier, 300);
     let encoded = fields.encode();
-    let header_bytes = encoded.len() - 1;
+    let header_bytes = encoded.len();
     for length in 0..header_bytes {
         assert_eq!(
             err(SuffixInvalidationBytesV1::try_from_canonical(
@@ -493,7 +590,7 @@ fn command_binds_every_transaction_part() {
     assert_eq!(command.first_tick(), 17);
     assert_eq!(command.first_tick_drafts(), &drafts());
 
-    let receipt = command.committed_receipt(Seq::from_u64(42));
+    let receipt = ok(command.committed_receipt(Seq::from_u64(42)));
     assert_eq!(receipt.generation(), command.new_generation());
     assert_eq!(receipt.frontier_digest(), input.frontier.digest());
     assert_eq!(receipt.invalidation_digest(), input.invalidation.digest());
@@ -530,6 +627,68 @@ fn command_rejects_disagreeing_bindings() {
     );
 }
 
+#[test]
+fn command_binds_the_tick_boundary_commit_coordinate() {
+    let coordinate_changes: [fn(&mut InvalidationFields); 3] = [
+        |fields| fields.commit_timeline = [0x77; 16],
+        |fields| fields.commit_seq = 42,
+        |fields| fields.commit_tick = 16,
+    ];
+    for change in coordinate_changes {
+        let mut moved = input();
+        let mut fields = InvalidationFields::valid(&moved.frontier, 3);
+        change(&mut fields);
+        moved.invalidation = ok(fields.parse());
+        assert_eq!(
+            err(CounterfactualInvalidationCommandV1::try_new(moved)),
+            StoreError::BindingMismatch
+        );
+    }
+    let input_changes: [fn(&mut CounterfactualInvalidationInputV1); 2] = [
+        |input| input.fork_logical_head = Seq::from_u64(40),
+        |input| input.first_tick = 18,
+    ];
+    for change in input_changes {
+        let mut moved = input();
+        change(&mut moved);
+        assert_eq!(
+            err(CounterfactualInvalidationCommandV1::try_new(moved)),
+            StoreError::BindingMismatch
+        );
+    }
+}
+
+#[test]
+fn command_never_quarantines_its_own_records() {
+    let input = input();
+    let own = [input.frontier.digest(), input.invalidation.digest()];
+    for digest in own {
+        assert_eq!(
+            with_sets(vec![digest], Vec::new()),
+            Err(StoreError::BindingMismatch)
+        );
+        assert_eq!(
+            with_sets(Vec::new(), vec![digest]),
+            Err(StoreError::BindingMismatch)
+        );
+    }
+}
+
+#[test]
+fn receipt_requires_the_fork_head_to_advance() {
+    let command = command();
+    for head in [0, 40, 41] {
+        assert_eq!(
+            command.committed_receipt(Seq::from_u64(head)),
+            Err(StoreError::CorruptState)
+        );
+    }
+    assert_eq!(
+        ok(command.committed_receipt(Seq::from_u64(u64::MAX))).first_tick_head(),
+        Seq::from_u64(u64::MAX)
+    );
+}
+
 fn with_sets(invalid_artifacts: Vec<Hash>, evictions: Vec<Hash>) -> Result<(), StoreError> {
     let mut input = input();
     input.invalid_artifacts = invalid_artifacts;
@@ -544,23 +703,22 @@ fn ascending(count: usize) -> Vec<Hash> {
 #[test]
 fn digest_sets_are_bounded_at_their_limits() {
     ok(with_sets(Vec::new(), Vec::new()));
+    let over_index = ascending(MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1 + 1);
     ok(with_sets(
-        ascending(MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1),
+        over_index[..MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1].to_vec(),
         Vec::new(),
     ));
     assert_eq!(
-        with_sets(
-            ascending(MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1 + 1),
-            Vec::new()
-        ),
+        with_sets(over_index, Vec::new()),
         Err(StoreError::FieldOutOfBounds)
     );
+    let over_evictions = ascending(MAX_COUNTERFACTUAL_EVICTIONS_V1 + 1);
     ok(with_sets(
         Vec::new(),
-        ascending(MAX_COUNTERFACTUAL_EVICTIONS_V1),
+        over_evictions[..MAX_COUNTERFACTUAL_EVICTIONS_V1].to_vec(),
     ));
     assert_eq!(
-        with_sets(Vec::new(), ascending(MAX_COUNTERFACTUAL_EVICTIONS_V1 + 1)),
+        with_sets(Vec::new(), over_evictions),
         Err(StoreError::FieldOutOfBounds)
     );
 }
@@ -706,9 +864,9 @@ impl CounterfactualStorePortV1 for FakeStore {
         self.basis.generation = command.new_generation().generation;
         self.quarantined
             .extend_from_slice(command.invalid_artifacts());
-        Ok(CounterfactualInvalidationOutcomeV1::Committed(
-            command.committed_receipt(Seq::from_u64(42)),
-        ))
+        command
+            .committed_receipt(Seq::from_u64(42))
+            .map(CounterfactualInvalidationOutcomeV1::Committed)
     }
 
     fn current_fork_generation(&self, fork: TimelineId) -> Result<ForkGenerationV1, StoreError> {
@@ -762,9 +920,9 @@ fn port_commits_whole_generation_or_reports_conflict() {
     store.basis = command.expected_basis();
     assert_eq!(
         ok(store.commit_counterfactual_invalidation(&command)),
-        CounterfactualInvalidationOutcomeV1::Committed(
+        CounterfactualInvalidationOutcomeV1::Committed(ok(
             command.committed_receipt(Seq::from_u64(42))
-        )
+        ))
     );
     let current = ok(store.current_fork_generation(fork()));
     assert_eq!(current, command.new_generation());

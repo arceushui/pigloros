@@ -22,14 +22,20 @@
 //! - the size bound before anything else is read;
 //! - the trailing 32-byte self-digest, recomputed with the ADR-064 domain
 //!   over the unsigned array of every preceding field;
-//! - the fixed-position header fields the transaction compares: the `RCF1`
-//!   plan and dependency-graph digests, and the `SIV1` plan digest, Fork ID,
-//!   prior and new generations (shortest-form unsigned integers), and
-//!   frontier digest.
+//! - the header fields the transaction compares: the `RCF1` plan and
+//!   dependency-graph digests, and the `SIV1` plan digest, Fork ID, prior and
+//!   new generations (shortest-form unsigned integers), frontier digest, and
+//!   Tick Boundary commit coordinate (field 15). The `SIV1` fields 8 through
+//!   14 between them are walked as definite-length CBOR items without
+//!   interpreting their content.
 //!
 //! The complete schema contract (list bounds, ordering, coordinate ranges) is
 //! validated by the conformance codecs before the coordinator constructs these
 //! values; this module never re-derives frontiers or invalidated artifacts.
+//! In particular, deriving the invalid-artifact index and the eviction set
+//! from the `SIV1` content is the coordinator's responsibility (#338); the
+//! port only checks that both are canonical digest sets that never name the
+//! command's own `RCF1` or `SIV1`.
 //!
 //! # ADR gap decisions
 //!
@@ -38,8 +44,17 @@
 //!   dependency-graph digest the frontier was derived from. The frontier
 //!   digest itself is bound by requiring the `SIV1` frontier digest to equal
 //!   the recomputed `RCF1` digest.
-//! - **Logical Head.** The rechecked Logical Head is the Fork Timeline's
-//!   committed head that the new generation is parented on.
+//! - **Logical Head.** ADR-064 rechecks the "parent Logical Head". A Fork's
+//!   parent cut is immutable once the Fork is created, and the coordinator
+//!   (#338) validates the `CFP1` parent cut against the Fork's recorded
+//!   parent cut before it calls this port. The port therefore rechecks the
+//!   one head that can still move: the Fork Timeline's committed head. That
+//!   recheck is the concurrency guard for the atomic first-Tick append.
+//! - **Commit coordinate.** The `SIV1` commit coordinate
+//!   `[timeline_id, seq, tick]` names the Tick Boundary the transaction
+//!   commits at: the Fork Timeline, the expected committed Fork head (the last
+//!   `Seq` before the first recomputation Tick, so the first Tick's Events
+//!   follow it), and the first recomputation Tick.
 //! - **Invalid-artifact index and eviction set.** Both are strictly ascending
 //!   unique digest sets. The index is bounded by the `SIV1` limit of
 //!   1,000,000 invalid artifact records; the eviction set by 131,072, the sum
@@ -64,6 +79,12 @@ pub const MAX_COUNTERFACTUAL_EVICTIONS_V1: usize = 131_072;
 const DIGEST_FIELD_HEAD: [u8; 2] = [0x58, 0x20];
 const DIGEST_FIELD_BYTES: usize = 34;
 const ID_FIELD_HEAD: [u8; 1] = [0x50];
+const COMMIT_COORDINATE_HEAD: [u8; 1] = [0x83];
+/// `SIV1` fields 8 through 14 sit between the frontier digest and the commit
+/// coordinate.
+const SKIPPED_INVALIDATION_FIELDS: usize = 7;
+/// Field 10 nests invalid artifacts, each holding a producer node.
+const MAX_SKIPPED_ARRAY_DEPTH: u8 = 3;
 
 const FRONTIER_FRAMING: ArtifactFramingV1 = ArtifactFramingV1 {
     array_head: 0x91,
@@ -196,7 +217,7 @@ fn read_hash(cursor: &mut CborCursor<'_>) -> Result<Hash, CborReadError> {
 }
 
 /// Read one shortest-form CBOR unsigned integer.
-fn read_generation(cursor: &mut CborCursor<'_>) -> Result<u64, CborReadError> {
+fn read_unsigned(cursor: &mut CborCursor<'_>) -> Result<u64, CborReadError> {
     let (width, minimum) = match cursor.byte()? {
         small @ 0..=23 => return Ok(u64::from(small)),
         24 => (1, 24),
@@ -212,6 +233,29 @@ fn read_generation(cursor: &mut CborCursor<'_>) -> Result<u64, CborReadError> {
             Err(CborReadError::InvalidEncoding)
         }
     })
+}
+
+/// Skip one definite-length unsigned integer, byte string, text string, or
+/// array of at most `array_depth` nested levels.
+fn skip_item(cursor: &mut CborCursor<'_>, array_depth: u8) -> Result<(), CborReadError> {
+    let first = cursor.byte()?;
+    let argument = match first & 0x1f {
+        small @ 0..=23 => u64::from(small),
+        24 => cursor.number::<1>()?,
+        25 => cursor.number::<2>()?,
+        26 => cursor.number::<4>()?,
+        27 => cursor.number::<8>()?,
+        _ => return Err(CborReadError::InvalidEncoding),
+    };
+    match (first >> 5, array_depth) {
+        (0, _) => Ok(()),
+        (2 | 3, _) => usize::try_from(argument)
+            .or(Err(CborReadError::InvalidEncoding))
+            .and_then(|length| cursor.take(length))
+            .map(drop),
+        (4, 1..) => (0..argument).try_for_each(|_| skip_item(cursor, array_depth - 1)),
+        _ => Err(CborReadError::InvalidEncoding),
+    }
 }
 
 /// Exact `RCF1` bytes whose framing, size, self-digest, and header digests
@@ -294,6 +338,9 @@ struct InvalidationHeaderV1 {
     prior_generation: u64,
     new_generation: u64,
     frontier_digest: Hash,
+    commit_timeline_id: [u8; 16],
+    commit_seq: u64,
+    commit_tick: u64,
 }
 
 impl SuffixInvalidationBytesV1 {
@@ -302,8 +349,9 @@ impl SuffixInvalidationBytesV1 {
     /// # Errors
     /// Returns `FieldOutOfBounds` above
     /// [`MAX_COUNTERFACTUAL_INVALIDATION_BYTES_V1`] (checked first),
-    /// `InvalidEncoding` for wrong framing, truncated header fields, or a
-    /// non-shortest generation, `UnsupportedVersion` for another magic or
+    /// `InvalidEncoding` for wrong framing, truncated or malformed fields up
+    /// to the commit coordinate, or a non-shortest generation or commit
+    /// coordinate integer, `UnsupportedVersion` for another magic or
     /// version, `DigestMismatch` when the trailing invalidation digest is
     /// wrong, and `PriorGenerationMismatch` unless the new generation is
     /// exactly the prior generation plus one.
@@ -362,6 +410,24 @@ impl SuffixInvalidationBytesV1 {
     pub const fn frontier_digest(&self) -> Hash {
         self.header.frontier_digest
     }
+
+    /// Return the Tick Boundary commit coordinate's 16-byte Timeline ID (field 15).
+    #[must_use]
+    pub const fn commit_timeline_id(&self) -> [u8; 16] {
+        self.header.commit_timeline_id
+    }
+
+    /// Return the Tick Boundary commit coordinate's Fork head `Seq` (field 15).
+    #[must_use]
+    pub const fn commit_seq(&self) -> u64 {
+        self.header.commit_seq
+    }
+
+    /// Return the Tick Boundary commit coordinate's Tick (field 15).
+    #[must_use]
+    pub const fn commit_tick(&self) -> u64 {
+        self.header.commit_tick
+    }
 }
 
 fn invalidation_header(fields: &[u8]) -> Result<InvalidationHeaderV1, CborReadError> {
@@ -369,14 +435,23 @@ fn invalidation_header(fields: &[u8]) -> Result<InvalidationHeaderV1, CborReadEr
     read_id(&mut cursor)?;
     let plan_digest = read_hash(&mut cursor)?;
     let fork_id = read_id(&mut cursor)?;
-    let prior_generation = read_generation(&mut cursor)?;
-    let new_generation = read_generation(&mut cursor)?;
-    read_hash(&mut cursor).map(|frontier_digest| InvalidationHeaderV1 {
+    let prior_generation = read_unsigned(&mut cursor)?;
+    let new_generation = read_unsigned(&mut cursor)?;
+    let frontier_digest = read_hash(&mut cursor)?;
+    (0..SKIPPED_INVALIDATION_FIELDS)
+        .try_for_each(|_| skip_item(&mut cursor, MAX_SKIPPED_ARRAY_DEPTH))?;
+    cursor.fixed(&COMMIT_COORDINATE_HEAD)?;
+    let commit_timeline_id = read_id(&mut cursor)?;
+    let commit_seq = read_unsigned(&mut cursor)?;
+    read_unsigned(&mut cursor).map(|commit_tick| InvalidationHeaderV1 {
         plan_digest,
         fork_id,
         prior_generation,
         new_generation,
         frontier_digest,
+        commit_timeline_id,
+        commit_seq,
+        commit_tick,
     })
 }
 
@@ -405,6 +480,13 @@ pub enum InvalidationConflictV1 {
 /// [`CounterfactualInvalidationCommandV1::expected_basis`]; an adapter reads
 /// the persisted basis inside its transaction and commits only when
 /// [`Self::first_conflict`] returns `None`.
+///
+/// The Logical Head here is the Fork Timeline's moving committed head, not
+/// ADR-064's "parent Logical Head": a Fork's parent cut is immutable once the
+/// Fork is created, and the coordinator (#338) validates the `CFP1` parent
+/// cut against the Fork's recorded parent cut before calling the port. The
+/// port rechecks the moving Fork head, which guards the atomic first-Tick
+/// append against concurrent writers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CounterfactualBasisV1 {
     /// Committed Logical Head of the Fork Timeline the new generation follows.
@@ -500,24 +582,41 @@ pub struct CounterfactualInvalidationCommandV1 {
 impl CounterfactualInvalidationCommandV1 {
     /// Bind the Fork, `RCF1`, `SIV1`, index, eviction set, and first Tick.
     ///
+    /// The `SIV1` commit coordinate must name this Tick Boundary: the Fork
+    /// Timeline, the expected committed Fork head `fork_logical_head` (the
+    /// last `Seq` before the first Tick's Events), and `first_tick`. Which
+    /// artifacts belong in the index and eviction set is derived by the
+    /// coordinator (#338) from the `SIV1` content and is not re-derived here.
+    ///
     /// # Errors
-    /// Returns `BindingMismatch` unless the `SIV1` Fork ID is `fork`, the
-    /// `SIV1` and `RCF1` plan digests agree, and the `SIV1` frontier digest is
-    /// the `RCF1` digest. Returns `FieldOutOfBounds`, `NonCanonicalOrder`, or
-    /// `DuplicateIdentity` for an oversized, unordered, or repeating
-    /// invalid-artifact index or eviction set.
+    /// Returns `BindingMismatch` unless the `SIV1` Fork ID and commit
+    /// Timeline are `fork`, the `SIV1` and `RCF1` plan digests agree, the
+    /// `SIV1` frontier digest is the `RCF1` digest, the commit `Seq` is
+    /// `fork_logical_head`, and the commit Tick is `first_tick`. Returns
+    /// `FieldOutOfBounds`, `NonCanonicalOrder`, or `DuplicateIdentity` for an
+    /// oversized, unordered, or repeating invalid-artifact index or eviction
+    /// set, and then `BindingMismatch` when either set names the command's
+    /// own `RCF1` or `SIV1` digest, so a committed record can never be
+    /// quarantined by its own transaction.
     pub fn try_new(
         input: CounterfactualInvalidationInputV1,
     ) -> Result<Self, CounterfactualStoreErrorV1> {
+        let fork_id = input.fork.inner().to_bytes();
         let bound = (
             input.invalidation.fork_id(),
             input.invalidation.plan_digest(),
             input.invalidation.frontier_digest(),
+            input.invalidation.commit_timeline_id(),
+            input.invalidation.commit_seq(),
+            input.invalidation.commit_tick(),
         );
         let expected = (
-            input.fork.inner().to_bytes(),
+            fork_id,
             input.frontier.plan_digest(),
             input.frontier.digest(),
+            fork_id,
+            input.fork_logical_head.as_u64(),
+            input.first_tick,
         );
         if bound != expected {
             return Err(CounterfactualStoreErrorV1::BindingMismatch);
@@ -527,7 +626,13 @@ impl CounterfactualInvalidationCommandV1 {
             MAX_COUNTERFACTUAL_INVALID_ARTIFACTS_V1,
         )
         .and_then(|()| ordered_digest_set(&input.evictions, MAX_COUNTERFACTUAL_EVICTIONS_V1))
-        .map(|()| Self { input })
+        .and_then(|()| {
+            if quarantines_own_records(&input) {
+                Err(CounterfactualStoreErrorV1::BindingMismatch)
+            } else {
+                Ok(Self { input })
+            }
+        })
     }
 
     /// Return the Fork Timeline.
@@ -597,20 +702,44 @@ impl CounterfactualInvalidationCommandV1 {
 
     /// Build the receipt for this command after its whole transaction committed.
     ///
-    /// `first_tick_head` is the Fork Logical Head after the first Tick's Events.
-    #[must_use]
+    /// This is the adapter-only constructor: only a
+    /// [`CounterfactualStorePortV1`] adapter calls it, inside
+    /// [`CounterfactualStorePortV1::commit_counterfactual_invalidation`],
+    /// after the whole transaction committed. It stays public because the
+    /// Memory and `SQLite` adapters live in another crate; the receipt is
+    /// meaningful only as that method's return value.
+    ///
+    /// `first_tick_head` is the Fork Logical Head after the first Tick's
+    /// Events. A Tick Boundary commits at least one Event, so it must be
+    /// strictly greater than the expected head.
+    ///
+    /// # Errors
+    /// Returns `CorruptState` unless `first_tick_head` is greater than the
+    /// command's expected Fork head.
     pub const fn committed_receipt(
         &self,
         first_tick_head: Seq,
-    ) -> CounterfactualGenerationReceiptV1 {
-        CounterfactualGenerationReceiptV1 {
+    ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1> {
+        if first_tick_head.as_u64() <= self.input.fork_logical_head.as_u64() {
+            return Err(CounterfactualStoreErrorV1::CorruptState);
+        }
+        Ok(CounterfactualGenerationReceiptV1 {
             generation: self.new_generation(),
             frontier_digest: self.input.frontier.digest(),
             invalidation_digest: self.input.invalidation.digest(),
             first_tick: self.input.first_tick,
             first_tick_head,
-        }
+        })
     }
+}
+
+/// Whether the ascending index or eviction set names the command's own
+/// `RCF1` or `SIV1` digest.
+fn quarantines_own_records(input: &CounterfactualInvalidationInputV1) -> bool {
+    let own = [input.frontier.digest(), input.invalidation.digest()];
+    [&input.invalid_artifacts, &input.evictions]
+        .into_iter()
+        .any(|set| own.iter().any(|digest| set.binary_search(digest).is_ok()))
 }
 
 fn ordered_digest_set(digests: &[Hash], maximum: usize) -> Result<(), CounterfactualStoreErrorV1> {
@@ -729,6 +858,19 @@ pub enum CounterfactualInvalidationOutcomeV1 {
 ///
 /// Only the core `CounterfactualCoordinator` may hold this capability; it
 /// must never be exposed to Plugin, provider, Driver, or evaluator code.
+///
+/// # Adapter obligations
+///
+/// - Persist, per Fork, the published plan digest, dependency-graph digest,
+///   and trust, revocation, and erasure epochs, so the basis recheck compares
+///   committed facts rather than caller input.
+/// - Route every artifact read through [`ForkGenerationV1::resolve_read`].
+/// - Build receipts only with
+///   [`CounterfactualInvalidationCommandV1::committed_receipt`] after the
+///   whole transaction committed.
+///
+/// Epoch monotonicity of those published facts is a host obligation; the
+/// port compares them for equality only.
 pub trait CounterfactualStorePortV1 {
     /// Atomically recheck the expected basis and commit the whole command.
     ///
