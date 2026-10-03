@@ -212,28 +212,46 @@ jobs:
         env:
           PROBE_RUNTIME: evergreen
           PROBE_RUNS: "3"
+        shell: cmd
         run: |
-          $env:PROBE_CSV = "$env:RUNNER_TEMP\out\40-evergreen.csv"; $env:PROBE_UDF_ROOT = "$env:RUNNER_TEMP\udf-e"
-          .\target\release\wv2probe.exe 2>&1 | Tee-Object "$env:RUNNER_TEMP\out\40-evergreen.txt"
+          set PROBE_CSV=%RUNNER_TEMP%\out\40-evergreen.csv
+          set PROBE_UDF_ROOT=%RUNNER_TEMP%\udf-e
+          target\release\wv2probe.exe > "%RUNNER_TEMP%\out\40-evergreen.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "%RUNNER_TEMP%\out\40-evergreen.txt"
+          echo probe exit code %RC%
+          echo probe exit code %RC% >> "%RUNNER_TEMP%\out\40-evergreen.txt"
       - name: G11/G1/G2/G6/G12 - fixed runtime 153.0.4234.48 smoke + 10^6 Atomics handoffs
         continue-on-error: true
         timeout-minutes: 25
         env:
           PROBE_RUNS: "5"
           PROBE_HANDOFFS: "1000000"
+        shell: cmd
         run: |
-          $env:PROBE_RUNTIME = $env:RUNTIME_ROOT
-          $env:PROBE_CSV = "$env:RUNNER_TEMP\out\41-fixed-smoke.csv"; $env:PROBE_UDF_ROOT = "$env:RUNNER_TEMP\udf-f"
-          .\target\release\wv2probe.exe 2>&1 | Tee-Object "$env:RUNNER_TEMP\out\41-fixed-smoke.txt"
+          set PROBE_RUNTIME=%RUNTIME_ROOT%
+          set PROBE_CSV=%RUNNER_TEMP%\out\41-fixed-smoke.csv
+          set PROBE_UDF_ROOT=%RUNNER_TEMP%\udf-f
+          target\release\wv2probe.exe > "%RUNNER_TEMP%\out\41-fixed-smoke.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "%RUNNER_TEMP%\out\41-fixed-smoke.txt"
+          echo probe exit code %RC%
+          echo probe exit code %RC% >> "%RUNNER_TEMP%\out\41-fixed-smoke.txt"
       - name: G3/G4/G16 - fixed runtime, 1000 fresh-environment ceremonies
         continue-on-error: true
         timeout-minutes: 90
         env:
           PROBE_RUNS: "1000"
+        shell: cmd
         run: |
-          $env:PROBE_RUNTIME = $env:RUNTIME_ROOT
-          $env:PROBE_CSV = "$env:RUNNER_TEMP\out\42-fixed-1000.csv"; $env:PROBE_UDF_ROOT = "$env:RUNNER_TEMP\udf-g"
-          .\target\release\wv2probe.exe 2>&1 | Tee-Object "$env:RUNNER_TEMP\out\42-fixed-1000.txt"
+          set PROBE_RUNTIME=%RUNTIME_ROOT%
+          set PROBE_CSV=%RUNNER_TEMP%\out\42-fixed-1000.csv
+          set PROBE_UDF_ROOT=%RUNNER_TEMP%\udf-g
+          target\release\wv2probe.exe > "%RUNNER_TEMP%\out\42-fixed-1000.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "%RUNNER_TEMP%\out\42-fixed-1000.txt"
+          echo probe exit code %RC%
+          echo probe exit code %RC% >> "%RUNNER_TEMP%\out\42-fixed-1000.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
