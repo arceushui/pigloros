@@ -453,6 +453,7 @@ fn plan(
         exogenous_descriptors: vec![descriptor(1, 0x50)],
         fixed_policy_descriptors: vec![descriptor(3, 0x30)],
         classification_bundle_digest: [5; 32],
+        unknown_edge_policy: UnknownEdgePolicyV1::Reject,
         execution_profile: PlanExecutionProfileRefV1::from_execution_profile_v1(profile)?,
         trust_policy: PlanTrustPolicyRefV1::from_trust_policy_snapshot_v1(snapshot)?,
         plugin_composition_digest: [6; 32],
@@ -594,13 +595,8 @@ impl Source {
     }
 
     fn graph_digest(&self, plan: &CounterfactualPlanV1) -> TestResult<[u8; 32]> {
-        let graph = validate_dependency_graph_v1(
-            plan,
-            UnknownEdgePolicyV1::Reject,
-            BOUNDS,
-            self.nodes.clone(),
-            self.edges.clone(),
-        )?;
+        let graph =
+            validate_dependency_graph_v1(plan, BOUNDS, self.nodes.clone(), self.edges.clone())?;
         Ok(dependency_graph_digest_v1(&graph))
     }
 }
@@ -612,14 +608,9 @@ impl CounterfactualFrontierSourceV1 for Source {
         frontier_id: [u8; 16],
         provenance_digest: [u8; 32],
     ) -> Result<CounterfactualFrontierDerivationV1, AdmissionError> {
-        let graph = validate_dependency_graph_v1(
-            plan,
-            UnknownEdgePolicyV1::Reject,
-            BOUNDS,
-            self.nodes.clone(),
-            self.edges.clone(),
-        )
-        .or(Err(AdmissionError::DependencyGraphInvalid))?;
+        let graph =
+            validate_dependency_graph_v1(plan, BOUNDS, self.nodes.clone(), self.edges.clone())
+                .or(Err(AdmissionError::DependencyGraphInvalid))?;
         let frontier =
             derive_recomputation_frontier_v1(plan, &graph, frontier_id, provenance_digest)
                 .or(Err(AdmissionError::DependencyGraphInvalid))?;
