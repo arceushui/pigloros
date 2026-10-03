@@ -323,7 +323,7 @@ fn validate_driver_output(entry: &PluginEntry, output: &StepOutput) -> Result<()
 /// Return the one-member Fork ancestry of a fixture Timeline with no parent.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn root_ancestry(timeline: TimelineId) -> Vec<TimelineMeta> {
+pub(crate) fn root_ancestry(timeline: TimelineId) -> Vec<TimelineMeta> {
     vec![TimelineMeta {
         id: timeline,
         ..TimelineMeta::root("root")

@@ -229,7 +229,7 @@ mod tests {
     fn all_drivers_fire_on_first_tick() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
-        let ancestry = pos_core::fork_ancestry(store.as_ref(), tl.id()).test_ok();
+        let ancestry = crate::registry::root_ancestry(tl.id());
         let mut reg = gated_registry();
         register_output_driver(
             &mut reg,
@@ -247,7 +247,7 @@ mod tests {
     fn slow_driver_skipped_when_interval_not_elapsed() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
-        let ancestry = pos_core::fork_ancestry(store.as_ref(), tl.id()).test_ok();
+        let ancestry = crate::registry::root_ancestry(tl.id());
         let mut reg = gated_registry();
         register_output_driver(
             &mut reg,
@@ -266,7 +266,7 @@ mod tests {
     fn slow_driver_fires_after_interval_elapsed() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
-        let ancestry = pos_core::fork_ancestry(store.as_ref(), tl.id()).test_ok();
+        let ancestry = crate::registry::root_ancestry(tl.id());
         let mut reg = gated_registry();
         register_output_driver(
             &mut reg,
@@ -287,7 +287,7 @@ mod tests {
     fn empty_registry_returns_empty() {
         let mut store = open_store(StoreConfig::Memory).test_ok();
         let tl = store.create_timeline("t").test_ok();
-        let ancestry = pos_core::fork_ancestry(store.as_ref(), tl.id()).test_ok();
+        let ancestry = crate::registry::root_ancestry(tl.id());
         let reg = gated_registry();
         let mut sched = TickScheduler::new(reg);
         let drafts = sched.tick(tl.id(), &ancestry, 0).test_ok();
