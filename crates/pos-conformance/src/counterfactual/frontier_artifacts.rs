@@ -768,5 +768,5 @@ fn encode_value(value: &Value) -> Result<Vec<u8>, FrontierArtifactErrorV1> {
     let mut encoded = Vec::new();
     ciborium::into_writer(value, &mut encoded)
         .map(|()| encoded)
-        .map_err(|_| FrontierArtifactErrorV1::InvalidEncoding)
+        .or(Err(FrontierArtifactErrorV1::InvalidEncoding))
 }
