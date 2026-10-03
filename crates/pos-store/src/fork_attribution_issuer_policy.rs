@@ -77,7 +77,7 @@ pub struct IssuerPolicyFloorV1 {
 }
 
 impl IssuerPolicyFloorV1 {
-    pub(crate) fn of(policy: &ForkAttributionIssuerPolicyV1) -> Self {
+    pub(crate) fn from_policy(policy: &ForkAttributionIssuerPolicyV1) -> Self {
         let input = policy.input();
         Self {
             scope: input.scope.clone(),
@@ -149,6 +149,11 @@ pub struct ForkAttributionIssuerAdmissionV1 {
 }
 
 /// Closed failures for issuer-policy installation and issuer admission.
+///
+/// One enum serves both operations: install returns the encoding, pin,
+/// continuity, ceiling, and transition variants; admission returns the key,
+/// availability, change, and issuer-state variants; both can return
+/// `CorruptPolicy` and `StorageIndeterminate`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ForkAttributionIssuerPolicyErrorV1 {
     /// The candidate `FIP1` bytes are malformed or noncanonical.
@@ -163,10 +168,6 @@ pub enum ForkAttributionIssuerPolicyErrorV1 {
     /// An issuer public key is not valid, non-weak Ed25519 material.
     #[error("Fork attribution issuer key is invalid")]
     InvalidIssuerKey,
-    /// A `pos-crypto` signature check failed. This port only checks keys, so
-    /// it never returns this; the mapping keeps crypto failures distinct.
-    #[error("Fork attribution issuer signature is invalid")]
-    InvalidSignature,
     /// The operator pin names a different scope or digest.
     #[error("Fork attribution issuer policy does not match the operator pin")]
     PinMismatch,
@@ -222,7 +223,7 @@ pub enum ForkAttributionIssuerPolicyErrorV1 {
     /// committed admission names a policy absent from the retained history.
     #[error("Fork attribution issuer policy state is corrupt")]
     CorruptPolicy,
-    /// The adapter cannot determine whether its transaction committed.
+    /// Storage failure; for writes the commit state is unknown.
     #[error("Fork attribution issuer policy storage outcome is indeterminate")]
     StorageIndeterminate,
 }
@@ -239,9 +240,12 @@ impl From<ForkAttributionCodecErrorV1> for ForkAttributionIssuerPolicyErrorV1 {
 
 impl From<ForkAttributionAuthoritySignatureErrorV1> for ForkAttributionIssuerPolicyErrorV1 {
     fn from(error: ForkAttributionAuthoritySignatureErrorV1) -> Self {
+        // This port calls only the `pos-crypto` key checks, so every failure
+        // it can see is an invalid key. Listing the variants keeps a new
+        // crypto failure from being absorbed silently.
         match error {
-            ForkAttributionAuthoritySignatureErrorV1::InvalidIssuerKey => Self::InvalidIssuerKey,
-            ForkAttributionAuthoritySignatureErrorV1::InvalidSignature => Self::InvalidSignature,
+            ForkAttributionAuthoritySignatureErrorV1::InvalidIssuerKey
+            | ForkAttributionAuthoritySignatureErrorV1::InvalidSignature => Self::InvalidIssuerKey,
         }
     }
 }
@@ -349,7 +353,7 @@ pub(crate) fn plan_issuer_policy_install(
             |current| install_successor(candidate, current),
         )
         .map(|outcome| IssuerPolicyInstallReceiptV1 {
-            floor: IssuerPolicyFloorV1::of(candidate),
+            floor: IssuerPolicyFloorV1::from_policy(candidate),
             outcome,
         })
 }
@@ -491,20 +495,27 @@ pub(crate) fn checked_retained_policy(
     }
 }
 
-/// Decide one issuer admission against the policy `load` returns for the
-/// query basis: the current floor policy, or the retained policy at the
-/// committed generation.
-pub(crate) fn admit_fork_attribution_issuer<F>(
+/// Decide one issuer admission against the policy the query basis selects:
+/// `retained` loads the policy at a committed generation, and `floor` loads
+/// the current floor policy.
+pub(crate) fn admit_fork_attribution_issuer<R, F>(
     query: &ForkAttributionIssuerAdmissionQueryV1,
-    load: F,
+    retained: R,
+    floor: F,
 ) -> PolicyResultV1<ForkAttributionIssuerAdmissionV1>
 where
-    F: FnOnce(ForkAttributionIssuerAdmissionBasisV1) -> LoadedIssuerPolicyV1,
+    R: FnOnce(u64) -> LoadedIssuerPolicyV1,
+    F: FnOnce() -> LoadedIssuerPolicyV1,
 {
     let missing = query.basis.missing_policy();
     verify_fork_attribution_issuer_key_v1(&query.issuer)
         .map_err(ForkAttributionIssuerPolicyErrorV1::from)
-        .and_then(|()| load(query.basis))
+        .and_then(|()| match query.basis {
+            ForkAttributionIssuerAdmissionBasisV1::CommittedImport { policy_generation } => {
+                retained(policy_generation)
+            }
+            ForkAttributionIssuerAdmissionBasisV1::AbsentImport => floor(),
+        })
         .and_then(|policy| policy.ok_or(missing))
         .and_then(|policy| {
             if policy.digest() == query.policy_digest {

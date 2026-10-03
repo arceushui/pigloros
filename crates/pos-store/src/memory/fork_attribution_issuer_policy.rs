@@ -10,10 +10,10 @@ use super::MemoryStore;
 use crate::fork_attribution_issuer_policy::{
     admit_fork_attribution_issuer, checked_retained_policy, pinned_issuer_policy,
     plan_issuer_policy_install, AuthenticatedOperatorPolicyPinV1,
-    ForkAttributionIssuerAdmissionBasisV1, ForkAttributionIssuerAdmissionQueryV1,
-    ForkAttributionIssuerAdmissionV1, ForkAttributionIssuerPolicyErrorV1,
-    ForkAttributionIssuerPolicyInstallationPortV1, IssuerPolicyFloorV1,
-    IssuerPolicyInstallOutcomeV1, IssuerPolicyInstallReceiptV1, LoadedIssuerPolicyV1,
+    ForkAttributionIssuerAdmissionQueryV1, ForkAttributionIssuerAdmissionV1,
+    ForkAttributionIssuerPolicyErrorV1, ForkAttributionIssuerPolicyInstallationPortV1,
+    IssuerPolicyFloorV1, IssuerPolicyInstallOutcomeV1, IssuerPolicyInstallReceiptV1,
+    LoadedIssuerPolicyV1,
 };
 
 impl MemoryStore {
@@ -33,7 +33,9 @@ impl MemoryStore {
             .transpose()
     }
 
-    /// The floor policy: the retained policy at the history length.
+    /// The floor policy: the retained policy at the history length. Deriving
+    /// the floor from the length keeps the history contiguous with it by
+    /// construction, which `SQLite` must check by counting rows.
     fn floor_issuer_policy(&self) -> LoadedIssuerPolicyV1 {
         let count = self.fork_attribution_issuer_policies.len();
         let generation = u64::try_from(count).unwrap_or(0);
@@ -63,19 +65,18 @@ impl ForkAttributionIssuerPolicyInstallationPortV1 for MemoryStore {
         &self,
     ) -> Result<Option<IssuerPolicyFloorV1>, ForkAttributionIssuerPolicyErrorV1> {
         let floor = self.floor_issuer_policy()?;
-        Ok(floor.as_ref().map(IssuerPolicyFloorV1::of))
+        Ok(floor.as_ref().map(IssuerPolicyFloorV1::from_policy))
     }
 
     fn admit_issuer(
         &self,
         query: &ForkAttributionIssuerAdmissionQueryV1,
     ) -> Result<ForkAttributionIssuerAdmissionV1, ForkAttributionIssuerPolicyErrorV1> {
-        admit_fork_attribution_issuer(query, |basis| match basis {
-            ForkAttributionIssuerAdmissionBasisV1::CommittedImport { policy_generation } => {
-                self.retained_issuer_policy(policy_generation)
-            }
-            ForkAttributionIssuerAdmissionBasisV1::AbsentImport => self.floor_issuer_policy(),
-        })
+        admit_fork_attribution_issuer(
+            query,
+            |generation| self.retained_issuer_policy(generation),
+            || self.floor_issuer_policy(),
+        )
     }
 }
 
@@ -90,6 +91,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::ForkAttributionIssuerAdmissionBasisV1;
 
     type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
     type Outcome = Result<IssuerPolicyInstallOutcomeV1, ForkAttributionIssuerPolicyErrorV1>;

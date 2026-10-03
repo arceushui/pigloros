@@ -11,7 +11,6 @@ use pos_core::{
     ForkAttributionIssuerPolicyV1, ForkAttributionIssuerStateV1 as State, ForkAttributionIssuerV1,
     Hash, PublicKey,
 };
-use pos_crypto::fork_attribution_authority::ForkAttributionAuthoritySignatureErrorV1;
 use pos_store::{
     memory::MemoryStore, sqlite::SqliteStore, AuthenticatedOperatorPolicyPinV1,
     ForkAttributionIssuerAdmissionBasisV1 as Basis, ForkAttributionIssuerAdmissionQueryV1,
@@ -24,7 +23,6 @@ use pos_store::{
 type Fallible<T> = Result<T, Box<dyn Error>>;
 type Policy = ForkAttributionIssuerPolicyV1;
 type Issuer = ForkAttributionIssuerV1;
-type SignatureError = ForkAttributionAuthoritySignatureErrorV1;
 
 const SCOPE: &str = "destination-a";
 const ACTIVE: State = State::Active;
@@ -184,6 +182,8 @@ fn unpinned_malformed_or_invalid_key_policies_install_nothing() -> Fallible<()> 
     let first = genesis(&[(&a, ACTIVE)])?;
     let bytes = first.to_canonical_cbor();
     let mut unsupported = bytes.clone();
+    // Byte 6 is the version: it follows the array head (1 byte) and the
+    // text-string "FIP1" (5 bytes).
     unsupported[6] = 2;
     let weak = Issuer::new("issuer-w", 1, PublicKey::from_bytes(WEAK_POINT))?;
     let weak = genesis(&[(&a, ACTIVE), (&weak, ACTIVE)])?;
@@ -496,14 +496,6 @@ fn committed_imports_are_decided_by_their_recorded_policy_only() -> Fallible<()>
         }
         Ok(())
     })
-}
-
-#[test]
-fn signature_failures_stay_distinct_from_key_failures() {
-    let key = PolicyError::from(SignatureError::InvalidIssuerKey);
-    assert_eq!(key, PolicyError::InvalidIssuerKey);
-    let signature = PolicyError::from(SignatureError::InvalidSignature);
-    assert_eq!(signature, PolicyError::InvalidSignature);
 }
 
 #[test]

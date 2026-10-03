@@ -1027,6 +1027,9 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
         ],
         constraints: &[
             "CHECK (length(policy_digest) = 32)",
+            // 96 is `MAX_FORK_ATTRIBUTION_ISSUER_POLICY_HISTORY_V1` and 20480
+            // is `pos_core::MAX_FORK_ATTRIBUTION_ISSUER_POLICY_BYTES_V1`; a unit
+            // test in `sqlite::fork_attribution_issuer_policy` pins both.
             "CHECK (generation BETWEEN 1 AND 96)",
             "CHECK (length(fip1_cbor) BETWEEN 1 AND 20480)",
             "UNIQUE (generation)",
@@ -1064,6 +1067,8 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
         ],
         constraints: &[
             "CHECK (singleton = 1)",
+            // 96 is `MAX_FORK_ATTRIBUTION_ISSUER_POLICY_HISTORY_V1`, pinned by a
+            // unit test in `sqlite::fork_attribution_issuer_policy`.
             "CHECK (generation BETWEEN 1 AND 96)",
             "CHECK (length(policy_digest) = 32)",
         ],

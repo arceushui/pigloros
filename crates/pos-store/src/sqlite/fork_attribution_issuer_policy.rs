@@ -13,11 +13,10 @@ use super::SqliteStore;
 use crate::fork_attribution_issuer_policy::{
     admit_fork_attribution_issuer, checked_retained_policy, pinned_issuer_policy,
     plan_issuer_policy_install, AuthenticatedOperatorPolicyPinV1,
-    ForkAttributionIssuerAdmissionBasisV1, ForkAttributionIssuerAdmissionQueryV1,
-    ForkAttributionIssuerAdmissionV1, ForkAttributionIssuerPolicyErrorV1,
-    ForkAttributionIssuerPolicyInstallationPortV1, IssuerPolicyFloorV1,
-    IssuerPolicyInstallOutcomeV1, IssuerPolicyInstallReceiptV1, LoadedIssuerPolicyV1,
-    PolicyResultV1,
+    ForkAttributionIssuerAdmissionQueryV1, ForkAttributionIssuerAdmissionV1,
+    ForkAttributionIssuerPolicyErrorV1, ForkAttributionIssuerPolicyInstallationPortV1,
+    IssuerPolicyFloorV1, IssuerPolicyInstallOutcomeV1, IssuerPolicyInstallReceiptV1,
+    LoadedIssuerPolicyV1, PolicyResultV1,
 };
 
 /// The expected scope, generation, and digest of one stored policy, with its
@@ -25,8 +24,8 @@ use crate::fork_attribution_issuer_policy::{
 type StoredPolicyRowV1 = (String, i64, [u8; 32], Option<Vec<u8>>);
 
 impl From<rusqlite::Error> for ForkAttributionIssuerPolicyErrorV1 {
-    /// Deliberately conservative: no `SQLite` failure is trusted to prove what
-    /// was or was not committed.
+    /// Storage failure; for writes the commit state is unknown. No `SQLite`
+    /// failure is trusted to prove what was or was not committed.
     fn from(_: rusqlite::Error) -> Self {
         Self::StorageIndeterminate
     }
@@ -50,19 +49,18 @@ impl ForkAttributionIssuerPolicyInstallationPortV1 for SqliteStore {
         &self,
     ) -> Result<Option<IssuerPolicyFloorV1>, ForkAttributionIssuerPolicyErrorV1> {
         let current = read_floor_policy(&self.conn)?;
-        Ok(current.as_ref().map(IssuerPolicyFloorV1::of))
+        Ok(current.as_ref().map(IssuerPolicyFloorV1::from_policy))
     }
 
     fn admit_issuer(
         &self,
         query: &ForkAttributionIssuerAdmissionQueryV1,
     ) -> Result<ForkAttributionIssuerAdmissionV1, ForkAttributionIssuerPolicyErrorV1> {
-        admit_fork_attribution_issuer(query, |basis| match basis {
-            ForkAttributionIssuerAdmissionBasisV1::CommittedImport { policy_generation } => {
-                read_retained_policy(&self.conn, policy_generation)
-            }
-            ForkAttributionIssuerAdmissionBasisV1::AbsentImport => read_floor_policy(&self.conn),
-        })
+        admit_fork_attribution_issuer(
+            query,
+            |generation| read_retained_policy(&self.conn, generation),
+            || read_floor_policy(&self.conn),
+        )
     }
 }
 
@@ -123,8 +121,15 @@ fn persist_floor_policy(
 }
 
 /// Read the floor policy, requiring the history row it names to decode to
-/// exactly the floor's scope, generation, and digest.
+/// exactly the floor's scope, generation, and digest, and the history to be
+/// contiguous with it: one row per generation up to the floor, and no rows at
+/// all without a floor.
 fn read_floor_policy(conn: &Connection) -> LoadedIssuerPolicyV1 {
+    let rows = conn.query_row(
+        "SELECT COUNT(*) FROM fork_attribution_issuer_policies",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
     let row = conn
         .query_row(
             "SELECT floor.scope, floor.generation, floor.policy_digest, history.fip1_cbor
@@ -135,7 +140,13 @@ fn read_floor_policy(conn: &Connection) -> LoadedIssuerPolicyV1 {
             |row| StoredPolicyRowV1::try_from(row),
         )
         .optional()?;
-    row.map(stored_policy_row).transpose()
+    let floor = row.map(stored_policy_row).transpose()?;
+    let generation = floor.as_ref().map_or(0, |policy| policy.input().generation);
+    if u64::try_from(rows) == Ok(generation) {
+        Ok(floor)
+    } else {
+        Err(ForkAttributionIssuerPolicyErrorV1::CorruptPolicy)
+    }
 }
 
 /// Decode one stored policy and require it to be exactly the expected scope,
@@ -188,10 +199,14 @@ mod tests {
     use pos_core::{
         ForkAttributionIssuerPolicyEntryV1, ForkAttributionIssuerPolicyInputV1,
         ForkAttributionIssuerStateV1, ForkAttributionIssuerV1, PublicKey,
+        MAX_FORK_ATTRIBUTION_ISSUER_POLICY_BYTES_V1,
     };
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
     use super::*;
+    use crate::{
+        ForkAttributionIssuerAdmissionBasisV1, MAX_FORK_ATTRIBUTION_ISSUER_POLICY_HISTORY_V1,
+    };
 
     type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -397,11 +412,56 @@ mod tests {
         store
             .conn
             .execute_batch("DROP TABLE fork_attribution_issuer_policies")?;
+        // The history count now fails before the floor read.
+        assert_eq!(store.issuer_policy_floor(), Err(INDETERMINATE));
         let committed = ForkAttributionIssuerAdmissionBasisV1::CommittedImport {
             policy_generation: 1,
         };
         assert_eq!(admit(&store, &policies[0], committed)?, Err(INDETERMINATE));
         Ok(())
+    }
+
+    #[test]
+    fn history_must_be_contiguous_with_the_floor() -> Fallible<()> {
+        let policies = lifecycle()?;
+        // History rows without a floor: a genesis install is corrupt, not a
+        // unique-key storage failure.
+        let mut store = installed_store(&policies)?;
+        store
+            .conn
+            .execute_batch("DELETE FROM fork_attribution_issuer_policy_floor")?;
+        assert_eq!(store.issuer_policy_floor(), Err(CORRUPT));
+        assert_eq!(install(&mut store, &policies[0]), Err(CORRUPT));
+        // A floor at generation 2 whose generation-1 row is missing.
+        let mut store = installed_store(&policies)?;
+        store
+            .conn
+            .execute_batch("DELETE FROM fork_attribution_issuer_policies WHERE generation = 1")?;
+        assert_eq!(store.issuer_policy_floor(), Err(CORRUPT));
+        assert_eq!(install(&mut store, &policies[2]), Err(CORRUPT));
+        Ok(())
+    }
+
+    #[test]
+    fn schema_ceilings_match_the_policy_constants() {
+        let history = format!(
+            "CHECK (generation BETWEEN 1 AND {MAX_FORK_ATTRIBUTION_ISSUER_POLICY_HISTORY_V1})"
+        );
+        let bytes = format!(
+            "CHECK (length(fip1_cbor) BETWEEN 1 AND {MAX_FORK_ATTRIBUTION_ISSUER_POLICY_BYTES_V1})"
+        );
+        let constraints = |name: &str| {
+            crate::sqlite::FORK_ADMISSION_SCHEMA_TABLES
+                .iter()
+                .filter(|table| table.name == name)
+                .flat_map(|table| table.constraints.iter().copied())
+                .collect::<Vec<_>>()
+        };
+        let policies = constraints("fork_attribution_issuer_policies");
+        assert!(policies.contains(&history.as_str()));
+        assert!(policies.contains(&bytes.as_str()));
+        let floor = constraints("fork_attribution_issuer_policy_floor");
+        assert!(floor.contains(&history.as_str()));
     }
 
     #[test]
