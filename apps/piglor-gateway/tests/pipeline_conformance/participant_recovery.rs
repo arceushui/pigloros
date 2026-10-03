@@ -317,11 +317,13 @@ fn error_text(result: Admitted) -> String {
     result.map_or_else(|error| error.to_string(), |_| "admitted".to_owned())
 }
 
-/// PCF-REC-004: a committed participant-authorized pass whose
-/// acknowledgement was lost stays in doubt and recovers its committed
-/// receipt without restaging; an exact retry returns the same receipt as a
-/// `RecoveredDuplicate`; and a revocation between the attempt and recovery is
-/// caught by the store fence on both observation profiles.
+/// PCF-REC-004: participant-authorized pass recovery.
+///
+/// A committed pass whose acknowledgement was lost stays in doubt and
+/// recovers its committed receipt without restaging; an exact retry returns
+/// the same receipt as a `RecoveredDuplicate`; and a revocation between the
+/// attempt and recovery is caught by the store fence on both observation
+/// profiles.
 #[must_use]
 pub fn participant_commit_recovery() -> Capture {
     let mut capture = Capture::default();
