@@ -15,6 +15,11 @@ use std::io::Cursor;
 /// Magic for the immutable recompute-checkpoint record.
 pub const RECOMPUTE_CHECKPOINT_MAGIC_V1: &str = "RCP1";
 /// Maximum encoded size of an RCP1 recompute checkpoint.
+///
+/// A structurally valid RCP1 record encodes to at most about 2 MiB (three
+/// lists of 4,096 entries of at most 165 bytes each plus fixed fields), so the
+/// limit is enforced on untrusted input before allocation rather than after
+/// encoding.
 pub const MAX_RECOMPUTE_CHECKPOINT_BYTES_V1: usize = 16 * 1024 * 1024;
 /// Maximum number of entries in each ordered RCP1 digest list.
 pub const MAX_CHECKPOINT_DIGEST_ENTRIES_V1: usize = 4_096;
@@ -26,12 +31,8 @@ pub const MAX_EXOGENOUS_CURSOR_POSITION_V1: u64 = 65_536;
 const FIELD_COUNT: usize = 12;
 const DIGEST_DOMAIN: &[u8] = b"PiglorOS.RecomputeCheckpoint.v1";
 const MAX_NESTING_DEPTH: u8 = 3;
-const MAX_NESTED_ARRAY_ITEMS: u64 = MAX_CHECKPOINT_DIGEST_ENTRIES_V1 as u64;
+const MAX_NESTED_ARRAY_ITEMS: u64 = 4_096;
 const ZERO_DIGEST: [u8; 32] = [0; 32];
-
-// A structurally valid RCP1 record encodes to at most about 2 MiB (three lists of
-// 4,096 entries of at most 165 bytes each plus fixed fields), so the 16 MiB limit
-// is enforced on untrusted input before allocation rather than after encoding.
 
 /// Closed safe errors exposed by the RCP1 contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,7 +117,13 @@ impl RecomputeCheckpointV1 {
     ///
     /// Returns a closed safe error when any field, ordering, or digest is invalid.
     pub fn validate(&self) -> Result<(), RecomputeCheckpointContractErrorV1> {
-        encode_validated_checkpoint(self).map(|_| ())
+        self.digest().and_then(|expected| {
+            if expected == self.checkpoint_digest {
+                Ok(())
+            } else {
+                Err(RecomputeCheckpointContractErrorV1::DigestMismatch)
+            }
+        })
     }
 
     /// Encode this checkpoint as an exact deterministic-CBOR RCP1 array.
@@ -125,7 +132,11 @@ impl RecomputeCheckpointV1 {
     ///
     /// Returns a closed safe error when validation or canonical encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, RecomputeCheckpointContractErrorV1> {
-        encode_validated_checkpoint(self)
+        self.validate().and_then(|()| {
+            let mut fields = checkpoint_fields(self);
+            fields.push(digest_bytes(&self.checkpoint_digest));
+            encode_value(&Value::Array(fields))
+        })
     }
 
     /// Decode and validate exact canonical RCP1 bytes.
@@ -161,20 +172,6 @@ impl RecomputeCheckpointV1 {
             .and_then(|()| encode_value(&Value::Array(checkpoint_fields(self))))
             .map(|unsigned| domain_digest(DIGEST_DOMAIN, &unsigned))
     }
-}
-
-fn encode_validated_checkpoint(
-    checkpoint: &RecomputeCheckpointV1,
-) -> Result<Vec<u8>, RecomputeCheckpointContractErrorV1> {
-    checkpoint.digest().and_then(|expected| {
-        if expected == checkpoint.checkpoint_digest {
-            let mut fields = checkpoint_fields(checkpoint);
-            fields.push(digest_bytes(&checkpoint.checkpoint_digest));
-            encode_value(&Value::Array(fields))
-        } else {
-            Err(RecomputeCheckpointContractErrorV1::DigestMismatch)
-        }
-    })
 }
 
 fn validate_structure(
@@ -333,7 +330,7 @@ fn encode_value(value: &Value) -> Result<Vec<u8>, RecomputeCheckpointContractErr
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)
         .map(|()| bytes)
-        .map_err(|_| RecomputeCheckpointContractErrorV1::InvalidEncoding)
+        .or(Err(RecomputeCheckpointContractErrorV1::InvalidEncoding))
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, RecomputeCheckpointContractErrorV1> {
