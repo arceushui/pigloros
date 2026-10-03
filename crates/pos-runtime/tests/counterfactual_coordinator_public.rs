@@ -453,10 +453,10 @@ const fn untampered(_: &mut RecomputationFrontierV1) {}
 fn graph_error(error: DependencyGraphErrorV1) -> AdmissionError {
     match error {
         DependencyGraphErrorV1::DependencyGraphIncomplete(coordinate) => {
-            AdmissionError::DependencyGraphIncomplete(coordinate)
+            AdmissionError::DependencyGraphIncomplete(*coordinate)
         }
         DependencyGraphErrorV1::UnknownDependencyEdge(coordinate) => {
-            AdmissionError::UnknownDependencyEdge(coordinate)
+            AdmissionError::UnknownDependencyEdge(*coordinate)
         }
         _ => AdmissionError::DependencyGraphInvalid,
     }
