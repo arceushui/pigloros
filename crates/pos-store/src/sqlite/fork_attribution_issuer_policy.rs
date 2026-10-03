@@ -518,6 +518,15 @@ mod tests {
         let next = policy(97, Some(ceiling.digest()), active)?;
         let mut store = SqliteStore::open_in_memory()?;
         let digest = ceiling.digest();
+        // The floor read requires one history row per generation, so fill
+        // generations 1..=95 with distinct placeholder rows behind the floor.
+        for generation in 1..=95_u8 {
+            store.conn.execute(
+                "INSERT INTO fork_attribution_issuer_policies (policy_digest, generation, fip1_cbor)
+                 VALUES (?1, ?2, ?3)",
+                params![[generation; 32].as_slice(), generation, [generation].as_slice()],
+            )?;
+        }
         store.conn.execute(
             "INSERT INTO fork_attribution_issuer_policies (policy_digest, generation, fip1_cbor)
              VALUES (?1, 96, ?2)",
@@ -531,7 +540,7 @@ mod tests {
         )?;
         let exhausted = Err(ForkAttributionIssuerPolicyErrorV1::HistoryExhausted);
         assert_eq!(install(&mut store, &next), exhausted);
-        assert_eq!(history_rows(&store)?, 1);
+        assert_eq!(history_rows(&store)?, 96);
         Ok(())
     }
 }
