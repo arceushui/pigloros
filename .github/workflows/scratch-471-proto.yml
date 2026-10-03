@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      OUT: ${{ github.workspace }}/../out
+      OUT: /tmp/out
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -114,10 +114,11 @@ jobs:
         if: always()
         with:
           name: linux-out
-          path: ${{ github.workspace }}/../out
+          path: /tmp/out
           retention-days: 3
 
   windows:
+    if: ${{ !contains(github.event.head_commit.message, '[linux-only]') }}
     runs-on: windows-latest
     timeout-minutes: 150
     defaults:
