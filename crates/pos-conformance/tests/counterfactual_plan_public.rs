@@ -590,7 +590,10 @@ fn intervention_list_accepts_exactly_its_bound() -> TestResult {
             .collect::<Result<_, _>>()?,
     );
     fields[FIELD_PLAN_DIGEST] = Value::Bytes(oversized.plan_digest.to_vec());
-    assert_eq!(decoded(&encode(&Value::Array(fields))?), expected);
+    assert_eq!(
+        decoded(&encode(&Value::Array(fields))?).map(|_| ()),
+        expected
+    );
     Ok(())
 }
 
