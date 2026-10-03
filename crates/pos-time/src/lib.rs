@@ -13,7 +13,7 @@
 //! | [`mod@snapshot`] | Protected snapshots, `Unavailable` until #502 |
 //! | [`compare()`] | Install both Fork arms and report diverged entities |
 //! | [`merge()`] | Conflict-free / strategy-guided timeline merge |
-//! | [`mod@counterfactual`] | ADR-064 counterfactual dependency-graph validation |
+//! | `counterfactual` | ADR-064 counterfactual dependency-graph validation and recomputation-frontier derivation (Linux only) |
 //!
 //! Protected Replay and Compare never fold through a visible
 //! `ProjectionRegistry` (ADR-113 §8). Inside ADR-112's release guard they read
@@ -25,7 +25,6 @@
 //! registry forgets only the revoked subjects of that range, after release
 //! (ADR-093 Revision 4). Each release reports its payload-free health
 //! signals into the caller's [`ReleaseHealthV1`].
-//! | [`mod@counterfactual`] | ADR-064 counterfactual dependency-graph validation (Linux only) |
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use std::{cell::Cell, sync::Arc};
