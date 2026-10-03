@@ -13,11 +13,6 @@
   ],
   "exclusions": [
     {
-      "id": "R3-PARTICIPANT-COMMIT-RECOVERY",
-      "reason": "Recovery and duplicate-receipt of a committed participant-authorized pass need a published participant authority fence in a store; the test host offers participant passes to a recording port only",
-      "owner": "#507"
-    },
-    {
       "id": "GATEWAY-HUMAN-SUCCESS-PATH",
       "reason": "Wave 8 has no installed Gateway action EPF1, so the authorized Gateway composition fails closed and its human success path is not publicly composable",
       "owner": "#461"
@@ -279,6 +274,49 @@
         "retry.receipt-equal": "true",
         "conflict": "idempotency key is held by another attempt",
         "approvals": "2",
+        "committed": "2"
+      }
+    },
+    {
+      "id": "PCF-REC-004",
+      "title": "A committed participant-authorized pass with a lost acknowledgement recovers its receipt without restaging; an exact retry is a duplicate; a revocation before recovery is caught by the store fence on both profiles",
+      "sources": [
+        "#481",
+        "#507",
+        "ADR-021 R3"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "lost": "store error: storage outcome is unknown: injected lost acknowledgement",
+        "attempt.outcomes": "Committed",
+        "committed-before-recovery": "1",
+        "restage-while-in-doubt": "an anchored Driver step is already pending",
+        "recovery.outcomes": "RecoveredDuplicate",
+        "recovery.receipt-equal": "true",
+        "recovery.driver-steps": "1",
+        "recovery.driver-aborts": "0",
+        "second-recovery": "no scheduled pass admission is in doubt",
+        "retry.outcomes": "RecoveredDuplicate",
+        "retry.receipt-equal": "true",
+        "retry.committed": "1",
+        "uncommitted.lost": "store error: storage outcome is unknown: injected lost acknowledgement",
+        "anchored.lost": "store error: storage outcome is unknown: injected lost acknowledgement",
+        "revoked.participant": "scheduled pass was not admitted: AuthorityRevoked",
+        "revoked.participant-outcomes": "AuthorityRevoked",
+        "revoked.participant-driver": "steps=1,aborts=1",
+        "revoked.anchored": "scheduled pass was not admitted: AuthorityRevoked",
+        "revoked.anchored-outcomes": "AuthorityRevoked",
+        "revoked.anchored-driver": "steps=1,aborts=1",
+        "revoked.committed-outcomes": "RecoveredDuplicate",
+        "revoked.committed-receipt-equal": "true",
         "committed": "2"
       }
     },

@@ -461,6 +461,7 @@ struct DriverState {
     emitted: Option<EntityId>,
     saw_raw_state: bool,
     saw_raw_events: bool,
+    steps: u32,
     commits: u32,
     aborts: u32,
 }
@@ -546,6 +547,7 @@ impl Driver for ParticipantDriver {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.steps += 1;
             state.observed_digest = observations
                 .authorized_snapshot()
                 .map(ObservationSnapshotV1::digest);
@@ -813,6 +815,7 @@ struct AdmissionStore {
     store: Box<dyn ScheduledAdmissionStoreV1>,
     timeline: TimelineId,
     revisions: PipelineSecurityRevisionsV1,
+    authority: AuthorityPersistenceHostV1,
 }
 
 impl AdmissionStore {
@@ -873,7 +876,30 @@ impl AdmissionStore {
             store,
             timeline,
             revisions,
+            authority: host,
         }
+    }
+
+    /// Persist a revocation of the root grant that the admission fence names.
+    fn revoke_admission_root(&mut self) {
+        let root = admission_root_grant();
+        let revocation = CapabilityRevocationV1::try_from_draft(CapabilityRevocationDraftV1 {
+            grant_id: root.grant_id(),
+            authority_timeline: root.issuance_timeline(),
+            fence_position: Seq::from_u64(2),
+            revocation_epoch: 1,
+            policy_revision: root.policy_revision(),
+            authority_registry_digest: root.authority_registry_digest(),
+        })
+        .test_ok();
+        self.store
+            .revoke_capability_grant(
+                self.authority
+                    .authorize_revocation(&root, &revocation)
+                    .test_ok(),
+                &revocation,
+            )
+            .test_ok();
     }
 
     /// Host admission inputs read after the pass finished.
@@ -2050,5 +2076,255 @@ fn authorized_staging_requires_each_driver_bound_to_its_views_participant() {
         &foreign_state,
     ] {
         assert_eq!(observed(state).observed_digest, None);
+    }
+}
+
+// ── #507: recovery and duplicate receipt of a participant-authorized pass ──
+
+type Admitted = Result<Option<PipelineCommitReceiptV1>, RuntimeError>;
+
+/// Whether a port delivers the store's acknowledgement to the registry.
+#[derive(Clone, Copy)]
+enum Ack {
+    Delivered,
+    LostAfterCommit,
+    LostBeforeCommit,
+}
+
+/// A port over a prepared store that records every store outcome and can
+/// lose the acknowledgement after, or instead of, the commit.
+struct AckPort<'a> {
+    inner: &'a mut dyn ScheduledAdmissionStoreV1,
+    ack: Ack,
+    outcomes: Vec<PipelineOutcomeV1>,
+}
+
+fn lost_acknowledgement() -> pos_core::CoreError {
+    pos_core::CoreError::StorageOutcomeUnknown("injected lost acknowledgement".to_owned())
+}
+
+impl PipelineAdmissionPortV1 for AckPort<'_> {
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, pos_core::CoreError> {
+        if matches!(self.ack, Ack::LostBeforeCommit) {
+            return Err(lost_acknowledgement());
+        }
+        let outcome = self.inner.admit_pipeline_batch(basis).test_ok();
+        self.outcomes.push(outcome.clone());
+        if matches!(self.ack, Ack::LostAfterCommit) {
+            return Err(lost_acknowledgement());
+        }
+        Ok(outcome)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<pos_core::PurgeOutcome, pos_core::CoreError> {
+        self.inner.purge_expired_pipeline_receipts_bounded(limit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: pos_core::TimelineId,
+        key: pos_core::AppendDedupKey,
+        attempt_id: pos_core::PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
+        self.inner
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+/// Admit the staged authorized pass under current view authority through
+/// an [`AckPort`]. Return the result and every store outcome it saw.
+fn admit_with_ack(
+    registry: &mut PluginRegistry,
+    prepared: &mut AdmissionStore,
+    fixture: &Fixture,
+    admission: &ScheduledPassAdmissionV1,
+    ack: Ack,
+) -> (Admitted, Vec<PipelineOutcomeV1>) {
+    let evaluation = observation_evaluation(&fixture.observation);
+    let authority = current_authority(fixture);
+    let mut port = AckPort {
+        inner: prepared.store.as_mut(),
+        ack,
+        outcomes: Vec::new(),
+    };
+    let result = registry.admit_authorized_scheduled_pass(
+        &mut port,
+        admission,
+        &[view_authority(fixture, &evaluation, &authority)],
+    );
+    (result, port.outcomes)
+}
+
+/// Recover the in-doubt pass through a delivering [`AckPort`]. Return the
+/// result and every store outcome it saw.
+fn recover_with_ack(
+    registry: &mut PluginRegistry,
+    prepared: &mut AdmissionStore,
+) -> (Admitted, Vec<PipelineOutcomeV1>) {
+    let mut port = AckPort {
+        inner: prepared.store.as_mut(),
+        ack: Ack::Delivered,
+        outcomes: Vec::new(),
+    };
+    let result = registry.recover_scheduled_pass(&mut port);
+    (result, port.outcomes)
+}
+
+/// The display of a commit whose acknowledgement the port lost.
+const OUTCOME_UNKNOWN: &str =
+    "store error: storage outcome is unknown: injected lost acknowledgement";
+
+fn committed_receipt(outcomes: &[PipelineOutcomeV1]) -> PipelineCommitReceiptV1 {
+    match outcomes {
+        [PipelineOutcomeV1::Committed(receipt)] => receipt.clone(),
+        other => std::panic::resume_unwind(Box::new(format!("expected one commit: {other:?}"))),
+    }
+}
+
+#[test]
+fn in_doubt_authorized_pass_recovers_its_committed_receipt_without_restaging() {
+    for (name, mut prepared) in admission_stores() {
+        let fixture = fixture_with_timeline(prepared.timeline);
+        let (mut registry, state) = registry(&fixture, false);
+        let admission = prepared.admission(20);
+        stage_current(&mut registry, &fixture).test_ok();
+
+        let (lost, attempted) = admit_with_ack(
+            &mut registry,
+            &mut prepared,
+            &fixture,
+            &admission,
+            Ack::LostAfterCommit,
+        );
+        assert_eq!(error_text(lost), OUTCOME_UNKNOWN, "{name}");
+        let original = committed_receipt(&attempted);
+        assert_eq!(prepared.committed().len(), 1, "{name}");
+        let blocked = error_text(stage_current(&mut registry, &fixture));
+        assert!(
+            blocked.contains("already pending"),
+            "{name}: an in-doubt pass blocks a new pass"
+        );
+
+        let (recovered, resubmitted) = recover_with_ack(&mut registry, &mut prepared);
+        let recovered = recovered.test_ok();
+        assert_eq!(recovered.as_ref(), Some(&original), "{name}");
+        assert_eq!(
+            resubmitted,
+            vec![PipelineOutcomeV1::RecoveredDuplicate(original.clone())],
+            "{name}: recovery resubmits the exact retained basis"
+        );
+        let once = observed(&state);
+        assert_eq!(
+            (once.steps, once.commits, once.aborts),
+            (1, 1, 0),
+            "{name}: recovery never restages the Driver"
+        );
+        assert!(
+            error_text(registry.recover_scheduled_pass(prepared.store.as_mut()))
+                .contains("no scheduled pass admission"),
+            "{name}"
+        );
+
+        stage_current(&mut registry, &fixture).test_ok();
+        let (retried, duplicate) = admit_with_ack(
+            &mut registry,
+            &mut prepared,
+            &fixture,
+            &admission,
+            Ack::Delivered,
+        );
+        assert_eq!(retried.test_ok(), Some(original.clone()), "{name}");
+        assert_eq!(
+            duplicate,
+            vec![PipelineOutcomeV1::RecoveredDuplicate(original)],
+            "{name}: an exact retry returns the same receipt"
+        );
+        assert_eq!(prepared.committed().len(), 1, "{name}");
+    }
+}
+
+#[test]
+fn revocation_before_recovery_is_caught_by_the_store_fence() {
+    for (name, mut prepared) in admission_stores() {
+        let fixture = fixture_with_timeline(prepared.timeline);
+        let (mut committed_pass, committed_state) = registry(&fixture, false);
+        let (mut uncommitted_pass, uncommitted_state) = registry(&fixture, false);
+
+        stage_current(&mut committed_pass, &fixture).test_ok();
+        let committed_admission = prepared.admission(21);
+        let (lost, attempted) = admit_with_ack(
+            &mut committed_pass,
+            &mut prepared,
+            &fixture,
+            &committed_admission,
+            Ack::LostAfterCommit,
+        );
+        assert_eq!(error_text(lost), OUTCOME_UNKNOWN, "{name}");
+        let original = committed_receipt(&attempted);
+
+        stage_current(&mut uncommitted_pass, &fixture).test_ok();
+        let uncommitted_admission = prepared.admission(22);
+        let (lost, attempted) = admit_with_ack(
+            &mut uncommitted_pass,
+            &mut prepared,
+            &fixture,
+            &uncommitted_admission,
+            Ack::LostBeforeCommit,
+        );
+        assert_eq!(error_text(lost), OUTCOME_UNKNOWN, "{name}");
+        assert!(attempted.is_empty(), "{name}");
+        assert_eq!(prepared.committed().len(), 1, "{name}");
+
+        prepared.revoke_admission_root();
+
+        let (rejected, outcomes) = recover_with_ack(&mut uncommitted_pass, &mut prepared);
+        assert_eq!(
+            error_text(rejected),
+            "scheduled pass was not admitted: AuthorityRevoked",
+            "{name}: the store fence is the recovery-time authority check"
+        );
+        assert_eq!(
+            outcomes,
+            vec![PipelineOutcomeV1::AuthorityRevoked],
+            "{name}"
+        );
+        let aborted = observed(&uncommitted_state);
+        assert_eq!(
+            (aborted.steps, aborted.commits, aborted.aborts),
+            (1, 0, 1),
+            "{name}"
+        );
+        assert!(
+            error_text(uncommitted_pass.recover_scheduled_pass(prepared.store.as_mut()))
+                .contains("no scheduled pass admission"),
+            "{name}"
+        );
+
+        let (recovered, outcomes) = recover_with_ack(&mut committed_pass, &mut prepared);
+        assert_eq!(
+            recovered.test_ok(),
+            Some(original.clone()),
+            "{name}: a committed pass keeps its receipt"
+        );
+        assert_eq!(
+            outcomes,
+            vec![PipelineOutcomeV1::RecoveredDuplicate(original)],
+            "{name}"
+        );
+        let kept = observed(&committed_state);
+        assert_eq!(
+            (kept.steps, kept.commits, kept.aborts),
+            (1, 1, 0),
+            "{name}: the committed Driver state stands"
+        );
+        assert_eq!(prepared.committed().len(), 1, "{name}");
     }
 }
