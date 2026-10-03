@@ -42,7 +42,7 @@ use pos_runtime::counterfactual::coordinator::{
     InterventionDecisionV1,
 };
 use pos_runtime::counterfactual::suffix::{
-    CounterfactualEpochSourceV1, CounterfactualEpochsV1,
+    CounterfactualAttestedEpochsV1, CounterfactualEpochSourceV1, CounterfactualEpochsV1,
     CounterfactualSuffixErrorV1 as SuffixError, CounterfactualSuffixFailureV1 as Failure,
     CounterfactualSuffixRequestV1, CounterfactualSuffixRunV1,
     COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1, SUFFIX_STATE_OWNER_V1,
@@ -242,6 +242,8 @@ enum StoreFault {
     ArtifactMissing,
     ArtifactGarbage,
     EventRead,
+    FirstEventDropped,
+    FirstEventAltered,
 }
 
 /// A `MemoryStore` whose reads fail as configured.
@@ -269,10 +271,23 @@ impl EventStore for Faulty {
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         if self.fault == StoreFault::EventRead {
-            Err(CoreError::Storage("injected read failure".to_owned()))
-        } else {
-            self.inner.read(timeline, range)
+            return Err(CoreError::Storage("injected read failure".to_owned()));
         }
+        let skip = usize::from(self.fault == StoreFault::FirstEventDropped);
+        let alter = self.fault == StoreFault::FirstEventAltered;
+        Ok(self
+            .inner
+            .read(timeline, range)?
+            .into_iter()
+            .skip(skip)
+            .enumerate()
+            .map(|(position, mut event)| {
+                if alter && position == 0 {
+                    event.payload = CanonicalBytes::from_vec(vec![0xee]);
+                }
+                event
+            })
+            .collect())
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
@@ -818,7 +833,10 @@ fn suffix_request(fixture: &Fixture) -> CounterfactualSuffixRequestV1<'_> {
     CounterfactualSuffixRequestV1 {
         plan: &fixture.plan,
         receipt: fixture.receipt,
-        admitted_epochs: admitted_epochs(fixture),
+        attested_epochs: CounterfactualAttestedEpochsV1 {
+            revocation: REVOCATION_EPOCH,
+            erasure: ERASURE_EPOCH,
+        },
         result_id: RESULT_ID,
         evaluator_identity_digest: EVALUATOR,
     }
@@ -845,10 +863,13 @@ fn reference() -> TestResult<CounterfactualSuffixRunV1> {
     Ok(run(&mut setup, &mut Stager::default())?)
 }
 
-fn chain(previous: &[u8; 32], tick: u64) -> [u8; 32] {
+fn chain(previous: &[u8; 32], trust: u64, tick: u64) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(STATE_DOMAIN);
     hasher.update(previous);
+    for epoch in [trust, REVOCATION_EPOCH, ERASURE_EPOCH] {
+        hasher.update(&epoch.to_be_bytes());
+    }
     hasher.update(&tick.to_be_bytes());
     hasher.update(pipeline_draft_vector_digest_v1(&tick_drafts(tick)).as_bytes());
     *hasher.finalize().as_bytes()
@@ -859,7 +880,7 @@ fn expected_checkpoints(fixture: &Fixture, last: u64) -> TestResult<Vec<Recomput
     let mut state = *fixture.receipt.invalidation_digest().as_bytes();
     let mut checkpoints = Vec::new();
     for tick in FRONTIER_TICK..=last {
-        state = chain(&state, tick);
+        state = chain(&state, fixture.plan.trust_policy.epoch, tick);
         let mut checkpoint = RecomputeCheckpointV1 {
             plan_digest: fixture.plan.plan_digest,
             tick,
@@ -1128,7 +1149,8 @@ fn epoch_change_stops_before_the_next_tick<B: Backend>() -> TestResult {
         let epochs = Epochs::changing(&setup.fixture, 2, change);
         let mut stager = Stager::default();
         let failed = run_with(&mut setup, &epochs, &mut stager)?;
-        assert_eq!(stager.ticks(), vec![12, 13]);
+        // The epochs are checked after staging, immediately before the commit.
+        assert_eq!(stager.ticks(), vec![12, 13, 14]);
         assert_failed_at(
             &setup,
             &failed,
@@ -1141,6 +1163,88 @@ fn epoch_change_stops_before_the_next_tick<B: Backend>() -> TestResult {
     Ok(())
 }
 both_backends!(epoch_change_stops_before_the_next_tick);
+
+fn completed_generation_rechecks_epochs<B: Backend>() -> TestResult {
+    let reference = reference()?;
+    let mut setup = prepare::<B>()?;
+    assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
+    let epochs = Epochs::changing(&setup.fixture, 0, |epochs| epochs.revocation += 1);
+    let mut stager = Stager::default();
+    assert_eq!(
+        run_with(&mut setup, &epochs, &mut stager),
+        Err(SuffixError::EpochChanged(
+            InvalidationConflictV1::RevocationEpoch
+        ))
+    );
+    assert!(stager.seen.is_empty());
+    assert_eq!(head(&setup)?, committed_head(HORIZON_TICK));
+    assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
+    Ok(())
+}
+both_backends!(completed_generation_rechecks_epochs);
+
+#[test]
+fn attested_epochs_are_bound_by_committed_checkpoints() -> TestResult {
+    let mut setup = prepare::<MemoryStore>()?;
+    run(&mut setup, &mut Stager::failing(13, Fault::Error))?;
+    // A host attesting its new epochs cannot resume a stale generation once a
+    // later Tick committed: its chained state covers the admitted epochs.
+    let change: fn(&mut CounterfactualEpochsV1) = |epochs| epochs.revocation += 1;
+    let epochs = Epochs::changing(&setup.fixture, 0, change);
+    let request = CounterfactualSuffixRequestV1 {
+        attested_epochs: CounterfactualAttestedEpochsV1 {
+            revocation: REVOCATION_EPOCH + 1,
+            erasure: ERASURE_EPOCH,
+        },
+        ..suffix_request(&setup.fixture)
+    };
+    let mut stager = Stager::default();
+    assert_eq!(
+        setup
+            .coordinator
+            .recompute_suffix(&request, &epochs, &mut stager),
+        Err(SuffixError::RecoveryMismatch)
+    );
+    assert!(stager.seen.is_empty());
+    Ok(())
+}
+
+#[test]
+fn incomplete_results_weaken_only_exact_claims() -> TestResult {
+    let cases: [(fn(&mut CounterfactualPlanV1), ReplayClaimV1, ReplayClaimV1); 5] = [
+        (|_| {}, ReplayClaimV1::Exact, ReplayClaimV1::StructuralOnly),
+        (
+            |plan| plan.replay_claim = ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            ReplayClaimV1::StructuralOnly,
+        ),
+        (
+            |plan| plan.replay_claim = ReplayClaimV1::StructuralOnly,
+            ReplayClaimV1::StructuralOnly,
+            ReplayClaimV1::StructuralOnly,
+        ),
+        (
+            |plan| plan.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing,
+            ReplayClaimV1::UnverifiableArtifactsMissing,
+            ReplayClaimV1::UnverifiableArtifactsMissing,
+        ),
+        (
+            |plan| plan.replay_claim = ReplayClaimV1::IncompatibleProfile,
+            ReplayClaimV1::IncompatibleProfile,
+            ReplayClaimV1::IncompatibleProfile,
+        ),
+    ];
+    for (edit, declared, incomplete) in cases {
+        let mut setup = setup_in(<MemoryStore as Backend>::open()?, edit)?;
+        let failed = run(&mut setup, &mut Stager::failing(13, Fault::Error))?;
+        let failed = CounterfactualResultV1::from_canonical_cbor(&failed.result)?;
+        assert_eq!(failed.replay_claim, incomplete);
+        let completed = run(&mut setup, &mut Stager::default())?;
+        let completed = CounterfactualResultV1::from_canonical_cbor(&completed.result)?;
+        assert_eq!(completed.replay_claim, declared);
+    }
+    Ok(())
+}
 
 #[test]
 fn memory_coordinator_recovers_after_a_restart() -> TestResult {
@@ -1236,11 +1340,15 @@ fn tampered_suffix_events_are_rejected<B: Backend>() -> TestResult {
         vec![event_draft("counterfactual.world", vec![9])],
         vec![event_draft("counterfactual.world", vec![9]), forged],
     ];
-    for drafts in tampers {
+    // Failing Tick 12 leaves only the first Tick, committed by admission.
+    for (drafts, failing) in tampers
+        .iter()
+        .flat_map(|drafts| [(drafts, 12), (drafts, 14)])
+    {
         let mut setup = prepare::<B>()?;
-        run(&mut setup, &mut Stager::failing(14, Fault::Error))?;
+        run(&mut setup, &mut Stager::failing(failing, Fault::Error))?;
         let mut setup = reopen(setup, |store| {
-            store.append(fork_id(), &drafts)?;
+            store.append(fork_id(), drafts)?;
             Ok(())
         })?;
         let mut stager = Stager::default();
@@ -1271,6 +1379,8 @@ fn store_read_faults_are_closed() -> TestResult {
             StoreFault::EventRead,
             SuffixError::Store(CounterfactualStoreErrorV1::StorageFailure),
         ),
+        // Only the first Tick is committed: its Event count is bound.
+        (StoreFault::FirstEventDropped, SuffixError::RecoveryMismatch),
     ];
     for (fault, expected) in cases {
         let setup = prepare::<Faulty>()?;
@@ -1282,6 +1392,24 @@ fn store_read_faults_are_closed() -> TestResult {
         assert_eq!(run(&mut setup, &mut stager), Err(expected));
         assert!(stager.seen.is_empty());
     }
+    Ok(())
+}
+
+#[test]
+fn altered_first_tick_events_are_rejected() -> TestResult {
+    let mut setup = prepare::<Faulty>()?;
+    run(&mut setup, &mut Stager::failing(13, Fault::Error))?;
+    // Tick 12's committed RCP1 chains the first Tick's state.
+    let mut setup = reopen(setup, |store| {
+        store.fault = StoreFault::FirstEventAltered;
+        Ok(())
+    })?;
+    let mut stager = Stager::default();
+    assert_eq!(
+        run(&mut setup, &mut stager),
+        Err(SuffixError::RecoveryMismatch)
+    );
+    assert!(stager.seen.is_empty());
     Ok(())
 }
 
@@ -1314,6 +1442,7 @@ fn every_error_has_a_distinct_safe_message() {
         SuffixError::SuffixTooLong,
         SuffixError::PlanMismatch,
         SuffixError::RecoveryMismatch,
+        SuffixError::EpochChanged(InvalidationConflictV1::TrustEpoch),
         SuffixError::ArtifactEncoding,
         SuffixError::Store(CounterfactualStoreErrorV1::StorageFailure),
     ];
@@ -1321,7 +1450,7 @@ fn every_error_has_a_distinct_safe_message() {
         errors.iter().map(ToString::to_string).collect();
     assert_eq!(messages.len(), errors.len());
     assert!(messages.iter().all(|message| !message.is_empty()));
-    let with_source = [0, 5];
+    let with_source = [0, 6];
     for (position, error) in errors.iter().enumerate() {
         assert_eq!(error.source().is_some(), with_source.contains(&position));
     }

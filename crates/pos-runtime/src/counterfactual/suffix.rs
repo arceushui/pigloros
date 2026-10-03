@@ -16,20 +16,28 @@
 //!    generation and reads the generation's committed `SIV1`, which must bind
 //!    the plan;
 //! 3. recovers the committed suffix from the Event Store alone: the first
-//!    Tick spans the Events after the `SIV1` commit coordinate through the
-//!    receipt's first-Tick head, and every later Tick ends with one
-//!    checkpoint Event whose payload is that Tick's exact `RCP1` bytes. Every
-//!    `RCP1` is re-derived from the committed Events and must match byte for
-//!    byte, so any foreign, unmarked, or altered Event is a
+//!    Tick is exactly the `first_tick_head - commit_seq` Events after the
+//!    `SIV1` commit coordinate through the receipt's first-Tick head, and
+//!    every later Tick ends with one checkpoint Event whose payload is that
+//!    Tick's exact `RCP1` bytes. Every later `RCP1` is re-derived from the
+//!    committed Events, chained through the first Tick's state, and must
+//!    match byte for byte, so a missing first-Tick Event and any foreign,
+//!    unmarked, or altered Event after the first Tick is a
 //!    [`CounterfactualSuffixErrorV1::RecoveryMismatch`];
-//! 4. commits each remaining Tick through the horizon: it checks the host's
-//!    current trust, revocation, and erasure epochs against the admitted ones,
-//!    stages the Tick through the same [`CounterfactualTickStagerV1`] seam and
-//!    staged inputs as the first Tick (the plan's exact frozen
-//!    `ExogenousFrozen` and `FixedPolicy` descriptors and the Interventions
-//!    effective at that Tick), and appends the Tick's Events together with its
-//!    checkpoint Event as one atomic batch;
+//! 4. commits each remaining Tick through the horizon: it stages the Tick
+//!    through the same [`CounterfactualTickStagerV1`] seam and staged inputs
+//!    as the first Tick (the plan's exact frozen `ExogenousFrozen` and
+//!    `FixedPolicy` descriptors and the Interventions effective at that
+//!    Tick), checks the host's current trust, revocation, and erasure epochs
+//!    against the admitted ones immediately before the commit, and appends
+//!    the Tick's Events together with its checkpoint Event as one atomic
+//!    batch;
 //! 5. emits every checkpoint of the generation and one sealed `CFR1`.
+//!
+//! A call on an already complete generation stages and commits nothing, but
+//! still checks the current epochs once: a changed epoch is
+//! [`CounterfactualSuffixErrorV1::EpochChanged`], because the completed
+//! generation is stale and its result is not re-emitted.
 //!
 //! The first failed Tick stops the call. It commits nothing, because its
 //! only write is the one atomic append, and it is reported as
@@ -59,12 +67,15 @@
 //!   ([`CounterfactualSuffixFailureV1::ReservedEventType`]). The first Tick,
 //!   committed by admission, has no checkpoint Event: its range is fixed by
 //!   the `SIV1` commit coordinate and the receipt, and its `RCP1` is
-//!   re-derived on every call.
+//!   re-derived on every call. Recovery binds its Event count to that range;
+//!   its Event content is bound by the next Tick's committed `RCP1`, which
+//!   chains the first Tick's state.
 //! - **`RCP1` content.** No Plugin or Projection state serialization exists
 //!   yet, so both lists are empty. The one state digest, owned by
 //!   [`SUFFIX_STATE_OWNER_V1`], chains the `SIV1` digest through every
 //!   committed Tick: `blake3("PiglorOS.CounterfactualSuffixState.v1\0" ||
-//!   previous || tick_be || draft_digest)`, where `draft_digest` is the
+//!   previous || trust_be || revocation_be || erasure_be || tick_be ||
+//!   draft_digest)`, over the admitted epochs, where `draft_digest` is the
 //!   [`pos_core::pipeline_draft_vector_digest_v1`] of the Tick's Event drafts
 //!   with their wall time cleared, because wall time is presentation-only and
 //!   store-assigned. `seq` is the Fork `Seq` of the Tick's last recomputed
@@ -77,9 +88,10 @@
 //!   dependency root is the committed `RCF1` frontier digest, which binds the
 //!   dependency-graph digest (recording generated edges is deferred); the
 //!   provenance root is the `SIV1` provenance digest. A completed result keeps
-//!   the plan's replay claim; an incomplete one weakens it, never upgrading,
-//!   to at most `StructuralOnly`, because CFR1 forbids an exact claim for an
-//!   incomplete suffix.
+//!   the plan's replay claim. An incomplete one weakens only the claims CFR1
+//!   forbids for an incomplete suffix, `Exact` and
+//!   `ExactAuthoritativeWithRedactedViews`, to `StructuralOnly`, the
+//!   strongest permitted claim; every other claim is kept unchanged.
 //! - **Terminal codes.** An epoch change is `InvalidationConflict`; a stager
 //!   failure, an empty, malformed, or oversized staged batch, and a reserved
 //!   Event type are `PluginFailure`; a rejected append is
@@ -87,11 +99,32 @@
 //!   Tick at scheduler position `0`, without a safe digest.
 //! - **Epoch changes.** The store keeps the published epochs only for the
 //!   invalidation recheck, so the host supplies its current epochs through
-//!   [`CounterfactualEpochSourceV1`] before every Tick. A changed epoch makes
-//!   the generation stale; re-admitting it is the host's decision.
+//!   [`CounterfactualEpochSourceV1`] before every commit. A changed epoch
+//!   makes the generation stale; re-admitting it is the host's decision.
+//! - **Admitted epochs.** The admitted trust epoch is the plan's TPS1 epoch,
+//!   which admission committed and the committed `SIV1` binds through the
+//!   plan digest. Neither the receipt, `SIV1`, nor the port exposes the
+//!   committed revocation and erasure epochs, so those two are
+//!   host-attested ([`CounterfactualAttestedEpochsV1`]). Every chained state
+//!   digest covers the admitted epochs, so once a later Tick committed, a
+//!   call attesting other epochs re-derives other `RCP1` bytes and is a
+//!   [`CounterfactualSuffixErrorV1::RecoveryMismatch`].
 //! - **Recovery reads.** Recovery reads the committed suffix with the generic
 //!   [`EventStore::read`]; an Event Store read failure is reported as
 //!   `StorageFailure`.
+//!
+//! # Deferred
+//!
+//! - **Committed revocation and erasure epochs.** While only the first Tick
+//!   is committed, nothing committed binds the attested revocation and
+//!   erasure epochs, so a host that attests its new epochs after a
+//!   revocation or erasure change can still recompute that stale generation.
+//!   Closing this needs the port to expose the epochs persisted at
+//!   admission (or the receipt to carry them).
+//! - **First-Tick Event content.** No committed artifact records the first
+//!   Tick's draft digest, so until the next Tick commits, an altered
+//!   first-Tick Event of the right count is not detected by recovery; it
+//!   relies on the store's own atomic commit.
 
 use pos_conformance::counterfactual::checkpoint::{
     CheckpointDigestEntryV1, ExogenousCursorV1, RecomputeCheckpointV1,
@@ -104,7 +137,7 @@ use pos_conformance::counterfactual::result::{
     CounterfactualTerminalErrorV1, CounterfactualTerminalStateV1,
     MAX_COUNTERFACTUAL_RESULT_CHECKPOINTS_V1,
 };
-use pos_conformance::{ErasureDispositionV1, SuffixInvalidationV1};
+use pos_conformance::{ReplayClaimV1, SuffixInvalidationV1};
 use pos_core::{
     pipeline_draft_vector_digest_v1, CanonicalBytes, CounterfactualGenerationReceiptV1,
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, EntityId, Event, EventDraft, EventStore,
@@ -160,6 +193,20 @@ impl CounterfactualEpochsV1 {
     }
 }
 
+/// The host-attested revocation and erasure epochs a generation was admitted
+/// under.
+///
+/// No committed artifact the port exposes carries them, so the host attests
+/// them; the module documentation describes what binds them and the
+/// deferred gap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CounterfactualAttestedEpochsV1 {
+    /// Authority revocation epoch the admission committed under.
+    pub revocation: u64,
+    /// Erasure epoch the admission committed under.
+    pub erasure: u64,
+}
+
 /// Host source of the current trust, revocation, and erasure epochs.
 pub trait CounterfactualEpochSourceV1 {
     /// Return the host's current epochs.
@@ -210,6 +257,10 @@ pub enum CounterfactualSuffixErrorV1 {
     /// The committed invalidation or suffix Events do not match the generation.
     #[error("counterfactual suffix does not match the committed generation")]
     RecoveryMismatch,
+    /// A host epoch changed since admission of an already complete
+    /// generation; the generation is stale.
+    #[error("counterfactual generation is stale")]
+    EpochChanged(InvalidationConflictV1),
     /// An `RCP1` or `CFR1` artifact could not be sealed.
     #[error("counterfactual suffix artifact could not be encoded")]
     ArtifactEncoding,
@@ -221,12 +272,12 @@ pub enum CounterfactualSuffixErrorV1 {
 /// One suffix recomputation request for a committed generation.
 #[derive(Clone, Copy)]
 pub struct CounterfactualSuffixRequestV1<'a> {
-    /// The admitted CFP1 plan.
+    /// The admitted CFP1 plan; its TPS1 epoch is the admitted trust epoch.
     pub plan: &'a CounterfactualPlanV1,
     /// The receipt of the admitted generation and its first Tick.
     pub receipt: CounterfactualGenerationReceiptV1,
-    /// The epochs the generation was admitted under.
-    pub admitted_epochs: CounterfactualEpochsV1,
+    /// The host-attested revocation and erasure epochs of the admission.
+    pub attested_epochs: CounterfactualAttestedEpochsV1,
     /// `CFR1` result ID of this call.
     pub result_id: [u8; 16],
     /// `CFR1` evaluator identity digest.
@@ -252,11 +303,21 @@ struct SuffixContextV1<'a> {
     receipt: CounterfactualGenerationReceiptV1,
     admitted_epochs: CounterfactualEpochsV1,
     provenance: [u8; 32],
+    result_id: [u8; 16],
+    evaluator_identity_digest: [u8; 32],
 }
 
 impl SuffixContextV1<'_> {
     const fn fork(&self) -> TimelineId {
         self.receipt.generation().fork
+    }
+
+    /// Return the first host epoch that changed since admission.
+    fn epoch_change(
+        &self,
+        epochs: &impl CounterfactualEpochSourceV1,
+    ) -> Option<InvalidationConflictV1> {
+        self.admitted_epochs.first_change(&epochs.current_epochs())
     }
 }
 
@@ -295,7 +356,7 @@ struct CheckpointV1 {
 impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// Release the exclusively owned store, for example to reopen it later.
     #[must_use]
-    pub fn into_store(self) -> S {
+    pub const fn into_store(self) -> S {
         self.store
     }
 
@@ -307,7 +368,9 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     ///
     /// # Errors
     /// Returns the first closed safe error detected before any Tick is
-    /// staged; every error commits nothing.
+    /// staged; every error commits nothing. On an already complete
+    /// generation, a changed host epoch is
+    /// [`CounterfactualSuffixErrorV1::EpochChanged`].
     pub fn recompute_suffix(
         &mut self,
         request: &CounterfactualSuffixRequestV1<'_>,
@@ -327,16 +390,27 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         let context = SuffixContextV1 {
             plan,
             receipt: request.receipt,
-            admitted_epochs: request.admitted_epochs,
+            admitted_epochs: CounterfactualEpochsV1 {
+                trust: plan.trust_policy.epoch,
+                revocation: request.attested_epochs.revocation,
+                erasure: request.attested_epochs.erasure,
+            },
             provenance: invalidation.provenance_digest,
+            result_id: request.result_id,
+            evaluator_identity_digest: request.evaluator_identity_digest,
         };
         let mut progress = self.recover(&context, invalidation.commit_seq)?;
-        while progress.tick < plan.horizon_tick {
-            if let Some(failure) = self.commit_tick(&context, &mut progress, epochs, stager)? {
-                return finish(&context, request, progress, Some(failure));
+        if progress.tick >= plan.horizon_tick {
+            if let Some(conflict) = context.epoch_change(epochs) {
+                return Err(CounterfactualSuffixErrorV1::EpochChanged(conflict));
             }
         }
-        finish(&context, request, progress, None)
+        while progress.tick < plan.horizon_tick {
+            if let Some(failure) = self.commit_tick(&context, &mut progress, epochs, stager)? {
+                return finish(&context, progress, Some(failure));
+            }
+        }
+        finish(&context, progress, None)
     }
 
     /// Prove the receipt's generation is committed and read its `SIV1`.
@@ -369,6 +443,9 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     }
 
     /// Rebuild the committed suffix from the Fork Events after `commit_seq`.
+    ///
+    /// The first Tick must be exactly the Events from `commit_seq + 1`
+    /// through the receipt's first-Tick head.
     fn recover(
         &self,
         context: &SuffixContextV1<'_>,
@@ -384,7 +461,11 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         let first_tick = context.receipt.first_tick();
         let first_head = context.receipt.first_tick_head().as_u64();
         let split = events.partition_point(|event| event.seq.as_u64() <= first_head);
-        let first_drafts: Vec<EventDraft> = events[..split].iter().map(committed_draft).collect();
+        let (first_events, later_events) = events.split_at(split);
+        if first_events.len() as u64 != first_head.saturating_sub(commit_seq) {
+            return Err(CounterfactualSuffixErrorV1::RecoveryMismatch);
+        }
+        let first_drafts: Vec<EventDraft> = first_events.iter().map(committed_draft).collect();
         let seed = *context.receipt.invalidation_digest().as_bytes();
         let first = next_checkpoint(context, seed, first_tick, &first_drafts, first_head)?;
         let mut progress = ProgressV1 {
@@ -396,10 +477,11 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             refs: Vec::new(),
         };
         progress.advance(first_tick, first_head, first);
-        recover_marked_ticks(context, &mut progress, &events[split..]).map(|()| progress)
+        recover_marked_ticks(context, &mut progress, later_events).map(|()| progress)
     }
 
-    /// Stage, checkpoint, and atomically commit the next Tick.
+    /// Stage, checkpoint, and atomically commit the next Tick; the epochs are
+    /// checked immediately before the commit.
     ///
     /// Returns the failure of a Tick that committed nothing.
     fn commit_tick(
@@ -409,13 +491,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         epochs: &impl CounterfactualEpochSourceV1,
         stager: &mut impl CounterfactualTickStagerV1,
     ) -> Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1> {
-        let tick = progress.tick + 1;
-        if let Some(conflict) = context
-            .admitted_epochs
-            .first_change(&epochs.current_epochs())
-        {
-            return Ok(Some(CounterfactualSuffixFailureV1::EpochChanged(conflict)));
-        }
+        let tick = progress.tick.saturating_add(1);
         let batch = match stage_first_tick(stager, context.plan, context.receipt.generation(), tick)
         {
             Ok(batch) => batch,
@@ -425,14 +501,18 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         if drafts.iter().any(is_checkpoint_event) {
             return Ok(Some(CounterfactualSuffixFailureV1::ReservedEventType));
         }
-        let seq = progress.head + drafts.len() as u64;
-        let checkpoint = next_checkpoint(context, progress.state, tick, drafts, seq)?;
+        let content: Vec<EventDraft> = drafts.iter().map(content_draft).collect();
+        let seq = progress.head.saturating_add(drafts.len() as u64);
+        let checkpoint = next_checkpoint(context, progress.state, tick, &content, seq)?;
         let mut tick_drafts = drafts.to_vec();
         tick_drafts.push(checkpoint_draft(context.fork(), &checkpoint.bytes));
+        if let Some(conflict) = context.epoch_change(epochs) {
+            return Ok(Some(CounterfactualSuffixFailureV1::EpochChanged(conflict)));
+        }
         if self.store.append(context.fork(), &tick_drafts).is_err() {
             return Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed));
         }
-        progress.advance(tick, seq + 1, checkpoint);
+        progress.advance(tick, seq.saturating_add(1), checkpoint);
         Ok(None)
     }
 }
@@ -447,8 +527,8 @@ fn recover_marked_ticks(
     let mut pending: Vec<EventDraft> = Vec::new();
     for event in events {
         if event.event_type.as_str() == COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1 {
-            let tick = progress.tick + 1;
-            let seq = progress.head + pending.len() as u64;
+            let tick = progress.tick.saturating_add(1);
+            let seq = progress.head.saturating_add(pending.len() as u64);
             let checkpoint = next_checkpoint(context, progress.state, tick, &pending, seq)?;
             if checkpoint.bytes.as_slice() != event.payload.as_slice() {
                 return Err(CounterfactualSuffixErrorV1::RecoveryMismatch);
@@ -489,6 +569,14 @@ fn checkpoint_draft(fork: TimelineId, checkpoint: &[u8]) -> EventDraft {
     )
 }
 
+/// The content of one staged draft, without its wall time.
+fn content_draft(draft: &EventDraft) -> EventDraft {
+    EventDraft {
+        wall_time: None,
+        ..draft.clone()
+    }
+}
+
 /// The draft content of one committed Event, without its wall time.
 fn committed_draft(event: &Event) -> EventDraft {
     EventDraft {
@@ -502,20 +590,22 @@ fn committed_draft(event: &Event) -> EventDraft {
     }
 }
 
-/// Chain one Tick's draft digest onto the previous suffix state.
-fn chain_state(previous: &[u8; 32], tick: u64, drafts: &[EventDraft]) -> [u8; 32] {
-    let content: Vec<EventDraft> = drafts
-        .iter()
-        .map(|draft| EventDraft {
-            wall_time: None,
-            ..draft.clone()
-        })
-        .collect();
+/// Chain one Tick's draft digest onto the previous suffix state under the
+/// admitted epochs; every draft already has its wall time cleared.
+fn chain_state(
+    previous: &[u8; 32],
+    epochs: &CounterfactualEpochsV1,
+    tick: u64,
+    drafts: &[EventDraft],
+) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(SUFFIX_STATE_DOMAIN);
     hasher.update(previous);
+    hasher.update(&epochs.trust.to_be_bytes());
+    hasher.update(&epochs.revocation.to_be_bytes());
+    hasher.update(&epochs.erasure.to_be_bytes());
     hasher.update(&tick.to_be_bytes());
-    hasher.update(pipeline_draft_vector_digest_v1(&content).as_bytes());
+    hasher.update(pipeline_draft_vector_digest_v1(drafts).as_bytes());
     *hasher.finalize().as_bytes()
 }
 
@@ -528,7 +618,7 @@ fn next_checkpoint(
     seq: u64,
 ) -> Result<CheckpointV1, CounterfactualSuffixErrorV1> {
     let plan = context.plan;
-    let state = chain_state(&previous, tick, drafts);
+    let state = chain_state(&previous, &context.admitted_epochs, tick, drafts);
     let unsigned = RecomputeCheckpointV1 {
         plan_digest: plan.plan_digest,
         tick,
@@ -567,10 +657,22 @@ fn next_checkpoint(
         .or(Err(CounterfactualSuffixErrorV1::ArtifactEncoding))
 }
 
+/// The strongest claim CFR1 permits for an incomplete suffix: only an exact
+/// claim is weakened, to `StructuralOnly`; every other claim is kept.
+const fn incomplete_claim(claim: ReplayClaimV1) -> ReplayClaimV1 {
+    match claim {
+        ReplayClaimV1::Exact | ReplayClaimV1::ExactAuthoritativeWithRedactedViews => {
+            ReplayClaimV1::StructuralOnly
+        }
+        ReplayClaimV1::StructuralOnly
+        | ReplayClaimV1::UnverifiableArtifactsMissing
+        | ReplayClaimV1::IncompatibleProfile => claim,
+    }
+}
+
 /// Seal the `CFR1` of this call and emit it with every checkpoint.
 fn finish(
     context: &SuffixContextV1<'_>,
-    request: &CounterfactualSuffixRequestV1<'_>,
     progress: ProgressV1,
     failure: Option<CounterfactualSuffixFailureV1>,
 ) -> Result<CounterfactualSuffixRunV1, CounterfactualSuffixErrorV1> {
@@ -587,17 +689,16 @@ fn finish(
                 CounterfactualTerminalStateV1::Failed,
                 Some(CounterfactualTerminalErrorV1 {
                     code: failure.code(),
-                    tick: progress.tick + 1,
+                    tick: progress.tick.saturating_add(1),
                     scheduler_position: 0,
                     safe_digest: None,
                 }),
-                plan.replay_claim
-                    .after_erasure(ErasureDispositionV1::StructuralOnly),
+                incomplete_claim(plan.replay_claim),
             )
         },
     );
     let unsigned = CounterfactualResultV1 {
-        result_id: request.result_id,
+        result_id: context.result_id,
         plan_digest: plan.plan_digest,
         fork_id: context.fork().inner().to_bytes(),
         fork_generation: progress.generation,
@@ -613,7 +714,7 @@ fn finish(
         replay_claim,
         execution_profile_digest: plan.execution_profile.profile_digest,
         trust_policy_snapshot_digest: plan.trust_policy.snapshot_digest,
-        evaluator_identity_digest: request.evaluator_identity_digest,
+        evaluator_identity_digest: context.evaluator_identity_digest,
         result_digest: [0; 32],
     };
     unsigned
