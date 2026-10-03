@@ -4,6 +4,8 @@
 //! WAL1 leaves. They do not read native bytes, extract native dependencies,
 //! publish a WCB1 binding, consult an owner store or grant a Replay claim.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::world_dependency_directory::{
     WorldDependencyBranchChildV1, WorldDependencyBranchV1, WorldDependencyKeyV1,
 };
@@ -92,9 +94,10 @@ pub fn check_manifest_policy_seeds_v1(
 ) -> Result<Vec<WorldArtifactLeafV1>, WorldDependencyDirectoryErrorV1> {
     let scope = binding.as_input().scope;
     let rows = &binding.as_input().rows;
+    let seeds_by_plugin = index_policy_seeds(policy_seeds);
     let mut admitted = Vec::with_capacity(rows.len() * 2);
     for row in rows {
-        let seed = row_seed(row.plugin_id, policy_seeds)?;
+        let seed = row_seed(row.plugin_id, &seeds_by_plugin)?;
         check_policy_leaf(
             &seed.eop1_leaf,
             WorldArtifactKindV1::OutputPolicy,
@@ -115,6 +118,7 @@ pub fn check_manifest_policy_seeds_v1(
         admitted.push(seed.eop1_leaf.clone());
         admitted.push(seed.opc1_leaf.clone());
     }
+    // Every row consumed one distinct seed, so any surplus seed is unadmitted.
     if policy_seeds.len() != rows.len() {
         return Err(WorldDependencyDirectoryErrorV1::UnexpectedPolicyLeaf);
     }
@@ -175,9 +179,10 @@ impl WorldDependencyDirectoryV1 {
         limits: WorldClosureReadLimitsV1,
     ) -> Result<Self, WorldDependencyDirectoryErrorV1> {
         let mut leaves = check_manifest_policy_seeds_v1(binding, policy_seeds, expectation)?;
+        let admitted: BTreeSet<Hash> = leaves.iter().map(WorldArtifactLeafV1::digest).collect();
         if other_seeds
             .iter()
-            .any(|seed| is_policy_kind(seed) && !leaves.contains(seed))
+            .any(|seed| is_policy_kind(seed) && !admitted.contains(&seed.digest()))
         {
             return Err(WorldDependencyDirectoryErrorV1::UnexpectedPolicyLeaf);
         }
@@ -218,20 +223,30 @@ impl WorldDependencyDirectoryV1 {
     }
 }
 
-fn row_seed(
-    plugin_id: PluginId,
+/// Index seeds by Plugin once; a Plugin supplied more than once maps to `None`.
+fn index_policy_seeds(
     policy_seeds: &[ManifestPolicySeedV1],
-) -> Result<&ManifestPolicySeedV1, WorldDependencyDirectoryErrorV1> {
-    let mut matching = policy_seeds
-        .iter()
-        .filter(|seed| seed.plugin_id == plugin_id);
-    let seed = matching
-        .next()
-        .ok_or(WorldDependencyDirectoryErrorV1::MissingPolicyLeaf)?;
-    if matching.next().is_some() {
-        return Err(WorldDependencyDirectoryErrorV1::UnexpectedPolicyLeaf);
+) -> BTreeMap<PluginId, Option<&ManifestPolicySeedV1>> {
+    let mut index = BTreeMap::new();
+    for seed in policy_seeds {
+        index
+            .entry(seed.plugin_id)
+            .and_modify(|entry| *entry = None)
+            .or_insert(Some(seed));
     }
-    Ok(seed)
+    index
+}
+
+/// Resolve the single seed of one MSB1 row; MSB1 rows name distinct Plugins.
+fn row_seed<'a>(
+    plugin_id: PluginId,
+    seeds_by_plugin: &BTreeMap<PluginId, Option<&'a ManifestPolicySeedV1>>,
+) -> Result<&'a ManifestPolicySeedV1, WorldDependencyDirectoryErrorV1> {
+    seeds_by_plugin
+        .get(&plugin_id)
+        .copied()
+        .ok_or(WorldDependencyDirectoryErrorV1::MissingPolicyLeaf)?
+        .ok_or(WorldDependencyDirectoryErrorV1::UnexpectedPolicyLeaf)
 }
 
 fn check_policy_leaf(
