@@ -6,13 +6,15 @@
 //! admission fails closed; fixtures are admitted only through
 //! `test-support`. Every candidate the provider opens builds each admitted
 //! reducer fresh through [`InstalledPluginFactoryV1::build`] from the
-//! retained frozen configuration and keeps only its `reducer`.
+//! retained frozen configuration, re-checks that the built Plugin is the
+//! recorded one, and keeps only its `reducer`.
 
 use std::{any::type_name, collections::HashSet, sync::Arc, time::Duration};
 
 use pos_core::{Event, Hash, Plugin, Reducer};
 use pos_state::{
-    DetachedProjectionCandidateV1, ProjectionCandidateErrorV1, ProtectedProjectionProviderV1,
+    CandidateBoundsV1, CandidateBuildV1, CandidateReducerV1, DetachedProjectionCandidateV1,
+    ProjectionCandidateErrorV1, ProjectionObservationPolicyV1, ProtectedProjectionProviderV1,
     RecordedConsumerV1,
 };
 
@@ -119,6 +121,16 @@ pub struct StagedReducerAdmissionV1 {
 }
 
 impl StagedReducerAdmissionV1 {
+    /// The candidate bounds this record admits.
+    #[must_use]
+    pub const fn candidate_bounds(&self) -> CandidateBoundsV1 {
+        CandidateBoundsV1 {
+            callback_bound: self.callback_bound,
+            growth_per_payload_byte: self.growth_bound.per_payload_byte,
+            growth_constant_bytes: self.growth_bound.constant_bytes,
+        }
+    }
+
     /// Admitted bound on the duration of one Reducer callback.
     #[must_use]
     pub const fn callback_bound(&self) -> Duration {
@@ -162,9 +174,11 @@ pub enum StagedReducerAdmissionErrorV1 {
 enum StagedEvidenceV1 {
     /// A reviewed entry with its recorded conformance evidence.
     Reviewed,
-    /// A nonproduction fixture that never reaches a production provider.
+    /// A nonproduction fixture with its callback bound, capped at
+    /// [`MAX_STAGED_CALLBACK_BOUND_V1`]; it never reaches a production
+    /// provider.
     #[cfg(any(test, feature = "test-support"))]
-    Fixture,
+    Fixture(Duration),
 }
 
 /// The admission record of one entry and the factory identifier hashed into
@@ -180,7 +194,13 @@ impl StagedEvidenceV1 {
             // A fixture has no reviewed identifier; its identity is bound to
             // the type name and is meaningful only within one build.
             #[cfg(any(test, feature = "test-support"))]
-            Self::Fixture => Ok((PENDING_CONFORMANCE_ADMISSION_V1, type_name::<F>())),
+            Self::Fixture(callback_bound) => Ok((
+                StagedReducerAdmissionV1 {
+                    callback_bound: callback_bound.min(MAX_STAGED_CALLBACK_BOUND_V1),
+                    ..PENDING_CONFORMANCE_ADMISSION_V1
+                },
+                type_name::<F>(),
+            )),
         }
     }
 }
@@ -226,14 +246,46 @@ fn staged_reducer_identity<P: Plugin>(
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-/// Builds one fresh reducer from the retained frozen configuration.
-type StagedReducerBuilderV1 = Box<dyn Fn() -> Option<Box<dyn Reducer>> + Send + Sync>;
+/// The parts of one fresh build a candidate keeps or re-checks.
+struct BuiltReducerV1 {
+    name: &'static str,
+    version: &'static str,
+    reducer: Option<Box<dyn Reducer>>,
+}
 
-/// One admitted entry: its recorded identity, record and fresh builder.
+/// Builds one fresh product from the retained frozen configuration.
+type StagedReducerBuilderV1 = Box<dyn Fn() -> BuiltReducerV1 + Send + Sync>;
+
+/// One admitted entry: its recorded identity and Plugin, record, the
+/// observation policy installed beside it and its fresh builder.
 struct AdmittedStagedReducerV1 {
     consumer: RecordedConsumerV1,
+    name: &'static str,
+    version: &'static str,
     admission: StagedReducerAdmissionV1,
+    observation_policy: Option<ProjectionObservationPolicyV1>,
     build: StagedReducerBuilderV1,
+}
+
+impl AdmittedStagedReducerV1 {
+    /// Build a fresh reducer and re-check that the built Plugin is the
+    /// recorded one, copying the entry's observation policy into the
+    /// candidate. The built Plugin and approver are dropped unused.
+    fn candidate_reducer(&self) -> Result<CandidateReducerV1, ProjectionCandidateErrorV1> {
+        let built = (self.build)();
+        let recorded = built.name == self.name && built.version == self.version;
+        built
+            .reducer
+            .filter(|_| recorded)
+            .map(|reducer| CandidateReducerV1 {
+                consumer: self.consumer,
+                name: self.name,
+                reducer,
+                bounds: self.admission.candidate_bounds(),
+                observation_policy: self.observation_policy.clone(),
+            })
+            .ok_or(ProjectionCandidateErrorV1::PluginMismatch)
+    }
 }
 
 /// Host catalogue implementation of [`ProtectedProjectionProviderV1`].
@@ -267,7 +319,29 @@ impl HostProjectionProviderV1 {
         F: InstalledPluginFactoryV1 + 'static,
         F::Configuration: Send + Sync + 'static,
     {
-        self.admit_with::<F>(frozen_configuration, StagedEvidenceV1::Reviewed)
+        self.admit_with::<F>(frozen_configuration, StagedEvidenceV1::Reviewed, None)
+    }
+
+    /// Admit the reviewed staged Reducer entry of factory `F` together with
+    /// the observation policy the host installs beside its visible slot.
+    /// Every candidate copies `policy` at open.
+    ///
+    /// # Errors
+    /// Returns the same closed errors as [`Self::admit`].
+    pub fn admit_observable<F>(
+        &mut self,
+        frozen_configuration: Arc<F::Configuration>,
+        policy: ProjectionObservationPolicyV1,
+    ) -> Result<RecordedConsumerV1, StagedReducerAdmissionErrorV1>
+    where
+        F: InstalledPluginFactoryV1 + 'static,
+        F::Configuration: Send + Sync + 'static,
+    {
+        self.admit_with::<F>(
+            frozen_configuration,
+            StagedEvidenceV1::Reviewed,
+            Some(policy),
+        )
     }
 
     /// Admit any factory as a nonproduction fixture entry.
@@ -285,7 +359,58 @@ impl HostProjectionProviderV1 {
         F: InstalledPluginFactoryV1 + 'static,
         F::Configuration: Send + Sync + 'static,
     {
-        self.admit_with::<F>(frozen_configuration, StagedEvidenceV1::Fixture)
+        self.admit_fixture_with_callback_bound::<F>(
+            frozen_configuration,
+            MAX_STAGED_CALLBACK_BOUND_V1,
+        )
+    }
+
+    /// Admit any factory as a nonproduction fixture entry whose admitted
+    /// callback bound is `callback_bound`, capped at
+    /// [`MAX_STAGED_CALLBACK_BOUND_V1`].
+    ///
+    /// # Errors
+    /// Returns the same closed errors as [`Self::admit_fixture`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn admit_fixture_with_callback_bound<F>(
+        &mut self,
+        frozen_configuration: Arc<F::Configuration>,
+        callback_bound: Duration,
+    ) -> Result<RecordedConsumerV1, StagedReducerAdmissionErrorV1>
+    where
+        F: InstalledPluginFactoryV1 + 'static,
+        F::Configuration: Send + Sync + 'static,
+    {
+        self.admit_with::<F>(
+            frozen_configuration,
+            StagedEvidenceV1::Fixture(callback_bound),
+            None,
+        )
+    }
+
+    /// Admit any factory as a nonproduction fixture entry with the
+    /// observation policy, if any, that candidates copy at open, as
+    /// [`Self::admit_observable`] does.
+    ///
+    /// # Errors
+    /// Returns the same closed errors as [`Self::admit_fixture`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn admit_fixture_with_policy<F>(
+        &mut self,
+        frozen_configuration: Arc<F::Configuration>,
+        observation_policy: Option<ProjectionObservationPolicyV1>,
+    ) -> Result<RecordedConsumerV1, StagedReducerAdmissionErrorV1>
+    where
+        F: InstalledPluginFactoryV1 + 'static,
+        F::Configuration: Send + Sync + 'static,
+    {
+        self.admit_with::<F>(
+            frozen_configuration,
+            StagedEvidenceV1::Fixture(MAX_STAGED_CALLBACK_BOUND_V1),
+            observation_policy,
+        )
     }
 
     /// The admission record of one recorded consumer, when it is admitted
@@ -299,6 +424,7 @@ impl HostProjectionProviderV1 {
         &mut self,
         frozen_configuration: Arc<F::Configuration>,
         evidence: StagedEvidenceV1,
+        observation_policy: Option<ProjectionObservationPolicyV1>,
     ) -> Result<RecordedConsumerV1, StagedReducerAdmissionErrorV1>
     where
         F: InstalledPluginFactoryV1 + 'static,
@@ -323,8 +449,18 @@ impl HostProjectionProviderV1 {
         }
         self.entries.push(AdmittedStagedReducerV1 {
             consumer,
+            name: product.plugin.name(),
+            version: product.plugin.version(),
             admission,
-            build: Box::new(move || F::build(&frozen_configuration).reducer),
+            observation_policy,
+            build: Box::new(move || {
+                let product = F::build(&frozen_configuration);
+                BuiltReducerV1 {
+                    name: product.plugin.name(),
+                    version: product.plugin.version(),
+                    reducer: product.reducer,
+                }
+            }),
         });
         Ok(consumer)
     }
@@ -367,17 +503,20 @@ fn names_a_plugin_twice(recorded_consumers: &[RecordedConsumerV1]) -> bool {
 }
 
 impl ProtectedProjectionProviderV1 for HostProjectionProviderV1 {
-    fn open_candidate(
+    fn candidate_builds(
         &self,
         recorded_consumers: &[RecordedConsumerV1],
-    ) -> Result<DetachedProjectionCandidateV1, ProjectionCandidateErrorV1> {
-        let entries = self.admitted_set(recorded_consumers)?;
-        entries
-            .into_iter()
-            .map(|entry| (entry.build)().map(|reducer| (entry.consumer, reducer)))
-            .collect::<Option<Vec<_>>>()
-            .ok_or(ProjectionCandidateErrorV1::PluginMismatch)
-            .and_then(DetachedProjectionCandidateV1::from_reducers)
+    ) -> Result<Vec<CandidateBuildV1<'_>>, ProjectionCandidateErrorV1> {
+        self.admitted_set(recorded_consumers).map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| {
+                    CandidateBuildV1::new(entry.admission.candidate_bounds(), move || {
+                        entry.candidate_reducer()
+                    })
+                })
+                .collect()
+        })
     }
 }
 

@@ -19,7 +19,6 @@ thiserror = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
 pos-runtime = { path = "../pos-runtime", features = ["test-support"] }
 pos-plugin-world = { path = "../../plugins/world" }
-proptest = { workspace = true }
 pos-store = { path = "../pos-store", features = ["sqlite"] }
 
 [lints]

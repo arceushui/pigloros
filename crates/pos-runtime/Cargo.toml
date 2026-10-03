@@ -73,6 +73,14 @@ name = "staged_reducer_admission"
 required-features = ["test-support"]
 
 [[test]]
+name = "staged_executor"
+required-features = ["test-support"]
+
+[[test]]
+name = "staged_executor_quarantine"
+required-features = ["test-support"]
+
+[[test]]
 name = "subscription_consent"
 required-features = ["test-support"]
 
