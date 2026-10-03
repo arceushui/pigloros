@@ -1157,20 +1157,16 @@ pub(super) fn sqlite_sync_local_cut_owner_after_admission(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod local_cut_owner_coverage {
     use super::*;
-    use pos_core::output_policy::{OutputPolicyInputV1, OutputPolicyV1};
+    use crate::manifest_owner_fixtures::{catalog, member_classes, timeline_request, READ_LIMITS};
     use pos_core::{
         prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
-        ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1,
         LocalCutManifestBindingRowV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
-        LocalCutSealInputV2, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
-        ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1,
+        LocalCutSealInputV2, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1,
         ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerAdmissionRequestV1,
         ManifestOwnerAdmissionSnapshotV1, ManifestOwnerAdmissionVerifierV1,
-        ManifestOwnerPolicyCopiesV1, ManifestOwnerTimelineAdmissionRequestV1,
-        ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1,
-        PreparedManifestOwnerAdmissionV1, WorldArtifactKindV1, WorldArtifactLeafInputV1,
-        WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
-        WorldProducerV1,
+        ManifestOwnerClassifiedLeafV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
+        ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
+        ManifestSlotAdmissionReceiptV1, PreparedManifestOwnerAdmissionV1,
     };
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
@@ -1178,7 +1174,6 @@ mod local_cut_owner_coverage {
 
     type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
     type TestResult = Fallible<()>;
-    type PolicySource = (OutputPolicyV1, Vec<u8>);
     type LocalError = LocalCutOwnerErrorV1;
     type AdmissionError = ManifestOwnerAdmissionErrorV1;
 
@@ -1298,6 +1293,15 @@ mod local_cut_owner_coverage {
         ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
             Ok(())
         }
+
+        fn classify_scope_member_leaves(
+            &self,
+            _timeline_id: TimelineId,
+            _scope: Hash,
+            members: &ManifestOwnerScopeMembersV1,
+        ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
+            Ok(member_classes(members))
+        }
     }
 
     // Structural stand-in for the installed local-cut owner and coordinator signer.
@@ -1339,118 +1343,6 @@ mod local_cut_owner_coverage {
         })?)
     }
 
-    fn policy_source(plugin_id: PluginId, seed: u8) -> Fallible<PolicySource> {
-        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-            plugin_id,
-            plugin_version: "1.0.0".to_owned(),
-            implementation_hash: hash(seed + 30),
-            base_configuration_digest: hash(seed + 40),
-            executable_profile_hash: hash(seed + 50),
-            retention_policy_hash: hash(seed + 60),
-            policy_revision: 1,
-            output_declarations: Vec::new(),
-        })?;
-        let members = [
-            policy.to_canonical_cbor(),
-            b"EBP1-fixture".to_vec(),
-            b"implementation-fixture".to_vec(),
-            b"CFG1-fixture".to_vec(),
-            Vec::new(),
-            b"RTP1-fixture".to_vec(),
-        ];
-        let mut closure = b"OPC1".to_vec();
-        for member in members {
-            closure.extend_from_slice(&u64::try_from(member.len())?.to_be_bytes());
-            closure.extend_from_slice(&member);
-        }
-        Ok((policy, closure))
-    }
-
-    fn opc1_digest(bytes: &[u8]) -> Hash {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
-        hasher.update(bytes);
-        Hash::from_bytes(*hasher.finalize().as_bytes())
-    }
-
-    fn catalog(generation: u64, sources: &[PolicySource]) -> Fallible<ManifestAdmissionCatalogV1> {
-        let rows = sources
-            .iter()
-            .zip(["slot-a", "slot-b"])
-            .map(|((policy, closure), slot)| ManifestAdmissionCatalogRowV1 {
-                stable_slot: slot.to_owned(),
-                plugin_id: policy.fields().plugin_id,
-                plugin_name: "same-name".to_owned(),
-                plugin_version: policy.fields().plugin_version.clone(),
-                implementation_hash: policy.fields().implementation_hash,
-                eop1_native_digest: policy.digest(),
-                closure_hash: opc1_digest(closure),
-            })
-            .collect();
-        Ok(ManifestAdmissionCatalogV1::new(
-            ManifestAdmissionCatalogInputV1 {
-                owner_id: OWNER,
-                configuration_generation: generation,
-                rows,
-            },
-        )?)
-    }
-
-    fn policy_leaf(
-        scope: Hash,
-        kind: WorldArtifactKindV1,
-        native_digest: Hash,
-        native_bytes: &[u8],
-        lease_hash: Hash,
-    ) -> Fallible<WorldArtifactLeafV1> {
-        Ok(WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-            scope,
-            kind,
-            native_digest,
-            native_byte_length: u64::try_from(native_bytes.len())?,
-            owner: OWNER,
-            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-            optionality: ArtifactOptionalityV1::Required,
-            transition: ArtifactTransitionRuleV1::PreserveExact,
-            source_lease_hash: lease_hash,
-            key_dependencies: Vec::new(),
-            child_node_hashes: Vec::new(),
-        })?)
-    }
-
-    fn policy_copies(
-        scope: Hash,
-        sources: &[PolicySource],
-        lease_hash: Hash,
-    ) -> Fallible<Vec<ManifestOwnerPolicyCopiesV1>> {
-        let mut copies = Vec::with_capacity(sources.len());
-        for (policy, closure) in sources {
-            let eop1_bytes = policy.to_canonical_cbor();
-            let eop1_leaf = policy_leaf(
-                scope,
-                WorldArtifactKindV1::OutputPolicy,
-                policy.digest(),
-                &eop1_bytes,
-                lease_hash,
-            )?;
-            let opc1_leaf = policy_leaf(
-                scope,
-                WorldArtifactKindV1::OutputPolicyClosure,
-                opc1_digest(closure),
-                closure,
-                lease_hash,
-            )?;
-            copies.push(ManifestOwnerPolicyCopiesV1 {
-                plugin_id: policy.fields().plugin_id,
-                eop1_bytes,
-                eop1_leaf,
-                opc1_bytes: closure.clone(),
-                opc1_leaf,
-            });
-        }
-        Ok(copies)
-    }
-
     fn admission_request(
         generation: u64,
         prestate: Option<&ManifestOwnerAdmissionOwnerStateV1>,
@@ -1458,36 +1350,19 @@ mod local_cut_owner_coverage {
         operation_id: Hash,
         resulting_inventory: Hash,
     ) -> Fallible<ManifestOwnerAdmissionRequestV1> {
-        let sources = [policy_source(plugin(1), 1)?, policy_source(plugin(2), 2)?];
+        let (catalog, sources) = catalog(OWNER, generation)?;
         let mut timelines = Vec::with_capacity(timeline_ids.len());
-        for (index, timeline_id) in timeline_ids.iter().enumerate() {
-            let offset = u8::try_from(index)?;
-            let scope = hash(70 + offset);
-            let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-                scope,
-                consumers: vec![WorldConsumerV1::new(
-                    "local-observer".to_owned(),
-                    hash(130),
-                    hash(131),
-                    hash(132),
-                )?],
-                producers: vec![WorldProducerV1::new(plugin(1), sources[0].0.digest())?],
-                optional_view_roots: Vec::new(),
-            })?;
-            timelines.push(ManifestOwnerTimelineAdmissionRequestV1 {
-                timeline_id: *timeline_id,
-                scope,
-                wcs1,
-                policy_copies: policy_copies(scope, &sources, hash(80 + offset))?,
-            });
+        for timeline_id in timeline_ids {
+            timelines.push(timeline_request(OWNER, *timeline_id, &sources)?);
         }
         Ok(ManifestOwnerAdmissionRequestV1 {
             operation_id,
-            catalog: catalog(generation, &sources)?,
+            catalog,
             expected_configuration_generation: prestate.map(|s| s.configuration_generation),
             previous_visible_lcq1_hash: prestate.and_then(|s| s.previous_visible_lcq1_hash),
             expected_inventory_generation: prestate.map(|s| s.inventory_generation),
             resulting_inventory_generation: resulting_inventory,
+            read_limits: READ_LIMITS,
             timelines,
         })
     }
