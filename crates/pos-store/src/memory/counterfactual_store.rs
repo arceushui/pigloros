@@ -358,10 +358,9 @@ impl MemoryStore {
         let tick = entries.stage_tick(drafts)?;
         // The outcome is built before the Tick is installed, so even its
         // `CorruptState` rejection commits nothing.
-        persisted.committed_tick(tick.head).map(|outcome| {
-            entries.install_tick(tick);
-            outcome
-        })
+        persisted
+            .committed_tick(tick.head)
+            .inspect(|_| entries.install_tick(tick))
     }
 }
 
