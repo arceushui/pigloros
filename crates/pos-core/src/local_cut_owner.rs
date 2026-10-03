@@ -461,7 +461,7 @@ pub trait LocalCutOwnerPersistencePortV1 {
 pub fn local_cut_owner_intent_digest_v1(
     request: &LocalCutOwnerRequestV1,
 ) -> Result<Hash, LocalCutOwnerErrorV1> {
-    validate_request(request)?;
+    validate_request_shape(request)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(INTENT_DOMAIN);
     hash_part(&mut hasher, request.operation_id.as_bytes());
@@ -549,9 +549,13 @@ pub fn prepare_local_cut_owner_commit_v1(
     validate_seal_prestate(&request, current_state, admission_state)?;
     validate_manifest_binding(&request, admission_state, admissions)?;
     validate_composition_bindings(&request.composition_rows, admission_state, catalog)?;
-    let closures = validate_recording_contexts(&request.recording_context_rows, admissions)
+    validate_recording_contexts(&request.recording_context_rows, admissions)?;
+    // Authenticate the request before deriving anything from it: derivation
+    // asks the verifier for each source genesis hash, and WCB1 must still be
+    // derived before LCC1 is built.
+    let closures = verifier
+        .verify_authenticated_cut(&request, current_state, admission_state, admissions)
         .and_then(|()| derive_cut_closures(&request, admissions, verifier))?;
-    verifier.verify_authenticated_cut(&request, current_state, admission_state, admissions)?;
 
     // The request shape already rejected every zero LCC1 identity, and the
     // seal address is a BLAKE3 digest, so the commit fields are structurally valid.
@@ -691,10 +695,6 @@ pub fn validate_local_cut_owner_successor_v1(
     Ok(())
 }
 
-fn validate_request(request: &LocalCutOwnerRequestV1) -> Result<(), LocalCutOwnerErrorV1> {
-    validate_request_shape(request).and_then(|()| validate_head_tables(request))
-}
-
 /// Prove that the kind-4 rows pack to the seal's expected-heads reference and
 /// the kind-5 rows pack to the request's LCC1 result-heads reference.
 fn validate_head_tables(request: &LocalCutOwnerRequestV1) -> Result<(), LocalCutOwnerErrorV1> {
@@ -745,7 +745,7 @@ fn validate_request_shape(request: &LocalCutOwnerRequestV1) -> Result<(), LocalC
     }
     validate_composition_row_order(&request.composition_rows)?;
     validate_recording_context_row_order(&request.recording_context_rows)?;
-    Ok(())
+    validate_head_tables(request)
 }
 
 fn validate_admission_state(

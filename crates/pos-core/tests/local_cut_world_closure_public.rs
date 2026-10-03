@@ -26,9 +26,10 @@ use pos_core::{
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
     ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId,
     PreparedLocalCutOwnerCommitV1, TimelineId, WorkloadProfileV1, WorldArtifactKindV1,
-    WorldClosureBindingV1, WorldClosureCutCoordinateV1, WorldClosureReadLimitsV1,
-    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldDependencyDirectoryV1,
-    WorldProducerV1, WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,
+    WorldArtifactLeafV1, WorldClosureBindingV1, WorldClosureCutCoordinateV1,
+    WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+    WorldDependencyDirectoryV1, WorldProducerV1, WorldRecordingReceiptInputV1,
+    WorldRecordingReceiptV1,
 };
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -840,6 +841,35 @@ fn derivation_rejects_a_zero_predecessor_binding() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn derivation_rejects_a_leaf_outside_the_scope() -> TestResult {
+    let admitted = admit(&[timeline(1)], READ_LIMITS)?;
+    let request = cut_request(&admitted, KEEP_INPUTS, KEEP_RESULTS)?;
+    let snapshot = admitted.snapshots.first().ok_or("missing snapshot")?;
+    let mut rescoped = snapshot.clone();
+    let copy = rescoped
+        .timeline
+        .policy_copies
+        .first_mut()
+        .ok_or("missing policy copy")?;
+    let mut input = copy.eop1_leaf.as_input().clone();
+    input.scope = hash(0x46);
+    copy.eop1_leaf = WorldArtifactLeafV1::new(input)?;
+    let source = LocalCutWorldClosureSourceV1 {
+        operation_id: OPERATION,
+        seal: &request.seal,
+        admission: &rescoped,
+        retention_lease_hash: recorded_lease(snapshot)?,
+        predecessor_binding_hash: None,
+        genesis_hash: GENESIS,
+    };
+    assert_eq!(
+        derive_local_cut_world_closure_v1(&source),
+        Err(LocalCutOwnerErrorV1::InvalidBatch)
+    );
+    Ok(())
+}
+
 fn rebound(binding: &WorldClosureBindingV1, cut_id: u64) -> Fallible<WorldClosureBindingV1> {
     let mut input = *binding.as_input();
     input.cut_coordinate.cut_id = cut_id;
@@ -909,7 +939,7 @@ fn retained_recordings_must_match_their_request_rows() -> TestResult {
     missing.recordings.pop();
     let mut substituted = applied.clone();
     substituted.recordings[0].binding = rebound(&applied.recordings[0].binding, 2)?;
-    let mut rescoped = applied;
+    let mut rescoped = applied.clone();
     rescoped.recordings[0].scope = hash(0x45);
     for corrupt in [missing, substituted, rescoped] {
         assert_eq!(
@@ -917,5 +947,12 @@ fn retained_recordings_must_match_their_request_rows() -> TestResult {
             Err(LocalCutOwnerErrorV1::CorruptState)
         );
     }
+    let first_binding = request.manifest_binding_table.rows()[..1].to_vec();
+    let mut unbound = request;
+    unbound.manifest_binding_table = LocalCutManifestBindingTableV1::new(OWNER, 1, first_binding)?;
+    assert_eq!(
+        validate_local_cut_owner_recordings_v1(&unbound, &applied),
+        Err(LocalCutOwnerErrorV1::CorruptState)
+    );
     Ok(())
 }

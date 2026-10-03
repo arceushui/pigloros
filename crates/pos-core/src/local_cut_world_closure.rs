@@ -14,7 +14,9 @@ use crate::local_cut_owner::{
 };
 use crate::local_cut_seal::LocalCutSealV2;
 use crate::manifest_owner_admission::ManifestOwnerAdmissionSnapshotV1;
-use crate::world_dependency_packing::WorldDependencyDirectoryV1;
+use crate::world_dependency_packing::{
+    WorldDependencyDirectoryErrorV1, WorldDependencyDirectoryV1,
+};
 use crate::{
     Hash, TimelineId, WorldArtifactKindV1, WorldClosureBindingInputV1, WorldClosureBindingV1,
     WorldClosureCutCoordinateV1, WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,
@@ -80,8 +82,9 @@ pub struct LocalCutWorldRecordingV1 {
 /// # Errors
 /// Returns `Conflict` when the lease is not the scope's recorded RLS1,
 /// `BoundExceeded` when the closure exceeds the generation's recorded read
-/// limits, and `InvalidBatch` for a WCB1 that cannot be formed, such as a
-/// zero predecessor.
+/// limits, and `InvalidBatch` for leaves that cannot pack into one WDB1
+/// directory, such as a leaf outside the scope, or a WCB1 that cannot be
+/// formed, such as a zero predecessor.
 pub fn derive_local_cut_world_closure_v1(
     source: &LocalCutWorldClosureSourceV1<'_>,
 ) -> Result<LocalCutWorldClosureV1, LocalCutOwnerErrorV1> {
@@ -110,7 +113,7 @@ pub fn derive_local_cut_world_closure_v1(
         .collect();
     let read_limits = source.admission.read_limits;
     let dependencies = WorldDependencyDirectoryV1::pack(timeline.scope, leaves, read_limits)
-        .map_err(|_| LocalCutOwnerErrorV1::BoundExceeded)?;
+        .map_err(packing_error)?;
     let binding = WorldClosureBindingV1::new(WorldClosureBindingInputV1 {
         timeline_id: timeline.timeline_id,
         operation_id: source.operation_id,
@@ -139,16 +142,16 @@ pub fn derive_local_cut_world_closure_v1(
 /// substitutes one of its recordings.
 ///
 /// # Errors
-/// Returns `CorruptState` for a missing, extra or substituted recording.
+/// Returns `CorruptState` for a missing, extra or substituted recording, or a
+/// kind-14 row count that differs from the kind-5 row count.
 pub fn validate_local_cut_owner_recordings_v1(
     request: &LocalCutOwnerRequestV1,
     result: &LocalCutOwnerCommitV1,
 ) -> Result<(), LocalCutOwnerErrorV1> {
-    let rows = request
-        .result_head_rows
-        .iter()
-        .zip(request.manifest_binding_table.rows());
-    if result.recordings.len() != request.result_head_rows.len()
+    let binding_rows = request.manifest_binding_table.rows();
+    let count = request.result_head_rows.len();
+    let rows = request.result_head_rows.iter().zip(binding_rows);
+    if (result.recordings.len(), binding_rows.len()) != (count, count)
         || result
             .recordings
             .iter()
@@ -204,6 +207,8 @@ pub(crate) fn derive_cut_closures(
     if expected.ne(timelines.clone()) || result.ne(timelines) {
         return Err(LocalCutOwnerErrorV1::InvalidBatch);
     }
+    // All four sequences now name the same Timelines in the same order, so
+    // zipping them pairs each Timeline's rows without dropping any.
     let heads = request
         .expected_head_rows
         .iter()
@@ -212,10 +217,25 @@ pub(crate) fn derive_cut_closures(
         .iter()
         .zip(&request.recording_context_rows)
         .zip(heads)
-        .map(|((admission, context), heads)| {
-            derive_cut_closure(request, admission, context, heads, verifier)
+        .map(|((admission, context), (expected, result))| {
+            let rows = CutTimelineRows {
+                admission,
+                context,
+                expected,
+                result,
+            };
+            derive_cut_closure(request, rows, verifier)
         })
         .collect()
+}
+
+/// One owned Timeline's admission and its kind-8, kind-4 and kind-5 rows.
+#[derive(Clone, Copy)]
+struct CutTimelineRows<'a> {
+    admission: &'a ManifestOwnerAdmissionSnapshotV1,
+    context: &'a LocalCutRecordingContextRowV1,
+    expected: &'a LocalCutExpectedHeadRowV1,
+    result: &'a LocalCutResultHeadRowV1,
 }
 
 /// Record each derived WCB1 with a WCR1 naming the signed LCQ1 receipt.
@@ -268,6 +288,16 @@ pub(crate) fn validate_recorded_closures(
     Ok(())
 }
 
+/// Only an exceeded read limit is a bound; every other packing failure is a
+/// structurally invalid leaf set.
+fn packing_error(error: WorldDependencyDirectoryErrorV1) -> LocalCutOwnerErrorV1 {
+    if error == WorldDependencyDirectoryErrorV1::LimitExceeded {
+        LocalCutOwnerErrorV1::BoundExceeded
+    } else {
+        LocalCutOwnerErrorV1::InvalidBatch
+    }
+}
+
 fn cut_coordinate(seal: &LocalCutSealV2) -> WorldClosureCutCoordinateV1 {
     WorldClosureCutCoordinateV1 {
         cut_id: seal.as_input().cut_id,
@@ -276,13 +306,22 @@ fn cut_coordinate(seal: &LocalCutSealV2) -> WorldClosureCutCoordinateV1 {
     }
 }
 
+/// Derive one Timeline's WCB1 after gating its head rows on the profile.
+///
+/// The ADR-081 R2.7 zero-Event profile gate returns `OwnerRejected`, which
+/// carries the profile rejection R2.7 names `CoverageGap`; that diagnostic is
+/// not modelled, since `LocalCutOwnerErrorV1` carries no diagnostics.
 fn derive_cut_closure(
     request: &LocalCutOwnerRequestV1,
-    admission: &ManifestOwnerAdmissionSnapshotV1,
-    context: &LocalCutRecordingContextRowV1,
-    (expected, result): (&LocalCutExpectedHeadRowV1, &LocalCutResultHeadRowV1),
+    rows: CutTimelineRows<'_>,
     verifier: &dyn LocalCutOwnerVerifierV1,
 ) -> Result<LocalCutWorldClosureV1, LocalCutOwnerErrorV1> {
+    let CutTimelineRows {
+        admission,
+        context,
+        expected,
+        result,
+    } = rows;
     let genesis_hash = verifier.source_genesis_hash(context.timeline_id)?;
     if !is_zero_event_profile(context.timeline_id, expected, result, genesis_hash) {
         return Err(LocalCutOwnerErrorV1::OwnerRejected);
