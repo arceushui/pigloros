@@ -538,11 +538,11 @@ pub struct AuthoritativeEventV1 {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyClassV1 {
-    ExogenousFrozen,
-    InterventionAssigned,
-    EndogenousRecomputed,
-    FixedPolicy,
-    PresentationOnly,
+    ExogenousFrozen = 0,
+    InterventionAssigned = 1,
+    EndogenousRecomputed = 2,
+    FixedPolicy = 3,
+    PresentationOnly = 4,
 }
 
 /// One projection state at the evidence boundary.
@@ -2683,26 +2683,15 @@ pub mod strict_codec {
     }
 
     fn enum_dependency_class(value: DependencyClassV1) -> Value {
-        uint(match value {
-            DependencyClassV1::ExogenousFrozen => 0,
-            DependencyClassV1::InterventionAssigned => 1,
-            DependencyClassV1::EndogenousRecomputed => 2,
-            DependencyClassV1::FixedPolicy => 3,
-            DependencyClassV1::PresentationOnly => 4,
-        })
+        uint(value.wire_code().into())
     }
 
     fn decode_dependency_class(value: &Value) -> Result<DependencyClassV1, StrictCborError> {
-        match uint_value(value, "dependency_class")? {
-            0 => Ok(DependencyClassV1::ExogenousFrozen),
-            1 => Ok(DependencyClassV1::InterventionAssigned),
-            2 => Ok(DependencyClassV1::EndogenousRecomputed),
-            3 => Ok(DependencyClassV1::FixedPolicy),
-            4 => Ok(DependencyClassV1::PresentationOnly),
-            _ => Err(StrictCborError::InvalidField {
+        DependencyClassV1::from_wire_code(uint_value(value, "dependency_class")?).ok_or_else(|| {
+            StrictCborError::InvalidField {
                 field: "dependency_class".to_owned(),
-            }),
-        }
+            }
+        })
     }
 
     fn enum_plugin_failure(value: PluginFailureClassV1) -> Value {
@@ -4738,6 +4727,22 @@ pub mod strict_codec {
                 Value::Null,
             );
             assert!(decode_case(&case).is_ok());
+        }
+
+        #[test]
+        fn dependency_class_codes_use_the_shared_table() {
+            for class in DependencyClassV1::ALL_V1 {
+                assert_eq!(
+                    decode_dependency_class(&enum_dependency_class(class)),
+                    Ok(class)
+                );
+            }
+            assert_eq!(
+                decode_dependency_class(&uint(5)),
+                Err(StrictCborError::InvalidField {
+                    field: "dependency_class".to_owned(),
+                })
+            );
         }
     }
 }

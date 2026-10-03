@@ -1,12 +1,14 @@
-//! ADR-064 deterministic counterfactual intervention contracts.
+//! ADR-064 deterministic counterfactual contracts.
 //!
-//! Each schema owns one module; this module only declares and re-exports them,
-//! and keeps the crate-private CBOR helpers they share in `codec`.
-//! It is public instead of re-exported at the crate root so that the INT1
-//! [`InterventionV1`] does not collide with the proof-local
-//! [`crate::InterventionV1`] evidence record.
+//! Each schema owns one module. This module is public instead of re-exported
+//! at the crate root so that the INT1 [`InterventionV1`] and the IDP1
+//! [`dependency::InputDependencyV1`] do not collide with the proof-local
+//! [`crate::InterventionV1`] and [`crate::InputDependencyV1`] evidence
+//! records. IDP1 items are reached through the [`dependency`] path. The
+//! crate-private CBOR helpers the schemas share live in `codec`.
 
 mod codec;
+pub mod dependency;
 pub mod intervention;
 
 pub use intervention::{

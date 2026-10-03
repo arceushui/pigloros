@@ -25,12 +25,15 @@
 //! 2. Decode with [`FieldReader::with_header`] for the record and
 //!    [`FieldReader::new`] for nested fixed-length arrays, then return
 //!    `reader.finish().map(|()| record)`.
-//! 3. Closed enum codes, optional fields, and variable-length lists stay with
-//!    the contract or are added here as `read_*` methods over
-//!    [`FieldReader::read_with`]; any helper added here must be exercised by
-//!    the contract that introduces it, because unused helpers fail the build
-//!    and untested branches fail the region gate.
+//! 3. Read closed enum codes with [`FieldReader::read_enum`] over a `const`
+//!    code table, and embedded node coordinates with
+//!    [`FieldReader::read_node`]. Optional fields and variable-length lists
+//!    are added here as `read_*` methods over [`FieldReader::read_with`]; any
+//!    helper added here must be exercised by the contract that introduces it,
+//!    because unused helpers fail the build and untested branches fail the
+//!    region gate.
 
+use crate::DependencyNodeV1;
 use ciborium::value::Value;
 use std::io::Cursor;
 
@@ -43,6 +46,8 @@ pub(super) enum WireError {
     FieldOutOfBounds,
     /// The record magic or schema version is not the expected one.
     UnsupportedVersion,
+    /// A well-typed enum code lies outside its closed code table.
+    UnknownEnum,
 }
 
 /// Structural bounds checked before a record is decoded.
@@ -127,6 +132,22 @@ pub(super) fn bytes_value(value: &[u8]) -> Value {
     Value::Bytes(value.to_vec())
 }
 
+/// Six-field `[tick, scheduler_position, owner_id, output_ordinal,
+/// schema_id, artifact_digest]` array of one dependency-graph node.
+///
+/// This is the single node encoding shared by every counterfactual record
+/// that embeds a node coordinate.
+pub(super) fn node_value(node: &DependencyNodeV1) -> Value {
+    Value::Array(vec![
+        uint_value(node.tick),
+        uint_value(node.scheduler_position.into()),
+        text_value(&node.owner_id),
+        uint_value(node.output_ordinal.into()),
+        uint_value(node.schema_id.into()),
+        bytes_value(&node.artifact_digest),
+    ])
+}
+
 /// Sequential reader over the fields of one fixed-length CBOR array.
 ///
 /// The first failure is kept; every read after it still advances and returns
@@ -186,7 +207,7 @@ impl<'a> FieldReader<'a> {
     /// field has failed or this one fails.
     pub(super) fn read_with<T>(
         &mut self,
-        decode: fn(&Value) -> Result<T, WireError>,
+        decode: impl FnOnce(&Value) -> Result<T, WireError>,
         fallback: T,
     ) -> T {
         let decoded = self
@@ -222,6 +243,31 @@ impl<'a> FieldReader<'a> {
         self.read_with(fixed_bytes_field::<LENGTH>, [0; LENGTH])
     }
 
+    /// Read a closed enum whose wire code indexes `codes`; a non-integer
+    /// records [`WireError::InvalidEncoding`] and a code outside the table
+    /// records [`WireError::UnknownEnum`].
+    pub(super) fn read_enum<T: Copy>(&mut self, codes: &[T], fallback: T) -> T {
+        self.read_with(
+            |value| u64_field(value).and_then(|code| enum_code(code, codes)),
+            fallback,
+        )
+    }
+
+    /// Read a node coordinate encoded by [`node_value`].
+    pub(super) fn read_node(&mut self) -> DependencyNodeV1 {
+        self.read_with(
+            node_field,
+            DependencyNodeV1 {
+                tick: 0,
+                scheduler_position: 0,
+                owner_id: String::new(),
+                output_ordinal: 0,
+                schema_id: 0,
+                artifact_digest: [0; 32],
+            },
+        )
+    }
+
     /// Return the first recorded failure, if any.
     pub(super) fn finish(self) -> Result<(), WireError> {
         self.error.map_or(Ok(()), Err)
@@ -253,4 +299,30 @@ fn fixed_bytes_field<const LENGTH: usize>(value: &Value) -> Result<[u8; LENGTH],
         }
         _ => Err(WireError::InvalidEncoding),
     }
+}
+
+fn enum_code<T: Copy>(code: u64, codes: &[T]) -> Result<T, WireError> {
+    usize::try_from(code)
+        .ok()
+        .and_then(|index| codes.get(index))
+        .copied()
+        .ok_or(WireError::UnknownEnum)
+}
+
+fn node_field(value: &Value) -> Result<DependencyNodeV1, WireError> {
+    let mut fields = FieldReader::new(value, 6);
+    let tick = fields.read_u64();
+    let scheduler_position = fields.read_u32();
+    let owner_id = fields.read_text();
+    let output_ordinal = fields.read_u32();
+    let schema_id = fields.read_u32();
+    let artifact_digest = fields.read_bytes::<32>();
+    fields.finish().map(|()| DependencyNodeV1 {
+        tick,
+        scheduler_position,
+        owner_id,
+        output_ordinal,
+        schema_id,
+        artifact_digest,
+    })
 }
