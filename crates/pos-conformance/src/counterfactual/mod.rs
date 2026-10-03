@@ -13,6 +13,7 @@ pub mod dependency;
 pub mod frontier_artifacts;
 pub mod intervention;
 pub mod plan;
+mod replay_claim;
 pub mod result;
 
 pub use intervention::{
