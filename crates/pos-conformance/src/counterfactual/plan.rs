@@ -49,7 +49,7 @@
 //!
 //! The largest structurally valid record encodes to about 12.5 MB (1,024
 //! Interventions of at most about 4.9 KB, 65,536 exogenous and 4,096
-//! FixedPolicy descriptors of 108 bytes, plus fixed fields), below the 16 MiB
+//! `FixedPolicy` descriptors of 108 bytes, plus fixed fields), below the 16 MiB
 //! bound, which is therefore enforced on untrusted input before allocation.
 
 use super::intervention::{
