@@ -7,6 +7,16 @@
 //! bytes cannot drift. Validation covers the closed record contract only;
 //! reachability, artifact discovery, persistence, eviction, and coordination
 //! belong to the counterfactual coordinator.
+//!
+//! A standalone `RCF1` follows the ADR-064 bounds: it carries at least one
+//! Intervention seed, one affected node, and one owner frontier. The nested
+//! evidence verifier also admits a no-Intervention baseline frontier whose
+//! lists are empty; such a baseline frontier is not an exportable `RCF1` and
+//! is rejected here. Both validators reject all-zero digests the same way, so
+//! a standalone-valid record never fails the nested digest rules.
+//!
+//! Every list count is checked before any per-item rule, digest, or encoding,
+//! so an oversized list is rejected without encoding any CBOR.
 
 use crate::{
     domain_digest, CborPreflightError, DependencyNodeV1, InvalidArtifactV1, OwnerFrontierV1,
@@ -101,12 +111,17 @@ pub struct UnknownEdgeCoordinateV1 {
 impl RecomputationFrontierV1 {
     /// Validate the closed `RCF1` contract, its encoded-size limit, and its digest.
     ///
+    /// The seed, affected-node, and owner-frontier lists must each be
+    /// non-empty. A no-Intervention baseline frontier, which the nested
+    /// evidence verifier admits with empty lists, is not an exportable `RCF1`
+    /// and fails here with [`FrontierArtifactErrorV1::FieldOutOfBounds`].
+    ///
     /// # Errors
     ///
     /// Returns a closed safe error when any field, ordering, coordinate range,
     /// encoded size, or the frontier digest is invalid.
     pub fn validate(&self) -> Result<(), FrontierArtifactErrorV1> {
-        self.to_canonical_cbor().map(|_| ())
+        self.to_canonical_cbor().map(drop)
     }
 
     /// Encode this frontier as an exact 17-field deterministic-CBOR `RCF1` array.
@@ -115,15 +130,10 @@ impl RecomputationFrontierV1 {
     ///
     /// Returns a closed safe error when validation or canonical encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, FrontierArtifactErrorV1> {
-        validate_frontier_fields(self)
-            .and_then(|()| self.digest())
-            .and_then(|digest| matching_digest(digest, self.frontier_digest))
-            .and_then(|()| {
-                encode_bounded(
-                    &recomputation_frontier_value(self),
-                    MAX_RECOMPUTATION_FRONTIER_BYTES_V1,
-                )
-            })
+        validate_frontier_fields(self)?;
+        let fields = frontier_fields(self);
+        verify_record_digest(&fields, self.frontier_digest, FRONTIER_DIGEST_DOMAIN_V1)?;
+        encode_bounded(&fields, MAX_RECOMPUTATION_FRONTIER_BYTES_V1)
     }
 
     /// Decode and validate exact canonical `RCF1` bytes.
@@ -133,9 +143,12 @@ impl RecomputationFrontierV1 {
     /// Returns a closed safe error for oversized, malformed, noncanonical, or
     /// invalid `RCF1` records. The size bound is checked before decoding.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, FrontierArtifactErrorV1> {
-        decode_bounded(bytes, MAX_RECOMPUTATION_FRONTIER_BYTES_V1)
-            .and_then(|value| decode_recomputation_frontier_value(&value))
-            .and_then(|frontier| frontier.validate().map(|()| frontier))
+        let value = decode_bounded(bytes, MAX_RECOMPUTATION_FRONTIER_BYTES_V1)?;
+        let fields = array_items(&value)?;
+        let frontier = decode_frontier_fields(fields)?;
+        validate_frontier_fields(&frontier)?;
+        verify_record_digest(fields, frontier.frontier_digest, FRONTIER_DIGEST_DOMAIN_V1)
+            .map(|()| frontier)
     }
 
     /// Compute the `RCF1` domain-separated digest over fields 0 through 15.
@@ -144,7 +157,7 @@ impl RecomputationFrontierV1 {
     ///
     /// Returns a closed safe error if the unsigned fields cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], FrontierArtifactErrorV1> {
-        unsigned_digest(frontier_fields(self), FRONTIER_DIGEST_DOMAIN_V1)
+        unsigned_digest(&frontier_fields(self), FRONTIER_DIGEST_DOMAIN_V1)
     }
 }
 
@@ -156,7 +169,7 @@ impl SuffixInvalidationV1 {
     /// Returns a closed safe error when any field, ordering, coordinate range,
     /// generation rule, encoded size, or the invalidation digest is invalid.
     pub fn validate(&self) -> Result<(), FrontierArtifactErrorV1> {
-        self.to_canonical_cbor().map(|_| ())
+        self.to_canonical_cbor().map(drop)
     }
 
     /// Encode this invalidation as an exact 18-field deterministic-CBOR `SIV1` array.
@@ -165,15 +178,14 @@ impl SuffixInvalidationV1 {
     ///
     /// Returns a closed safe error when validation or canonical encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, FrontierArtifactErrorV1> {
-        validate_invalidation_fields(self)
-            .and_then(|()| self.digest())
-            .and_then(|digest| matching_digest(digest, self.invalidation_digest))
-            .and_then(|()| {
-                encode_bounded(
-                    &suffix_invalidation_value(self),
-                    MAX_SUFFIX_INVALIDATION_BYTES_V1,
-                )
-            })
+        validate_invalidation_fields(self)?;
+        let fields = invalidation_fields(self);
+        verify_record_digest(
+            &fields,
+            self.invalidation_digest,
+            INVALIDATION_DIGEST_DOMAIN_V1,
+        )?;
+        encode_bounded(&fields, MAX_SUFFIX_INVALIDATION_BYTES_V1)
     }
 
     /// Decode and validate exact canonical `SIV1` bytes.
@@ -183,9 +195,16 @@ impl SuffixInvalidationV1 {
     /// Returns a closed safe error for oversized, malformed, noncanonical, or
     /// invalid `SIV1` records. The size bound is checked before decoding.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, FrontierArtifactErrorV1> {
-        decode_bounded(bytes, MAX_SUFFIX_INVALIDATION_BYTES_V1)
-            .and_then(|value| decode_suffix_invalidation_value(&value))
-            .and_then(|invalidation| invalidation.validate().map(|()| invalidation))
+        let value = decode_bounded(bytes, MAX_SUFFIX_INVALIDATION_BYTES_V1)?;
+        let fields = array_items(&value)?;
+        let invalidation = decode_invalidation_fields(fields)?;
+        validate_invalidation_fields(&invalidation)?;
+        verify_record_digest(
+            fields,
+            invalidation.invalidation_digest,
+            INVALIDATION_DIGEST_DOMAIN_V1,
+        )
+        .map(|()| invalidation)
     }
 
     /// Compute the `SIV1` domain-separated digest over fields 0 through 16.
@@ -194,7 +213,7 @@ impl SuffixInvalidationV1 {
     ///
     /// Returns a closed safe error if the unsigned fields cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], FrontierArtifactErrorV1> {
-        unsigned_digest(invalidation_fields(self), INVALIDATION_DIGEST_DOMAIN_V1)
+        unsigned_digest(&invalidation_fields(self), INVALIDATION_DIGEST_DOMAIN_V1)
     }
 }
 
@@ -224,7 +243,20 @@ pub(crate) fn dependency_node_value(node: &DependencyNodeV1) -> Value {
 pub(crate) fn decode_recomputation_frontier_value(
     value: &Value,
 ) -> Result<RecomputationFrontierV1, FrontierArtifactErrorV1> {
-    let fields = array(value, FRONTIER_FIELDS)?;
+    array_items(value).and_then(decode_frontier_fields)
+}
+
+/// Decode the `SIV1` array shape without validating bounds, order, or digest.
+pub(crate) fn decode_suffix_invalidation_value(
+    value: &Value,
+) -> Result<SuffixInvalidationV1, FrontierArtifactErrorV1> {
+    array_items(value).and_then(decode_invalidation_fields)
+}
+
+fn decode_frontier_fields(
+    fields: &[Value],
+) -> Result<RecomputationFrontierV1, FrontierArtifactErrorV1> {
+    let fields = exact_length(fields, FRONTIER_FIELDS)?;
     validate_header(fields, RECOMPUTATION_FRONTIER_MAGIC_V1)?;
     Ok(RecomputationFrontierV1 {
         frontier_id: fixed_bytes(&fields[2])?,
@@ -245,11 +277,10 @@ pub(crate) fn decode_recomputation_frontier_value(
     })
 }
 
-/// Decode the `SIV1` array shape without validating bounds, order, or digest.
-pub(crate) fn decode_suffix_invalidation_value(
-    value: &Value,
+fn decode_invalidation_fields(
+    fields: &[Value],
 ) -> Result<SuffixInvalidationV1, FrontierArtifactErrorV1> {
-    let fields = array(value, INVALIDATION_FIELDS)?;
+    let fields = exact_length(fields, INVALIDATION_FIELDS)?;
     validate_header(fields, SUFFIX_INVALIDATION_MAGIC_V1)?;
     let commit_coordinate = array(&fields[15], COMMIT_COORDINATE_FIELDS)?;
     Ok(SuffixInvalidationV1 {
@@ -277,17 +308,19 @@ pub(crate) fn decode_suffix_invalidation_value(
 fn validate_frontier_fields(
     frontier: &RecomputationFrontierV1,
 ) -> Result<(), FrontierArtifactErrorV1> {
-    if !counted(frontier.intervention_seed_nodes.len(), MAX_SEED_NODES)
-        || !counted(frontier.affected_nodes.len(), MAX_AFFECTED_NODES)
-        || !counted(frontier.owner_frontiers.len(), MAX_OWNER_FRONTIERS)
-        || frontier.unknown_edge_coordinates.len() > MAX_UNKNOWN_EDGES
+    if !frontier_counts_within_bounds(
+        frontier.intervention_seed_nodes.len(),
+        frontier.affected_nodes.len(),
+        frontier.owner_frontiers.len(),
+        frontier.unknown_edge_coordinates.len(),
+    ) || !frontier_identifiers_nonzero(frontier)
         || !frontier.intervention_seed_nodes.iter().all(valid_node)
         || !frontier.affected_nodes.iter().all(valid_node)
         || !frontier.owner_frontiers.iter().all(valid_owner_frontier)
         || !frontier
             .unknown_edge_coordinates
             .iter()
-            .all(|edge| valid_node(&edge.consumer))
+            .all(valid_unknown_edge)
         || unknown_edges_contradict_policy(frontier)
     {
         return Err(FrontierArtifactErrorV1::FieldOutOfBounds);
@@ -360,16 +393,21 @@ fn validate_frontier_range(
 fn validate_invalidation_fields(
     invalidation: &SuffixInvalidationV1,
 ) -> Result<(), FrontierArtifactErrorV1> {
-    if invalidation.invalid_artifacts.len() > MAX_INVALID_ARTIFACTS
-        || invalidation.invalid_checkpoint_digests.len() > MAX_DIGEST_LIST
-        || invalidation.invalid_projection_digests.len() > MAX_DIGEST_LIST
-        || invalidation.retained_exogenous_digests.len() > MAX_DIGEST_LIST
-        || !valid_node(&invalidation.invalid_start)
-        || !valid_node(&invalidation.invalid_end)
+    if !invalidation_counts_within_bounds(
+        invalidation.invalid_artifacts.len(),
+        invalidation.invalid_checkpoint_digests.len(),
+        invalidation.invalid_projection_digests.len(),
+        invalidation.retained_exogenous_digests.len(),
+    ) || !invalidation_identifiers_nonzero(invalidation)
+        || !valid_coordinate(&invalidation.invalid_start)
+        || !valid_coordinate(&invalidation.invalid_end)
         || !invalidation
             .invalid_artifacts
             .iter()
             .all(valid_invalid_artifact)
+        || !nonzero_digests(&invalidation.invalid_checkpoint_digests)
+        || !nonzero_digests(&invalidation.invalid_projection_digests)
+        || !nonzero_digests(&invalidation.retained_exogenous_digests)
     {
         return Err(FrontierArtifactErrorV1::FieldOutOfBounds);
     }
@@ -404,22 +442,97 @@ fn compare_invalid_artifacts(left: &InvalidArtifactV1, right: &InvalidArtifactV1
         ))
 }
 
+/// The `RCF1` list counts, checked before any per-item rule or encoding.
+const fn frontier_counts_within_bounds(
+    seeds: usize,
+    affected: usize,
+    owners: usize,
+    unknown_edges: usize,
+) -> bool {
+    counted(seeds, MAX_SEED_NODES)
+        && counted(affected, MAX_AFFECTED_NODES)
+        && counted(owners, MAX_OWNER_FRONTIERS)
+        && unknown_edges <= MAX_UNKNOWN_EDGES
+}
+
+/// The `SIV1` list counts, checked before any per-item rule or encoding.
+const fn invalidation_counts_within_bounds(
+    artifacts: usize,
+    checkpoints: usize,
+    projections: usize,
+    retained: usize,
+) -> bool {
+    artifacts <= MAX_INVALID_ARTIFACTS
+        && checkpoints <= MAX_DIGEST_LIST
+        && projections <= MAX_DIGEST_LIST
+        && retained <= MAX_DIGEST_LIST
+}
+
+fn frontier_identifiers_nonzero(frontier: &RecomputationFrontierV1) -> bool {
+    [
+        frontier.frontier_id.as_slice(),
+        frontier.plan_digest.as_slice(),
+        frontier.parent_cut_digest.as_slice(),
+        frontier.dependency_graph_digest.as_slice(),
+        frontier.classification_bundle_digest.as_slice(),
+        frontier.provenance_digest.as_slice(),
+    ]
+    .into_iter()
+    .all(nonzero)
+}
+
+fn invalidation_identifiers_nonzero(invalidation: &SuffixInvalidationV1) -> bool {
+    [
+        invalidation.invalidation_id.as_slice(),
+        invalidation.plan_digest.as_slice(),
+        invalidation.frontier_digest.as_slice(),
+        invalidation.commit_timeline_id.as_slice(),
+        invalidation.provenance_digest.as_slice(),
+    ]
+    .into_iter()
+    .all(nonzero)
+}
+
 /// Every bounded list or identifier here holds between one and `maximum` items.
 const fn counted(length: usize, maximum: usize) -> bool {
     length != 0 && length <= maximum
 }
 
-const fn valid_node(node: &DependencyNodeV1) -> bool {
+/// Identifiers and digests are never all zero, matching the nested verifier.
+fn nonzero(value: &[u8]) -> bool {
+    value.iter().any(|byte| *byte != 0)
+}
+
+fn nonzero_digests(digests: &[[u8; 32]]) -> bool {
+    digests.iter().all(|digest| nonzero(digest.as_slice()))
+}
+
+/// A bare coordinate: a bounded owner identifier.
+const fn valid_coordinate(node: &DependencyNodeV1) -> bool {
     counted(node.owner_id.len(), MAX_OWNER_ID_BYTES)
 }
 
-const fn valid_owner_frontier(owner: &OwnerFrontierV1) -> bool {
-    counted(owner.owner_id.len(), MAX_OWNER_ID_BYTES)
-        && counted(owner.cause_node_digests.len(), MAX_CAUSE_DIGESTS)
+/// A coordinate that names a produced artifact by its nonzero digest.
+fn valid_node(node: &DependencyNodeV1) -> bool {
+    valid_coordinate(node) && nonzero(&node.artifact_digest)
 }
 
-const fn valid_invalid_artifact(artifact: &InvalidArtifactV1) -> bool {
+fn valid_unknown_edge(edge: &UnknownEdgeCoordinateV1) -> bool {
+    valid_node(&edge.consumer)
+        && edge
+            .missing_source_digest
+            .is_none_or(|digest| nonzero(&digest))
+}
+
+fn valid_owner_frontier(owner: &OwnerFrontierV1) -> bool {
+    counted(owner.owner_id.len(), MAX_OWNER_ID_BYTES)
+        && counted(owner.cause_node_digests.len(), MAX_CAUSE_DIGESTS)
+        && nonzero_digests(&owner.cause_node_digests)
+}
+
+fn valid_invalid_artifact(artifact: &InvalidArtifactV1) -> bool {
     counted(artifact.artifact_class.len(), MAX_ARTIFACT_CLASS_BYTES)
+        && nonzero(&artifact.artifact_digest)
         && valid_node(&artifact.producer)
 }
 
@@ -446,12 +559,17 @@ fn matching_digest(computed: [u8; 32], declared: [u8; 32]) -> Result<(), Frontie
 }
 
 /// Hash every field except the trailing record digest.
-fn unsigned_digest(
-    mut fields: Vec<Value>,
+fn unsigned_digest(fields: &[Value], domain: &[u8]) -> Result<[u8; 32], FrontierArtifactErrorV1> {
+    encode_value(&fields[..fields.len() - 1]).map(|unsigned| domain_digest(domain, &unsigned))
+}
+
+/// Compare the digest over `fields` with the record's declared digest.
+fn verify_record_digest(
+    fields: &[Value],
+    declared: [u8; 32],
     domain: &[u8],
-) -> Result<[u8; 32], FrontierArtifactErrorV1> {
-    fields.truncate(fields.len() - 1);
-    encode_value(&Value::Array(fields)).map(|unsigned| domain_digest(domain, &unsigned))
+) -> Result<(), FrontierArtifactErrorV1> {
+    unsigned_digest(fields, domain).and_then(|computed| matching_digest(computed, declared))
 }
 
 fn frontier_fields(frontier: &RecomputationFrontierV1) -> Vec<Value> {
@@ -681,9 +799,21 @@ fn decode_list<T>(
 }
 
 fn array(value: &Value, length: usize) -> Result<&[Value], FrontierArtifactErrorV1> {
+    array_items(value).and_then(|values| exact_length(values, length))
+}
+
+fn array_items(value: &Value) -> Result<&[Value], FrontierArtifactErrorV1> {
     match value {
-        Value::Array(values) if values.len() == length => Ok(values),
+        Value::Array(values) => Ok(values),
         _ => Err(FrontierArtifactErrorV1::InvalidEncoding),
+    }
+}
+
+fn exact_length(values: &[Value], length: usize) -> Result<&[Value], FrontierArtifactErrorV1> {
+    if values.len() == length {
+        Ok(values)
+    } else {
+        Err(FrontierArtifactErrorV1::InvalidEncoding)
     }
 }
 
@@ -730,8 +860,8 @@ const fn within_size(length: usize, maximum: usize) -> Result<(), FrontierArtifa
     }
 }
 
-fn encode_bounded(value: &Value, maximum: usize) -> Result<Vec<u8>, FrontierArtifactErrorV1> {
-    encode_value(value).and_then(|encoded| within_size(encoded.len(), maximum).map(|()| encoded))
+fn encode_bounded(fields: &[Value], maximum: usize) -> Result<Vec<u8>, FrontierArtifactErrorV1> {
+    encode_value(fields).and_then(|encoded| within_size(encoded.len(), maximum).map(|()| encoded))
 }
 
 /// Bound the input, then preflight nesting and list lengths before any
@@ -764,9 +894,77 @@ const fn preflight_error(error: CborPreflightError) -> FrontierArtifactErrorV1 {
     }
 }
 
-fn encode_value(value: &Value) -> Result<Vec<u8>, FrontierArtifactErrorV1> {
+/// Encode a value, or a field slice as a definite-length CBOR array.
+fn encode_value<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, FrontierArtifactErrorV1> {
     let mut encoded = Vec::new();
     ciborium::into_writer(value, &mut encoded)
         .map(|()| encoded)
         .or(Err(FrontierArtifactErrorV1::InvalidEncoding))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod count_bound_tests {
+    use super::*;
+
+    #[test]
+    fn list_limits_are_pinned() {
+        assert_eq!(MAX_SEED_NODES, 1_024);
+        assert_eq!(MAX_AFFECTED_NODES, 1_000_000);
+        assert_eq!(MAX_OWNER_FRONTIERS, 4_096);
+        assert_eq!(MAX_UNKNOWN_EDGES, 65_536);
+        assert_eq!(MAX_INVALID_ARTIFACTS, 1_000_000);
+        assert_eq!(MAX_DIGEST_LIST, 65_536);
+    }
+
+    /// The million-entry limits are checked on counts alone, so they are
+    /// exercised here without allocating a million-entry record.
+    #[test]
+    fn frontier_counts_accept_each_limit_and_reject_one_more() {
+        let limits = [
+            MAX_SEED_NODES,
+            MAX_AFFECTED_NODES,
+            MAX_OWNER_FRONTIERS,
+            MAX_UNKNOWN_EDGES,
+        ];
+        assert!(frontier_counts_within_bounds(
+            limits[0], limits[1], limits[2], limits[3]
+        ));
+        assert!(frontier_counts_within_bounds(1, 1, 1, 0));
+        for (index, limit) in limits.into_iter().enumerate() {
+            let mut over = [1, 1, 1, 0];
+            over[index] = limit + 1;
+            assert!(!frontier_counts_within_bounds(
+                over[0], over[1], over[2], over[3]
+            ));
+        }
+        for index in [0, 1, 2] {
+            let mut empty = [1, 1, 1, 0];
+            empty[index] = 0;
+            assert!(!frontier_counts_within_bounds(
+                empty[0], empty[1], empty[2], empty[3]
+            ));
+        }
+    }
+
+    #[test]
+    fn invalidation_counts_accept_each_limit_and_reject_one_more() {
+        let limits = [
+            MAX_INVALID_ARTIFACTS,
+            MAX_DIGEST_LIST,
+            MAX_DIGEST_LIST,
+            MAX_DIGEST_LIST,
+        ];
+        assert!(invalidation_counts_within_bounds(
+            limits[0], limits[1], limits[2], limits[3]
+        ));
+        assert!(invalidation_counts_within_bounds(0, 0, 0, 0));
+        for (index, limit) in limits.into_iter().enumerate() {
+            let mut over = [0; 4];
+            over[index] = limit + 1;
+            assert!(!invalidation_counts_within_bounds(
+                over[0], over[1], over[2], over[3]
+            ));
+        }
+    }
 }

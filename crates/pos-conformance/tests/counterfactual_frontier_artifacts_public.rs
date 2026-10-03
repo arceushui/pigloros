@@ -499,16 +499,6 @@ fn frontier_list_bounds_are_exact() -> TestResult {
             OUT_OF_RANGE,
         ),
         ("no affected", |f| f.affected_nodes.clear(), OUT_OF_RANGE),
-        (
-            "affected over limit",
-            |f| f.affected_nodes = vec![node(5, 0, "a"); 1_000_001],
-            OUT_OF_RANGE,
-        ),
-        (
-            "affected at limit",
-            |f| f.affected_nodes = vec![node(5, 0, "a"); 1_000_000],
-            DUPLICATE,
-        ),
         ("no owners", |f| f.owner_frontiers.clear(), OUT_OF_RANGE),
         (
             "owners over limit",
@@ -594,6 +584,14 @@ fn frontier_identifiers_and_unknown_edge_policy_are_bounded() -> TestResult {
             OUT_OF_RANGE,
         ),
         (
+            "zero unknown source digest",
+            |f| {
+                full_suffix(f);
+                f.unknown_edge_coordinates[1].missing_source_digest = Some([0; 32]);
+            },
+            OUT_OF_RANGE,
+        ),
+        (
             "reject with unknown edges",
             |f| {
                 full_suffix(f);
@@ -618,6 +616,61 @@ fn frontier_identifiers_and_unknown_edge_policy_are_bounded() -> TestResult {
         }),
         ("full suffix with unknown edges", full_suffix),
     ])
+}
+
+#[test]
+fn frontier_rejects_every_all_zero_digest_like_the_nested_verifier() {
+    assert_frontier_rejected(&[
+        (
+            "zero frontier id",
+            |f| f.frontier_id = [0; 16],
+            OUT_OF_RANGE,
+        ),
+        ("zero plan", |f| f.plan_digest = [0; 32], OUT_OF_RANGE),
+        (
+            "zero parent cut",
+            |f| f.parent_cut_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero dependency graph",
+            |f| f.dependency_graph_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero classification bundle",
+            |f| f.classification_bundle_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero provenance",
+            |f| f.provenance_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero seed artifact",
+            |f| f.intervention_seed_nodes[0].artifact_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero affected artifact",
+            |f| f.affected_nodes[1].artifact_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero cause digest",
+            |f| f.owner_frontiers[1].cause_node_digests[1] = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero unknown consumer artifact",
+            |f| {
+                full_suffix(f);
+                f.unknown_edge_coordinates[0].consumer.artifact_digest = [0; 32];
+            },
+            OUT_OF_RANGE,
+        ),
+    ]);
 }
 
 #[test]
@@ -755,17 +808,10 @@ fn frontier_digest_covers_fields_two_through_fifteen_only() -> TestResult {
 
 #[test]
 fn invalidation_list_bounds_are_exact() {
+    // The million-entry artifact and affected-node limits are checked on
+    // counts alone; the crate's unit tests cover them without a million-entry
+    // record.
     assert_invalidation_rejected(&[
-        (
-            "artifacts over limit",
-            |s| s.invalid_artifacts = vec![artifact("e", node(5, 0, "a")); 1_000_001],
-            OUT_OF_RANGE,
-        ),
-        (
-            "artifacts at limit",
-            |s| s.invalid_artifacts = vec![artifact("e", node(5, 0, "a")); 1_000_000],
-            DUPLICATE,
-        ),
         (
             "checkpoints over limit",
             |s| s.invalid_checkpoint_digests = vec![[1; 32]; 65_537],
@@ -870,6 +916,63 @@ fn invalidation_identifiers_generation_and_range_are_exact() -> TestResult {
 }
 
 #[test]
+fn invalidation_rejects_every_all_zero_digest_like_the_nested_verifier() -> TestResult {
+    assert_invalidation_rejected(&[
+        (
+            "zero invalidation id",
+            |s| s.invalidation_id = [0; 16],
+            OUT_OF_RANGE,
+        ),
+        ("zero plan", |s| s.plan_digest = [0; 32], OUT_OF_RANGE),
+        (
+            "zero frontier digest",
+            |s| s.frontier_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero commit timeline",
+            |s| s.commit_timeline_id = [0; 16],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero provenance",
+            |s| s.provenance_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero artifact digest",
+            |s| s.invalid_artifacts[2].artifact_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero producer artifact",
+            |s| s.invalid_artifacts[2].producer.artifact_digest = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero checkpoint",
+            |s| s.invalid_checkpoint_digests[1] = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero projection",
+            |s| s.invalid_projection_digests[0] = [0; 32],
+            OUT_OF_RANGE,
+        ),
+        (
+            "zero retained",
+            |s| s.retained_exogenous_digests[0] = [0; 32],
+            OUT_OF_RANGE,
+        ),
+    ]);
+    // Range endpoints are bare coordinates, as in the nested verifier.
+    assert_invalidation_accepted(&[("zero endpoint artifacts", |s| {
+        s.invalid_start.artifact_digest = [0; 32];
+        s.invalid_end.artifact_digest = [0; 32];
+    })])
+}
+
+#[test]
 fn invalidation_lists_are_strictly_ordered() {
     assert_invalidation_rejected(&[
         (
@@ -948,13 +1051,17 @@ fn invalidation_digest_covers_fields_two_through_sixteen_only() -> TestResult {
 
 #[test]
 fn decoders_bound_input_size_before_parsing() {
-    let over_limit = vec![0xff; MAX_RECOMPUTATION_FRONTIER_BYTES_V1 + 1];
-    assert_frontier_decode(&over_limit[..MAX_RECOMPUTATION_FRONTIER_BYTES_V1], ENCODING);
-    assert_frontier_decode(&over_limit, OUT_OF_RANGE);
-
-    let over_limit = vec![0xff; MAX_SUFFIX_INVALIDATION_BYTES_V1 + 1];
-    assert_invalidation_decode(&over_limit[..MAX_SUFFIX_INVALIDATION_BYTES_V1], ENCODING);
-    assert_invalidation_decode(&over_limit, OUT_OF_RANGE);
+    assert_eq!(MAX_RECOMPUTATION_FRONTIER_BYTES_V1, 64 * 1024 * 1024);
+    assert_eq!(MAX_SUFFIX_INVALIDATION_BYTES_V1, 128 * 1024 * 1024);
+    // One zeroed (lazily committed) buffer serves every case. A leading zero
+    // byte is a lone unsigned integer, so the bytes that pass the size bound
+    // fail at once on trailing input without being read further.
+    let buffer = vec![0; MAX_SUFFIX_INVALIDATION_BYTES_V1 + 1];
+    let frontier_limit = MAX_RECOMPUTATION_FRONTIER_BYTES_V1;
+    assert_frontier_decode(&buffer[..frontier_limit], ENCODING);
+    assert_frontier_decode(&buffer[..=frontier_limit], OUT_OF_RANGE);
+    assert_invalidation_decode(&buffer[..MAX_SUFFIX_INVALIDATION_BYTES_V1], ENCODING);
+    assert_invalidation_decode(&buffer, OUT_OF_RANGE);
 }
 
 #[test]
@@ -985,10 +1092,13 @@ fn frontier_decoder_rejects_noncanonical_and_forbidden_cbor() -> TestResult {
     }
     let too_deep = Value::Array(vec![Value::Array(vec![uint(1)])]);
     assert_frontier_decode(&replaced(&encoded, &[6, 0, 0], too_deep)?, OUT_OF_RANGE);
-    let too_many = Value::Array(vec![uint(0); 1_000_001]);
-    assert_frontier_decode(&replaced(&encoded, &[7], too_many)?, OUT_OF_RANGE);
-    let most_items = Value::Array(vec![uint(0); 1_000_000]);
-    assert_frontier_decode(&replaced(&encoded, &[7], most_items)?, ENCODING);
+    // Array headers are bounded before any item is read: one item over the
+    // limit is out of bounds, while the limit itself passes the header check
+    // and then fails on the absent items.
+    let too_many = [0x9a, 0x00, 0x0f, 0x42, 0x41];
+    assert_eq!(u32::from_be_bytes([0x00, 0x0f, 0x42, 0x41]), 1_000_001);
+    assert_frontier_decode(&too_many, OUT_OF_RANGE);
+    assert_frontier_decode(&[0x9a, 0x00, 0x0f, 0x42, 0x40], ENCODING);
 
     assert_frontier_decode(&encode(&uint(1))?, ENCODING);
     let mut short = root_fields(&encoded)?;
