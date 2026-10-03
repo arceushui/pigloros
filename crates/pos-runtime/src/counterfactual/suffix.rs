@@ -566,15 +566,15 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         stager: &mut impl CounterfactualTickStagerV1,
     ) -> Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1> {
         let tick = progress.tick.saturating_add(1);
-        let staged = match stage_tick(stager, context.plan, context.receipt.generation(), tick) {
-            Ok(staged) => staged,
+        let batch = match stage_tick(stager, context.plan, context.receipt.generation(), tick) {
+            Ok(batch) => batch,
             Err(error) => return Ok(Some(staging_failure(&error))),
         };
-        let drafts = staged.drafts();
-        let content: Vec<EventDraft> = drafts.iter().map(content_draft).collect();
+        let drafts = batch.drafts();
+        let bodies: Vec<EventDraft> = drafts.iter().map(content_draft).collect();
         let seq = progress.head.saturating_add(drafts.len() as u64);
         // Sealing a well-formed `RCP1` does not fail; an error flows out as is.
-        next_checkpoint(context, progress.state, tick, &content, seq)
+        next_checkpoint(context, progress.state, tick, &bodies, seq)
             .map(|checkpoint| self.append_tick(context, progress, tick, drafts, checkpoint))
     }
 
