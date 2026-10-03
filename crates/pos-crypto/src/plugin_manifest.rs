@@ -330,7 +330,9 @@ pub(crate) fn valid_id_text(value: &str) -> bool {
 fn valid_semver(value: &str) -> bool {
     let (core, pre_release) = value
         .split_once('-')
-        .map_or((value, None), |(core, pre_release)| (core, Some(pre_release)));
+        .map_or((value, None), |(core, pre_release)| {
+            (core, Some(pre_release))
+        });
     core.split('.').count() == 3
         && core.split('.').all(numeric_identifier)
         && pre_release.is_none_or(valid_pre_release)
