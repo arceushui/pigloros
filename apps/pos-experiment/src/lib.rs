@@ -769,6 +769,17 @@ pub enum ExperimentError {
     },
 }
 
+/// Compose a fresh Driver registry for the experiment host, which has no
+/// Participants: every Driver is explicitly non-participant (ADR-021
+/// Revision 3), and a participant-bound Driver is rejected here.
+fn compose_non_participant(
+    mut registry: PluginRegistry,
+) -> Result<PluginRegistry, pos_runtime::RuntimeError> {
+    registry
+        .compose_non_participant_drivers()
+        .map(|()| registry)
+}
+
 fn map_runtime_error(error: pos_runtime::RuntimeError) -> ExperimentError {
     match error {
         pos_runtime::RuntimeError::Store(error) => ExperimentError::Store(error),
@@ -1354,7 +1365,8 @@ impl Experiment {
         mut self,
         factory: impl Fn() -> Result<PluginRegistry, pos_runtime::RuntimeError> + Send + Sync + 'static,
     ) -> Self {
-        self.fork_registry_factory = Some(Arc::new(factory));
+        let composed = move || factory().and_then(compose_non_participant);
+        self.fork_registry_factory = Some(Arc::new(composed));
         self
     }
 
@@ -1400,7 +1412,9 @@ impl Experiment {
         reducer: Option<Box<dyn pos_core::Reducer>>,
         driver: Option<Box<dyn pos_runtime::Driver>>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register_generated(plugin, reducer, driver)
+        self.registry
+            .register_generated(plugin, reducer, driver)
+            .and_then(|()| self.registry.compose_non_participant_drivers())
     }
 
     /// Register a Plugin with a complete host-authorized output binding.
@@ -1417,6 +1431,7 @@ impl Experiment {
     ) -> Result<(), pos_runtime::RuntimeError> {
         self.registry
             .register_with_verified_output_policy(plugin, binding, reducer, driver)
+            .and_then(|()| self.registry.compose_non_participant_drivers())
     }
 
     /// Register a Plugin with an authorized binding and optional action approver.
@@ -1442,6 +1457,7 @@ impl Experiment {
                 approver,
                 approver_event_types,
             )
+            .and_then(|()| self.registry.compose_non_participant_drivers())
     }
 
     /// Register a plugin with an optional action approver.
@@ -1457,13 +1473,15 @@ impl Experiment {
         approver: Option<Box<dyn pos_core::ActionApprover>>,
         approver_event_types: impl IntoIterator<Item = pos_core::Kind>,
     ) -> Result<(), pos_runtime::RuntimeError> {
-        self.registry.register_generated_with_approver(
-            plugin,
-            reducer,
-            driver,
-            approver,
-            approver_event_types,
-        )
+        self.registry
+            .register_generated_with_approver(
+                plugin,
+                reducer,
+                driver,
+                approver,
+                approver_event_types,
+            )
+            .and_then(|()| self.registry.compose_non_participant_drivers())
     }
 
     /// Create the experiment Timeline and retain the live runtime resources.
@@ -3142,7 +3160,7 @@ impl BacktestRunner {
 
         // --- Train phase ---
         let train_name = format!("{}-train", self.config.experiment_name);
-        let mut train_registry = (self.registry_factory)();
+        let mut train_registry = compose_non_participant((self.registry_factory)())?;
         let (erasure_gate, train_tl) =
             start_backtest_train(store, &mut train_registry, runtime_gate, &train_name)?;
         let train_tl_id = train_tl.id();
@@ -3163,7 +3181,7 @@ impl BacktestRunner {
         let eval_tl_id = eval_tl.id();
 
         // --- Eval phase (same store, forked timeline) ---
-        let mut eval_registry = (self.registry_factory)();
+        let mut eval_registry = compose_non_participant((self.registry_factory)())?;
         let inherited = prepare_backtest_eval_registry(
             store,
             eval_tl_id,
