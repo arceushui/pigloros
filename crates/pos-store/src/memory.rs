@@ -115,6 +115,7 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+mod fork_attribution_issuer_policy;
 mod pipeline_admission;
 
 #[cfg(test)]
@@ -282,6 +283,9 @@ pub struct MemoryStore {
     fork_publication_operations: HashMap<Hash, ForkPublicationOperationV1>,
     fork_publication_bindings: HashMap<(TimelineId, u64), ForkPublicationBindingV1>,
     fork_publication_artifacts: HashMap<Hash, ForkPublicationArtifactV1>,
+    /// Accepted ADR-105 `FIP1` history with each digest recorded at install;
+    /// index `g - 1` holds generation `g`, and the last entry is the floor.
+    fork_attribution_issuer_policies: Vec<(Hash, pos_core::ForkAttributionIssuerPolicyV1)>,
     /// Current raw ERCRP1 envelope per request.
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
@@ -706,6 +710,7 @@ impl MemoryStore {
             fork_publication_operations: HashMap::new(),
             fork_publication_bindings: HashMap::new(),
             fork_publication_artifacts: HashMap::new(),
+            fork_attribution_issuer_policies: Vec::new(),
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
             artifact_registrations: BTreeMap::new(),
