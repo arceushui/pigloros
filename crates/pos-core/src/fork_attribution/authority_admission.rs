@@ -13,11 +13,15 @@ use super::{
 };
 use crate::{Hash, TimelineId};
 
-/// Maximum accepted canonical `IFA1` bytes. The largest valid record, with a
-/// 128-byte issuer ID and every integer at its widest, is 428 bytes.
+/// Maximum accepted canonical `IFA1` bytes, per ADR-105 r6 erratum E3.
+///
+/// The largest valid record, with a 128-byte issuer ID and every integer at
+/// its widest, is 428 bytes.
 pub const MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1: usize = 512;
 
 /// Construction fields for one `IFA1` import admission record.
+///
+/// The wire layout is the 12-element array of ADR-105 r6 erratum E3.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedForkAttributionAdmissionInputV1 {
     /// `IFA1` field 2: the `FAE1` import operation ID.

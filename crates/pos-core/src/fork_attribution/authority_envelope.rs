@@ -6,7 +6,8 @@
 //! signed-envelope digest. It is pure: it installs nothing, consults no issuer
 //! policy, and validates no cross-record graph against a store. The carried
 //! ADR-099 records stay opaque bounded bytes here, so their authority-origin
-//! code 2 remains fail closed in every existing decoder.
+//! code 2 remains fail closed in every existing decoder; their typed strict
+//! decode runs first in the import validator, per ADR-105 r6 erratum E1.
 
 use super::authority_evidence::{
     ForkEventEvidenceV1, ForkTimelineImportV1, ImportedKeyRecordV1, ImportedKeyTombstoneV1,
@@ -24,7 +25,7 @@ use crate::{
     Hash, Signature, TimelineId, MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
     MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1, MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1,
     MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1, MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
-    MAX_FORK_MANIFEST_INTERVENTIONS_V1,
+    MAX_FORK_MANIFEST_INTERVENTIONS_V1, MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1,
 };
 
 /// Maximum complete signed `FAE1` bytes (64 MiB).
@@ -36,8 +37,13 @@ pub const MAX_FORK_ATTRIBUTION_AUTHORITY_INTERVENTIONS_V1: usize =
     MAX_FORK_MANIFEST_INTERVENTIONS_V1;
 /// Maximum sum of all carried Event payload bytes (60 MiB).
 pub const MAX_FORK_ATTRIBUTION_AUTHORITY_PAYLOAD_BYTES_V1: usize = 62_914_560;
-/// Maximum code-2 `POB1` bytes carried by `FAE1` field 7.
-pub const MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1: usize = 320;
+/// Maximum code-2 `POB1` bytes carried by `FAE1` field 7, per ADR-105 r6
+/// erratum E2.
+///
+/// This is the local `POB1` maximum plus 34 bytes for the code-2 origin
+/// `[2, bstr32]` in place of `[1]`: 207 + 34 = 241.
+pub const MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1: usize =
+    MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1 + 34;
 
 const LEAF_DOMAIN: &[u8] = b"pigloros/fork-attribution-closure-leaf/v1";
 const ROOT_DOMAIN: &[u8] = b"pigloros/fork-attribution-final-closure/v1";
@@ -305,8 +311,9 @@ impl ForkAttributionAuthorityUnsignedEnvelopeV1 {
     /// Validate every conjunctive bound and structural rule, then derive the
     /// closure root and the primitive code-2 origin digest.
     ///
-    /// The origin digest uses the `FTI1` parent and child IDs; the import
-    /// seam must still prove they equal `FAR1` fields 5 and 6. Every record
+    /// The origin digest uses the `FTI1` parent and child IDs, per ADR-105 r6
+    /// erratum E4; the import seam must still prove they equal `FAR1` fields
+    /// 5 and 6. Every record
     /// is encoded exactly once, and each closure leaf is hashed as it is
     /// written.
     ///
@@ -606,6 +613,9 @@ fn validate_counts(input: &ForkAttributionAuthorityEnvelopeInputV1) -> Result<()
 
 /// Enforce the structural count, all-or-none, child-segment, and
 /// key-lifecycle rules.
+///
+/// Every failure is `FieldMismatch`, which the import seam maps to
+/// `InvalidAuthorityClosure` per ADR-105 r6 erratum E5.
 fn validate_structure(input: &ForkAttributionAuthorityEnvelopeInputV1) -> Result<(), Error> {
     let events = input.event_evidence.len();
     let unclassified_records = input.classifier.is_none()

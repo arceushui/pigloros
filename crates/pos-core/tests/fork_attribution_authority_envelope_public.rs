@@ -350,6 +350,9 @@ fn closure_leaves_match_independent_vectors_codes_and_bounds() -> TestResult {
             .to_vec(),
         unhex(LEAF_FOP1_ABC_HEX)?
     );
+    // ADR-105 r6 erratum E2 and E6 pin these two derived bounds.
+    assert_eq!(MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1, 241);
+    assert_eq!(MAX_FORK_EVENT_EVIDENCE_BYTES_V1, 16_777_809);
     let buffer = vec![0x5a; MAX_FORK_EVENT_EVIDENCE_BYTES_V1 + 1];
     for (leaf, code, maximum, absent) in LEAF_TABLE {
         assert_eq!(leaf.code(), code);

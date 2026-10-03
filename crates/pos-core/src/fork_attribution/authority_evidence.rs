@@ -25,7 +25,7 @@ pub const MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1: usize = 512;
 pub const MAX_FORK_TIMELINE_IMPORT_BYTES_V1: usize = 1_024;
 /// Maximum exact UTF-8 bytes of the optional `FTI1` Timeline name.
 pub const MAX_FORK_TIMELINE_IMPORT_NAME_BYTES_V1: usize = 256;
-/// Largest canonical `FEE1`, derived from its field bounds.
+/// Largest canonical `FEE1`, per ADR-105 r6 erratum E6.
 ///
 /// The sum is the array head (1), marker (5), version (1), a 512-byte
 /// envelope with its 3-byte head, a 16 MiB payload with its 5-byte head, and
@@ -290,7 +290,8 @@ impl ForkEventEvidenceV1 {
     /// # Errors
     /// Returns `FieldOutOfBounds` for an oversized payload and
     /// `FieldMismatch` for a payload-hash mismatch or a schema
-    /// version that no V1 Event can carry.
+    /// version other than 1, which no V1 Event can carry (ADR-105 r6
+    /// erratum E6).
     pub fn new(
         envelope: TimelineEventEnvelopeV1,
         payload: CanonicalBytes,
