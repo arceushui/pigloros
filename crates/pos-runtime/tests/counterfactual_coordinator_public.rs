@@ -43,9 +43,10 @@ use pos_store::sqlite::SqliteStore;
 use pos_time::counterfactual::dependency_graph::{
     validate_dependency_graph_v1, DependencyGraphBoundsV1, DependencyGraphErrorV1,
     DependencyGraphNodeOriginV1 as Origin, DependencyGraphNodeV1 as Node,
+    ValidatedDependencyGraphV1,
 };
 use pos_time::counterfactual::frontier::{
-    dependency_graph_digest_v1, derive_recomputation_frontier_v1,
+    affected_presentation_outputs_v1, dependency_graph_digest_v1, derive_recomputation_frontier_v1,
 };
 use ulid::Ulid;
 
@@ -300,6 +301,7 @@ fn plan(
     parent: TimelineId,
     profile: &ExecutionProfileV1,
     snapshot: &TrustPolicySnapshotV1,
+    unknown_edge_policy: UnknownEdgePolicyV1,
     edit: fn(&mut CounterfactualPlanV1),
 ) -> TestResult<CounterfactualPlanV1> {
     let mut plan = CounterfactualPlanV1 {
@@ -319,6 +321,7 @@ fn plan(
         exogenous_descriptors: vec![descriptor(1, 0x50)],
         fixed_policy_descriptors: vec![descriptor(3, 0x30)],
         classification_bundle_digest: [5; 32],
+        unknown_edge_policy,
         execution_profile: PlanExecutionProfileRefV1::from_execution_profile_v1(profile)?,
         trust_policy: PlanTrustPolicyRefV1::from_trust_policy_snapshot_v1(snapshot)?,
         plugin_composition_digest: [6; 32],
@@ -472,7 +475,6 @@ fn graph_error(error: DependencyGraphErrorV1) -> AdmissionError {
 struct Source {
     nodes: Vec<Node>,
     edges: Vec<InputDependencyV1>,
-    policy: UnknownEdgePolicyV1,
     tamper: fn(&mut RecomputationFrontierV1),
     /// Provisional outputs reported in addition to the graph's.
     extra_outputs: Vec<CounterfactualProvisionalOutputV1>,
@@ -482,11 +484,7 @@ struct Source {
 impl Source {
     /// The base graph through the plan horizon: nodes after the horizon and
     /// their edges are dropped.
-    fn new(
-        plan: &CounterfactualPlanV1,
-        policy: UnknownEdgePolicyV1,
-        omitted: &[(usize, usize)],
-    ) -> TestResult<Self> {
+    fn new(plan: &CounterfactualPlanV1, omitted: &[(usize, usize)]) -> TestResult<Self> {
         let mut nodes = nodes(plan)?;
         for &(consumer, source) in &EDGE_SPECS {
             let digest = nodes[source].node.artifact_digest;
@@ -513,22 +511,30 @@ impl Source {
         Ok(Self {
             nodes,
             edges,
-            policy,
             tamper: untampered,
             extra_outputs: Vec::new(),
             calls: 0,
         })
     }
 
+    /// Validate the graph under the plan's unknown-edge policy.
+    fn graph(
+        &self,
+        plan: &CounterfactualPlanV1,
+    ) -> Result<ValidatedDependencyGraphV1, DependencyGraphErrorV1> {
+        validate_dependency_graph_v1(plan, BOUNDS, self.nodes.clone(), self.edges.clone())
+    }
+
     fn graph_digest(&self, plan: &CounterfactualPlanV1) -> TestResult<[u8; 32]> {
-        let graph = validate_dependency_graph_v1(
-            plan,
-            self.policy,
-            BOUNDS,
-            self.nodes.clone(),
-            self.edges.clone(),
-        )?;
-        Ok(dependency_graph_digest_v1(&graph))
+        Ok(dependency_graph_digest_v1(&self.graph(plan)?))
+    }
+
+    /// The `PresentationOnly` outputs `pos-time` reports stale for the graph.
+    fn affected_presentation(
+        &self,
+        plan: &CounterfactualPlanV1,
+    ) -> TestResult<Vec<DependencyNodeV1>> {
+        Ok(affected_presentation_outputs_v1(&self.graph(plan)?))
     }
 }
 
@@ -540,14 +546,7 @@ impl CounterfactualFrontierSourceV1 for Source {
         provenance_digest: [u8; 32],
     ) -> Result<CounterfactualFrontierDerivationV1, AdmissionError> {
         self.calls += 1;
-        let graph = validate_dependency_graph_v1(
-            plan,
-            self.policy,
-            BOUNDS,
-            self.nodes.clone(),
-            self.edges.clone(),
-        )
-        .map_err(graph_error)?;
+        let graph = self.graph(plan).map_err(graph_error)?;
         let mut frontier =
             derive_recomputation_frontier_v1(plan, &graph, frontier_id, provenance_digest)
                 .or(Err(AdmissionError::DependencyGraphInvalid))?;
@@ -688,8 +687,8 @@ fn setup<B: Backend>(spec: &Spec) -> TestResult<Setup<B>> {
     )?)?;
     let snapshot =
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_trust_policy_snapshot_bytes_v1()?)?;
-    let plan = plan(root, &profile, &snapshot, spec.plan)?;
-    let source = Source::new(&plan, spec.policy, spec.omitted)?;
+    let plan = plan(root, &profile, &snapshot, spec.policy, spec.plan)?;
+    let source = Source::new(&plan, spec.omitted)?;
     // An invalid graph has no digest; its admission never reaches the store.
     let graph_digest = source.graph_digest(&plan).unwrap_or([0xee; 32]);
     let mut facts = CounterfactualFactsV1 {
@@ -864,6 +863,34 @@ fn expected_invalidation<B>(
     }
 }
 
+/// Assert every `PresentationOnly` output `pos-time` reports stale for the
+/// graph is `expected` and is quarantined at `generation`.
+fn assert_affected_presentation_quarantined<B: Backend>(
+    setup: &Setup<B>,
+    generation: ForkGenerationV1,
+    expected: &[usize],
+) -> TestResult {
+    let affected = setup.source.affected_presentation(&setup.fixture.plan)?;
+    let nodes = &setup.source.nodes;
+    assert_eq!(
+        affected,
+        expected
+            .iter()
+            .map(|&position| nodes[position].node.clone())
+            .collect::<Vec<_>>()
+    );
+    for node in affected {
+        assert_eq!(
+            setup
+                .coordinator
+                .store()
+                .read_generation_artifact(generation, Hash::from_bytes(node.artifact_digest)),
+            Err(CounterfactualStoreErrorV1::InvalidArtifactReuse)
+        );
+    }
+    Ok(())
+}
+
 /// Assert generation-qualified reads after the first commit: the `RCF1` is
 /// readable, invalidated outputs, suffix presentation outputs, and evicted
 /// checkpoints are quarantined, outputs before the frontier and Intervention
@@ -960,6 +987,7 @@ fn commits_one_generation_and_the_first_tick<B: Backend>() -> TestResult {
         expected
     );
     assert_generation_reads(&setup, &receipt, &frontier)?;
+    assert_affected_presentation_quarantined(&setup, generation, &[UI_15])?;
 
     // A second admission advances exactly one more generation on top of the
     // committed first Tick.
@@ -1004,6 +1032,8 @@ fn unknown_edge_fallback_recomputes_from_the_cut<B: Backend>() -> TestResult {
     let nodes = &setup.source.nodes;
     assert_eq!(invalidation.reason, reason);
     assert_eq!(invalidation.commit_tick, FIRST_TICK);
+    // Under the fallback every provisional presentation output is stale.
+    assert_affected_presentation_quarantined(&setup, receipt.generation(), &[UI_15])?;
     // The lowest invalidated producer and the highest one.
     assert_eq!(invalidation.invalid_start, nodes[WORLD_10].node);
     assert_eq!(invalidation.invalid_end, nodes[WEATHER_16].node);
