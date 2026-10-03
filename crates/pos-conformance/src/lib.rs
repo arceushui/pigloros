@@ -1929,9 +1929,9 @@ pub mod strict_codec {
         EVIDENCE_FORMAT_V1, VERIFICATION_RECORD_MAGIC_V1,
     };
     use crate::counterfactual::frontier_artifacts::{
-        decode_recomputation_frontier_value, decode_suffix_invalidation_value,
-        dependency_node_value, recomputation_frontier_value, suffix_invalidation_value,
-        FrontierArtifactErrorV1,
+        decode_dependency_node_value, decode_recomputation_frontier_value,
+        decode_suffix_invalidation_value, dependency_node_value, recomputation_frontier_value,
+        suffix_invalidation_value, FrontierArtifactErrorV1,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -3452,27 +3452,10 @@ pub mod strict_codec {
         })
     }
 
+    /// Decode a node through the shared counterfactual node codec.
     fn decode_node(value: &Value) -> Result<DependencyNodeV1, StrictCborError> {
-        let fields = array(value, "dependency_node", 6)?;
-        Ok(DependencyNodeV1 {
-            tick: uint_value(&fields[0], "node_tick")?,
-            scheduler_position: u32::try_from(uint_value(&fields[1], "node_scheduler")?).map_err(
-                |_| StrictCborError::InvalidField {
-                    field: "node_scheduler".to_owned(),
-                },
-            )?,
-            owner_id: string(&fields[2], "node_owner")?,
-            output_ordinal: u32::try_from(uint_value(&fields[3], "node_ordinal")?).map_err(
-                |_| StrictCborError::InvalidField {
-                    field: "node_ordinal".to_owned(),
-                },
-            )?,
-            schema_id: u32::try_from(uint_value(&fields[4], "node_schema")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "node_schema".to_owned(),
-                }
-            })?,
-            artifact_digest: bytes(&fields[5], "node_digest")?,
+        decode_dependency_node_value(value).map_err(|field| StrictCborError::InvalidField {
+            field: field.to_owned(),
         })
     }
 
@@ -3534,16 +3517,16 @@ pub mod strict_codec {
 
     fn decode_frontier(value: &Value) -> Result<RecomputationFrontierV1, StrictCborError> {
         decode_recomputation_frontier_value(value)
-            .map_err(|error| nested_record_error(error, "recomputation_frontier"))
+            .map_err(|(error, field)| nested_record_error(error, field))
     }
 
     fn decode_invalidation(value: &Value) -> Result<SuffixInvalidationV1, StrictCborError> {
         decode_suffix_invalidation_value(value)
-            .map_err(|error| nested_record_error(error, "suffix_invalidation"))
+            .map_err(|(error, field)| nested_record_error(error, field))
     }
 
     /// A magic or version mismatch keeps its own code; every other shape
-    /// failure names the nested record.
+    /// failure names the first malformed field of the nested record.
     fn nested_record_error(error: FrontierArtifactErrorV1, field: &str) -> StrictCborError {
         match error {
             FrontierArtifactErrorV1::UnsupportedVersion => StrictCborError::UnsupportedVersion,
@@ -4456,48 +4439,6 @@ pub mod strict_codec {
             let evidence = super::super::tests::evidence();
             let contract = &evidence.contract.counterfactual;
 
-            let frontier = replace_field(
-                &recomputation_frontier_value(&contract.frontier),
-                10,
-                uint(u64::from(u32::MAX) + 1),
-            );
-            assert_eq!(
-                decode_frontier(&frontier),
-                Err(StrictCborError::InvalidField {
-                    field: "recomputation_frontier".to_owned(),
-                })
-            );
-            let frontier = replace_field(
-                &recomputation_frontier_value(&contract.frontier),
-                0,
-                text("RCF2"),
-            );
-            assert_eq!(
-                decode_frontier(&frontier),
-                Err(StrictCborError::UnsupportedVersion)
-            );
-
-            let invalidation = replace_field(
-                &suffix_invalidation_value(&contract.invalidation),
-                15,
-                Value::Array(vec![uint(1), Value::Null, Value::Bool(true)]),
-            );
-            assert_eq!(
-                decode_invalidation(&invalidation),
-                Err(StrictCborError::InvalidField {
-                    field: "suffix_invalidation".to_owned(),
-                })
-            );
-            let invalidation = replace_field(
-                &suffix_invalidation_value(&contract.invalidation),
-                1,
-                uint(2),
-            );
-            assert_eq!(
-                decode_invalidation(&invalidation),
-                Err(StrictCborError::UnsupportedVersion)
-            );
-
             let counterfactual = replace_field(&encode_counterfactual(contract), 8, Value::Null);
             assert!(decode_counterfactual(&counterfactual).is_err());
 
@@ -4508,6 +4449,128 @@ pub mod strict_codec {
                 Value::Null,
             );
             assert!(decode_case(&case).is_ok());
+        }
+
+        fn invalid_field(field: &str) -> Result<(), StrictCborError> {
+            Err(StrictCborError::InvalidField {
+                field: field.to_owned(),
+            })
+        }
+
+        #[test]
+        fn nested_frontier_errors_name_the_malformed_field() {
+            let evidence = super::super::tests::evidence();
+            let frontier = recomputation_frontier_value(&evidence.contract.counterfactual.frontier);
+            let beyond_u32 = uint(u64::from(u32::MAX) + 1);
+            let cases = [
+                (0, uint(1), invalid_field("frontier_magic")),
+                (0, text("RCF2"), Err(StrictCborError::UnsupportedVersion)),
+                (1, text("1"), invalid_field("frontier_version")),
+                (2, uint(0), invalid_field("frontier_id")),
+                (6, uint(0), invalid_field("frontier_seeds")),
+                (8, uint(0), invalid_field("frontier_owners")),
+                (10, beyond_u32, invalid_field("frontier_global_scheduler")),
+                (11, uint(2), invalid_field("frontier_unknown_policy")),
+                (13, text("9"), invalid_field("frontier_end_tick")),
+                (16, Value::Null, invalid_field("frontier_digest")),
+            ];
+            for (index, replacement, expected) in cases {
+                assert_eq!(
+                    decode_frontier(&replace_field(&frontier, index, replacement)).map(drop),
+                    expected,
+                    "frontier field {index}"
+                );
+            }
+            assert_eq!(
+                decode_frontier(&Value::Array(Vec::new())).map(drop),
+                invalid_field("recomputation_frontier")
+            );
+        }
+
+        #[test]
+        fn nested_invalidation_errors_name_the_malformed_field() {
+            let evidence = super::super::tests::evidence();
+            let invalidation =
+                suffix_invalidation_value(&evidence.contract.counterfactual.invalidation);
+            let start =
+                dependency_node_value(&evidence.contract.counterfactual.invalidation.invalid_start);
+            let timeline = Value::Bytes(vec![12; 16]);
+            let cases = [
+                (1, uint(2), Err(StrictCborError::UnsupportedVersion)),
+                (1, text("1"), invalid_field("invalidation_version")),
+                (6, text("1"), invalid_field("invalidation_new_generation")),
+                (8, uint(0), invalid_field("dependency_node")),
+                (
+                    8,
+                    replace_field(&start, 2, uint(1)),
+                    invalid_field("node_owner"),
+                ),
+                (
+                    9,
+                    replace_field(&start, 5, uint(1)),
+                    invalid_field("node_digest"),
+                ),
+                (10, uint(0), invalid_field("invalid_artifacts")),
+                (13, uint(0), invalid_field("retained_exogenous")),
+                (14, uint(9), invalid_field("invalidation_reason")),
+                (
+                    15,
+                    Value::Array(vec![timeline.clone()]),
+                    invalid_field("invalidation_commit_coordinate"),
+                ),
+                (
+                    15,
+                    Value::Array(vec![uint(1), Value::Null, Value::Bool(true)]),
+                    invalid_field("invalidation_commit_timeline"),
+                ),
+                (
+                    15,
+                    Value::Array(vec![timeline.clone(), text("3"), uint(5)]),
+                    invalid_field("invalidation_commit_seq"),
+                ),
+                (
+                    15,
+                    Value::Array(vec![timeline, uint(3), Value::Null]),
+                    invalid_field("invalidation_commit_tick"),
+                ),
+                (17, Value::Null, invalid_field("invalidation_digest")),
+            ];
+            for (index, replacement, expected) in cases {
+                assert_eq!(
+                    decode_invalidation(&replace_field(&invalidation, index, replacement))
+                        .map(drop),
+                    expected,
+                    "invalidation field {index}"
+                );
+            }
+        }
+
+        #[test]
+        fn nested_node_errors_name_the_malformed_field() {
+            let evidence = super::super::tests::evidence();
+            let node =
+                dependency_node_value(&evidence.contract.counterfactual.invalidation.invalid_end);
+            let beyond_u32 = uint(u64::from(u32::MAX) + 1);
+            let cases = [
+                (0, text("1"), "node_tick"),
+                (1, beyond_u32.clone(), "node_scheduler"),
+                (3, beyond_u32.clone(), "node_ordinal"),
+                (4, beyond_u32, "node_schema"),
+            ];
+            for (index, replacement, field) in cases {
+                assert_eq!(
+                    decode_node(&replace_field(&node, index, replacement)).map(drop),
+                    invalid_field(field)
+                );
+            }
+            assert_eq!(
+                decode_node(&uint(1)).map(drop),
+                invalid_field("dependency_node")
+            );
+            assert_eq!(
+                decode_node(&node).map(|decoded| dependency_node_value(&decoded)),
+                Ok(node)
+            );
         }
 
         #[test]
