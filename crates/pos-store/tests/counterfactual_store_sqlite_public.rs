@@ -881,6 +881,55 @@ fn corrupt_persisted_state_is_rejected_closed() {
     }
 }
 
+/// Every counterfactual index and guard trigger, with a weakened body.
+const SCHEMA_OBJECTS: [(&str, &str, &str); 9] = [
+    (
+        "INDEX",
+        "idx_counterfactual_quarantine_artifact",
+        "ON counterfactual_quarantine(fork_id)",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_forks_generation_monotonic",
+        "BEFORE UPDATE ON counterfactual_forks BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_forks_retained",
+        "BEFORE DELETE ON counterfactual_forks BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_quarantine_retained",
+        "BEFORE DELETE ON counterfactual_quarantine BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_quarantine_immutable",
+        "BEFORE UPDATE ON counterfactual_quarantine BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_generations_retained",
+        "BEFORE DELETE ON counterfactual_generations BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_generations_immutable",
+        "BEFORE UPDATE ON counterfactual_generations BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_artifacts_retained",
+        "BEFORE DELETE ON counterfactual_artifacts BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_artifacts_immutable",
+        "BEFORE UPDATE ON counterfactual_artifacts BEGIN SELECT 1; END",
+    ),
+];
+
 #[test]
 fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
     let fixture = fixture();
@@ -919,53 +968,7 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
     );
     drop(migrated);
 
-    for (kind, name, weakened) in [
-        (
-            "INDEX",
-            "idx_counterfactual_quarantine_artifact",
-            "ON counterfactual_quarantine(fork_id)",
-        ),
-        (
-            "TRIGGER",
-            "counterfactual_forks_generation_monotonic",
-            "BEFORE UPDATE ON counterfactual_forks BEGIN SELECT 1; END",
-        ),
-        (
-            "TRIGGER",
-            "counterfactual_forks_retained",
-            "BEFORE DELETE ON counterfactual_forks BEGIN SELECT 1; END",
-        ),
-        (
-            "TRIGGER",
-            "counterfactual_quarantine_retained",
-            "BEFORE DELETE ON counterfactual_quarantine BEGIN SELECT 1; END",
-        ),
-        (
-            "TRIGGER",
-            "counterfactual_quarantine_immutable",
-            "BEFORE UPDATE ON counterfactual_quarantine BEGIN SELECT 1; END",
-        ),
-        (
-            "TRIGGER",
-            "counterfactual_generations_retained",
-            "BEFORE DELETE ON counterfactual_generations BEGIN SELECT 1; END",
-        ),
-        (
-            "TRIGGER",
-            "counterfactual_generations_immutable",
-            "BEFORE UPDATE ON counterfactual_generations BEGIN SELECT 1; END",
-        ),
-        (
-            "TRIGGER",
-            "counterfactual_artifacts_retained",
-            "BEFORE DELETE ON counterfactual_artifacts BEGIN SELECT 1; END",
-        ),
-        (
-            "TRIGGER",
-            "counterfactual_artifacts_immutable",
-            "BEFORE UPDATE ON counterfactual_artifacts BEGIN SELECT 1; END",
-        ),
-    ] {
+    for (kind, name, weakened) in SCHEMA_OBJECTS {
         ok(execute(&fixture.path, &format!("DROP {kind} {name};")));
         assert!(open_read_only().contains(name), "{name}");
         // A writable open recreates a missing object.
