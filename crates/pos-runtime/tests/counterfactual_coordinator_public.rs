@@ -783,7 +783,7 @@ fn invalid_artifact(
 ) -> InvalidArtifactV1 {
     InvalidArtifactV1 {
         artifact_class: ENDOGENOUS_ARTIFACT_CLASS_V1.to_owned(),
-        schema_id: 40,
+        schema_id: nodes[position].node.schema_id,
         artifact_digest: nodes[position].node.artifact_digest,
         producer: nodes[position].node.clone(),
         prior_generation,
@@ -1461,7 +1461,7 @@ fn suffix_ending_on_the_frontier_tick_has_a_valid_range<B: Backend>() -> TestRes
         invalidation.invalid_artifacts,
         vec![InvalidArtifactV1 {
             artifact_class: ENDOGENOUS_ARTIFACT_CLASS_V1.to_owned(),
-            schema_id: 40,
+            schema_id: world.node.schema_id,
             artifact_digest: world.node.artifact_digest,
             producer: world.node.clone(),
             prior_generation: 0,
