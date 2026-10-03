@@ -380,7 +380,10 @@ pub(crate) const SOURCE_GENESIS: Hash = hash(0x47);
 pub(crate) fn zero_event_inputs(
     snapshots: &[ManifestOwnerAdmissionSnapshotV1],
     predecessor: &dyn Fn(TimelineId) -> Option<Hash>,
-) -> Fallible<(Vec<LocalCutRecordingContextRowV1>, Vec<LocalCutExpectedHeadRowV1>)> {
+) -> Fallible<(
+    Vec<LocalCutRecordingContextRowV1>,
+    Vec<LocalCutExpectedHeadRowV1>,
+)> {
     let mut contexts = Vec::with_capacity(snapshots.len());
     let mut heads = Vec::with_capacity(snapshots.len());
     for snapshot in snapshots {

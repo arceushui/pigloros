@@ -320,11 +320,17 @@ fn rows_round_trip_through_their_canonical_encodings() {
     unchained.predecessor_wcb_hash = None;
     for row in [expected_row(1), unchained] {
         let bytes = row.to_canonical_cbor();
-        assert_eq!(LocalCutExpectedHeadRowV1::from_canonical_cbor(&bytes), Ok(row));
+        assert_eq!(
+            LocalCutExpectedHeadRowV1::from_canonical_cbor(&bytes),
+            Ok(row)
+        );
     }
     let row = result_row(1);
     let bytes = row.to_canonical_cbor();
-    assert_eq!(LocalCutResultHeadRowV1::from_canonical_cbor(&bytes), Ok(row));
+    assert_eq!(
+        LocalCutResultHeadRowV1::from_canonical_cbor(&bytes),
+        Ok(row)
+    );
 }
 
 #[test]

@@ -183,7 +183,12 @@ impl LocalCutManifestBindingPageV1 {
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let rows = self.rows.iter().map(encode_binding_row).collect::<Vec<_>>();
-        encode_page(MANIFEST_BINDING_KIND, self.tree_scope, self.first_ordinal, &rows)
+        encode_page(
+            MANIFEST_BINDING_KIND,
+            self.tree_scope,
+            self.first_ordinal,
+            &rows,
+        )
     }
 
     #[must_use]
@@ -331,7 +336,13 @@ impl LocalCutManifestBindingBranchV1 {
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let span = (self.first_ordinal, self.row_count);
-        encode_branch(MANIFEST_BINDING_KIND, self.tree_scope, self.height, span, &self.children)
+        encode_branch(
+            MANIFEST_BINDING_KIND,
+            self.tree_scope,
+            self.height,
+            span,
+            &self.children,
+        )
     }
 
     #[must_use]
