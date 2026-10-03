@@ -31,6 +31,7 @@
 //!    the contract that introduces it, because unused helpers fail the build
 //!    and untested branches fail the region gate.
 
+use crate::DependencyNodeV1;
 use ciborium::value::Value;
 use std::io::Cursor;
 
@@ -125,6 +126,22 @@ pub(super) fn text_value(value: &str) -> Value {
 /// Byte-string value for encoding.
 pub(super) fn bytes_value(value: &[u8]) -> Value {
     Value::Bytes(value.to_vec())
+}
+
+/// Six-field `[tick, scheduler_position, owner_id, output_ordinal,
+/// schema_id, artifact_digest]` array of one dependency-graph node.
+///
+/// This is the single node encoding shared by every counterfactual record
+/// that embeds a node coordinate.
+pub(super) fn node_value(node: &DependencyNodeV1) -> Value {
+    Value::Array(vec![
+        uint_value(node.tick),
+        uint_value(node.scheduler_position.into()),
+        text_value(&node.owner_id),
+        uint_value(node.output_ordinal.into()),
+        uint_value(node.schema_id.into()),
+        bytes_value(&node.artifact_digest),
+    ])
 }
 
 /// Sequential reader over the fields of one fixed-length CBOR array.
@@ -222,6 +239,21 @@ impl<'a> FieldReader<'a> {
         self.read_with(fixed_bytes_field::<LENGTH>, [0; LENGTH])
     }
 
+    /// Read a node coordinate encoded by [`node_value`].
+    pub(super) fn read_node(&mut self) -> DependencyNodeV1 {
+        self.read_with(
+            node_field,
+            DependencyNodeV1 {
+                tick: 0,
+                scheduler_position: 0,
+                owner_id: String::new(),
+                output_ordinal: 0,
+                schema_id: 0,
+                artifact_digest: [0; 32],
+            },
+        )
+    }
+
     /// Return the first recorded failure, if any.
     pub(super) fn finish(self) -> Result<(), WireError> {
         self.error.map_or(Ok(()), Err)
@@ -253,4 +285,22 @@ fn fixed_bytes_field<const LENGTH: usize>(value: &Value) -> Result<[u8; LENGTH],
         }
         _ => Err(WireError::InvalidEncoding),
     }
+}
+
+fn node_field(value: &Value) -> Result<DependencyNodeV1, WireError> {
+    let mut fields = FieldReader::new(value, 6);
+    let tick = fields.read_u64();
+    let scheduler_position = fields.read_u32();
+    let owner_id = fields.read_text();
+    let output_ordinal = fields.read_u32();
+    let schema_id = fields.read_u32();
+    let artifact_digest = fields.read_bytes::<32>();
+    fields.finish().map(|()| DependencyNodeV1 {
+        tick,
+        scheduler_position,
+        owner_id,
+        output_ordinal,
+        schema_id,
+        artifact_digest,
+    })
 }
