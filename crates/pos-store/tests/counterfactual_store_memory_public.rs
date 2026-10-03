@@ -462,10 +462,14 @@ fn unpublished_root_and_deleted_forks_are_not_found() {
     assert_eq!(seqs(store, fork), vec![1]);
 
     ok(store.publish_counterfactual_facts(fork, facts()));
+    let command = Spec::new(fork).command();
+    committed(store, &command);
     ok(store.delete_timeline(fork));
 
+    // Like the SQLite adapter, deletion keeps the counterfactual state but the
+    // deleted Fork is no longer visible to any port operation.
     assert_eq!(
-        store.commit_counterfactual_invalidation(&Spec::new(fork).command()),
+        store.commit_counterfactual_invalidation(&command),
         Err(StoreError::ForkNotFound)
     );
     assert_eq!(
@@ -473,7 +477,11 @@ fn unpublished_root_and_deleted_forks_are_not_found() {
         Err(StoreError::ForkNotFound)
     );
     assert_eq!(
-        store.read_generation_artifact(at(fork, 0), hash(1)),
+        store.read_generation_artifact(at(fork, 1), command.frontier().digest()),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.publish_counterfactual_facts(fork, facts()),
         Err(StoreError::ForkNotFound)
     );
 }
