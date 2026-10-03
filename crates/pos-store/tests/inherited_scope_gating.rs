@@ -83,7 +83,7 @@ fn stores() -> Vec<(&'static str, Box<dyn EventStore>)> {
     ]
 }
 
-fn bounds() -> EventReadBounds {
+const fn bounds() -> EventReadBounds {
     EventReadBounds::new(1_024, 64, 8, 64)
 }
 
