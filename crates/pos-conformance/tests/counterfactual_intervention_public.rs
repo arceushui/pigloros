@@ -351,6 +351,18 @@ fn header_is_checked_before_the_field_count() -> TestResult {
 }
 
 #[test]
+fn supported_header_with_an_extra_field_is_invalid_encoding() -> TestResult {
+    let mut extra = fields()?;
+    extra.push(Value::Integer(0_u64.into()));
+    assert_eq!(extra.len(), FIELD_COUNT + 1);
+    assert_eq!(
+        decode_error(&encode(&Value::Array(extra))?)?,
+        InterventionError::InvalidEncoding
+    );
+    Ok(())
+}
+
+#[test]
 fn every_field_rejects_a_wrong_cbor_type() -> TestResult {
     for index in 0..FIELD_COUNT {
         let bytes = bytes_with_field(index, Value::Array(Vec::new()))?;

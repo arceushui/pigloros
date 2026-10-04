@@ -314,9 +314,7 @@ fn digest_binds_every_field_and_the_declared_digest_is_checked() -> TestResult {
     ];
     for edit in error_edits {
         let mut result = error_base.clone();
-        if let Some(error) = result.terminal_error.as_mut() {
-            edit(error);
-        }
+        edit(terminal(&mut result));
         assert_ne!(result.digest()?, error_base.digest()?);
     }
 
@@ -347,12 +345,17 @@ const ZERO_IDENTITY_EDITS: [Edit; 11] = [
     |result| result.execution_profile_digest = [0; 32],
     |result| result.trust_policy_snapshot_digest = [0; 32],
     |result| result.evaluator_identity_digest = [0; 32],
-    |result| {
-        if let Some(error) = result.terminal_error.as_mut() {
-            error.safe_digest = Some([0; 32]);
-        }
-    },
+    |result| terminal(result).safe_digest = Some([0; 32]),
 ];
+
+/// Borrow the fixture's terminal error, failing the test loudly when the
+/// fixture has none.
+fn terminal(result: &mut CounterfactualResultV1) -> &mut TerminalError {
+    result
+        .terminal_error
+        .as_mut()
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("fixture has no terminal error")))
+}
 
 const fn minimal_nonzero<const LENGTH: usize>() -> [u8; LENGTH] {
     let mut value = [0; LENGTH];
@@ -392,9 +395,7 @@ fn zero_identities_and_digests_are_rejected() -> TestResult {
     ] {
         *digest = minimal_nonzero();
     }
-    if let Some(error) = minimal.terminal_error.as_mut() {
-        error.safe_digest = Some(minimal_nonzero());
-    }
+    terminal(&mut minimal).safe_digest = Some(minimal_nonzero());
     let minimal = sealed(minimal)?;
     minimal.validate()?;
     assert_eq!(decoded(&minimal.to_canonical_cbor()?)?, minimal);

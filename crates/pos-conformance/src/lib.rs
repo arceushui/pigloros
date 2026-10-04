@@ -4476,10 +4476,12 @@ pub mod strict_codec {
                     "frontier field {index}"
                 );
             }
-            assert_eq!(
-                decode_frontier(&Value::Array(Vec::new())).map(drop),
-                invalid_field("recomputation_frontier")
-            );
+            for record in [Vec::new(), vec![text("RCF1")]] {
+                assert_eq!(
+                    decode_frontier(&Value::Array(record)).map(drop),
+                    invalid_field("recomputation_frontier")
+                );
+            }
         }
 
         #[test]
@@ -4536,6 +4538,12 @@ pub mod strict_codec {
                         .map(drop),
                     expected,
                     "invalidation field {index}"
+                );
+            }
+            for record in [Vec::new(), vec![text("SIV1")]] {
+                assert_eq!(
+                    decode_invalidation(&Value::Array(record)).map(drop),
+                    invalid_field("suffix_invalidation")
                 );
             }
         }
