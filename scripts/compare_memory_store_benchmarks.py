@@ -38,7 +38,9 @@ CSV_HEADER = ("scenario", "cardinality", "sample", "elapsed_nanos")
 DEFAULT_BRANCH = "main"
 FRESHNESS_LIMIT = datetime.timedelta(days=14)
 MANIFEST_FILE = "memory-erasure-benchmark-manifest.json"
+MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
 MAX_ARCHIVE_MEMBER_BYTES = 1_000_000
+MAX_ARCHIVE_MEMBERS = 32
 SAMPLE_COUNT = 10
 SCHEMA_VERSION = 1
 WORKFLOW_PATH = ".github/workflows/memory-store-benchmark.yml"
@@ -595,6 +597,11 @@ def validate_artifact_metadata(
     if artifact.get("name") != ARTIFACT_NAME:
         raise CandidateRejected("artifact has the wrong baseline name")
     artifact_id = require_positive_int(artifact.get("id"), "artifact id", CandidateRejected)
+    archive_size = require_positive_int(
+        artifact.get("size_in_bytes"), "artifact size_in_bytes", CandidateRejected
+    )
+    if archive_size > MAX_ARCHIVE_BYTES:
+        raise CandidateRejected("artifact exceeds the maximum archive size")
     if artifact.get("expired") is not False:
         raise CandidateRejected("artifact is expired")
     created_at = parse_timestamp(artifact.get("created_at"), "artifact created_at", CandidateRejected)
@@ -666,8 +673,11 @@ def read_named_archive_members(archive: bytes) -> tuple[str, str]:
 
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+            members = zipped.infolist()
+            if len(members) > MAX_ARCHIVE_MEMBERS:
+                raise CandidateRejected("archive has too many members")
             matches: dict[str, zipfile.ZipInfo] = {}
-            for member in zipped.infolist():
+            for member in members:
                 name = pathlib.PurePosixPath(member.filename).name
                 if name not in {MANIFEST_FILE, "memory-erasure-benchmark.csv"}:
                     continue
@@ -682,7 +692,11 @@ def read_named_archive_members(archive: bytes) -> tuple[str, str]:
             manifest_text = zipped.read(matches[MANIFEST_FILE]).decode("utf-8")
             csv_text = zipped.read(matches["memory-erasure-benchmark.csv"]).decode("utf-8")
             return manifest_text, csv_text
-    except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as error:
+    except CandidateRejected:
+        raise
+    except Exception as error:
+        # Archive bytes are historical evidence: no malformed ZIP/decompression
+        # failure may turn the advisory PR comparison into a failed job.
         raise CandidateRejected(f"cannot read baseline artifact archive: {error}") from error
 
 
@@ -804,6 +818,30 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def read_bounded_archive_response(response: Any) -> bytes:
+    """Read a historical artifact with a hard size limit, even without a header."""
+
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        if not re.fullmatch(r"[0-9]+", content_length):
+            raise ApiError("artifact response has an invalid Content-Length")
+        if int(content_length) > MAX_ARCHIVE_BYTES:
+            raise ApiError("artifact response exceeds the maximum archive size")
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(min(64 * 1024, MAX_ARCHIVE_BYTES - total + 1))
+        if not chunk:
+            return b"".join(chunks)
+        if not isinstance(chunk, bytes):
+            raise ApiError("artifact response did not return bytes")
+        total += len(chunk)
+        if total > MAX_ARCHIVE_BYTES:
+            raise ApiError("artifact response exceeds the maximum archive size")
+        chunks.append(chunk)
+
+
 class GitHubActionsClient:
     """Small standard-library GitHub Actions REST client for one workflow job."""
 
@@ -888,7 +926,7 @@ class GitHubActionsClient:
         opener = urllib.request.build_opener(NoRedirect)
         try:
             with opener.open(request, timeout=30) as response:
-                return response.read()
+                return read_bounded_archive_response(response)
         except urllib.error.HTTPError as error:
             if error.code not in {301, 302, 303, 307, 308}:
                 raise ApiError(f"cannot start artifact download: {error}") from error
@@ -907,7 +945,7 @@ class GitHubActionsClient:
         )
         try:
             with urllib.request.urlopen(anonymous_request, timeout=30) as response:
-                return response.read()
+                return read_bounded_archive_response(response)
         except (urllib.error.URLError, urllib.error.HTTPError) as error:
             raise ApiError(f"cannot download artifact archive: {error}") from error
 

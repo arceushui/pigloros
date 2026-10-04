@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import importlib.util
 import io
 import json
@@ -11,6 +12,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 from collections.abc import Callable
 from typing import Any
@@ -18,6 +20,7 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "compare_memory_store_benchmarks.py"
+WORKFLOW = ROOT / ".github" / "workflows" / "memory-store-benchmark.yml"
 SPEC = importlib.util.spec_from_file_location("compare_memory_store_benchmarks", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load {SCRIPT}")
@@ -112,6 +115,7 @@ def artifact(
     repository_id: int = IDENTITY.repository_id,
     head_repository_id: int = IDENTITY.repository_id,
     expired: bool = False,
+    size_in_bytes: int = 1_000,
 ) -> dict[str, Any]:
     """Build the relevant GitHub artifact-list response shape."""
 
@@ -121,6 +125,7 @@ def artifact(
     return {
         "id": artifact_id,
         "name": COMPARATOR.ARTIFACT_NAME,
+        "size_in_bytes": size_in_bytes,
         "expired": expired,
         "created_at": iso(created_at),
         "expires_at": iso(expires_at),
@@ -180,6 +185,24 @@ def archive_bytes(manifest_data: dict[str, Any], data: Any) -> bytes:
         zipped.writestr(f"artifacts/{COMPARATOR.MANIFEST_FILE}", json.dumps(manifest_data))
         zipped.writestr("artifacts/memory-erasure-benchmark.csv", csv_contents)
     return output.getvalue()
+
+
+def encrypted_archive(archive: bytes) -> bytes:
+    """Set ZIP encryption flags so stdlib reading deterministically raises."""
+
+    modified = bytearray(archive)
+    for signature, flag_offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        offset = 0
+        while True:
+            index = modified.find(signature, offset)
+            if index < 0:
+                break
+            flags = int.from_bytes(modified[index + flag_offset : index + flag_offset + 2], "little")
+            modified[index + flag_offset : index + flag_offset + 2] = (flags | 1).to_bytes(
+                2, "little"
+            )
+            offset = index + len(signature)
+    return bytes(modified)
 
 
 class BenchmarkCsvTests(unittest.TestCase):
@@ -568,6 +591,141 @@ class BaselineSelectionTests(unittest.TestCase):
 
         self.assertIsNone(selected)
         self.assertIn("duplicate", rejections[0])
+
+    def test_rejects_oversized_historical_artifact_before_downloading(self) -> None:
+        candidate, run, _archive = self.valid_candidate(1, run_id=101, sha="1" * 40)
+        candidate["size_in_bytes"] = COMPARATOR.MAX_ARCHIVE_BYTES + 1
+
+        selected, rejections = self.select([candidate], {101: run}, {})
+
+        self.assertIsNone(selected)
+        self.assertIn("maximum archive size", rejections[0])
+
+
+class HistoricalArchiveFailureTests(unittest.TestCase):
+    """Historical ZIP failures remain non-fatal advisory comparison results."""
+
+    def test_bounded_response_rejects_a_body_larger_than_the_announced_limit(self) -> None:
+        class OversizedResponse:
+            headers: dict[str, str] = {}
+
+            def __init__(self) -> None:
+                self.remaining = COMPARATOR.MAX_ARCHIVE_BYTES + 1
+
+            def read(self, amount: int) -> bytes:
+                length = min(amount, self.remaining)
+                self.remaining -= length
+                return b"x" * length
+
+        with self.assertRaisesRegex(COMPARATOR.ApiError, "maximum archive size"):
+            COMPARATOR.read_bounded_archive_response(OversizedResponse())
+
+    def test_encrypted_historical_archive_is_comparison_unavailable_not_failure(self) -> None:
+        current_data = dataset()
+        current_manifest = manifest(current_data)
+        now = COMPARATOR.utc_now()
+        baseline_manifest = manifest(
+            current_data,
+            event="push",
+            head_branch="main",
+            head_sha="a" * 40,
+            workflow_run_id=201,
+            created_at=now,
+        )
+        candidate = artifact(301, run_id=201, sha="a" * 40, created_at=now)
+        run = workflow_run(201, sha="a" * 40)
+        broken_archive = encrypted_archive(archive_bytes(baseline_manifest, current_data))
+        test_case = self
+
+        class HistoricalClient:
+            def __init__(self, token: str, api_url: str = "https://api.github.com") -> None:
+                del token, api_url
+
+            def list_baseline_artifacts(self, repository: str) -> list[dict[str, Any]]:
+                test_case.assertEqual(repository, IDENTITY.repository)
+                return [candidate]
+
+            def get_run(self, repository: str, run_id: int) -> dict[str, Any]:
+                test_case.assertEqual(repository, IDENTITY.repository)
+                test_case.assertEqual(run_id, 201)
+                return run
+
+            def download_archive(self, received: dict[str, Any]) -> bytes:
+                test_case.assertEqual(received["id"], 301)
+                return broken_archive
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            csv_path = temporary / "current.csv"
+            manifest_path = temporary / "current-manifest.json"
+            summary_path = temporary / "summary.md"
+            csv_path.write_text(csv_text(), encoding="utf-8")
+            manifest_path.write_text(json.dumps(current_manifest), encoding="utf-8")
+
+            arguments = COMPARATOR.argparse.Namespace(
+                csv=csv_path,
+                manifest=manifest_path,
+                summary=summary_path,
+                token="read-only-token",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                workflow_id=IDENTITY.workflow_id,
+                workflow_path=IDENTITY.workflow_path,
+                default_branch="main",
+                api_url="https://api.github.com",
+            )
+            with mock.patch.object(COMPARATOR, "GitHubActionsClient", HistoricalClient):
+                self.assertEqual(COMPARATOR.compare(arguments), 0)
+
+            self.assertIn("Comparison unavailable", summary_path.read_text(encoding="utf-8"))
+
+
+class WorkflowTriggerTests(unittest.TestCase):
+    """Relevant benchmark inputs must trigger both main and PR measurements."""
+
+    @staticmethod
+    def paths_for_event(event: str) -> tuple[str, ...]:
+        lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+        marker = f"  {event}:"
+        start = lines.index(marker) + 1
+        paths: list[str] = []
+        inside_paths = False
+        for line in lines[start:]:
+            if line.startswith("  ") and not line.startswith("    "):
+                break
+            if line == "    paths:":
+                inside_paths = True
+                continue
+            if inside_paths and line.startswith("      - "):
+                paths.append(line.removeprefix("      - "))
+            elif inside_paths and line.startswith("    "):
+                break
+        return tuple(paths)
+
+    def test_compiled_child_modules_and_lockfile_trigger_benchmark(self) -> None:
+        representative_changes = (
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "crates/pos-store/Cargo.toml",
+            "crates/pos-store/src/memory/pipeline_admission.rs",
+            "crates/pos-core/src/erasure/authorization.rs",
+            "crates/pos-crypto/src/lib.rs",
+            "crates/pos-conformance/src/lib.rs",
+            "crates/pos-reference/src/lib.rs",
+        )
+        for event in ("push", "pull_request"):
+            with self.subTest(event=event):
+                paths = self.paths_for_event(event)
+                for changed_path in representative_changes:
+                    with self.subTest(path=changed_path):
+                        self.assertTrue(
+                            any(
+                                fnmatch.fnmatchcase(changed_path, pattern)
+                                for pattern in paths
+                            ),
+                            f"{changed_path} does not trigger {event}",
+                        )
 
 
 class SummaryTests(unittest.TestCase):

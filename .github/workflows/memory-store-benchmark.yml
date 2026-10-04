@@ -8,23 +8,31 @@ on:
     branches: [main]
     paths:
       - .github/workflows/memory-store-benchmark.yml
-      - crates/pos-core/src/erasure.rs
-      - crates/pos-core/src/erasure/**
-      - crates/pos-core/tests/support/erasure.rs
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/pos-conformance/**
+      - crates/pos-core/**
+      - crates/pos-crypto/**
+      - crates/pos-reference/**
       - crates/pos-store/Cargo.toml
       - crates/pos-store/benches/**
-      - crates/pos-store/src/memory.rs
+      - crates/pos-store/src/**
       - scripts/compare_memory_store_benchmarks.py
       - scripts/test_compare_memory_store_benchmarks.py
   pull_request:
     paths:
       - .github/workflows/memory-store-benchmark.yml
-      - crates/pos-core/src/erasure.rs
-      - crates/pos-core/src/erasure/**
-      - crates/pos-core/tests/support/erasure.rs
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/pos-conformance/**
+      - crates/pos-core/**
+      - crates/pos-crypto/**
+      - crates/pos-reference/**
       - crates/pos-store/Cargo.toml
       - crates/pos-store/benches/**
-      - crates/pos-store/src/memory.rs
+      - crates/pos-store/src/**
       - scripts/compare_memory_store_benchmarks.py
       - scripts/test_compare_memory_store_benchmarks.py
   schedule:
