@@ -2,8 +2,9 @@ use std::error::Error;
 
 use pos_core::{
     local_cut_owner_intent_digest_v1, Hash, LocalCutCompositionBindingRowV1,
-    LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1, LocalCutOwnerErrorV1,
-    LocalCutOwnerRequestV1, LocalCutOwnerStateV1, LocalCutRecordingContextRowV1,
+    LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1, LocalCutManifestBindingRowV1,
+    LocalCutManifestBindingTableV1, LocalCutOwnerErrorV1, LocalCutOwnerRequestV1,
+    LocalCutOwnerStateV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1,
     LocalCutSealInputV2, LocalCutSealV2, LocalCutTableRefV1, PluginId, TimelineId,
 };
 
@@ -17,10 +18,52 @@ fn table(row_count: u64, byte: u8) -> Result<LocalCutTableRefV1, pos_core::Local
     LocalCutTableRefV1::new(row_count, (row_count != 0).then(|| hash(byte)))
 }
 
+const fn expected_head(timeline_id: TimelineId) -> LocalCutExpectedHeadRowV1 {
+    LocalCutExpectedHeadRowV1 {
+        timeline_id,
+        logical_head: 0,
+        stitched_chain_hash: hash(34),
+        source_timeline_id: timeline_id,
+        source_segment_head: 0,
+        source_chain_hash: hash(34),
+        logical_prefix: 0,
+        lineage_proof_hash: None,
+        predecessor_wcb_hash: None,
+    }
+}
+
+const fn result_head(timeline_id: TimelineId) -> LocalCutResultHeadRowV1 {
+    LocalCutResultHeadRowV1 {
+        timeline_id,
+        result_logical_head: 0,
+        result_stitched_hash: hash(34),
+        result_source_segment_head: 0,
+        result_source_chain_hash: hash(34),
+        successor_wcb_hash: hash(35),
+        event_count: 0,
+    }
+}
+
 fn request() -> Result<LocalCutOwnerRequestV1, Box<dyn Error>> {
-    let owner_id = [1; 32];
     let timeline_id = TimelineId::new();
+    request_with_heads(
+        vec![expected_head(timeline_id)],
+        vec![result_head(timeline_id)],
+    )
+}
+
+fn request_with_heads(
+    expected_head_rows: Vec<LocalCutExpectedHeadRowV1>,
+    result_head_rows: Vec<LocalCutResultHeadRowV1>,
+) -> Result<LocalCutOwnerRequestV1, Box<dyn Error>> {
+    let owner_id = [1; 32];
+    let timeline_id = expected_head_rows
+        .first()
+        .ok_or("missing expected head row")?
+        .timeline_id;
     let plugin_id = PluginId::new();
+    let expected_table = LocalCutHeadsTableV1::expected_heads(owner_id, 1, &expected_head_rows)?;
+    let result_table = LocalCutHeadsTableV1::result_heads(owner_id, 1, &result_head_rows)?;
     let manifest_binding_table = LocalCutManifestBindingTableV1::new(
         owner_id,
         1,
@@ -47,7 +90,7 @@ fn request() -> Result<LocalCutOwnerRequestV1, Box<dyn Error>> {
         composition_table,
         inbox_table: table(0, 10)?,
         invocation_table: table(0, 11)?,
-        expected_heads_table: table(1, 12)?,
+        expected_heads_table: expected_table.table_ref(),
         ebp_native_hash: hash(13),
         execution_profile_native_hash: hash(14),
         recording_context_table,
@@ -78,8 +121,10 @@ fn request() -> Result<LocalCutOwnerRequestV1, Box<dyn Error>> {
             retention_lease_hash: hash(22),
             predecessor_wcb_hash: None,
         }],
+        expected_head_rows,
+        result_head_rows,
         partition_ledger_seq: 1,
-        result_heads_table: table(1, 23)?,
+        result_heads_table: result_table.table_ref(),
         participant_successor_table: table(1, 24)?,
         cpu_completion_table: table(0, 25)?,
         action_disposition_table: table(1, 26)?,
@@ -149,6 +194,45 @@ fn intent_rejects_partial_or_invalid_kind_one_and_kind_eight_rows() -> TestResul
         local_cut_owner_intent_digest_v1(&invalid_context),
         Err(LocalCutOwnerErrorV1::InvalidBatch)
     );
+    Ok(())
+}
+
+#[test]
+fn intent_proves_kind_four_and_kind_five_rows_against_their_tables() -> TestResult {
+    let request = request()?;
+    let digest = local_cut_owner_intent_digest_v1(&request)?;
+    let timeline_id = request.expected_head_rows[0].timeline_id;
+
+    let mut expected = expected_head(timeline_id);
+    expected.predecessor_wcb_hash = Some(hash(36));
+    let rebuilt = request_with_heads(vec![expected], vec![result_head(timeline_id)])?;
+    assert_ne!(local_cut_owner_intent_digest_v1(&rebuilt)?, digest);
+    let mut result = result_head(timeline_id);
+    result.successor_wcb_hash = hash(37);
+    let rebuilt = request_with_heads(vec![expected_head(timeline_id)], vec![result])?;
+    assert_ne!(local_cut_owner_intent_digest_v1(&rebuilt)?, digest);
+
+    let mut unproven_expected = request.clone();
+    unproven_expected.expected_head_rows[0].logical_head = 1;
+    let mut unproven_result = request.clone();
+    unproven_result.result_head_rows[0].event_count = 1;
+    let mut missing_expected = request.clone();
+    missing_expected.expected_head_rows.clear();
+    let mut unsorted_result = request;
+    unsorted_result
+        .result_head_rows
+        .push(result_head(TimelineId::from_ulid(ulid::Ulid::nil())));
+    for invalid in [
+        unproven_expected,
+        unproven_result,
+        missing_expected,
+        unsorted_result,
+    ] {
+        assert_eq!(
+            local_cut_owner_intent_digest_v1(&invalid),
+            Err(LocalCutOwnerErrorV1::InvalidBatch)
+        );
+    }
     Ok(())
 }
 

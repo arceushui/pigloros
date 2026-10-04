@@ -38,11 +38,14 @@ pub mod hasher;
 pub mod ids;
 pub mod key_registry;
 pub mod local_cut_commit;
+pub mod local_cut_heads;
 pub mod local_cut_owner;
 pub mod local_cut_seal;
+pub mod local_cut_world_closure;
 pub mod manifest;
 pub mod manifest_owner_admission;
 pub mod manifest_owner_link;
+pub mod manifest_owner_members;
 pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
@@ -65,6 +68,7 @@ pub mod world_artifact;
 pub mod world_closure_binding;
 pub mod world_consumer_set;
 pub mod world_dependency_directory;
+pub mod world_dependency_packing;
 pub mod world_history;
 pub mod world_key_evidence;
 pub mod world_recording_receipt;
@@ -237,6 +241,9 @@ pub use local_cut_commit::{
     LocalCutCommitV1, LocalCutReceiptInputV1, LocalCutReceiptV1, MAX_LOCAL_CUT_COMMIT_BYTES_V1,
     MAX_LOCAL_CUT_RECEIPT_BYTES_V1,
 };
+pub use local_cut_heads::{
+    LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1, LocalCutResultHeadRowV1,
+};
 pub use local_cut_owner::{
     local_cut_owner_intent_digest_v1, prepare_local_cut_owner_commit_v1,
     validate_local_cut_owner_result_v1, validate_local_cut_owner_successor_v1,
@@ -250,6 +257,11 @@ pub use local_cut_seal::{
     LocalCutManifestBindingPageV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
     LocalCutSealErrorV2, LocalCutSealInputV2, LocalCutSealV2, LocalCutTableRefV1,
     MAX_LOCAL_CUT_SEAL_BYTES_V2, MAX_LOCAL_CUT_TABLE_ROWS_V1,
+};
+pub use local_cut_world_closure::{
+    derive_local_cut_world_closure_v1, validate_local_cut_owner_predecessors_v1,
+    validate_local_cut_owner_recordings_v1, LocalCutWorldClosureSourceV1, LocalCutWorldClosureV1,
+    LocalCutWorldRecordingV1,
 };
 pub use manifest_owner_admission::{
     manifest_owner_admission_intent_digest_v1, prepare_manifest_owner_admission_v1,
@@ -270,6 +282,13 @@ pub use manifest_owner_link::{
     ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1,
     MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, MAX_MANIFEST_OWNER_PLUGINS_V1,
     MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+};
+pub use manifest_owner_members::{
+    build_manifest_owner_scope_v1, validate_manifest_owner_lease_replacement_v1,
+    ManifestOwnerClassifiedLeafV1, ManifestOwnerConsumerReferenceV1,
+    ManifestOwnerLeafClassificationV1, ManifestOwnerMemberLeafV1, ManifestOwnerPolicySourceV1,
+    ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1,
+    MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1,
 };
 pub use repro_manifest_root::{
     ReproManifestRootErrorV1, ReproManifestRootInputV1, ReproManifestRootV1,
@@ -563,6 +582,10 @@ pub use world_dependency_directory::{
     WorldDependencyBranchChildV1, WorldDependencyBranchErrorV1, WorldDependencyBranchInputV1,
     WorldDependencyBranchV1, WorldDependencyKeyV1, MAX_WORLD_DEPENDENCY_DIRECTORY_BYTES_V1,
     MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1, MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1,
+};
+pub use world_dependency_packing::{
+    check_manifest_policy_seeds_v1, ManifestPolicyLeafExpectationV1, ManifestPolicySeedV1,
+    WorldDependencyDirectoryErrorV1, WorldDependencyDirectoryV1,
 };
 pub use world_history::{
     WorldEventOccurrenceV1, WorldEventPageV1, WorldEventRowInputV1, WorldEventRowV1,

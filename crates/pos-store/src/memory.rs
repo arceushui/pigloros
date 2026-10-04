@@ -6,6 +6,7 @@
 
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
+    ops::Bound,
     sync::Arc,
     time::Instant,
 };
@@ -304,12 +305,24 @@ pub struct MemoryStore {
     /// Idempotent operation outcomes, including the original receipt digests.
     manifest_owner_admission_operations:
         BTreeMap<([u8; 32], Hash), MemoryManifestOwnerAdmissionOperationV1>,
+    /// Scoped admission member leaves by `(scope, kind, native digest)`.
+    manifest_owner_member_leaves:
+        BTreeMap<MemoryManifestOwnerMemberKeyV1, pos_core::ManifestOwnerMemberLeafV1>,
     /// Current local-cut owner state, synchronized with the current admission state.
     local_cut_owner_states: BTreeMap<[u8; 32], LocalCutOwnerStateV1>,
     /// Immutable local-cut batches keyed by owner operation identity.
     local_cut_owner_operations: BTreeMap<([u8; 32], Hash), MemoryLocalCutOwnerOperationV1>,
-    /// Immutable visible local-cut results keyed by their owner and cut identity.
-    local_cut_owner_commits: BTreeMap<([u8; 32], u64), LocalCutOwnerCommitV1>,
+    /// Operation identity of each immutable visible cut, keyed by owner and cut.
+    local_cut_owner_cuts: BTreeMap<([u8; 32], u64), Hash>,
+    /// Each visible cut's WCB1/WCR1 recordings by `(owner, cut, Timeline)`.
+    local_cut_world_recordings:
+        BTreeMap<([u8; 32], u64, TimelineId), pos_core::LocalCutWorldRecordingV1>,
+    /// Unique WCB1 digest index into `local_cut_world_recordings`.
+    local_cut_world_binding_digests: BTreeMap<Hash, ([u8; 32], u64, TimelineId)>,
+    /// WCB1 digest of each owner's Timeline in its last visible recording cut.
+    local_cut_world_latest_bindings: BTreeMap<([u8; 32], TimelineId), Hash>,
+    /// Packed WDB1 dependency nodes by `(scope, node digest)`.
+    world_dependency_branches: BTreeMap<(Hash, Hash), pos_core::WorldDependencyBranchV1>,
     /// Crash-recoverable local adapter recorder sessions by owner/run ID.
     adapter_recording_sessions: BTreeMap<(Hash, Hash), MemoryAdapterRecordingSessionV1>,
     /// Canonical ERS1 history needed to validate predecessor links after restart.
@@ -356,6 +369,8 @@ struct MemoryManifestOwnerAdmissionStateV1 {
     inventory_generation: Hash,
     timelines: BTreeSet<TimelineId>,
 }
+
+type MemoryManifestOwnerMemberKeyV1 = (Hash, pos_core::WorldArtifactKindV1, Hash);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MemoryManifestOwnerAdmissionOperationV1 {
@@ -719,9 +734,14 @@ impl MemoryStore {
             manifest_owner_admission_states: BTreeMap::new(),
             manifest_owner_admission_snapshots: BTreeMap::new(),
             manifest_owner_admission_operations: BTreeMap::new(),
+            manifest_owner_member_leaves: BTreeMap::new(),
             local_cut_owner_states: BTreeMap::new(),
             local_cut_owner_operations: BTreeMap::new(),
-            local_cut_owner_commits: BTreeMap::new(),
+            local_cut_owner_cuts: BTreeMap::new(),
+            local_cut_world_recordings: BTreeMap::new(),
+            local_cut_world_binding_digests: BTreeMap::new(),
+            local_cut_world_latest_bindings: BTreeMap::new(),
+            world_dependency_branches: BTreeMap::new(),
             adapter_recording_sessions: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
             erasure_attempt_pages: BTreeMap::new(),
@@ -11078,7 +11098,7 @@ fn memory_manifest_owner_state_has_orphaned_rows(store: &MemoryStore, owner_id: 
             .keys()
             .any(|(stored_owner, _)| *stored_owner == owner_id)
         || store
-            .local_cut_owner_commits
+            .local_cut_owner_cuts
             .keys()
             .any(|(stored_owner, _)| *stored_owner == owner_id)
 }
@@ -11101,7 +11121,7 @@ fn memory_validate_manifest_owner_state_header(
             .keys()
             .any(|(stored_owner, _)| *stored_owner == owner_id)
             || store
-                .local_cut_owner_commits
+                .local_cut_owner_cuts
                 .keys()
                 .any(|(stored_owner, _)| *stored_owner == owner_id);
         return if has_orphaned_local_cut_rows {
@@ -11264,6 +11284,81 @@ fn memory_successor_local_cut_owner_state(
     Ok(Some(successor))
 }
 
+/// Reject a successor that reuses a generation row, renews a recorded lease, or
+/// registers a different leaf under an existing `(scope, kind, digest)` key.
+fn memory_validate_manifest_owner_successor(
+    store: &MemoryStore,
+    input: &pos_core::ManifestOwnerAdmissionInputV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let owner_id = input.catalog.as_input().owner_id;
+    let configuration_generation = input.catalog.as_input().configuration_generation;
+    for timeline in &input.timelines {
+        if store.manifest_owner_admission_snapshots.contains_key(&(
+            owner_id,
+            configuration_generation,
+            timeline.timeline_id,
+        )) {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+        if let Some(previous) =
+            memory_latest_manifest_owner_admission(store, owner_id, timeline.timeline_id)
+        {
+            pos_core::validate_manifest_owner_lease_replacement_v1(
+                &previous.timeline.members,
+                &timeline.members,
+            )?;
+        }
+        // Native bytes are deliberately not compared: preparation derived
+        // them from the native records and the leaf's native digest commits
+        // to them, so an equal leaf can only carry equal bytes.
+        if timeline.members.leaves.iter().any(|member| {
+            store
+                .manifest_owner_member_leaves
+                .get(&memory_manifest_owner_member_key(timeline.scope, member))
+                .is_some_and(|stored| stored.leaf != member.leaf)
+        }) {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+    }
+    Ok(())
+}
+
+/// Latest recorded admission of one owned Timeline across every generation.
+fn memory_latest_manifest_owner_admission(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    timeline_id: TimelineId,
+) -> Option<&ManifestOwnerAdmissionSnapshotV1> {
+    store
+        .manifest_owner_admission_snapshots
+        .iter()
+        .rev()
+        .find(|((owner, _, timeline), _)| *owner == owner_id && *timeline == timeline_id)
+        .map(|(_, snapshot)| snapshot)
+}
+
+const fn memory_manifest_owner_member_key(
+    scope: Hash,
+    member: &pos_core::ManifestOwnerMemberLeafV1,
+) -> MemoryManifestOwnerMemberKeyV1 {
+    let leaf = member.leaf.as_input();
+    (scope, leaf.kind, leaf.native_digest)
+}
+
+fn memory_insert_manifest_owner_member_leaves(
+    store: &mut MemoryStore,
+    input: &pos_core::ManifestOwnerAdmissionInputV1,
+) {
+    for timeline in &input.timelines {
+        for member in &timeline.members.leaves {
+            store
+                .manifest_owner_member_leaves
+                .entry(memory_manifest_owner_member_key(timeline.scope, member))
+                .or_insert_with(|| member.clone());
+        }
+    }
+}
+
 impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
     fn read_manifest_owner_state_v1(
         &self,
@@ -11372,15 +11467,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
         }
 
         let configuration_generation = input.catalog.as_input().configuration_generation;
-        if input.timelines.iter().any(|timeline| {
-            self.manifest_owner_admission_snapshots.contains_key(&(
-                owner_id,
-                configuration_generation,
-                timeline.timeline_id,
-            ))
-        }) {
-            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
-        }
+        memory_validate_manifest_owner_successor(self, input)?;
 
         let result = ManifestOwnerAdmissionCommitV1 {
             kind: ManifestOwnerAdmissionCommitKindV1::Applied,
@@ -11404,6 +11491,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
                         operation_id: input.operation_id,
                         expected_inventory_generation: input.expected_inventory_generation,
                         resulting_inventory_generation: input.resulting_inventory_generation,
+                        read_limits: input.read_limits,
                     },
                 )
             })
@@ -11429,6 +11517,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
             self.manifest_owner_admission_snapshots
                 .insert(key, snapshot);
         }
+        memory_insert_manifest_owner_member_leaves(self, input);
         self.manifest_owner_admission_states
             .insert(owner_id, next_state);
         if let Some(next_local_cut_owner_state) = next_local_cut_owner_state {
@@ -11525,11 +11614,34 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
     }
 }
 
+/// Borrow, in one fixed order, the ten fields an LCC1 commit record copies from
+/// its local-cut owner request.
+macro_rules! local_cut_commit_bindings {
+    ($source:ident) => {
+        (
+            &$source.partition_ledger_seq,
+            &$source.manifest_hash,
+            &$source.result_heads_table,
+            &$source.participant_successor_table,
+            &$source.cpu_completion_table,
+            &$source.action_disposition_table,
+            &$source.candidate_bases_table,
+            &$source.invocation_bridges_table,
+            &$source.result_inventory_generation,
+            &$source.release_fence_proof_digest,
+        )
+    };
+}
+
+/// Largest operation identity: the inclusive upper bound of one owner's
+/// operation-key range.
+const MAX_LOCAL_CUT_OPERATION_ID: Hash = Hash::from_bytes([u8::MAX; 32]);
+
 fn validate_memory_local_cut_operation(
     owner_id: [u8; 32],
     operation_id: Hash,
     operation: &MemoryLocalCutOwnerOperationV1,
-    commits: &BTreeMap<([u8; 32], u64), LocalCutOwnerCommitV1>,
+    cuts: &BTreeMap<([u8; 32], u64), Hash>,
 ) -> Result<(), LocalCutOwnerErrorV1> {
     if local_cut_owner_intent_digest_v1(&operation.request)? != operation.intent_digest {
         return Err(LocalCutOwnerErrorV1::CorruptState);
@@ -11537,23 +11649,174 @@ fn validate_memory_local_cut_operation(
     let cut_id = operation.request.seal.as_input().cut_id;
     validate_local_cut_owner_result_v1(owner_id, cut_id, &operation.result)?;
     let commit = operation.result.commit.as_input();
-    if operation.request.operation_id != operation_id
-        || operation.result.seal != operation.request.seal
-        || commit.partition_ledger_seq != operation.request.partition_ledger_seq
-        || commit.manifest_hash != operation.request.manifest_hash
-        || commit.result_heads_table != operation.request.result_heads_table
-        || commit.participant_successor_table != operation.request.participant_successor_table
-        || commit.cpu_completion_table != operation.request.cpu_completion_table
-        || commit.action_disposition_table != operation.request.action_disposition_table
-        || commit.candidate_bases_table != operation.request.candidate_bases_table
-        || commit.invocation_bridges_table != operation.request.invocation_bridges_table
-        || commit.result_inventory_generation != operation.request.result_inventory_generation
-        || commit.release_fence_proof_digest != operation.request.release_fence_proof_digest
-        || commits.get(&(owner_id, cut_id)) != Some(&operation.result)
-    {
+    let request = &operation.request;
+    // Stored and expected bindings are compared pairwise. One macro projects the
+    // copied LCC1 fields from both sides, so their order cannot diverge.
+    let stored = (
+        (
+            &request.operation_id,
+            &operation.result.seal,
+            cuts.get(&(owner_id, cut_id)),
+        ),
+        local_cut_commit_bindings!(commit),
+    );
+    let expected = (
+        (&operation_id, &request.seal, Some(&operation_id)),
+        local_cut_commit_bindings!(request),
+    );
+    if stored != expected {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    pos_core::validate_local_cut_owner_recordings_v1(request, &operation.result)
+}
+
+/// Check a prepared successor and each WCB1 predecessor inside the commit.
+///
+/// Each predecessor must be the WCB1 of the owner's last visible cut that
+/// contained the Timeline, even after the Timeline left and rejoined.
+fn validate_memory_local_cut_successor(
+    store: &MemoryStore,
+    batch: &PreparedLocalCutOwnerCommitV1,
+    admission: &ManifestOwnerAdmissionOwnerStateV1,
+    current_state: Option<&LocalCutOwnerStateV1>,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    validate_local_cut_owner_successor_v1(batch, admission, current_state)?;
+    let owner_id = batch.successor_state().owner_id;
+    let latest = &store.local_cut_world_latest_bindings;
+    pos_core::validate_local_cut_owner_predecessors_v1(batch, |timeline_id| {
+        Ok(latest.get(&(owner_id, timeline_id)).copied())
+    })
+}
+
+/// Return the operation linked to one visible cut after fully validating it.
+fn memory_linked_local_cut_operation(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    cut_id: u64,
+    operation_id: Hash,
+) -> Result<&MemoryLocalCutOwnerOperationV1, LocalCutOwnerErrorV1> {
+    let operation = store
+        .local_cut_owner_operations
+        .get(&(owner_id, operation_id))
+        .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+    validate_memory_local_cut_operation(
+        owner_id,
+        operation_id,
+        operation,
+        &store.local_cut_owner_cuts,
+    )?;
+    if operation.request.seal.as_input().cut_id != cut_id {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    validate_memory_world_recordings(store, owner_id, cut_id, operation).map(|()| operation)
+}
+
+/// Require one visible cut's stored WCB1/WCR1 rows to be exactly its result's.
+///
+/// Every row must be reachable through the unique WCB1 digest index, and its
+/// dependency root must be a WDB1 node recorded in the row's scope.
+fn validate_memory_world_recordings(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    cut_id: u64,
+    operation: &MemoryLocalCutOwnerOperationV1,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let lowest = TimelineId::from_ulid(ulid::Ulid::nil());
+    let highest = TimelineId::from_ulid(ulid::Ulid::from(u128::MAX));
+    let (first, last) = ((owner_id, cut_id, lowest), (owner_id, cut_id, highest));
+    let digests = &store.local_cut_world_binding_digests;
+    let branches = &store.world_dependency_branches;
+    let stored = store
+        .local_cut_world_recordings
+        .range(first..=last)
+        .map(|(key, recording)| {
+            let binding = recording.binding;
+            let root = (recording.scope, binding.as_input().dependency_root_hash);
+            (
+                *recording,
+                digests.get(&binding.digest()) == Some(key),
+                branches.contains_key(&root),
+            )
+        });
+    let expected = operation
+        .result
+        .recordings
+        .iter()
+        .map(|recording| (*recording, true, true));
+    if stored.ne(expected) {
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
     Ok(())
+}
+
+/// Load and fully validate one visible cut, if the owner retains it.
+fn memory_local_cut_owner_cut(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    cut_id: u64,
+) -> Result<Option<&MemoryLocalCutOwnerOperationV1>, LocalCutOwnerErrorV1> {
+    store
+        .local_cut_owner_cuts
+        .get(&(owner_id, cut_id))
+        .map(|operation_id| {
+            memory_linked_local_cut_operation(store, owner_id, cut_id, *operation_id)
+        })
+        .transpose()
+}
+
+/// Resolve a retained operation after fully validating the cut it returns.
+fn memory_resolve_local_cut_owner_retry(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    operation_id: Hash,
+    intent_digest: Hash,
+) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+    let Some(operation) = store
+        .local_cut_owner_operations
+        .get(&(owner_id, operation_id))
+    else {
+        return Ok(None);
+    };
+    validate_memory_local_cut_operation(
+        owner_id,
+        operation_id,
+        operation,
+        &store.local_cut_owner_cuts,
+    )?;
+    if operation.intent_digest != intent_digest {
+        return Err(LocalCutOwnerErrorV1::Conflict);
+    }
+    let mut retry = operation.result.clone();
+    retry.kind = LocalCutOwnerCommitKindV1::ExactRetry;
+    Ok(Some(retry))
+}
+
+impl MemoryStore {
+    /// Record a committed cut's WCB1/WCR1 pairs and their WDB1 nodes.
+    ///
+    /// Identical WDB1 nodes are content addressed within their scope, so a
+    /// node already recorded by an earlier cut is kept unchanged.
+    fn record_local_cut_world_closures(&mut self, batch: &PreparedLocalCutOwnerCommitV1) {
+        let owner_id = batch.successor_state().owner_id;
+        let cut_id = batch.request().seal.as_input().cut_id;
+        for recording in batch.recordings() {
+            let timeline_id = recording.binding.as_input().timeline_id;
+            let key = (owner_id, cut_id, timeline_id);
+            let binding_hash = recording.binding.digest();
+            self.local_cut_world_recordings.insert(key, *recording);
+            self.local_cut_world_binding_digests
+                .insert(binding_hash, key);
+            self.local_cut_world_latest_bindings
+                .insert((owner_id, timeline_id), binding_hash);
+        }
+        for directory in batch.dependency_directories() {
+            for branch in directory.branches() {
+                self.world_dependency_branches
+                    .entry((directory.scope(), branch.digest()))
+                    .or_insert_with(|| branch.clone());
+            }
+        }
+    }
 }
 
 impl LocalCutOwnerPersistencePortV1 for MemoryStore {
@@ -11567,7 +11830,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
                 .keys()
                 .any(|(stored_owner, _)| *stored_owner == owner_id)
                 || self
-                    .local_cut_owner_commits
+                    .local_cut_owner_cuts
                     .keys()
                     .any(|(stored_owner, _)| *stored_owner == owner_id);
             return if has_rows {
@@ -11581,47 +11844,19 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         // this local-cut state against the admitted header, and rejects a
         // local-cut state without an admitted header as orphaned.
         self.read_manifest_owner_state_v1(owner_id)?;
-
-        let mut found_current = false;
-        for ((stored_owner, cut_id), result) in &self.local_cut_owner_commits {
-            if *stored_owner != owner_id {
-                continue;
-            }
-            validate_local_cut_owner_result_v1(owner_id, *cut_id, result)?;
-            if *cut_id > state.last_visible_cut_id {
-                return Err(LocalCutOwnerErrorV1::CorruptState);
-            }
-            if *cut_id == state.last_visible_cut_id {
-                if state.previous_visible_lcq1_hash != Some(result.receipt.digest()) {
-                    return Err(LocalCutOwnerErrorV1::CorruptState);
-                }
-                found_current = true;
-            }
-            let linked_operations = self
-                .local_cut_owner_operations
-                .iter()
-                .filter(|((stored_owner, _), operation)| {
-                    *stored_owner == owner_id
-                        && operation.request.seal.as_input().cut_id == *cut_id
-                        && operation.result == *result
-                })
-                .count();
-            if linked_operations != 1 {
-                return Err(LocalCutOwnerErrorV1::CorruptState);
-            }
-        }
-        if !found_current {
+        // Only the current visible cut is validated here; older cuts are
+        // validated when returned and by `verify_local_cut_owner_history_v1`.
+        let later_cuts = (
+            Bound::Excluded((owner_id, state.last_visible_cut_id)),
+            Bound::Included((owner_id, u64::MAX)),
+        );
+        if self.local_cut_owner_cuts.range(later_cuts).next().is_some() {
             return Err(LocalCutOwnerErrorV1::CorruptState);
         }
-        for ((stored_owner, operation_id), operation) in &self.local_cut_owner_operations {
-            if *stored_owner == owner_id {
-                validate_memory_local_cut_operation(
-                    owner_id,
-                    *operation_id,
-                    operation,
-                    &self.local_cut_owner_commits,
-                )?;
-            }
+        let current = memory_local_cut_owner_cut(self, owner_id, state.last_visible_cut_id)?
+            .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+        if state.previous_visible_lcq1_hash != Some(current.result.receipt.digest()) {
+            return Err(LocalCutOwnerErrorV1::CorruptState);
         }
         Ok(Some(state.clone()))
     }
@@ -11633,19 +11868,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         intent_digest: Hash,
     ) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
         self.read_local_cut_owner_state_v1(owner_id)?;
-        let Some(operation) = self
-            .local_cut_owner_operations
-            .get(&(owner_id, operation_id))
-        else {
-            return Ok(None);
-        };
-        // The owner-state read above already validated every retained operation.
-        if operation.intent_digest != intent_digest {
-            return Err(LocalCutOwnerErrorV1::Conflict);
-        }
-        let mut retry = operation.result.clone();
-        retry.kind = LocalCutOwnerCommitKindV1::ExactRetry;
-        Ok(Some(retry))
+        memory_resolve_local_cut_owner_retry(self, owner_id, operation_id, intent_digest)
     }
 
     fn commit_local_cut_owner_v1(
@@ -11665,7 +11888,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         let admission = self
             .read_manifest_owner_state_v1(owner_id)?
             .ok_or(LocalCutOwnerErrorV1::Conflict)?;
-        validate_local_cut_owner_successor_v1(&batch, &admission, current_state.as_ref())?;
+        validate_memory_local_cut_successor(self, &batch, &admission, current_state.as_ref())?;
         let request = batch.request();
         let successor = batch.successor_state();
         // The owner-state read bounds every retained cut by the last visible cut,
@@ -11683,14 +11906,15 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
             timelines: admission.timelines.iter().copied().collect(),
         };
 
-        self.local_cut_owner_commits
-            .insert((owner_id, cut_id), result.clone());
+        self.local_cut_owner_cuts
+            .insert((owner_id, cut_id), operation_id);
         self.local_cut_owner_operations
             .insert((owner_id, operation_id), operation);
         self.local_cut_owner_states
             .insert(owner_id, successor.clone());
         self.manifest_owner_admission_states
             .insert(owner_id, next_admission_state);
+        self.record_local_cut_world_closures(&batch);
         Ok(result)
     }
 
@@ -11699,13 +11923,35 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         owner_id: [u8; 32],
         cut_id: u64,
     ) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
-        // The owner-state read validates every retained cut and its one
-        // linked operation.
         self.read_local_cut_owner_state_v1(owner_id)?;
-        Ok(self
-            .local_cut_owner_commits
-            .get(&(owner_id, cut_id))
-            .cloned())
+        memory_local_cut_owner_cut(self, owner_id, cut_id)
+            .map(|cut| cut.map(|operation| operation.result.clone()))
+    }
+
+    fn verify_local_cut_owner_history_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1> {
+        let state = self.read_local_cut_owner_state_v1(owner_id)?;
+        let linked_operations = self
+            .local_cut_owner_cuts
+            .range((owner_id, 0)..=(owner_id, u64::MAX))
+            .map(|(&(_, cut_id), &operation_id)| {
+                memory_linked_local_cut_operation(self, owner_id, cut_id, operation_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Each validated cut links a distinct operation sealed for that cut, so
+        // any further retained operation is unlinked.
+        let owner_operations = (owner_id, Hash::zero())..=(owner_id, MAX_LOCAL_CUT_OPERATION_ID);
+        if self
+            .local_cut_owner_operations
+            .range(owner_operations)
+            .count()
+            != linked_operations.len()
+        {
+            return Err(LocalCutOwnerErrorV1::CorruptState);
+        }
+        Ok(state)
     }
 }
 
@@ -13630,13 +13876,9 @@ mod coverage_entrypoints {
 mod manifest_owner_admission_coverage {
     use super::*;
     use crate::manifest_owner_fixtures::{
-        catalog, hash, plugin, policy_copies, AcceptingOwner, PolicySource,
+        catalog, hash, timeline_request, AcceptingOwner, READ_LIMITS,
     };
-    use pos_core::{
-        prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionRequestV1,
-        ManifestOwnerTimelineAdmissionRequestV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
-        WorldConsumerV1, WorldProducerV1,
-    };
+    use pos_core::{prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionRequestV1};
 
     type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
     type TestResult = FixtureResult<()>;
@@ -13650,32 +13892,6 @@ mod manifest_owner_admission_coverage {
         TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
     }
 
-    fn timeline_request(
-        index: usize,
-        timeline_id: TimelineId,
-        sources: &[PolicySource],
-    ) -> FixtureResult<ManifestOwnerTimelineAdmissionRequestV1> {
-        let offset = u8::try_from(index).unwrap_or(u8::MAX);
-        let scope = hash(70 + offset);
-        let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-            scope,
-            consumers: vec![WorldConsumerV1::new(
-                "local-observer".to_owned(),
-                hash(130),
-                hash(131),
-                hash(132),
-            )?],
-            producers: vec![WorldProducerV1::new(plugin(1), sources[0].0.digest())?],
-            optional_view_roots: Vec::new(),
-        })?;
-        Ok(ManifestOwnerTimelineAdmissionRequestV1 {
-            timeline_id,
-            scope,
-            wcs1,
-            policy_copies: policy_copies(OWNER, scope, sources, hash(80 + offset))?,
-        })
-    }
-
     /// Prepare the successor of `current` (or genesis) owning `timeline_ids`.
     fn prepared(
         current: Option<&ManifestOwnerAdmissionOwnerStateV1>,
@@ -13686,8 +13902,7 @@ mod manifest_owner_admission_coverage {
         let (catalog, sources) = catalog(OWNER, generation)?;
         let timelines = timeline_ids
             .iter()
-            .enumerate()
-            .map(|(index, timeline_id)| timeline_request(index, *timeline_id, &sources))
+            .map(|timeline_id| timeline_request(OWNER, *timeline_id, &sources))
             .collect::<FixtureResult<Vec<_>>>()?;
         let request = ManifestOwnerAdmissionRequestV1 {
             operation_id: hash(40 + seed),
@@ -13696,6 +13911,7 @@ mod manifest_owner_admission_coverage {
             previous_visible_lcq1_hash: current.and_then(|state| state.previous_visible_lcq1_hash),
             expected_inventory_generation: current.map(|state| state.inventory_generation),
             resulting_inventory_generation: hash(50 + seed),
+            read_limits: READ_LIMITS,
             timelines,
         };
         let batch = prepare_manifest_owner_admission_v1(request, &AcceptingOwner, current)?;
@@ -14004,25 +14220,25 @@ mod manifest_owner_admission_coverage {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod local_cut_owner_coverage {
     use super::*;
+    use crate::manifest_owner_fixtures::{
+        catalog, member_classes, timeline_request, zero_event_inputs, zero_event_results,
+        READ_LIMITS, SOURCE_GENESIS,
+    };
     use pos_core::{
-        output_policy::{OutputPolicyInputV1, OutputPolicyV1},
-        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
-        ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, LocalCutCommitV1,
-        LocalCutCompositionBindingRowV1, LocalCutManifestBindingRowV1,
+        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1, LocalCutCommitV1,
+        LocalCutCompositionBindingRowV1, LocalCutHeadsTableV1, LocalCutManifestBindingRowV1,
         LocalCutManifestBindingTableV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
-        LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutSealInputV2, LocalCutSealV2,
-        LocalCutTableRefV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
-        ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
-        ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
+        LocalCutReceiptV1, LocalCutSealInputV2, LocalCutSealV2, LocalCutTableRefV1,
+        ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
+        ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-        ManifestSlotAdmissionReceiptV1, PluginId, WorldArtifactKindV1, WorldArtifactLeafInputV1,
-        WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
-        WorldProducerV1,
+        ManifestSlotAdmissionReceiptV1,
     };
 
     type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
     type TestResult = FixtureResult<()>;
-    type PolicySource = (OutputPolicyV1, Vec<u8>);
+    type CutCorruption = fn(&mut MemoryStore) -> TestResult;
 
     const CUT_OWNER: [u8; 32] = [0x41; 32];
     const IDLE_OWNER: [u8; 32] = [0x42; 32];
@@ -14049,6 +14265,13 @@ mod local_cut_owner_coverage {
         membership_epoch: 0,
         operation_id: hash(0x62),
         result_inventory: hash(0x72),
+    };
+    const THIRD_CUT: CutPlan = CutPlan {
+        cut_id: 3,
+        tick: 3,
+        membership_epoch: 0,
+        operation_id: hash(0x65),
+        result_inventory: hash(0x75),
     };
     const RIVAL_CUT: CutPlan = CutPlan {
         cut_id: 1,
@@ -14128,6 +14351,15 @@ mod local_cut_owner_coverage {
         ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
             Ok(())
         }
+
+        fn classify_scope_member_leaves(
+            &self,
+            _timeline_id: TimelineId,
+            _scope: Hash,
+            members: &ManifestOwnerScopeMembersV1,
+        ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
+            Ok(member_classes(members))
+        }
     }
 
     impl LocalCutOwnerVerifierV1 for AcceptingOwner {
@@ -14139,6 +14371,13 @@ mod local_cut_owner_coverage {
             _admissions: &[ManifestOwnerAdmissionSnapshotV1],
         ) -> Result<(), LocalCutOwnerErrorV1> {
             Ok(())
+        }
+
+        fn source_genesis_hash(
+            &self,
+            _timeline_id: TimelineId,
+        ) -> Result<Hash, LocalCutOwnerErrorV1> {
+            Ok(SOURCE_GENESIS)
         }
 
         fn sign_local_cut_receipt(
@@ -14167,144 +14406,8 @@ mod local_cut_owner_coverage {
         Hash::from_bytes([byte; 32])
     }
 
-    const fn plugin(byte: u8) -> PluginId {
-        PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
-    }
-
     const fn timeline(byte: u8) -> TimelineId {
         TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
-    }
-
-    fn policy_source(plugin_id: PluginId, seed: u8) -> FixtureResult<PolicySource> {
-        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-            plugin_id,
-            plugin_version: "1.0.0".to_owned(),
-            implementation_hash: hash(seed + 30),
-            base_configuration_digest: hash(seed + 40),
-            executable_profile_hash: hash(seed + 50),
-            retention_policy_hash: hash(seed + 60),
-            policy_revision: 1,
-            output_declarations: Vec::new(),
-        })?;
-        let members = [
-            policy.to_canonical_cbor(),
-            b"EBP1-fixture".to_vec(),
-            b"implementation-fixture".to_vec(),
-            b"CFG1-fixture".to_vec(),
-            Vec::new(),
-            b"RTP1-fixture".to_vec(),
-        ];
-        let mut closure = b"OPC1".to_vec();
-        for member in members {
-            let length = u64::try_from(member.len())?;
-            closure.extend_from_slice(&length.to_be_bytes());
-            closure.extend_from_slice(&member);
-        }
-        Ok((policy, closure))
-    }
-
-    fn opc1_digest(bytes: &[u8]) -> Hash {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
-        hasher.update(bytes);
-        Hash::from_bytes(*hasher.finalize().as_bytes())
-    }
-
-    fn catalog_fixture(
-        owner_id: [u8; 32],
-        generation: u64,
-    ) -> FixtureResult<(ManifestAdmissionCatalogV1, Vec<PolicySource>)> {
-        let first = policy_source(plugin(1), 1)?;
-        let second = policy_source(plugin(2), 2)?;
-        let sources = vec![first, second];
-        let mut rows = Vec::with_capacity(sources.len());
-        for (index, (policy, closure)) in sources.iter().enumerate() {
-            rows.push(ManifestAdmissionCatalogRowV1 {
-                stable_slot: format!("slot-{index}"),
-                plugin_id: policy.fields().plugin_id,
-                plugin_name: "same-name".to_owned(),
-                plugin_version: policy.fields().plugin_version.clone(),
-                implementation_hash: policy.fields().implementation_hash,
-                eop1_native_digest: policy.digest(),
-                closure_hash: opc1_digest(closure),
-            });
-        }
-        let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
-            owner_id,
-            configuration_generation: generation,
-            rows,
-        })?;
-        Ok((catalog, sources))
-    }
-
-    fn leaf(
-        owner_id: [u8; 32],
-        scope: Hash,
-        kind: WorldArtifactKindV1,
-        native_digest: Hash,
-        native_bytes: &[u8],
-    ) -> FixtureResult<WorldArtifactLeafV1> {
-        let leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-            scope,
-            kind,
-            native_digest,
-            native_byte_length: u64::try_from(native_bytes.len())?,
-            owner: owner_id,
-            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-            optionality: ArtifactOptionalityV1::Required,
-            transition: ArtifactTransitionRuleV1::PreserveExact,
-            source_lease_hash: hash(80),
-            key_dependencies: Vec::new(),
-            child_node_hashes: Vec::new(),
-        })?;
-        Ok(leaf)
-    }
-
-    fn policy_copy(
-        owner_id: [u8; 32],
-        scope: Hash,
-        policy: &OutputPolicyV1,
-        closure: &[u8],
-    ) -> FixtureResult<ManifestOwnerPolicyCopiesV1> {
-        let eop1_bytes = policy.to_canonical_cbor();
-        let eop1_kind = WorldArtifactKindV1::OutputPolicy;
-        let eop1_leaf = leaf(owner_id, scope, eop1_kind, policy.digest(), &eop1_bytes)?;
-        let opc1_kind = WorldArtifactKindV1::OutputPolicyClosure;
-        let opc1_leaf = leaf(owner_id, scope, opc1_kind, opc1_digest(closure), closure)?;
-        Ok(ManifestOwnerPolicyCopiesV1 {
-            plugin_id: policy.fields().plugin_id,
-            eop1_bytes,
-            eop1_leaf,
-            opc1_bytes: closure.to_vec(),
-            opc1_leaf,
-        })
-    }
-
-    fn timeline_request(
-        owner_id: [u8; 32],
-        timeline_id: TimelineId,
-        scope: Hash,
-        sources: &[PolicySource],
-    ) -> FixtureResult<ManifestOwnerTimelineAdmissionRequestV1> {
-        let observer = "local-observer".to_owned();
-        let consumer = WorldConsumerV1::new(observer, hash(130), hash(131), hash(132))?;
-        let producer = WorldProducerV1::new(plugin(1), sources[0].0.digest())?;
-        let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-            scope,
-            consumers: vec![consumer],
-            producers: vec![producer],
-            optional_view_roots: Vec::new(),
-        })?;
-        let mut policy_copies = Vec::with_capacity(sources.len());
-        for (policy, closure) in sources {
-            policy_copies.push(policy_copy(owner_id, scope, policy, closure)?);
-        }
-        Ok(ManifestOwnerTimelineAdmissionRequestV1 {
-            timeline_id,
-            scope,
-            wcs1,
-            policy_copies,
-        })
     }
 
     fn admission_request(
@@ -14314,11 +14417,10 @@ mod local_cut_owner_coverage {
         operation_id: Hash,
         current: Option<&ManifestOwnerAdmissionOwnerStateV1>,
     ) -> FixtureResult<ManifestOwnerAdmissionRequestV1> {
-        let (catalog, sources) = catalog_fixture(owner_id, generation)?;
+        let (catalog, sources) = catalog(owner_id, generation)?;
         let mut timelines = Vec::with_capacity(timeline_ids.len());
-        for (index, timeline_id) in timeline_ids.iter().enumerate() {
-            let scope = hash(70 + u8::try_from(index)?);
-            timelines.push(timeline_request(owner_id, *timeline_id, scope, &sources)?);
+        for timeline_id in timeline_ids {
+            timelines.push(timeline_request(owner_id, *timeline_id, &sources)?);
         }
         let expected_generation = current.map(|state| state.configuration_generation);
         let previous_receipt = current.and_then(|state| state.previous_visible_lcq1_hash);
@@ -14330,6 +14432,7 @@ mod local_cut_owner_coverage {
             previous_visible_lcq1_hash: previous_receipt,
             expected_inventory_generation: expected_inventory,
             resulting_inventory_generation: operation_id,
+            read_limits: READ_LIMITS,
             timelines,
         })
     }
@@ -14405,10 +14508,10 @@ mod local_cut_owner_coverage {
         admission: &ManifestOwnerAdmissionOwnerStateV1,
         snapshots: &[ManifestOwnerAdmissionSnapshotV1],
         plan: &CutPlan,
+        predecessor: &dyn Fn(TimelineId) -> Option<Hash>,
     ) -> FixtureResult<LocalCutOwnerRequestV1> {
         let mut binding_rows = Vec::with_capacity(snapshots.len());
         let mut composition_rows = Vec::new();
-        let mut recording_context_rows = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let timeline = &snapshot.timeline;
             binding_rows.push(LocalCutManifestBindingRowV1 {
@@ -14421,14 +14524,12 @@ mod local_cut_owner_coverage {
             for row in &snapshot.catalog.as_input().rows {
                 composition_rows.push(composition_row(row, timeline.timeline_id));
             }
-            recording_context_rows.push(LocalCutRecordingContextRowV1 {
-                timeline_id: timeline.timeline_id,
-                wcs_hash: timeline.wcs1.digest(),
-                retention_lease_hash: hash(104),
-                predecessor_wcb_hash: None,
-            });
         }
         composition_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
+        let (recording_context_rows, expected_head_rows) =
+            zero_event_inputs(snapshots, predecessor)?;
+        let expected_table =
+            LocalCutHeadsTableV1::expected_heads(owner_id, plan.cut_id, &expected_head_rows)?;
         let binding_table =
             LocalCutManifestBindingTableV1::new(owner_id, plan.cut_id, binding_rows)?;
         let seal = LocalCutSealV2::new(LocalCutSealInputV2 {
@@ -14444,7 +14545,7 @@ mod local_cut_owner_coverage {
             composition_table: table(composition_rows.len(), 92)?,
             inbox_table: table(0, 95)?,
             invocation_table: table(0, 96)?,
-            expected_heads_table: table(1, 105)?,
+            expected_heads_table: expected_table.table_ref(),
             ebp_native_hash: hash(98),
             execution_profile_native_hash: hash(99),
             recording_context_table: table(recording_context_rows.len(), 93)?,
@@ -14453,15 +14554,22 @@ mod local_cut_owner_coverage {
             ingress_preallocation_native_hash: hash(101),
             manifest_binding_table: binding_table.table_ref(),
         })?;
+        let operation_id = plan.operation_id;
+        let result_head_rows =
+            zero_event_results(operation_id, &seal, snapshots, &recording_context_rows)?;
+        let result_table =
+            LocalCutHeadsTableV1::result_heads(owner_id, plan.cut_id, &result_head_rows)?;
         Ok(LocalCutOwnerRequestV1 {
-            operation_id: plan.operation_id,
+            operation_id,
             seal,
             manifest_hash: hash(103),
             manifest_binding_table: binding_table,
             composition_rows,
             recording_context_rows,
+            expected_head_rows,
+            result_head_rows,
             partition_ledger_seq: plan.cut_id,
-            result_heads_table: table(1, 105)?,
+            result_heads_table: result_table.table_ref(),
             participant_successor_table: table(1, 106)?,
             cpu_completion_table: table(0, 107)?,
             action_disposition_table: table(1, 108)?,
@@ -14472,6 +14580,19 @@ mod local_cut_owner_coverage {
         })
     }
 
+    /// Read the owner's latest stored WCB1 for a Timeline, as the commit does.
+    fn stored_predecessor(
+        store: &MemoryStore,
+        owner_id: [u8; 32],
+    ) -> impl Fn(TimelineId) -> Option<Hash> + '_ {
+        move |timeline_id| {
+            store
+                .local_cut_world_latest_bindings
+                .get(&(owner_id, timeline_id))
+                .copied()
+        }
+    }
+
     fn prepare_cut_from(
         store: &MemoryStore,
         owner_id: [u8; 32],
@@ -14479,7 +14600,8 @@ mod local_cut_owner_coverage {
         current: Option<&LocalCutOwnerStateV1>,
     ) -> FixtureResult<PreparedLocalCutOwnerCommitV1> {
         let view = admitted_view(store, owner_id)?;
-        let request = cut_request(owner_id, &view.state, &view.snapshots, plan)?;
+        let predecessor = stored_predecessor(store, owner_id);
+        let request = cut_request(owner_id, &view.state, &view.snapshots, plan, &predecessor)?;
         let batch = prepare_local_cut_owner_commit_v1(
             request,
             current,
@@ -14558,6 +14680,10 @@ mod local_cut_owner_coverage {
 
     fn assert_local_error(store: &MemoryStore, error: LocalCutOwnerErrorV1) {
         assert_eq!(store.read_local_cut_owner_state_v1(CUT_OWNER), Err(error));
+        assert_eq!(
+            store.verify_local_cut_owner_history_v1(CUT_OWNER),
+            Err(error)
+        );
     }
 
     #[test]
@@ -14696,9 +14822,8 @@ mod local_cut_owner_coverage {
     #[test]
     fn local_cut_state_rejects_inconsistent_commit_rows() -> TestResult {
         let (mut retried, _) = cut_store()?;
-        let rows = &mut retried.local_cut_owner_commits;
-        let commit = rows.get_mut(&(CUT_OWNER, 1)).ok_or("missing commit")?;
-        commit.kind = LocalCutOwnerCommitKindV1::ExactRetry;
+        let operation = local_operation(&mut retried, FIRST_CUT.operation_id)?;
+        operation.result.kind = LocalCutOwnerCommitKindV1::ExactRetry;
         assert_local_error(&retried, LocalCutOwnerErrorV1::CorruptState);
 
         let (mut unlinked, _) = cut_store()?;
@@ -14748,6 +14873,12 @@ mod local_cut_owner_coverage {
         );
         let unknown_cut = store.read_local_cut_owner_commit_v1(CUT_OWNER, 9);
         assert_eq!(unknown_cut, Ok(None));
+        let verified = store.verify_local_cut_owner_history_v1(CUT_OWNER)?;
+        assert_eq!(verified, Some(state));
+        assert_eq!(
+            store.verify_local_cut_owner_history_v1(IDLE_OWNER),
+            Ok(None)
+        );
         Ok(())
     }
 
@@ -14769,7 +14900,13 @@ mod local_cut_owner_coverage {
         retried.result.kind = LocalCutOwnerCommitKindV1::ExactRetry;
         let rows = &mut replayed.local_cut_owner_operations;
         rows.insert((CUT_OWNER, hash(0x96)), retried);
-        assert_local_error(&replayed, LocalCutOwnerErrorV1::CorruptState);
+        // Only the integrity pass visits operations that no visible cut links.
+        let current = replayed.read_local_cut_owner_state_v1(CUT_OWNER)?;
+        assert_eq!(current.map(|state| state.last_visible_cut_id), Some(1));
+        assert_eq!(
+            replayed.verify_local_cut_owner_history_v1(CUT_OWNER),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
 
         let (mut rekeyed, _) = cut_store()?;
         let rows = &mut rekeyed.local_cut_owner_operations;
@@ -14872,6 +15009,280 @@ mod local_cut_owner_coverage {
             store.commit_local_cut_owner_v1(batch),
             Err(LocalCutOwnerErrorV1::Conflict)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_hot_paths_validate_only_the_current_and_returned_cuts() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        let second = commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
+        let current = store.read_local_cut_owner_state_v1(CUT_OWNER)?;
+        assert_eq!(store.verify_local_cut_owner_history_v1(CUT_OWNER)?, current);
+        local_operation(&mut store, FIRST_CUT.operation_id)?.intent_digest = hash(0x97);
+        // Current-state reads, retries, commits, and current-cut reads never
+        // revalidate the damaged older cut.
+        assert_eq!(store.read_local_cut_owner_state_v1(CUT_OWNER)?, current);
+        let second_intent = local_operation(&mut store, SECOND_CUT.operation_id)?.intent_digest;
+        let retry = store
+            .resolve_local_cut_owner_retry_v1(CUT_OWNER, SECOND_CUT.operation_id, second_intent)?
+            .ok_or("missing current-cut retry")?;
+        assert_eq!(retry.kind, LocalCutOwnerCommitKindV1::ExactRetry);
+        assert_eq!(retry.receipt, second.receipt);
+        let third = commit_cut(&mut store, CUT_OWNER, &THIRD_CUT)?;
+        assert_eq!(
+            store.read_local_cut_owner_commit_v1(CUT_OWNER, THIRD_CUT.cut_id)?,
+            Some(third)
+        );
+        // Every path that returns the damaged cut, and the integrity pass, fail closed.
+        let corrupt = Err(LocalCutOwnerErrorV1::CorruptState);
+        assert_eq!(
+            store.read_local_cut_owner_commit_v1(CUT_OWNER, FIRST_CUT.cut_id),
+            corrupt
+        );
+        assert_eq!(
+            store.resolve_local_cut_owner_retry_v1(CUT_OWNER, FIRST_CUT.operation_id, hash(0x97)),
+            corrupt
+        );
+        assert_eq!(
+            store.verify_local_cut_owner_history_v1(CUT_OWNER),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_commit_records_and_returns_each_wcb1_wcr1_and_wdb1_node() -> TestResult {
+        let (mut store, first) = cut_store()?;
+        let second = commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
+        let [first_recording] = first.recordings.as_slice() else {
+            return Err("expected one first-cut recording".into());
+        };
+        let [second_recording] = second.recordings.as_slice() else {
+            return Err("expected one second-cut recording".into());
+        };
+        let first_binding = first_recording.binding.digest();
+        let second_binding = second_recording.binding.digest();
+        let chained = second_recording.binding.as_input();
+        assert_eq!(chained.predecessor_binding_hash, Some(first_binding));
+        let key = (CUT_OWNER, FIRST_CUT.cut_id, CUT_TIMELINE);
+        let recordings = &store.local_cut_world_recordings;
+        assert_eq!(recordings.get(&key), Some(first_recording));
+        let digests = &store.local_cut_world_binding_digests;
+        assert_eq!(digests.get(&first_binding), Some(&key));
+        let latest = &store.local_cut_world_latest_bindings;
+        assert_eq!(
+            latest.get(&(CUT_OWNER, CUT_TIMELINE)),
+            Some(&second_binding)
+        );
+        let root = first_recording.binding.as_input().dependency_root_hash;
+        let branches = &store.world_dependency_branches;
+        let node = branches.get(&(first_recording.scope, root));
+        assert_eq!(node.ok_or("missing dependency root")?.digest(), root);
+        assert_eq!(
+            store.read_local_cut_owner_commit_v1(CUT_OWNER, FIRST_CUT.cut_id)?,
+            Some(first)
+        );
+        let intent = local_operation(&mut store, SECOND_CUT.operation_id)?.intent_digest;
+        let retry = store
+            .resolve_local_cut_owner_retry_v1(CUT_OWNER, SECOND_CUT.operation_id, intent)?
+            .ok_or("missing second-cut retry")?;
+        assert_eq!(retry.recordings, second.recordings);
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_commit_rejects_a_stale_wcb1_predecessor() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        let view = admitted_view(&store, CUT_OWNER)?;
+        let unchained = |_: TimelineId| None::<Hash>;
+        let request = cut_request(
+            CUT_OWNER,
+            &view.state,
+            &view.snapshots,
+            &SECOND_CUT,
+            &unchained,
+        )?;
+        let current = store.read_local_cut_owner_state_v1(CUT_OWNER)?;
+        let batch = prepare_local_cut_owner_commit_v1(
+            request,
+            current.as_ref(),
+            &view.state,
+            &view.snapshots,
+            &AcceptingOwner,
+        )?;
+        assert_eq!(
+            store.commit_local_cut_owner_v1(batch),
+            Err(LocalCutOwnerErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_rejoined_timeline_chains_to_its_last_recorded_binding() -> TestResult {
+        let (mut store, first) = cut_store()?;
+        let batch = prepare_admission(&store, CUT_OWNER, 2, &[NEXT_TIMELINE], hash(0x54))?;
+        store.commit_manifest_owner_admission_v1(batch)?;
+        let away = CutPlan {
+            cut_id: 2,
+            tick: 2,
+            membership_epoch: 1,
+            operation_id: hash(0x66),
+            result_inventory: hash(0x76),
+        };
+        let second = commit_cut(&mut store, CUT_OWNER, &away)?;
+        let batch = prepare_admission(&store, CUT_OWNER, 3, &[CUT_TIMELINE], hash(0x55))?;
+        store.commit_manifest_owner_admission_v1(batch)?;
+        let back = CutPlan {
+            cut_id: 3,
+            tick: 3,
+            membership_epoch: 2,
+            operation_id: hash(0x67),
+            result_inventory: hash(0x77),
+        };
+        let third = commit_cut(&mut store, CUT_OWNER, &back)?;
+        let first_binding = first.recordings[0].binding.digest();
+        let away_binding = second.recordings[0].binding.as_input();
+        assert_eq!(away_binding.timeline_id, NEXT_TIMELINE);
+        assert_eq!(away_binding.predecessor_binding_hash, None);
+        let rejoined = third.recordings[0].binding.as_input();
+        assert_eq!(rejoined.timeline_id, CUT_TIMELINE);
+        assert_eq!(rejoined.predecessor_binding_hash, Some(first_binding));
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_reads_reject_missing_or_substituted_world_recordings() -> TestResult {
+        let key = (CUT_OWNER, FIRST_CUT.cut_id, CUT_TIMELINE);
+        let (mut missing, _) = cut_store()?;
+        missing.local_cut_world_recordings.remove(&key);
+        assert_local_error(&missing, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut rescoped, _) = cut_store()?;
+        let recording = rescoped.local_cut_world_recordings.get_mut(&key);
+        recording.ok_or("missing recording")?.scope = hash(0x93);
+        assert_local_error(&rescoped, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut unindexed, first) = cut_store()?;
+        let digest = first.recordings[0].binding.digest();
+        unindexed.local_cut_world_binding_digests.remove(&digest);
+        assert_local_error(&unindexed, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut rootless, _) = cut_store()?;
+        rootless.world_dependency_branches.clear();
+        assert_local_error(&rootless, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut substituted, _) = cut_store()?;
+        let operation = local_operation(&mut substituted, FIRST_CUT.operation_id)?;
+        operation.result.recordings[0].scope = hash(0x93);
+        assert_local_error(&substituted, LocalCutOwnerErrorV1::CorruptState);
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_reads_reject_a_cut_linked_to_another_cut_operation() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
+        let cuts = &mut store.local_cut_owner_cuts;
+        cuts.insert((CUT_OWNER, FIRST_CUT.cut_id), SECOND_CUT.operation_id);
+        let current = store.read_local_cut_owner_state_v1(CUT_OWNER)?;
+        assert_eq!(current.map(|state| state.last_visible_cut_id), Some(2));
+        assert_eq!(
+            store.read_local_cut_owner_commit_v1(CUT_OWNER, FIRST_CUT.cut_id),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
+        assert_eq!(
+            store.verify_local_cut_owner_history_v1(CUT_OWNER),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
+        Ok(())
+    }
+
+    fn first_request(store: &mut MemoryStore) -> FixtureResult<&mut LocalCutOwnerRequestV1> {
+        Ok(&mut local_operation(store, FIRST_CUT.operation_id)?.request)
+    }
+
+    /// Change one kind-5 row and its table so only the commit's head binding differs.
+    fn reheaded_first_cut(store: &mut MemoryStore) -> TestResult {
+        let request = first_request(store)?;
+        request.result_head_rows[0].event_count = 1;
+        let rows = &request.result_head_rows;
+        let table = LocalCutHeadsTableV1::result_heads(CUT_OWNER, FIRST_CUT.cut_id, rows)?;
+        request.result_heads_table = table.table_ref();
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_retry_rejects_each_mismatched_stored_binding() -> TestResult {
+        // Each case breaks exactly one of the 13 compared bindings of the older
+        // cut, then re-derives its intent digest, so only the binding comparison
+        // can reject the retained operation.
+        let corruptions: [CutCorruption; 13] = [
+            |store| {
+                first_request(store)?.operation_id = hash(0x95);
+                Ok(())
+            },
+            |store| {
+                let request = first_request(store)?;
+                let mut seal = *request.seal.as_input();
+                seal.schedule_ns = 1;
+                request.seal = LocalCutSealV2::new(seal)?;
+                Ok(())
+            },
+            |store| {
+                let cuts = &mut store.local_cut_owner_cuts;
+                cuts.insert((CUT_OWNER, FIRST_CUT.cut_id), SECOND_CUT.operation_id);
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.partition_ledger_seq = 9;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.manifest_hash = hash(0x99);
+                Ok(())
+            },
+            reheaded_first_cut,
+            |store| {
+                first_request(store)?.participant_successor_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.cpu_completion_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.action_disposition_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.candidate_bases_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.invocation_bridges_table = table(1, 0x99)?;
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.result_inventory_generation = hash(0x99);
+                Ok(())
+            },
+            |store| {
+                first_request(store)?.release_fence_proof_digest = hash(0x99);
+                Ok(())
+            },
+        ];
+        for corrupt in corruptions {
+            let (mut store, _) = cut_store()?;
+            commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
+            corrupt(&mut store)?;
+            let operation = local_operation(&mut store, FIRST_CUT.operation_id)?;
+            operation.intent_digest = local_cut_owner_intent_digest_v1(&operation.request)?;
+            let intent = operation.intent_digest;
+            assert_eq!(
+                store.resolve_local_cut_owner_retry_v1(CUT_OWNER, FIRST_CUT.operation_id, intent),
+                Err(LocalCutOwnerErrorV1::CorruptState)
+            );
+        }
         Ok(())
     }
 }

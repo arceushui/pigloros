@@ -7,21 +7,27 @@ use std::{
     },
 };
 
+use pos_core::retention::{
+    WorldRetentionLeaseInputV1, WorldRetentionLeaseV1, WorldRetentionPolicyV1,
+};
 use pos_core::{
-    manifest_owner_admission_intent_digest_v1, prepare_manifest_owner_admission_v1,
-    validate_manifest_owner_admission_snapshot_v1, ArtifactDataClassV1, ArtifactOptionalityV1,
-    ArtifactTransitionRuleV1, Hash, LocalCutOwnerCommitKindV1, LocalCutOwnerErrorV1,
-    LocalCutOwnerPersistencePortV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1,
-    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
+    build_manifest_owner_scope_v1, manifest_owner_admission_intent_digest_v1,
+    prepare_manifest_owner_admission_v1, validate_manifest_owner_admission_snapshot_v1,
+    ArtifactDataClassV1, ArtifactTransitionRuleV1, Hash, LocalCutOwnerCommitKindV1,
+    LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, ManifestAdmissionCatalogInputV1,
+    ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
-    ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
-    ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-    ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1,
-    ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1, OwnerIdV1, Plugin,
-    PluginId, PreparedManifestOwnerAdmissionV1, TimelineId, WorldArtifactKindV1,
-    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
-    WorldConsumerV1, WorldProducerV1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
+    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
+    ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
+    ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
+    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptInputV1,
+    ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1, ManifestSlotBindingRowV1,
+    ManifestSlotBindingV1, OutputPolicyClosureEnvelopeV1, OwnerIdV1, Plugin, PluginId,
+    PreparedManifestOwnerAdmissionV1, TimelineId, WorldArtifactKindV1, WorldClosureReadLimitsV1,
+    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
+    MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 use pos_runtime::{
     recover_local_cut_owner_retry_v1, recover_manifest_owner_admission_retry_v1,
@@ -40,6 +46,16 @@ type LocalCutPair = (
     pos_core::LocalCutOwnerCommitV1,
     pos_core::LocalCutOwnerCommitV1,
 );
+
+const DAY_MICROS: u64 = 86_400_000_000;
+const READ_LIMITS: WorldClosureReadLimitsV1 = WorldClosureReadLimitsV1 {
+    max_node_visits: 4096,
+    max_native_bytes: 1_048_576,
+    max_combined_depth: 32,
+};
+
+/// Genesis chain hash attested by the fixture local-cut source owner.
+const SOURCE_GENESIS: Hash = hash(0x47);
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -165,55 +181,20 @@ fn request_for_timelines(
     }
 
     let mut timelines = Vec::with_capacity(timeline_ids.len());
-    for (index, timeline_id) in timeline_ids.iter().enumerate() {
-        let scope_byte = 70u8
-            .checked_add(u8::try_from(index)?)
-            .ok_or("too many fixture Timelines")?;
-        let scope = hash(scope_byte);
-        let mut policy_copies = Vec::with_capacity(sources.len());
-        for source in sources {
-            let eop1_bytes = source.eop1_bytes().to_vec();
-            let opc1_bytes = source.opc1_bytes().to_vec();
-            let eop1_leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-                scope,
-                kind: WorldArtifactKindV1::OutputPolicy,
-                native_digest: source.eop1_native_digest(),
-                native_byte_length: u64::try_from(eop1_bytes.len()).unwrap_or(u64::MAX),
-                owner: owner_id,
-                data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-                optionality: ArtifactOptionalityV1::Required,
-                transition: ArtifactTransitionRuleV1::PreserveExact,
-                source_lease_hash: hash(71),
-                key_dependencies: Vec::new(),
-                child_node_hashes: Vec::new(),
-            })?;
-            let opc1_leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-                scope,
-                kind: WorldArtifactKindV1::OutputPolicyClosure,
-                native_digest: source.closure_hash(),
-                native_byte_length: u64::try_from(opc1_bytes.len()).unwrap_or(u64::MAX),
-                owner: owner_id,
-                data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-                optionality: ArtifactOptionalityV1::Required,
-                transition: ArtifactTransitionRuleV1::PreserveExact,
-                source_lease_hash: hash(71),
-                key_dependencies: Vec::new(),
-                child_node_hashes: Vec::new(),
-            })?;
-            policy_copies.push(ManifestOwnerPolicyCopiesV1 {
-                plugin_id: source.plugin_id(),
-                eop1_bytes,
-                eop1_leaf,
-                opc1_bytes,
-                opc1_leaf,
-            });
-        }
-        let wcs1 = consumer_set(scope, producer.plugin_id(), producer.eop1_native_digest())?;
+    for timeline_id in timeline_ids {
+        let scope = admitted_scope(owner_id, timeline_id, sources)?;
+        let wcs1 = consumer_set(
+            scope.scope,
+            &scope.members,
+            producer.plugin_id(),
+            producer.eop1_native_digest(),
+        )?;
         timelines.push(ManifestOwnerTimelineAdmissionRequestV1 {
-            timeline_id: *timeline_id,
-            scope,
+            timeline_id,
+            scope: scope.scope,
             wcs1,
-            policy_copies,
+            policy_copies: scope.policy_copies,
+            members: scope.members,
         });
     }
 
@@ -224,12 +205,89 @@ fn request_for_timelines(
         previous_visible_lcq1_hash: transition.previous_visible_lcq1_hash,
         expected_inventory_generation: transition.expected_inventory_generation,
         resulting_inventory_generation: transition.resulting_inventory_generation,
+        read_limits: READ_LIMITS,
         timelines,
     })
 }
 
+/// Derive one scope from the admitted sources and a lease over their RTP1.
+fn admitted_scope(
+    owner_id: [u8; 32],
+    timeline_id: TimelineId,
+    sources: &[pos_runtime::AdmittedManifestPolicySourceV1],
+) -> Result<ManifestOwnerScopeV1, Box<dyn Error>> {
+    let first = sources.first().ok_or("empty admitted Plugin set")?;
+    let envelope = OutputPolicyClosureEnvelopeV1::from_canonical_bytes_v1(
+        first.opc1_bytes(),
+        first.eop1_bytes(),
+    )?;
+    let rtp1_bytes = envelope.retention_policy_artifact().to_vec();
+    let policy = WorldRetentionPolicyV1::from_canonical_cbor(&rtp1_bytes)?;
+    let lease = WorldRetentionLeaseV1::new(
+        &policy,
+        WorldRetentionLeaseInputV1 {
+            timeline_id,
+            policy_hash: policy.digest(),
+            started_at_micros: DAY_MICROS,
+            admission_closes_at_micros: 11 * DAY_MICROS,
+            retention_deadline_micros: 111 * DAY_MICROS,
+        },
+    )?;
+    let source = ManifestOwnerScopeSourceV1 {
+        owner_id,
+        timeline_id,
+        rtp1_bytes,
+        rls1_bytes: lease.to_canonical_cbor(),
+        consumer_references: vec![ManifestOwnerConsumerReferenceV1 {
+            schema: hash(80),
+            reducer: hash(79),
+            runtime: hash(81),
+        }],
+        policy_sources: sources
+            .iter()
+            .map(|source| ManifestOwnerPolicySourceV1 {
+                plugin_id: source.plugin_id(),
+                eop1_bytes: source.eop1_bytes().to_vec(),
+                opc1_bytes: source.opc1_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    let classify = |_: WorldArtifactKindV1, _: Hash| {
+        Some(ManifestOwnerLeafClassificationV1 {
+            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
+            transition: ArtifactTransitionRuleV1::PreserveExact,
+            key_dependencies: Vec::new(),
+        })
+    };
+    let scope = build_manifest_owner_scope_v1(&source, &classify)?;
+    for copy in &scope.policy_copies {
+        let admitted = sources
+            .iter()
+            .find(|source| source.plugin_id() == copy.plugin_id)
+            .ok_or("missing admitted Plugin source")?;
+        assert_eq!(
+            copy.opc1_leaf.as_input().native_digest,
+            admitted.closure_hash()
+        );
+    }
+    Ok(scope)
+}
+
+fn reference_leaf(
+    members: &ManifestOwnerScopeMembersV1,
+    kind: WorldArtifactKindV1,
+) -> Result<Hash, Box<dyn Error>> {
+    members
+        .leaves
+        .iter()
+        .find(|member| member.leaf.as_input().kind == kind)
+        .map(|member| member.leaf.digest())
+        .ok_or_else(|| "missing reference leaf".into())
+}
+
 fn consumer_set(
     scope: Hash,
+    members: &ManifestOwnerScopeMembersV1,
     producer_id: PluginId,
     output_policy_hash: Hash,
 ) -> Result<WorldConsumerSetV1, Box<dyn Error>> {
@@ -237,9 +295,9 @@ fn consumer_set(
         scope,
         consumers: vec![WorldConsumerV1::new(
             "local-observer".to_owned(),
-            hash(79),
-            hash(80),
-            hash(81),
+            reference_leaf(members, WorldArtifactKindV1::ReducerImplementation)?,
+            reference_leaf(members, WorldArtifactKindV1::Schema)?,
+            reference_leaf(members, WorldArtifactKindV1::RuntimeIdentity)?,
         )?],
         producers: vec![WorldProducerV1::new(producer_id, output_policy_hash)?],
         optional_view_roots: Vec::new(),
@@ -370,6 +428,19 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
             Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
         }
     }
+
+    fn classify_scope_member_leaves(
+        &self,
+        _timeline_id: TimelineId,
+        _scope: Hash,
+        members: &ManifestOwnerScopeMembersV1,
+    ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
+        Ok(members
+            .leaves
+            .iter()
+            .map(|member| ManifestOwnerClassifiedLeafV1::of_leaf(&member.leaf))
+            .collect())
+    }
 }
 
 impl pos_core::LocalCutOwnerVerifierV1 for FixtureOwner {
@@ -386,15 +457,16 @@ impl pos_core::LocalCutOwnerVerifierV1 for FixtureOwner {
                 && row.event_cursor == 0
                 && row.participant_native_state_hash == hash(91)
         });
-        let recording_contexts_are_current = request
-            .recording_context_rows
-            .iter()
-            .all(|row| row.retention_lease_hash == hash(104) && row.predecessor_wcb_hash.is_none());
-        (!self.rejected.load(Ordering::Relaxed)
-            && composition_is_current
-            && recording_contexts_are_current)
+        (!self.rejected.load(Ordering::Relaxed) && composition_is_current)
             .then_some(())
             .ok_or(pos_core::LocalCutOwnerErrorV1::OwnerRejected)
+    }
+
+    fn source_genesis_hash(
+        &self,
+        _timeline_id: TimelineId,
+    ) -> Result<Hash, pos_core::LocalCutOwnerErrorV1> {
+        Ok(SOURCE_GENESIS)
     }
 
     fn sign_local_cut_receipt(
@@ -616,7 +688,79 @@ struct LocalCutTransition {
     membership_epoch: u32,
     operation_id: Hash,
     result_inventory_generation: Hash,
-    result_heads_table: pos_core::LocalCutTableRefV1,
+    /// Recordings of earlier visible cuts, newest last, that name predecessors.
+    previous_recordings: Vec<pos_core::LocalCutWorldRecordingV1>,
+}
+
+fn predecessor_in(
+    recordings: &[pos_core::LocalCutWorldRecordingV1],
+    timeline_id: TimelineId,
+) -> Option<Hash> {
+    recordings
+        .iter()
+        .rev()
+        .find(|recording| recording.binding.as_input().timeline_id == timeline_id)
+        .map(|recording| recording.binding.digest())
+}
+
+/// Kind-5 rows naming the WCB1 the owner derives for each sealed Timeline.
+fn derived_result_heads(
+    request: &pos_core::LocalCutOwnerRequestV1,
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+) -> Result<Vec<pos_core::LocalCutResultHeadRowV1>, Box<dyn Error>> {
+    let mut rows = Vec::with_capacity(snapshots.len());
+    for (snapshot, context) in snapshots.iter().zip(&request.recording_context_rows) {
+        let source = pos_core::LocalCutWorldClosureSourceV1 {
+            operation_id: request.operation_id,
+            seal: &request.seal,
+            admission: snapshot,
+            retention_lease_hash: context.retention_lease_hash,
+            predecessor_binding_hash: context.predecessor_wcb_hash,
+            genesis_hash: SOURCE_GENESIS,
+        };
+        let closure = pos_core::derive_local_cut_world_closure_v1(&source)?;
+        rows.push(pos_core::LocalCutResultHeadRowV1 {
+            timeline_id: context.timeline_id,
+            result_logical_head: 0,
+            result_stitched_hash: SOURCE_GENESIS,
+            result_source_segment_head: 0,
+            result_source_chain_hash: SOURCE_GENESIS,
+            successor_wcb_hash: closure.binding().digest(),
+            event_count: 0,
+        });
+    }
+    Ok(rows)
+}
+
+/// Replace the seal and re-derive the kind-5 rows that name its WCB1s.
+fn resealed(
+    request: &pos_core::LocalCutOwnerRequestV1,
+    seal: &pos_core::LocalCutSealInputV2,
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+) -> Result<pos_core::LocalCutOwnerRequestV1, Box<dyn Error>> {
+    let mut rebound = request.clone();
+    rebound.seal = pos_core::LocalCutSealV2::new(*seal)?;
+    rebound.result_head_rows = derived_result_heads(&rebound, snapshots)?;
+    let table = pos_core::LocalCutHeadsTableV1::result_heads(
+        seal.owner_id,
+        seal.cut_id,
+        &rebound.result_head_rows,
+    )?;
+    rebound.result_heads_table = table.table_ref();
+    Ok(rebound)
+}
+
+fn recorded_lease(
+    snapshot: &pos_core::ManifestOwnerAdmissionSnapshotV1,
+) -> Result<Hash, Box<dyn Error>> {
+    let lease = snapshot
+        .timeline
+        .members
+        .leaves
+        .iter()
+        .find(|member| member.leaf.as_input().kind == WorldArtifactKindV1::RetentionLease)
+        .ok_or("missing recorded lease leaf")?;
+    Ok(lease.leaf.as_input().native_digest)
 }
 
 fn local_cut_request(
@@ -634,9 +778,67 @@ fn local_cut_request(
             membership_epoch: 0,
             operation_id: hash(102),
             result_inventory_generation: hash(111),
-            result_heads_table: local_cut_table(1, 105)?,
+            previous_recordings: Vec::new(),
         },
     )
+}
+
+fn local_cut_composition_rows(
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+) -> Vec<pos_core::LocalCutCompositionBindingRowV1> {
+    let mut composition_rows = Vec::new();
+    for snapshot in snapshots {
+        composition_rows.extend(snapshot.catalog.as_input().rows.iter().map(|row| {
+            pos_core::LocalCutCompositionBindingRowV1 {
+                plugin_id: row.plugin_id,
+                timeline_id: snapshot.timeline.timeline_id,
+                plugin_version: row.plugin_version.clone(),
+                implementation_hash: row.implementation_hash,
+                eop1_native_digest: row.eop1_native_digest,
+                driver_interval_ns: Some(0),
+                last_due_ns: None,
+                event_cursor: 0,
+                participant_native_state_hash: hash(91),
+            }
+        }));
+    }
+    composition_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
+    composition_rows
+}
+
+type LocalCutContextAndHeadRows = (
+    Vec<pos_core::LocalCutRecordingContextRowV1>,
+    Vec<pos_core::LocalCutExpectedHeadRowV1>,
+);
+
+fn local_cut_context_and_head_rows(
+    snapshots: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
+    transition: &LocalCutTransition,
+) -> Result<LocalCutContextAndHeadRows, Box<dyn Error>> {
+    let mut recording_context_rows = Vec::with_capacity(snapshots.len());
+    let mut expected_head_rows = Vec::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        let timeline_id = snapshot.timeline.timeline_id;
+        let predecessor_wcb_hash = predecessor_in(&transition.previous_recordings, timeline_id);
+        recording_context_rows.push(pos_core::LocalCutRecordingContextRowV1 {
+            timeline_id,
+            wcs_hash: snapshot.timeline.wcs1.digest(),
+            retention_lease_hash: recorded_lease(snapshot)?,
+            predecessor_wcb_hash,
+        });
+        expected_head_rows.push(pos_core::LocalCutExpectedHeadRowV1 {
+            timeline_id,
+            logical_head: 0,
+            stitched_chain_hash: SOURCE_GENESIS,
+            source_timeline_id: timeline_id,
+            source_segment_head: 0,
+            source_chain_hash: SOURCE_GENESIS,
+            logical_prefix: 0,
+            lineage_proof_hash: None,
+            predecessor_wcb_hash,
+        });
+    }
+    Ok((recording_context_rows, expected_head_rows))
 }
 
 fn local_cut_request_for_admissions(
@@ -665,33 +867,14 @@ fn local_cut_request_for_admissions(
             })
             .collect(),
     )?;
-    let mut composition_rows = Vec::new();
-    for snapshot in &snapshots {
-        composition_rows.extend(snapshot.catalog.as_input().rows.iter().map(|row| {
-            pos_core::LocalCutCompositionBindingRowV1 {
-                plugin_id: row.plugin_id,
-                timeline_id: snapshot.timeline.timeline_id,
-                plugin_version: row.plugin_version.clone(),
-                implementation_hash: row.implementation_hash,
-                eop1_native_digest: row.eop1_native_digest,
-                driver_interval_ns: Some(0),
-                last_due_ns: None,
-                event_cursor: 0,
-                participant_native_state_hash: hash(91),
-            }
-        }));
-    }
-    composition_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
-    let mut recording_context_rows = snapshots
-        .iter()
-        .map(|snapshot| pos_core::LocalCutRecordingContextRowV1 {
-            timeline_id: snapshot.timeline.timeline_id,
-            wcs_hash: snapshot.timeline.wcs1.digest(),
-            retention_lease_hash: hash(104),
-            predecessor_wcb_hash: None,
-        })
-        .collect::<Vec<_>>();
-    recording_context_rows.sort_unstable_by_key(|row| row.timeline_id);
+    let composition_rows = local_cut_composition_rows(&snapshots);
+    let (recording_context_rows, expected_head_rows) =
+        local_cut_context_and_head_rows(&snapshots, transition)?;
+    let expected_heads = pos_core::LocalCutHeadsTableV1::expected_heads(
+        owner_id,
+        transition.cut_id,
+        &expected_head_rows,
+    )?;
     let composition_table = local_cut_table(u64::try_from(composition_rows.len())?, 92)?;
     let recording_context_table =
         local_cut_table(u64::try_from(recording_context_rows.len())?, 93)?;
@@ -708,7 +891,7 @@ fn local_cut_request_for_admissions(
         composition_table,
         inbox_table: local_cut_table(0, 95)?,
         invocation_table: local_cut_table(0, 96)?,
-        expected_heads_table: transition.result_heads_table,
+        expected_heads_table: expected_heads.table_ref(),
         ebp_native_hash: hash(98),
         execution_profile_native_hash: hash(99),
         recording_context_table,
@@ -717,15 +900,17 @@ fn local_cut_request_for_admissions(
         ingress_preallocation_native_hash: hash(101),
         manifest_binding_table: manifest_binding_table.table_ref(),
     })?;
-    Ok(pos_core::LocalCutOwnerRequestV1 {
+    let request = pos_core::LocalCutOwnerRequestV1 {
         operation_id: transition.operation_id,
         seal,
         manifest_hash: hash(103),
         manifest_binding_table,
         composition_rows,
         recording_context_rows,
+        expected_head_rows,
+        result_head_rows: Vec::new(),
         partition_ledger_seq: transition.cut_id,
-        result_heads_table: transition.result_heads_table,
+        result_heads_table: local_cut_table(0, 105)?,
         participant_successor_table: local_cut_table(1, 106)?,
         cpu_completion_table: local_cut_table(0, 107)?,
         action_disposition_table: local_cut_table(1, 108)?,
@@ -733,7 +918,8 @@ fn local_cut_request_for_admissions(
         invocation_bridges_table: local_cut_table(0, 110)?,
         result_inventory_generation: transition.result_inventory_generation,
         release_fence_proof_digest: hash(112),
-    })
+    };
+    resealed(&request, request.seal.as_input(), &snapshots)
 }
 
 fn admitted_snapshot<S: ManifestOwnerAdmissionPersistencePortV1>(
@@ -815,6 +1001,7 @@ fn registry_commits_local_cut_owner_and_recovers_without_authority() -> TestResu
         local_state.inventory_generation,
         local_cut.result_inventory_generation
     );
+    assert_eq!(verified_local_cut_state(&store, owner_id)?, local_state);
     let current_admission = store
         .read_manifest_owner_state_v1(owner_id)?
         .ok_or("missing synchronized admitted owner state")?;
@@ -836,6 +1023,8 @@ fn registry_commits_local_cut_owner_and_recovers_without_authority() -> TestResu
     assert_eq!(recovered.kind, LocalCutOwnerCommitKindV1::ExactRetry);
     assert_eq!(recovered.commit, applied.commit);
     assert_eq!(recovered.receipt, applied.receipt);
+    assert_eq!(recovered.recordings, applied.recordings);
+    assert_eq!(applied.recordings.len(), 1);
 
     let without_authority = PluginRegistry::new().commit_admitted_local_cut_owner_v1(
         &admitted,
@@ -894,6 +1083,11 @@ fn sqlite_local_cut_owner_retry_survives_reopen_without_registry_authority() -> 
     drop(store);
 
     let mut reopened = pos_store::sqlite::SqliteStore::open(database)?;
+    let verified = verified_local_cut_state(&reopened, owner_id)?;
+    assert_eq!(
+        verified.previous_visible_lcq1_hash,
+        Some(applied.receipt.digest())
+    );
     let retry = recover_local_cut_owner_retry_v1(&local_cut, &reopened)?
         .ok_or("SQLite local-cut owner operation was not recovered")?;
     assert_eq!(retry.kind, LocalCutOwnerCommitKindV1::ExactRetry);
@@ -904,6 +1098,8 @@ fn sqlite_local_cut_owner_retry_survives_reopen_without_registry_authority() -> 
         .ok_or("SQLite local-cut owner record was not retained")?;
     assert_eq!(stored.commit, applied.commit);
     assert_eq!(stored.receipt, applied.receipt);
+    assert_eq!(stored.recordings, applied.recordings);
+    assert_eq!(retry.recordings, applied.recordings);
 
     let without_authority = PluginRegistry::new().commit_admitted_local_cut_owner_v1(
         &admitted,
@@ -954,12 +1150,16 @@ fn commit_two_zero_output_cuts(
             membership_epoch: 0,
             operation_id: hash(124),
             result_inventory_generation: hash(125),
-            result_heads_table: local_cut_table(0, 105)?,
+            previous_recordings: Vec::new(),
         },
     )?;
     let first = registry.commit_admitted_local_cut_owner_v1(admitted, first_request, store)?;
     assert_eq!(first.kind, LocalCutOwnerCommitKindV1::Applied);
-    assert_eq!(first.commit.as_input().result_heads_table.row_count(), 0);
+    let result_heads = first.commit.as_input().result_heads_table;
+    assert_eq!(
+        result_heads.row_count(),
+        u64::try_from(expected_timelines.len())?
+    );
 
     let after_first = store
         .read_local_cut_owner_state_v1(owner_id)?
@@ -984,15 +1184,15 @@ fn commit_two_zero_output_cuts(
             membership_epoch: after_first.membership_epoch,
             operation_id: hash(126),
             result_inventory_generation: hash(127),
-            result_heads_table: local_cut_table(0, 105)?,
+            previous_recordings: first.recordings.clone(),
         },
     )?;
     let second = registry.commit_admitted_local_cut_owner_v1(admitted, second_request, store)?;
     assert_eq!(second.kind, LocalCutOwnerCommitKindV1::Applied);
-    assert_eq!(
-        second.commit.as_input().result_heads_table,
-        first.commit.as_input().result_heads_table
-    );
+    for (earlier, later) in first.recordings.iter().zip(&second.recordings) {
+        let predecessor = later.binding.as_input().predecessor_binding_hash;
+        assert_eq!(predecessor, Some(earlier.binding.digest()));
+    }
     assert_ne!(second.commit.digest(), first.commit.digest());
     Ok((first, second))
 }
@@ -1076,7 +1276,7 @@ fn replace_scope_and_commit_third_cut(
             membership_epoch: after_replacement.membership_epoch,
             operation_id: hash(129),
             result_inventory_generation: hash(130),
-            result_heads_table: local_cut_table(0, 105)?,
+            previous_recordings: context.second.recordings.clone(),
         },
     )?;
     let third =
@@ -1211,7 +1411,7 @@ fn commit_sqlite_successor_and_reopen(
             membership_epoch: successor_state.membership_epoch,
             operation_id: hash(138),
             result_inventory_generation: hash(139),
-            result_heads_table: local_cut_table(0, 105)?,
+            previous_recordings: first.recordings.clone(),
         },
     )?;
     let second = input.registry.commit_admitted_local_cut_owner_v1(
@@ -1409,7 +1609,7 @@ fn assert_structural_local_cut_rejections(
             std::slice::from_ref(context.snapshot),
             context.verifier,
         ),
-        Err(pos_core::LocalCutOwnerErrorV1::OwnerRejected)
+        Err(pos_core::LocalCutOwnerErrorV1::Conflict)
     );
 }
 
@@ -1688,6 +1888,7 @@ enum OwnerFault {
     Composition,
     ScopeSet,
     NativeCopies,
+    MemberLeaves,
     Signature,
     ReceiptDraft,
     Receipt,
@@ -1770,6 +1971,17 @@ impl ManifestOwnerAdmissionVerifierV1 for FaultyOwner {
         self.inner
             .verify_native_policy_copies(timeline_id, scope, copies)
     }
+
+    fn classify_scope_member_leaves(
+        &self,
+        timeline_id: TimelineId,
+        scope: Hash,
+        members: &ManifestOwnerScopeMembersV1,
+    ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
+        self.reject_at(OwnerFault::MemberLeaves)?;
+        self.inner
+            .classify_scope_member_leaves(timeline_id, scope, members)
+    }
 }
 
 /// Store whose owner-state read fails after a missing retry lookup.
@@ -1839,6 +2051,7 @@ fn prepared_snapshot(
         operation_id: input.operation_id,
         expected_inventory_generation: input.expected_inventory_generation,
         resulting_inventory_generation: input.resulting_inventory_generation,
+        read_limits: input.read_limits,
     })
 }
 
@@ -1872,6 +2085,7 @@ fn owner_verifier_rejections_stop_preparation_at_each_step() -> TestResult {
         OwnerFault::Composition,
         OwnerFault::ScopeSet,
         OwnerFault::NativeCopies,
+        OwnerFault::MemberLeaves,
         OwnerFault::Signature,
         OwnerFault::ReceiptDraft,
         OwnerFault::Receipt,
@@ -1962,11 +2176,13 @@ fn preparation_rejects_unknown_copies_unparseable_eop1_and_foreign_producers() -
 
     let mut foreign_producer = request(&admitted, &sources, timeline_id, operation_id)?;
     let scope = foreign_producer.timelines[0].scope;
+    let members = foreign_producer.timelines[0].members.clone();
     foreign_producer.timelines[0].wcs1 =
-        consumer_set(scope, unknown, producer.eop1_native_digest())?;
+        consumer_set(scope, &members, unknown, producer.eop1_native_digest())?;
 
     let mut drifted_producer = request(&admitted, &sources, timeline_id, operation_id)?;
-    drifted_producer.timelines[0].wcs1 = consumer_set(scope, producer.plugin_id(), hash(87))?;
+    drifted_producer.timelines[0].wcs1 =
+        consumer_set(scope, &members, producer.plugin_id(), hash(87))?;
 
     for invalid in [
         unknown_copy,
@@ -2128,6 +2344,10 @@ impl pos_core::LocalCutOwnerVerifierV1 for FaultingCutVerifier {
         )
     }
 
+    fn source_genesis_hash(&self, timeline_id: TimelineId) -> CutResult<Hash> {
+        pos_core::LocalCutOwnerVerifierV1::source_genesis_hash(&self.inner, timeline_id)
+    }
+
     fn sign_local_cut_receipt(
         &self,
         commit: &pos_core::LocalCutCommitV1,
@@ -2283,6 +2503,22 @@ impl LocalCutOwnerPersistencePortV1 for FaultStore {
     ) -> CutResult<Option<pos_core::LocalCutOwnerCommitV1>> {
         self.inner.read_local_cut_owner_commit_v1(owner, cut)
     }
+
+    fn verify_local_cut_owner_history_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> CutResult<Option<pos_core::LocalCutOwnerStateV1>> {
+        self.inner.verify_local_cut_owner_history_v1(owner_id)
+    }
+}
+
+/// Verify an owner's complete local-cut history through the persistence port.
+fn verified_local_cut_state<S: LocalCutOwnerPersistencePortV1>(
+    store: &S,
+    owner_id: [u8; 32],
+) -> Result<pos_core::LocalCutOwnerStateV1, Box<dyn Error>> {
+    let state = store.verify_local_cut_owner_history_v1(owner_id)?;
+    state.ok_or_else(|| "local-cut owner history was not retained".into())
 }
 
 struct LocalCutFixture {
@@ -2524,11 +2760,11 @@ fn local_cut_preparation_rejects_unbound_manifest_rows() -> TestResult {
 fn with_composition_rows(
     request: &pos_core::LocalCutOwnerRequestV1,
     rows: Vec<pos_core::LocalCutCompositionBindingRowV1>,
+    snapshot: &pos_core::ManifestOwnerAdmissionSnapshotV1,
 ) -> Result<pos_core::LocalCutOwnerRequestV1, Box<dyn Error>> {
-    let mut rebound = request.clone();
-    let mut seal = *rebound.seal.as_input();
+    let mut seal = *request.seal.as_input();
     seal.composition_table = local_cut_table(u64::try_from(rows.len())?, 92)?;
-    rebound.seal = pos_core::LocalCutSealV2::new(seal)?;
+    let mut rebound = resealed(request, &seal, std::slice::from_ref(snapshot))?;
     rebound.composition_rows = rows;
     Ok(rebound)
 }
@@ -2574,7 +2810,7 @@ fn local_cut_commits_without_kind_one_row_for_reducer_only_plugin() -> TestResul
     let mut unknown_rows = fixture.request.composition_rows.clone();
     unknown_rows.push(unknown_row);
     unknown_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
-    let unknown_plugin = with_composition_rows(&fixture.request, unknown_rows)?;
+    let unknown_plugin = with_composition_rows(&fixture.request, unknown_rows, &fixture.snapshot)?;
     let mut store = fixture.store;
     assert_eq!(
         fixture.registry.commit_admitted_local_cut_owner_v1(
@@ -2596,7 +2832,8 @@ fn local_cut_commits_without_kind_one_row_for_reducer_only_plugin() -> TestResul
         producer_rows.len() + 1,
         fixture.request.composition_rows.len()
     );
-    let reducer_omitted = with_composition_rows(&fixture.request, producer_rows)?;
+    let reducer_omitted =
+        with_composition_rows(&fixture.request, producer_rows, &fixture.snapshot)?;
     let applied = fixture.registry.commit_admitted_local_cut_owner_v1(
         &fixture.admitted,
         reducer_omitted.clone(),
@@ -2620,7 +2857,8 @@ fn local_cut_preparation_rejects_unknown_composition_and_partial_recording_rows(
 
     let mut omitted_rows = fixture.request.composition_rows.clone();
     omitted_rows.pop();
-    let omitted_composition = with_composition_rows(&fixture.request, omitted_rows)?;
+    let omitted_composition =
+        with_composition_rows(&fixture.request, omitted_rows, &fixture.snapshot)?;
     assert!(prepare_request(&fixture, omitted_composition, None).is_ok());
 
     let mut unknown_plugin = fixture.request.clone();
@@ -2757,6 +2995,11 @@ fn registry_local_cut_commit_maps_store_faults_before_signing() -> TestResult {
     let applied =
         registry.commit_admitted_local_cut_owner_v1(admitted, local_cut.clone(), &mut store)?;
     assert_eq!(applied.kind, LocalCutOwnerCommitKindV1::Applied);
+    let verified = verified_local_cut_state(&store, fixture.state.owner_id)?;
+    assert_eq!(
+        verified.previous_visible_lcq1_hash,
+        Some(applied.receipt.digest())
+    );
     Ok(())
 }
 

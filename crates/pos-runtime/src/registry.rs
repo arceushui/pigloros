@@ -1478,9 +1478,18 @@ impl PluginRegistry {
     /// capability is still current.
     ///
     /// The request catalog and each supplied EOP1/OPC1 byte copy must match
-    /// this registry's current `AdmittedCompositionV1`. The trusted owner
-    /// verifier then checks the owner pre-state and complete Timeline scopes,
-    /// verifies native policy semantics, and signs each MSR1 before the store
+    /// this registry's current `AdmittedCompositionV1`. This runtime owner
+    /// hook validates every OPC1 member through
+    /// `OutputPolicyClosureV1::from_manifest_canonical_bytes_v1` before the
+    /// core owner derives the scope's member leaves from exactly those bytes:
+    /// EOP1, EBP1 and RTP1 by their native decoders, CFG1 by its canonical
+    /// framing, and the implementation artifact by its length and identity.
+    /// An empty (Generated) EPF1 is accepted everywhere; a non-empty EPF1 is
+    /// decoded natively on Linux and rejected as `InvalidBatch` on other
+    /// hosts. Stores therefore never need the EPF1 decoder. The
+    /// trusted owner verifier then checks the owner pre-state and complete
+    /// Timeline scopes, verifies native policy semantics, classifies every
+    /// scope member leaf, and signs each MSR1 before the store
     /// commits the complete batch with its generation CAS. An exact durable
     /// retry is resolved before this method consults the live registry or
     /// coordinator verifier.

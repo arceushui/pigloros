@@ -2,17 +2,24 @@
 //!
 //! The records in `manifest_owner_link` are portable structures. This module
 //! binds a complete MCA1 catalog to every owned Timeline, its exact scoped
-//! MSB1/WCS1 pair, signed MSR1, and the Required EOP1/OPC1 WAL1 leaves and
-//! native bytes. A decoded or prepared batch is still not a Replay capability.
+//! MSB1/WCS1 pair, signed MSR1, the Required EOP1/OPC1 WAL1 leaves and
+//! native bytes, and the ADR-081 Revision 2 scope members: the recorded
+//! RLS1/RTP1 lease, retained native member leaves and unavailable reference
+//! leaves. A decoded or prepared batch is still not a Replay capability.
 
 use std::collections::HashSet;
 
+use crate::manifest_owner_members::{
+    validate_scope_budgets, validate_scope_members, verify_member_classes,
+    ManifestOwnerClassifiedLeafV1, ManifestOwnerScopeMembersV1,
+};
 use crate::output_policy::OutputPolicyV1;
 use crate::{
     ArtifactOptionalityV1, Hash, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1,
     ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1, PluginId,
-    TimelineId, WorldArtifactKindV1, WorldArtifactLeafV1, WorldConsumerSetV1,
+    TimelineId, WorldArtifactKindV1, WorldArtifactLeafV1, WorldClosureReadLimitsV1,
+    WorldConsumerSetV1,
 };
 
 /// Maximum owned Timeline scopes committed by one admission transaction.
@@ -223,6 +230,23 @@ pub trait ManifestOwnerAdmissionVerifierV1: Send + Sync {
         scope: Hash,
         copies: &ManifestOwnerPolicyCopiesV1,
     ) -> Result<(), ManifestOwnerAdmissionErrorV1>;
+
+    /// Classify every member and reference leaf of one owned Timeline scope.
+    ///
+    /// Called once per scope after its per-Plugin
+    /// [`Self::verify_native_policy_copies`] calls. The installed owner policy
+    /// hook returns the data class, transition and key dependencies of each
+    /// leaf in `members.leaves` order; the owner never guesses them.
+    ///
+    /// # Errors
+    /// Returns `OwnerRejected` when the scope's members cannot be classified
+    /// under the installed owner and purpose policy.
+    fn classify_scope_member_leaves(
+        &self,
+        timeline_id: TimelineId,
+        scope: Hash,
+        members: &ManifestOwnerScopeMembersV1,
+    ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1>;
 }
 
 /// Exact Required native bytes and WAL1 leaves for one admitted Plugin.
@@ -255,6 +279,8 @@ pub struct ManifestOwnerTimelineAdmissionV1 {
     pub receipt: ManifestSlotAdmissionReceiptV1,
     /// Exact native policy bytes and Required leaves, sorted by `PluginId`.
     pub policy_copies: Vec<ManifestOwnerPolicyCopiesV1>,
+    /// Recorded RLS1/RTP1 lease and the scope's member and reference leaves.
+    pub members: ManifestOwnerScopeMembersV1,
 }
 
 /// Untrusted per-Timeline request; the owner derives MSB1 and signs MSR1.
@@ -268,6 +294,8 @@ pub struct ManifestOwnerTimelineAdmissionRequestV1 {
     pub wcs1: WorldConsumerSetV1,
     /// Exact native policy bytes and Required leaves, sorted by `PluginId`.
     pub policy_copies: Vec<ManifestOwnerPolicyCopiesV1>,
+    /// Recorded RLS1/RTP1 lease and the scope's member and reference leaves.
+    pub members: ManifestOwnerScopeMembersV1,
 }
 
 /// First twelve MSR1 fields that the installed coordinator signs.
@@ -334,6 +362,8 @@ pub struct ManifestOwnerAdmissionInputV1 {
     pub expected_inventory_generation: Option<Hash>,
     /// New opaque inventory generation allocated for the committed successor.
     pub resulting_inventory_generation: Hash,
+    /// Recorded WCB1 read limits for the resulting configuration generation.
+    pub read_limits: WorldClosureReadLimitsV1,
     /// Complete resulting owned Timeline set, never a partial delta.
     pub timelines: Vec<ManifestOwnerTimelineAdmissionV1>,
 }
@@ -353,6 +383,8 @@ pub struct ManifestOwnerAdmissionRequestV1 {
     pub expected_inventory_generation: Option<Hash>,
     /// New opaque owner-allocated inventory generation.
     pub resulting_inventory_generation: Hash,
+    /// WCB1 read limits recorded for the resulting configuration generation.
+    pub read_limits: WorldClosureReadLimitsV1,
     /// Complete resulting owned Timeline set, never a partial delta.
     pub timelines: Vec<ManifestOwnerTimelineAdmissionRequestV1>,
 }
@@ -367,7 +399,7 @@ pub struct ManifestOwnerAdmissionRequestV1 {
 pub fn manifest_owner_admission_intent_digest_v1(
     request: &ManifestOwnerAdmissionRequestV1,
 ) -> Result<Hash, ManifestOwnerAdmissionErrorV1> {
-    validate_request_shape(request)?;
+    validate_admission_request(request)?;
     Ok(digest_request(request))
 }
 
@@ -397,7 +429,10 @@ impl PreparedManifestOwnerAdmissionV1 {
 ///
 /// # Errors
 /// Rejects partial/duplicate scopes, catalog mismatch, invalid CAS null-state,
-/// missing zero-output copies, malformed EOP1/OPC1 identities, or an owner
+/// missing zero-output copies, malformed EOP1/OPC1 identities, invalid read
+/// limits, a lease, scope, member leaf or edge that differs from the exact
+/// derivation of its native bytes (`InvalidBatch`), retained native bytes
+/// above the recorded `max_native_bytes` (`BoundExceeded`), or an owner
 /// verifier rejection. No signature supplied by the request is treated as
 /// authority without the installed verifier.
 pub fn prepare_manifest_owner_admission_v1(
@@ -405,7 +440,7 @@ pub fn prepare_manifest_owner_admission_v1(
     verifier: &dyn ManifestOwnerAdmissionVerifierV1,
     current_state: Option<&ManifestOwnerAdmissionOwnerStateV1>,
 ) -> Result<PreparedManifestOwnerAdmissionV1, ManifestOwnerAdmissionErrorV1> {
-    validate_request_shape(&request)?;
+    validate_admission_request(&request)?;
     validate_current_prestate(&request, current_state)?;
     let intent_digest = digest_request(&request);
     verifier.verify_complete_composition(&request.catalog)?;
@@ -413,42 +448,11 @@ pub fn prepare_manifest_owner_admission_v1(
     verifier
         .verify_complete_owned_scope_set(request.catalog.as_input().owner_id, &request.timelines)?;
 
-    let mut timelines = Vec::with_capacity(request.timelines.len());
-    for timeline_request in &request.timelines {
-        validate_timeline_request(&request.catalog, timeline_request)?;
-        let binding = derive_binding(&request.catalog, timeline_request)?;
-        for copies in &timeline_request.policy_copies {
-            verifier.verify_native_policy_copies(
-                timeline_request.timeline_id,
-                timeline_request.scope,
-                copies,
-            )?;
-        }
-        let draft = ManifestSlotAdmissionReceiptDraftV1 {
-            owner_id: request.catalog.as_input().owner_id,
-            configuration_generation: request.catalog.as_input().configuration_generation,
-            scope: timeline_request.scope,
-            wcs1_hash: timeline_request.wcs1.digest(),
-            mca1_hash: request.catalog.digest(),
-            admission_operation_id: request.operation_id,
-            previous_visible_lcq1_hash: request.previous_visible_lcq1_hash,
-            expected_inventory_generation: request.expected_inventory_generation,
-            msb1_hash: binding.digest(),
-        };
-        let receipt = verifier.sign_coordinator_receipt(draft)?;
-        if !receipt_matches_draft(&receipt, &draft) {
-            return Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
-        }
-        verifier.verify_coordinator_receipt(&receipt)?;
-        timelines.push(ManifestOwnerTimelineAdmissionV1 {
-            timeline_id: timeline_request.timeline_id,
-            scope: timeline_request.scope,
-            wcs1: timeline_request.wcs1.clone(),
-            binding,
-            receipt,
-            policy_copies: timeline_request.policy_copies.clone(),
-        });
-    }
+    let timelines = request
+        .timelines
+        .iter()
+        .map(|timeline_request| prepare_timeline(&request, timeline_request, verifier))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let input = ManifestOwnerAdmissionInputV1 {
         operation_id: request.operation_id,
@@ -457,6 +461,7 @@ pub fn prepare_manifest_owner_admission_v1(
         previous_visible_lcq1_hash: request.previous_visible_lcq1_hash,
         expected_inventory_generation: request.expected_inventory_generation,
         resulting_inventory_generation: request.resulting_inventory_generation,
+        read_limits: request.read_limits,
         timelines,
     };
     validate_transaction_shape(&input)?;
@@ -466,6 +471,55 @@ pub fn prepare_manifest_owner_admission_v1(
     Ok(PreparedManifestOwnerAdmissionV1 {
         input,
         intent_digest,
+    })
+}
+
+/// Verify one scope, derive its MSB1, and sign its MSR1 with the installed
+/// coordinator after the owner hook classified every member leaf.
+fn prepare_timeline(
+    request: &ManifestOwnerAdmissionRequestV1,
+    timeline_request: &ManifestOwnerTimelineAdmissionRequestV1,
+    verifier: &dyn ManifestOwnerAdmissionVerifierV1,
+) -> Result<ManifestOwnerTimelineAdmissionV1, ManifestOwnerAdmissionErrorV1> {
+    validate_timeline_request(&request.catalog, timeline_request)?;
+    let binding = derive_binding(&request.catalog, timeline_request)?;
+    for copies in &timeline_request.policy_copies {
+        verifier.verify_native_policy_copies(
+            timeline_request.timeline_id,
+            timeline_request.scope,
+            copies,
+        )?;
+    }
+    let classes = verifier.classify_scope_member_leaves(
+        timeline_request.timeline_id,
+        timeline_request.scope,
+        &timeline_request.members,
+    )?;
+    verify_member_classes(&timeline_request.members, &classes)?;
+    let draft = ManifestSlotAdmissionReceiptDraftV1 {
+        owner_id: request.catalog.as_input().owner_id,
+        configuration_generation: request.catalog.as_input().configuration_generation,
+        scope: timeline_request.scope,
+        wcs1_hash: timeline_request.wcs1.digest(),
+        mca1_hash: request.catalog.digest(),
+        admission_operation_id: request.operation_id,
+        previous_visible_lcq1_hash: request.previous_visible_lcq1_hash,
+        expected_inventory_generation: request.expected_inventory_generation,
+        msb1_hash: binding.digest(),
+    };
+    let receipt = verifier.sign_coordinator_receipt(draft)?;
+    if !receipt_matches_draft(&receipt, &draft) {
+        return Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
+    }
+    verifier.verify_coordinator_receipt(&receipt)?;
+    Ok(ManifestOwnerTimelineAdmissionV1 {
+        timeline_id: timeline_request.timeline_id,
+        scope: timeline_request.scope,
+        wcs1: timeline_request.wcs1.clone(),
+        binding,
+        receipt,
+        policy_copies: timeline_request.policy_copies.clone(),
+        members: timeline_request.members.clone(),
     })
 }
 
@@ -500,10 +554,20 @@ pub fn validate_manifest_owner_admission_snapshot_v1(
         previous_visible_lcq1_hash,
         expected_inventory_generation: snapshot.expected_inventory_generation,
         resulting_inventory_generation: snapshot.resulting_inventory_generation,
+        read_limits: snapshot.read_limits,
         timelines: vec![snapshot.timeline.clone()],
     };
     validate_transaction_shape(&input)
         .and_then(|()| validate_timeline_admission(&input, &snapshot.timeline))
+        .and_then(|()| {
+            validate_scope_budgets(
+                snapshot.read_limits,
+                [(
+                    snapshot.timeline.policy_copies.as_slice(),
+                    &snapshot.timeline.members,
+                )],
+            )
+        })
 }
 
 /// Whether the atomic owner transaction applied or recovered an exact retry.
@@ -541,6 +605,8 @@ pub struct ManifestOwnerAdmissionSnapshotV1 {
     pub expected_inventory_generation: Option<Hash>,
     /// Inventory generation committed with this row.
     pub resulting_inventory_generation: Hash,
+    /// WCB1 read limits recorded for this configuration generation.
+    pub read_limits: WorldClosureReadLimitsV1,
 }
 
 /// Current owner state required to form the next generation's CAS request.
@@ -592,11 +658,21 @@ pub trait ManifestOwnerAdmissionPersistencePortV1 {
     /// A store validates the exact current owner/configuration/inventory
     /// pre-state, resolves identical operation retries, rejects operation-id
     /// reuse with different input, and publishes the entire successor only
-    /// after every Timeline/catalog/binding/receipt/copy row is ready.
+    /// after every Timeline/catalog/binding/receipt/copy row is ready. In the
+    /// same transaction it records the generation's read limits and each
+    /// scope's lease and member leaves by `(scope, kind, native digest)`: an
+    /// identical member registration deduplicates, any other one conflicts.
+    /// A Timeline whose latest recorded lease is extended by the replacement
+    /// lease is rejected, as decided by
+    /// [`crate::validate_manifest_owner_lease_replacement_v1`].
     ///
     /// # Errors
-    /// Returns `Conflict`, `CorruptState`, or `StorageFailure`; failure leaves
-    /// no partial generation or visible receipt.
+    /// Returns `OwnerRejected` for a lease extension, otherwise `Conflict`,
+    /// `CorruptState`, or `StorageFailure`; failure leaves no partial
+    /// generation or visible receipt. `Conflict` is the intended error for a
+    /// member leaf that differs from one an earlier transaction persisted
+    /// under the same key; request-shape faults never reach the store and are
+    /// rejected as `InvalidBatch` during preparation.
     fn commit_manifest_owner_admission_v1(
         &mut self,
         batch: PreparedManifestOwnerAdmissionV1,
@@ -685,6 +761,20 @@ fn validate_transaction_shape(
         return Err(ManifestOwnerAdmissionErrorV1::InvalidBatch);
     }
     Ok(())
+}
+
+fn validate_admission_request(
+    request: &ManifestOwnerAdmissionRequestV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    validate_request_shape(request).and_then(|()| {
+        validate_scope_budgets(
+            request.read_limits,
+            request
+                .timelines
+                .iter()
+                .map(|timeline| (timeline.policy_copies.as_slice(), &timeline.members)),
+        )
+    })
 }
 
 fn validate_request_shape(
@@ -802,6 +892,15 @@ fn validate_timeline_request(
         &timeline.policy_copies,
         None,
     )
+    .and_then(|()| {
+        validate_scope_members(
+            catalog.as_input().owner_id,
+            timeline.timeline_id,
+            &timeline.wcs1,
+            &timeline.policy_copies,
+            &timeline.members,
+        )
+    })
 }
 
 fn derive_binding(
@@ -881,6 +980,15 @@ fn validate_timeline_admission(
         &timeline.policy_copies,
         Some(&timeline.binding),
     )
+    .and_then(|()| {
+        validate_scope_members(
+            catalog.owner_id,
+            timeline.timeline_id,
+            &timeline.wcs1,
+            &timeline.policy_copies,
+            &timeline.members,
+        )
+    })
 }
 
 fn validate_timeline_policy_copies(
@@ -982,7 +1090,7 @@ fn valid_native_copy(
         && eop.source_lease_hash == opc.source_lease_hash
 }
 
-fn opc1_native_digest(bytes: &[u8]) -> Hash {
+pub(crate) fn opc1_native_digest(bytes: &[u8]) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
     hasher.update(bytes);
@@ -1021,8 +1129,28 @@ fn digest_request(request: &ManifestOwnerAdmissionRequestV1) -> Hash {
             hash_part(&mut hasher, &copies.opc1_bytes);
             hash_part(&mut hasher, &copies.opc1_leaf.to_canonical_cbor());
         }
+        hash_scope_members(&mut hasher, &timeline.members);
     }
+    hash_read_limits(&mut hasher, request.read_limits);
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn hash_scope_members(hasher: &mut blake3::Hasher, members: &ManifestOwnerScopeMembersV1) {
+    hasher.update(b"scope-members\0");
+    hash_part(hasher, &members.rtp1_bytes);
+    hash_part(hasher, &members.rls1_bytes);
+    hash_count(hasher, members.leaves.len());
+    for member in &members.leaves {
+        hash_part(hasher, &member.leaf.to_canonical_cbor());
+        hash_part(hasher, &member.native_bytes);
+    }
+}
+
+fn hash_read_limits(hasher: &mut blake3::Hasher, limits: WorldClosureReadLimitsV1) {
+    hasher.update(b"read-limits\0");
+    hasher.update(&limits.max_node_visits.to_be_bytes());
+    hasher.update(&limits.max_native_bytes.to_be_bytes());
+    hasher.update(&[limits.max_combined_depth]);
 }
 
 fn hash_count(hasher: &mut blake3::Hasher, count: usize) {
