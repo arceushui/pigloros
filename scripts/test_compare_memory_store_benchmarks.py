@@ -679,6 +679,70 @@ class HistoricalArchiveFailureTests(unittest.TestCase):
 
             self.assertIn("Comparison unavailable", summary_path.read_text(encoding="utf-8"))
 
+    def test_historical_download_network_failure_is_comparison_unavailable_not_failure(self) -> None:
+        current_data = dataset()
+        current_manifest = manifest(current_data)
+        now = COMPARATOR.utc_now()
+        baseline_manifest = manifest(
+            current_data,
+            event="push",
+            head_branch="main",
+            head_sha="b" * 40,
+            workflow_run_id=202,
+            created_at=now,
+        )
+        candidate = artifact(302, run_id=202, sha="b" * 40, created_at=now)
+        run = workflow_run(202, sha="b" * 40)
+        test_case = self
+
+        class NetworkFailureClient(COMPARATOR.GitHubActionsClient):
+            def list_baseline_artifacts(self, repository: str) -> list[dict[str, Any]]:
+                test_case.assertEqual(repository, IDENTITY.repository)
+                return [candidate]
+
+            def get_run(self, repository: str, run_id: int) -> dict[str, Any]:
+                test_case.assertEqual(repository, IDENTITY.repository)
+                test_case.assertEqual(run_id, 202)
+                return run
+
+        class FailingOpener:
+            def open(self, request: Any, timeout: int) -> Any:
+                del request, timeout
+                raise COMPARATOR.urllib.error.URLError("offline")
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            csv_path = temporary / "current.csv"
+            manifest_path = temporary / "current-manifest.json"
+            summary_path = temporary / "summary.md"
+            csv_path.write_text(csv_text(), encoding="utf-8")
+            manifest_path.write_text(json.dumps(current_manifest), encoding="utf-8")
+
+            arguments = COMPARATOR.argparse.Namespace(
+                csv=csv_path,
+                manifest=manifest_path,
+                summary=summary_path,
+                token="read-only-token",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                workflow_id=IDENTITY.workflow_id,
+                workflow_path=IDENTITY.workflow_path,
+                default_branch="main",
+                api_url="https://api.github.com",
+            )
+            client = NetworkFailureClient("read-only-token")
+            with (
+                mock.patch.object(COMPARATOR, "GitHubActionsClient", return_value=client),
+                mock.patch.object(
+                    COMPARATOR.urllib.request,
+                    "build_opener",
+                    return_value=FailingOpener(),
+                ),
+            ):
+                self.assertEqual(COMPARATOR.compare(arguments), 0)
+
+            self.assertIn("Comparison unavailable", summary_path.read_text(encoding="utf-8"))
+
 
 class WorkflowTriggerTests(unittest.TestCase):
     """Relevant benchmark inputs must trigger both main and PR measurements."""

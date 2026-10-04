@@ -931,6 +931,8 @@ class GitHubActionsClient:
             if error.code not in {301, 302, 303, 307, 308}:
                 raise ApiError(f"cannot start artifact download: {error}") from error
             location = error.headers.get("Location")
+        except urllib.error.URLError as error:
+            raise ApiError(f"cannot start artifact download: {error}") from error
         if not location:
             raise ApiError("artifact download redirect did not include a location")
         destination = urllib.parse.urlparse(location)
