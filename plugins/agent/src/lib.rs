@@ -11,13 +11,13 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use pos_core::{
-    event::{CanonicalBytes, Event, Kind},
+    event::{CanonicalBytes, Kind},
     ids::{EntityId, PluginId, TimelineId},
     plugin::{Capability, Plugin},
-    state::{Reducer, State},
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, Driver, ObservationView, RuntimeError, StepOutput,
+    recorder::RECORDER_EVENT_TYPE, Driver, InstalledPluginFactoryV1, InstalledPluginProductV1,
+    NoActionApproverV1, ObservationView, RuntimeError, StepOutput,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -25,10 +25,12 @@ use std::time::Duration;
 pub mod protocol;
 pub mod provider;
 pub mod provider_driver;
+mod reducer;
 pub mod replay;
 
 pub use provider::{AgentDecisionProvider, FixtureAgentDecisionProvider, FixtureProviderCallCount};
 pub use provider_driver::ProviderBackedAgentDriver;
+pub use reducer::AgentReducer;
 pub use replay::{AgentDecisionReplayVerifier, ReplayCheckpoint, ReplayVerificationError};
 
 /// The entity kind string for AI agents.
@@ -186,6 +188,26 @@ impl Plugin for AgentPlugin {
     }
 }
 
+// Reviewed staged Reducer catalogue factory (ADR-113 §1): every protected
+// candidate builds a fresh `AgentReducer` here and keeps only the reducer.
+impl InstalledPluginFactoryV1 for AgentPlugin {
+    type Configuration = ();
+    type Plugin = Self;
+    type Approver = NoActionApproverV1;
+
+    fn configuration_details(_configuration: &()) -> Vec<u8> {
+        pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1.to_vec()
+    }
+
+    fn build(_configuration: &()) -> InstalledPluginProductV1<Self, NoActionApproverV1> {
+        InstalledPluginProductV1 {
+            plugin: Self::new(),
+            reducer: Some(Box::new(AgentReducer)),
+            approver: NoActionApproverV1,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------
@@ -268,48 +290,6 @@ impl Driver for AgentDriver {
 }
 
 // ---------------------------------------------------------------------------
-// Reducer
-// ---------------------------------------------------------------------------
-
-/// Tracks per-agent action count and last action in State.
-pub struct AgentReducer;
-
-impl Reducer for AgentReducer {
-    fn initial(&self) -> State {
-        let mut s = State::new();
-        s.set("action_count", serde_json::Value::Number(0.into()));
-        s.set("last_action", serde_json::Value::String(String::new()));
-        s
-    }
-
-    fn apply(&self, state: &mut State, event: &Event) {
-        if event.event_type.as_str() == EVENT_TYPE_ACTION {
-            let action_count = state
-                .get("action_count")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            state.set(
-                "action_count",
-                serde_json::Value::Number((action_count + 1).into()),
-            );
-
-            let action = if protocol::is_agent_action_wire(event.payload.as_slice()) {
-                protocol::AgentActionV1::decode(event.payload.as_slice())
-                    .ok()
-                    .map(|payload| payload.action_id().to_owned())
-            } else {
-                ciborium::from_reader::<ActionPayload, _>(event.payload.as_slice())
-                    .ok()
-                    .map(|payload| payload.action)
-            };
-            if let Some(action) = action {
-                state.set("last_action", serde_json::Value::String(action));
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -341,8 +321,9 @@ mod tests {
     use pos_core::{
         clock::{Seq, WallTime},
         crypto::Hash,
-        event::{CanonicalBytes, SchemaVersion},
+        event::{CanonicalBytes, Event, SchemaVersion},
         ids::{EntityId, EventId},
+        state::Reducer,
     };
     use pos_store::{open_store, StoreConfig};
 
@@ -1079,5 +1060,43 @@ mod tests {
         for truncated in non_action_wire_prefixes() {
             assert!(!protocol::is_agent_action_wire(&truncated));
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn staged_factory_builds_a_fresh_reducer_per_candidate() {
+        use pos_runtime::{
+            fold_detached_candidate_v1, HostProjectionProviderV1, InitialStateV1,
+            ProtectedProjectionProviderV1, StagedReducerAdmissionErrorV1,
+        };
+
+        let mut provider = HostProjectionProviderV1::default();
+        assert_eq!(
+            AgentPlugin::configuration_details(&()),
+            pos_runtime::EMPTY_CONFIGURATION_DETAILS_V1
+        );
+        assert_eq!(
+            provider.admit::<AgentPlugin>(std::sync::Arc::new(())),
+            Err(StagedReducerAdmissionErrorV1::ConformanceEvidenceMissing)
+        );
+        let consumer = provider
+            .admit_fixture::<AgentPlugin>(std::sync::Arc::new(()))
+            .test_ok();
+        let source =
+            pos_core::staged_install::ProjectionSourceV1::bound(pos_core::TimelineId::new(), None);
+        let open = || provider.open_candidate(&[consumer], InitialStateV1::Empty, source);
+        let mut folded = open().test_ok();
+        let fresh = open().test_ok();
+        let entity = EntityId::new();
+        let event = make_action_event(entity, "move");
+        fold_detached_candidate_v1(&mut folded, std::slice::from_ref(&event));
+
+        let mut expected = AgentReducer.initial();
+        AgentReducer.apply(&mut expected, &event);
+        assert_eq!(
+            folded.state_for(consumer.plugin_id(), &entity),
+            Some(&expected)
+        );
+        assert!(fresh.state_for(consumer.plugin_id(), &entity).is_none());
     }
 }

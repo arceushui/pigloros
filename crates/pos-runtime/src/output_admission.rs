@@ -216,6 +216,11 @@ static GENERATED_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDesc
     source_files: &[],
 };
 
+// Size note: this is the largest bundle. It includes World's `lib.rs` and
+// `reducer.rs` so the delegated approver and reducer are covered by the
+// Gateway implementation identity. The test
+// `every_installed_source_bundle_fits_the_artifact_limit` guards its size
+// against `MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1`.
 static GATEWAY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
     plugins: &[InstalledPluginV1 {
         name: "gateway-world-actions",
@@ -262,6 +267,10 @@ static GATEWAY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescri
             "plugins/world/src/lib.rs",
             include_bytes!("../../../plugins/world/src/lib.rs"),
         ),
+        (
+            "plugins/world/src/reducer.rs",
+            include_bytes!("../../../plugins/world/src/reducer.rs"),
+        ),
     ],
 };
 
@@ -278,10 +287,16 @@ static WORLD_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescript
     }],
     approver_type: Some("pos_plugin_world::WorldPlugin"),
     workload_profile: WorkloadProfileV1::Fork,
-    source_files: &[(
-        "src/lib.rs",
-        include_bytes!("../../../plugins/world/src/lib.rs"),
-    )],
+    source_files: &[
+        (
+            "src/lib.rs",
+            include_bytes!("../../../plugins/world/src/lib.rs"),
+        ),
+        (
+            "src/reducer.rs",
+            include_bytes!("../../../plugins/world/src/reducer.rs"),
+        ),
+    ],
 };
 
 static RULE_AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
@@ -293,10 +308,16 @@ static RULE_AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDes
     }],
     approver_type: None,
     workload_profile: WorkloadProfileV1::Research,
-    source_files: &[(
-        "src/lib.rs",
-        include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
-    )],
+    source_files: &[
+        (
+            "src/lib.rs",
+            include_bytes!("../../../plugins/entities/rule-agent/src/lib.rs"),
+        ),
+        (
+            "src/reducer.rs",
+            include_bytes!("../../../plugins/entities/rule-agent/src/reducer.rs"),
+        ),
+    ],
 };
 
 static AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
@@ -326,6 +347,10 @@ static AGENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescript
             include_bytes!("../../../plugins/agent/src/provider_driver.rs"),
         ),
         (
+            "src/reducer.rs",
+            include_bytes!("../../../plugins/agent/src/reducer.rs"),
+        ),
+        (
             "src/replay.rs",
             include_bytes!("../../../plugins/agent/src/replay.rs"),
         ),
@@ -342,10 +367,16 @@ static SYNTHETIC_OBSERVATION_SOURCE: OutputPolicySourceDescriptorV1 =
         }],
         approver_type: None,
         workload_profile: WorkloadProfileV1::Research,
-        source_files: &[(
-            "src/lib.rs",
-            include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
-        )],
+        source_files: &[
+            (
+                "src/lib.rs",
+                include_bytes!("../../../plugins/observations/synthetic/src/lib.rs"),
+            ),
+            (
+                "src/reducer.rs",
+                include_bytes!("../../../plugins/observations/synthetic/src/reducer.rs"),
+            ),
+        ],
     };
 
 static SOCIETY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
@@ -365,10 +396,16 @@ static SOCIETY_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescri
     ],
     approver_type: None,
     workload_profile: WorkloadProfileV1::Fork,
-    source_files: &[(
-        "src/lib.rs",
-        include_bytes!("../../../plugins/society/src/lib.rs"),
-    )],
+    source_files: &[
+        (
+            "src/lib.rs",
+            include_bytes!("../../../plugins/society/src/lib.rs"),
+        ),
+        (
+            "src/reducer.rs",
+            include_bytes!("../../../plugins/society/src/reducer.rs"),
+        ),
+    ],
 };
 
 static EXPERIMENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDescriptorV1 {
@@ -414,8 +451,16 @@ static EXPERIMENT_SOURCE: OutputPolicySourceDescriptorV1 = OutputPolicySourceDes
             include_bytes!("../../../plugins/world/src/lib.rs"),
         ),
         (
+            "plugins/world/src/reducer.rs",
+            include_bytes!("../../../plugins/world/src/reducer.rs"),
+        ),
+        (
             "plugins/society/src/lib.rs",
             include_bytes!("../../../plugins/society/src/lib.rs"),
+        ),
+        (
+            "plugins/society/src/reducer.rs",
+            include_bytes!("../../../plugins/society/src/reducer.rs"),
         ),
     ],
 };
@@ -2029,6 +2074,44 @@ mod tests {
             OutputPolicySourceV1::Society,
             OutputPolicySourceV1::Experiment,
         ]
+    }
+
+    /// `source`'s entry in `policy_sources`. The wildcard-free match and the
+    /// constant indexes make an unlisted variant a compile error.
+    const fn listed_policy_source(source: OutputPolicySourceV1) -> OutputPolicySourceV1 {
+        let sources = policy_sources();
+        match source {
+            OutputPolicySourceV1::Generated => sources[0],
+            OutputPolicySourceV1::Gateway => sources[1],
+            OutputPolicySourceV1::World => sources[2],
+            OutputPolicySourceV1::RuleAgent => sources[3],
+            OutputPolicySourceV1::Agent => sources[4],
+            OutputPolicySourceV1::SyntheticObservation => sources[5],
+            OutputPolicySourceV1::Society => sources[6],
+            OutputPolicySourceV1::Experiment => sources[7],
+        }
+    }
+
+    #[test]
+    fn policy_sources_list_every_variant_in_order() {
+        for source in policy_sources() {
+            assert_eq!(listed_policy_source(source), source);
+        }
+    }
+
+    #[test]
+    fn every_installed_source_bundle_fits_the_artifact_limit() {
+        let limit = crate::reviewed_policy::MAX_PLUGIN_IMPLEMENTATION_ARTIFACT_BYTES_V1;
+        let oversized = policy_sources()
+            .into_iter()
+            .filter(|source| !matches!(source, OutputPolicySourceV1::Generated))
+            .map(|source| {
+                let bundle = source_artifact_bundle(source.descriptor().source_files);
+                (source, bundle.len())
+            })
+            .filter(|&(_, len)| len > limit)
+            .collect::<Vec<_>>();
+        assert_eq!(oversized, Vec::new());
     }
 
     #[test]

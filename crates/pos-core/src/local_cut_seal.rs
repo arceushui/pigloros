@@ -182,22 +182,13 @@ impl LocalCutManifestBindingPageV1 {
     /// Encode exactly six definite LCP1 fields.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(160 * self.rows.len() + 64);
-        encode_head(&mut out, 4, 6);
-        encode_bytes(&mut out, b"LCP1");
-        encode_head(&mut out, 0, 1);
-        encode_head(&mut out, 0, MANIFEST_BINDING_KIND);
-        encode_bytes(&mut out, self.tree_scope.as_bytes());
-        encode_head(&mut out, 0, self.first_ordinal);
-        encode_head(&mut out, 4, self.rows.len() as u64);
-        for row in &self.rows {
-            encode_head(&mut out, 4, 5);
-            encode_bytes(&mut out, &row.timeline_id.inner().to_bytes());
-            for hash in [row.scope, row.wcs_hash, row.msr_hash, row.msb_hash] {
-                encode_bytes(&mut out, hash.as_bytes());
-            }
-        }
-        out
+        let rows = self.rows.iter().map(encode_binding_row).collect::<Vec<_>>();
+        encode_page(
+            MANIFEST_BINDING_KIND,
+            self.tree_scope,
+            self.first_ordinal,
+            &rows,
+        )
     }
 
     #[must_use]
@@ -216,7 +207,7 @@ impl LocalCutManifestBindingPageV1 {
         if bytes.len() > MAX_TABLE_NODE_BYTES {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader::new(bytes);
         reader.array(6)?;
         if reader.fixed_bytes::<4>()? != *b"LCP1" {
             return Err(LocalCutSealErrorV2::InvalidEncoding);
@@ -235,9 +226,8 @@ impl LocalCutManifestBindingPageV1 {
         let mut rows = Vec::new();
         for _ in 0..row_count {
             reader.array(5)?;
-            let timeline_id = TimelineId::from_ulid(ulid::Ulid::from_bytes(reader.fixed_bytes()?));
             rows.push(LocalCutManifestBindingRowV1 {
-                timeline_id,
+                timeline_id: reader.timeline()?,
                 scope: reader.hash()?,
                 wcs_hash: reader.hash()?,
                 msr_hash: reader.hash()?,
@@ -345,23 +335,14 @@ impl LocalCutManifestBindingBranchV1 {
     /// Encode exactly eight definite LCT1 fields.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(64 * self.children.len() + 64);
-        encode_head(&mut out, 4, 8);
-        encode_bytes(&mut out, b"LCT1");
-        encode_head(&mut out, 0, 1);
-        encode_head(&mut out, 0, MANIFEST_BINDING_KIND);
-        encode_bytes(&mut out, self.tree_scope.as_bytes());
-        encode_head(&mut out, 0, u64::from(self.height));
-        encode_head(&mut out, 0, self.first_ordinal);
-        encode_head(&mut out, 0, self.row_count);
-        encode_head(&mut out, 4, self.children.len() as u64);
-        for child in &self.children {
-            encode_head(&mut out, 4, 3);
-            encode_head(&mut out, 0, child.first_ordinal);
-            encode_head(&mut out, 0, child.row_count);
-            encode_bytes(&mut out, child.node_hash.as_bytes());
-        }
-        out
+        let span = (self.first_ordinal, self.row_count);
+        encode_branch(
+            MANIFEST_BINDING_KIND,
+            self.tree_scope,
+            self.height,
+            span,
+            &self.children,
+        )
     }
 
     #[must_use]
@@ -380,7 +361,7 @@ impl LocalCutManifestBindingBranchV1 {
         if bytes.len() > MAX_TABLE_NODE_BYTES {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader::new(bytes);
         reader.array(8)?;
         if reader.fixed_bytes::<4>()? != *b"LCT1" {
             return Err(LocalCutSealErrorV2::InvalidEncoding);
@@ -429,6 +410,110 @@ fn domain_digest(domain: &[u8], bytes: &[u8]) -> Hash {
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
+/// One packed table's reference and every LCP1 page and LCT1 branch record,
+/// pages first, root last.
+pub(crate) type PackedLocalCutTableV1 = (LocalCutTableRefV1, Vec<Vec<u8>>);
+
+/// Pack canonically encoded rows of one table kind into the minimal ADR-082 tree.
+///
+/// Rows fill LCP1 pages 64 at a time and children fill LCT1 branches 240 at a
+/// time, left to right. One page is its own root; otherwise branches rise
+/// until a single root remains. The table reference rejects a row count above
+/// the ADR-082 cap.
+pub(crate) fn pack_local_cut_table(
+    kind: u64,
+    tree_scope: Hash,
+    rows: &[Vec<u8>],
+) -> Result<PackedLocalCutTableV1, LocalCutSealErrorV2> {
+    let mut records = Vec::new();
+    let mut level = Vec::new();
+    for (index, chunk) in rows.chunks(MAX_PAGE_ROWS).enumerate() {
+        let first_ordinal = (index * MAX_PAGE_ROWS) as u64;
+        let page = encode_page(kind, tree_scope, first_ordinal, chunk);
+        level.push(LocalCutBranchChildV1 {
+            first_ordinal,
+            row_count: chunk.len() as u64,
+            node_hash: domain_digest(PAGE_DOMAIN, &page),
+        });
+        records.push(page);
+    }
+    let mut height = 0_u8;
+    while level.len() > 1 {
+        height += 1;
+        let mut parents = Vec::new();
+        for children in level.chunks(MAX_BRANCH_CHILDREN) {
+            let first_ordinal = children[0].first_ordinal;
+            let row_count = children.iter().map(|child| child.row_count).sum();
+            let span = (first_ordinal, row_count);
+            let branch = encode_branch(kind, tree_scope, height, span, children);
+            parents.push(LocalCutBranchChildV1 {
+                first_ordinal,
+                row_count,
+                node_hash: domain_digest(BRANCH_DOMAIN, &branch),
+            });
+            records.push(branch);
+        }
+        level = parents;
+    }
+    let root_hash = level.first().map(|root| root.node_hash);
+    let reference = LocalCutTableRefV1::new(rows.len() as u64, root_hash);
+    reference.map(|reference| (reference, records))
+}
+
+/// Encode one LCP1 page over rows already in their canonical CBOR form.
+fn encode_page(kind: u64, tree_scope: Hash, first_ordinal: u64, rows: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_head(&mut out, 4, 6);
+    encode_bytes(&mut out, b"LCP1");
+    encode_head(&mut out, 0, 1);
+    encode_head(&mut out, 0, kind);
+    encode_bytes(&mut out, tree_scope.as_bytes());
+    encode_head(&mut out, 0, first_ordinal);
+    encode_head(&mut out, 4, rows.len() as u64);
+    for row in rows {
+        out.extend_from_slice(row);
+    }
+    out
+}
+
+/// Encode one LCT1 branch spanning `(first_ordinal, row_count)` rows.
+fn encode_branch(
+    kind: u64,
+    tree_scope: Hash,
+    height: u8,
+    (first_ordinal, row_count): (u64, u64),
+    children: &[LocalCutBranchChildV1],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_head(&mut out, 4, 8);
+    encode_bytes(&mut out, b"LCT1");
+    encode_head(&mut out, 0, 1);
+    encode_head(&mut out, 0, kind);
+    encode_bytes(&mut out, tree_scope.as_bytes());
+    encode_head(&mut out, 0, u64::from(height));
+    encode_head(&mut out, 0, first_ordinal);
+    encode_head(&mut out, 0, row_count);
+    encode_head(&mut out, 4, children.len() as u64);
+    for child in children {
+        encode_head(&mut out, 4, 3);
+        encode_head(&mut out, 0, child.first_ordinal);
+        encode_head(&mut out, 0, child.row_count);
+        encode_bytes(&mut out, child.node_hash.as_bytes());
+    }
+    out
+}
+
+/// Encode one kind-14 row as its five definite ADR-082 fields.
+fn encode_binding_row(row: &LocalCutManifestBindingRowV1) -> Vec<u8> {
+    let mut out = Vec::with_capacity(150);
+    encode_head(&mut out, 4, 5);
+    encode_bytes(&mut out, &row.timeline_id.inner().to_bytes());
+    for hash in [row.scope, row.wcs_hash, row.msr_hash, row.msb_hash] {
+        encode_bytes(&mut out, hash.as_bytes());
+    }
+    out
+}
+
 /// Canonically packed kind-14 records, still unauthenticated by any owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalCutManifestBindingTableV1 {
@@ -453,48 +538,9 @@ impl LocalCutManifestBindingTableV1 {
         }
         validate_binding_rows(&rows)?;
         let tree_scope = local_cut_tree_scope_v1(owner_id, cut_id);
-        let mut records = Vec::new();
-        let mut level = Vec::new();
-        for (index, chunk) in rows.chunks(MAX_PAGE_ROWS).enumerate() {
-            let first_ordinal = (index * MAX_PAGE_ROWS) as u64;
-            let page =
-                LocalCutManifestBindingPageV1::new(tree_scope, first_ordinal, chunk.to_vec())?;
-            level.push(LocalCutBranchChildV1 {
-                first_ordinal,
-                row_count: chunk.len() as u64,
-                node_hash: page.digest(),
-            });
-            records.push(page.to_canonical_cbor());
-        }
-        let root_hash = if level.len() > 1 {
-            let mut parent_level = Vec::new();
-            for children in level.chunks(MAX_BRANCH_CHILDREN) {
-                let branch = LocalCutManifestBindingBranchV1::new(
-                    tree_scope,
-                    1,
-                    children[0].first_ordinal,
-                    children.to_vec(),
-                )?;
-                parent_level.push(LocalCutBranchChildV1 {
-                    first_ordinal: branch.first_ordinal(),
-                    row_count: branch.row_count(),
-                    node_hash: branch.digest(),
-                });
-                records.push(branch.to_canonical_cbor());
-            }
-            if parent_level.len() == 1 {
-                Some(parent_level[0].node_hash)
-            } else {
-                let root = LocalCutManifestBindingBranchV1::new(tree_scope, 2, 0, parent_level)?;
-                let hash = root.digest();
-                records.push(root.to_canonical_cbor());
-                Some(hash)
-            }
-        } else {
-            level.first().map(|node| node.node_hash)
-        };
-        let reference = LocalCutTableRefV1::new(rows.len() as u64, root_hash)?;
-        Ok(Self {
+        let encoded = rows.iter().map(encode_binding_row).collect::<Vec<_>>();
+        let packed = pack_local_cut_table(MANIFEST_BINDING_KIND, tree_scope, &encoded);
+        packed.map(|(reference, records)| Self {
             tree_scope,
             rows,
             reference,
@@ -716,7 +762,7 @@ impl LocalCutSealV2 {
         if bytes.len() > MAX_LOCAL_CUT_SEAL_BYTES_V2 {
             return Err(LocalCutSealErrorV2::FieldOutOfBounds);
         }
-        let mut reader = Reader { bytes, offset: 0 };
+        let mut reader = Reader::new(bytes);
         reader.lcs2_header()?;
         let owner_id = reader.fixed_bytes()?;
         let cut_id = reader.uint()?;
@@ -777,7 +823,7 @@ fn encode_table_ref(out: &mut Vec<u8>, reference: LocalCutTableRefV1) {
     encode_optional_hash(out, reference.root_hash);
 }
 
-fn encode_optional_hash(out: &mut Vec<u8>, hash: Option<Hash>) {
+pub(crate) fn encode_optional_hash(out: &mut Vec<u8>, hash: Option<Hash>) {
     if let Some(hash) = hash {
         encode_bytes(out, hash.as_bytes());
     } else {
@@ -785,12 +831,12 @@ fn encode_optional_hash(out: &mut Vec<u8>, hash: Option<Hash>) {
     }
 }
 
-fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     encode_head(out, 2, bytes.len() as u64);
     out.extend_from_slice(bytes);
 }
 
-fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
+pub(crate) fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     if value < 24 {
         // The low byte is exact here because the value is below 24.
         out.push((major << 5) | value.to_be_bytes()[7]);
@@ -808,12 +854,22 @@ fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
     }
 }
 
-struct Reader<'a> {
+/// Cursor over one bounded preferred-CBOR record of this module's layouts.
+pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    pub(crate) const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    /// Whether every input byte has been read.
+    pub(crate) const fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+
     fn lcs2_header(&mut self) -> Result<(), LocalCutSealErrorV2> {
         self.array(22)?;
         if self.fixed_bytes::<4>()? != *b"LCS2" {
@@ -826,8 +882,8 @@ impl Reader<'_> {
     }
 
     fn take(&mut self, length: usize) -> Result<&[u8], LocalCutSealErrorV2> {
-        // Seal input is capped at 16 KiB, node input at 64 KiB, and each read
-        // requests at most 32 bytes on supported targets.
+        // The offset never passes the input length and each read requests at
+        // most 32 bytes, so the end cannot overflow on supported targets.
         let end = self.offset + length;
         let slice = self
             .bytes
@@ -864,7 +920,7 @@ impl Reader<'_> {
         }
     }
 
-    fn array(&mut self, count: u64) -> Result<(), LocalCutSealErrorV2> {
+    pub(crate) fn array(&mut self, count: u64) -> Result<(), LocalCutSealErrorV2> {
         if self.head(4)? == count {
             Ok(())
         } else {
@@ -876,7 +932,7 @@ impl Reader<'_> {
         self.head(4)
     }
 
-    fn uint(&mut self) -> Result<u64, LocalCutSealErrorV2> {
+    pub(crate) fn uint(&mut self) -> Result<u64, LocalCutSealErrorV2> {
         self.head(0)
     }
 
@@ -889,17 +945,22 @@ impl Reader<'_> {
         Ok(bytes)
     }
 
-    fn hash(&mut self) -> Result<Hash, LocalCutSealErrorV2> {
+    pub(crate) fn hash(&mut self) -> Result<Hash, LocalCutSealErrorV2> {
         Ok(Hash::from_bytes(self.fixed_bytes()?))
     }
 
-    fn optional_hash(&mut self) -> Result<Option<Hash>, LocalCutSealErrorV2> {
+    pub(crate) fn optional_hash(&mut self) -> Result<Option<Hash>, LocalCutSealErrorV2> {
         if self.bytes.get(self.offset) == Some(&0xf6) {
             self.offset += 1;
             Ok(None)
         } else {
             self.hash().map(Some)
         }
+    }
+
+    pub(crate) fn timeline(&mut self) -> Result<TimelineId, LocalCutSealErrorV2> {
+        let bytes = self.fixed_bytes()?;
+        Ok(TimelineId::from_ulid(ulid::Ulid::from_bytes(bytes)))
     }
 
     fn table_ref(&mut self) -> Result<LocalCutTableRefV1, LocalCutSealErrorV2> {

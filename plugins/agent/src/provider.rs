@@ -3,10 +3,7 @@
 use crate::protocol::{AgentDecisionRequestV1, ProviderAttempt};
 use std::{
     collections::VecDeque,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::{atomic::Ordering, Arc},
 };
 
 /// Supplies one bounded decision attempt for a host-owned request.
@@ -17,7 +14,12 @@ pub trait AgentDecisionProvider: Send + Sync {
 
 /// Read-only call-count handle for the local fixture provider.
 #[derive(Clone, Debug)]
-pub struct FixtureProviderCallCount(Arc<AtomicUsize>);
+#[expect(
+    clippy::disallowed_types,
+    reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
+              the fixture provider's call counter is an atomic"
+)]
+pub struct FixtureProviderCallCount(Arc<std::sync::atomic::AtomicUsize>);
 
 impl FixtureProviderCallCount {
     /// Returns the number of decisions requested from the fixture.
@@ -39,10 +41,15 @@ pub struct FixtureAgentDecisionProvider {
 impl FixtureAgentDecisionProvider {
     /// Creates a local fixture that returns attempts in declaration order.
     #[must_use]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "ADR-113 §7: the reducer-module type list applies only inside `reducer.rs`; \
+                  the fixture provider's call counter is an atomic"
+    )]
     pub fn new(attempts: Vec<ProviderAttempt>) -> Self {
         Self {
             attempts: attempts.into(),
-            call_count: FixtureProviderCallCount(Arc::new(AtomicUsize::new(0))),
+            call_count: FixtureProviderCallCount(Arc::new(std::sync::atomic::AtomicUsize::new(0))),
         }
     }
 

@@ -5,17 +5,47 @@
 //! `pos-time` — timeline replay, snapshots, and fork-comparison utilities.
 //!
 //! Builds on top of `pos-core` (traits/types), `pos-store` (backend factory),
-//! and `pos-state` (projection registry).
+//! `pos-state` (projection registry) and `pos-runtime` (staged executor).
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | [`mod@replay`] | Fold all (or partial) events through a `ProjectionRegistry` |
-//! | [`mod@snapshot`] | Capture and verify state snapshots |
-//! | [`compare()`] | Diff two divergent timelines after a fork |
+//! | [`mod@replay`] | Install protected Replay State through a staged fold |
+//! | [`mod@snapshot`] | Protected snapshots, `Unavailable` until #502 |
+//! | [`compare()`] | Install both Fork arms and report diverged entities |
 //! | [`merge()`] | Conflict-free / strategy-guided timeline merge |
+//! | `counterfactual` | ADR-064 counterfactual dependency-graph validation and recomputation-frontier derivation (Linux only) |
+//!
+//! Protected Replay and Compare never fold through a visible
+//! `ProjectionRegistry` (ADR-113 §8). Inside ADR-112's release guard they read
+//! and verify the Event range, fold it on the process-global
+//! [`pos_runtime::StagedFoldExecutorV1`] with the host-installed
+//! [`pos_runtime::HostProjectionProviderV1`], prepare the install, and move it
+//! in only through [`pos_runtime::handoff`]. They return State only, never
+//! Events. On a failure after the range was read and verified, the visible
+//! registry forgets only the revoked subjects of that range, after release
+//! (ADR-093 Revision 4). Each release reports its payload-free health
+//! signals into the caller's [`ReleaseHealthV1`].
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+use std::{cell::Cell, sync::Arc};
+
+use pos_core::trusted_clock::{
+    ApplicableExpiriesV1, GuardMonotonicSourceV1, MonotonicMarkV1, ProtectedHandoffTargetV1,
+    ReleaseGuardV1, StagedProtectedOutputV1, SystemGuardMonotonicSourceV1,
+    TrustedClockOverrunKindV1,
+};
+use pos_core::{staged_install::ProjectionSourceV1, ErasureReferenceV1, Event};
+use pos_runtime::{
+    GuardedFoldWindowV1, HostProjectionProviderV1, StagedFoldExecutorV1, StagedFoldPlanV1,
+};
+use pos_state::{
+    ProjectionRegistry, ProtectedProjectionProviderV1, RecordedConsumerV1, RevokedSubjectsV1,
+    StagedProjectionV1,
+};
+
 pub mod compare;
+#[cfg(target_os = "linux")]
+pub mod counterfactual;
 pub mod merge;
 pub mod replay;
 pub mod snapshot;
@@ -27,6 +57,199 @@ pub use merge::{
 };
 pub use replay::{replay, replay_at};
 pub use snapshot::{snapshot, verify_snapshot_consistency, Snapshot, SnapshotError};
+
+/// The ADR-112 capability of one protected release: the held release guard
+/// and the expiries checked under it, plus the caller's health record. The
+/// release consumes it.
+pub struct ProtectedReleaseV1<'g> {
+    /// The held authority guard.
+    pub guard: ReleaseGuardV1<'g>,
+    /// The applicable expiries checked under `guard`.
+    pub expiries: ApplicableExpiriesV1,
+    /// Where the release reports its payload-free health signals.
+    pub health: &'g ReleaseHealthV1,
+}
+
+/// Payload-free health signals of protected releases, which the release host
+/// forwards to its health sink. Signals only accumulate; none carries State,
+/// Events or a cause.
+#[derive(Debug, Default)]
+pub struct ReleaseHealthV1 {
+    overrun: Cell<Option<TrustedClockOverrunKindV1>>,
+    guard_release_late: Cell<Option<&'static str>>,
+}
+
+impl ReleaseHealthV1 {
+    /// An empty record.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            overrun: Cell::new(None),
+            guard_release_late: Cell::new(None),
+        }
+    }
+
+    /// ADR-112's `trusted_clock_fence_overrun{kind}` signal, when a
+    /// handoff's post-handoff check detected an overrun.
+    #[must_use]
+    pub const fn overrun_signal(&self) -> Option<TrustedClockOverrunKindV1> {
+        self.overrun.get()
+    }
+
+    /// ADR-113 P2's [`pos_runtime::GUARD_RELEASE_LATE_SIGNAL`], when a
+    /// failure-path teardown was predicted to end after `g0 + 30 s`.
+    #[must_use]
+    pub const fn guard_release_late(&self) -> Option<&'static str> {
+        self.guard_release_late.get()
+    }
+
+    fn record_overrun(&self, signal: Option<TrustedClockOverrunKindV1>) {
+        self.overrun.set(self.overrun.get().or(signal));
+    }
+
+    fn record_guard_release_late(&self, signal: Option<&'static str>) {
+        self.guard_release_late
+            .set(self.guard_release_late.get().or(signal));
+    }
+}
+
+/// The staged fold of one protected arm: the executor, the host-installed
+/// provider and the recorded consumer set.
+#[derive(Clone, Copy)]
+pub struct ProtectedFoldV1<'a> {
+    /// The process-global staged-fold executor.
+    pub executor: &'a StagedFoldExecutorV1,
+    /// The host catalogue provider of the installed composition.
+    pub provider: &'a Arc<HostProjectionProviderV1>,
+    /// The recorded consumers, in the visible registry's slot order.
+    pub consumers: &'a [RecordedConsumerV1],
+}
+
+/// Every protected failure is ADR-093 `Unavailable`; the closed cause is
+/// dropped, never exposed.
+fn unavailable<E>(error: E) -> pos_core::CoreError {
+    drop(error);
+    pos_core::CoreError::ArtifactUnavailable
+}
+
+/// The source of a verified read: the requested Timeline at the inventory
+/// generation the closure was verified against.
+const fn verified_source(
+    timeline: pos_core::TimelineId,
+    closure: &pos_core::WorldReplayClosureV1,
+) -> ProjectionSourceV1 {
+    let generation = ErasureReferenceV1::from_digest(*closure.inventory_generation().as_bytes());
+    ProjectionSourceV1::bound(timeline, Some(generation))
+}
+
+/// Fold a verified range on the staged executor inside `guard`'s window.
+/// The plan takes the Events without copying their payloads.
+fn fold_staged(
+    fold: &ProtectedFoldV1<'_>,
+    guard: &ReleaseGuardV1<'_>,
+    events: Vec<Event>,
+    source: ProjectionSourceV1,
+) -> Result<StagedProjectionV1, pos_core::CoreError> {
+    let window = GuardedFoldWindowV1::new(guard);
+    let plan = StagedFoldPlanV1::new(fold.consumers.to_vec(), events, source);
+    let provider: Arc<dyn ProtectedProjectionProviderV1 + Send + Sync> =
+        Arc::<HostProjectionProviderV1>::clone(fold.provider);
+    fold.executor
+        .fold(&window, &mut SystemGuardMonotonicSourceV1, provider, plan)
+        .map_err(unavailable)
+}
+
+/// P1: the handoff work must be planned to end by `g0 + 29 s`.
+fn handoff_reserve(guard: &ReleaseGuardV1<'_>) -> Result<(), pos_core::CoreError> {
+    pos_runtime::check_handoff_reserve(&mut SystemGuardMonotonicSourceV1, guard.guard_started_at())
+        .map_err(unavailable)
+}
+
+/// P2: record the payload-free late signal when teardown, measured on
+/// `clock`, is predicted to end after `g0 + 30 s`.
+fn record_p2(
+    health: &ReleaseHealthV1,
+    clock: &mut dyn GuardMonotonicSourceV1,
+    g0: MonotonicMarkV1,
+) {
+    health.record_guard_release_late(pos_runtime::teardown_signal(clock, g0));
+}
+
+/// The ADR-112 handoff of one staged install, then the health signals, with
+/// P2 measured on the production monotonic source.
+fn handoff_with_p2<T: ProtectedHandoffTargetV1>(
+    guard: ReleaseGuardV1<'_>,
+    expiries: &ApplicableExpiriesV1,
+    staged: StagedProtectedOutputV1<T>,
+    health: &ReleaseHealthV1,
+) -> Result<(), pos_core::CoreError> {
+    handoff_with_p2_on(
+        guard,
+        expiries,
+        staged,
+        health,
+        &mut SystemGuardMonotonicSourceV1,
+    )
+}
+
+/// [`handoff_with_p2`] with P2 measured on `p2_clock`.
+///
+/// On success the overrun signal is recorded and the committed value (the
+/// displaced maps) is dropped after the handoff returns. On failure,
+/// `handoff_checked` has already rolled back and released the guard; P2 is
+/// then evaluated against the guard's `g0` and the payload-free late signal
+/// is recorded before the failure is reported.
+fn handoff_with_p2_on<T: ProtectedHandoffTargetV1>(
+    guard: ReleaseGuardV1<'_>,
+    expiries: &ApplicableExpiriesV1,
+    staged: StagedProtectedOutputV1<T>,
+    health: &ReleaseHealthV1,
+    p2_clock: &mut dyn GuardMonotonicSourceV1,
+) -> Result<(), pos_core::CoreError> {
+    let g0 = guard.guard_started_at();
+    match pos_runtime::handoff(guard, expiries, staged) {
+        Ok(used) => {
+            health.record_overrun(used.overrun_signal());
+            Ok(())
+        }
+        Err(error) => {
+            // ADR-113 §4/§9 order this as "P2, then teardown", but
+            // `handoff_checked` (#503) rolls back and drops the guard
+            // internally on `Err`, so P2 is evaluated after that teardown.
+            // That is conservative (it can only over-signal); see #515.
+            record_p2(health, p2_clock, g0);
+            Err(unavailable(error))
+        }
+    }
+}
+
+/// P2, then teardown: a guard that did not reach the handoff is rolled back
+/// and released, after recording the payload-free late signal when the
+/// teardown is predicted to end after `g0 + 30 s`. Teardown runs either way.
+/// A guard the handoff consumed has nothing left to tear down.
+fn teardown(guard: Option<ReleaseGuardV1<'_>>, health: &ReleaseHealthV1) {
+    if let Some(guard) = guard {
+        record_p2(
+            health,
+            &mut SystemGuardMonotonicSourceV1,
+            guard.guard_started_at(),
+        );
+        drop(guard);
+    }
+}
+
+/// Apply the ADR-093 Revision 4 failure-path forget after release: only the
+/// revoked subjects of a range that was read and verified, and only on failure.
+fn forget_on_failure<T>(
+    result: Result<T, pos_core::CoreError>,
+    registry: &mut ProjectionRegistry,
+    revoked: Option<&RevokedSubjectsV1>,
+) -> Result<T, pos_core::CoreError> {
+    if let (Err(_), Some(subjects)) = (&result, revoked) {
+        registry.forget_revoked_subjects(subjects);
+    }
+    result
+}
 
 const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::CoreError {
     match error {
@@ -147,17 +370,323 @@ fn read_complete_world_replay(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {
-    use std::{fmt::Debug, sync::Arc};
+    use std::{
+        fmt::Debug,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+    };
 
+    use pos_core::retention::{
+        WorldRetentionLeaseInputV1, WorldRetentionLeaseV1, WorldRetentionPolicyInputV1,
+        WorldRetentionPolicyV1,
+    };
+    use pos_core::trusted_clock::{
+        open_release_guard, reserve_trusted_clock, ApplicableExpiriesV1, ExpiryPremisesV1,
+        ReleaseGuardV1, SystemGuardMonotonicSourceV1, SystemTrustedWallSourceV1,
+        TrustedWallSourceV1, WaitBudgetV1,
+    };
+    use pos_core::trusted_clock_fixture::TrustedClockFixtureV1;
     use pos_core::{
-        ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
+        AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
+        Capability, ErasureGate, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1,
+        Hash, Plugin, PluginId, PrincipalRefV1, Reducer, TimelineId, WallTime,
         WorldReplayClosureV1,
     };
     use pos_runtime::{
-        ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
-        WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+        ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, HostProjectionProviderV1,
+        InstalledPluginFactoryV1, InstalledPluginProductV1, NoActionApproverV1,
+        StagedFoldExecutorV1, VerifiedWorldReplayV1, WorldReplayUseV1,
+        WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
     };
+    use pos_state::{ProjectionObservationPolicyV1, ProjectionRegistry, RecordedConsumerV1};
     use pos_store::StoreConfig;
+
+    use crate::{ProtectedFoldV1, ProtectedReleaseV1, ReleaseHealthV1};
+
+    const DAY_MICROS: u64 = 86_400_000_000;
+
+    /// Serializes folds on the process-global staged executor.
+    static EXECUTOR_SERIAL: AtomicBool = AtomicBool::new(false);
+
+    /// Holds [`EXECUTOR_SERIAL`] until dropped.
+    ///
+    /// A plain flag guard rather than a `MutexGuard`, so a fixture that holds it
+    /// for a whole test is not reported as a lock held longer than needed.
+    pub(crate) struct SerialGuard;
+
+    impl Drop for SerialGuard {
+        fn drop(&mut self) {
+            EXECUTOR_SERIAL.store(false, Ordering::Release);
+        }
+    }
+
+    pub(crate) struct FixturePlugin {
+        id: PluginId,
+        name: &'static str,
+    }
+
+    impl Plugin for FixturePlugin {
+        fn id(&self) -> PluginId {
+            self.id
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                owned_event_types: Vec::new(),
+                owned_entity_kinds: Vec::new(),
+                has_driver: false,
+                has_reducer: true,
+            }
+        }
+    }
+
+    pub(crate) struct FixtureConfiguration {
+        name: &'static str,
+        reducer: fn() -> Box<dyn Reducer>,
+    }
+
+    impl InstalledPluginFactoryV1 for FixturePlugin {
+        type Configuration = FixtureConfiguration;
+        type Plugin = Self;
+        type Approver = NoActionApproverV1;
+
+        fn configuration_details(configuration: &FixtureConfiguration) -> Vec<u8> {
+            configuration.name.as_bytes().to_vec()
+        }
+
+        fn build(
+            configuration: &FixtureConfiguration,
+        ) -> InstalledPluginProductV1<Self, NoActionApproverV1> {
+            InstalledPluginProductV1 {
+                plugin: Self {
+                    id: PluginId::new(),
+                    name: configuration.name,
+                },
+                reducer: Some((configuration.reducer)()),
+                approver: NoActionApproverV1,
+            }
+        }
+    }
+
+    /// One admitted staged consumer and the executor, held under the flag
+    /// guard that serializes folds in this test process.
+    pub(crate) struct ProtectedFixture {
+        _serial: Option<SerialGuard>,
+        executor: StagedFoldExecutorV1,
+        provider: Arc<HostProjectionProviderV1>,
+        consumers: Vec<RecordedConsumerV1>,
+        name: &'static str,
+        reducer: fn() -> Box<dyn Reducer>,
+        policy: Option<ProjectionObservationPolicyV1>,
+    }
+
+    impl ProtectedFixture {
+        pub(crate) fn new(name: &'static str, reducer: fn() -> Box<dyn Reducer>) -> Self {
+            Self::admitted(Some(serial()), name, reducer, None)
+        }
+
+        /// A fixture whose admitted entry and installed slot both carry
+        /// `policy`.
+        pub(crate) fn observable(
+            name: &'static str,
+            reducer: fn() -> Box<dyn Reducer>,
+            policy: ProjectionObservationPolicyV1,
+        ) -> Self {
+            Self::admitted(Some(serial()), name, reducer, Some(policy))
+        }
+
+        /// Another admission of the same reducer under its own provider and
+        /// Plugin identity, serialized by this fixture's flag guard.
+        pub(crate) fn rival(&self) -> Self {
+            Self::admitted(None, self.name, self.reducer, self.policy.clone())
+        }
+
+        fn admitted(
+            serial: Option<SerialGuard>,
+            name: &'static str,
+            reducer: fn() -> Box<dyn Reducer>,
+            policy: Option<ProjectionObservationPolicyV1>,
+        ) -> Self {
+            let mut provider = HostProjectionProviderV1::default();
+            let configuration = Arc::new(FixtureConfiguration { name, reducer });
+            let consumer = test_ok(
+                provider.admit_fixture_with_policy::<FixturePlugin>(configuration, policy.clone()),
+            );
+            Self {
+                _serial: serial,
+                executor: test_ok(StagedFoldExecutorV1::acquire()),
+                provider: Arc::new(provider),
+                consumers: vec![consumer],
+                name,
+                reducer,
+                policy,
+            }
+        }
+
+        /// A visible registry whose one installed slot is the recorded
+        /// consumer, with the fixture's observation policy.
+        pub(crate) fn registry(&self, gate: Arc<dyn ErasureGate>) -> ProjectionRegistry {
+            self.registry_with_policy(gate, self.policy.clone())
+        }
+
+        /// A visible registry whose one installed slot is the recorded
+        /// consumer, with `policy` in place of the fixture's.
+        pub(crate) fn registry_with_policy(
+            &self,
+            gate: Arc<dyn ErasureGate>,
+            policy: Option<ProjectionObservationPolicyV1>,
+        ) -> ProjectionRegistry {
+            let mut registry = ProjectionRegistry::new().with_erasure_gate(gate);
+            test_ok(registry.register_installed_reducer_with_policy(
+                self.consumers[0].plugin_id(),
+                self.name,
+                (self.reducer)(),
+                policy,
+            ));
+            registry
+        }
+
+        pub(crate) fn fold(&self) -> ProtectedFoldV1<'_> {
+            ProtectedFoldV1 {
+                executor: &self.executor,
+                provider: &self.provider,
+                consumers: &self.consumers,
+            }
+        }
+    }
+
+    fn lease(deadline: u64) -> WorldRetentionLeaseV1 {
+        let policy = test_ok(WorldRetentionPolicyV1::new(WorldRetentionPolicyInputV1 {
+            policy_revision: 1,
+            purpose: "world".to_owned(),
+            audience_policy_hash: Hash::from_bytes([7; 32]),
+            minimum_post_admission_days: 90,
+            maximum_active_days: 30,
+            maximum_total_days: 120,
+        }));
+        let input = WorldRetentionLeaseInputV1 {
+            timeline_id: TimelineId::new(),
+            policy_hash: policy.digest(),
+            started_at_micros: deadline - 120 * DAY_MICROS,
+            admission_closes_at_micros: deadline - 90 * DAY_MICROS,
+            retention_deadline_micros: deadline,
+        };
+        test_ok(WorldRetentionLeaseV1::new(&policy, input))
+    }
+
+    fn authenticated(expires_at: u64) -> AuthenticatedPrincipalResultV1 {
+        let draft = AuthenticatedPrincipalDraftV1 {
+            principal: test_ok(PrincipalRefV1::try_new([1; 16], "operators")),
+            adapter_id: "test-passkey".to_owned(),
+            assurance: test_ok(AssuranceLevelV1::try_new(2)),
+            issued_at: WallTime::from_micros(1),
+            expires_at: WallTime::from_micros(expires_at),
+            binding_digest: Hash::from_bytes([7; 32]),
+        };
+        test_ok(AuthenticatedPrincipalResultV1::try_from_draft(draft))
+    }
+
+    /// Spin-acquire [`EXECUTOR_SERIAL`], yielding between attempts, and return
+    /// a guard that releases it on drop.
+    fn serial() -> SerialGuard {
+        while EXECUTOR_SERIAL
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::thread::yield_now();
+        }
+        SerialGuard
+    }
+
+    /// An observation policy permitting the `n` field.
+    pub(crate) fn count_policy() -> ProjectionObservationPolicyV1 {
+        test_ok(ProjectionObservationPolicyV1::try_new(
+            vec!["n".to_owned()],
+            "count.v1".to_owned(),
+            Hash::from_bytes([7; 32]),
+            Hash::from_bytes([8; 32]),
+            Hash::from_bytes([9; 32]),
+        ))
+    }
+
+    /// Run `body` with one fresh ADR-112 release on its own authority.
+    pub(crate) fn with_release<T>(body: impl FnOnce(ProtectedReleaseV1<'_>) -> T) -> T {
+        with_release_health(&ReleaseHealthV1::new(), body)
+    }
+
+    /// Run `body` with one fresh ADR-112 release reporting into `health`.
+    pub(crate) fn with_release_health<T>(
+        health: &ReleaseHealthV1,
+        body: impl FnOnce(ProtectedReleaseV1<'_>) -> T,
+    ) -> T {
+        let mut port = TrustedClockFixtureV1::new();
+        let guard = guard_on(&mut port);
+        let expiries = far_expiries(&guard);
+        body(ProtectedReleaseV1 {
+            guard,
+            expiries,
+            health,
+        })
+    }
+
+    /// Run `body` with a release whose expiries were checked under another
+    /// authority's guard: every check before the handoff passes, and the
+    /// ADR-112 handoff then refuses it as `AuthorityRegressed`.
+    pub(crate) fn with_mismatched_release_health<T>(
+        health: &ReleaseHealthV1,
+        body: impl FnOnce(ProtectedReleaseV1<'_>) -> T,
+    ) -> T {
+        let mut other_port = TrustedClockFixtureV1::new();
+        let other_guard = guard_on(&mut other_port);
+        let expiries = far_expiries(&other_guard);
+        drop(other_guard);
+        let mut port = TrustedClockFixtureV1::new();
+        let guard = guard_on(&mut port);
+        body(ProtectedReleaseV1 {
+            guard,
+            expiries,
+            health,
+        })
+    }
+
+    /// Reserve on `port`'s identity and open its release guard.
+    fn guard_on(port: &mut TrustedClockFixtureV1) -> ReleaseGuardV1<'_> {
+        let mut store = port.clone();
+        let mut wait = WaitBudgetV1::new();
+        let reservation = test_ok(reserve_trusted_clock(
+            &mut store,
+            &mut SystemTrustedWallSourceV1,
+            &mut SystemGuardMonotonicSourceV1,
+            &mut wait,
+            None,
+        ));
+        test_ok(open_release_guard(
+            port,
+            reservation,
+            &mut wait,
+            &mut SystemGuardMonotonicSourceV1,
+        ))
+    }
+
+    /// Expiries far in the future, checked under `guard`.
+    fn far_expiries(guard: &ReleaseGuardV1<'_>) -> ApplicableExpiriesV1 {
+        let far = test_ok(SystemTrustedWallSourceV1.sample()).as_micros() + 1_000 * DAY_MICROS;
+        let leases = [lease(far)];
+        let access = authenticated(far);
+        let premises = ExpiryPremisesV1 {
+            retention_leases: &leases,
+            consent_grants: &[],
+            consent_references: &[],
+            access: Some(&access),
+        };
+        test_ok(guard.applicable_expiries(&premises))
+    }
 
     struct ExactWorldReplayVerifier;
 
@@ -224,13 +753,41 @@ pub mod test_support {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{host_error_to_core, observed_world_replay_use, read_complete_world_replay};
+    use super::{
+        handoff_with_p2_on, host_error_to_core, observed_world_replay_use,
+        read_complete_world_replay, ReleaseHealthV1,
+    };
+    use pos_core::trusted_clock::{
+        ScriptedGuardMonotonicSourceV1, StagedArtifactBytesV1, StagedProtectedOutputV1,
+    };
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         store::{EventReadBounds, SeqRange},
         CoreError, EntityId, ErasureHostErrorV1, ErasureProtectedOperationV1, Seq, TimelineId,
     };
-    use pos_runtime::WorldReplayUseV1;
+    use pos_runtime::{WorldReplayUseV1, GUARD_RELEASE_LATE_SIGNAL};
+    use std::time::Duration;
+
+    /// A refused handoff whose P2 measurement lands past `g0 + 30 s` records
+    /// the late signal; nothing is handed over and no overrun is recorded.
+    #[test]
+    fn a_late_refused_handoff_records_the_guard_release_late_signal() {
+        let health = ReleaseHealthV1::new();
+        let refused = crate::test_support::with_mismatched_release_health(&health, |release| {
+            let mut late = ScriptedGuardMonotonicSourceV1::new([Duration::from_hours(1)]);
+            let staged = StagedProtectedOutputV1::stage(StagedArtifactBytesV1::new(vec![7]));
+            handoff_with_p2_on(
+                release.guard,
+                &release.expiries,
+                staged,
+                release.health,
+                &mut late,
+            )
+        });
+        assert!(matches!(refused, Err(CoreError::ArtifactUnavailable)));
+        assert_eq!(health.overrun_signal(), None);
+        assert_eq!(health.guard_release_late(), Some(GUARD_RELEASE_LATE_SIGNAL));
+    }
 
     fn use_at(timeline: TimelineId, range: SeqRange, head: u64) -> WorldReplayUseV1 {
         crate::test_support::test_ok(WorldReplayUseV1::new(
@@ -392,5 +949,68 @@ mod tests {
                 CoreError::ArtifactUnavailable
             ));
         }
+    }
+
+    /// Case 13 (registry part): the ADR-093 Revision 4 forget applies only on
+    /// failure, only for a range that was read and verified, and only to its
+    /// revoked subjects.
+    #[test]
+    fn the_failure_path_forget_applies_only_to_verified_failed_ranges() {
+        use pos_core::{Event, EventId, Hash, SchemaVersion, WallTime};
+        use std::sync::Arc;
+
+        let event = |entity, event_type: &str, payload| Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new(event_type),
+            payload,
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let (revoked, kept, timeline) = (EntityId::new(), EntityId::new(), TimelineId::new());
+        let mut registry = pos_state::ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()));
+        registry.register("events", Box::new(pos_state::EntityStateProjection));
+        for entity in [revoked, kept] {
+            registry.apply_event(
+                timeline,
+                &event(entity, "test.tick", CanonicalBytes::from_vec(Vec::new())),
+            );
+        }
+        let payload = crate::test_support::test_ok(
+            pos_core::ConsentRevokedV1 {
+                subject_id: revoked,
+                grantee_id: EntityId::new(),
+                grant_seq: 1,
+                fence_seq: 2,
+            }
+            .encode(),
+        );
+        let range = [event(
+            revoked,
+            pos_core::EVENT_TYPE_CONSENT_REVOKED_V1,
+            payload,
+        )];
+        let subjects = pos_state::RevokedSubjectsV1::from_verified_events(&range);
+        let present = |registry: &pos_state::ProjectionRegistry, entity| {
+            crate::test_support::test_ok(registry.state_for(timeline, &entity)).is_some()
+        };
+
+        assert!(super::forget_on_failure(Ok(()), &mut registry, Some(&subjects)).is_ok());
+        assert!(present(&registry, revoked));
+        let unverified = Err::<(), _>(CoreError::ArtifactUnavailable);
+        assert!(super::forget_on_failure(unverified, &mut registry, None).is_err());
+        assert!(present(&registry, revoked));
+        let failed = Err::<(), _>(CoreError::ArtifactUnavailable);
+        assert!(super::forget_on_failure(failed, &mut registry, Some(&subjects)).is_err());
+        assert!(!present(&registry, revoked));
+        assert!(present(&registry, kept));
     }
 }

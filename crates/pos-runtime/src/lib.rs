@@ -37,6 +37,8 @@ pub mod reviewed_policy;
 pub mod scheduled_admission_host;
 pub mod scheduler;
 pub mod schema;
+pub mod staged_executor;
+pub mod trusted_clock;
 pub mod world_profile;
 pub mod world_replay;
 
@@ -64,15 +66,25 @@ pub use output_admission::{
     OutputPolicyBindingV1, OutputPolicyClosureV1, OutputPolicySourceV1,
     MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1,
 };
+pub use pos_state::{
+    DetachedProjectionCandidateV1, InitialStateV1, ProjectionCandidateErrorV1,
+    ProtectedProjectionProviderV1, RecordedConsumerV1,
+};
 pub use recorder::{RecordedOutput, Recorder, RunMode};
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use registry::is_reviewed_staged_factory;
 pub use registry::{
-    recover_local_cut_owner_retry_v1, recover_manifest_owner_admission_retry_v1,
-    AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, ClosedAdapterTranscriptV1,
-    HostCatalogueEntryV1, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
-    HumanActionReceiptV1, InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
+    fold_detached_candidate_v1, recover_local_cut_owner_retry_v1,
+    recover_manifest_owner_admission_retry_v1, AuthorizedDriverViewV1, AuthorizedViewAuthorityV1,
+    ClosedAdapterTranscriptV1, HostCatalogueEntryV1, HostProjectionProviderV1,
+    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
+    InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
     LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1, LocalAdapterProviderV1,
-    LocalAdapterSessionV1, OperationContext, PluginRegistry, ScheduledDriverBindingV1,
-    ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
+    LocalAdapterSessionV1, NoActionApproverV1, OperationContext, PluginRegistry,
+    ScheduledDriverBindingV1, ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
+    StagedGrowthBoundV1, StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1,
+    EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,
@@ -86,6 +98,14 @@ pub use scheduled_admission_host::LocalScheduledAdmissionHostV1;
 pub use scheduled_admission_host::{ScheduledAdmissionPortsV1, ScheduledAdmissionStoreV1};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;
+pub use staged_executor::{
+    check_handoff_reserve, require_staged_release, teardown_signal, ExecutorHealthV1,
+    GuardedFoldWindowV1, StagedFoldErrorV1, StagedFoldExecutorV1, StagedFoldPlanV1,
+    GUARD_RELEASE_LATE_SIGNAL, MAX_STAGED_INPUT_BYTES_V1, MEASURED_PREPARE_BOUND_V1,
+    MEASURED_TEARDOWN_BOUND_V1, STAGED_ACCOUNTING_PASS_BOUND_V1, STAGED_FOLD_DEADLINE_V1,
+    STAGED_FOLD_WORKER_NAME_V1, STAGED_HANDOFF_DEADLINE_V1,
+};
+pub use trusted_clock::handoff;
 pub use world_profile::HostWorldProfileV1;
 pub use world_replay::{
     VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,

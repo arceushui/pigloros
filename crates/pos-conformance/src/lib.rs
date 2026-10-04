@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
 mod bundle_contract;
+pub mod counterfactual;
 mod execution_profile;
 mod non_interference;
 mod non_interference_report;
@@ -537,11 +538,11 @@ pub struct AuthoritativeEventV1 {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyClassV1 {
-    ExogenousFrozen,
-    InterventionAssigned,
-    EndogenousRecomputed,
-    FixedPolicy,
-    PresentationOnly,
+    ExogenousFrozen = 0,
+    InterventionAssigned = 1,
+    EndogenousRecomputed = 2,
+    FixedPolicy = 3,
+    PresentationOnly = 4,
 }
 
 /// One projection state at the evidence boundary.
@@ -953,6 +954,10 @@ pub struct InputDependencyV1 {
 }
 
 /// One ordered user Intervention admitted at a Tick Boundary.
+///
+/// This is proof-local evidence, not a public wire schema. The ADR-064 INT1
+/// contract is [`counterfactual::InterventionV1`], which converts from this
+/// record through [`counterfactual::InterventionV1::from_proof_evidence_v1`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InterventionV1 {
@@ -993,7 +998,15 @@ pub struct RecomputationFrontierV1 {
     pub global_frontier_tick: u64,
     pub global_frontier_scheduler_position: u32,
     pub unknown_edge_policy: UnknownEdgePolicyV1,
-    pub unknown_edge_coordinates: Vec<DependencyNodeV1>,
+    /// Required edges the frontier could not resolve.
+    ///
+    /// The nested v1 evidence encodes each entry in the ADR-064 shape
+    /// `[consumer_coordinate, missing_source_digest_or_null]`, the same record
+    /// the standalone `RCF1` artifact uses. This replaced an earlier bare
+    /// coordinate list without changing any verified bytes: the evidence
+    /// header verifier requires `Reject` with an empty list, so no verified
+    /// evidence could carry a non-empty one.
+    pub unknown_edge_coordinates: Vec<counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1>,
     pub endogenous_suffix_end_tick: u64,
     pub classification_bundle_digest: [u8; 32],
     pub provenance_digest: [u8; 32],
@@ -1015,8 +1028,8 @@ pub struct InvalidArtifactV1 {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnknownEdgePolicyV1 {
-    Reject,
-    FullSuffixFromCut,
+    Reject = 0,
+    FullSuffixFromCut = 1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -1904,19 +1917,23 @@ pub mod strict_codec {
         DivergenceLocationKindV1, DivergenceMismatchKindV1, DivergenceReportV1, ExecutionModeV1,
         FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1, FixturePrincipalRefV1,
         FollowOnMismatchV1, HostClosureAuditV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-        InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1,
-        MoatProofEvidenceV1, NonInterferenceCaseV1, NonInterferenceDivergenceCoordinateV1,
-        NonInterferenceExecutionStatusV1, NonInterferenceVariantV1, OwnerFrontierV1,
-        ParticipantEventV1, ParticipantViewV1, PluginBoundaryV1, PluginFailureClassV1,
-        PluginFailureV1, ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1,
-        ReplayClaimV1, ReproManifestV1, ReproducibilityClassV1, SafeErrorCodeV1,
-        ScenarioRoomFixtureV1, StructuralCausalTraceEntryV1, SuffixInvalidationReasonV1,
-        SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1, Value,
+        InputDependencyV1, InterventionV1, KnowledgeSnapshotV1, MoatProofEvidenceV1,
+        NonInterferenceCaseV1, NonInterferenceDivergenceCoordinateV1,
+        NonInterferenceExecutionStatusV1, NonInterferenceVariantV1, ParticipantEventV1,
+        ParticipantViewV1, PluginBoundaryV1, PluginFailureClassV1, PluginFailureV1,
+        ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1,
+        ReproManifestV1, ReproducibilityClassV1, SafeErrorCodeV1, ScenarioRoomFixtureV1,
+        StructuralCausalTraceEntryV1, SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, Value,
         VerificationErrorV1, VerificationOutcomeV1, VerificationResultV1, Wave8ProofContractV1,
         CONFORMANCE_REPORT_MAGIC_V1, DIVERGENCE_RECORD_MAGIC_V1, EVIDENCE_ENVELOPE_MAGIC_V1,
-        EVIDENCE_FORMAT_V1, RECOMPUTATION_FRONTIER_MAGIC_V1, SUFFIX_INVALIDATION_MAGIC_V1,
-        VERIFICATION_RECORD_MAGIC_V1,
+        EVIDENCE_FORMAT_V1, VERIFICATION_RECORD_MAGIC_V1,
     };
+    use crate::counterfactual::frontier_artifacts::{
+        decode_dependency_node_value, decode_recomputation_frontier_value,
+        decode_suffix_invalidation_value, dependency_node_value, recomputation_frontier_value,
+        suffix_invalidation_value, FrontierArtifactErrorV1,
+    };
+    use crate::counterfactual::replay_claim::{replay_claim_code, REPLAY_CLAIMS};
 
     #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
     pub enum StrictCborError {
@@ -2678,26 +2695,15 @@ pub mod strict_codec {
     }
 
     fn enum_dependency_class(value: DependencyClassV1) -> Value {
-        uint(match value {
-            DependencyClassV1::ExogenousFrozen => 0,
-            DependencyClassV1::InterventionAssigned => 1,
-            DependencyClassV1::EndogenousRecomputed => 2,
-            DependencyClassV1::FixedPolicy => 3,
-            DependencyClassV1::PresentationOnly => 4,
-        })
+        uint(value.wire_code().into())
     }
 
     fn decode_dependency_class(value: &Value) -> Result<DependencyClassV1, StrictCborError> {
-        match uint_value(value, "dependency_class")? {
-            0 => Ok(DependencyClassV1::ExogenousFrozen),
-            1 => Ok(DependencyClassV1::InterventionAssigned),
-            2 => Ok(DependencyClassV1::EndogenousRecomputed),
-            3 => Ok(DependencyClassV1::FixedPolicy),
-            4 => Ok(DependencyClassV1::PresentationOnly),
-            _ => Err(StrictCborError::InvalidField {
+        DependencyClassV1::from_wire_code(uint_value(value, "dependency_class")?).ok_or_else(|| {
+            StrictCborError::InvalidField {
                 field: "dependency_class".to_owned(),
-            }),
-        }
+            }
+        })
     }
 
     fn enum_plugin_failure(value: PluginFailureClassV1) -> Value {
@@ -2713,56 +2719,6 @@ pub mod strict_codec {
             1 => Ok(PluginFailureClassV1::ResourceExhaustion),
             _ => Err(StrictCborError::InvalidField {
                 field: "failure_class".to_owned(),
-            }),
-        }
-    }
-
-    fn enum_unknown_edge_policy(value: UnknownEdgePolicyV1) -> Value {
-        uint(unknown_edge_policy_code(value))
-    }
-
-    const fn unknown_edge_policy_code(value: UnknownEdgePolicyV1) -> u64 {
-        match value {
-            UnknownEdgePolicyV1::Reject => 0,
-            UnknownEdgePolicyV1::FullSuffixFromCut => 1,
-        }
-    }
-
-    fn decode_unknown_edge_policy(value: &Value) -> Result<UnknownEdgePolicyV1, StrictCborError> {
-        match uint_value(value, "frontier_unknown_policy")? {
-            0 => Ok(UnknownEdgePolicyV1::Reject),
-            1 => Ok(UnknownEdgePolicyV1::FullSuffixFromCut),
-            _ => Err(StrictCborError::InvalidField {
-                field: "frontier_unknown_policy".to_owned(),
-            }),
-        }
-    }
-
-    fn enum_invalidation_reason(value: SuffixInvalidationReasonV1) -> Value {
-        uint(invalidation_reason_code(value))
-    }
-
-    const fn invalidation_reason_code(value: SuffixInvalidationReasonV1) -> u64 {
-        match value {
-            SuffixInvalidationReasonV1::NewIntervention => 0,
-            SuffixInvalidationReasonV1::ChangedIntervention => 1,
-            SuffixInvalidationReasonV1::UnknownEdgeFallback => 2,
-            SuffixInvalidationReasonV1::RetryAfterAtomicFailure => 3,
-            SuffixInvalidationReasonV1::TrustOrErasureChange => 4,
-        }
-    }
-
-    fn decode_invalidation_reason(
-        value: &Value,
-    ) -> Result<SuffixInvalidationReasonV1, StrictCborError> {
-        match uint_value(value, "invalidation_reason")? {
-            0 => Ok(SuffixInvalidationReasonV1::NewIntervention),
-            1 => Ok(SuffixInvalidationReasonV1::ChangedIntervention),
-            2 => Ok(SuffixInvalidationReasonV1::UnknownEdgeFallback),
-            3 => Ok(SuffixInvalidationReasonV1::RetryAfterAtomicFailure),
-            4 => Ok(SuffixInvalidationReasonV1::TrustOrErasureChange),
-            _ => Err(StrictCborError::InvalidField {
-                field: "invalidation_reason".to_owned(),
             }),
         }
     }
@@ -2921,27 +2877,21 @@ pub mod strict_codec {
         }
     }
 
+    /// Encode a replay claim through the shared counterfactual wire table.
     fn enum_replay_claim(value: ReplayClaimV1) -> Value {
-        uint(match value {
-            ReplayClaimV1::Exact => 0,
-            ReplayClaimV1::ExactAuthoritativeWithRedactedViews => 1,
-            ReplayClaimV1::StructuralOnly => 2,
-            ReplayClaimV1::UnverifiableArtifactsMissing => 3,
-            ReplayClaimV1::IncompatibleProfile => 4,
-        })
+        uint(replay_claim_code(value))
     }
 
+    /// Decode a replay claim through the shared counterfactual wire table.
     fn decode_replay_claim(value: &Value) -> Result<ReplayClaimV1, StrictCborError> {
-        match uint_value(value, "replay_claim")? {
-            0 => Ok(ReplayClaimV1::Exact),
-            1 => Ok(ReplayClaimV1::ExactAuthoritativeWithRedactedViews),
-            2 => Ok(ReplayClaimV1::StructuralOnly),
-            3 => Ok(ReplayClaimV1::UnverifiableArtifactsMissing),
-            4 => Ok(ReplayClaimV1::IncompatibleProfile),
-            _ => Err(StrictCborError::InvalidField {
+        let code = uint_value(value, "replay_claim")?;
+        usize::try_from(code)
+            .ok()
+            .and_then(|index| REPLAY_CLAIMS.get(index))
+            .copied()
+            .ok_or_else(|| StrictCborError::InvalidField {
                 field: "replay_claim".to_owned(),
-            }),
-        }
+            })
     }
 
     fn encode_manifest(manifest: &ReproManifestV1) -> Value {
@@ -3497,45 +3447,17 @@ pub mod strict_codec {
         })
     }
 
-    fn encode_node(node: &DependencyNodeV1) -> Value {
-        Value::Array(vec![
-            uint(node.tick),
-            uint(u64::from(node.scheduler_position)),
-            text(&node.owner_id),
-            uint(u64::from(node.output_ordinal)),
-            uint(u64::from(node.schema_id)),
-            digest(&node.artifact_digest),
-        ])
-    }
-
+    /// Decode a node through the shared counterfactual node codec.
     fn decode_node(value: &Value) -> Result<DependencyNodeV1, StrictCborError> {
-        let fields = array(value, "dependency_node", 6)?;
-        Ok(DependencyNodeV1 {
-            tick: uint_value(&fields[0], "node_tick")?,
-            scheduler_position: u32::try_from(uint_value(&fields[1], "node_scheduler")?).map_err(
-                |_| StrictCborError::InvalidField {
-                    field: "node_scheduler".to_owned(),
-                },
-            )?,
-            owner_id: string(&fields[2], "node_owner")?,
-            output_ordinal: u32::try_from(uint_value(&fields[3], "node_ordinal")?).map_err(
-                |_| StrictCborError::InvalidField {
-                    field: "node_ordinal".to_owned(),
-                },
-            )?,
-            schema_id: u32::try_from(uint_value(&fields[4], "node_schema")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "node_schema".to_owned(),
-                }
-            })?,
-            artifact_digest: bytes(&fields[5], "node_digest")?,
+        decode_dependency_node_value(value).map_err(|field| StrictCborError::InvalidField {
+            field: field.to_owned(),
         })
     }
 
     fn encode_dependency(dependency: &InputDependencyV1) -> Value {
         Value::Array(vec![
-            encode_node(&dependency.consumer),
-            encode_node(&dependency.source),
+            dependency_node_value(&dependency.consumer),
+            dependency_node_value(&dependency.source),
             enum_dependency_class(dependency.dependency_class),
             digest(&dependency.authorization_digest),
             digest(&dependency.provenance_digest),
@@ -3588,215 +3510,25 @@ pub mod strict_codec {
         })
     }
 
-    fn encode_owner_frontier(frontier: &OwnerFrontierV1) -> Value {
-        Value::Array(vec![
-            text(&frontier.owner_id),
-            uint(frontier.earliest_tick),
-            uint(u64::from(frontier.earliest_scheduler_position)),
-            uint(u64::from(frontier.earliest_output_ordinal)),
-            digest_array(&frontier.cause_node_digests),
-        ])
-    }
-
-    fn decode_owner_frontier(value: &Value) -> Result<OwnerFrontierV1, StrictCborError> {
-        let fields = array(value, "owner_frontier", 5)?;
-        let earliest_scheduler_position =
-            u32::try_from(uint_value(&fields[2], "frontier_scheduler")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "frontier_scheduler".to_owned(),
-                }
-            })?;
-        let earliest_output_ordinal = u32::try_from(uint_value(&fields[3], "frontier_ordinal")?)
-            .map_err(|_| StrictCborError::InvalidField {
-                field: "frontier_ordinal".to_owned(),
-            })?;
-        Ok(OwnerFrontierV1 {
-            owner_id: string(&fields[0], "frontier_owner")?,
-            earliest_tick: uint_value(&fields[1], "frontier_tick")?,
-            earliest_scheduler_position,
-            earliest_output_ordinal,
-            cause_node_digests: decode_digest_array(&fields[4], "frontier_causes")?,
-        })
-    }
-
-    fn encode_frontier(frontier: &RecomputationFrontierV1) -> Value {
-        Value::Array(vec![
-            text(RECOMPUTATION_FRONTIER_MAGIC_V1),
-            uint(1),
-            digest16(&frontier.frontier_id),
-            digest(&frontier.plan_digest),
-            digest(&frontier.parent_cut_digest),
-            digest(&frontier.dependency_graph_digest),
-            Value::Array(
-                frontier
-                    .intervention_seed_nodes
-                    .iter()
-                    .map(encode_node)
-                    .collect(),
-            ),
-            Value::Array(frontier.affected_nodes.iter().map(encode_node).collect()),
-            Value::Array(
-                frontier
-                    .owner_frontiers
-                    .iter()
-                    .map(encode_owner_frontier)
-                    .collect(),
-            ),
-            uint(frontier.global_frontier_tick),
-            uint(u64::from(frontier.global_frontier_scheduler_position)),
-            enum_unknown_edge_policy(frontier.unknown_edge_policy),
-            Value::Array(
-                frontier
-                    .unknown_edge_coordinates
-                    .iter()
-                    .map(encode_node)
-                    .collect(),
-            ),
-            uint(frontier.endogenous_suffix_end_tick),
-            digest(&frontier.classification_bundle_digest),
-            digest(&frontier.provenance_digest),
-            digest(&frontier.frontier_digest),
-        ])
-    }
-
     fn decode_frontier(value: &Value) -> Result<RecomputationFrontierV1, StrictCborError> {
-        let fields = array(value, "recomputation_frontier", 17)?;
-        if string(&fields[0], "frontier_magic")? != RECOMPUTATION_FRONTIER_MAGIC_V1
-            || uint_value(&fields[1], "frontier_version")? != 1
-        {
-            return Err(StrictCborError::UnsupportedVersion);
-        }
-        let global_frontier_scheduler_position =
-            u32::try_from(uint_value(&fields[10], "frontier_global_scheduler")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "frontier_global_scheduler".to_owned(),
-                }
-            })?;
-        Ok(RecomputationFrontierV1 {
-            frontier_id: bytes(&fields[2], "frontier_id")?,
-            plan_digest: bytes(&fields[3], "frontier_plan")?,
-            parent_cut_digest: bytes(&fields[4], "frontier_parent_cut")?,
-            dependency_graph_digest: bytes(&fields[5], "frontier_graph")?,
-            intervention_seed_nodes: array_values(&fields[6], "frontier_seeds")?
-                .iter()
-                .map(decode_node)
-                .collect::<Result<Vec<_>, _>>()?,
-            affected_nodes: array_values(&fields[7], "frontier_affected")?
-                .iter()
-                .map(decode_node)
-                .collect::<Result<Vec<_>, _>>()?,
-            owner_frontiers: array_values(&fields[8], "frontier_owners")?
-                .iter()
-                .map(decode_owner_frontier)
-                .collect::<Result<Vec<_>, _>>()?,
-            global_frontier_tick: uint_value(&fields[9], "frontier_global_tick")?,
-            global_frontier_scheduler_position,
-            unknown_edge_policy: decode_unknown_edge_policy(&fields[11])?,
-            unknown_edge_coordinates: array_values(&fields[12], "frontier_unknown_edges")?
-                .iter()
-                .map(decode_node)
-                .collect::<Result<Vec<_>, _>>()?,
-            endogenous_suffix_end_tick: uint_value(&fields[13], "frontier_end_tick")?,
-            classification_bundle_digest: bytes(&fields[14], "frontier_classification")?,
-            provenance_digest: bytes(&fields[15], "frontier_provenance")?,
-            frontier_digest: bytes(&fields[16], "frontier_digest")?,
-        })
-    }
-
-    fn encode_invalid_artifact(artifact: &InvalidArtifactV1) -> Value {
-        Value::Array(vec![
-            text(&artifact.artifact_class),
-            uint(u64::from(artifact.schema_id)),
-            digest(&artifact.artifact_digest),
-            encode_node(&artifact.producer),
-            uint(artifact.prior_generation),
-            enum_invalidation_reason(artifact.reason),
-        ])
-    }
-
-    fn decode_invalid_artifact(value: &Value) -> Result<InvalidArtifactV1, StrictCborError> {
-        let fields = array(value, "invalid_artifact", 6)?;
-        Ok(InvalidArtifactV1 {
-            artifact_class: string(&fields[0], "artifact_class")?,
-            schema_id: u32::try_from(uint_value(&fields[1], "artifact_schema")?).map_err(|_| {
-                StrictCborError::InvalidField {
-                    field: "artifact_schema".to_owned(),
-                }
-            })?,
-            artifact_digest: bytes(&fields[2], "artifact_digest")?,
-            producer: decode_node(&fields[3])?,
-            prior_generation: uint_value(&fields[4], "artifact_generation")?,
-            reason: decode_invalidation_reason(&fields[5])?,
-        })
-    }
-
-    fn encode_invalidation(invalidation: &SuffixInvalidationV1) -> Value {
-        Value::Array(vec![
-            text(SUFFIX_INVALIDATION_MAGIC_V1),
-            uint(1),
-            digest16(&invalidation.invalidation_id),
-            digest(&invalidation.plan_digest),
-            digest16(&invalidation.fork_id),
-            uint(invalidation.prior_generation),
-            uint(invalidation.new_generation),
-            digest(&invalidation.frontier_digest),
-            encode_node(&invalidation.invalid_start),
-            encode_node(&invalidation.invalid_end),
-            Value::Array(
-                invalidation
-                    .invalid_artifacts
-                    .iter()
-                    .map(encode_invalid_artifact)
-                    .collect(),
-            ),
-            digest_array(&invalidation.invalid_checkpoint_digests),
-            digest_array(&invalidation.invalid_projection_digests),
-            digest_array(&invalidation.retained_exogenous_digests),
-            enum_invalidation_reason(invalidation.reason),
-            Value::Array(vec![
-                digest16(&invalidation.commit_timeline_id),
-                uint(invalidation.commit_seq),
-                uint(invalidation.commit_tick),
-            ]),
-            digest(&invalidation.provenance_digest),
-            digest(&invalidation.invalidation_digest),
-        ])
+        decode_recomputation_frontier_value(value)
+            .map_err(|(error, field)| nested_record_error(error, field))
     }
 
     fn decode_invalidation(value: &Value) -> Result<SuffixInvalidationV1, StrictCborError> {
-        let fields = array(value, "suffix_invalidation", 18)?;
-        if string(&fields[0], "invalidation_magic")? != SUFFIX_INVALIDATION_MAGIC_V1
-            || uint_value(&fields[1], "invalidation_version")? != 1
-        {
-            return Err(StrictCborError::UnsupportedVersion);
+        decode_suffix_invalidation_value(value)
+            .map_err(|(error, field)| nested_record_error(error, field))
+    }
+
+    /// A magic or version mismatch keeps its own code; every other shape
+    /// failure names the first malformed field of the nested record.
+    fn nested_record_error(error: FrontierArtifactErrorV1, field: &str) -> StrictCborError {
+        match error {
+            FrontierArtifactErrorV1::UnsupportedVersion => StrictCborError::UnsupportedVersion,
+            _ => StrictCborError::InvalidField {
+                field: field.to_owned(),
+            },
         }
-        let commit_coordinate = array(&fields[15], "invalidation_commit_coordinate", 3)?;
-        let commit_timeline_id = bytes(&commit_coordinate[0], "invalidation_commit_timeline")?;
-        let commit_seq = uint_value(&commit_coordinate[1], "invalidation_commit_seq")?;
-        let commit_tick = uint_value(&commit_coordinate[2], "invalidation_commit_tick")?;
-        Ok(SuffixInvalidationV1 {
-            invalidation_id: bytes(&fields[2], "invalidation_id")?,
-            plan_digest: bytes(&fields[3], "invalidation_plan")?,
-            fork_id: bytes(&fields[4], "invalidation_fork")?,
-            prior_generation: uint_value(&fields[5], "invalidation_prior_generation")?,
-            new_generation: uint_value(&fields[6], "invalidation_new_generation")?,
-            frontier_digest: bytes(&fields[7], "invalidation_frontier")?,
-            invalid_start: decode_node(&fields[8])?,
-            invalid_end: decode_node(&fields[9])?,
-            invalid_artifacts: array_values(&fields[10], "invalid_artifacts")?
-                .iter()
-                .map(decode_invalid_artifact)
-                .collect::<Result<Vec<_>, _>>()?,
-            invalid_checkpoint_digests: decode_digest_array(&fields[11], "invalid_checkpoints")?,
-            invalid_projection_digests: decode_digest_array(&fields[12], "invalid_projections")?,
-            retained_exogenous_digests: decode_digest_array(&fields[13], "retained_exogenous")?,
-            reason: decode_invalidation_reason(&fields[14])?,
-            commit_timeline_id,
-            commit_seq,
-            commit_tick,
-            provenance_digest: bytes(&fields[16], "invalidation_provenance")?,
-            invalidation_digest: bytes(&fields[17], "invalidation_digest")?,
-        })
     }
 
     fn encode_counterfactual(contract: &CounterfactualContractV1) -> Value {
@@ -3812,8 +3544,8 @@ pub mod strict_codec {
                     .map(encode_dependency)
                     .collect(),
             ),
-            encode_frontier(&contract.frontier),
-            encode_invalidation(&contract.invalidation),
+            recomputation_frontier_value(&contract.frontier),
+            suffix_invalidation_value(&contract.invalidation),
             Value::Array(
                 contract
                     .recomputed_event_seqs
@@ -4702,27 +4434,6 @@ pub mod strict_codec {
             let evidence = super::super::tests::evidence();
             let contract = &evidence.contract.counterfactual;
 
-            let owner = replace_field(
-                &encode_owner_frontier(&contract.frontier.owner_frontiers[0]),
-                2,
-                uint(u64::from(u32::MAX) + 1),
-            );
-            assert!(decode_owner_frontier(&owner).is_err());
-
-            let frontier = replace_field(
-                &encode_frontier(&contract.frontier),
-                10,
-                uint(u64::from(u32::MAX) + 1),
-            );
-            assert!(decode_frontier(&frontier).is_err());
-
-            let invalidation = replace_field(
-                &encode_invalidation(&contract.invalidation),
-                15,
-                Value::Array(vec![uint(1), Value::Null, Value::Bool(true)]),
-            );
-            assert!(decode_invalidation(&invalidation).is_err());
-
             let counterfactual = replace_field(&encode_counterfactual(contract), 8, Value::Null);
             assert!(decode_counterfactual(&counterfactual).is_err());
 
@@ -4733,6 +4444,324 @@ pub mod strict_codec {
                 Value::Null,
             );
             assert!(decode_case(&case).is_ok());
+        }
+
+        fn invalid_field(field: &str) -> Result<(), StrictCborError> {
+            Err(StrictCborError::InvalidField {
+                field: field.to_owned(),
+            })
+        }
+
+        #[test]
+        fn nested_frontier_errors_name_the_malformed_field() {
+            let evidence = super::super::tests::evidence();
+            let frontier = recomputation_frontier_value(&evidence.contract.counterfactual.frontier);
+            let beyond_u32 = uint(u64::from(u32::MAX) + 1);
+            let cases = [
+                (0, uint(1), invalid_field("frontier_magic")),
+                (0, text("RCF2"), Err(StrictCborError::UnsupportedVersion)),
+                (1, text("1"), invalid_field("frontier_version")),
+                (2, uint(0), invalid_field("frontier_id")),
+                (6, uint(0), invalid_field("frontier_seeds")),
+                (8, uint(0), invalid_field("frontier_owners")),
+                (10, beyond_u32, invalid_field("frontier_global_scheduler")),
+                (11, uint(2), invalid_field("frontier_unknown_policy")),
+                (13, text("9"), invalid_field("frontier_end_tick")),
+                (16, Value::Null, invalid_field("frontier_digest")),
+            ];
+            for (index, replacement, expected) in cases {
+                assert_eq!(
+                    decode_frontier(&replace_field(&frontier, index, replacement)).map(drop),
+                    expected,
+                    "frontier field {index}"
+                );
+            }
+            assert_eq!(
+                decode_frontier(&Value::Array(Vec::new())).map(drop),
+                invalid_field("recomputation_frontier")
+            );
+        }
+
+        #[test]
+        fn nested_invalidation_errors_name_the_malformed_field() {
+            let evidence = super::super::tests::evidence();
+            let invalidation =
+                suffix_invalidation_value(&evidence.contract.counterfactual.invalidation);
+            let start =
+                dependency_node_value(&evidence.contract.counterfactual.invalidation.invalid_start);
+            let timeline = Value::Bytes(vec![12; 16]);
+            let cases = [
+                (1, uint(2), Err(StrictCborError::UnsupportedVersion)),
+                (1, text("1"), invalid_field("invalidation_version")),
+                (6, text("1"), invalid_field("invalidation_new_generation")),
+                (8, uint(0), invalid_field("dependency_node")),
+                (
+                    8,
+                    replace_field(&start, 2, uint(1)),
+                    invalid_field("node_owner"),
+                ),
+                (
+                    9,
+                    replace_field(&start, 5, uint(1)),
+                    invalid_field("node_digest"),
+                ),
+                (10, uint(0), invalid_field("invalid_artifacts")),
+                (13, uint(0), invalid_field("retained_exogenous")),
+                (14, uint(9), invalid_field("invalidation_reason")),
+                (
+                    15,
+                    Value::Array(vec![timeline.clone()]),
+                    invalid_field("invalidation_commit_coordinate"),
+                ),
+                (
+                    15,
+                    Value::Array(vec![uint(1), Value::Null, Value::Bool(true)]),
+                    invalid_field("invalidation_commit_timeline"),
+                ),
+                (
+                    15,
+                    Value::Array(vec![timeline.clone(), text("3"), uint(5)]),
+                    invalid_field("invalidation_commit_seq"),
+                ),
+                (
+                    15,
+                    Value::Array(vec![timeline, uint(3), Value::Null]),
+                    invalid_field("invalidation_commit_tick"),
+                ),
+                (17, Value::Null, invalid_field("invalidation_digest")),
+            ];
+            for (index, replacement, expected) in cases {
+                assert_eq!(
+                    decode_invalidation(&replace_field(&invalidation, index, replacement))
+                        .map(drop),
+                    expected,
+                    "invalidation field {index}"
+                );
+            }
+        }
+
+        fn replace_item_field(
+            record: &Value,
+            index: usize,
+            item_index: usize,
+            replacement: Value,
+        ) -> Value {
+            let mut items = record
+                .as_array()
+                .and_then(|fields| fields[index].as_array())
+                .cloned()
+                .unwrap_or_default();
+            items[0] = replace_field(&items[0], item_index, replacement);
+            replace_field(record, index, Value::Array(items))
+        }
+
+        #[test]
+        fn nested_frontier_list_items_name_their_malformed_field() {
+            let mut frontier = super::super::tests::evidence()
+                .contract
+                .counterfactual
+                .frontier;
+            let node = DependencyNodeV1 {
+                tick: 2,
+                scheduler_position: 1,
+                owner_id: "proof".to_owned(),
+                output_ordinal: 0,
+                schema_id: 1,
+                artifact_digest: [7; 32],
+            };
+            frontier.intervention_seed_nodes = vec![node.clone()];
+            frontier.affected_nodes = vec![node.clone()];
+            frontier.owner_frontiers = vec![crate::OwnerFrontierV1 {
+                owner_id: "proof".to_owned(),
+                earliest_tick: 2,
+                earliest_scheduler_position: 1,
+                earliest_output_ordinal: 0,
+                cause_node_digests: vec![[1; 32]],
+            }];
+            frontier.unknown_edge_coordinates = vec![
+                crate::counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1 {
+                    consumer: node,
+                    missing_source_digest: None,
+                },
+            ];
+            let frontier = recomputation_frontier_value(&frontier);
+            let beyond_u32 = uint(u64::from(u32::MAX) + 1);
+            let cases = [
+                (6, 1, beyond_u32.clone(), "node_scheduler"),
+                (7, 2, uint(1), "node_owner"),
+                (8, 0, uint(1), "frontier_owner"),
+                (8, 1, text("2"), "frontier_tick"),
+                (8, 2, beyond_u32.clone(), "frontier_scheduler"),
+                (8, 3, beyond_u32, "frontier_ordinal"),
+                (8, 4, uint(0), "frontier_causes"),
+                (12, 0, uint(1), "dependency_node"),
+                (12, 1, Value::Bytes(vec![8; 31]), "unknown_edge_source"),
+            ];
+            for (index, item_index, replacement, field) in cases {
+                assert_eq!(
+                    decode_frontier(&replace_item_field(
+                        &frontier,
+                        index,
+                        item_index,
+                        replacement
+                    ))
+                    .map(drop),
+                    invalid_field(field),
+                    "frontier list {index} item field {item_index}"
+                );
+            }
+            for (index, field) in [(8, "owner_frontier"), (12, "unknown_edge")] {
+                assert_eq!(
+                    decode_frontier(&replace_field(
+                        &frontier,
+                        index,
+                        Value::Array(vec![uint(1)])
+                    ))
+                    .map(drop),
+                    invalid_field(field)
+                );
+            }
+        }
+
+        #[test]
+        fn nested_invalid_artifact_items_name_their_malformed_field() {
+            let invalidation = suffix_invalidation_value(
+                &super::super::tests::evidence()
+                    .contract
+                    .counterfactual
+                    .invalidation,
+            );
+            let beyond_u32 = uint(u64::from(u32::MAX) + 1);
+            let cases = [
+                (0, uint(1), "artifact_class"),
+                (1, beyond_u32, "artifact_schema"),
+                (2, uint(1), "artifact_digest"),
+                (3, uint(1), "dependency_node"),
+                (4, text("0"), "artifact_generation"),
+                (5, uint(9), "invalidation_reason"),
+            ];
+            for (item_index, replacement, field) in cases {
+                assert_eq!(
+                    decode_invalidation(&replace_item_field(
+                        &invalidation,
+                        10,
+                        item_index,
+                        replacement
+                    ))
+                    .map(drop),
+                    invalid_field(field),
+                    "invalid artifact field {item_index}"
+                );
+            }
+            assert_eq!(
+                decode_invalidation(&replace_field(
+                    &invalidation,
+                    10,
+                    Value::Array(vec![uint(1)])
+                ))
+                .map(drop),
+                invalid_field("invalid_artifact")
+            );
+        }
+
+        #[test]
+        fn nested_node_errors_name_the_malformed_field() {
+            let evidence = super::super::tests::evidence();
+            let node =
+                dependency_node_value(&evidence.contract.counterfactual.invalidation.invalid_end);
+            let beyond_u32 = uint(u64::from(u32::MAX) + 1);
+            let cases = [
+                (0, text("1"), "node_tick"),
+                (1, beyond_u32.clone(), "node_scheduler"),
+                (3, beyond_u32.clone(), "node_ordinal"),
+                (4, beyond_u32, "node_schema"),
+            ];
+            for (index, replacement, field) in cases {
+                assert_eq!(
+                    decode_node(&replace_field(&node, index, replacement)).map(drop),
+                    invalid_field(field)
+                );
+            }
+            assert_eq!(
+                decode_node(&uint(1)).map(drop),
+                invalid_field("dependency_node")
+            );
+            assert_eq!(
+                decode_node(&node).map(|decoded| dependency_node_value(&decoded)),
+                Ok(node)
+            );
+        }
+
+        #[test]
+        fn replay_claim_codes_use_the_shared_table() {
+            for claim in REPLAY_CLAIMS {
+                assert_eq!(decode_replay_claim(&enum_replay_claim(claim)), Ok(claim));
+            }
+            assert_eq!(
+                decode_replay_claim(&uint(5)),
+                Err(StrictCborError::InvalidField {
+                    field: "replay_claim".to_owned(),
+                })
+            );
+        }
+
+        #[test]
+        fn dependency_class_codes_use_the_shared_table() {
+            for class in DependencyClassV1::ALL_V1 {
+                assert_eq!(
+                    decode_dependency_class(&enum_dependency_class(class)),
+                    Ok(class)
+                );
+            }
+            assert_eq!(
+                decode_dependency_class(&uint(5)),
+                Err(StrictCborError::InvalidField {
+                    field: "dependency_class".to_owned(),
+                })
+            );
+        }
+
+        #[test]
+        fn nested_frontier_roundtrips_adr_unknown_edge_records() {
+            let evidence = super::super::tests::evidence();
+            let mut contract = evidence.contract.counterfactual;
+            let consumer = DependencyNodeV1 {
+                tick: 2,
+                scheduler_position: 1,
+                owner_id: "proof".to_owned(),
+                output_ordinal: 0,
+                schema_id: 1,
+                artifact_digest: [7; 32],
+            };
+            contract.frontier.unknown_edge_policy = crate::UnknownEdgePolicyV1::FullSuffixFromCut;
+            contract.frontier.unknown_edge_coordinates = vec![
+                crate::counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1 {
+                    consumer: consumer.clone(),
+                    missing_source_digest: None,
+                },
+                crate::counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1 {
+                    consumer: consumer.clone(),
+                    missing_source_digest: Some([8; 32]),
+                },
+            ];
+
+            let encoded = encode_counterfactual(&contract);
+            let edges = encoded
+                .as_array()
+                .and_then(|fields| fields[5].as_array())
+                .and_then(|frontier| frontier[12].as_array())
+                .cloned();
+            assert_eq!(
+                edges,
+                Some(vec![
+                    Value::Array(vec![dependency_node_value(&consumer), Value::Null]),
+                    Value::Array(vec![
+                        dependency_node_value(&consumer),
+                        Value::Bytes(vec![8; 32]),
+                    ]),
+                ])
+            );
+            assert_eq!(decode_counterfactual(&encoded), Ok(contract));
         }
     }
 }
@@ -5800,7 +5829,8 @@ fn valid_owner_frontiers(frontiers: &[OwnerFrontierV1], has_intervention: bool) 
                 !owner.owner_id.is_empty()
                     && owner.owner_id.len() <= 128
                     && !owner.cause_node_digests.is_empty()
-                    && owner.cause_node_digests.len() <= 4_096
+                    && owner.cause_node_digests.len()
+                        <= counterfactual::frontier_artifacts::MAX_CAUSE_DIGESTS_V1
                     && owner
                         .cause_node_digests
                         .windows(2)
@@ -5812,16 +5842,20 @@ fn valid_owner_frontiers(frontiers: &[OwnerFrontierV1], has_intervention: bool) 
             }))
 }
 
+/// Unknown edges are bounded, strictly ordered, name a valid consumer, and
+/// never carry an all-zero missing-source digest (an unidentified source is
+/// `None`), matching the standalone `RCF1` rule.
 fn valid_unknown_edge_coordinates(frontier: &RecomputationFrontierV1) -> bool {
-    frontier.unknown_edge_coordinates.len() <= 65_536
+    frontier.unknown_edge_coordinates.len()
+        <= counterfactual::frontier_artifacts::MAX_UNKNOWN_EDGE_COORDINATES_V1
         && frontier
             .unknown_edge_coordinates
             .windows(2)
             .all(|pair| pair[0] < pair[1])
-        && frontier
-            .unknown_edge_coordinates
-            .iter()
-            .all(|node| valid_contract_node(node, false))
+        && frontier.unknown_edge_coordinates.iter().all(|edge| {
+            valid_contract_node(&edge.consumer, false)
+                && edge.missing_source_digest != Some([0; 32])
+        })
 }
 
 fn valid_digest_list(values: &[[u8; 32]]) -> bool {
@@ -8221,8 +8255,14 @@ pub mod tests {
 
             let mut unknown_edges = shape.clone();
             unknown_edges.frontier.unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
-            unknown_edges.frontier.unknown_edge_coordinates = vec![later_node.clone()];
+            unknown_edges.frontier.unknown_edge_coordinates = vec![unknown_edge(&later_node)];
             assert!(verify_counterfactual_record_shapes(&unknown_edges));
+            unknown_edges.frontier.unknown_edge_coordinates[0].missing_source_digest =
+                Some([3; 32]);
+            assert!(verify_counterfactual_record_shapes(&unknown_edges));
+            unknown_edges.frontier.unknown_edge_coordinates[0].missing_source_digest =
+                Some([0; 32]);
+            assert!(!verify_counterfactual_record_shapes(&unknown_edges));
             unknown_edges.frontier.unknown_edge_coordinates.clear();
             assert!(!verify_counterfactual_record_shapes(&unknown_edges));
 
@@ -8513,7 +8553,7 @@ pub mod tests {
             unsorted_unknown_edges.frontier.unknown_edge_policy =
                 UnknownEdgePolicyV1::FullSuffixFromCut;
             unsorted_unknown_edges.frontier.unknown_edge_coordinates =
-                vec![later_node.clone(), node.clone()];
+                vec![unknown_edge(&later_node), unknown_edge(&node)];
             assert!(!verify_counterfactual_record_shapes(
                 &unsorted_unknown_edges
             ));
@@ -8538,6 +8578,15 @@ pub mod tests {
     #[test]
     fn covers_remaining_typed_verifier_boundaries() {
         typed_verifier_boundary_cases!();
+    }
+
+    fn unknown_edge(
+        consumer: &DependencyNodeV1,
+    ) -> crate::counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1 {
+        crate::counterfactual::frontier_artifacts::UnknownEdgeCoordinateV1 {
+            consumer: consumer.clone(),
+            missing_source_digest: None,
+        }
     }
 
     fn fork_pair() -> (MoatProofEvidenceV1, MoatProofEvidenceV1) {

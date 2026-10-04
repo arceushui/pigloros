@@ -4635,6 +4635,7 @@ dependencies = [
  "ciborium",
  "pos-core",
  "pos-plugin-geo",
+ "pos-runtime",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -4865,12 +4866,13 @@ dependencies = [
 name = "pos-time"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "pos-conformance",
  "pos-core",
  "pos-plugin-world",
  "pos-runtime",
  "pos-state",
  "pos-store",
- "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
