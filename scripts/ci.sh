@@ -23,6 +23,9 @@ bash "$ROOT/scripts/test-check-pinned-dependencies.sh"
 echo "==> Rust scope filter policy"
 python3 "$ROOT/scripts/test_rust_scope_policy.py"
 
+echo "==> advisory benchmark comparator"
+python3 "$ROOT/scripts/test_compare_memory_store_benchmarks.py"
+
 echo "==> ASan CI policy"
 bash "$ROOT/scripts/check-asan-ci-policy.sh"
 python3 "$ROOT/scripts/test_check_asan_ci_policy.py"
