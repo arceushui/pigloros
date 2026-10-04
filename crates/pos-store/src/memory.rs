@@ -305,6 +305,9 @@ pub struct MemoryStore {
     /// Idempotent operation outcomes, including the original receipt digests.
     manifest_owner_admission_operations:
         BTreeMap<([u8; 32], Hash), MemoryManifestOwnerAdmissionOperationV1>,
+    /// Scoped admission member leaves by `(scope, kind, native digest)`.
+    manifest_owner_member_leaves:
+        BTreeMap<MemoryManifestOwnerMemberKeyV1, pos_core::ManifestOwnerMemberLeafV1>,
     /// Current local-cut owner state, synchronized with the current admission state.
     local_cut_owner_states: BTreeMap<[u8; 32], LocalCutOwnerStateV1>,
     /// Immutable local-cut batches keyed by owner operation identity.
@@ -357,6 +360,8 @@ struct MemoryManifestOwnerAdmissionStateV1 {
     inventory_generation: Hash,
     timelines: BTreeSet<TimelineId>,
 }
+
+type MemoryManifestOwnerMemberKeyV1 = (Hash, pos_core::WorldArtifactKindV1, Hash);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MemoryManifestOwnerAdmissionOperationV1 {
@@ -720,6 +725,7 @@ impl MemoryStore {
             manifest_owner_admission_states: BTreeMap::new(),
             manifest_owner_admission_snapshots: BTreeMap::new(),
             manifest_owner_admission_operations: BTreeMap::new(),
+            manifest_owner_member_leaves: BTreeMap::new(),
             local_cut_owner_states: BTreeMap::new(),
             local_cut_owner_operations: BTreeMap::new(),
             local_cut_owner_cuts: BTreeMap::new(),
@@ -11265,6 +11271,81 @@ fn memory_successor_local_cut_owner_state(
     Ok(Some(successor))
 }
 
+/// Reject a successor that reuses a generation row, renews a recorded lease, or
+/// registers a different leaf under an existing `(scope, kind, digest)` key.
+fn memory_validate_manifest_owner_successor(
+    store: &MemoryStore,
+    input: &pos_core::ManifestOwnerAdmissionInputV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let owner_id = input.catalog.as_input().owner_id;
+    let configuration_generation = input.catalog.as_input().configuration_generation;
+    for timeline in &input.timelines {
+        if store.manifest_owner_admission_snapshots.contains_key(&(
+            owner_id,
+            configuration_generation,
+            timeline.timeline_id,
+        )) {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+        if let Some(previous) =
+            memory_latest_manifest_owner_admission(store, owner_id, timeline.timeline_id)
+        {
+            pos_core::validate_manifest_owner_lease_replacement_v1(
+                &previous.timeline.members,
+                &timeline.members,
+            )?;
+        }
+        // Native bytes are deliberately not compared: preparation derived
+        // them from the native records and the leaf's native digest commits
+        // to them, so an equal leaf can only carry equal bytes.
+        if timeline.members.leaves.iter().any(|member| {
+            store
+                .manifest_owner_member_leaves
+                .get(&memory_manifest_owner_member_key(timeline.scope, member))
+                .is_some_and(|stored| stored.leaf != member.leaf)
+        }) {
+            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
+        }
+    }
+    Ok(())
+}
+
+/// Latest recorded admission of one owned Timeline across every generation.
+fn memory_latest_manifest_owner_admission(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    timeline_id: TimelineId,
+) -> Option<&ManifestOwnerAdmissionSnapshotV1> {
+    store
+        .manifest_owner_admission_snapshots
+        .iter()
+        .rev()
+        .find(|((owner, _, timeline), _)| *owner == owner_id && *timeline == timeline_id)
+        .map(|(_, snapshot)| snapshot)
+}
+
+const fn memory_manifest_owner_member_key(
+    scope: Hash,
+    member: &pos_core::ManifestOwnerMemberLeafV1,
+) -> MemoryManifestOwnerMemberKeyV1 {
+    let leaf = member.leaf.as_input();
+    (scope, leaf.kind, leaf.native_digest)
+}
+
+fn memory_insert_manifest_owner_member_leaves(
+    store: &mut MemoryStore,
+    input: &pos_core::ManifestOwnerAdmissionInputV1,
+) {
+    for timeline in &input.timelines {
+        for member in &timeline.members.leaves {
+            store
+                .manifest_owner_member_leaves
+                .entry(memory_manifest_owner_member_key(timeline.scope, member))
+                .or_insert_with(|| member.clone());
+        }
+    }
+}
+
 impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
     fn read_manifest_owner_state_v1(
         &self,
@@ -11373,15 +11454,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
         }
 
         let configuration_generation = input.catalog.as_input().configuration_generation;
-        if input.timelines.iter().any(|timeline| {
-            self.manifest_owner_admission_snapshots.contains_key(&(
-                owner_id,
-                configuration_generation,
-                timeline.timeline_id,
-            ))
-        }) {
-            return Err(ManifestOwnerAdmissionErrorV1::Conflict);
-        }
+        memory_validate_manifest_owner_successor(self, input)?;
 
         let result = ManifestOwnerAdmissionCommitV1 {
             kind: ManifestOwnerAdmissionCommitKindV1::Applied,
@@ -11405,6 +11478,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
                         operation_id: input.operation_id,
                         expected_inventory_generation: input.expected_inventory_generation,
                         resulting_inventory_generation: input.resulting_inventory_generation,
+                        read_limits: input.read_limits,
                     },
                 )
             })
@@ -11430,6 +11504,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
             self.manifest_owner_admission_snapshots
                 .insert(key, snapshot);
         }
+        memory_insert_manifest_owner_member_leaves(self, input);
         self.manifest_owner_admission_states
             .insert(owner_id, next_state);
         if let Some(next_local_cut_owner_state) = next_local_cut_owner_state {
@@ -13703,13 +13778,9 @@ mod coverage_entrypoints {
 mod manifest_owner_admission_coverage {
     use super::*;
     use crate::manifest_owner_fixtures::{
-        catalog, hash, plugin, policy_copies, AcceptingOwner, PolicySource,
+        catalog, hash, timeline_request, AcceptingOwner, READ_LIMITS,
     };
-    use pos_core::{
-        prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionRequestV1,
-        ManifestOwnerTimelineAdmissionRequestV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
-        WorldConsumerV1, WorldProducerV1,
-    };
+    use pos_core::{prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionRequestV1};
 
     type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
     type TestResult = FixtureResult<()>;
@@ -13723,32 +13794,6 @@ mod manifest_owner_admission_coverage {
         TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
     }
 
-    fn timeline_request(
-        index: usize,
-        timeline_id: TimelineId,
-        sources: &[PolicySource],
-    ) -> FixtureResult<ManifestOwnerTimelineAdmissionRequestV1> {
-        let offset = u8::try_from(index).unwrap_or(u8::MAX);
-        let scope = hash(70 + offset);
-        let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-            scope,
-            consumers: vec![WorldConsumerV1::new(
-                "local-observer".to_owned(),
-                hash(130),
-                hash(131),
-                hash(132),
-            )?],
-            producers: vec![WorldProducerV1::new(plugin(1), sources[0].0.digest())?],
-            optional_view_roots: Vec::new(),
-        })?;
-        Ok(ManifestOwnerTimelineAdmissionRequestV1 {
-            timeline_id,
-            scope,
-            wcs1,
-            policy_copies: policy_copies(OWNER, scope, sources, hash(80 + offset))?,
-        })
-    }
-
     /// Prepare the successor of `current` (or genesis) owning `timeline_ids`.
     fn prepared(
         current: Option<&ManifestOwnerAdmissionOwnerStateV1>,
@@ -13759,8 +13804,7 @@ mod manifest_owner_admission_coverage {
         let (catalog, sources) = catalog(OWNER, generation)?;
         let timelines = timeline_ids
             .iter()
-            .enumerate()
-            .map(|(index, timeline_id)| timeline_request(index, *timeline_id, &sources))
+            .map(|timeline_id| timeline_request(OWNER, *timeline_id, &sources))
             .collect::<FixtureResult<Vec<_>>>()?;
         let request = ManifestOwnerAdmissionRequestV1 {
             operation_id: hash(40 + seed),
@@ -13769,6 +13813,7 @@ mod manifest_owner_admission_coverage {
             previous_visible_lcq1_hash: current.and_then(|state| state.previous_visible_lcq1_hash),
             expected_inventory_generation: current.map(|state| state.inventory_generation),
             resulting_inventory_generation: hash(50 + seed),
+            read_limits: READ_LIMITS,
             timelines,
         };
         let batch = prepare_manifest_owner_admission_v1(request, &AcceptingOwner, current)?;
@@ -14077,25 +14122,21 @@ mod manifest_owner_admission_coverage {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod local_cut_owner_coverage {
     use super::*;
+    use crate::manifest_owner_fixtures::{catalog, member_classes, timeline_request, READ_LIMITS};
     use pos_core::{
-        output_policy::{OutputPolicyInputV1, OutputPolicyV1},
-        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
-        ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactTransitionRuleV1, LocalCutCommitV1,
+        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1, LocalCutCommitV1,
         LocalCutCompositionBindingRowV1, LocalCutManifestBindingRowV1,
         LocalCutManifestBindingTableV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
         LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutSealInputV2, LocalCutSealV2,
-        LocalCutTableRefV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1,
-        ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
-        ManifestOwnerAdmissionVerifierV1, ManifestOwnerPolicyCopiesV1,
+        LocalCutTableRefV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
+        ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1,
+        ManifestOwnerClassifiedLeafV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-        ManifestSlotAdmissionReceiptV1, PluginId, WorldArtifactKindV1, WorldArtifactLeafInputV1,
-        WorldArtifactLeafV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
-        WorldProducerV1,
+        ManifestSlotAdmissionReceiptV1,
     };
 
     type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
     type TestResult = FixtureResult<()>;
-    type PolicySource = (OutputPolicyV1, Vec<u8>);
     type CutCorruption = fn(&mut MemoryStore) -> TestResult;
 
     const CUT_OWNER: [u8; 32] = [0x41; 32];
@@ -14209,6 +14250,15 @@ mod local_cut_owner_coverage {
         ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
             Ok(())
         }
+
+        fn classify_scope_member_leaves(
+            &self,
+            _timeline_id: TimelineId,
+            _scope: Hash,
+            members: &ManifestOwnerScopeMembersV1,
+        ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
+            Ok(member_classes(members))
+        }
     }
 
     impl LocalCutOwnerVerifierV1 for AcceptingOwner {
@@ -14248,144 +14298,8 @@ mod local_cut_owner_coverage {
         Hash::from_bytes([byte; 32])
     }
 
-    const fn plugin(byte: u8) -> PluginId {
-        PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
-    }
-
     const fn timeline(byte: u8) -> TimelineId {
         TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
-    }
-
-    fn policy_source(plugin_id: PluginId, seed: u8) -> FixtureResult<PolicySource> {
-        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-            plugin_id,
-            plugin_version: "1.0.0".to_owned(),
-            implementation_hash: hash(seed + 30),
-            base_configuration_digest: hash(seed + 40),
-            executable_profile_hash: hash(seed + 50),
-            retention_policy_hash: hash(seed + 60),
-            policy_revision: 1,
-            output_declarations: Vec::new(),
-        })?;
-        let members = [
-            policy.to_canonical_cbor(),
-            b"EBP1-fixture".to_vec(),
-            b"implementation-fixture".to_vec(),
-            b"CFG1-fixture".to_vec(),
-            Vec::new(),
-            b"RTP1-fixture".to_vec(),
-        ];
-        let mut closure = b"OPC1".to_vec();
-        for member in members {
-            let length = u64::try_from(member.len())?;
-            closure.extend_from_slice(&length.to_be_bytes());
-            closure.extend_from_slice(&member);
-        }
-        Ok((policy, closure))
-    }
-
-    fn opc1_digest(bytes: &[u8]) -> Hash {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"pigloros.manifest-plugin-closure.v1\0");
-        hasher.update(bytes);
-        Hash::from_bytes(*hasher.finalize().as_bytes())
-    }
-
-    fn catalog_fixture(
-        owner_id: [u8; 32],
-        generation: u64,
-    ) -> FixtureResult<(ManifestAdmissionCatalogV1, Vec<PolicySource>)> {
-        let first = policy_source(plugin(1), 1)?;
-        let second = policy_source(plugin(2), 2)?;
-        let sources = vec![first, second];
-        let mut rows = Vec::with_capacity(sources.len());
-        for (index, (policy, closure)) in sources.iter().enumerate() {
-            rows.push(ManifestAdmissionCatalogRowV1 {
-                stable_slot: format!("slot-{index}"),
-                plugin_id: policy.fields().plugin_id,
-                plugin_name: "same-name".to_owned(),
-                plugin_version: policy.fields().plugin_version.clone(),
-                implementation_hash: policy.fields().implementation_hash,
-                eop1_native_digest: policy.digest(),
-                closure_hash: opc1_digest(closure),
-            });
-        }
-        let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
-            owner_id,
-            configuration_generation: generation,
-            rows,
-        })?;
-        Ok((catalog, sources))
-    }
-
-    fn leaf(
-        owner_id: [u8; 32],
-        scope: Hash,
-        kind: WorldArtifactKindV1,
-        native_digest: Hash,
-        native_bytes: &[u8],
-    ) -> FixtureResult<WorldArtifactLeafV1> {
-        let leaf = WorldArtifactLeafV1::new(WorldArtifactLeafInputV1 {
-            scope,
-            kind,
-            native_digest,
-            native_byte_length: u64::try_from(native_bytes.len())?,
-            owner: owner_id,
-            data_class: ArtifactDataClassV1::StructuralAuditMetadata,
-            optionality: ArtifactOptionalityV1::Required,
-            transition: ArtifactTransitionRuleV1::PreserveExact,
-            source_lease_hash: hash(80),
-            key_dependencies: Vec::new(),
-            child_node_hashes: Vec::new(),
-        })?;
-        Ok(leaf)
-    }
-
-    fn policy_copy(
-        owner_id: [u8; 32],
-        scope: Hash,
-        policy: &OutputPolicyV1,
-        closure: &[u8],
-    ) -> FixtureResult<ManifestOwnerPolicyCopiesV1> {
-        let eop1_bytes = policy.to_canonical_cbor();
-        let eop1_kind = WorldArtifactKindV1::OutputPolicy;
-        let eop1_leaf = leaf(owner_id, scope, eop1_kind, policy.digest(), &eop1_bytes)?;
-        let opc1_kind = WorldArtifactKindV1::OutputPolicyClosure;
-        let opc1_leaf = leaf(owner_id, scope, opc1_kind, opc1_digest(closure), closure)?;
-        Ok(ManifestOwnerPolicyCopiesV1 {
-            plugin_id: policy.fields().plugin_id,
-            eop1_bytes,
-            eop1_leaf,
-            opc1_bytes: closure.to_vec(),
-            opc1_leaf,
-        })
-    }
-
-    fn timeline_request(
-        owner_id: [u8; 32],
-        timeline_id: TimelineId,
-        scope: Hash,
-        sources: &[PolicySource],
-    ) -> FixtureResult<ManifestOwnerTimelineAdmissionRequestV1> {
-        let observer = "local-observer".to_owned();
-        let consumer = WorldConsumerV1::new(observer, hash(130), hash(131), hash(132))?;
-        let producer = WorldProducerV1::new(plugin(1), sources[0].0.digest())?;
-        let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-            scope,
-            consumers: vec![consumer],
-            producers: vec![producer],
-            optional_view_roots: Vec::new(),
-        })?;
-        let mut policy_copies = Vec::with_capacity(sources.len());
-        for (policy, closure) in sources {
-            policy_copies.push(policy_copy(owner_id, scope, policy, closure)?);
-        }
-        Ok(ManifestOwnerTimelineAdmissionRequestV1 {
-            timeline_id,
-            scope,
-            wcs1,
-            policy_copies,
-        })
     }
 
     fn admission_request(
@@ -14395,11 +14309,10 @@ mod local_cut_owner_coverage {
         operation_id: Hash,
         current: Option<&ManifestOwnerAdmissionOwnerStateV1>,
     ) -> FixtureResult<ManifestOwnerAdmissionRequestV1> {
-        let (catalog, sources) = catalog_fixture(owner_id, generation)?;
+        let (catalog, sources) = catalog(owner_id, generation)?;
         let mut timelines = Vec::with_capacity(timeline_ids.len());
-        for (index, timeline_id) in timeline_ids.iter().enumerate() {
-            let scope = hash(70 + u8::try_from(index)?);
-            timelines.push(timeline_request(owner_id, *timeline_id, scope, &sources)?);
+        for timeline_id in timeline_ids {
+            timelines.push(timeline_request(owner_id, *timeline_id, &sources)?);
         }
         let expected_generation = current.map(|state| state.configuration_generation);
         let previous_receipt = current.and_then(|state| state.previous_visible_lcq1_hash);
@@ -14411,6 +14324,7 @@ mod local_cut_owner_coverage {
             previous_visible_lcq1_hash: previous_receipt,
             expected_inventory_generation: expected_inventory,
             resulting_inventory_generation: operation_id,
+            read_limits: READ_LIMITS,
             timelines,
         })
     }
