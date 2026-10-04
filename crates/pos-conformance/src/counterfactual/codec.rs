@@ -23,12 +23,14 @@
 //!    [`encode_value`], [`decode_canonical`] plus a `const` [`CborLimits`], and
 //!    the [`FieldReader`] `read_*` methods.
 //! 2. Decode with [`FieldReader::with_header`] for the record and
-//!    [`FieldReader::new`] for nested fixed-length arrays, then return
-//!    `reader.finish().map(|()| record)`.
+//!    [`FieldReader::new`] or [`FieldReader::read_nested`] for nested
+//!    fixed-length arrays, then return `reader.finish().map(|()| record)`, or
+//!    use [`FieldReader::finish_at`] to name the failing field.
 //! 3. Read closed enum codes with [`FieldReader::read_enum`] over a `const`
 //!    code table, optional fields with the `read_optional*` methods,
-//!    variable-length lists with [`FieldReader::read_array`], and embedded
-//!    node coordinates with [`FieldReader::read_node`].
+//!    variable-length lists with [`FieldReader::read_array`] (or
+//!    [`FieldReader::read_record_array`] to locate the field inside a failing
+//!    item), and embedded node coordinates with [`FieldReader::read_node`].
 //! 4. Any helper added here must be exercised by the contract that introduces
 //!    it, because unused helpers fail the build and untested branches fail the
 //!    region gate.
@@ -148,31 +150,61 @@ pub(super) fn node_value(node: &DependencyNodeV1) -> Value {
     ])
 }
 
+/// Number of fields in one node coordinate encoded by [`node_value`].
+const NODE_FIELD_COUNT: usize = 6;
+
 /// Sequential reader over the fields of one fixed-length CBOR array.
 ///
 /// The first failure is kept; every read after it still advances and returns
 /// its fallback, so callers check the outcome once with [`Self::finish`].
+///
+/// Every read also advances a flat field slot, so [`Self::finish_at`] can name
+/// the first failing field. Slot 0 is the array itself and slot 1 its first
+/// field; a [`Self::read_nested`] array takes one slot for itself followed by
+/// one per nested field, so a record's slot layout is fixed by its schema. A
+/// [`Self::read_record_array`] list takes one slot, and a failing item adds
+/// the item's own slot as [`FieldFailure::item_slot`].
 pub(super) struct FieldReader<'a> {
     fields: &'a [Value],
     next: usize,
-    error: Option<WireError>,
+    slot: usize,
+    failure: Option<FieldFailure>,
+}
+
+/// The first failing field of a record read by a [`FieldReader`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FieldFailure {
+    /// The closed codec failure.
+    pub(super) error: WireError,
+    /// Reader slot of the failing field.
+    pub(super) slot: usize,
+    /// Slot inside the failing item when the field is a
+    /// [`FieldReader::read_record_array`] list and one of its items failed.
+    pub(super) item_slot: Option<usize>,
+}
+
+impl FieldFailure {
+    const fn at(error: WireError, slot: usize) -> Self {
+        Self {
+            error,
+            slot,
+            item_slot: None,
+        }
+    }
 }
 
 impl<'a> FieldReader<'a> {
     /// Read the fields of `value`, which must be an array of exactly `length`
     /// items; any other value records [`WireError::InvalidEncoding`].
     pub(super) fn new(value: &'a Value, length: usize) -> Self {
-        match value {
-            Value::Array(fields) if fields.len() == length => Self {
-                fields,
-                next: 0,
-                error: None,
-            },
-            _ => Self {
-                fields: &[],
-                next: 0,
-                error: Some(WireError::InvalidEncoding),
-            },
+        let fields = exact_array(Some(value), length);
+        Self {
+            fields: fields.unwrap_or_default(),
+            next: 0,
+            slot: 1,
+            failure: fields
+                .is_none()
+                .then_some(FieldFailure::at(WireError::InvalidEncoding, 0)),
         }
     }
 
@@ -182,25 +214,61 @@ impl<'a> FieldReader<'a> {
     /// another magic or version is reported as such whatever its length:
     /// a non-array value, a missing or wrongly typed header field records
     /// [`WireError::InvalidEncoding`]; a well-typed but different magic or
-    /// version records [`WireError::UnsupportedVersion`]; only a supported
-    /// header with other than `length` fields records
-    /// [`WireError::InvalidEncoding`].
+    /// version records [`WireError::UnsupportedVersion`] at the magic slot;
+    /// only a supported header with other than `length` fields records
+    /// [`WireError::InvalidEncoding`] at the array's own slot 0.
     pub(super) fn with_header(value: &'a Value, length: usize, magic: &str, version: u64) -> Self {
         let count = match value {
             Value::Array(fields) => fields.len(),
             _ => length,
         };
         let mut reader = Self::new(value, count);
+        // A record too short to carry its magic and version is malformed as
+        // a whole, not at its magic field.
+        if count < 2 {
+            reader.failure = reader
+                .failure
+                .or_else(|| Some(FieldFailure::at(WireError::InvalidEncoding, 0)));
+        }
+        let magic_slot = reader.slot;
         let read_magic = reader.read_text();
         let read_version = reader.read_u64();
-        if reader.error.is_none() {
+        if reader.failure.is_none() {
             if read_magic != magic || read_version != version {
-                reader.error = Some(WireError::UnsupportedVersion);
+                reader.failure = Some(FieldFailure::at(WireError::UnsupportedVersion, magic_slot));
             } else if count != length {
-                reader.error = Some(WireError::InvalidEncoding);
+                reader.failure = Some(FieldFailure::at(WireError::InvalidEncoding, 0));
             }
         }
         reader
+    }
+
+    /// Read the next field as a nested array of exactly `length` items with
+    /// `decode`, which reads the nested fields from the same reader state.
+    ///
+    /// Any other value records [`WireError::InvalidEncoding`] at the nested
+    /// array's own slot.
+    pub(super) fn read_nested<T>(
+        &mut self,
+        length: usize,
+        decode: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let parent_fields: &'a [Value] = self.fields;
+        let fields = exact_array(parent_fields.get(self.next), length);
+        let shape_failure = fields
+            .is_none()
+            .then_some(FieldFailure::at(WireError::InvalidEncoding, self.slot));
+        let mut nested = Self {
+            fields: fields.unwrap_or_default(),
+            next: 0,
+            slot: self.slot + 1,
+            failure: self.failure.or(shape_failure),
+        };
+        let decoded = decode(&mut nested);
+        self.next += 1;
+        self.slot = nested.slot;
+        self.failure = nested.failure;
+        decoded
     }
 
     /// Decode the next field with `decode`, or return `fallback` once any
@@ -215,9 +283,11 @@ impl<'a> FieldReader<'a> {
             .get(self.next)
             .ok_or(WireError::InvalidEncoding)
             .and_then(decode);
+        let slot = self.slot;
         self.next += 1;
+        self.slot += 1;
         decoded.unwrap_or_else(|error| {
-            self.error = self.error.or(Some(error));
+            self.failure = self.failure.or_else(|| Some(FieldFailure::at(error, slot)));
             fallback
         })
     }
@@ -280,24 +350,95 @@ impl<'a> FieldReader<'a> {
         self.read_with(|value| array_values(value, decode), Vec::new())
     }
 
-    /// Read a node coordinate encoded by [`node_value`].
+    /// Read a variable-length array of fixed-layout records, decoding every
+    /// item with `decode`.
+    ///
+    /// A failing item records this list's slot together with the item's own
+    /// [`FieldFailure::slot`] as the [`FieldFailure::item_slot`], so the field
+    /// inside the item can be named; a non-array records
+    /// [`WireError::InvalidEncoding`] at the list slot.
+    pub(super) fn read_record_array<T>(
+        &mut self,
+        decode: fn(&Value) -> Result<T, FieldFailure>,
+    ) -> Vec<T> {
+        let slot = self.slot;
+        let decoded = self
+            .fields
+            .get(self.next)
+            .and_then(Value::as_array)
+            .map(|items| items.iter().map(decode).collect::<Result<Vec<_>, _>>());
+        self.next += 1;
+        self.slot += 1;
+        match decoded {
+            Some(Ok(items)) => items,
+            Some(Err(item)) => {
+                self.failure = self.failure.or(Some(FieldFailure {
+                    error: item.error,
+                    slot,
+                    item_slot: Some(item.slot),
+                }));
+                Vec::new()
+            }
+            None => {
+                self.failure = self
+                    .failure
+                    .or_else(|| Some(FieldFailure::at(WireError::InvalidEncoding, slot)));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Read a variable-length array of byte strings of exactly `LENGTH`
+    /// bytes each.
+    pub(super) fn read_bytes_list<const LENGTH: usize>(&mut self) -> Vec<[u8; LENGTH]> {
+        self.read_array(fixed_bytes_field::<LENGTH>)
+    }
+
+    /// Read a node coordinate encoded by [`node_value`] as a nested array.
     pub(super) fn read_node(&mut self) -> DependencyNodeV1 {
-        self.read_with(
-            node_field,
-            DependencyNodeV1 {
-                tick: 0,
-                scheduler_position: 0,
-                owner_id: String::new(),
-                output_ordinal: 0,
-                schema_id: 0,
-                artifact_digest: [0; 32],
-            },
-        )
+        self.read_nested(NODE_FIELD_COUNT, Self::node_fields)
+    }
+
+    /// Read a variable-length array of node coordinates; a failing node is
+    /// located by its own slot, as in [`decode_node`].
+    pub(super) fn read_node_list(&mut self) -> Vec<DependencyNodeV1> {
+        self.read_record_array(decode_node)
+    }
+
+    fn node_fields(&mut self) -> DependencyNodeV1 {
+        DependencyNodeV1 {
+            tick: self.read_u64(),
+            scheduler_position: self.read_u32(),
+            owner_id: self.read_text(),
+            output_ordinal: self.read_u32(),
+            schema_id: self.read_u32(),
+            artifact_digest: self.read_bytes(),
+        }
     }
 
     /// Return the first recorded failure, if any.
     pub(super) fn finish(self) -> Result<(), WireError> {
-        self.error.map_or(Ok(()), Err)
+        self.failure.map_or(Ok(()), |failure| Err(failure.error))
+    }
+
+    /// Return the first recorded failure together with its field slot.
+    pub(super) fn finish_at(self) -> Result<(), FieldFailure> {
+        self.failure.map_or(Ok(()), Err)
+    }
+}
+
+/// Decode a node coordinate encoded by [`node_value`]; a failure carries its
+/// slot, 0 for the array and 1 through 6 for its fields.
+pub(super) fn decode_node(value: &Value) -> Result<DependencyNodeV1, FieldFailure> {
+    let mut fields = FieldReader::new(value, NODE_FIELD_COUNT);
+    let node = fields.node_fields();
+    fields.finish_at().map(|()| node)
+}
+
+const fn exact_array(value: Option<&Value>, length: usize) -> Option<&[Value]> {
+    match value {
+        Some(Value::Array(fields)) if fields.len() == length => Some(fields.as_slice()),
+        _ => None,
     }
 }
 
@@ -354,22 +495,4 @@ fn array_values<T>(
         Value::Array(values) => values.iter().map(decode).collect(),
         _ => Err(WireError::InvalidEncoding),
     }
-}
-
-fn node_field(value: &Value) -> Result<DependencyNodeV1, WireError> {
-    let mut fields = FieldReader::new(value, 6);
-    let tick = fields.read_u64();
-    let scheduler_position = fields.read_u32();
-    let owner_id = fields.read_text();
-    let output_ordinal = fields.read_u32();
-    let schema_id = fields.read_u32();
-    let artifact_digest = fields.read_bytes::<32>();
-    fields.finish().map(|()| DependencyNodeV1 {
-        tick,
-        scheduler_position,
-        owner_id,
-        output_ordinal,
-        schema_id,
-        artifact_digest,
-    })
 }
