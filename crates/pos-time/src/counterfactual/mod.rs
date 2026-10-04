@@ -5,3 +5,4 @@
 //! algorithms that consume them. Each algorithm owns one submodule.
 
 pub mod dependency_graph;
+pub mod frontier;
