@@ -395,6 +395,22 @@ pub trait LocalCutOwnerPersistencePortV1 {
         owner_id: [u8; 32],
         cut_id: u64,
     ) -> Result<Option<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1>;
+
+    /// Fully verify one owner's retained local-cut history.
+    ///
+    /// Owner-state reads, retries, and commits validate only the current visible
+    /// cut and any cut they return. This integrity pass also validates every
+    /// older retained cut and operation, then returns the same owner state as
+    /// [`Self::read_local_cut_owner_state_v1`].
+    ///
+    /// # Errors
+    /// Returns `CorruptState` for an invalid owner state or any invalid retained
+    /// cut or operation, and `StorageFailure` when the backend cannot provide a
+    /// snapshot.
+    fn verify_local_cut_owner_history_v1(
+        &self,
+        owner_id: [u8; 32],
+    ) -> Result<Option<LocalCutOwnerStateV1>, LocalCutOwnerErrorV1>;
 }
 
 /// Derive the stable unsigned operation digest used for lost-reply recovery.

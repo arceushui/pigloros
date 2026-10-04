@@ -1885,10 +1885,13 @@ impl SqliteStore {
         if read_only {
             Ok(())
         } else {
+            // Hot-path local-cut reads decode only the current visible cut, so
+            // a read-write open verifies every retained cut once.
             self.conn
                 .execute_batch(MANIFEST_OWNER_ADMISSION_SCHEMA_SQL)
                 .and_then(|()| self.conn.execute_batch(LOCAL_CUT_OWNER_SCHEMA_SQL))
                 .map_err(Self::into_storage_error)
+                .and_then(|()| self.verify_local_cut_owner_histories())
         }
     }
 
