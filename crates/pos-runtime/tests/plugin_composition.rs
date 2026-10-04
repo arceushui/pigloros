@@ -14,6 +14,14 @@ use pos_runtime::{
     RequiredPluginV1, RuntimeError, StepOutput, MAX_REQUIRED_PLUGINS_V1,
 };
 
+/// The one-member Fork ancestry of a fixture Timeline with no parent.
+fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+    vec![pos_core::TimelineMeta {
+        id: timeline,
+        ..pos_core::TimelineMeta::root("root")
+    }]
+}
+
 trait TestValueExt<T> {
     fn test_ok(self) -> T;
 }
@@ -753,21 +761,25 @@ fn replay_resolves_only_replay_evidence_and_never_invokes_live_drivers() {
             .mode(),
         PluginExecutionModeV1::Replay
     );
+    let timeline = TimelineId::new();
     assert_eq!(
-        replay.step_all(TimelineId::new()).test_err().to_string(),
+        replay
+            .step_all(timeline, &root_ancestry(timeline))
+            .test_err()
+            .to_string(),
         "recorder mode mismatch: expected Live, got Replay"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         replay
-            .tick_cadenced(TimelineId::new(), 0)
+            .tick_cadenced(timeline, &root_ancestry(timeline), 0)
             .test_err()
             .to_string(),
         "recorder mode mismatch: expected Live, got Replay"
     );
     assert_eq!(
         replay
-            .step_all_anchored(TimelineId::new(), Seq::ZERO)
+            .step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO)
             .test_err()
             .to_string(),
         "recorder mode mismatch: expected Live, got Replay"
