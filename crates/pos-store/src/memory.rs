@@ -314,6 +314,15 @@ pub struct MemoryStore {
     local_cut_owner_operations: BTreeMap<([u8; 32], Hash), MemoryLocalCutOwnerOperationV1>,
     /// Operation identity of each immutable visible cut, keyed by owner and cut.
     local_cut_owner_cuts: BTreeMap<([u8; 32], u64), Hash>,
+    /// Each visible cut's WCB1/WCR1 recordings by `(owner, cut, Timeline)`.
+    local_cut_world_recordings:
+        BTreeMap<([u8; 32], u64, TimelineId), pos_core::LocalCutWorldRecordingV1>,
+    /// Unique WCB1 digest index into `local_cut_world_recordings`.
+    local_cut_world_binding_digests: BTreeMap<Hash, ([u8; 32], u64, TimelineId)>,
+    /// WCB1 digest of each owner's Timeline in its last visible recording cut.
+    local_cut_world_latest_bindings: BTreeMap<([u8; 32], TimelineId), Hash>,
+    /// Packed WDB1 dependency nodes by `(scope, node digest)`.
+    world_dependency_branches: BTreeMap<(Hash, Hash), pos_core::WorldDependencyBranchV1>,
     /// Crash-recoverable local adapter recorder sessions by owner/run ID.
     adapter_recording_sessions: BTreeMap<(Hash, Hash), MemoryAdapterRecordingSessionV1>,
     /// Canonical ERS1 history needed to validate predecessor links after restart.
@@ -729,6 +738,10 @@ impl MemoryStore {
             local_cut_owner_states: BTreeMap::new(),
             local_cut_owner_operations: BTreeMap::new(),
             local_cut_owner_cuts: BTreeMap::new(),
+            local_cut_world_recordings: BTreeMap::new(),
+            local_cut_world_binding_digests: BTreeMap::new(),
+            local_cut_world_latest_bindings: BTreeMap::new(),
+            world_dependency_branches: BTreeMap::new(),
             adapter_recording_sessions: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
             erasure_attempt_pages: BTreeMap::new(),
@@ -11654,7 +11667,25 @@ fn validate_memory_local_cut_operation(
     if stored != expected {
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
-    Ok(())
+    pos_core::validate_local_cut_owner_recordings_v1(request, &operation.result)
+}
+
+/// Check a prepared successor and each WCB1 predecessor inside the commit.
+///
+/// Each predecessor must be the WCB1 of the owner's last visible cut that
+/// contained the Timeline, even after the Timeline left and rejoined.
+fn validate_memory_local_cut_successor(
+    store: &MemoryStore,
+    batch: &PreparedLocalCutOwnerCommitV1,
+    admission: &ManifestOwnerAdmissionOwnerStateV1,
+    current_state: Option<&LocalCutOwnerStateV1>,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    validate_local_cut_owner_successor_v1(batch, admission, current_state)?;
+    let owner_id = batch.successor_state().owner_id;
+    let latest = &store.local_cut_world_latest_bindings;
+    pos_core::validate_local_cut_owner_predecessors_v1(batch, |timeline_id| {
+        Ok(latest.get(&(owner_id, timeline_id)).copied())
+    })
 }
 
 /// Return the operation linked to one visible cut after fully validating it.
@@ -11677,7 +11708,45 @@ fn memory_linked_local_cut_operation(
     if operation.request.seal.as_input().cut_id != cut_id {
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
-    Ok(operation)
+    validate_memory_world_recordings(store, owner_id, cut_id, operation).map(|()| operation)
+}
+
+/// Require one visible cut's stored WCB1/WCR1 rows to be exactly its result's.
+///
+/// Every row must be reachable through the unique WCB1 digest index, and its
+/// dependency root must be a WDB1 node recorded in the row's scope.
+fn validate_memory_world_recordings(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    cut_id: u64,
+    operation: &MemoryLocalCutOwnerOperationV1,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let lowest = TimelineId::from_ulid(ulid::Ulid::nil());
+    let highest = TimelineId::from_ulid(ulid::Ulid::from(u128::MAX));
+    let (first, last) = ((owner_id, cut_id, lowest), (owner_id, cut_id, highest));
+    let digests = &store.local_cut_world_binding_digests;
+    let branches = &store.world_dependency_branches;
+    let stored = store
+        .local_cut_world_recordings
+        .range(first..=last)
+        .map(|(key, recording)| {
+            let binding = recording.binding;
+            let root = (recording.scope, binding.as_input().dependency_root_hash);
+            (
+                *recording,
+                digests.get(&binding.digest()) == Some(key),
+                branches.contains_key(&root),
+            )
+        });
+    let expected = operation
+        .result
+        .recordings
+        .iter()
+        .map(|recording| (*recording, true, true));
+    if stored.ne(expected) {
+        return Err(LocalCutOwnerErrorV1::CorruptState);
+    }
+    Ok(())
 }
 
 /// Load and fully validate one visible cut, if the owner retains it.
@@ -11720,6 +11789,34 @@ fn memory_resolve_local_cut_owner_retry(
     let mut retry = operation.result.clone();
     retry.kind = LocalCutOwnerCommitKindV1::ExactRetry;
     Ok(Some(retry))
+}
+
+impl MemoryStore {
+    /// Record a committed cut's WCB1/WCR1 pairs and their WDB1 nodes.
+    ///
+    /// Identical WDB1 nodes are content addressed within their scope, so a
+    /// node already recorded by an earlier cut is kept unchanged.
+    fn record_local_cut_world_closures(&mut self, batch: &PreparedLocalCutOwnerCommitV1) {
+        let owner_id = batch.successor_state().owner_id;
+        let cut_id = batch.request().seal.as_input().cut_id;
+        for recording in batch.recordings() {
+            let timeline_id = recording.binding.as_input().timeline_id;
+            let key = (owner_id, cut_id, timeline_id);
+            let binding_hash = recording.binding.digest();
+            self.local_cut_world_recordings.insert(key, *recording);
+            self.local_cut_world_binding_digests
+                .insert(binding_hash, key);
+            self.local_cut_world_latest_bindings
+                .insert((owner_id, timeline_id), binding_hash);
+        }
+        for directory in batch.dependency_directories() {
+            for branch in directory.branches() {
+                self.world_dependency_branches
+                    .entry((directory.scope(), branch.digest()))
+                    .or_insert_with(|| branch.clone());
+            }
+        }
+    }
 }
 
 impl LocalCutOwnerPersistencePortV1 for MemoryStore {
@@ -11791,7 +11888,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         let admission = self
             .read_manifest_owner_state_v1(owner_id)?
             .ok_or(LocalCutOwnerErrorV1::Conflict)?;
-        validate_local_cut_owner_successor_v1(&batch, &admission, current_state.as_ref())?;
+        validate_memory_local_cut_successor(self, &batch, &admission, current_state.as_ref())?;
         let request = batch.request();
         let successor = batch.successor_state();
         // The owner-state read bounds every retained cut by the last visible cut,
@@ -11817,6 +11914,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
             .insert(owner_id, successor.clone());
         self.manifest_owner_admission_states
             .insert(owner_id, next_admission_state);
+        self.record_local_cut_world_closures(&batch);
         Ok(result)
     }
 
@@ -14122,15 +14220,18 @@ mod manifest_owner_admission_coverage {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod local_cut_owner_coverage {
     use super::*;
-    use crate::manifest_owner_fixtures::{catalog, member_classes, timeline_request, READ_LIMITS};
+    use crate::manifest_owner_fixtures::{
+        catalog, member_classes, timeline_request, zero_event_inputs, zero_event_results,
+        READ_LIMITS, SOURCE_GENESIS,
+    };
     use pos_core::{
         prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1, LocalCutCommitV1,
-        LocalCutCompositionBindingRowV1, LocalCutManifestBindingRowV1,
+        LocalCutCompositionBindingRowV1, LocalCutHeadsTableV1, LocalCutManifestBindingRowV1,
         LocalCutManifestBindingTableV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
-        LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutSealInputV2, LocalCutSealV2,
-        LocalCutTableRefV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
-        ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1,
-        ManifestOwnerClassifiedLeafV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
+        LocalCutReceiptV1, LocalCutSealInputV2, LocalCutSealV2, LocalCutTableRefV1,
+        ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
+        ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
         ManifestSlotAdmissionReceiptV1,
     };
@@ -14272,6 +14373,13 @@ mod local_cut_owner_coverage {
             Ok(())
         }
 
+        fn source_genesis_hash(
+            &self,
+            _timeline_id: TimelineId,
+        ) -> Result<Hash, LocalCutOwnerErrorV1> {
+            Ok(SOURCE_GENESIS)
+        }
+
         fn sign_local_cut_receipt(
             &self,
             commit: &LocalCutCommitV1,
@@ -14400,10 +14508,10 @@ mod local_cut_owner_coverage {
         admission: &ManifestOwnerAdmissionOwnerStateV1,
         snapshots: &[ManifestOwnerAdmissionSnapshotV1],
         plan: &CutPlan,
+        predecessor: &dyn Fn(TimelineId) -> Option<Hash>,
     ) -> FixtureResult<LocalCutOwnerRequestV1> {
         let mut binding_rows = Vec::with_capacity(snapshots.len());
         let mut composition_rows = Vec::new();
-        let mut recording_context_rows = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let timeline = &snapshot.timeline;
             binding_rows.push(LocalCutManifestBindingRowV1 {
@@ -14416,14 +14524,12 @@ mod local_cut_owner_coverage {
             for row in &snapshot.catalog.as_input().rows {
                 composition_rows.push(composition_row(row, timeline.timeline_id));
             }
-            recording_context_rows.push(LocalCutRecordingContextRowV1 {
-                timeline_id: timeline.timeline_id,
-                wcs_hash: timeline.wcs1.digest(),
-                retention_lease_hash: hash(104),
-                predecessor_wcb_hash: None,
-            });
         }
         composition_rows.sort_unstable_by_key(|row| (row.plugin_id, row.timeline_id));
+        let (recording_context_rows, expected_head_rows) =
+            zero_event_inputs(snapshots, predecessor)?;
+        let expected_table =
+            LocalCutHeadsTableV1::expected_heads(owner_id, plan.cut_id, &expected_head_rows)?;
         let binding_table =
             LocalCutManifestBindingTableV1::new(owner_id, plan.cut_id, binding_rows)?;
         let seal = LocalCutSealV2::new(LocalCutSealInputV2 {
@@ -14439,7 +14545,7 @@ mod local_cut_owner_coverage {
             composition_table: table(composition_rows.len(), 92)?,
             inbox_table: table(0, 95)?,
             invocation_table: table(0, 96)?,
-            expected_heads_table: table(1, 105)?,
+            expected_heads_table: expected_table.table_ref(),
             ebp_native_hash: hash(98),
             execution_profile_native_hash: hash(99),
             recording_context_table: table(recording_context_rows.len(), 93)?,
@@ -14448,15 +14554,22 @@ mod local_cut_owner_coverage {
             ingress_preallocation_native_hash: hash(101),
             manifest_binding_table: binding_table.table_ref(),
         })?;
+        let operation_id = plan.operation_id;
+        let result_head_rows =
+            zero_event_results(operation_id, &seal, snapshots, &recording_context_rows)?;
+        let result_table =
+            LocalCutHeadsTableV1::result_heads(owner_id, plan.cut_id, &result_head_rows)?;
         Ok(LocalCutOwnerRequestV1 {
-            operation_id: plan.operation_id,
+            operation_id,
             seal,
             manifest_hash: hash(103),
             manifest_binding_table: binding_table,
             composition_rows,
             recording_context_rows,
+            expected_head_rows,
+            result_head_rows,
             partition_ledger_seq: plan.cut_id,
-            result_heads_table: table(1, 105)?,
+            result_heads_table: result_table.table_ref(),
             participant_successor_table: table(1, 106)?,
             cpu_completion_table: table(0, 107)?,
             action_disposition_table: table(1, 108)?,
@@ -14467,6 +14580,19 @@ mod local_cut_owner_coverage {
         })
     }
 
+    /// Read the owner's latest stored WCB1 for a Timeline, as the commit does.
+    fn stored_predecessor(
+        store: &MemoryStore,
+        owner_id: [u8; 32],
+    ) -> impl Fn(TimelineId) -> Option<Hash> + '_ {
+        move |timeline_id| {
+            store
+                .local_cut_world_latest_bindings
+                .get(&(owner_id, timeline_id))
+                .copied()
+        }
+    }
+
     fn prepare_cut_from(
         store: &MemoryStore,
         owner_id: [u8; 32],
@@ -14474,7 +14600,8 @@ mod local_cut_owner_coverage {
         current: Option<&LocalCutOwnerStateV1>,
     ) -> FixtureResult<PreparedLocalCutOwnerCommitV1> {
         let view = admitted_view(store, owner_id)?;
-        let request = cut_request(owner_id, &view.state, &view.snapshots, plan)?;
+        let predecessor = stored_predecessor(store, owner_id);
+        let request = cut_request(owner_id, &view.state, &view.snapshots, plan, &predecessor)?;
         let batch = prepare_local_cut_owner_commit_v1(
             request,
             current,
@@ -14924,6 +15051,134 @@ mod local_cut_owner_coverage {
     }
 
     #[test]
+    fn local_cut_commit_records_and_returns_each_wcb1_wcr1_and_wdb1_node() -> TestResult {
+        let (mut store, first) = cut_store()?;
+        let second = commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
+        let [first_recording] = first.recordings.as_slice() else {
+            return Err("expected one first-cut recording".into());
+        };
+        let [second_recording] = second.recordings.as_slice() else {
+            return Err("expected one second-cut recording".into());
+        };
+        let first_binding = first_recording.binding.digest();
+        let second_binding = second_recording.binding.digest();
+        let chained = second_recording.binding.as_input();
+        assert_eq!(chained.predecessor_binding_hash, Some(first_binding));
+        let key = (CUT_OWNER, FIRST_CUT.cut_id, CUT_TIMELINE);
+        let recordings = &store.local_cut_world_recordings;
+        assert_eq!(recordings.get(&key), Some(first_recording));
+        let digests = &store.local_cut_world_binding_digests;
+        assert_eq!(digests.get(&first_binding), Some(&key));
+        let latest = &store.local_cut_world_latest_bindings;
+        assert_eq!(
+            latest.get(&(CUT_OWNER, CUT_TIMELINE)),
+            Some(&second_binding)
+        );
+        let root = first_recording.binding.as_input().dependency_root_hash;
+        let branches = &store.world_dependency_branches;
+        let node = branches.get(&(first_recording.scope, root));
+        assert_eq!(node.ok_or("missing dependency root")?.digest(), root);
+        assert_eq!(
+            store.read_local_cut_owner_commit_v1(CUT_OWNER, FIRST_CUT.cut_id)?,
+            Some(first)
+        );
+        let intent = local_operation(&mut store, SECOND_CUT.operation_id)?.intent_digest;
+        let retry = store
+            .resolve_local_cut_owner_retry_v1(CUT_OWNER, SECOND_CUT.operation_id, intent)?
+            .ok_or("missing second-cut retry")?;
+        assert_eq!(retry.recordings, second.recordings);
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_commit_rejects_a_stale_wcb1_predecessor() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        let view = admitted_view(&store, CUT_OWNER)?;
+        let unchained = |_: TimelineId| None::<Hash>;
+        let request = cut_request(
+            CUT_OWNER,
+            &view.state,
+            &view.snapshots,
+            &SECOND_CUT,
+            &unchained,
+        )?;
+        let current = store.read_local_cut_owner_state_v1(CUT_OWNER)?;
+        let batch = prepare_local_cut_owner_commit_v1(
+            request,
+            current.as_ref(),
+            &view.state,
+            &view.snapshots,
+            &AcceptingOwner,
+        )?;
+        assert_eq!(
+            store.commit_local_cut_owner_v1(batch),
+            Err(LocalCutOwnerErrorV1::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_rejoined_timeline_chains_to_its_last_recorded_binding() -> TestResult {
+        let (mut store, first) = cut_store()?;
+        let batch = prepare_admission(&store, CUT_OWNER, 2, &[NEXT_TIMELINE], hash(0x54))?;
+        store.commit_manifest_owner_admission_v1(batch)?;
+        let away = CutPlan {
+            cut_id: 2,
+            tick: 2,
+            membership_epoch: 1,
+            operation_id: hash(0x66),
+            result_inventory: hash(0x76),
+        };
+        let second = commit_cut(&mut store, CUT_OWNER, &away)?;
+        let batch = prepare_admission(&store, CUT_OWNER, 3, &[CUT_TIMELINE], hash(0x55))?;
+        store.commit_manifest_owner_admission_v1(batch)?;
+        let back = CutPlan {
+            cut_id: 3,
+            tick: 3,
+            membership_epoch: 2,
+            operation_id: hash(0x67),
+            result_inventory: hash(0x77),
+        };
+        let third = commit_cut(&mut store, CUT_OWNER, &back)?;
+        let first_binding = first.recordings[0].binding.digest();
+        let away_binding = second.recordings[0].binding.as_input();
+        assert_eq!(away_binding.timeline_id, NEXT_TIMELINE);
+        assert_eq!(away_binding.predecessor_binding_hash, None);
+        let rejoined = third.recordings[0].binding.as_input();
+        assert_eq!(rejoined.timeline_id, CUT_TIMELINE);
+        assert_eq!(rejoined.predecessor_binding_hash, Some(first_binding));
+        Ok(())
+    }
+
+    #[test]
+    fn local_cut_reads_reject_missing_or_substituted_world_recordings() -> TestResult {
+        let key = (CUT_OWNER, FIRST_CUT.cut_id, CUT_TIMELINE);
+        let (mut missing, _) = cut_store()?;
+        missing.local_cut_world_recordings.remove(&key);
+        assert_local_error(&missing, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut rescoped, _) = cut_store()?;
+        let recording = rescoped.local_cut_world_recordings.get_mut(&key);
+        recording.ok_or("missing recording")?.scope = hash(0x93);
+        assert_local_error(&rescoped, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut unindexed, first) = cut_store()?;
+        let digest = first.recordings[0].binding.digest();
+        unindexed.local_cut_world_binding_digests.remove(&digest);
+        assert_local_error(&unindexed, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut rootless, _) = cut_store()?;
+        rootless.world_dependency_branches.clear();
+        assert_local_error(&rootless, LocalCutOwnerErrorV1::CorruptState);
+
+        let (mut substituted, _) = cut_store()?;
+        let operation = local_operation(&mut substituted, FIRST_CUT.operation_id)?;
+        operation.result.recordings[0].scope = hash(0x93);
+        assert_local_error(&substituted, LocalCutOwnerErrorV1::CorruptState);
+        Ok(())
+    }
+
+    #[test]
     fn local_cut_reads_reject_a_cut_linked_to_another_cut_operation() -> TestResult {
         let (mut store, _) = cut_store()?;
         commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
@@ -14944,6 +15199,16 @@ mod local_cut_owner_coverage {
 
     fn first_request(store: &mut MemoryStore) -> FixtureResult<&mut LocalCutOwnerRequestV1> {
         Ok(&mut local_operation(store, FIRST_CUT.operation_id)?.request)
+    }
+
+    /// Change one kind-5 row and its table so only the commit's head binding differs.
+    fn reheaded_first_cut(store: &mut MemoryStore) -> TestResult {
+        let request = first_request(store)?;
+        request.result_head_rows[0].event_count = 1;
+        let rows = &request.result_head_rows;
+        let table = LocalCutHeadsTableV1::result_heads(CUT_OWNER, FIRST_CUT.cut_id, rows)?;
+        request.result_heads_table = table.table_ref();
+        Ok(())
     }
 
     #[test]
@@ -14976,10 +15241,7 @@ mod local_cut_owner_coverage {
                 first_request(store)?.manifest_hash = hash(0x99);
                 Ok(())
             },
-            |store| {
-                first_request(store)?.result_heads_table = table(1, 0x99)?;
-                Ok(())
-            },
+            reheaded_first_cut,
             |store| {
                 first_request(store)?.participant_successor_table = table(1, 0x99)?;
                 Ok(())

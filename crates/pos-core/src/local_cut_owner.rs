@@ -2,19 +2,27 @@
 //!
 //! Portable LCS2, LCC1, LCQ1, and kind-14 records deliberately do not grant
 //! cut authority. This module makes the complete admitted owner state, kind-1
-//! composition bindings, kind-8 recording contexts, manifest binding, result
-//! inventory, and coordinator receipt one verified transaction input.
+//! composition bindings, kind-4/kind-5 head rows, kind-8 recording contexts,
+//! manifest binding, result inventory, coordinator receipt, and each owned
+//! Timeline's zero-Event WCB1/WCR1 recording one verified transaction input.
 
 use std::collections::BTreeMap;
 
 use crate::local_cut_commit::{LocalCutCommitInputV1, LocalCutCommitV1, LocalCutReceiptV1};
+use crate::local_cut_heads::{
+    LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1, LocalCutResultHeadRowV1,
+};
 use crate::local_cut_seal::{
     local_cut_tree_scope_v1, LocalCutManifestBindingTableV1, LocalCutSealV2, LocalCutTableRefV1,
+};
+use crate::local_cut_world_closure::{
+    derive_cut_closures, record_cut_closures, validate_recorded_closures, LocalCutWorldRecordingV1,
 };
 use crate::manifest_owner_admission::{
     validate_manifest_owner_admission_snapshot_v1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionSnapshotV1,
 };
+use crate::world_dependency_packing::WorldDependencyDirectoryV1;
 use crate::{Hash, ManifestAdmissionCatalogV1, PluginId, TimelineId};
 
 /// Maximum kind-1 or kind-8 rows that one local owner cut can select.
@@ -135,6 +143,12 @@ pub struct LocalCutOwnerRequestV1 {
     pub composition_rows: Vec<LocalCutCompositionBindingRowV1>,
     /// Complete canonical kind-8 recording-context set.
     pub recording_context_rows: Vec<LocalCutRecordingContextRowV1>,
+    /// Complete canonical kind-4 rows; they must pack to the seal's
+    /// expected-heads table reference.
+    pub expected_head_rows: Vec<LocalCutExpectedHeadRowV1>,
+    /// Complete canonical kind-5 rows; they must pack to
+    /// `result_heads_table`, which LCC1 authenticates.
+    pub result_head_rows: Vec<LocalCutResultHeadRowV1>,
     /// Positive partition commit-ledger coordinate allocated by the owner.
     pub partition_ledger_seq: u64,
     /// Exact complete kind-5 result-head table reference.
@@ -242,6 +256,16 @@ pub trait LocalCutOwnerVerifierV1: Send + Sync {
         admissions: &[ManifestOwnerAdmissionSnapshotV1],
     ) -> Result<(), LocalCutOwnerErrorV1>;
 
+    /// Return the genesis chain hash of the source owner's pinned Hasher.
+    ///
+    /// The zero-Event profile requires every kind-4/kind-5 chain hash of the
+    /// Timeline and its WCB1 stitched head to equal this value.
+    ///
+    /// # Errors
+    /// Returns `OwnerRejected` when the installed source owner cannot attest
+    /// the Timeline's pinned Hasher.
+    fn source_genesis_hash(&self, timeline_id: TimelineId) -> Result<Hash, LocalCutOwnerErrorV1>;
+
     /// Sign the exact LCC1 content address through the installed coordinator role.
     ///
     /// The implementation chooses retained key evidence itself and signs the
@@ -277,6 +301,8 @@ pub struct PreparedLocalCutOwnerCommitV1 {
     commit: LocalCutCommitV1,
     receipt: LocalCutReceiptV1,
     successor_state: LocalCutOwnerStateV1,
+    recordings: Vec<LocalCutWorldRecordingV1>,
+    dependency_directories: Vec<WorldDependencyDirectoryV1>,
 }
 
 impl PreparedLocalCutOwnerCommitV1 {
@@ -310,14 +336,27 @@ impl PreparedLocalCutOwnerCommitV1 {
         &self.successor_state
     }
 
+    /// Borrow each owned Timeline's WCB1/WCR1 recording, in Timeline order.
+    #[must_use]
+    pub fn recordings(&self) -> &[LocalCutWorldRecordingV1] {
+        &self.recordings
+    }
+
+    /// Borrow each recording's packed WDB1 directory, in Timeline order.
+    #[must_use]
+    pub fn dependency_directories(&self) -> &[WorldDependencyDirectoryV1] {
+        &self.dependency_directories
+    }
+
     /// Return the durable result produced when this batch first applies.
     #[must_use]
-    pub const fn applied_result(&self) -> LocalCutOwnerCommitV1 {
+    pub fn applied_result(&self) -> LocalCutOwnerCommitV1 {
         LocalCutOwnerCommitV1 {
             kind: LocalCutOwnerCommitKindV1::Applied,
             seal: self.request.seal,
             commit: self.commit,
             receipt: self.receipt,
+            recordings: self.recordings.clone(),
         }
     }
 }
@@ -342,6 +381,8 @@ pub struct LocalCutOwnerCommitV1 {
     pub commit: LocalCutCommitV1,
     /// Exact installed-coordinator LCQ1 receipt.
     pub receipt: LocalCutReceiptV1,
+    /// Each owned Timeline's WCB1/WCR1 recording, in Timeline order.
+    pub recordings: Vec<LocalCutWorldRecordingV1>,
 }
 
 /// Same-store port for local-cut state, historical records, and retry recovery.
@@ -448,6 +489,16 @@ pub fn local_cut_owner_intent_digest_v1(
         hash_part(&mut hasher, row.retention_lease_hash.as_bytes());
         hash_optional_hash(&mut hasher, row.predecessor_wcb_hash);
     }
+    hash_count(&mut hasher, request.expected_head_rows.len());
+    request
+        .expected_head_rows
+        .iter()
+        .for_each(|row| hash_part(&mut hasher, &row.to_canonical_cbor()));
+    hash_count(&mut hasher, request.result_head_rows.len());
+    request
+        .result_head_rows
+        .iter()
+        .for_each(|row| hash_part(&mut hasher, &row.to_canonical_cbor()));
     hash_part(&mut hasher, &request.partition_ledger_seq.to_be_bytes());
     for reference in [
         request.result_heads_table,
@@ -466,12 +517,24 @@ pub fn local_cut_owner_intent_digest_v1(
 
 /// Verify a complete admitted selection, build LCC1, and obtain its LCQ1 receipt.
 ///
+/// Before LCC1 is built, each owned Timeline's zero-Event WCB1 is derived from
+/// the stored admission facts and must equal its kind-5 `successor_wcb_hash`;
+/// after LCQ1 is signed, each WCB1 is recorded with a WCR1 naming it. The
+/// recorded predecessors are checked against stored bindings by the commit.
+///
 /// # Errors
 /// Rejects partial or stale admission, missing kind-8/kind-14 rows, extra or
 /// unadmitted kind-1 rows, substituted static Plugin pins, duplicate cut
 /// identity, wrong owner state, unverified result inventory, or any
-/// signer/key-role mismatch. The request cannot supply authority, evidence, or
-/// a signature.
+/// signer/key-role mismatch. A kind-8 lease other than the scope's recorded
+/// RLS1 returns `Conflict`; head rows outside the zero-Event non-Fork profile
+/// return `OwnerRejected`, which carries the rejection ADR-081 R2.7 names
+/// `CoverageGap` without modelling that diagnostic; a closure beyond the
+/// recorded read limits returns `BoundExceeded`; kind-4/kind-5 rows that
+/// differ from their tables, the admitted Timelines, the kind-8 predecessor or
+/// the derived WCB1, and a leaf set that cannot pack into one WDB1 directory,
+/// return `InvalidBatch`. The request is authenticated before any WCB1 is
+/// derived from it, and cannot supply authority, evidence, or a signature.
 pub fn prepare_local_cut_owner_commit_v1(
     request: LocalCutOwnerRequestV1,
     current_state: Option<&LocalCutOwnerStateV1>,
@@ -489,7 +552,12 @@ pub fn prepare_local_cut_owner_commit_v1(
     validate_manifest_binding(&request, admission_state, admissions)?;
     validate_composition_bindings(&request.composition_rows, admission_state, catalog)?;
     validate_recording_contexts(&request.recording_context_rows, admissions)?;
-    verifier.verify_authenticated_cut(&request, current_state, admission_state, admissions)?;
+    // Authenticate the request before deriving anything from it: derivation
+    // asks the verifier for each source genesis hash, and WCB1 must still be
+    // derived before LCC1 is built.
+    let closures = verifier
+        .verify_authenticated_cut(&request, current_state, admission_state, admissions)
+        .and_then(|()| derive_cut_closures(&request, admissions, verifier))?;
 
     // The request shape already rejected every zero LCC1 identity, and the
     // seal address is a BLAKE3 digest, so the commit fields are structurally valid.
@@ -523,6 +591,7 @@ pub fn prepare_local_cut_owner_commit_v1(
         return Err(LocalCutOwnerErrorV1::OwnerRejected);
     }
     verifier.verify_local_cut_receipt(&receipt, &commit, admissions)?;
+    let recordings = record_cut_closures(&request, &closures, &receipt);
 
     // Every field comes from the validated admission state, request, LCS2 seal
     // (positive cut and tick), or a BLAKE3 receipt digest, so the successor is
@@ -543,6 +612,11 @@ pub fn prepare_local_cut_owner_commit_v1(
         commit,
         receipt,
         successor_state,
+        recordings,
+        dependency_directories: closures
+            .into_iter()
+            .map(|closure| closure.directory().clone())
+            .collect(),
     })
 }
 
@@ -570,7 +644,7 @@ pub fn validate_local_cut_owner_result_v1(
     {
         return Err(LocalCutOwnerErrorV1::CorruptState);
     }
-    Ok(())
+    validate_recorded_closures(result)
 }
 
 /// Compare a prepared batch with the persisted owner pre-state it replaces.
@@ -623,6 +697,22 @@ pub fn validate_local_cut_owner_successor_v1(
     Ok(())
 }
 
+/// Prove that the kind-4 rows pack to the seal's expected-heads reference and
+/// the kind-5 rows pack to the request's LCC1 result-heads reference.
+fn validate_head_tables(request: &LocalCutOwnerRequestV1) -> Result<(), LocalCutOwnerErrorV1> {
+    let seal = request.seal.as_input();
+    let expected_rows = &request.expected_head_rows;
+    let result_rows = &request.result_head_rows;
+    let expected = LocalCutHeadsTableV1::expected_heads(seal.owner_id, seal.cut_id, expected_rows);
+    let result = LocalCutHeadsTableV1::result_heads(seal.owner_id, seal.cut_id, result_rows);
+    if expected.as_ref().map(LocalCutHeadsTableV1::table_ref) != Ok(seal.expected_heads_table)
+        || result.as_ref().map(LocalCutHeadsTableV1::table_ref) != Ok(request.result_heads_table)
+    {
+        return Err(LocalCutOwnerErrorV1::InvalidBatch);
+    }
+    Ok(())
+}
+
 fn validate_request_shape(request: &LocalCutOwnerRequestV1) -> Result<(), LocalCutOwnerErrorV1> {
     if request.operation_id == Hash::zero()
         || request.manifest_hash == Hash::zero()
@@ -657,7 +747,7 @@ fn validate_request_shape(request: &LocalCutOwnerRequestV1) -> Result<(), LocalC
     }
     validate_composition_row_order(&request.composition_rows)?;
     validate_recording_context_row_order(&request.recording_context_rows)?;
-    Ok(())
+    validate_head_tables(request)
 }
 
 fn validate_admission_state(

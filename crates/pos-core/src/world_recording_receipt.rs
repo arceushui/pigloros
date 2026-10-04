@@ -55,6 +55,15 @@ impl WorldRecordingReceiptV1 {
         Ok(Self(input))
     }
 
+    /// Record an owner-derived WCR1 whose two content addresses are digests.
+    ///
+    /// The local-cut owner passes a WCB1 digest and an LCQ1 digest, both
+    /// domain-separated BLAKE3 outputs, so the nonzero-address rule of
+    /// [`Self::new`] holds by construction.
+    pub(crate) const fn from_owner_digests(input: WorldRecordingReceiptInputV1) -> Self {
+        Self(input)
+    }
+
     /// Borrow the exact untrusted values retained by this structural record.
     #[must_use]
     pub const fn as_input(&self) -> &WorldRecordingReceiptInputV1 {
