@@ -102,12 +102,14 @@ fn owner(value: &str) -> Fallible<OwnerIdV1> {
 }
 
 fn binding() -> Fallible<PrincipalOwnerBindingV1> {
-    Ok(PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
-        operation_id: hash(0x21),
-        principal_digest: hash(0x22),
-        owner: owner("creator-a")?,
-        origin: ForkAuthorityOriginV1::Local,
-    })?)
+    Ok(PrincipalOwnerBindingV1::new(
+        PrincipalOwnerBindingInputV1 {
+            operation_id: hash(0x21),
+            principal_digest: hash(0x22),
+            owner: owner("creator-a")?,
+            origin: ForkAuthorityOriginV1::Local,
+        },
+    )?)
 }
 
 fn admission(binding_digest: Hash) -> Fallible<ForkAdmissionRecordV1> {
@@ -258,38 +260,44 @@ fn publication(
     admission_digest: Hash,
 ) -> Fallible<ForkPublicationOperationV1> {
     let fields = manifest.manifest().input();
-    Ok(ForkPublicationOperationV1::new(ForkPublicationOperationInputV1 {
-        operation_id: hash(PUBLICATION_OPERATION),
-        child_timeline_id: timeline_id(2),
-        final_logical_head: fields.final_fork_logical_head,
-        final_chain_head_hash: fields.final_fork_chain_head_hash,
-        admission_digest,
-        signing_identity: attribution_identity(1),
-        private_material_digest: hash(0x44),
-        public_verification_key: PublicKey::from_bytes([0x55; 32]),
-        signed_manifest_record_id: manifest.record_id(),
-        origin: ForkAttributionOriginV1::Local,
-    })?)
+    Ok(ForkPublicationOperationV1::new(
+        ForkPublicationOperationInputV1 {
+            operation_id: hash(PUBLICATION_OPERATION),
+            child_timeline_id: timeline_id(2),
+            final_logical_head: fields.final_fork_logical_head,
+            final_chain_head_hash: fields.final_fork_chain_head_hash,
+            admission_digest,
+            signing_identity: attribution_identity(1),
+            private_material_digest: hash(0x44),
+            public_verification_key: PublicKey::from_bytes([0x55; 32]),
+            signed_manifest_record_id: manifest.record_id(),
+            origin: ForkAttributionOriginV1::Local,
+        },
+    )?)
 }
 
 fn publication_binding(manifest: &SignedForkReproManifestV1) -> Fallible<ForkPublicationBindingV1> {
-    Ok(ForkPublicationBindingV1::new(ForkPublicationBindingInputV1 {
-        child_timeline_id: timeline_id(2),
-        final_logical_head: manifest.manifest().input().final_fork_logical_head,
-        operation_id: hash(PUBLICATION_OPERATION),
-        signed_manifest_record_id: manifest.record_id(),
-    })?)
+    Ok(ForkPublicationBindingV1::new(
+        ForkPublicationBindingInputV1 {
+            child_timeline_id: timeline_id(2),
+            final_logical_head: manifest.manifest().input().final_fork_logical_head,
+            operation_id: hash(PUBLICATION_OPERATION),
+            signed_manifest_record_id: manifest.record_id(),
+        },
+    )?)
 }
 
 fn artifact(
     manifest: &SignedForkReproManifestV1,
     operation_id: Hash,
 ) -> Fallible<ForkPublicationArtifactV1> {
-    Ok(ForkPublicationArtifactV1::new(ForkPublicationArtifactInputV1 {
-        signed_manifest_record_id: manifest.record_id(),
-        operation_id,
-        signed_manifest_bytes: manifest.to_canonical_cbor(),
-    })?)
+    Ok(ForkPublicationArtifactV1::new(
+        ForkPublicationArtifactInputV1 {
+            signed_manifest_record_id: manifest.record_id(),
+            operation_id,
+            signed_manifest_bytes: manifest.to_canonical_cbor(),
+        },
+    )?)
 }
 
 fn key_record(epoch: u64, material: Option<Hash>, key: u8) -> Fallible<ImportedKeyRecordV1> {
