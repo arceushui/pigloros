@@ -16,7 +16,9 @@ use super::{
     ForkPublicationOperationInputV1, ForkPublicationOperationV1, ADMISSION_DOMAIN,
     MAX_FORK_ADMISSION_RECORD_BYTES_V1, MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
 };
-use crate::{Hash, OwnerIdV1, PrincipalOwnerBindingV1};
+use crate::{
+    fork_admission::PRINCIPAL_OWNER_BINDING_DOMAIN, Hash, OwnerIdV1, PrincipalOwnerBindingV1,
+};
 
 /// The local `authority-origin-v1 = [1]`.
 const LOCAL_ORIGIN: [u8; 2] = [0x81, 0x01];
@@ -24,8 +26,6 @@ const LOCAL_ORIGIN: [u8; 2] = [0x81, 0x01];
 const IMPORTED_ORIGIN_HEAD: [u8; 4] = [0x82, 0x02, 0x58, 0x20];
 /// The complete code-2 origin: its head plus the 32-byte digest.
 const IMPORTED_ORIGIN_BYTES: usize = IMPORTED_ORIGIN_HEAD.len() + 32;
-/// ADR-099 `POB1` digest domain.
-const BINDING_DOMAIN: &[u8] = b"pigloros/principal-owner-binding/v1";
 
 /// Split bounded code-2 record bytes into their local projection and the
 /// carried authority-origin digest.
@@ -57,9 +57,11 @@ fn local_projection(bytes_in: &[u8], maximum: usize) -> Result<(Vec<u8>, Hash), 
 
 /// Replace the local `[1]` origin that ends `local` with `[2, digest]`.
 ///
-/// Every local encoder ends its record with `[1]`.
+/// Every local encoder ends its record with the two `[1]` bytes, so the body
+/// is everything before them.
 fn with_imported_origin(local: &[u8], authority_origin_digest: Hash) -> Vec<u8> {
-    let mut out = local.strip_suffix(&LOCAL_ORIGIN).unwrap_or(local).to_vec();
+    let (body, _) = local.split_at(local.len().saturating_sub(LOCAL_ORIGIN.len()));
+    let mut out = body.to_vec();
     out.extend_from_slice(&IMPORTED_ORIGIN_HEAD);
     out.extend_from_slice(authority_origin_digest.as_bytes());
     out
@@ -115,7 +117,7 @@ impl ImportedPrincipalOwnerBindingV1 {
     /// Return the ADR-099 `POB1` digest over the exact code-2 bytes.
     #[must_use]
     pub fn digest(&self) -> Hash {
-        domain_digest(BINDING_DOMAIN, &self.to_canonical_cbor())
+        domain_digest(PRINCIPAL_OWNER_BINDING_DOMAIN, &self.to_canonical_cbor())
     }
 
     /// The carried code-2 authority-origin digest.

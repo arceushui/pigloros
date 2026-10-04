@@ -27,18 +27,17 @@ use crate::{
 
 /// Closed failures of the typed decode and pure closure validation.
 ///
-/// Each variant is the ADR-105 public import error of the same name.
+/// Each variant is the ADR-105 public import error of the same name. Per
+/// ADR-105 r6 erratum E9, every failure while decoding a carried ADR-099
+/// record is `InvalidEncoding`, including an unsupported version, an
+/// out-of-range or zero field, and a record over its own byte bound;
+/// `BoundsExceeded` is reserved for the envelope-level limits that the `FAE1`
+/// codec enforces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ForkAttributionImportClosureErrorV1 {
-    /// A carried record is malformed, noncanonical, or out of order.
+    /// A carried record does not decode strictly, or a list is out of order.
     #[error("Fork attribution import record encoding is invalid")]
     InvalidEncoding,
-    /// A carried record declares an unsupported version.
-    #[error("Fork attribution import record version is unsupported")]
-    UnsupportedVersion,
-    /// A carried record field is zero, empty, or exceeds its bound.
-    #[error("Fork attribution import record exceeds a bound")]
-    BoundsExceeded,
     /// The carried records do not form one consistent authority closure.
     #[error("Fork attribution import closure is inconsistent")]
     InvalidAuthorityClosure,
@@ -50,17 +49,19 @@ impl From<ForkAttributionCodecErrorV1> for ForkAttributionImportClosureErrorV1 {
     /// Map an ADR-099 or ADR-105 codec failure.
     ///
     /// `FieldMismatch` covers the step-1 structural rules, which ADR-105 r6
-    /// erratum E5 maps to `InvalidAuthorityClosure`, and a local code-1
-    /// origin, which step 2 forbids inside `FAE1`.
+    /// erratum E5 maps to `InvalidAuthorityClosure`, a nested `FSM1` record ID
+    /// that `FPA1` contradicts, and a local code-1 origin, which step 2
+    /// forbids inside `FAE1`. Every other failure is a nested-record decode
+    /// failure, so erratum E9 makes it `InvalidEncoding`.
     fn from(error: ForkAttributionCodecErrorV1) -> Self {
         match error {
+            ForkAttributionCodecErrorV1::FieldMismatch => Self::InvalidAuthorityClosure,
             ForkAttributionCodecErrorV1::InvalidEncoding
             | ForkAttributionCodecErrorV1::NonCanonical
-            | ForkAttributionCodecErrorV1::InterventionOrder
-            | ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable => Self::InvalidEncoding,
-            ForkAttributionCodecErrorV1::UnsupportedVersion => Self::UnsupportedVersion,
-            ForkAttributionCodecErrorV1::FieldOutOfBounds => Self::BoundsExceeded,
-            ForkAttributionCodecErrorV1::FieldMismatch => Self::InvalidAuthorityClosure,
+            | ForkAttributionCodecErrorV1::UnsupportedVersion
+            | ForkAttributionCodecErrorV1::FieldOutOfBounds
+            | ForkAttributionCodecErrorV1::ImportedAuthorityUnavailable
+            | ForkAttributionCodecErrorV1::InterventionOrder => Self::InvalidEncoding,
         }
     }
 }
@@ -68,18 +69,20 @@ impl From<ForkAttributionCodecErrorV1> for ForkAttributionImportClosureErrorV1 {
 impl From<ForkEventProvenanceErrorV1> for ForkAttributionImportClosureErrorV1 {
     /// Map an ADR-099 provenance codec or classification failure.
     ///
-    /// An impossible `(0,1)` pair and a source route absent from `FCT1` are
-    /// classification failures of the closure, not encoding failures.
+    /// A source route absent from `FCT1` is a classification failure of the
+    /// closure. Every other failure, including an impossible `(0,1)` `EOR1`
+    /// pair, arises while decoding a carried record, so erratum E9 makes it
+    /// `InvalidEncoding`.
     fn from(error: ForkEventProvenanceErrorV1) -> Self {
         match error {
+            ForkEventProvenanceErrorV1::SourceRejected => Self::InvalidAuthorityClosure,
             ForkEventProvenanceErrorV1::InvalidEncoding
             | ForkEventProvenanceErrorV1::NonCanonical
+            | ForkEventProvenanceErrorV1::UnsupportedVersion
+            | ForkEventProvenanceErrorV1::FieldOutOfBounds
             | ForkEventProvenanceErrorV1::ImportedAuthorityUnavailable
+            | ForkEventProvenanceErrorV1::ImpossibleClassification
             | ForkEventProvenanceErrorV1::DuplicateSourceRoute => Self::InvalidEncoding,
-            ForkEventProvenanceErrorV1::UnsupportedVersion => Self::UnsupportedVersion,
-            ForkEventProvenanceErrorV1::FieldOutOfBounds => Self::BoundsExceeded,
-            ForkEventProvenanceErrorV1::ImpossibleClassification
-            | ForkEventProvenanceErrorV1::SourceRejected => Self::InvalidAuthorityClosure,
         }
     }
 }
@@ -198,10 +201,10 @@ impl ForkAttributionImportClosureV1 {
     /// store-independent closure equality.
     ///
     /// # Errors
-    /// Returns `InvalidEncoding`, `UnsupportedVersion`, or `BoundsExceeded`
-    /// for a record that does not decode strictly or a list that is not in
-    /// strict logical-sequence order, and `InvalidAuthorityClosure` for a
-    /// local code-1 origin or any failed equality.
+    /// Returns `InvalidEncoding` for a record that does not decode strictly
+    /// or a list that is not in strict logical-sequence order, and
+    /// `InvalidAuthorityClosure` for a local code-1 origin or any failed
+    /// equality.
     pub fn validate(envelope: &ForkAttributionAuthorityEnvelopeV1) -> Result<Self, Error> {
         let closure = Self::decode(envelope)?;
         closure.check(envelope).map(|()| closure)
@@ -268,6 +271,7 @@ impl ForkAttributionImportClosureV1 {
         closure_rule(
             self.origins_match(envelope)
                 && self.admission_matches(final_logical_head)
+                && self.empty_segment_matches(final_logical_head)
                 && self.publication_matches()
                 && self.key_evidence_matches(&input.key_record, tombstone)
                 && self.classifier_matches(),
@@ -305,6 +309,16 @@ impl ForkAttributionImportClosureV1 {
             && manifest.admission_digest == self.fork_admission_digest
             && manifest.cut_coordinates() == admission.cut_coordinates()
             && manifest.final_fork_logical_head == final_logical_head
+    }
+
+    /// An empty child segment ends exactly at the parent cut, so its final
+    /// chain hash is the `FAR1` parent chain hash. `FPO1` field 5 then equals
+    /// it too, through the source-table check.
+    fn empty_segment_matches(&self, final_logical_head: u64) -> bool {
+        let admission = self.fork_admission.fields();
+        let manifest = self.signed_manifest().manifest().input();
+        final_logical_head != admission.parent_logical_head
+            || manifest.final_fork_chain_head_hash == admission.parent_chain_head_hash
     }
 
     /// The ADR-099 `FPO1` source table, with `FPB1` and `FPA1` duplicating
@@ -356,11 +370,15 @@ impl ForkAttributionImportClosureV1 {
 
     /// Import step 6: P1–P8 for every Event, exactly the implied `FIA1` set,
     /// and the `FRM1` intervention list.
+    ///
+    /// Without the classifier triple there is nothing to classify: the `FAE1`
+    /// codec's all-or-none rule (`validate_structure`) admits a null triple
+    /// only with no `FEE1`, `EOR1`, `FIA1`, or `FOP1`.
     fn check_events(&self, evidence: &[ForkEventEvidenceV1]) -> Result<(), Error> {
         let derived = self
             .classifier
             .as_ref()
-            .map(|graph| self.derive_interventions(graph, evidence))
+            .map(|graph| self.check_event_rows(graph, evidence))
             .transpose()?
             .unwrap_or_default();
         let manifest = self.signed_manifest().manifest().input();
@@ -370,11 +388,11 @@ impl ForkAttributionImportClosureV1 {
         )
     }
 
-    /// Check P1–P8 for each Event and the P1 distinct `FOP1` operation IDs.
+    /// Check P1–P8 for each Event and the P1 distinct `FOP1` operation IDs,
+    /// returning the interventions the Events imply.
     ///
-    /// The envelope codec proved one `EOR1` and one `FOP1` per `FEE1`, and
-    /// the order check makes this index join a logical-sequence join.
-    fn derive_interventions(
+    /// The order check makes this index join a logical-sequence join.
+    fn check_event_rows(
         &self,
         graph: &ImportedForkClassifierGraphV1,
         evidence: &[ForkEventEvidenceV1],
@@ -382,6 +400,8 @@ impl ForkAttributionImportClosureV1 {
         let classifier = ForkEventClassifierV1::from_table(&graph.table);
         let table_digest = graph.table.digest();
         let mut derived = DerivedInterventionsV1::default();
+        // `zip` stops at the shortest list; the `FAE1` codec's
+        // `validate_structure` proved one `EOR1` and one `FOP1` per `FEE1`.
         let events = evidence
             .iter()
             .zip(&self.event_origins)

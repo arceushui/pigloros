@@ -239,6 +239,7 @@ fn manifest_input(
     admission_digest: Hash,
     intervention_sequences: Vec<u64>,
     final_head: u64,
+    final_hash: Hash,
 ) -> ForkReproManifestInputV1 {
     ForkReproManifestInputV1 {
         parent_timeline_id: timeline_id(1),
@@ -251,7 +252,7 @@ fn manifest_input(
         plugin_composition_hash: hash(0x42),
         intervention_sequences,
         final_fork_logical_head: final_head,
-        final_fork_chain_head_hash: hash(0x77),
+        final_fork_chain_head_hash: final_hash,
     }
 }
 
@@ -383,7 +384,10 @@ impl Fixture {
             .filter(|record| record.intervention.is_some())
             .map(|record| record.operation.input().logical_seq)
             .collect();
-        let input = manifest_input(admission_digest, sequences, PARENT_CUT + local_head);
+        // An empty segment ends at the cut, with the parent chain hash.
+        let final_hash = hash(if local_head == 0 { 0x66 } else { 0x77 });
+        let final_head = PARENT_CUT + local_head;
+        let input = manifest_input(admission_digest, sequences, final_head, final_hash);
         let manifest = signed_manifest(attribution_identity(1), input)?;
         Ok(Self {
             origin,
@@ -525,8 +529,6 @@ fn destroyed_key_and_empty_closures_validate() -> TestResult {
 fn closure_errors_name_the_public_import_errors() {
     let cases = [
         (ClosureError::InvalidEncoding, "encoding is invalid"),
-        (ClosureError::UnsupportedVersion, "version is unsupported"),
-        (ClosureError::BoundsExceeded, "exceeds a bound"),
         (ClosureError::InvalidAuthorityClosure, "inconsistent"),
     ];
     for (error, text) in cases {
@@ -536,7 +538,8 @@ fn closure_errors_name_the_public_import_errors() {
 
 /// Replace the final local `[1]` origin of `local` with `[2, digest]`.
 fn code_two(local: &[u8], digest: Hash) -> Vec<u8> {
-    let mut out = local.strip_suffix(&LOCAL_ORIGIN).unwrap_or(local).to_vec();
+    let (body, _) = local.split_at(local.len().saturating_sub(LOCAL_ORIGIN.len()));
+    let mut out = body.to_vec();
     out.extend_from_slice(&[0x82, 0x02, 0x58, 0x20]);
     out.extend_from_slice(digest.as_bytes());
     out
@@ -677,16 +680,12 @@ fn code_two_admission_maps_version_and_bound_failures() -> TestResult {
     let admission = Fixture::new(Shape::Mixed)?.records().fork_admission;
     let version = edited(&admission, 1, int(2))?;
     let zero_operation = edited(&admission, 2, Value::Bytes(vec![0; 32]))?;
-    let cases = [
-        (version, ClosureError::UnsupportedVersion),
-        (zero_operation, ClosureError::BoundsExceeded),
-    ];
-    for (bytes, expected) in cases {
+    for bytes in [version, zero_operation] {
         let rejection = reject_input(|input| {
             input.records.fork_admission = bytes;
             Ok(())
         })?;
-        assert_eq!(rejection, Some(expected));
+        assert_eq!(rejection, Some(ClosureError::InvalidEncoding));
     }
     Ok(())
 }
@@ -695,19 +694,14 @@ fn code_two_admission_maps_version_and_bound_failures() -> TestResult {
 fn event_origin_failures_map_to_closed_import_errors() -> TestResult {
     let records = Fixture::new(Shape::Mixed)?.records();
     let origin = records.event_origins.first().ok_or("origin")?;
-    let cases = [
-        (1, 2, ClosureError::UnsupportedVersion),
-        (3, 0, ClosureError::BoundsExceeded),
-        (5, 2, ClosureError::InvalidEncoding),
-        (6, 1, ClosureError::InvalidAuthorityClosure),
-    ];
-    for (at, value, expected) in cases {
+    // Version 2, a zero sequence, origin code 2, and the impossible `(0,1)`.
+    for (at, value) in [(1, 2), (3, 0), (5, 2), (6, 1)] {
         let bytes = edited(origin, at, int(value))?;
         let rejection = reject_input(|input| {
             *first(&mut input.records.event_origins)? = bytes;
             Ok(())
         })?;
-        assert_eq!(rejection, Some(expected));
+        assert_eq!(rejection, Some(ClosureError::InvalidEncoding));
     }
     Ok(())
 }
@@ -777,7 +771,7 @@ fn nested_records_reject_noncanonical_order_and_bounds() -> TestResult {
     let artifact = unordered_manifest_artifact(&fixture)?;
     let cases = [
         (source, 0, ClosureError::InvalidEncoding),
-        (registration, 1, ClosureError::BoundsExceeded),
+        (registration, 1, ClosureError::InvalidEncoding),
         (artifact, 2, ClosureError::InvalidEncoding),
     ];
     for (bytes, record, expected) in cases {
@@ -1202,4 +1196,23 @@ fn origin_and_intervention_records_must_be_exactly_implied() -> TestResult {
             },
         ],
     )
+}
+
+#[test]
+fn an_empty_segment_must_end_at_the_parent_chain_hash() -> TestResult {
+    for shape in [Shape::EmptyClassified, Shape::EmptyUnclassified] {
+        let mut fixture = Fixture::new(shape)?;
+        let mut input = fixture.manifest.manifest().input().clone();
+        input.final_fork_chain_head_hash = hash(0x77);
+        fixture.manifest = signed_manifest(fixture.manifest.identity(), input)?;
+        let admission_digest = fixture.imported_admission().digest();
+        fixture.publication = publication(&fixture.manifest, admission_digest)?;
+        fixture.publication_binding = publication_binding(&fixture.manifest)?;
+        fixture.artifact = artifact(&fixture.manifest, hash(PUBLICATION_OPERATION))?;
+        assert_eq!(
+            fixture.rejection()?,
+            Some(ClosureError::InvalidAuthorityClosure)
+        );
+    }
+    Ok(())
 }
