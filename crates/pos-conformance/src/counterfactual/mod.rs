@@ -11,6 +11,7 @@ pub mod checkpoint;
 mod codec;
 pub mod dependency;
 pub mod intervention;
+pub mod result;
 
 pub use intervention::{
     validate_plan_interventions_v1, InterventionContractErrorV1, InterventionOperationV1,
