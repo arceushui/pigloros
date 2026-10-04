@@ -43,8 +43,6 @@ const PUBLICATION_OPERATION: u8 = 0x91;
 const ROUTE_A_SCHEMA: u8 = 0x51;
 const ROUTE_B_SCHEMA: u8 = 0x52;
 const OTHER: u8 = 0x99;
-/// The local `authority-origin-v1 = [1]`.
-const LOCAL_ORIGIN: [u8; 2] = [0x81, 0x01];
 
 /// The child segment of one fixture.
 #[derive(Clone, Copy)]
@@ -536,11 +534,9 @@ fn closure_errors_name_the_public_import_errors() {
     }
 }
 
-/// Replace the final local `[1]` origin of `local` with `[2, digest]`.
-fn code_two(local: &[u8], digest: Hash) -> Vec<u8> {
-    let (body, _) = local.split_at(local.len().saturating_sub(LOCAL_ORIGIN.len()));
-    let mut out = body.to_vec();
-    out.extend_from_slice(&[0x82, 0x02, 0x58, 0x20]);
+/// The code-2 `authority-origin-v1` bytes `[2, digest]`, spelled out.
+fn imported_origin_bytes(digest: Hash) -> Vec<u8> {
+    let mut out = vec![0x82, 0x02, 0x58, 0x20];
     out.extend_from_slice(digest.as_bytes());
     out
 }
@@ -549,17 +545,24 @@ fn code_two(local: &[u8], digest: Hash) -> Vec<u8> {
 fn import_decoders_round_trip_exact_code_two_bytes() -> TestResult {
     let fixture = Fixture::new(Shape::Mixed)?;
     let digest = hash(0x5a);
-    let binding = code_two(&fixture.binding.to_canonical_cbor(), digest);
-    let decoded = ImportedPrincipalOwnerBindingV1::from_canonical_cbor(&binding)?;
-    assert_eq!(decoded.to_canonical_cbor(), binding);
+    let origin = imported_origin_bytes(digest);
+    let binding = ImportedPrincipalOwnerBindingV1::from_local(fixture.binding, digest);
+    let bytes = binding.to_canonical_cbor();
+    assert!(bytes.ends_with(&origin));
+    let decoded = ImportedPrincipalOwnerBindingV1::from_canonical_cbor(&bytes)?;
+    assert_eq!(decoded, binding);
     assert_eq!(decoded.authority_origin_digest(), digest);
-    let admission = code_two(&fixture.admission.to_canonical_cbor(), digest);
-    let decoded = ImportedForkAdmissionRecordV1::from_canonical_cbor(&admission)?;
-    assert_eq!(decoded.to_canonical_cbor(), admission);
+    let admission = ImportedForkAdmissionRecordV1::from_local(fixture.admission, digest);
+    let bytes = admission.to_canonical_cbor();
+    assert!(bytes.ends_with(&origin));
+    let decoded = ImportedForkAdmissionRecordV1::from_canonical_cbor(&bytes)?;
+    assert_eq!(decoded, admission);
     assert_eq!(decoded.authority_origin_digest(), digest);
-    let publication = code_two(&fixture.publication.to_canonical_cbor(), digest);
-    let decoded = ImportedForkPublicationOperationV1::from_canonical_cbor(&publication)?;
-    assert_eq!(decoded.to_canonical_cbor(), publication);
+    let publication = ImportedForkPublicationOperationV1::from_local(fixture.publication, digest);
+    let bytes = publication.to_canonical_cbor();
+    assert!(bytes.ends_with(&origin));
+    let decoded = ImportedForkPublicationOperationV1::from_canonical_cbor(&bytes)?;
+    assert_eq!(decoded, publication);
     assert_eq!(decoded.authority_origin_digest(), digest);
     Ok(())
 }
@@ -651,7 +654,7 @@ fn code_two_records_reject_local_origin_and_malformed_bytes() -> TestResult {
     let admission = local.admission.to_canonical_cbor();
     let publication = local.publication.to_canonical_cbor();
     let mut undecodable = vec![0x00];
-    undecodable.extend(code_two(&LOCAL_ORIGIN, hash(0x5a)));
+    undecodable.extend(imported_origin_bytes(hash(0x5a)));
     let cases = [
         (binding, 0, ClosureError::InvalidAuthorityClosure),
         (undecodable, 0, ClosureError::InvalidEncoding),
@@ -676,7 +679,7 @@ fn code_two_records_reject_local_origin_and_malformed_bytes() -> TestResult {
 }
 
 #[test]
-fn code_two_admission_maps_version_and_bound_failures() -> TestResult {
+fn code_two_admission_version_and_zero_operation_are_invalid_encoding() -> TestResult {
     let admission = Fixture::new(Shape::Mixed)?.records().fork_admission;
     let version = edited(&admission, 1, int(2))?;
     let zero_operation = edited(&admission, 2, Value::Bytes(vec![0; 32]))?;
@@ -691,7 +694,7 @@ fn code_two_admission_maps_version_and_bound_failures() -> TestResult {
 }
 
 #[test]
-fn event_origin_failures_map_to_closed_import_errors() -> TestResult {
+fn event_origin_field_failures_are_invalid_encoding() -> TestResult {
     let records = Fixture::new(Shape::Mixed)?.records();
     let origin = records.event_origins.first().ok_or("origin")?;
     // Version 2, a zero sequence, origin code 2, and the impossible `(0,1)`.

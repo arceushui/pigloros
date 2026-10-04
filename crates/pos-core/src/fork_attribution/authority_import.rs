@@ -10,12 +10,15 @@
 //! canonical form. The projection never leaves this module, and every digest
 //! is computed over the exact code-2 bytes.
 
+use ciborium::value::Value;
+
 use super::{
     authority_envelope::MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1, domain_digest,
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1 as Error,
     ForkPublicationOperationInputV1, ForkPublicationOperationV1, ADMISSION_DOMAIN,
     MAX_FORK_ADMISSION_RECORD_BYTES_V1, MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
 };
+
 use crate::{
     fork_admission::PRINCIPAL_OWNER_BINDING_DOMAIN, Hash, OwnerIdV1, PrincipalOwnerBindingV1,
 };
@@ -55,16 +58,11 @@ fn local_projection(bytes_in: &[u8], maximum: usize) -> Result<(Vec<u8>, Hash), 
         .ok_or(rejection)
 }
 
-/// Replace the local `[1]` origin that ends `local` with `[2, digest]`.
-///
-/// Every local encoder ends its record with the two `[1]` bytes, so the body
-/// is everything before them.
-fn with_imported_origin(local: &[u8], authority_origin_digest: Hash) -> Vec<u8> {
-    let (body, _) = local.split_at(local.len().saturating_sub(LOCAL_ORIGIN.len()));
-    let mut out = body.to_vec();
-    out.extend_from_slice(&IMPORTED_ORIGIN_HEAD);
-    out.extend_from_slice(authority_origin_digest.as_bytes());
-    out
+/// Append the code-2 `[2, digest]` origin to one local record body.
+fn with_imported_origin(mut body: Vec<u8>, authority_origin_digest: Hash) -> Vec<u8> {
+    body.extend_from_slice(&IMPORTED_ORIGIN_HEAD);
+    body.extend_from_slice(authority_origin_digest.as_bytes());
+    body
 }
 
 /// One strict code-2 `POB1` carried by `FAE1` field 7.
@@ -108,10 +106,10 @@ impl ImportedPrincipalOwnerBindingV1 {
     /// Encode the exact canonical code-2 `POB1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        with_imported_origin(
-            &self.binding.to_canonical_cbor(),
-            self.authority_origin_digest,
-        )
+        self.binding.canonical_cbor_with_origin(Value::Array(vec![
+            Value::Integer(2.into()),
+            Value::Bytes(self.authority_origin_digest.as_bytes().to_vec()),
+        ]))
     }
 
     /// Return the ADR-099 `POB1` digest over the exact code-2 bytes.
@@ -168,10 +166,7 @@ impl ImportedForkAdmissionRecordV1 {
     /// Encode the exact canonical code-2 `FAR1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        with_imported_origin(
-            &self.record.to_canonical_cbor(),
-            self.authority_origin_digest,
-        )
+        with_imported_origin(self.record.canonical_body(), self.authority_origin_digest)
     }
 
     /// Return the ADR-099 `FAR1` digest over the exact code-2 bytes.
@@ -231,10 +226,7 @@ impl ImportedForkPublicationOperationV1 {
     /// Encode the exact canonical code-2 `FPO1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        with_imported_origin(
-            &self.operation.to_canonical_cbor(),
-            self.authority_origin_digest,
-        )
+        with_imported_origin(self.operation.canonical_body(), self.authority_origin_digest)
     }
 
     /// The carried code-2 authority-origin digest.

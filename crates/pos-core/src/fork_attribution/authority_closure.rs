@@ -375,12 +375,13 @@ impl ForkAttributionImportClosureV1 {
     /// codec's all-or-none rule (`validate_structure`) admits a null triple
     /// only with no `FEE1`, `EOR1`, `FIA1`, or `FOP1`.
     fn check_events(&self, evidence: &[ForkEventEvidenceV1]) -> Result<(), Error> {
-        let derived = self
-            .classifier
-            .as_ref()
-            .map(|graph| self.check_event_rows(graph, evidence))
-            .transpose()?
-            .unwrap_or_default();
+        let derived = self.classifier.as_ref().map_or_else(
+            || {
+                debug_assert!(evidence.is_empty(), "FAE1 classifier triple is all-or-none");
+                Ok(DerivedInterventionsV1::default())
+            },
+            |graph| self.derive_and_check_events(graph, evidence),
+        )?;
         let manifest = self.signed_manifest().manifest().input();
         closure_rule(
             derived.admissions == self.intervention_admissions
@@ -388,11 +389,11 @@ impl ForkAttributionImportClosureV1 {
         )
     }
 
-    /// Check P1–P8 for each Event and the P1 distinct `FOP1` operation IDs,
-    /// returning the interventions the Events imply.
+    /// Derive the interventions the Events imply while checking P1–P8 for
+    /// each Event and the P1 distinct `FOP1` operation IDs.
     ///
     /// The order check makes this index join a logical-sequence join.
-    fn check_event_rows(
+    fn derive_and_check_events(
         &self,
         graph: &ImportedForkClassifierGraphV1,
         evidence: &[ForkEventEvidenceV1],

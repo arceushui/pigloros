@@ -169,6 +169,13 @@ impl PrincipalOwnerBindingV1 {
     /// Return the complete canonical POB1 bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        self.canonical_cbor_with_origin(Value::Array(vec![Value::Integer(1.into())]))
+    }
+
+    /// Encode these fields with `origin` as the final `authority-origin-v1`.
+    ///
+    /// Only the ADR-105 code-2 `POB1` encoder passes a non-local origin.
+    pub(crate) fn canonical_cbor_with_origin(&self, origin: Value) -> Vec<u8> {
         let input = self.input();
         canonical_bytes(&Value::Array(vec![
             Value::Bytes(b"POB1".to_vec()),
@@ -176,7 +183,7 @@ impl PrincipalOwnerBindingV1 {
             Value::Bytes(input.operation_id.as_bytes().to_vec()),
             Value::Bytes(input.principal_digest.as_bytes().to_vec()),
             Value::Text(input.owner.as_str().to_owned()),
-            Value::Array(vec![Value::Integer(1.into())]),
+            origin,
         ]))
     }
 

@@ -186,6 +186,14 @@ impl ForkAdmissionRecordV1 {
     /// Encode the exact 15-field deterministic-CBOR `FAR1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let mut out = self.canonical_body();
+        authority_origin(&mut out, self.0.origin);
+        out
+    }
+
+    /// Encode every `FAR1` byte before the final `authority-origin-v1`
+    /// field, which the ADR-105 code-2 encoder appends in its own form.
+    fn canonical_body(&self) -> Vec<u8> {
         let value = &self.0;
         let mut out = Vec::with_capacity(320);
         array(&mut out, 15);
@@ -203,7 +211,6 @@ impl ForkAdmissionRecordV1 {
         uint(&mut out, value.post_fold_tick_boundary);
         hash(&mut out, value.plugin_composition_hash);
         uint(&mut out, u64::from(value.attribution_required));
-        authority_origin(&mut out, value.origin);
         out
     }
 
@@ -650,6 +657,14 @@ impl ForkPublicationOperationV1 {
     /// Encode the exact 14-field deterministic-CBOR `FPO1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let mut out = self.canonical_body();
+        authority_origin(&mut out, self.0.origin);
+        out
+    }
+
+    /// Encode every `FPO1` byte before the final `authority-origin-v1`
+    /// field, which the ADR-105 code-2 encoder appends in its own form.
+    fn canonical_body(&self) -> Vec<u8> {
         let value = &self.0;
         let mut out = Vec::with_capacity(512);
         array(&mut out, 14);
@@ -666,7 +681,6 @@ impl ForkPublicationOperationV1 {
         hash(&mut out, value.private_material_digest);
         bytes(&mut out, value.public_verification_key.as_bytes());
         hash(&mut out, value.signed_manifest_record_id);
-        authority_origin(&mut out, value.origin);
         out
     }
 
