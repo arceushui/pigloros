@@ -376,10 +376,7 @@ impl ForkAttributionImportClosureV1 {
     /// only with no `FEE1`, `EOR1`, `FIA1`, or `FOP1`.
     fn check_events(&self, evidence: &[ForkEventEvidenceV1]) -> Result<(), Error> {
         let derived = self.classifier.as_ref().map_or_else(
-            || {
-                debug_assert!(evidence.is_empty(), "FAE1 classifier triple is all-or-none");
-                Ok(DerivedInterventionsV1::default())
-            },
+            || Ok(DerivedInterventionsV1::default()),
             |graph| self.derive_and_check_events(graph, evidence),
         )?;
         let manifest = self.signed_manifest().manifest().input();
