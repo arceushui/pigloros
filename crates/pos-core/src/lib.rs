@@ -65,6 +65,7 @@ pub mod world_artifact;
 pub mod world_closure_binding;
 pub mod world_consumer_set;
 pub mod world_dependency_directory;
+pub mod world_dependency_packing;
 pub mod world_history;
 pub mod world_key_evidence;
 pub mod world_recording_receipt;
@@ -563,6 +564,10 @@ pub use world_dependency_directory::{
     WorldDependencyBranchChildV1, WorldDependencyBranchErrorV1, WorldDependencyBranchInputV1,
     WorldDependencyBranchV1, WorldDependencyKeyV1, MAX_WORLD_DEPENDENCY_DIRECTORY_BYTES_V1,
     MAX_WORLD_DEPENDENCY_DIRECTORY_CHILDREN_V1, MAX_WORLD_DEPENDENCY_DIRECTORY_HEIGHT_V1,
+};
+pub use world_dependency_packing::{
+    check_manifest_policy_seeds_v1, ManifestPolicyLeafExpectationV1, ManifestPolicySeedV1,
+    WorldDependencyDirectoryErrorV1, WorldDependencyDirectoryV1,
 };
 pub use world_history::{
     WorldEventOccurrenceV1, WorldEventPageV1, WorldEventRowInputV1, WorldEventRowV1,
