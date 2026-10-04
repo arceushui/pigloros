@@ -10,6 +10,11 @@ publish.workspace = true
 # Enables explicitly named containment fixtures for downstream test targets.
 # This feature is intentionally off in production dependency graphs.
 test-support = []
+# Mints `CounterfactualAdapterSealV1`, which builds ADR-064 counterfactual
+# commit evidence. Only `pos-store` (the Memory and SQLite adapters) may enable
+# it outside dev-dependencies; scripts/check_counterfactual_adapter_seal.py
+# enforces that in CI.
+counterfactual-adapter = []
 
 [dependencies]
 blake3 = { workspace = true }

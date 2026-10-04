@@ -340,7 +340,8 @@ pub use consent::{
     MODALITY_MODEL_FIT, MODALITY_PERSONA,
 };
 pub use counterfactual_store::{
-    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
+    CounterfactualAdapterSealV1, CounterfactualBasisV1, CounterfactualFactsV1,
+    CounterfactualGenerationReceiptV1, CounterfactualGenerationRecordV1,
     CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     CounterfactualTickOutcomeV1, ForkGenerationV1, InvalidationConflictV1,

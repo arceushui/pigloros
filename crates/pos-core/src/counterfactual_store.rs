@@ -76,10 +76,68 @@
 //! - **Head that did not advance.** A first or later Tick whose staged head
 //!   is not strictly greater than the expected head is `CorruptState` in
 //!   every adapter, and nothing commits.
+//!
+//! # Quarantine by generation
+//!
+//! A committed invalidation quarantines the digests of its invalid-artifact
+//! index and eviction set *through its prior generation*
+//! ([`CounterfactualInvalidationCommandV1::quarantines_through`]): bytes
+//! written at that generation or earlier are never readable again. Adapters
+//! record, per artifact digest, the latest generation that wrote it and the
+//! latest generation it was quarantined through, and resolve every read with
+//! [`ForkGenerationV1::resolve_read`]. A byte-identical artifact recomputed
+//! and written again at a later generation (including by the first
+//! recomputation Tick of the quarantining transaction itself) is therefore
+//! readable at that generation, while the quarantined earlier copy is not.
+//!
+//! # Outcome-unknown recovery
+//!
+//! Every write may fail with
+//! [`CounterfactualStoreErrorV1::OutcomeUnknown`] (adapters map
+//! `CoreError::StorageOutcomeUnknown` to it): the commit may or may not have
+//! landed, and the caller must re-read before retrying.
+//!
+//! - **Invalidation (#338).** Read
+//!   [`CounterfactualStorePortV1::committed_generation_receipt`] at
+//!   [`CounterfactualInvalidationCommandV1::new_generation`]. A receipt that
+//!   [`CounterfactualGenerationReceiptV1::matches_invalidation`] the
+//!   command's `SIV1` means the command committed: continue exactly as if
+//!   `Committed` had been returned. A receipt for another `SIV1` means a
+//!   different invalidation committed that generation: treat it as
+//!   `InvalidationConflict(PriorGeneration)`. `None` means nothing committed
+//!   at that generation: the same command may be retried, and its basis
+//!   recheck keeps the retry safe. A failing recovery read leaves the outcome
+//!   unknown; repeat the read, never the commit.
+//! - **Later Tick (#339).** Read
+//!   [`CounterfactualStorePortV1::current_counterfactual_basis`]. When
+//!   `expected.first_conflict(&persisted)` is `None` the Tick did not commit
+//!   (a committed Tick always advances the head), and the same append may be
+//!   retried. Otherwise the in-doubt Tick cannot be attributed: the suffix
+//!   loop treats it as `Stale` with that conflict and never assumes it
+//!   committed; the coordinator then admits a new generation from the
+//!   persisted basis, whose invalidation quarantines anything the in-doubt
+//!   Tick may have written.
+//! - **Facts publication.** Re-read the basis; republishing the same facts
+//!   is idempotent.
+//!
+//! # Adapter seal
+//!
+//! Receipts and committed Tick outcomes are evidence that a transaction
+//! committed, so they are built only with a [`CounterfactualAdapterSealV1`].
+//! The seal is constructible only through
+//! [`CounterfactualAdapterSealV1::for_adapter`], which exists only with this
+//! crate's `counterfactual-adapter` cargo feature. Only `pos-store`, which
+//! owns the Memory and `SQLite` adapters, enables that feature outside
+//! dev-dependencies, and outside `pos-core`, `pos-store`, and test
+//! directories no code may name the seal; CI enforces both with
+//! `scripts/check_counterfactual_adapter_seal.py`.
 
 use std::cmp::Ordering;
 
 use crate::{CborCursor, CborReadError, Hash, PipelineDraftBatchV1, Seq, TimelineId};
+
+#[cfg(feature = "test-support")]
+pub mod test_fixtures;
 
 /// Maximum encoded size of `RCF1` bytes carried by the port.
 pub const MAX_COUNTERFACTUAL_FRONTIER_BYTES_V1: usize = 64 * 1024 * 1024;
@@ -155,9 +213,35 @@ pub enum CounterfactualStoreErrorV1 {
     /// Persisted counterfactual state is malformed or inconsistent.
     #[error("counterfactual store state is corrupt")]
     CorruptState,
-    /// The store cannot commit or determine the outcome of the operation.
+    /// The storage operation failed and committed nothing.
     #[error("counterfactual storage operation failed")]
     StorageFailure,
+    /// A write may or may not have committed; re-read before retrying (see
+    /// the module's outcome-unknown recovery protocol).
+    #[error("counterfactual storage outcome is unknown")]
+    OutcomeUnknown,
+}
+
+/// Capability held only by [`CounterfactualStorePortV1`] adapters.
+///
+/// [`CounterfactualInvalidationCommandV1::committed_receipt`],
+/// [`CounterfactualGenerationReceiptV1::from_record`], and
+/// [`CounterfactualBasisV1::committed_tick`] require it, so only an adapter
+/// can mint commit evidence. It is constructible only with
+/// [`Self::for_adapter`], which exists only with this crate's
+/// `counterfactual-adapter` cargo feature; only `pos-store` enables that
+/// feature outside dev-dependencies, and it must not re-export the seal.
+#[derive(Debug)]
+pub struct CounterfactualAdapterSealV1(());
+
+#[cfg(feature = "counterfactual-adapter")]
+impl CounterfactualAdapterSealV1 {
+    /// Mint the adapter seal; available only to `counterfactual-adapter`
+    /// builds.
+    #[must_use]
+    pub const fn for_adapter() -> Self {
+        Self(())
+    }
 }
 
 struct ArtifactFramingV1 {
@@ -597,9 +681,10 @@ impl CounterfactualBasisV1 {
 
     /// Build the outcome of a later Tick committed on this basis.
     ///
-    /// This is the adapter-only constructor of
+    /// This is the sealed constructor of
     /// [`CounterfactualTickOutcomeV1::Committed`]: only a
-    /// [`CounterfactualStorePortV1`] adapter calls it, inside
+    /// [`CounterfactualStorePortV1`] adapter holding the
+    /// [`CounterfactualAdapterSealV1`] calls it, inside
     /// [`CounterfactualStorePortV1::append_counterfactual_tick`], before it
     /// installs the Tick. `head` is the Fork Logical Head after the Tick's
     /// Events; a Tick commits at least one Event, so it must be strictly
@@ -610,6 +695,7 @@ impl CounterfactualBasisV1 {
     /// [`Self::fork_logical_head`]; the adapter then commits nothing.
     pub const fn committed_tick(
         &self,
+        _seal: &CounterfactualAdapterSealV1,
         head: Seq,
     ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
         if head.as_u64() > self.fork_logical_head.as_u64() {
@@ -755,6 +841,17 @@ impl CounterfactualInvalidationCommandV1 {
         }
     }
 
+    /// Return the generation the invalid-artifact index and eviction set are
+    /// quarantined through: the `SIV1` prior generation.
+    ///
+    /// Adapters record it per quarantined digest (keeping the latest value),
+    /// so bytes written at this generation or earlier are no longer readable,
+    /// while bytes written again at the new or a later generation are.
+    #[must_use]
+    pub const fn quarantines_through(&self) -> u64 {
+        self.input.invalidation.prior_generation()
+    }
+
     /// Borrow the verified `RCF1` frontier.
     #[must_use]
     pub const fn frontier(&self) -> &RecomputationFrontierBytesV1 {
@@ -793,12 +890,13 @@ impl CounterfactualInvalidationCommandV1 {
 
     /// Build the receipt for this command after its whole transaction committed.
     ///
-    /// This is the adapter-only constructor: only a
-    /// [`CounterfactualStorePortV1`] adapter calls it, inside
-    /// [`CounterfactualStorePortV1::commit_counterfactual_invalidation`],
-    /// after the whole transaction committed. It stays public because the
-    /// Memory and `SQLite` adapters live in another crate; the receipt is
-    /// meaningful only as that method's return value.
+    /// This is the sealed constructor: only a [`CounterfactualStorePortV1`]
+    /// adapter holding the [`CounterfactualAdapterSealV1`] calls it, inside
+    /// [`CounterfactualStorePortV1::commit_counterfactual_invalidation`]. The
+    /// adapter persists the receipt's [`CounterfactualGenerationReceiptV1::record`]
+    /// in the same transaction, so
+    /// [`CounterfactualStorePortV1::committed_generation_receipt`] can rebuild
+    /// it after an `OutcomeUnknown`.
     ///
     /// `first_tick_head` is the Fork Logical Head after the first Tick's
     /// Events. A Tick Boundary commits at least one Event, so it must be
@@ -812,6 +910,7 @@ impl CounterfactualInvalidationCommandV1 {
     /// reports for a first Tick whose head did not advance.
     pub const fn committed_receipt(
         &self,
+        _seal: &CounterfactualAdapterSealV1,
         first_tick_head: Seq,
     ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1> {
         if first_tick_head.as_u64() <= self.input.fork_logical_head.as_u64() {
@@ -863,11 +962,16 @@ impl ForkGenerationV1 {
     /// Resolve one stored artifact for a read at this generation.
     ///
     /// Adapters route every read through this rule so that a quarantined or
-    /// other-generation artifact is never exposed.
+    /// other-generation artifact is never exposed. A stored artifact is
+    /// readable unless it was quarantined through a generation at or after
+    /// the latest generation that wrote it.
     ///
     /// # Errors
     /// Returns `MixedForkGeneration` unless `current_generation` is this
-    /// generation, and `InvalidArtifactReuse` for a quarantined artifact.
+    /// generation; `CorruptState` when the artifact claims to be written
+    /// after `current_generation` or quarantined through `current_generation`
+    /// or later (a quarantine is always through an earlier generation); and
+    /// `InvalidArtifactReuse` for a quarantined artifact.
     pub fn resolve_read(
         self,
         current_generation: u64,
@@ -876,12 +980,22 @@ impl ForkGenerationV1 {
         if self.generation != current_generation {
             return Err(CounterfactualStoreErrorV1::MixedForkGeneration);
         }
-        match stored {
-            StoredCounterfactualArtifactV1::Absent => Ok(None),
-            StoredCounterfactualArtifactV1::Quarantined => {
-                Err(CounterfactualStoreErrorV1::InvalidArtifactReuse)
-            }
-            StoredCounterfactualArtifactV1::Authoritative(bytes) => Ok(Some(bytes)),
+        let StoredCounterfactualArtifactV1::Stored {
+            bytes,
+            written_generation,
+            quarantined_through,
+        } = stored
+        else {
+            return Ok(None);
+        };
+        if written_generation > current_generation
+            || quarantined_through.is_some_and(|through| through >= current_generation)
+        {
+            Err(CounterfactualStoreErrorV1::CorruptState)
+        } else if quarantined_through.is_some_and(|through| written_generation <= through) {
+            Err(CounterfactualStoreErrorV1::InvalidArtifactReuse)
+        } else {
+            Ok(Some(bytes))
         }
     }
 }
@@ -891,17 +1005,27 @@ impl ForkGenerationV1 {
 pub enum StoredCounterfactualArtifactV1 {
     /// No artifact with this digest exists on the Fork.
     Absent,
-    /// A committed invalidation quarantined the artifact; its bytes stay for audit only.
-    Quarantined,
-    /// The artifact is authoritative at the current generation.
-    Authoritative(Vec<u8>),
+    /// The Fork holds bytes with this digest.
+    Stored {
+        /// The exact stored bytes.
+        bytes: Vec<u8>,
+        /// Latest Fork generation that wrote (committed or staged) these
+        /// bytes; artifacts that predate every invalidation use 0.
+        written_generation: u64,
+        /// Latest [`CounterfactualInvalidationCommandV1::quarantines_through`]
+        /// of a committed invalidation whose index or eviction set named this
+        /// digest, or `None` when none did.
+        quarantined_through: Option<u64>,
+    },
 }
 
 /// Receipt of one fully committed invalidation transaction.
 ///
 /// Only [`CounterfactualInvalidationCommandV1::committed_receipt`] builds a
 /// receipt, from a command whose `SIV1` binds the Fork, the new generation,
-/// the `RCF1` digest, and the Tick Boundary commit coordinate. A receipt
+/// the `RCF1` digest, and the Tick Boundary commit coordinate, and only
+/// [`Self::from_record`] rebuilds one from its persisted
+/// [`CounterfactualGenerationRecordV1`]; both are sealed. A receipt
 /// therefore matches exactly one `SIV1`; holders verify that the receipt's
 /// generation actually committed by reading that `SIV1` at
 /// [`Self::generation`] and checking [`Self::matches_invalidation`].
@@ -915,7 +1039,69 @@ pub struct CounterfactualGenerationReceiptV1 {
     facts: CounterfactualFactsV1,
 }
 
+/// The persisted form of one committed [`CounterfactualGenerationReceiptV1`].
+///
+/// An adapter persists exactly these fields, keyed by Fork and generation, in
+/// the invalidation transaction itself, and rebuilds the receipt with
+/// [`CounterfactualGenerationReceiptV1::from_record`] for
+/// [`CounterfactualStorePortV1::committed_generation_receipt`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CounterfactualGenerationRecordV1 {
+    /// Committed Fork generation (the `SIV1` new generation).
+    pub generation: ForkGenerationV1,
+    /// Committed `RCF1` frontier digest.
+    pub frontier_digest: Hash,
+    /// Committed `SIV1` invalidation digest.
+    pub invalidation_digest: Hash,
+    /// First recomputation Tick number.
+    pub first_tick: u64,
+    /// Fork Logical Head after the first Tick's Events.
+    pub first_tick_head: Seq,
+    /// Host-published facts the generation was committed under.
+    pub facts: CounterfactualFactsV1,
+}
+
 impl CounterfactualGenerationReceiptV1 {
+    /// Rebuild a committed receipt from its persisted record.
+    ///
+    /// This is the sealed recovery constructor: only an adapter serving
+    /// [`CounterfactualStorePortV1::committed_generation_receipt`] calls it,
+    /// with the record it persisted from [`Self::record`] in the committing
+    /// transaction.
+    ///
+    /// # Errors
+    /// Returns `CorruptState` for generation 0, which no invalidation
+    /// commits.
+    pub const fn from_record(
+        _seal: &CounterfactualAdapterSealV1,
+        record: CounterfactualGenerationRecordV1,
+    ) -> Result<Self, CounterfactualStoreErrorV1> {
+        if record.generation.generation == 0 {
+            return Err(CounterfactualStoreErrorV1::CorruptState);
+        }
+        Ok(Self {
+            generation: record.generation,
+            frontier_digest: record.frontier_digest,
+            invalidation_digest: record.invalidation_digest,
+            first_tick: record.first_tick,
+            first_tick_head: record.first_tick_head,
+            facts: record.facts,
+        })
+    }
+
+    /// Return the record an adapter persists for this receipt.
+    #[must_use]
+    pub const fn record(&self) -> CounterfactualGenerationRecordV1 {
+        CounterfactualGenerationRecordV1 {
+            generation: self.generation,
+            frontier_digest: self.frontier_digest,
+            invalidation_digest: self.invalidation_digest,
+            first_tick: self.first_tick,
+            first_tick_head: self.first_tick_head,
+            facts: self.facts,
+        }
+    }
+
     /// Return the committed Fork generation.
     #[must_use]
     pub const fn generation(&self) -> ForkGenerationV1 {
@@ -1009,15 +1195,28 @@ pub enum CounterfactualInvalidationOutcomeV1 {
 ///   `ensure_non_geographic_drafts`), whose rejection is concealed as
 ///   `ForkNotFound`, and inside the Fork's erasure write fence.
 /// - Serve [`Self::current_fork_generation`],
-///   [`Self::current_counterfactual_basis`], and
+///   [`Self::current_counterfactual_basis`],
+///   [`Self::committed_generation_receipt`], and
 ///   [`Self::read_generation_artifact`] through the Fork's erasure read
 ///   fence.
-/// - Route every artifact read through [`ForkGenerationV1::resolve_read`].
+/// - Route every artifact read through [`ForkGenerationV1::resolve_read`],
+///   persisting per digest the latest generation that wrote it and the
+///   latest [`CounterfactualInvalidationCommandV1::quarantines_through`]
+///   that named it in an index or eviction set.
 /// - Build receipts only with
 ///   [`CounterfactualInvalidationCommandV1::committed_receipt`] and later
 ///   Tick outcomes only with [`CounterfactualBasisV1::committed_tick`], from
 ///   the staged head and before installing anything. A head that did not
 ///   advance is reported as `CorruptState` and commits nothing.
+/// - Persist the receipt's [`CounterfactualGenerationReceiptV1::record`] in
+///   the invalidation transaction, keyed by Fork and generation, and serve
+///   [`Self::committed_generation_receipt`] from it with
+///   [`CounterfactualGenerationReceiptV1::from_record`].
+/// - Report a write whose commit may or may not have landed (for example
+///   `CoreError::StorageOutcomeUnknown`) as `OutcomeUnknown`, never as
+///   `StorageFailure`, and answer the recovery reads only from settled
+///   state: once the in-doubt write has committed or rolled back, or with
+///   `StorageFailure` while that cannot be determined.
 ///
 /// Epoch monotonicity of those published facts is a host obligation; the
 /// port compares them for equality only.
@@ -1032,8 +1231,11 @@ pub trait CounterfactualStorePortV1 {
     /// This is a host operation; the coordinator never calls it.
     ///
     /// # Errors
-    /// Returns `ForkNotFound` unless `fork` is a visible Fork Timeline, and
-    /// `CorruptState` or `StorageFailure`; every error publishes nothing.
+    /// Returns `ForkNotFound` unless `fork` is a visible Fork Timeline,
+    /// `CorruptState` or `StorageFailure`, all of which publish nothing, or
+    /// `OutcomeUnknown` when the publication may or may not have landed:
+    /// re-read [`Self::current_counterfactual_basis`]; republishing the same
+    /// facts is idempotent.
     fn publish_counterfactual_facts(
         &mut self,
         fork: TimelineId,
@@ -1050,9 +1252,11 @@ pub trait CounterfactualStorePortV1 {
     /// set, and the first Tick's Events as one transaction.
     ///
     /// # Errors
-    /// Returns `ForkNotFound`, `CorruptState`, or `StorageFailure`. Every
-    /// error and every conflict commits nothing; `StorageFailure` may also
-    /// mean the outcome is unknown.
+    /// Returns `ForkNotFound`, `CorruptState`, or `StorageFailure`, which,
+    /// like every conflict, commit nothing. Returns `OutcomeUnknown` when the
+    /// transaction may or may not have committed: the caller re-reads
+    /// [`Self::committed_generation_receipt`] at the command's new generation
+    /// before retrying (see the module's outcome-unknown recovery protocol).
     fn commit_counterfactual_invalidation(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
@@ -1069,9 +1273,11 @@ pub trait CounterfactualStorePortV1 {
     ///
     /// # Errors
     /// Returns `ForkNotFound` (also for a draft the generic append guard
-    /// rejects), `CorruptState`, or `StorageFailure`. Every error and every
-    /// stale outcome commits nothing; `StorageFailure` may also mean the
-    /// outcome is unknown.
+    /// rejects), `CorruptState`, or `StorageFailure`, which, like every stale
+    /// outcome, commit nothing. Returns `OutcomeUnknown` when the Tick may or
+    /// may not have committed: the caller re-reads
+    /// [`Self::current_counterfactual_basis`] before retrying (see the
+    /// module's outcome-unknown recovery protocol).
     fn append_counterfactual_tick(
         &mut self,
         fork: TimelineId,
@@ -1098,6 +1304,23 @@ pub trait CounterfactualStorePortV1 {
         &self,
         fork: TimelineId,
     ) -> Result<CounterfactualBasisV1, CounterfactualStoreErrorV1>;
+
+    /// Return the receipt of the invalidation that committed generation
+    /// `at`, rebuilt from its persisted record, or `None` when no
+    /// invalidation committed that generation (including generation 0 and
+    /// every generation after the committed one).
+    ///
+    /// This is the recovery read after an `OutcomeUnknown` invalidation; it
+    /// also serves earlier generations, so it never reports
+    /// `MixedForkGeneration`. It reads settled state only.
+    ///
+    /// # Errors
+    /// Returns `ForkNotFound`, `CorruptState`, or `StorageFailure` (also
+    /// while an in-doubt write cannot yet be resolved).
+    fn committed_generation_receipt(
+        &self,
+        at: ForkGenerationV1,
+    ) -> Result<Option<CounterfactualGenerationReceiptV1>, CounterfactualStoreErrorV1>;
 
     /// Read one artifact by digest at an exact Fork generation.
     ///

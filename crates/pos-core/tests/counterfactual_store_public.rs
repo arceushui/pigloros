@@ -1,9 +1,17 @@
+#![cfg(all(feature = "test-support", feature = "counterfactual-adapter"))]
+
 //! Public-interface contract tests for the ADR-064 counterfactual storage port.
 
 use std::collections::BTreeMap;
 
+use pos_core::counterfactual_store::test_fixtures::{
+    frame, frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle,
+    node_field, uint, DIGEST_FIELD_BYTES, FRONTIER_DOMAIN, FRONTIER_PREFIX, INVALIDATION_DOMAIN,
+    INVALIDATION_PREFIX,
+};
 use pos_core::{
-    CanonicalBytes, CounterfactualBasisV1, CounterfactualFactsV1,
+    CanonicalBytes, CounterfactualAdapterSealV1, CounterfactualBasisV1, CounterfactualFactsV1,
+    CounterfactualGenerationReceiptV1, CounterfactualGenerationRecordV1,
     CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     CounterfactualTickOutcomeV1, EntityId, EventDraft, ForkGenerationV1, Hash,
@@ -23,12 +31,9 @@ type FactsChange = (
     Option<InvalidationConflictV1>,
 );
 
-const FRONTIER_DOMAIN: &[u8] = b"PiglorOS.RecomputationFrontier.v1";
-const INVALIDATION_DOMAIN: &[u8] = b"PiglorOS.SuffixInvalidation.v1";
-const FRONTIER_PREFIX: [u8; 6] = [0x64, b'R', b'C', b'F', b'1', 0x01];
-const INVALIDATION_PREFIX: [u8; 6] = [0x64, b'S', b'I', b'V', b'1', 0x01];
 const FRONTIER_HEADER_BYTES: usize = 17 + 3 * 34;
-const DIGEST_FIELD_BYTES: usize = 34;
+/// The adapter seal; these tests stand in for an adapter.
+const SEAL: CounterfactualAdapterSealV1 = CounterfactualAdapterSealV1::for_adapter();
 
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
@@ -57,97 +62,6 @@ fn fork() -> TimelineId {
     TimelineId::from_ulid(Ulid::from(0x0123_4567_89ab_cdef_u128))
 }
 
-/// Encode one shortest-form CBOR unsigned integer.
-fn uint(value: u64) -> Vec<u8> {
-    let bytes = value.to_be_bytes();
-    match value {
-        0..=23 => vec![bytes[7]],
-        24..=0xff => vec![0x18, bytes[7]],
-        0x100..=0xffff => [&[0x19][..], &bytes[6..]].concat(),
-        0x1_0000..=0xffff_ffff => [&[0x1a][..], &bytes[4..]].concat(),
-        _ => [&[0x1b][..], &bytes[..]].concat(),
-    }
-}
-
-/// Encode one shortest-form CBOR head of `major` with `argument`.
-fn head(major: u8, argument: u64) -> Vec<u8> {
-    let mut encoded = uint(argument);
-    encoded[0] |= major << 5;
-    encoded
-}
-
-fn text_field(value: &str) -> Vec<u8> {
-    [
-        head(3, ok(u64::try_from(value.len()))),
-        value.as_bytes().to_vec(),
-    ]
-    .concat()
-}
-
-/// Encode one six-field dependency-node coordinate.
-fn node_field(tick: u64, owner: &str) -> Vec<u8> {
-    [
-        vec![0x86],
-        uint(tick),
-        uint(0),
-        text_field(owner),
-        uint(0),
-        uint(7),
-        hash_field(hash(21)),
-    ]
-    .concat()
-}
-
-/// Encode `SIV1` fields 8 through 14, crossing every CBOR argument width.
-fn invalidation_middle() -> Vec<u8> {
-    [
-        node_field(5, "agent-a"),
-        node_field(4_294_967_296, "an-owner-identifier-of-thirty-"),
-        vec![0x81, 0x86],
-        text_field("event"),
-        uint(70_000),
-        hash_field(hash(22)),
-        node_field(5, "agent-a"),
-        uint(300),
-        uint(0),
-        vec![0x81],
-        hash_field(hash(23)),
-        vec![0x80, 0x80],
-        uint(0),
-    ]
-    .concat()
-}
-
-fn id_field(value: [u8; 16]) -> Vec<u8> {
-    [&[0x50][..], &value[..]].concat()
-}
-
-fn hash_field(value: Hash) -> Vec<u8> {
-    [&[0x58, 0x20][..], &value.as_bytes()[..]].concat()
-}
-
-/// Frame fields after the version as one self-digested record.
-fn frame(
-    heads: (u8, u8),
-    prefix: [u8; 6],
-    domain: &[u8],
-    fields: &[u8],
-    padding: usize,
-) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(7 + fields.len() + padding + DIGEST_FIELD_BYTES);
-    bytes.push(heads.0);
-    bytes.extend_from_slice(&prefix);
-    bytes.extend_from_slice(fields);
-    bytes.resize(bytes.len() + padding, 0);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(&[0, heads.1]);
-    hasher.update(&bytes[1..]);
-    bytes.extend_from_slice(&[0x58, 0x20]);
-    bytes.extend_from_slice(hasher.finalize().as_bytes());
-    bytes
-}
-
 fn frontier_fields(plan: Hash, graph: Hash) -> Vec<u8> {
     [
         id_field([1; 16]),
@@ -160,13 +74,7 @@ fn frontier_fields(plan: Hash, graph: Hash) -> Vec<u8> {
 }
 
 fn frontier_bytes(plan: Hash, graph: Hash) -> Vec<u8> {
-    frame(
-        (0x91, 0x90),
-        FRONTIER_PREFIX,
-        FRONTIER_DOMAIN,
-        &frontier_fields(plan, graph),
-        0,
-    )
+    frontier_frame(&frontier_fields(plan, graph), 0)
 }
 
 fn frontier(plan: Hash) -> RecomputationFrontierBytesV1 {
@@ -234,16 +142,6 @@ impl InvalidationFields {
     fn parse(&self) -> Result<SuffixInvalidationBytesV1, StoreError> {
         SuffixInvalidationBytesV1::try_from_canonical(self.bytes())
     }
-}
-
-fn invalidation_frame(fields: &[u8], padding: usize) -> Vec<u8> {
-    frame(
-        (0x92, 0x91),
-        INVALIDATION_PREFIX,
-        INVALIDATION_DOMAIN,
-        fields,
-        padding,
-    )
 }
 
 fn drafts() -> PipelineDraftBatchV1 {
@@ -594,7 +492,7 @@ fn command_binds_every_transaction_part() {
     assert_eq!(command.first_tick(), 17);
     assert_eq!(command.first_tick_drafts(), &drafts());
 
-    let receipt = ok(command.committed_receipt(Seq::from_u64(42)));
+    let receipt = ok(command.committed_receipt(&SEAL, Seq::from_u64(42)));
     assert_eq!(receipt.generation(), command.new_generation());
     assert_eq!(receipt.frontier_digest(), input.frontier.digest());
     assert_eq!(receipt.invalidation_digest(), input.invalidation.digest());
@@ -616,7 +514,7 @@ const fn facts() -> CounterfactualFactsV1 {
 #[test]
 fn receipt_binds_its_committed_invalidation() {
     let command = command();
-    let receipt = ok(command.committed_receipt(Seq::from_u64(42)));
+    let receipt = ok(command.committed_receipt(&SEAL, Seq::from_u64(42)));
     assert!(receipt.matches_invalidation(command.invalidation()));
     let same = ok(InvalidationFields::valid(command.frontier(), 3).parse());
     assert!(receipt.matches_invalidation(&same));
@@ -716,12 +614,12 @@ fn receipt_requires_the_fork_head_to_advance() {
     let command = command();
     for head in [0, 40, 41] {
         assert_eq!(
-            command.committed_receipt(Seq::from_u64(head)),
+            command.committed_receipt(&SEAL, Seq::from_u64(head)),
             Err(StoreError::CorruptState)
         );
     }
     assert_eq!(
-        ok(command.committed_receipt(Seq::from_u64(u64::MAX))).first_tick_head(),
+        ok(command.committed_receipt(&SEAL, Seq::from_u64(u64::MAX))).first_tick_head(),
         Seq::from_u64(u64::MAX)
     );
 }
@@ -888,13 +786,13 @@ fn committed_tick_requires_the_fork_head_to_advance() {
     let basis = command().expected_basis();
     for head in [0, 40, 41] {
         assert_eq!(
-            basis.committed_tick(Seq::from_u64(head)),
+            basis.committed_tick(&SEAL, Seq::from_u64(head)),
             Err(StoreError::CorruptState)
         );
     }
     for head in [42, u64::MAX] {
         assert_eq!(
-            basis.committed_tick(Seq::from_u64(head)),
+            basis.committed_tick(&SEAL, Seq::from_u64(head)),
             Ok(CounterfactualTickOutcomeV1::Committed {
                 head: Seq::from_u64(head)
             })
@@ -902,18 +800,36 @@ fn committed_tick_requires_the_fork_head_to_advance() {
     }
 }
 
+/// One read resolution: written generation, quarantine, and the result at
+/// current generation 4.
+type ReadCase = (u64, Option<u64>, Result<bool, StoreError>);
+
+const READ_CASES: [ReadCase; 9] = [
+    (0, None, Ok(true)),
+    (4, None, Ok(true)),
+    (5, None, Err(StoreError::CorruptState)),
+    (4, Some(4), Err(StoreError::CorruptState)),
+    (2, Some(3), Err(StoreError::InvalidArtifactReuse)),
+    (3, Some(3), Err(StoreError::InvalidArtifactReuse)),
+    (4, Some(3), Ok(true)),
+    (1, Some(0), Ok(true)),
+    (0, Some(0), Err(StoreError::InvalidArtifactReuse)),
+];
+
 #[test]
 fn reads_require_the_current_generation_and_hide_quarantined_bytes() {
     let at = ForkGenerationV1 {
         fork: fork(),
         generation: 4,
     };
+    let stored = |written_generation, quarantined_through| StoredCounterfactualArtifactV1::Stored {
+        bytes: vec![1, 2],
+        written_generation,
+        quarantined_through,
+    };
     for current in [3, 5] {
         assert_eq!(
-            at.resolve_read(
-                current,
-                StoredCounterfactualArtifactV1::Authoritative(vec![1])
-            ),
+            at.resolve_read(current, stored(0, None)),
             Err(StoreError::MixedForkGeneration)
         );
     }
@@ -921,13 +837,48 @@ fn reads_require_the_current_generation_and_hide_quarantined_bytes() {
         at.resolve_read(4, StoredCounterfactualArtifactV1::Absent),
         Ok(None)
     );
+    for (written, quarantined, expected) in READ_CASES {
+        let expected = expected.map(|readable| readable.then(|| vec![1, 2]));
+        assert_eq!(
+            at.resolve_read(4, stored(written, quarantined)),
+            expected,
+            "written at {written}, quarantined through {quarantined:?}"
+        );
+    }
+}
+
+#[test]
+fn commands_quarantine_through_their_prior_generation() {
+    assert_eq!(command().quarantines_through(), 3);
+    assert_eq!(command_from(7, 41, Vec::new()).quarantines_through(), 7);
+}
+
+#[test]
+fn receipts_round_trip_through_their_persisted_record() {
+    let command = command();
+    let receipt = ok(command.committed_receipt(&SEAL, Seq::from_u64(42)));
+    let record = receipt.record();
+    assert_eq!(record.generation, command.new_generation());
+    assert_eq!(record.frontier_digest, command.frontier().digest());
+    assert_eq!(record.invalidation_digest, command.invalidation().digest());
+    assert_eq!(record.first_tick, 17);
+    assert_eq!(record.first_tick_head, Seq::from_u64(42));
+    assert_eq!(record.facts, facts());
     assert_eq!(
-        at.resolve_read(4, StoredCounterfactualArtifactV1::Quarantined),
-        Err(StoreError::InvalidArtifactReuse)
+        CounterfactualGenerationReceiptV1::from_record(&SEAL, record),
+        Ok(receipt)
     );
+    let mut first = record;
+    first.generation.generation = 1;
     assert_eq!(
-        at.resolve_read(4, StoredCounterfactualArtifactV1::Authoritative(vec![1, 2])),
-        Ok(Some(vec![1, 2]))
+        ok(CounterfactualGenerationReceiptV1::from_record(&SEAL, first)).generation(),
+        first.generation
+    );
+    let mut zero = record;
+    zero.generation.generation = 0;
+    assert_eq!(
+        CounterfactualGenerationReceiptV1::from_record(&SEAL, zero),
+        Err(StoreError::CorruptState)
     );
 }
 
@@ -947,18 +898,42 @@ fn errors_have_distinct_safe_messages() {
         StoreError::ForkNotFound,
         StoreError::CorruptState,
         StoreError::StorageFailure,
+        StoreError::OutcomeUnknown,
     ];
     let messages: std::collections::BTreeSet<String> =
         errors.iter().map(ToString::to_string).collect();
     assert_eq!(messages.len(), errors.len());
 }
 
+/// A command invalidating `prior` at Fork head `head`, quarantining
+/// `invalid_artifacts`.
+fn command_from(
+    prior: u64,
+    head: u64,
+    invalid_artifacts: Vec<Hash>,
+) -> CounterfactualInvalidationCommandV1 {
+    let mut input = input();
+    let mut fields = InvalidationFields::valid(&input.frontier, prior);
+    fields.commit_seq = head;
+    input.invalidation = ok(fields.parse());
+    input.fork_logical_head = Seq::from_u64(head);
+    input.invalid_artifacts = invalid_artifacts;
+    ok(CounterfactualInvalidationCommandV1::try_new(input))
+}
+
 /// Minimal fake showing the port is implementable without backend types.
 struct FakeStore {
     head: Seq,
     published: Option<(u64, CounterfactualFactsV1)>,
-    artifacts: BTreeMap<Hash, Vec<u8>>,
-    quarantined: Vec<Hash>,
+    /// Bytes and the latest generation that wrote them, per digest.
+    artifacts: BTreeMap<Hash, (Vec<u8>, u64)>,
+    /// Latest generation each digest is quarantined through.
+    quarantined: BTreeMap<Hash, u64>,
+    /// Persisted receipt records by committed generation.
+    receipts: BTreeMap<u64, CounterfactualGenerationRecordV1>,
+    /// When set, the next write lands (`true`) or not (`false`) and then
+    /// reports `OutcomeUnknown`.
+    in_doubt: Option<bool>,
 }
 
 impl FakeStore {
@@ -966,8 +941,10 @@ impl FakeStore {
         Self {
             head: Seq::from_u64(41),
             published: None,
-            artifacts: BTreeMap::from([(hash(10), vec![1]), (hash(20), vec![2])]),
-            quarantined: Vec::new(),
+            artifacts: BTreeMap::from([(hash(10), (vec![1], 0)), (hash(20), (vec![2], 0))]),
+            quarantined: BTreeMap::new(),
+            receipts: BTreeMap::new(),
+            in_doubt: None,
         }
     }
 
@@ -984,6 +961,21 @@ impl FakeStore {
 
     fn head_after(&self, drafts: &PipelineDraftBatchV1) -> Seq {
         Seq::from_u64(self.head.as_u64() + ok(u64::try_from(drafts.drafts().len())))
+    }
+
+    /// Write recomputed bytes at the committed generation.
+    fn write(&mut self, digest: Hash, bytes: Vec<u8>) {
+        let generation = self.published.map_or(0, |(generation, _)| generation);
+        self.artifacts.insert(digest, (bytes, generation));
+    }
+
+    /// Return `outcome`, or `OutcomeUnknown` once after a write set in doubt.
+    fn settle<T>(&mut self, outcome: T) -> Result<T, StoreError> {
+        if self.in_doubt.take().is_some() {
+            Err(StoreError::OutcomeUnknown)
+        } else {
+            Ok(outcome)
+        }
     }
 }
 
@@ -1011,12 +1003,31 @@ impl CounterfactualStorePortV1 for FakeStore {
                 conflict,
             ));
         }
-        let receipt = command.committed_receipt(self.head_after(command.first_tick_drafts()))?;
-        self.published = Some((receipt.generation().generation, persisted.facts));
-        self.head = receipt.first_tick_head();
-        self.quarantined
-            .extend_from_slice(command.invalid_artifacts());
-        Ok(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
+        let receipt =
+            command.committed_receipt(&SEAL, self.head_after(command.first_tick_drafts()))?;
+        if self.in_doubt != Some(false) {
+            let generation = receipt.generation().generation;
+            self.published = Some((generation, persisted.facts));
+            self.head = receipt.first_tick_head();
+            for digest in command
+                .invalid_artifacts()
+                .iter()
+                .chain(command.evictions())
+            {
+                self.quarantined
+                    .insert(*digest, command.quarantines_through());
+            }
+            self.write(
+                command.frontier().digest(),
+                command.frontier().as_bytes().to_vec(),
+            );
+            self.write(
+                command.invalidation().digest(),
+                command.invalidation().as_bytes().to_vec(),
+            );
+            self.receipts.insert(generation, receipt.record());
+        }
+        self.settle(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
             receipt,
         )))
     }
@@ -1031,9 +1042,11 @@ impl CounterfactualStorePortV1 for FakeStore {
         if let Some(conflict) = expected.first_conflict(&persisted) {
             return Ok(CounterfactualTickOutcomeV1::Stale(conflict));
         }
-        let outcome = persisted.committed_tick(self.head_after(drafts))?;
-        self.head = self.head_after(drafts);
-        Ok(outcome)
+        let outcome = persisted.committed_tick(&SEAL, self.head_after(drafts))?;
+        if self.in_doubt != Some(false) {
+            self.head = self.head_after(drafts);
+        }
+        self.settle(outcome)
     }
 
     fn current_fork_generation(&self, fork: TimelineId) -> Result<ForkGenerationV1, StoreError> {
@@ -1050,21 +1063,31 @@ impl CounterfactualStorePortV1 for FakeStore {
         self.basis(fork)
     }
 
+    fn committed_generation_receipt(
+        &self,
+        at: ForkGenerationV1,
+    ) -> Result<Option<CounterfactualGenerationReceiptV1>, StoreError> {
+        self.basis(at.fork)?;
+        self.receipts
+            .get(&at.generation)
+            .map(|record| CounterfactualGenerationReceiptV1::from_record(&SEAL, *record))
+            .transpose()
+    }
+
     fn read_generation_artifact(
         &self,
         at: ForkGenerationV1,
         artifact_digest: Hash,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         let current = self.basis(at.fork)?;
-        let stored = if self.quarantined.contains(&artifact_digest) {
-            StoredCounterfactualArtifactV1::Quarantined
-        } else {
-            self.artifacts
-                .get(&artifact_digest)
-                .map_or(StoredCounterfactualArtifactV1::Absent, |bytes| {
-                    StoredCounterfactualArtifactV1::Authoritative(bytes.clone())
-                })
-        };
+        let stored = self.artifacts.get(&artifact_digest).map_or(
+            StoredCounterfactualArtifactV1::Absent,
+            |(bytes, written_generation)| StoredCounterfactualArtifactV1::Stored {
+                bytes: bytes.clone(),
+                written_generation: *written_generation,
+                quarantined_through: self.quarantined.get(&artifact_digest).copied(),
+            },
+        );
         at.resolve_read(current.generation, stored)
     }
 }
@@ -1128,7 +1151,7 @@ fn port_commits_whole_generation_or_reports_conflict() {
     assert_eq!(
         ok(store.commit_counterfactual_invalidation(&command)),
         CounterfactualInvalidationOutcomeV1::Committed(Box::new(ok(
-            command.committed_receipt(Seq::from_u64(42))
+            command.committed_receipt(&SEAL, Seq::from_u64(42))
         )))
     );
     let current = ok(store.current_fork_generation(fork()));
@@ -1209,4 +1232,112 @@ fn port_appends_later_ticks_only_on_the_expected_basis() {
         store.append_counterfactual_tick(other, &next, &drafts()),
         Err(StoreError::ForkNotFound)
     );
+}
+
+#[test]
+fn recomputed_artifacts_are_readable_at_the_generation_that_rewrote_them() {
+    let mut store = FakeStore::new();
+    store.published = Some((3, facts()));
+    ok(store.commit_counterfactual_invalidation(&command()));
+    let current = ok(store.current_fork_generation(fork()));
+    assert_eq!(
+        store.read_generation_artifact(current, hash(10)),
+        Err(StoreError::InvalidArtifactReuse)
+    );
+    store.write(hash(10), vec![1]);
+    assert_eq!(
+        ok(store.read_generation_artifact(current, hash(10))),
+        Some(vec![1])
+    );
+    let next = command_from(4, 42, vec![hash(10)]);
+    assert_eq!(next.quarantines_through(), 4);
+    let CounterfactualInvalidationOutcomeV1::Committed(receipt) =
+        ok(store.commit_counterfactual_invalidation(&next))
+    else {
+        std::panic::resume_unwind(Box::new("second invalidation did not commit"));
+    };
+    assert_eq!(
+        store.read_generation_artifact(receipt.generation(), hash(10)),
+        Err(StoreError::InvalidArtifactReuse)
+    );
+    for record in [command().frontier().digest(), next.invalidation().digest()] {
+        assert!(ok(store.read_generation_artifact(receipt.generation(), record)).is_some());
+    }
+}
+
+#[test]
+fn in_doubt_invalidations_are_recovered_from_the_committed_receipt() {
+    let command = command();
+    let expected = ok(command.committed_receipt(&SEAL, Seq::from_u64(42)));
+    for landed in [false, true] {
+        let mut store = FakeStore::new();
+        store.published = Some((3, facts()));
+        store.in_doubt = Some(landed);
+        assert_eq!(
+            store.commit_counterfactual_invalidation(&command),
+            Err(StoreError::OutcomeUnknown)
+        );
+        let recovered = ok(store.committed_generation_receipt(command.new_generation()));
+        if landed {
+            assert_eq!(recovered, Some(expected));
+            assert!(expected.matches_invalidation(command.invalidation()));
+        } else {
+            assert_eq!(recovered, None);
+            assert_eq!(
+                ok(store.commit_counterfactual_invalidation(&command)),
+                CounterfactualInvalidationOutcomeV1::Committed(Box::new(expected))
+            );
+        }
+        let earlier = ForkGenerationV1 {
+            fork: fork(),
+            generation: 3,
+        };
+        assert_eq!(ok(store.committed_generation_receipt(earlier)), None);
+    }
+    let mut store = FakeStore::new();
+    store.published = Some((3, facts()));
+    ok(store.commit_counterfactual_invalidation(&command));
+    let mut input = input();
+    let mut fields = InvalidationFields::valid(&input.frontier, 3);
+    fields.commit_tick = 18;
+    input.invalidation = ok(fields.parse());
+    input.first_tick = 18;
+    let other = ok(CounterfactualInvalidationCommandV1::try_new(input));
+    let committed = ok(store.committed_generation_receipt(other.new_generation()));
+    assert!(committed.is_some_and(|receipt| !receipt.matches_invalidation(other.invalidation())));
+    let unknown_fork = ForkGenerationV1 {
+        fork: TimelineId::from_ulid(Ulid::from(77_u128)),
+        generation: 4,
+    };
+    assert_eq!(
+        store.committed_generation_receipt(unknown_fork),
+        Err(StoreError::ForkNotFound)
+    );
+}
+
+#[test]
+fn in_doubt_ticks_are_resolved_from_the_persisted_basis() {
+    for landed in [false, true] {
+        let mut store = FakeStore::new();
+        store.published = Some((4, facts()));
+        let expected = ok(store.current_counterfactual_basis(fork()));
+        store.in_doubt = Some(landed);
+        assert_eq!(
+            store.append_counterfactual_tick(fork(), &expected, &drafts()),
+            Err(StoreError::OutcomeUnknown)
+        );
+        let persisted = ok(store.current_counterfactual_basis(fork()));
+        let conflict = expected.first_conflict(&persisted);
+        if landed {
+            assert_eq!(conflict, Some(InvalidationConflictV1::LogicalHead));
+        } else {
+            assert_eq!(conflict, None);
+            assert_eq!(
+                ok(store.append_counterfactual_tick(fork(), &expected, &drafts())),
+                CounterfactualTickOutcomeV1::Committed {
+                    head: Seq::from_u64(42)
+                }
+            );
+        }
+    }
 }
