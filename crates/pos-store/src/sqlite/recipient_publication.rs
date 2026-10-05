@@ -10,7 +10,7 @@ use thiserror::Error;
 /// One host-authorized request to publish an encrypted Timeline export.
 ///
 /// The caller supplies the opaque host-issued consent capability and the
-/// already-evaluated ADR-060 export authority. The SQLite host rechecks both
+/// already-evaluated ADR-060 export authority. The `SQLite` host rechecks both
 /// while it holds the protected publication boundary.
 pub struct RecipientExportRequestV1<'a> {
     /// Exact subject-owned Timeline to export.
@@ -77,7 +77,7 @@ pub enum RecipientExportPublicationErrorV1 {
     /// The immutable ciphertext object or its catalog binding is unavailable.
     #[error("recipient export artifact is unavailable")]
     ArtifactUnavailable,
-    /// The SQLite adapter, durable directory, erasure fence, or catalog failed.
+    /// The `SQLite` adapter, durable directory, erasure fence, or catalog failed.
     #[error(transparent)]
     Store(#[from] CoreError),
 }

@@ -84,7 +84,7 @@ fn recipient_export_publication_public_contract_fails_closed_without_linux_custo
     };
 
     assert!(matches!(
-        store.publish_recipient_export(&authority, &owner, request),
+        store.publish_recipient_export(&authority, &owner, &request),
         Err(RecipientExportPublicationErrorV1::Store(
             CoreError::Storage(_)
         ))

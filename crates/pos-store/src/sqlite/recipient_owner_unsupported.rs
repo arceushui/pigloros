@@ -88,7 +88,7 @@ impl SqliteStore {
         &mut self,
         _authority: &ConsentAuthority,
         _owner: &RecipientKeyOwnerV1,
-        _request: RecipientExportRequestV1<'_>,
+        _request: &RecipientExportRequestV1<'_>,
     ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
         Err(RecipientExportPublicationErrorV1::Store(
             CoreError::Storage(UNSUPPORTED.to_owned()),
