@@ -11,9 +11,9 @@ fn recipient_export_decryption_public_contract_is_unavailable_without_linux_cust
     let store = SqliteStore::open_in_memory()?;
     let owner = RecipientKeyOwnerV1;
     let descriptor = RecipientKeyDescriptorV1::for_grantee(EntityId::new(), 1, [0; 32])?;
-    assert_eq!(
+    assert!(matches!(
         store.decrypt_recipient_export(&owner, &[], [0; 16], descriptor),
         Err(RecipientExportDecryptionErrorV1::MaterialUnavailable)
-    );
+    ));
     Ok(())
 }
