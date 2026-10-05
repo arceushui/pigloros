@@ -973,6 +973,7 @@ dependencies = [
  "ed25519-dalek",
  "hpke",
  "pos-core",
+ "pos-plugin-release",
  "rand",
  "serde",
  "serde_json",
@@ -1007,6 +1008,16 @@ dependencies = [
  "toml",
  "ulid",
  "url",
+]
+
+[[package]]
+name = "pos-plugin-release"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

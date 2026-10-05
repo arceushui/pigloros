@@ -4,7 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use pos_core::OwnerIdV1;
+use pos_plugin_release::VerifiedReleaseBundleV1;
 use thiserror::Error;
+
+use crate::plugin_manifest::{self, PluginManifestErrorV1};
+use crate::strict_cbor::StrictCborError;
+
+/// PTR1 and PRV1 report no field ordinal.
+type Reader<'a> = crate::strict_cbor::Reader<'a, PluginTrustErrorV1>;
 
 const ROOT_KEY_DOMAIN: &[u8] = b"pigloros/plugin-root-key-id/v1\0";
 const ROOT_SIGNATURE_DOMAIN: &[u8] = b"pigloros/plugin-trust-root/v1\0";
@@ -84,6 +91,16 @@ pub enum PluginTrustErrorV1 {
     /// The release digest or a descriptor digest is effectively revoked.
     #[error("Plugin manifest artifact is revoked")]
     ArtifactRevoked,
+}
+
+impl StrictCborError for PluginTrustErrorV1 {
+    fn invalid_encoding(_ordinal: u8) -> Self {
+        Self::InvalidEncoding
+    }
+
+    fn bounds_exceeded(_ordinal: u8) -> Self {
+        Self::BoundsExceeded
+    }
 }
 
 /// A caller-pinned genesis digest and exact policy scope. #424 authenticates its source.
@@ -286,7 +303,8 @@ impl VerifiedPluginTrustEvidenceV1 {
     /// Returns `RevocationCapacityExhausted` when either terminal cumulative
     /// PRV1 collection is full (including future-effective entries), because
     /// V1 cannot represent another denial;
-    /// `IncompleteManifestProjection`, `ManifestExpired`,
+    /// `IncompleteManifestProjection` (only for a `test-support` fixture
+    /// projection), `ManifestExpired`,
     /// `UnknownPublisherKey`, `PluginIdNotGranted`, `PublisherKeyRevoked`, or
     /// `ArtifactRevoked` for the corresponding failed release check.
     pub fn authorize_release(
@@ -340,27 +358,45 @@ impl VerifiedPluginTrustEvidenceV1 {
 
 /// The complete ADR-103 release projection of one canonical PMF1 manifest.
 ///
-/// Only #401's complete canonical PMF1 parser may construct this value, after
-/// digest validation and after proving from the PMF1 structure that the
-/// descriptor list contains every digest-bearing descriptor reachable from
-/// PMF1 fields 9-20. Its fields are private and this crate exposes no
-/// production constructor, so callers cannot supply an arbitrary interval or
-/// a partial digest list; until #401 lands, release authorization fails closed
-/// because no projection exists.
+/// The only production constructor is [`Self::from_verified_bundle`], which
+/// strictly decodes the complete PMF1 V1 member of one verified OCI release
+/// closure, proves that closure equal to the PMF1 descriptors, recomputes
+/// every inner, manifest, and release digest, and derives the descriptor
+/// digest set from the PMF1 structure (ADR-061 revision 3). Its fields are
+/// crate-private and only that decoder constructs it, so callers cannot supply
+/// an arbitrary interval or a partial digest list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedPluginManifestProjectionV1 {
-    pmf1_digest: [u8; 32],
-    plugin_id: String,
-    owner: OwnerIdV1,
-    role: u64,
-    epoch: u64,
-    not_before: i64,
-    not_after: i64,
-    release_digest: [u8; 32],
-    descriptor_digests: Vec<[u8; 32]>,
+    pub(crate) pmf1_digest: [u8; 32],
+    pub(crate) plugin_id: String,
+    pub(crate) owner: OwnerIdV1,
+    pub(crate) role: u64,
+    pub(crate) epoch: u64,
+    pub(crate) not_before: i64,
+    pub(crate) not_after: i64,
+    pub(crate) release_digest: [u8; 32],
+    pub(crate) descriptor_digests: Vec<[u8; 32]>,
 }
 
 impl ValidatedPluginManifestProjectionV1 {
+    /// Construct the complete projection from one verified OCI release closure.
+    ///
+    /// The PMF1 bytes are the closure's `pmf1` member, so a caller supplies no
+    /// PMF1 bytes, IDs, or digests. The projection binds the complete-PMF1
+    /// BLAKE3 digest, the Plugin ID, the publisher owner, role, and epoch, the
+    /// release interval, the release digest, and both digests of every
+    /// artifact descriptor plus every dependency release digest. It does not
+    /// verify the PMF1 signature or validate artifact content.
+    ///
+    /// # Errors
+    /// Returns the first ADR-061 revision 3 decode, closure, inner-digest, or
+    /// manifest/release-digest failure, and no projection.
+    pub fn from_verified_bundle(
+        bundle: &VerifiedReleaseBundleV1,
+    ) -> Result<Self, PluginManifestErrorV1> {
+        plugin_manifest::project_verified_bundle(bundle)
+    }
+
     fn is_complete(&self) -> bool {
         self.role == 3
             && self.epoch != 0
@@ -378,9 +414,10 @@ impl ValidatedPluginManifestProjectionV1 {
 ///
 /// This type exists only with the `test-support` feature, which
 /// `scripts/check_test_support_features.py` keeps out of deployable dependency
-/// graphs. It lets tests reach every release-query branch, including the
-/// incomplete-projection checks; it is not a PMF1 parser and establishes no
-/// release authority.
+/// graphs. It represents a caller-fabricated projection, so tests can reach
+/// the incomplete-projection checks that a projection built by
+/// [`ValidatedPluginManifestProjectionV1::from_verified_bundle`] never fails;
+/// it is not a PMF1 parser and establishes no release authority.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginManifestProjectionFixtureV1 {
@@ -470,161 +507,10 @@ impl ResolvedPluginTrustAuthorizationV1 {
 }
 
 fn validate_plugin_id(value: &str) -> Result<(), PluginTrustErrorV1> {
-    let bytes = value.as_bytes();
-    if !(1..=MAX_TEXT_BYTES).contains(&bytes.len())
-        || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
-        || !bytes[1..].iter().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'_' | b'/' | b'-')
-        })
-    {
-        return Err(PluginTrustErrorV1::InvalidEncoding);
-    }
-    Ok(())
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn byte(&mut self) -> Result<u8, PluginTrustErrorV1> {
-        let byte = *self
-            .bytes
-            .get(self.offset)
-            .ok_or(PluginTrustErrorV1::InvalidEncoding)?;
-        self.offset += 1;
-        Ok(byte)
-    }
-
-    fn take(&mut self, count: usize) -> Result<&'a [u8], PluginTrustErrorV1> {
-        if count > self.bytes.len() - self.offset {
-            return Err(PluginTrustErrorV1::InvalidEncoding);
-        }
-        let end = self.offset + count;
-        let bytes = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(bytes)
-    }
-
-    fn head(&mut self) -> Result<(u8, u64), PluginTrustErrorV1> {
-        let first = self.byte()?;
-        let major = first >> 5;
-        let small = first & 31;
-        let value = match small {
-            0..=23 => u64::from(small),
-            24 => {
-                let value = u64::from(self.byte()?);
-                if value < 24 {
-                    return Err(PluginTrustErrorV1::InvalidEncoding);
-                }
-                value
-            }
-            25 => {
-                let bytes = self.take(2)?;
-                let value = u64::from(u16::from_be_bytes([bytes[0], bytes[1]]));
-                if u8::try_from(value).is_ok() {
-                    return Err(PluginTrustErrorV1::InvalidEncoding);
-                }
-                value
-            }
-            26 => {
-                let bytes = self.take(4)?;
-                let value = u64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-                if u16::try_from(value).is_ok() {
-                    return Err(PluginTrustErrorV1::InvalidEncoding);
-                }
-                value
-            }
-            27 => {
-                let bytes = self.take(8)?;
-                let value = u64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-                ]);
-                if u32::try_from(value).is_ok() {
-                    return Err(PluginTrustErrorV1::InvalidEncoding);
-                }
-                value
-            }
-            _ => return Err(PluginTrustErrorV1::InvalidEncoding),
-        };
-        Ok((major, value))
-    }
-
-    fn array(&mut self, max: usize) -> Result<usize, PluginTrustErrorV1> {
-        let (major, count) = self.head()?;
-        if major != 4 {
-            return Err(PluginTrustErrorV1::InvalidEncoding);
-        }
-        let count = usize::try_from(count).map_err(|_| PluginTrustErrorV1::BoundsExceeded)?;
-        if count > max {
-            return Err(PluginTrustErrorV1::BoundsExceeded);
-        }
-        Ok(count)
-    }
-
-    fn unsigned(&mut self) -> Result<u64, PluginTrustErrorV1> {
-        let (major, value) = self.head()?;
-        if major != 0 {
-            return Err(PluginTrustErrorV1::InvalidEncoding);
-        }
-        Ok(value)
-    }
-
-    fn signed(&mut self) -> Result<i64, PluginTrustErrorV1> {
-        let (major, value) = self.head()?;
-        match major {
-            0 => i64::try_from(value).map_err(|_| PluginTrustErrorV1::InvalidEncoding),
-            1 => i64::try_from(value)
-                .map(|value| -1 - value)
-                .map_err(|_| PluginTrustErrorV1::InvalidEncoding),
-            _ => Err(PluginTrustErrorV1::InvalidEncoding),
-        }
-    }
-
-    fn text(&mut self, max: usize) -> Result<&'a str, PluginTrustErrorV1> {
-        let (major, length) = self.head()?;
-        if major != 3 {
-            return Err(PluginTrustErrorV1::InvalidEncoding);
-        }
-        let length = usize::try_from(length).map_err(|_| PluginTrustErrorV1::BoundsExceeded)?;
-        if length > max {
-            return Err(PluginTrustErrorV1::BoundsExceeded);
-        }
-        std::str::from_utf8(self.take(length)?).map_err(|_| PluginTrustErrorV1::InvalidEncoding)
-    }
-
-    fn bytes<const N: usize>(&mut self) -> Result<[u8; N], PluginTrustErrorV1> {
-        let (major, length) = self.head()?;
-        if major != 2 || usize::try_from(length) != Ok(N) {
-            return Err(PluginTrustErrorV1::InvalidEncoding);
-        }
-        self.take(N)?
-            .try_into()
-            .map_err(|_| PluginTrustErrorV1::InvalidEncoding)
-    }
-
-    fn optional_bytes<const N: usize>(&mut self) -> Result<Option<[u8; N]>, PluginTrustErrorV1> {
-        if self.bytes.get(self.offset) == Some(&0xf6) {
-            self.offset += 1;
-            Ok(None)
-        } else {
-            self.bytes::<N>().map(Some)
-        }
-    }
-
-    const fn finish(&self) -> Result<(), PluginTrustErrorV1> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(PluginTrustErrorV1::InvalidEncoding)
-        }
+    if plugin_manifest::valid_id_text(value) {
+        Ok(())
+    } else {
+        Err(PluginTrustErrorV1::InvalidEncoding)
     }
 }
 
@@ -657,8 +543,7 @@ fn read_publisher(reader: &mut Reader<'_>) -> Result<PublisherKey, PluginTrustEr
 fn read_optional_publisher(
     reader: &mut Reader<'_>,
 ) -> Result<Option<PublisherKey>, PluginTrustErrorV1> {
-    if reader.bytes.get(reader.offset) == Some(&0xf6) {
-        reader.offset += 1;
+    if reader.null() {
         Ok(None)
     } else {
         read_publisher(reader).map(Some)
@@ -821,7 +706,7 @@ impl PluginTrustRootRecordV1 {
         let keys = read_root_keys(&mut reader, threshold)?;
         let publishers = read_publishers(&mut reader)?;
         let grants = read_grants(&mut reader, &publishers)?;
-        let prefix_end = reader.offset;
+        let prefix_end = reader.offset();
         let signatures = read_signatures(&mut reader)?;
         reader.finish()?;
         Ok(Self {
@@ -964,7 +849,7 @@ impl PluginRevocationRecordV1 {
         let tick = reader.unsigned()?;
         let keys = read_revoked_keys(&mut reader, tick)?;
         let artifacts = read_revoked_artifacts(&mut reader, tick)?;
-        let prefix_end = reader.offset;
+        let prefix_end = reader.offset();
         let signatures = read_signatures(&mut reader)?;
         reader.finish()?;
         Ok(Self {
