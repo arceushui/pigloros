@@ -190,6 +190,17 @@ thread_local! {
 }
 
 #[cfg(feature = "test-support")]
+struct RecipientExportPublicationTestFencePause {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(feature = "test-support")]
+static RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES: std::sync::Mutex<
+    Vec<(TimelineId, RecipientExportPublicationTestFencePause)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(feature = "test-support")]
 struct RecipientExportPublicationTestFaultGuard;
 
 #[cfg(feature = "test-support")]
@@ -198,6 +209,38 @@ impl Drop for RecipientExportPublicationTestFaultGuard {
         RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|fault| fault.set(None));
         RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(|export_id| export_id.set(None));
     }
+}
+
+#[cfg(feature = "test-support")]
+fn pause_recipient_export_publication_after_fences(timeline: TimelineId) -> Result<(), CoreError> {
+    RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES
+        .lock()
+        .map_err(|_| CoreError::Storage("recipient export test pause is unavailable".to_owned()))
+        .map(|mut pauses| {
+            pauses
+                .iter()
+                .position(|(configured, _)| *configured == timeline)
+                .map(|index| pauses.swap_remove(index).1)
+        })
+        .and_then(|pause| {
+            pause.map_or(Ok(()), |pause| {
+                pause
+                    .entered
+                    .send(())
+                    .map_err(|_| {
+                        CoreError::Storage(
+                            "recipient export test pause observer is unavailable".to_owned(),
+                        )
+                    })
+                    .and_then(|()| {
+                        pause.release.recv().map_err(|_| {
+                            CoreError::Storage(
+                                "recipient export test pause release is unavailable".to_owned(),
+                            )
+                        })
+                    })
+            })
+        })
 }
 
 #[cfg(feature = "test-support")]
@@ -986,13 +1029,8 @@ impl SqliteStore {
         ensure_recipient_export_durability(&self.conn)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
         #[cfg(feature = "test-support")]
-        self.apply_recipient_export_publication_test_race(
-            authority,
-            &gate,
-            request.timeline_id,
-            expected_logical_head,
-        )
-        .map_err(RecipientExportPublicationErrorV1::Store)?;
+        self.apply_recipient_export_publication_test_race(request.timeline_id)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
 
         let mut result = Err(RecipientExportPublicationErrorV1::Store(
             CoreError::Storage("recipient export consent fence did not execute".to_owned()),
@@ -1029,10 +1067,7 @@ impl SqliteStore {
     #[cfg(feature = "test-support")]
     fn apply_recipient_export_publication_test_race(
         &mut self,
-        authority: &ConsentAuthority,
-        gate: &ErasureContainmentGateV1,
         timeline: TimelineId,
-        expected_logical_head: Seq,
     ) -> Result<(), CoreError> {
         if take_recipient_export_publication_test_fault(
             RecipientExportPublicationTestFaultV1::SourceHeadChanged,
@@ -1046,21 +1081,6 @@ impl SqliteStore {
                 )],
             )?;
         }
-        if take_recipient_export_publication_test_fault(
-            RecipientExportPublicationTestFaultV1::ConsentRevoked,
-        ) {
-            ConsentGate::fence_timeline_at(
-                authority,
-                timeline,
-                expected_logical_head.as_u64().saturating_add(1),
-            )
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        }
-        if take_recipient_export_publication_test_fault(
-            RecipientExportPublicationTestFaultV1::ErasureBlocked,
-        ) {
-            gate.block_timeline(timeline);
-        }
         Ok(())
     }
 
@@ -1070,6 +1090,9 @@ impl SqliteStore {
         request: &RecipientExportRequestV1<'_>,
         expected_logical_head: Seq,
     ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        #[cfg(feature = "test-support")]
+        pause_recipient_export_publication_after_fences(request.timeline_id)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
         self.recover_recipient_exports_under_writer(owner)?;
         let export_id = self.reserve_recipient_export_id(owner)?;
         self.conn
@@ -1363,7 +1386,7 @@ impl SqliteStore {
             ));
         }
         RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(|configured| {
-            if configured.is_some() {
+            if configured.get().is_some() {
                 return Err(CoreError::Storage(
                     "recipient export test ID is already configured".to_owned(),
                 ));
@@ -1371,6 +1394,43 @@ impl SqliteStore {
             configured.set(Some(export_id));
             Ok(())
         })
+    }
+
+    /// Pause the next test publication for one Timeline after its fences hold.
+    ///
+    /// This exists only behind the nondefault test-support feature so an
+    /// external test can prove that neither competing lifecycle operation
+    /// can pass its real fence before catalog publication linearizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Storage`] when another pause is already configured
+    /// or test synchronization is unavailable.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn pause_recipient_export_publication_after_fences_for_test(
+        &self,
+        timeline: TimelineId,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), CoreError> {
+        RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES
+            .lock()
+            .map_err(|_| {
+                CoreError::Storage("recipient export test pause is unavailable".to_owned())
+            })
+            .and_then(|mut pauses| {
+                if pauses.iter().any(|(configured, _)| *configured == timeline) {
+                    return Err(CoreError::Storage(
+                        "recipient export test pause is already configured".to_owned(),
+                    ));
+                }
+                pauses.push((
+                    timeline,
+                    RecipientExportPublicationTestFencePause { entered, release },
+                ));
+                Ok(())
+            })
     }
 
     /// Inject one narrow recipient-export boundary failure for an acceptance

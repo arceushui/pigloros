@@ -49,6 +49,7 @@ impl CanonicalBytes {
         match bytes.try_into_mut() {
             Ok(mut bytes) => {
                 bytes.as_mut().zeroize();
+                bytes.clear();
                 self.0 = bytes.freeze();
                 true
             }

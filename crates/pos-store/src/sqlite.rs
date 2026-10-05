@@ -3263,11 +3263,18 @@ impl ForkChainRow {
 #[derive(Debug)]
 struct TimelineRow {
     id: String,
-    name: Option<String>,
+    name: Zeroizing<Option<String>>,
     mode: String,
     parent_id: Option<String>,
     fork_seq: Option<i64>,
     head_seq: i64,
+}
+
+struct DecodedTimelineFields {
+    id: TimelineId,
+    mode: TimelineMode,
+    fork_point: Option<(TimelineId, Seq)>,
+    head: Seq,
 }
 
 #[derive(Clone, Copy)]
@@ -3300,7 +3307,7 @@ fn sqlite_usize_or_max(value: i64) -> usize {
 fn read_timeline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimelineRow> {
     Ok(TimelineRow {
         id: row.get(0)?,
-        name: row.get(1)?,
+        name: Zeroizing::new(row.get(1)?),
         mode: row.get(2)?,
         parent_id: row.get(3)?,
         fork_seq: row.get(4)?,
@@ -3308,14 +3315,13 @@ fn read_timeline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimelineRow> {
     })
 }
 
-fn timeline_fields_to_timeline(
+fn decode_timeline_fields(
     id_str: &str,
-    name: Option<String>,
     mode_s: &str,
     parent_id: Option<String>,
     fork_seq: Option<i64>,
     head_seq: i64,
-) -> Result<Timeline, CoreError> {
+) -> Result<DecodedTimelineFields, CoreError> {
     let id = parse_timeline_id(id_str)?;
     let mode = parse_mode(mode_s);
     let fork_point = match (parent_id, fork_seq) {
@@ -3325,16 +3331,37 @@ fn timeline_fields_to_timeline(
         )),
         _ => None,
     };
-    let meta = TimelineMeta {
+    Ok(DecodedTimelineFields {
         id,
         mode,
-        name,
-        owner: None,
         fork_point,
+        head: Seq::from_u64(u64::try_from(head_seq).unwrap_or(0)),
+    })
+}
+
+fn timeline_fields_to_timeline(
+    id_str: &str,
+    mut name: Zeroizing<Option<String>>,
+    mode_s: &str,
+    parent_id: Option<String>,
+    fork_seq: Option<i64>,
+    head_seq: i64,
+) -> Result<Timeline, CoreError> {
+    let fields = decode_timeline_fields(id_str, mode_s, parent_id, fork_seq, head_seq)?;
+    let meta = TimelineMeta {
+        id: fields.id,
+        mode: fields.mode,
+        name: std::mem::take(&mut *name),
+        owner: None,
+        fork_point: fields.fork_point,
     };
     let mut tl = Timeline::new(meta);
-    tl.head = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0));
+    tl.head = fields.head;
     Ok(tl)
+}
+
+fn restore_timeline_name(timeline: &mut Timeline, name: Option<Zeroizing<String>>) {
+    timeline.meta.name = name.map(|mut name| std::mem::take(&mut *name));
 }
 
 impl SqliteStore {
@@ -3520,6 +3547,30 @@ impl SqliteStore {
             self.timeline_contains_geographic_evidence(timeline),
             timeline,
         )
+    }
+
+    fn ensure_timeline_exists(&self, timeline: TimelineId) -> Result<(), CoreError> {
+        self.conn
+            .query_row(
+                "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
+                params![timeline.to_string()],
+                read_timeline_row,
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))
+            .and_then(|row| {
+                row.ok_or(CoreError::TimelineNotFound(timeline))
+                    .and_then(|row| {
+                        decode_timeline_fields(
+                            &row.id,
+                            &row.mode,
+                            row.parent_id,
+                            row.fork_seq,
+                            row.head_seq,
+                        )
+                        .and_then(|fields| self.timeline_owner(fields.id).map(|_| ()))
+                    })
+            })
     }
 
     fn ensure_admin_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
@@ -5153,8 +5204,12 @@ impl SqliteStore {
             row.fork_seq,
             row.head_seq,
         )?;
-        timeline.meta.owner = self.timeline_owner(timeline.id())?;
-        Ok(timeline)
+        let timeline_name = timeline.meta.name.take().map(Zeroizing::new);
+        self.timeline_owner(timeline.id()).map(move |owner| {
+            restore_timeline_name(&mut timeline, timeline_name);
+            timeline.meta.owner = owner;
+            timeline
+        })
     }
 }
 
@@ -5990,12 +6045,8 @@ impl EventStore for SqliteStore {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Export, |store| {
             store
                 .ensure_generic_timeline_visibility(timeline)
-                .and_then(|()| {
-                    let _ = store
-                        .get_timeline(timeline)?
-                        .ok_or(CoreError::TimelineNotFound(timeline))?;
-                    store.read_own_events(timeline, range.from, range.to)
-                })
+                .and_then(|()| store.ensure_timeline_exists(timeline))
+                .and_then(|()| store.read_own_events(timeline, range.from, range.to))
         })
     }
 
@@ -6087,11 +6138,17 @@ impl EventStore for SqliteStore {
             store
                 .get_timeline_for_host_transition_unchecked(id)
                 .and_then(|timeline| {
-                    timeline.map_or(Ok(None), |timeline| {
+                    timeline.map_or(Ok(None), |mut timeline| {
+                        let timeline_name = timeline.meta.name.take().map(Zeroizing::new);
                         crate::generic_timeline_is_visible(
                             store.timeline_contains_geographic_evidence(timeline.id()),
                         )
-                        .map(|visible| visible.then_some(timeline))
+                        .map(move |visible| {
+                            visible.then(|| {
+                                restore_timeline_name(&mut timeline, timeline_name);
+                                timeline
+                            })
+                        })
                     })
                 })
         })

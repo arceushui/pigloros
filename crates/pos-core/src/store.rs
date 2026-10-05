@@ -346,7 +346,7 @@ impl TimelineExport {
     /// Zeroize the export-owned plaintext buffers and strings used for staging.
     ///
     /// Returns false without changing the export when a payload is shared.
-    /// Hosts should check [Self::plaintext_staging_is_exclusively_owned] before they
+    /// Hosts should check [`Self::plaintext_staging_is_exclusively_owned`] before they
     /// materialize any ciphertext.
     pub fn zeroize_plaintext_staging(&mut self) -> bool {
         if !self.plaintext_staging_is_exclusively_owned() {
@@ -1379,7 +1379,11 @@ pub fn export_timeline(
         .require_authoritative_use(crate::ErasureArtifactClassV1::Export, artifact_digest)
         .map_err(|_| CoreError::ArtifactUnavailable)
         .and_then(|()| {
-            export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)
+            export_timeline_using(
+                store.get_timeline(id),
+                || store.read(id, SeqRange::all()),
+                id,
+            )
         })
         .map(|mut export| {
             let was_fork = export.timeline.meta.fork_point.take().is_some();
@@ -1447,7 +1451,7 @@ pub fn export_timeline_raw(
         .and_then(|()| {
             export_timeline_using(
                 store.get_timeline(id),
-                store.read_own(id, SeqRange::all()),
+                || store.read_own(id, SeqRange::all()),
                 id,
             )
         })
@@ -1730,16 +1734,19 @@ pub fn validate_event_signature(event: &Event) -> Result<(), CoreError> {
     }
 }
 
-fn export_timeline_using(
+fn export_timeline_using<F>(
     timeline_result: Result<Option<Timeline>, CoreError>,
-    events_result: Result<Vec<Event>, CoreError>,
+    read_events: F,
     id: TimelineId,
-) -> Result<TimelineExport, CoreError> {
+) -> Result<TimelineExport, CoreError>
+where
+    F: FnOnce() -> Result<Vec<Event>, CoreError>,
+{
     let Some(mut timeline) = timeline_result? else {
         return Err(CoreError::TimelineNotFound(id));
     };
     let timeline_name = timeline.meta.name.take().map(Zeroizing::new);
-    let events = events_result?;
+    let events = read_events()?;
     timeline.meta.name = timeline_name.map(|mut name| std::mem::take(&mut *name));
     Ok(TimelineExport {
         timeline,
