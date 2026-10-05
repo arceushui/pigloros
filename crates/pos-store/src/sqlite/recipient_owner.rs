@@ -3046,6 +3046,7 @@ mod tests {
     };
     use pos_crypto::recipient_export::encrypt_timeline_export_v1;
     use rand::{rngs::StdRng, SeedableRng};
+    use rusqlite::limits::Limit;
     use ulid::Ulid;
 
     use super::*;
@@ -5592,9 +5593,15 @@ mod tests {
             .store
             .conn
             .execute_batch("DELETE FROM recipient_export_pending_v1")?;
-        fixture.store.conn.progress_handler(1, Some(|| true));
+        let previous_limit = fixture
+            .store
+            .conn
+            .set_limit(Limit::SQLITE_LIMIT_LENGTH, 1)?;
         let query_result = reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
-        fixture.store.conn.progress_handler(0, None::<fn() -> bool>);
+        fixture
+            .store
+            .conn
+            .set_limit(Limit::SQLITE_LIMIT_LENGTH, previous_limit)?;
         assert!(query_result.is_err());
         Ok(())
     }
