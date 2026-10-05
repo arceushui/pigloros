@@ -249,10 +249,10 @@ pub struct SqliteStore {
     fork_admission_authority_enabled: bool,
     /// Per-adapter `FAI1`/`FAO1`/session state. It never enters `SQLite`.
     fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1,
-    /// Whether a counterfactual write reported an unknown outcome that no
-    /// later observation of this connection in autocommit has settled; while
-    /// set and the connection is inside a transaction, counterfactual port
-    /// reads are refused.
+    /// Whether a counterfactual write reported an unknown outcome while this
+    /// connection was inside a transaction, and no later observation of it
+    /// in autocommit has settled that; while set and the connection is inside
+    /// a transaction, counterfactual port reads are refused.
     counterfactual_write_in_doubt: std::cell::Cell<bool>,
     #[cfg(test)]
     destruction_transaction_hook:

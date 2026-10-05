@@ -77,14 +77,18 @@
 //! - **Outcome unknown.** A write whose commit or rollback failed is
 //!   `CoreError::StorageOutcomeUnknown`, reported through the crate's shared
 //!   `counterfactual_port_error` as `OutcomeUnknown`; a rejection never hides
-//!   it. That write also marks the store's connection in doubt. While the
-//!   mark is set and the connection is still inside a transaction (one the
-//!   failed write may have left open, or the host's outer transaction holding
-//!   the write's unreleased savepoint), every port read is refused with
-//!   `StorageFailure`, so a recovery read never answers from unsettled state.
-//!   The mark is cleared once the connection is seen in autocommit again, by
-//!   the next port read or by the host beginning a new protected-effect
-//!   interval; the recovery read then answers from settled state.
+//!   it. When that write leaves the connection still inside a transaction
+//!   (one the failed write may have left open, or the host's outer
+//!   transaction holding the write's unreleased savepoint), it marks the
+//!   store's connection in doubt, and while the mark is set and the
+//!   connection is still inside a transaction every port read is refused
+//!   with `StorageFailure`, so a recovery read never answers from unsettled
+//!   state. The mark is cleared once the connection is seen in autocommit
+//!   again, by the next port read or by the host beginning a new
+//!   protected-effect interval; the recovery read then answers from settled
+//!   state. An unknown outcome reported with the connection already back in
+//!   autocommit left nothing open and never sets the mark, so a host that
+//!   later opens a transaction by any means is answered normally.
 //! - **Reads inside a host transaction.** Outside that in-doubt state, a
 //!   port read on a connection already inside a transaction (the host's
 //!   protected-effect interval runs `BEGIN IMMEDIATE` on this connection)
@@ -635,8 +639,10 @@ const READ_TRANSACTION: ReadScopeSqlV1 = ReadScopeSqlV1 {
 const READ_SAVEPOINT: ReadScopeSqlV1 = ReadScopeSqlV1 {
     begin: "SAVEPOINT pigloros_counterfactual_read",
     release: "RELEASE SAVEPOINT pigloros_counterfactual_read",
-    abandon: "ROLLBACK TO SAVEPOINT pigloros_counterfactual_read;
-              RELEASE SAVEPOINT pigloros_counterfactual_read",
+    abandon: concat!(
+        "ROLLBACK TO SAVEPOINT pigloros_counterfactual_read;",
+        "RELEASE SAVEPOINT pigloros_counterfactual_read",
+    ),
 };
 
 /// Run `next` only when the previous staged step accepted.
@@ -984,13 +990,15 @@ impl SqliteStore {
             .set(self.counterfactual_write_in_doubt.get() && !self.conn.is_autocommit());
     }
 
-    /// Settle a write's result; an unknown outcome marks the connection in
-    /// doubt until it is next seen in autocommit.
+    /// Settle a write's result; an unknown outcome reported while the
+    /// connection is still inside a transaction marks it in doubt until it is
+    /// next seen in autocommit. One reported back in autocommit has nothing
+    /// left open, so it is settled at once.
     fn settle_write<T>(&self, staged: Staged<T>) -> Result<T, StoreError> {
         let settled = settle(staged);
+        let unknown = matches!(settled, Err(StoreError::OutcomeUnknown));
         self.counterfactual_write_in_doubt.set(
-            self.counterfactual_write_in_doubt.get()
-                || matches!(settled, Err(StoreError::OutcomeUnknown)),
+            (self.counterfactual_write_in_doubt.get() || unknown) && !self.conn.is_autocommit(),
         );
         settled
     }
@@ -1577,12 +1585,17 @@ mod tests {
             ErasureProtectedEffectDispositionV1::Rollback,
         ));
 
-        // An unknown outcome that left the connection in autocommit is
-        // settled by the recovery read itself.
+        // An unknown outcome that left the connection in autocommit never
+        // marks it in doubt, so reads in a transaction the host opens by
+        // other means than a protected-effect interval are answered.
         assert_eq!(
             store.settle_write::<()>(Err(unknown())),
             Err(StoreError::OutcomeUnknown)
         );
+        assert!(!store.counterfactual_write_in_doubt.get());
+        assert!(store.conn.execute_batch("BEGIN").is_ok());
+        assert_eq!(store.current_fork_generation(fork), Ok(settled));
+        assert!(store.conn.execute_batch("ROLLBACK").is_ok());
         assert_eq!(store.current_fork_generation(fork), Ok(settled));
     }
 
