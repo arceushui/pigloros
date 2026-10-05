@@ -1397,7 +1397,7 @@ fn crafted_cut_chains_select_no_other_cut() -> TestResult {
     let mut retimed = *snapshot.result.seal.as_input();
     retimed.schedule_ns = 1;
     let retimed = LocalCutSealV2::new(retimed)?;
-    let mut reheaded = snapshot.request.result_head_rows.clone();
+    let mut reheaded = snapshot.request.result_head_rows;
     let reheaded_row = reheaded.first_mut().ok_or("missing kind-5 row")?;
     reheaded_row.event_count = 1;
     let reheaded_table = LocalCutHeadsTableV1::result_heads(owner_id(&world), 3, &reheaded)?;
