@@ -39,6 +39,8 @@ pos-conformance = { path = "../pos-conformance", optional = true }
 [dev-dependencies]
 ed25519-dalek = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
+# Test-only SQLite limit control injects query binding failures.
+rusqlite = { workspace = true, features = ["limits"] }
 tempfile = "3"
 
 [[bench]]
