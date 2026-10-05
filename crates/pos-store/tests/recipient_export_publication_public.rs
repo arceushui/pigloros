@@ -52,6 +52,21 @@ fn evaluation() -> TestResult<pos_core::ReplayClaimEvaluationV1> {
     .map_err(|error| error.to_string().into())
 }
 
+fn grant(subject_id: EntityId, grantee_id: EntityId, export_permitted: bool) -> ConsentGrantedV1 {
+    ConsentGrantedV1 {
+        subject_id,
+        grantee_id,
+        purpose: "recipient-export-public-contract".to_owned(),
+        modalities: pos_core::MODALITY_EXPORT,
+        min_geo_resolution: 0,
+        fork_permitted: false,
+        export_permitted,
+        retention_days: 1,
+        expiry_secs: 0,
+        grant_seq: 1,
+    }
+}
+
 fn fixture(export_permitted: bool) -> TestResult<Fixture> {
     let temporary = tempfile::tempdir()?;
     let directory = temporary.path().join("recipient-private");
@@ -77,18 +92,7 @@ fn fixture(export_permitted: bool) -> TestResult<Fixture> {
 
     let authority = ConsentAuthority::new();
     store.bind_consent_authority(authority.append_permit())?;
-    let grant = ConsentGrantedV1 {
-        subject_id: subject,
-        grantee_id: grantee,
-        purpose: "recipient-export-public-contract".to_owned(),
-        modalities: pos_core::MODALITY_EXPORT,
-        min_geo_resolution: 0,
-        fork_permitted: false,
-        export_permitted,
-        retention_days: 1,
-        expiry_secs: 0,
-        grant_seq: 1,
-    };
+    let grant = grant(subject, grantee, export_permitted);
     let token = authority.record_grant_on_timeline(timeline.id(), &grant);
     let owner = RecipientKeyOwnerV1::open(&directory, grantee)?;
     let descriptor = store.enroll_recipient_key(&owner)?;
@@ -185,6 +189,55 @@ fn publication_rejects_a_token_without_export_permission_before_creating_an_obje
     assert!(entries
         .iter()
         .all(|entry| !entry.file_name().to_string_lossy().ends_with(".trx1")));
+    Ok(())
+}
+
+#[test]
+fn publication_rejects_an_authority_that_is_not_bound_to_the_store() -> TestResult {
+    let mut fixture = fixture(true)?;
+    let foreign_authority = ConsentAuthority::new();
+    let foreign_token = foreign_authority.record_grant_on_timeline(
+        fixture.timeline,
+        &grant(fixture.token.subject_id(), fixture.token.grantee_id(), true),
+    );
+    let request = request(
+        fixture.timeline,
+        fixture.descriptor,
+        &fixture.evaluation,
+        &foreign_token,
+    );
+
+    assert!(matches!(
+        fixture
+            .store
+            .publish_recipient_export(&foreign_authority, &fixture.owner, request),
+        Err(RecipientExportPublicationErrorV1::Consent(
+            pos_core::ConsentError::NoConsent
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn publication_rejects_a_recipient_owner_for_another_consent_grantee() -> TestResult {
+    let mut fixture = fixture(true)?;
+    let foreign_directory = fixture.temporary.path().join("foreign-recipient-private");
+    std::fs::create_dir(&foreign_directory)?;
+    std::fs::set_permissions(&foreign_directory, std::fs::Permissions::from_mode(0o700))?;
+    let foreign_owner = RecipientKeyOwnerV1::open(&foreign_directory, EntityId::new())?;
+    let request = request(
+        fixture.timeline,
+        fixture.descriptor,
+        &fixture.evaluation,
+        &fixture.token,
+    );
+
+    assert!(matches!(
+        fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &foreign_owner, request),
+        Err(RecipientExportPublicationErrorV1::RecipientMismatch)
+    ));
     Ok(())
 }
 
