@@ -110,12 +110,12 @@ fn fixture(export_permitted: bool) -> TestResult<Fixture> {
     })
 }
 
-fn request(
+fn request<'a>(
     timeline_id: pos_core::TimelineId,
     recipient: pos_core::RecipientKeyDescriptorV1,
-    evaluation: &pos_core::ReplayClaimEvaluationV1,
-    token: &pos_core::ConsentCapabilityToken,
-) -> RecipientExportRequestV1<'_> {
+    evaluation: &'a pos_core::ReplayClaimEvaluationV1,
+    token: &'a pos_core::ConsentCapabilityToken,
+) -> RecipientExportRequestV1<'a> {
     RecipientExportRequestV1 {
         timeline_id,
         recipient,
@@ -147,7 +147,7 @@ fn publication_is_catalog_visible_and_decryptable_without_importing() -> TestRes
     let publication =
         fixture
             .store
-            .publish_recipient_export(&fixture.authority, &fixture.owner, request)?;
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
     let encoded = fixture
         .store
         .read_recipient_export(&fixture.owner, publication.export_id)?;
@@ -178,7 +178,7 @@ fn publication_rejects_a_token_without_export_permission_before_creating_an_obje
     );
     let error = fixture
         .store
-        .publish_recipient_export(&fixture.authority, &fixture.owner, request)
+        .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
         .err()
         .ok_or("publication unexpectedly succeeded")?;
     assert!(matches!(
@@ -210,7 +210,7 @@ fn publication_rejects_an_authority_that_is_not_bound_to_the_store() -> TestResu
     assert!(matches!(
         fixture
             .store
-            .publish_recipient_export(&foreign_authority, &fixture.owner, request),
+            .publish_recipient_export(&foreign_authority, &fixture.owner, &request),
         Err(RecipientExportPublicationErrorV1::Consent(
             pos_core::ConsentError::NoConsent
         ))
@@ -235,7 +235,7 @@ fn publication_rejects_a_recipient_owner_for_another_consent_grantee() -> TestRe
     assert!(matches!(
         fixture
             .store
-            .publish_recipient_export(&fixture.authority, &foreign_owner, request),
+            .publish_recipient_export(&fixture.authority, &foreign_owner, &request),
         Err(RecipientExportPublicationErrorV1::RecipientMismatch)
     ));
     Ok(())
@@ -253,7 +253,7 @@ fn publication_holds_the_erasure_export_fence() -> TestResult {
     );
     let error = fixture
         .store
-        .publish_recipient_export(&fixture.authority, &fixture.owner, request)
+        .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
         .err()
         .ok_or("publication unexpectedly succeeded")?;
     assert!(matches!(
@@ -275,7 +275,7 @@ fn reader_rejects_a_catalog_visible_ciphertext_whose_digest_changed() -> TestRes
     let publication =
         fixture
             .store
-            .publish_recipient_export(&fixture.authority, &fixture.owner, request)?;
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
     let path = export_file(&fixture.directory, publication.export_id);
     let mut encoded = std::fs::read(&path)?;
     let first = encoded.first_mut().ok_or("TRX1 object is empty")?;

@@ -766,7 +766,7 @@ impl SqliteStore {
     /// Publish one consent-authorized Timeline snapshot as a durable TRX1 object.
     ///
     /// The concrete [`ConsentAuthority`] lock is held first, followed by the
-    /// erasure export fence, the SQLite writer reservation, and then the
+    /// erasure export fence, the `SQLite` writer reservation, and then the
     /// active role-4 registry authorization. The ciphertext is staged and
     /// synced in the owner-bound private directory before a catalog row makes
     /// it visible to readers.
@@ -781,7 +781,7 @@ impl SqliteStore {
         &mut self,
         authority: &ConsentAuthority,
         owner: &RecipientKeyOwnerV1,
-        request: RecipientExportRequestV1<'_>,
+        request: &RecipientExportRequestV1<'_>,
     ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
         if self.consent_authority_permit != Some(authority.append_permit()) {
             return Err(RecipientExportPublicationErrorV1::Consent(
@@ -834,7 +834,7 @@ impl SqliteStore {
                     || {
                         self.publish_recipient_export_under_fences(
                             owner,
-                            &request,
+                            request,
                             expected_logical_head,
                         )
                     },
@@ -856,7 +856,7 @@ impl SqliteStore {
     }
 
     fn publish_recipient_export_under_fences(
-        &mut self,
+        &self,
         owner: &RecipientKeyOwnerV1,
         request: &RecipientExportRequestV1<'_>,
         expected_logical_head: Seq,
@@ -1045,12 +1045,12 @@ impl SqliteStore {
     /// Remove bounded orphan staging and final ciphertext files.
     ///
     /// Recovery never creates catalog entries or reconstructs an export from a
-    /// directory entry. The SQLite catalog remains the only visibility marker.
+    /// directory entry. The `SQLite` catalog remains the only visibility marker.
     ///
     /// # Errors
     ///
     /// Returns a closed error if the durable directory or catalog cannot be
-    /// inspected under the SQLite writer reservation.
+    /// inspected under the `SQLite` writer reservation.
     pub fn recover_recipient_exports(
         &mut self,
         owner: &RecipientKeyOwnerV1,
@@ -1708,7 +1708,7 @@ fn read_recipient_export_ciphertext(
     })
 }
 
-fn is_safe_recipient_export_entry(
+const fn is_safe_recipient_export_entry(
     owner: &RecipientKeyOwnerV1,
     metadata: &rustix::fs::Stat,
 ) -> bool {
