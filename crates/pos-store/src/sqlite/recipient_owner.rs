@@ -5,6 +5,7 @@ use std::{
     ffi::CString,
     fs::File,
     io::{Read, Write},
+    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
 };
 
@@ -21,7 +22,10 @@ use pos_crypto::recipient_export::{
     RecipientExportErrorV1, RecipientTimelineExportV1,
 };
 use pos_crypto::recipient_key::recipient_public_key_from_private_v1;
-use rand::{rngs::SysRng, TryRng};
+use rand::{
+    rngs::{StdRng, SysRng},
+    SeedableRng, TryRng,
+};
 use rusqlite::{Connection, OptionalExtension};
 use rustix::fs::{
     fsync, openat2, renameat_with, statat, unlinkat, AtFlags, Mode, OFlags, RenameFlags,
@@ -825,7 +829,7 @@ impl SqliteStore {
                     || {
                         self.publish_recipient_export_under_fences(
                             owner,
-                            request,
+                            &request,
                             expected_logical_head,
                         )
                     },
@@ -849,7 +853,7 @@ impl SqliteStore {
     fn publish_recipient_export_under_fences(
         &mut self,
         owner: &RecipientKeyOwnerV1,
-        request: RecipientExportRequestV1<'_>,
+        request: &RecipientExportRequestV1<'_>,
         expected_logical_head: Seq,
     ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
         self.conn
@@ -944,7 +948,11 @@ impl SqliteStore {
         }
 
         let export_id = fresh_recipient_export_id()?;
-        let mut rng = SysRng;
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        recipient_random_bytes(&mut *seed).map_err(|error| {
+            RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
+        })?;
+        let mut rng = StdRng::from_seed(*seed);
         let encoded = encrypt_timeline_export_v1(source, recipient, export_id, &mut rng)
             .map_err(RecipientExportPublicationErrorV1::Export)?
             .encode();
