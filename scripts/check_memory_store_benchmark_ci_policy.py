@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import re
 import sys
 from typing import Any
 
@@ -32,6 +33,82 @@ TRUSTED_BASELINE_CONDITION = (
 UNTRUSTED_EVIDENCE_CONDITION = (
     "${{ always() && (github.event_name == 'pull_request' || "
     "github.event_name == 'workflow_dispatch') }}"
+)
+WRITE_MANIFEST_STEP_NAME = "Validate current benchmark evidence and write manifest"
+WRITE_MANIFEST_COMMAND = """set -euo pipefail
+toolchain="$(rustc --version --verbose)"
+python3 scripts/compare_memory_store_benchmarks.py write-manifest \\
+  --csv "$PIGLOROS_BENCH_OUTPUT" \\
+  --output "artifacts/memory-erasure-benchmark-manifest.json" \\
+  --architecture "$(uname -m)" \\
+  --event "$GITHUB_EVENT_NAME" \\
+  --head-branch "$HEAD_BRANCH" \\
+  --head-repository-id "$HEAD_REPOSITORY_ID" \\
+  --head-sha "$HEAD_SHA" \\
+  --repository "$GITHUB_REPOSITORY" \\
+  --repository-id "$GITHUB_REPOSITORY_ID" \\
+  --run-attempt "$GITHUB_RUN_ATTEMPT" \\
+  --runner-image "$ImageOS-$ImageVersion" \\
+  --toolchain "$toolchain" \\
+  --workflow-id "$BENCHMARK_WORKFLOW_ID" \\
+  --workflow-path "$BENCHMARK_WORKFLOW_PATH" \\
+  --workflow-run-id "$GITHUB_RUN_ID"
+"""
+COMPARE_EVIDENCE_STEP_NAME = "Compare PR evidence with the latest trusted main baseline"
+COMPARE_EVIDENCE_CONDITION = "${{ github.event_name == 'pull_request' }}"
+COMPARE_EVIDENCE_COMMAND = """set -euo pipefail
+python3 scripts/compare_memory_store_benchmarks.py compare \\
+  --csv "$PIGLOROS_BENCH_OUTPUT" \\
+  --manifest "artifacts/memory-erasure-benchmark-manifest.json" \\
+  --summary "$GITHUB_STEP_SUMMARY" \\
+  --token "$GITHUB_TOKEN" \\
+  --repository "$GITHUB_REPOSITORY" \\
+  --repository-id "$GITHUB_REPOSITORY_ID" \\
+  --workflow-id "$BENCHMARK_WORKFLOW_ID" \\
+  --workflow-path "$BENCHMARK_WORKFLOW_PATH"
+"""
+BENCHMARK_PATHS = [
+    ".github/workflows/memory-store-benchmark.yml",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "crates/pos-conformance/**",
+    "crates/pos-core/**",
+    "crates/pos-crypto/**",
+    "crates/pos-reference/**",
+    "crates/pos-store/Cargo.toml",
+    "crates/pos-store/benches/**",
+    "crates/pos-store/src/**",
+    "scripts/compare_memory_store_benchmarks.py",
+    "scripts/test_compare_memory_store_benchmarks.py",
+]
+BENCHMARK_TRIGGERS = {
+    "push": {"branches": ["main"], "paths": BENCHMARK_PATHS},
+    "pull_request": {"paths": BENCHMARK_PATHS},
+    "schedule": [{"cron": "17 4 * * 1"}],
+    "workflow_dispatch": None,
+}
+
+
+class GithubActionsLoader(yaml.SafeLoader):
+    """Safely load Actions YAML using its YAML 1.2 boolean spelling."""
+
+
+# PyYAML implements YAML 1.1, where an unquoted ``on`` becomes ``True``. GitHub
+# Actions uses ``on`` as the trigger key, so retain it as a string while keeping
+# ordinary true/false values (for example artifact ``overwrite``) as booleans.
+GithubActionsLoader.yaml_implicit_resolvers = {
+    first_character: [
+        (tag, pattern)
+        for tag, pattern in resolvers
+        if tag != "tag:yaml.org,2002:bool"
+    ]
+    for first_character, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+GithubActionsLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
 )
 
 
@@ -93,7 +170,7 @@ def load_workflow(path: pathlib.Path) -> dict[str, Any]:
     """Decode one Actions workflow before checking its executable structure."""
 
     with path.open(encoding="utf-8") as stream:
-        workflow = yaml.safe_load(stream)
+        workflow = yaml.load(stream, Loader=GithubActionsLoader)
     return require_mapping(workflow, f"workflow {path}")
 
 
@@ -154,6 +231,11 @@ def check_benchmark_workflow(workflow_path: pathlib.Path) -> None:
         "comparator trusted-event policy diverged from the benchmark contract",
     )
     workflow = load_workflow(workflow_path)
+    triggers = require_mapping(workflow.get("on"), "benchmark workflow triggers")
+    require(
+        triggers == BENCHMARK_TRIGGERS,
+        "benchmark triggers must partition main baselines from PR/manual evidence",
+    )
     require(
         workflow.get("permissions") == {"actions": "read", "contents": "read"},
         "benchmark workflow must retain read-only Actions and contents permissions",
@@ -180,6 +262,28 @@ def check_benchmark_workflow(workflow_path: pathlib.Path) -> None:
         checkouts[0]
         == {"uses": CHECKOUT_ACTION, "with": {"ref": BENCHMARK_SOURCE_REF}},
         "benchmark checkout must match manifest HEAD_SHA for every event",
+    )
+
+    manifest_step = named_step(steps, WRITE_MANIFEST_STEP_NAME)
+    expected_manifest_step = {
+        "name": WRITE_MANIFEST_STEP_NAME,
+        "run": WRITE_MANIFEST_COMMAND,
+    }
+    require(
+        manifest_step == expected_manifest_step,
+        "manifest generation must fail closed and write the checked-out HEAD_SHA",
+    )
+
+    comparison_step = named_step(steps, COMPARE_EVIDENCE_STEP_NAME)
+    expected_comparison_step = {
+        "name": COMPARE_EVIDENCE_STEP_NAME,
+        "if": COMPARE_EVIDENCE_CONDITION,
+        "env": {"GITHUB_TOKEN": "${{ github.token }}"},
+        "run": COMPARE_EVIDENCE_COMMAND,
+    }
+    require(
+        comparison_step == expected_comparison_step,
+        "PR comparison must be a blocking, fail-closed evidence check",
     )
 
     trusted_step = named_step(steps, "Upload trusted main benchmark baseline")

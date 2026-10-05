@@ -31,10 +31,8 @@ class MemoryStoreBenchmarkCiPolicyTests(unittest.TestCase):
     """Mutate parsed Actions workflows to prove policy controls are executable."""
 
     def setUp(self) -> None:
-        with CI_WORKFLOW.open(encoding="utf-8") as stream:
-            self.ci_workflow = yaml.safe_load(stream)
-        with BENCHMARK_WORKFLOW.open(encoding="utf-8") as stream:
-            self.benchmark_workflow = yaml.safe_load(stream)
+        self.ci_workflow = CHECKER.load_workflow(CI_WORKFLOW)
+        self.benchmark_workflow = CHECKER.load_workflow(BENCHMARK_WORKFLOW)
 
     def assert_rejected(
         self,
@@ -144,6 +142,115 @@ class MemoryStoreBenchmarkCiPolicyTests(unittest.TestCase):
                 {"HEAD_SHA": "${{ github.sha }}"}
             )
         )
+
+    def test_rejects_non_failing_manifest_step(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.named_benchmark_step(
+                workflow, CHECKER.WRITE_MANIFEST_STEP_NAME
+            ).update({"continue-on-error": True})
+        )
+
+    def test_rejects_disabled_manifest_step(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.named_benchmark_step(
+                workflow, CHECKER.WRITE_MANIFEST_STEP_NAME
+            ).update({"if": False})
+        )
+
+    def test_rejects_commented_manifest_command(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.named_benchmark_step(
+                workflow, CHECKER.WRITE_MANIFEST_STEP_NAME
+            ).update({"run": "# manifest generation disabled\n"})
+        )
+
+    def test_rejects_manifest_head_sha_argument_drift(self) -> None:
+        def replace_head_sha(workflow: dict[str, Any]) -> None:
+            manifest = self.named_benchmark_step(
+                workflow, CHECKER.WRITE_MANIFEST_STEP_NAME
+            )
+            manifest["run"] = manifest["run"].replace(
+                '--head-sha "$HEAD_SHA"', '--head-sha "$GITHUB_SHA"'
+            )
+
+        self.assert_rejected(mutate_benchmark=replace_head_sha)
+
+    def test_rejects_non_failing_comparison_step(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.named_benchmark_step(
+                workflow, CHECKER.COMPARE_EVIDENCE_STEP_NAME
+            ).update({"continue-on-error": True})
+        )
+
+    def test_rejects_disabled_comparison_step(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.named_benchmark_step(
+                workflow, CHECKER.COMPARE_EVIDENCE_STEP_NAME
+            ).update({"if": False})
+        )
+
+    def test_rejects_commented_comparison_command(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.named_benchmark_step(
+                workflow, CHECKER.COMPARE_EVIDENCE_STEP_NAME
+            ).update({"run": "# comparison disabled\n"})
+        )
+
+    def test_rejects_changed_comparison_command(self) -> None:
+        def replace_comparison(workflow: dict[str, Any]) -> None:
+            comparison = self.named_benchmark_step(
+                workflow, CHECKER.COMPARE_EVIDENCE_STEP_NAME
+            )
+            comparison["run"] = "exit 0\n"
+
+        self.assert_rejected(mutate_benchmark=replace_comparison)
+
+    def test_rejects_widened_push_branch_scope(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: workflow["on"]["push"].update(
+                {"branches": ["main", "feature"]}
+            )
+        )
+
+    def test_rejects_narrowed_push_branch_scope(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: workflow["on"]["push"].update(
+                {"branches": ["release"]}
+            )
+        )
+
+    def test_rejects_changed_scheduled_execution(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: workflow["on"].update(
+                {"schedule": [{"cron": "0 0 * * *"}]}
+            )
+        )
+
+    def test_rejects_added_benchmark_event(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: workflow["on"].update(
+                {"workflow_call": None}
+            )
+        )
+
+    def test_rejects_removed_benchmark_event(self) -> None:
+        def remove_schedule(workflow: dict[str, Any]) -> None:
+            del workflow["on"]["schedule"]
+
+        self.assert_rejected(mutate_benchmark=remove_schedule)
+
+    def test_rejects_changed_benchmark_path_scope(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: workflow["on"]["pull_request"].update(
+                {"paths": ["docs/**"]}
+            )
+        )
+
+    def test_rejects_widened_benchmark_path_scope(self) -> None:
+        def widen_paths(workflow: dict[str, Any]) -> None:
+            workflow["on"]["pull_request"]["paths"].append("docs/**")
+
+        self.assert_rejected(mutate_benchmark=widen_paths)
 
     def test_rejects_baseline_artifact_name_drift(self) -> None:
         self.assert_rejected(
