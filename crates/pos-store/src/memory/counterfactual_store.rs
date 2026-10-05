@@ -274,6 +274,15 @@ struct StagedTickV1 {
     head: Seq,
 }
 
+/// Map a fenced effect's storage error onto the port and flatten its result.
+fn fenced_result<T>(
+    result: Result<Result<T, CounterfactualStoreErrorV1>, CoreError>,
+) -> Result<T, CounterfactualStoreErrorV1> {
+    result
+        .map_err(|error| counterfactual_port_error(&error))
+        .and_then(std::convert::identity)
+}
+
 /// The inherited logical prefix of one Timeline state.
 fn logical_prefix(state: &TimelineState) -> u64 {
     state
@@ -438,13 +447,12 @@ impl CounterfactualStorePortV1 for MemoryStore {
         command: &CounterfactualInvalidationCommandV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
         let fork = command.fork();
-        self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
+        let write = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
             store
                 .ensure_generic_fork_append_is_rejected(fork)
                 .map(|()| store.commit_visible_counterfactual(command))
-        })
-        .map_err(|error| counterfactual_port_error(&error))
-        .and_then(std::convert::identity)
+        });
+        fenced_result(write)
     }
 
     fn append_counterfactual_tick(
@@ -453,54 +461,50 @@ impl CounterfactualStorePortV1 for MemoryStore {
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
     ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
-        self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
+        let write = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
             store
                 .ensure_generic_fork_append_is_rejected(fork)
                 .map(|()| store.append_visible_counterfactual_tick(fork, expected, drafts))
-        })
-        .map_err(|error| counterfactual_port_error(&error))
-        .and_then(std::convert::identity)
+        });
+        fenced_result(write)
     }
 
     fn current_fork_generation(
         &self,
         fork: TimelineId,
     ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1> {
-        self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
+        let read = self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
             Ok(store
                 .counterfactual_fork(fork)
                 .map(|state| ForkGenerationV1 {
                     fork,
                     generation: state.generation,
                 }))
-        })
-        .map_err(|error| counterfactual_port_error(&error))
-        .and_then(std::convert::identity)
+        });
+        fenced_result(read)
     }
 
     fn current_counterfactual_basis(
         &self,
         fork: TimelineId,
     ) -> Result<CounterfactualBasisV1, CounterfactualStoreErrorV1> {
-        self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
+        let read = self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
             Ok(store.persisted_counterfactual_basis(fork))
-        })
-        .map_err(|error| counterfactual_port_error(&error))
-        .and_then(std::convert::identity)
+        });
+        fenced_result(read)
     }
 
     fn committed_generation_receipt(
         &self,
         at: ForkGenerationV1,
     ) -> Result<Option<CounterfactualGenerationReceiptV1>, CounterfactualStoreErrorV1> {
-        self.with_erasure_read_fence(at.fork, ErasureProtectedOperationV1::Read, |store| {
+        let fork = at.fork;
+        let read = self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
             Ok(store
-                .counterfactual_fork(at.fork)
+                .counterfactual_fork(fork)
                 .map(|state| state.receipts.get(&at.generation).copied()))
-        })
-        .map_err(|error| counterfactual_port_error(&error))
-        .and_then(std::convert::identity)
-        .and_then(|record| {
+        });
+        fenced_result(read).and_then(|record| {
             record
                 .map(|record| {
                     CounterfactualGenerationReceiptV1::from_record(&COUNTERFACTUAL_SEAL, record)
@@ -514,13 +518,13 @@ impl CounterfactualStorePortV1 for MemoryStore {
         at: ForkGenerationV1,
         artifact_digest: Hash,
     ) -> Result<Option<Vec<u8>>, CounterfactualStoreErrorV1> {
-        self.with_erasure_read_fence(at.fork, ErasureProtectedOperationV1::Read, |store| {
+        let fork = at.fork;
+        let read = self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
             Ok(store
-                .counterfactual_fork(at.fork)
+                .counterfactual_fork(fork)
                 .and_then(|state| at.resolve_read(state.generation, state.stored(artifact_digest))))
-        })
-        .map_err(|error| counterfactual_port_error(&error))
-        .and_then(std::convert::identity)
+        });
+        fenced_result(read)
     }
 }
 
@@ -841,17 +845,27 @@ mod tests {
     }
 
     /// Fork state, Events, chain head, and Event ID count of one Fork.
-    type ForkSnapshot = (Option<CounterfactualForkStateV1>, Vec<Event>, Hash, usize);
+    #[derive(Debug, PartialEq, Eq)]
+    struct ForkSnapshot {
+        /// The Fork's counterfactual state, if published.
+        state: Option<CounterfactualForkStateV1>,
+        /// The Fork Timeline's own Events.
+        events: Vec<Event>,
+        /// The Fork Timeline's chain head.
+        chain_head: Hash,
+        /// How many Event IDs the store has recorded.
+        event_id_count: usize,
+    }
 
     /// Snapshot one Fork to prove nothing committed.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn snapshot(store: &MemoryStore, fork: TimelineId) -> ForkSnapshot {
-        (
-            store.counterfactual_forks.get(&fork).cloned(),
-            store.state(fork).events.clone(),
-            store.state(fork).chain_head,
-            store.event_ids.len(),
-        )
+        ForkSnapshot {
+            state: store.counterfactual_forks.get(&fork).cloned(),
+            events: store.state(fork).events.clone(),
+            chain_head: store.state(fork).chain_head,
+            event_id_count: store.event_ids.len(),
+        }
     }
 
     #[test]
