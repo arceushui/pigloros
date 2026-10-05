@@ -15,10 +15,7 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "linux")]
-use std::os::{
-    fd::AsRawFd,
-    unix::fs::symlink,
-};
+use std::os::{fd::AsRawFd, unix::fs::symlink};
 
 #[cfg(target_os = "linux")]
 use pos_reference::evaluator_build_identity::{
@@ -551,8 +548,9 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
     // Observing the loaded image orders the replacement after exec whenever the
     // evaluator is still running; the evaluator reads only regular files, so no
     // public input can hold it at the identity check. The binding itself is
-    // timing-independent: it digests /proc/self/exe, never the launcher path. Remove the symlink before installing
-    // the replacement so filesystems that reject an overwrite with ETXTBSY pass.
+    // timing-independent: it digests /proc/self/exe, never the launcher path.
+    // Remove the symlink before installing the replacement so filesystems that
+    // reject an overwrite with ETXTBSY pass.
     wait_for_child_exec(
         &mut child,
         Path::new(env!("CARGO_BIN_EXE_pos-reference-evaluator")),
