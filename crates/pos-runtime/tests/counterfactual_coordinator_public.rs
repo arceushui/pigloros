@@ -527,10 +527,6 @@ type FactsCase = (
     usize,
 );
 
-const fn untampered(_: &mut RecomputationFrontierV1) -> TamperResult {
-    Ok(())
-}
-
 fn graph_error(error: DependencyGraphErrorV1) -> AdmissionError {
     match error {
         DependencyGraphErrorV1::DependencyGraphIncomplete(coordinate) => {
@@ -584,7 +580,7 @@ impl Source {
         Ok(Self {
             nodes,
             edges,
-            tamper: untampered,
+            tamper: reseal,
             extra_outputs: Vec::new(),
             calls: 0,
         })
