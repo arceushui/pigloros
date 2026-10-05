@@ -23,8 +23,11 @@ impl LocalBindingFixture {
             limits[10 + offset] =
                 Value::Array(vec![integer(10 + u64::try_from(offset)?), integer(value)]);
         }
-        let policy =
-            launch_policy_with_limits(wrapped_digest(&fixture.sim1)?, u64::from(mode.code()), limits)?;
+        let policy = launch_policy_with_limits(
+            wrapped_digest(&fixture.sim1)?,
+            u64::from(mode.code()),
+            limits,
+        )?;
         fixture.lps1 =
             redigest_unsigned_field(&policy, "LPS1", 6, Value::Array(ordered(capabilities)?))?;
         fixture.policy = fixture.policy_for_image(&fixture.sim1, &fixture.lps1)?;
@@ -183,16 +186,29 @@ fn local_network_requires_unique_matching_bounded_endpoint_capabilities() -> Tes
     let endpoint = local_endpoint(&[127, 0, 0, 1], 443, 10, 10);
     let duplicate = local_endpoint(&[127, 0, 0, 1], 444, 10, 10);
     for capabilities in [vec![], vec![endpoint.clone(), duplicate]] {
-        let fixture =
-            LocalBindingFixture::new(ExecutionMode::Local, capabilities, vec![local_plan(0, 3, 4)?], [100; 3])?;
+        let fixture = LocalBindingFixture::new(
+            ExecutionMode::Local,
+            capabilities,
+            vec![local_plan(0, 3, 4)?],
+            [100; 3],
+        )?;
         assert!(fixture.bind().is_err());
     }
     for plan in [local_plan(0, 11, 4)?, local_plan(0, 3, 11)?] {
-        let fixture = LocalBindingFixture::new(ExecutionMode::Local, vec![endpoint.clone()], vec![plan], [100; 3])?;
+        let fixture = LocalBindingFixture::new(
+            ExecutionMode::Local,
+            vec![endpoint.clone()],
+            vec![plan],
+            [100; 3],
+        )?;
         assert!(fixture.bind().is_err());
     }
-    let fixture =
-        LocalBindingFixture::new(ExecutionMode::Local, vec![endpoint], vec![local_plan(0, 10, 10)?], [100; 3])?;
+    let fixture = LocalBindingFixture::new(
+        ExecutionMode::Local,
+        vec![endpoint],
+        vec![local_plan(0, 10, 10)?],
+        [100; 3],
+    )?;
     assert_eq!(fixture.bind()?.exchanges().len(), 1);
     Ok(())
 }
