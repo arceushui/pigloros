@@ -105,8 +105,7 @@ const PROJECTIONS: [[u8; 32]; 2] = [[0xc2; 32], [0xc3; 32]];
 const INTERVENTION_A_ID: [u8; 16] = [1; 16];
 const INTERVENTION_B_ID: [u8; 16] = [2; 16];
 const TICK_EVENT_TYPE: &str = "counterfactual.tick";
-const LONGEST_TYPE_BYTES: [u8; MAX_FORK_EVENT_TYPE_BYTES_V1] =
-    [b't'; MAX_FORK_EVENT_TYPE_BYTES_V1];
+const LONGEST_TYPE_BYTES: [u8; MAX_FORK_EVENT_TYPE_BYTES_V1] = [b't'; MAX_FORK_EVENT_TYPE_BYTES_V1];
 const LONG_TYPE_BYTES: [u8; MAX_FORK_EVENT_TYPE_BYTES_V1 + 1] =
     [b't'; MAX_FORK_EVENT_TYPE_BYTES_V1 + 1];
 

@@ -1266,7 +1266,10 @@ fn failed_tick_commits_nothing_and_retries_deterministically<B: Backend>() -> Te
             let mut setup = prepare::<B>()?;
             let mut attempt = Stager::failing(fault_tick, fault);
             let failed = run(&mut setup, &mut attempt)?;
-            assert_eq!(attempt.ticks(), (FRONTIER_TICK + 1..=fault_tick).collect::<Vec<_>>());
+            assert_eq!(
+                attempt.ticks(),
+                (FRONTIER_TICK + 1..=fault_tick).collect::<Vec<_>>()
+            );
             assert_failed_at(&setup, &failed, failure, code, fault_tick)?;
 
             // The failure is explicit and repeatable until the Tick succeeds,
@@ -1278,7 +1281,10 @@ fn failed_tick_commits_nothing_and_retries_deterministically<B: Backend>() -> Te
 
             let mut finish = Stager::default();
             assert_eq!(run(&mut setup, &mut finish)?, reference);
-            assert_eq!(finish.ticks(), (fault_tick..=HORIZON_TICK).collect::<Vec<_>>());
+            assert_eq!(
+                finish.ticks(),
+                (fault_tick..=HORIZON_TICK).collect::<Vec<_>>()
+            );
             assert_eq!(finish.seen.first(), attempt.seen.last());
         }
     }
