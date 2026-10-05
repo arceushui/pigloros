@@ -20,7 +20,7 @@ use pos_runtime::{
 use super::{
     harness::Capture,
     support::{
-        draft, events, expect_err, pass, persona_token, stage, stores, FixturePlugin,
+        ancestry, draft, events, expect_err, pass, persona_token, stage, stores, FixturePlugin,
         ScriptedDriver, TestOk,
     },
 };
@@ -444,6 +444,7 @@ pub fn invalid_prefix_discards_the_pass() -> Capture {
         let head = backend.logical_head(timeline).test_ok();
         let error = expect_err(registry.step_all_anchored_protected(
             timeline,
+            &ancestry(backend.as_ref(), timeline),
             head,
             token,
             0,

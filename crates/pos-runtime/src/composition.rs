@@ -208,6 +208,13 @@ pub enum PluginCompositionErrorV1 {
     /// type in one registry. The error names the type, not the incumbent.
     #[error("Event type '{event_type}' has more than one owner")]
     DuplicateEventTypeOwner { event_type: String },
+    /// A cursor-based Driver subscribes to a consent-sensitive Event type.
+    ///
+    /// ADR-021 Revision 4 Decision 1: a scheduled Driver that does not read
+    /// the full verified prefix may not subscribe to a consent-sensitive
+    /// type. The error names the first such subscription.
+    #[error("cursor-based Driver subscribes to consent-sensitive Event type '{event_type}'")]
+    CursorSubscriptionToConsentSensitiveType { event_type: String },
     #[error("required Plugin implementation {plugin_id} is not registered")]
     MissingImplementation { plugin_id: PluginId },
     #[error("required Plugin implementation {plugin_id} was not registered through a pinned seam")]

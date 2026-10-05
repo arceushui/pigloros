@@ -1394,8 +1394,12 @@ impl ErasureExecutionHostV1 {
         self.gate.clone()
     }
 
-    #[cfg(test)]
-    pub(crate) fn freeze_timeline_for_test(&self, timeline: TimelineId) {
+    /// Mark one Timeline access-frozen in this host's containment gate.
+    ///
+    /// This is available only to test targets. Production hosts derive
+    /// frozen scope from verified coordinator state instead.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn freeze_timeline_for_test(&self, timeline: TimelineId) {
         self.gate.freeze_timeline_for_test(timeline);
     }
 
@@ -3015,6 +3019,11 @@ pub struct ErasureCommandSenderV1<'host> {
 }
 
 impl ErasureCommandSenderV1<'_> {
+    /// Fence one authorization decision on a single Timeline.
+    ///
+    /// This is single-Timeline on purpose. It evaluates caller-supplied
+    /// authority and consent records and reads no stitched Fork content, so
+    /// ancestor gating belongs to the gated reads that produced those records.
     fn with_authorization_fence<T>(
         &mut self,
         target_timeline: TimelineId,
@@ -4102,6 +4111,55 @@ impl ErasureReadSenderV1<'_> {
         effect: &mut dyn FnMut(&mut Self),
     ) -> Result<(), ErasureHostErrorV1> {
         with_sender_protected_effect_fence(self, timeline, operation, effect)
+    }
+
+    /// Return one Timeline's Fork ancestry, nearest first, under the current
+    /// inventory generation.
+    ///
+    /// The chain comes from the host store through [`pos_core::fork_ancestry()`].
+    ///
+    /// # Errors
+    /// Returns only payload-free host errors, including the closed erasure
+    /// error when a member's own `Read` is denied.
+    pub fn fork_ancestry(
+        &mut self,
+        timeline: TimelineId,
+    ) -> Result<Vec<TimelineMeta>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        pos_core::fork_ancestry(&*self.host.store.host_store(), timeline).map_store_error()
+    }
+
+    /// Run one read-only protected effect over a Timeline's stitched history.
+    ///
+    /// The effect runs under `timeline`'s fence only while every scope in its
+    /// Fork ancestry, from [`Self::fork_ancestry`], also permits `operation`
+    /// (ADR-021 Revision 4 Decision 3). It does not run when any contributing
+    /// scope denies.
+    ///
+    /// # Errors
+    /// Returns the payload-free host errors of
+    /// [`Self::with_protected_effect_fence`], or the closed erasure error of
+    /// the first denying scope.
+    pub fn with_protected_ancestry_fence(
+        &mut self,
+        timeline: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        effect: &mut dyn FnMut(&mut Self),
+    ) -> Result<(), ErasureHostErrorV1> {
+        let ancestry = self.fork_ancestry(timeline)?;
+        let gate = Arc::clone(&self.host.gate);
+        let mut decision = Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable);
+        let mut gated = |sender: &mut Self| {
+            decision = pos_core::with_fork_ancestry_fence(
+                &*gate,
+                timeline,
+                &ancestry,
+                operation,
+                &mut || effect(sender),
+            );
+        };
+        with_sender_protected_effect_fence(self, timeline, operation, &mut gated)
+            .and_then(|()| decision.map_err(ErasureHostErrorV1::from))
     }
 
     /// Read a bounded Timeline range under the current inventory generation.

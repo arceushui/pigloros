@@ -21,8 +21,8 @@ use pos_runtime::{
 use super::{
     harness::Capture,
     support::{
-        draft, events, expect_err, gated_registry, pass, stores, FixturePlugin, ScriptedDriver,
-        TestOk,
+        ancestry, draft, events, expect_err, gated_registry, pass, stores, FixturePlugin,
+        ScriptedDriver, TestOk,
     },
 };
 
@@ -84,7 +84,12 @@ fn anchored(
     timeline: TimelineId,
 ) -> RuntimeError {
     let head = backend.logical_head(timeline).test_ok();
-    expect_err(registry.step_all_anchored_with_events(timeline, head, &[]))
+    expect_err(registry.step_all_anchored_with_events(
+        timeline,
+        &ancestry(backend, timeline),
+        head,
+        &[],
+    ))
 }
 
 /// Stage an empty participant-authorized pass at the store's Logical Head.
@@ -94,7 +99,13 @@ fn authorized(
     timeline: TimelineId,
 ) -> RuntimeError {
     let head = backend.logical_head(timeline).test_ok();
-    expect_err(registry.stage_authorized_scheduled_pass(timeline, head, &[], &[]))
+    expect_err(registry.stage_authorized_scheduled_pass(
+        timeline,
+        &ancestry(backend, timeline),
+        head,
+        &[],
+        &[],
+    ))
 }
 
 /// PCF-R3-009: a scheduled Driver with no profile assignment is rejected at
@@ -161,14 +172,24 @@ pub fn participant_bound_driver_never_stages_anchored() -> Capture {
         capture.record(
             store,
             "cadenced",
-            expect_err(registry.tick_cadenced_anchored_with_events(timeline, 0, head, &[])),
+            expect_err(registry.tick_cadenced_anchored_with_events(
+                timeline,
+                &ancestry(backend.as_ref(), timeline),
+                0,
+                head,
+                &[],
+            )),
         );
         capture.record(
             store,
             "local-host",
             expect_err(pass(&mut registry, backend.as_mut(), timeline, None)),
         );
-        capture.record(store, "unanchored", expect_err(registry.step_all(timeline)));
+        capture.record(
+            store,
+            "unanchored",
+            expect_err(registry.step_all(timeline, &ancestry(backend.as_ref(), timeline))),
+        );
         capture.record(store, "driver.steps/aborts", invocations(&[&participant]));
         capture.record(store, "committed", events(backend.as_ref(), timeline).len());
     }

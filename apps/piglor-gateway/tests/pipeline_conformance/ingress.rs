@@ -26,7 +26,7 @@ use pos_store::{sqlite::SqliteStore, StoreConfig};
 use super::{
     harness::Capture,
     support::{
-        draft, events, exact_claim, expect_err, experiment_stores, gated_registry, pass,
+        ancestry, draft, events, exact_claim, expect_err, experiment_stores, gated_registry, pass,
         profile_tag, stage, stores, CountingApprover, FailingWritePort, FixturePlugin,
         LostOutcomePort, ScriptedDriver, TestOk,
     },
@@ -645,8 +645,12 @@ pub fn replay_never_resubmits() -> Capture {
         };
         register_action_plugin(&mut replay, &fixture.approvals, Some(replay_driver));
         replay.fold_events(timeline, &committed);
-        let replay_step =
-            expect_err(replay.step_all_anchored_with_events(timeline, head, &committed));
+        let replay_step = expect_err(replay.step_all_anchored_with_events(
+            timeline,
+            &ancestry(fixture.store.as_ref(), timeline),
+            head,
+            &committed,
+        ));
         let replay_submit = expect_err(replay.submit_action(timeline, &proposal(entity, b"move")));
 
         capture.record(store, "live.committed", committed.len());

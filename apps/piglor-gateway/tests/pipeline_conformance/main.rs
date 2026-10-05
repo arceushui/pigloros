@@ -7,10 +7,12 @@
 //! ADR-021 Revision 3 observation profiles and their composition-time
 //! assignment (#504), participant-authorized recovery (#507), draft and
 //! exclusive Event-type ownership (#484, #486, ADR-024 Revision 1), source
-//! quarantine (#493, ADR-024 Revision 2) and revocation persistence
-//! (#483). Each case runs only through public seams, on `MemoryStore` and
-//! `SQLite` wherever a store is involved, and its expected observations are
-//! data in the manifest.
+//! quarantine (#493, ADR-024 Revision 2), revocation persistence (#483),
+//! the ADR-021 Revision 4 consent-sensitive Driver subscriptions (#494)
+//! and inherited-lineage erasure gating of Fork reads and passes (#499,
+//! ADR-021 Revision 4 Decision 3). Each case runs only through public seams,
+//! on `MemoryStore` and `SQLite` wherever a store is involved, and its
+//! expected observations are data in the manifest.
 //!
 //! The suite fails closed: an unknown manifest version or field, a changed
 //! fixture byte, a skipped mandatory case, a missing or unexpected capture,
@@ -18,10 +20,12 @@
 //! declared tag is a failure. Community Plugin-host cases are #489.
 
 pub mod composition;
+pub mod consent_subscriptions;
 pub mod eval_seam;
 pub mod gateway;
 pub mod harness;
 pub mod ingress;
+pub mod inherited_scope;
 pub mod nonparticipant;
 pub mod ownership;
 pub mod participant_recovery;
@@ -40,10 +44,10 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "bc5018ae994f50c508af50c04627cc5d4aa1d46041f19cba079ecf11c1e5ab8c";
+const MANIFEST_SHA256: &str = "2c51b6ec1e371d2269e39499b4a7aade344767d7e87af908ae4764fc7fe68409";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 49] = [
+const RUNNERS: [(&str, Runner); 58] = [
     ("PCF-ING-001", ingress::ingress_parity),
     ("PCF-ING-002", ingress::human_admission_receipt),
     ("PCF-ING-003", gateway::first_party_has_no_privileged_route),
@@ -82,6 +86,26 @@ const RUNNERS: [(&str, Runner); 49] = [
         composition::participant_bound_driver_never_stages_anchored,
     ),
     ("PCF-R3-011", composition::mixed_composition_is_rejected),
+    (
+        "PCF-R4-001",
+        consent_subscriptions::cursor_modality_subscription_is_rejected,
+    ),
+    (
+        "PCF-R4-002",
+        consent_subscriptions::cursor_fork_and_retention_subscriptions_are_rejected,
+    ),
+    (
+        "PCF-R4-003",
+        consent_subscriptions::verified_prefix_delivery_loses_nothing,
+    ),
+    (
+        "PCF-R4-004",
+        consent_subscriptions::cursor_subscription_to_ordinary_types_is_unchanged,
+    ),
+    (
+        "PCF-R4-005",
+        consent_subscriptions::registration_snapshot_governs,
+    ),
     ("PCF-REG-001", ownership::second_claimant_rejected),
     ("PCF-REG-002", ownership::duplicate_declaration_rejected),
     ("PCF-REG-003", ownership::host_type_not_claimable),
@@ -129,6 +153,22 @@ const RUNNERS: [(&str, Runner); 49] = [
     ("PCF-REV-001", revocation::learned_revocation_is_persisted),
     ("PCF-REV-002", revocation::equal_epochs_distinct_revisions),
     ("PCF-REV-003", revocation::cross_connection_staleness),
+    (
+        "PCF-R4-006",
+        inherited_scope::frozen_ancestor_fails_pass_and_read,
+    ),
+    (
+        "PCF-R4-007",
+        inherited_scope::completed_ancestor_follows_persisted_state,
+    ),
+    (
+        "PCF-R4-008",
+        inherited_scope::export_and_projection_fail_closed,
+    ),
+    (
+        "PCF-R4-009",
+        inherited_scope::unanchored_step_all_fails_closed,
+    ),
 ];
 
 #[test]
@@ -148,7 +188,7 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
         .map(|case| case.id.clone())
         .collect();
     assert_eq!(report.not_applicable, inapplicable);
-    assert_eq!(manifest.cases.len(), 50);
+    assert_eq!(manifest.cases.len(), 59);
     assert_eq!(
         report.passed.len() + report.not_applicable.len(),
         manifest.cases.len()

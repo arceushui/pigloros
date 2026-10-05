@@ -48,6 +48,7 @@ use pos_core::{
     event::{CanonicalBytes, Event, EventDraft, Kind},
     geo_admission::{GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1},
     ids::{EntityId, EventId, TimelineId},
+    is_subject_controlled_event_type,
     store::{AppendDedupScope, EventReadBounds, PurgeOutcome, SeqRange},
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
@@ -3666,13 +3667,6 @@ impl TryFrom<&Event> for EventView {
             payload_hex: hex_encode(bytes),
         })
     }
-}
-
-fn is_subject_controlled_event_type(event_type: &Kind) -> bool {
-    pos_core::required_modality_for_event(event_type) != 0
-        || pos_core::is_consent_event_type(event_type)
-        || event_type.as_str().starts_with("timeline.fork.")
-        || event_type.as_str().starts_with("retention.")
 }
 
 fn map_event_page_read_error(error: executor::StoreExecutorError) -> GatewayError {

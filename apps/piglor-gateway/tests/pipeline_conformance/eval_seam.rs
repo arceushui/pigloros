@@ -28,8 +28,9 @@ use ulid::Ulid;
 use super::{
     harness::{closed_object, require_version, verify_pinned, Capture, ConformanceError},
     support::{
-        draft, events, exact_claim, expect_err, experiment_stores, gated_registry, of_type, pass,
-        persona_token, profile_tag, stage, stores, FixturePlugin, ScriptedDriver, TestOk, REPORT,
+        ancestry, draft, events, exact_claim, expect_err, experiment_stores, gated_registry,
+        of_type, pass, persona_token, profile_tag, stage, stores, FixturePlugin, ScriptedDriver,
+        TestOk, REPORT,
     },
 };
 
@@ -776,7 +777,15 @@ pub fn legacy_history() -> Capture {
         for (name, subject) in &history.subjects {
             let token = persona_token(&authority, timeline, *subject);
             let folded = registry
-                .projection_state_for_reducer(timeline, head, 0, &token, "eval", *subject)
+                .projection_state_for_reducer(
+                    timeline,
+                    &ancestry(backend.as_ref(), timeline),
+                    head,
+                    0,
+                    &token,
+                    "eval",
+                    *subject,
+                )
                 .test_ok()
                 .map_or_else(
                     || "absent".to_owned(),
