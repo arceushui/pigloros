@@ -11,8 +11,9 @@
 use std::path::PathBuf;
 
 use pos_core::{CoreError, EntityId, Hash, RecipientKeyDescriptorV1};
+use pos_crypto::recipient_export::DecryptedTimelineExportV1;
 
-use super::SqliteStore;
+use super::{RecipientExportDecryptionErrorV1, SqliteStore};
 
 const UNSUPPORTED: &str = "recipient key custody requires Linux";
 
@@ -54,6 +55,25 @@ impl SqliteStore {
         _owner: &RecipientKeyOwnerV1,
     ) -> Result<Vec<RecipientKeyDescriptorV1>, CoreError> {
         Err(CoreError::Storage(UNSUPPORTED.to_owned()))
+    }
+
+    /// Refuse decryption on platforms without the required file boundary.
+    ///
+    /// No recipient key can be enrolled here, so the Linux adapter's
+    /// envelope-first precedence is skipped: the result is always
+    /// [`RecipientExportDecryptionErrorV1::MaterialUnavailable`].
+    ///
+    /// # Errors
+    ///
+    /// Always reports the recipient private material as unavailable.
+    pub const fn decrypt_recipient_export(
+        &self,
+        _owner: &RecipientKeyOwnerV1,
+        _encoded: &[u8],
+        _expected_export_id: [u8; 16],
+        _expected_recipient: RecipientKeyDescriptorV1,
+    ) -> Result<DecryptedTimelineExportV1, RecipientExportDecryptionErrorV1> {
+        Err(RecipientExportDecryptionErrorV1::MaterialUnavailable)
     }
 
     /// Refuse destruction on platforms without the required file boundary.
