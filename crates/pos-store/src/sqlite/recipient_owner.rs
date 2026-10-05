@@ -1540,7 +1540,9 @@ fn ensure_recipient_export_catalog(connection: &Connection) -> Result<(), CoreEr
             CREATE TABLE IF NOT EXISTS recipient_export_pending_v1 (
                 export_id BLOB NOT NULL PRIMARY KEY CHECK (length(export_id) = 16),
                 owner_id TEXT NOT NULL
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS recipient_export_pending_owner_v1
+                ON recipient_export_pending_v1 (owner_id, export_id);",
         )
         .map_err(storage_error)
 }
