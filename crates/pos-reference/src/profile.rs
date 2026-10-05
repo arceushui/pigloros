@@ -9,7 +9,7 @@ use crate::evaluator_protocol::{
     array, array_values, bool_value, contract_digest, contract_digest_matches, decode_canonical,
     encode, fixed_bytes, text, uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
-use crate::signed_bundle::{ExpectedResultKey, SelectedBundleCaps, VerifiedBundle, VerifiedMember};
+use crate::signed_bundle::{ExpectedResultKey, VerifiedBundle, VerifiedMember};
 
 const MAX_FIXTURES: usize = 65_536;
 const MAX_AUXILIARY: usize = 64;
@@ -194,18 +194,6 @@ impl EvaluatorHardCaps {
             Err(ProfileError::FieldOutOfBounds)
         } else {
             Ok(())
-        }
-    }
-}
-
-impl From<EvaluatorHardCaps> for SelectedBundleCaps {
-    fn from(caps: EvaluatorHardCaps) -> Self {
-        Self {
-            max_profile_bytes: caps.max_profile_bytes,
-            max_bundle_members: caps.max_bundle_members,
-            max_member_path_bytes: caps.max_member_path_bytes,
-            max_member_bytes: caps.max_member_bytes,
-            max_total_bundle_bytes: caps.max_total_bundle_bytes,
         }
     }
 }

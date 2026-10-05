@@ -815,7 +815,7 @@ fn command_closes_post_preflight_and_output_failures() -> TestResult {
             support::ProfileMutation::SelectedProfileByteCapBoundary,
         )?,
         support::corpus_with_profile_mutation(
-            support::ProfileMutation::SelectedClosureCapBoundary(0),
+            support::ProfileMutation::SelectedClosureCapBoundary(support::ClosureCap::MemberCount),
         )?,
         support::corpus_with_bundle_mutation(support::BundleMutation::MemberBytes)?,
     ] {

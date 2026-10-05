@@ -20,20 +20,50 @@ const MAX_TAR_METADATA_BYTES: u64 = 4 * 1024;
 const MAX_SOURCE_TAR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const PROVENANCE_SCHEMA: &str = "PiglorOS.EvaluatorBuildProvenance.v1";
 const PROVENANCE_DOMAIN: &[u8] = b"PiglorOS.EvaluatorBuildProvenance.v1";
-const EVIDENCE_FILES: [&str; 6] = [
-    "Cargo.lock",
-    "bin/pos-reference-evaluator",
-    "licences.json",
-    "provenance.json",
-    "sbom.cdx.json",
-    "source/pigloros-source.tar.gz",
-];
 const REQUIRED_SOURCE_ENTRIES: [&str; 4] = [
     "Cargo.lock",
     "Cargo.toml",
     "crates/pos-reference/Cargo.toml",
     "crates/pos-reference/src/bin/pos-reference-evaluator.rs",
 ];
+
+/// One value per file of an evaluator evidence package, named by the file's role.
+///
+/// [`EvidenceFiles::ordered`] is the single definition of the checksum-inventory order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvidenceFiles<T> {
+    pub lock: T,
+    pub binary: T,
+    pub licences: T,
+    pub provenance: T,
+    pub sbom: T,
+    pub source: T,
+}
+
+/// The only accepted package-relative path of each evidence file.
+pub const PACKAGE_EVIDENCE_FILES: EvidenceFiles<&str> = EvidenceFiles {
+    lock: "Cargo.lock",
+    binary: "bin/pos-reference-evaluator",
+    licences: "licences.json",
+    provenance: "provenance.json",
+    sbom: "sbom.cdx.json",
+    source: "source/pigloros-source.tar.gz",
+};
+
+impl<T: Copy> EvidenceFiles<T> {
+    /// Return the values in checksum-inventory order.
+    #[must_use]
+    pub const fn ordered(&self) -> [T; 6] {
+        [
+            self.lock,
+            self.binary,
+            self.licences,
+            self.provenance,
+            self.sbom,
+            self.source,
+        ]
+    }
+}
 
 /// The two declared paths that locate one complete evaluator evidence package.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,11 +189,13 @@ pub fn verify_evaluator_build_identity(
 ) -> Result<VerifiedEvaluatorBuildIdentity, EvaluatorBuildIdentityError> {
     let provenance_path =
         fs::canonicalize(&evidence.provenance).map_err(|_| EvaluatorBuildIdentityError::Input)?;
-    if provenance_path.file_name().and_then(|name| name.to_str()) != Some("provenance.json") {
+    if provenance_path.file_name().and_then(|name| name.to_str())
+        != Some(PACKAGE_EVIDENCE_FILES.provenance)
+    {
         return Err(EvaluatorBuildIdentityError::Invalid);
     }
     let evidence_root = provenance_path.with_file_name("");
-    let source_path = evidence_root.join("source/pigloros-source.tar.gz");
+    let source_path = evidence_root.join(PACKAGE_EVIDENCE_FILES.source);
     if fs::canonicalize(&evidence.source_archive).map_err(|_| EvaluatorBuildIdentityError::Input)?
         != fs::canonicalize(&source_path).map_err(|_| EvaluatorBuildIdentityError::Input)?
     {
@@ -194,7 +226,7 @@ pub fn verify_evaluator_build_identity(
         return Err(EvaluatorBuildIdentityError::Invalid);
     }
     let packaged_binary = verified_digest(
-        &evidence_root.join("bin/pos-reference-evaluator"),
+        &evidence_root.join(PACKAGE_EVIDENCE_FILES.binary),
         MAX_EVALUATOR_BINARY_BYTES,
         &provenance.evaluator_binary_blake3,
     )?;
@@ -203,30 +235,30 @@ pub fn verify_evaluator_build_identity(
         return Err(EvaluatorBuildIdentityError::Invalid);
     }
     let lock = verified_digest(
-        &evidence_root.join("Cargo.lock"),
+        &evidence_root.join(PACKAGE_EVIDENCE_FILES.lock),
         MAX_DEPENDENCY_LOCK_BYTES,
         &provenance.dependency_lock_blake3,
     )?;
     let licences = verified_digest(
-        &evidence_root.join("licences.json"),
+        &evidence_root.join(PACKAGE_EVIDENCE_FILES.licences),
         MAX_LICENCES_BYTES,
         &provenance.licences_blake3,
     )?;
     let sbom = verified_digest(
-        &evidence_root.join("sbom.cdx.json"),
+        &evidence_root.join(PACKAGE_EVIDENCE_FILES.sbom),
         MAX_SBOM_BYTES,
         &provenance.sbom_blake3,
     )?;
     verify_checksum_inventory(
         &evidence_root,
-        [
+        EvidenceFiles {
             lock,
-            packaged_binary,
+            binary: packaged_binary,
             licences,
-            *blake3::hash(&provenance_bytes).as_bytes(),
+            provenance: *blake3::hash(&provenance_bytes).as_bytes(),
             sbom,
             source,
-        ],
+        },
     )?;
     Ok(VerifiedEvaluatorBuildIdentity {
         source_digest: source,
@@ -319,10 +351,14 @@ fn running_binary_digest() -> Result<[u8; 32], EvaluatorBuildIdentityError> {
 
 fn verify_checksum_inventory(
     evidence_root: &Path,
-    digests: [[u8; 32]; 6],
+    digests: EvidenceFiles<[u8; 32]>,
 ) -> Result<(), EvaluatorBuildIdentityError> {
     let mut expected = String::new();
-    for (path, digest) in EVIDENCE_FILES.iter().zip(digests) {
+    for (path, digest) in PACKAGE_EVIDENCE_FILES
+        .ordered()
+        .into_iter()
+        .zip(digests.ordered())
+    {
         let encoded = blake3::Hash::from_bytes(digest).to_hex();
         expected.push_str(encoded.as_str());
         expected.push_str("  ");

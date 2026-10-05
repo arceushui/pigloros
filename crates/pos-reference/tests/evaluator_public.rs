@@ -17,7 +17,7 @@ use pos_reference::profile::{
     DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
 };
 use pos_reference::signed_bundle::{preflight_signed_bundle, verify_signed_bundle, BundleError};
-use support::{BundleMutation, ProfileMutation, ReleaseMutation, TrustMutation};
+use support::{BundleMutation, ClosureCap, ProfileMutation, ReleaseMutation, TrustMutation};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -928,7 +928,9 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
 fn sandbox_attempts_translate_authenticated_transport_caps_before_execution() -> TestResult {
     for corpus in [
         support::corpus()?,
-        support::corpus_with_profile_mutation(ProfileMutation::SelectedClosureCapExact(3))?,
+        support::corpus_with_profile_mutation(ProfileMutation::SelectedClosureCapExact(
+            ClosureCap::TotalBytes,
+        ))?,
     ] {
         for sandboxed in [false, true] {
             let request_bytes = request_with(&corpus.request, |request| {
@@ -1570,7 +1572,7 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
         .chain(std::iter::once(ProfileMutation::DivergenceCoordinateLong))
         .chain((0..7).map(ProfileMutation::SelectedCapBoundary))
         .chain(std::iter::once(ProfileMutation::InvertedTransportCaps))
-        .chain((0..4).map(ProfileMutation::SelectedClosureCapBoundary))
+        .chain(ClosureCap::ALL.map(ProfileMutation::SelectedClosureCapBoundary))
         .chain((0..10).map(ProfileMutation::ExecutionContractBoundary))
         .chain((0..10).map(ProfileMutation::FixtureSemanticBoundary))
         .chain((0..8).map(ProfileMutation::ProvenanceBoundary))
@@ -1610,8 +1612,9 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
 
 #[test]
 fn evaluator_accepts_exact_authenticated_closure_caps() -> TestResult {
-    let mutations = (0..4)
+    let mutations = ClosureCap::ALL
         .map(ProfileMutation::SelectedClosureCapExact)
+        .into_iter()
         .chain([ProfileMutation::SelectedProfileByteCapExact]);
     for mutation in mutations {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
@@ -1634,7 +1637,7 @@ fn evaluator_accepts_exact_authenticated_closure_caps() -> TestResult {
 #[test]
 fn public_evaluator_enforces_selected_caps_before_full_materialization() -> TestResult {
     let corpus = support::corpus_with_selected_closure_cap_and_secret(
-        0,
+        ClosureCap::MemberCount,
         br#"{"client_secret":"must-not-be-materialized"}"#,
     )?;
     let mut adapter = PublicAdapter {
@@ -1712,7 +1715,7 @@ fn public_evaluator_enforces_selected_coordinate_cap_on_adapter_output() -> Test
 
 #[test]
 fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> TestResult {
-    for mutation in (0..4).map(ProfileMutation::SelectedClosureCapBoundary) {
+    for mutation in ClosureCap::ALL.map(ProfileMutation::SelectedClosureCapBoundary) {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
         let mut archive = Cursor::new(&corpus.archive);
@@ -1723,7 +1726,7 @@ fn staged_preflight_enforces_selected_caps_before_archive_materialization() -> T
             Err(pos_reference::signed_bundle::BundleError::FieldOutOfBounds)
         );
     }
-    for mutation in (0..4).map(ProfileMutation::SelectedClosureCapExact) {
+    for mutation in ClosureCap::ALL.map(ProfileMutation::SelectedClosureCapExact) {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
         let mut archive = Cursor::new(&corpus.archive);
