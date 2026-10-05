@@ -41,7 +41,7 @@ impl LocalBindingFixture {
         )?;
         let request = SandboxExecuteRequest::from_canonical_cbor(&request)?;
         let mut attempt = selector_attempt();
-        attempt.mode = mode;
+        attempt.mode = execution_mode(u64::from(mode))?;
         attempt.network_allowed = mode == 0;
         let commitment = provider.derive_selector_grant_commitment(
             &image,

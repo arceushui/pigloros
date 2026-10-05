@@ -260,17 +260,7 @@ pub(super) fn identifier(value: &Value) -> Result<String, SandboxProviderProtoco
 }
 
 pub(super) fn valid_identifier(value: &str) -> bool {
-    let Some(first) = value.bytes().next() else {
-        return false;
-    };
-    value.len() <= MAX_IDENTIFIER_BYTES
-        && value.is_ascii()
-        && (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'_' | b'/' | b'-')
-        })
+    crate::evaluator_protocol::valid_identifier(value)
 }
 
 pub(super) fn key_id(value: &Value) -> Result<String, SandboxProviderProtocolError> {

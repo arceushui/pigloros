@@ -1305,7 +1305,7 @@ impl SelectorGrantCommitment {
             || requirement.sim1_digest != image.manifest.manifest_digest
             || requirement.apt1_digest != provider.policy.policy_digest()
             || requirement.policy_epoch != provider.policy.policy_epoch()
-            || u64::from(attempt.mode) != launch.execution_mode.code()
+            || u64::from(attempt.mode.code()) != launch.execution_mode.code()
             || attempt.fixture_digest == [0; 32]
             || !attempt
                 .capability_ids

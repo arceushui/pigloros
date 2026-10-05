@@ -9,6 +9,10 @@ use pos_reference::evaluator::{
     SubjectObservation, SubjectResult,
 };
 use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
+use pos_reference::evaluator_domain::{
+    ClaimLayer, DivergenceMismatchKind, ExecutionMode, FixtureFamily, RedactionState, ReplayClaim,
+    SafeErrorCode,
+};
 use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence,
     RequiredProviderCapability, SandboxRequirement, SubjectAdapterKind,
@@ -17,6 +21,7 @@ use pos_reference::profile::{
     DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
 };
 use pos_reference::signed_bundle::{preflight_signed_bundle, verify_signed_bundle, BundleError};
+use support::cbor::rewrite_fields;
 use support::{BundleMutation, ClosureCap, ProfileMutation, ReleaseMutation, TrustMutation};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -245,13 +250,13 @@ impl SubjectAdapter for MixedOracleAdapter {
 
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
         let result = match attempt.family {
-            1 => SubjectResult::Failure(NamespacedFailure {
+            FixtureFamily::Denied => SubjectResult::Failure(NamespacedFailure {
                 owner_id: "test-provider".to_owned(),
                 contract_version: "1.0.0".to_owned(),
                 code_id: "denied".to_owned(),
             }),
-            2 => SubjectResult::Divergence {
-                classification: 2,
+            FixtureFamily::Malformed => SubjectResult::Divergence {
+                classification: DivergenceMismatchKind::CanonicalBytes,
                 first_coordinate: self
                     .coordinate_bytes
                     .map_or_else(|| vec![1, 2], |length| vec![1; length]),
@@ -276,13 +281,13 @@ impl SubjectAdapter for MismatchedOracleAdapter {
 
     fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
         let result = match attempt.family {
-            1 => SubjectResult::Failure(NamespacedFailure {
+            FixtureFamily::Denied => SubjectResult::Failure(NamespacedFailure {
                 owner_id: "test-provider".to_owned(),
                 contract_version: "1.0.0".to_owned(),
                 code_id: "different".to_owned(),
             }),
-            2 => SubjectResult::Divergence {
-                classification: 3,
+            FixtureFamily::Malformed => SubjectResult::Divergence {
+                classification: DivergenceMismatchKind::ProjectionCheckpoint,
                 first_coordinate: vec![9],
             },
             _ => SubjectResult::Output(self.output.clone()),
@@ -368,20 +373,6 @@ fn request_with(
     request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     request.request_digest = request.digest()?;
     Ok(request.to_canonical_cbor()?)
-}
-
-fn archive_with(
-    bytes: &[u8],
-    update: impl FnOnce(&mut [ciborium::value::Value]) -> TestResult,
-) -> TestResult<Vec<u8>> {
-    let mut archive: ciborium::value::Value = ciborium::from_reader(bytes)?;
-    let ciborium::value::Value::Array(fields) = &mut archive else {
-        return Err("archive is not an array".into());
-    };
-    update(fields)?;
-    let mut encoded = Vec::new();
-    ciborium::into_writer(&archive, &mut encoded)?;
-    Ok(encoded)
 }
 
 fn request_for_archive(bytes: &[u8], archive: &[u8]) -> TestResult<EvaluationRequest> {
@@ -525,8 +516,8 @@ fn sandbox_cases_bind_authenticated_spr1_provenance() -> TestResult {
 
 #[test]
 fn evaluator_accepts_every_current_profile_claim_layer() -> TestResult {
-    for claim_layer in 0..=6 {
-        let corpus = support::corpus_for_claim_layer(claim_layer)?;
+    for claim_layer in ClaimLayer::ALL.iter().copied() {
+        let corpus = support::corpus_for_claim_layer(claim_layer.code())?;
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output,
@@ -703,6 +694,8 @@ fn public_hard_caps_reject_zero_and_excessive_fixture_budgets() {
 #[test]
 fn replay_claims_accept_each_matching_redaction_state() -> TestResult {
     for state in 1..=3 {
+        let redaction = RedactionState::from_code(state).ok_or("unassigned redaction state")?;
+        let replay = ReplayClaim::from_code(state).ok_or("unassigned replay claim")?;
         let corpus =
             support::corpus_with_profile_mutation(ProfileMutation::FixtureClaimState(state))?;
         let mut adapter = PublicAdapter {
@@ -720,9 +713,9 @@ fn replay_claims_accept_each_matching_redaction_state() -> TestResult {
             .report
             .cases
             .iter()
-            .find(|case| case.redaction_state == state)
+            .find(|case| case.redaction_state == redaction)
             .ok_or("mutated redaction case is absent")?;
-        assert_eq!(affected.replay_claim, state);
+        assert_eq!(affected.replay_claim, replay);
         if state == 1 {
             assert_eq!(affected.outcome, CaseStatus::Pass);
         } else {
@@ -734,7 +727,7 @@ fn replay_claims_accept_each_matching_redaction_state() -> TestResult {
             .report
             .cases
             .iter()
-            .all(|case| { case.redaction_state == state || case.outcome == CaseStatus::Pass }));
+            .all(|case| { case.redaction_state == redaction || case.outcome == CaseStatus::Pass }));
     }
     Ok(())
 }
@@ -872,13 +865,10 @@ fn evaluator_rejects_empty_archives_and_mismatched_trust_snapshots() -> TestResu
 #[test]
 fn evaluator_returns_typed_nonpass_for_an_unsupported_request_version() -> TestResult {
     let corpus = support::corpus()?;
-    let mut request: ciborium::value::Value = ciborium::from_reader(corpus.request.as_slice())?;
-    let ciborium::value::Value::Array(fields) = &mut request else {
-        return Err("request is not an array".into());
-    };
-    fields[1] = ciborium::value::Value::Integer(2_u64.into());
-    let mut request_bytes = Vec::new();
-    ciborium::into_writer(&request, &mut request_bytes)?;
+    let request_bytes = rewrite_fields(&corpus.request, |fields| {
+        fields[1] = ciborium::value::Value::Integer(2_u64.into());
+        Ok(())
+    })?;
     let mut adapter = PublicAdapter {
         subject_digest: corpus.subject_digest,
         output: corpus.expected_output,
@@ -916,7 +906,7 @@ fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestRe
     assert_eq!(adapter.attempts.len(), 7);
     assert_eq!(adapter.case_ordinals, (0..7).collect::<Vec<_>>());
     assert!(adapter.attempts.iter().all(|attempt| {
-        attempt.mode == 1
+        attempt.mode == ExecutionMode::AirGapped
             && !attempt.network_allowed
             && attempt.capability_ids.len() == 1
             && attempt.capability_ids[0] == "read-public-bundle"
@@ -1073,6 +1063,7 @@ fn evaluator_matches_output_failure_and_divergence_oracles() -> TestResult {
 #[test]
 fn evaluator_reports_typed_failure_oracles_with_closed_safe_errors() -> TestResult {
     for (verification_outcome, safe_error) in [(2, 0), (3, 9), (4, 11), (5, 13)] {
+        let safe_error = SafeErrorCode::from_code(safe_error).ok_or("unassigned safe error")?;
         let corpus = support::mixed_oracle_corpus_with_failure_outcome(verification_outcome)?;
         let mut adapter = MixedOracleAdapter {
             subject_digest: corpus.subject_digest,
@@ -1105,8 +1096,10 @@ fn evaluator_reports_typed_failure_oracles_with_closed_safe_errors() -> TestResu
 
 #[test]
 fn evaluator_omits_typed_failure_evidence_when_redacted() -> TestResult {
-    for redaction_state in [2, 3] {
-        let corpus = support::mixed_oracle_corpus_with_failure_redaction(redaction_state)?;
+    for state in [2, 3] {
+        let redaction = RedactionState::from_code(state).ok_or("unassigned redaction state")?;
+        let replay = ReplayClaim::from_code(state).ok_or("unassigned replay claim")?;
+        let corpus = support::mixed_oracle_corpus_with_failure_redaction(state)?;
         let mut adapter = MixedOracleAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output,
@@ -1125,8 +1118,8 @@ fn evaluator_omits_typed_failure_evidence_when_redacted() -> TestResult {
             .iter()
             .find(|case| case.case_id == "case-1")
             .ok_or("redacted typed failure case is absent")?;
-        assert_eq!(failure.redaction_state, redaction_state);
-        assert_eq!(failure.replay_claim, redaction_state);
+        assert_eq!(failure.redaction_state, redaction);
+        assert_eq!(failure.replay_claim, replay);
         assert_eq!(failure.outcome, CaseStatus::Unavailable);
         assert_eq!(failure.expected_error, None);
         assert_eq!(failure.actual_error, None);
@@ -1165,8 +1158,8 @@ fn evaluator_reports_mismatched_failure_and_divergence_oracles() -> TestResult {
         .iter()
         .find(|case| case.case_id == "case-1")
         .ok_or("typed failure case is absent")?;
-    assert_eq!(failure.expected_error, Some(0));
-    assert_eq!(failure.actual_error, Some(4));
+    assert_eq!(failure.expected_error, Some(SafeErrorCode::InvalidEncoding));
+    assert_eq!(failure.actual_error, Some(SafeErrorCode::DigestMismatch));
     assert_eq!(
         (failure.expected_digest, failure.actual_digest),
         (None, None)
@@ -1936,23 +1929,23 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
     for _ in 0..34 {
         nested = Value::Array(vec![nested]);
     }
-    let recursive_manifest = archive_with(&corpus.archive, |archive| {
+    let recursive_manifest = rewrite_fields(&corpus.archive, |archive| {
         archive[0] = nested;
         Ok(())
     })?;
-    let map_manifest = archive_with(&corpus.archive, |archive| {
+    let map_manifest = rewrite_fields(&corpus.archive, |archive| {
         archive[0] = Value::Map(Vec::new());
         Ok(())
     })?;
-    let negative_manifest = archive_with(&corpus.archive, |archive| {
+    let negative_manifest = rewrite_fields(&corpus.archive, |archive| {
         archive[0] = Value::Integer((-1_i64).into());
         Ok(())
     })?;
-    let oversized_signer = archive_with(&corpus.archive, |archive| {
+    let oversized_signer = rewrite_fields(&corpus.archive, |archive| {
         archive[2] = Value::Bytes(vec![0; 33]);
         Ok(())
     })?;
-    let missing_profile = archive_with(&corpus.archive, |archive| {
+    let missing_profile = rewrite_fields(&corpus.archive, |archive| {
         let Value::Array(members) = &mut archive[1] else {
             return Err("archive members are not an array".into());
         };
@@ -1966,7 +1959,7 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
     })?;
     let mut oversized_member = vec![0x84, 0xf6, 0x81, 0x83, 0x61, b'p', 0x5b];
     oversized_member.extend_from_slice(&(64_u64 * 1024 * 1024 + 1).to_be_bytes());
-    let long_member_path = archive_with(&corpus.archive, |archive| {
+    let long_member_path = rewrite_fields(&corpus.archive, |archive| {
         let Value::Array(members) = &mut archive[1] else {
             return Err("archive members are not an array".into());
         };
@@ -1976,7 +1969,7 @@ fn staged_preflight_rejects_recursive_framing_and_profile_substitution() -> Test
         member[0] = Value::Text("p".repeat(257));
         Ok(())
     })?;
-    let substituted_profile = archive_with(&corpus.archive, |archive| {
+    let substituted_profile = rewrite_fields(&corpus.archive, |archive| {
         let Value::Array(members) = &mut archive[1] else {
             return Err("archive members are not an array".into());
         };
@@ -2065,7 +2058,7 @@ fn signed_bundle_verifiers_reject_invalid_member_paths_and_noncanonical_manifest
     use ciborium::value::Value;
 
     let corpus = support::corpus()?;
-    let invalid_member_path = archive_with(&corpus.archive, |archive| {
+    let invalid_member_path = rewrite_fields(&corpus.archive, |archive| {
         let Value::Array(members) = &mut archive[1] else {
             return Err("archive members are not an array".into());
         };

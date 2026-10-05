@@ -3,6 +3,7 @@
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_reference::evaluator::{AttemptArtifact, AttemptTransportCaps, CaseAttempt};
+use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
 use pos_reference::evaluator_protocol::{
     EvaluationRequest, ImplementationIdentity, OutputCapability, RequiredProviderCapability,
     SandboxRequirement, SubjectAdapterKind,
@@ -671,6 +672,11 @@ fn admission_grant(
     )
 }
 
+fn execution_mode(code: u64) -> TestResult<ExecutionMode> {
+    let code = u8::try_from(code)?;
+    Ok(ExecutionMode::from_code(code).ok_or("unassigned execution mode")?)
+}
+
 fn selector_attempt() -> CaseAttempt {
     let artifact = |bytes: Vec<u8>| AttemptArtifact {
         digest: *blake3::hash(&bytes).as_bytes(),
@@ -678,9 +684,9 @@ fn selector_attempt() -> CaseAttempt {
     };
     CaseAttempt {
         case_id: "case".to_owned(),
-        claim_layer: 1,
-        family: 1,
-        mode: 1,
+        claim_layer: ClaimLayer::ReplayConformance,
+        family: FixtureFamily::Denied,
+        mode: ExecutionMode::AirGapped,
         fixture_digest: [38; 32],
         schema: artifact(vec![1]),
         payload: artifact(vec![2]),
@@ -2342,7 +2348,7 @@ fn selector_commitment_rejects_invalid_attempt_bindings() -> TestResult {
     let attempt = selector_attempt();
 
     let mut mode_mismatch = attempt.clone();
-    mode_mismatch.mode = 0;
+    mode_mismatch.mode = ExecutionMode::Local;
     assert_eq!(
         admitted.derive_selector_grant_commitment(
             &image,
@@ -2505,7 +2511,7 @@ fn selector_commitment_covers_each_execution_mode_and_concurrent_attempt_bound()
         requirement.policy_epoch = policy.policy_epoch();
         refresh_evaluation_request(&mut evaluation)?;
         let mut attempt = selector_attempt();
-        attempt.mode = u8::try_from(mode)?;
+        attempt.mode = execution_mode(mode)?;
         let commitment = admitted.derive_selector_grant_commitment(
             &image,
             &launch,
@@ -2599,7 +2605,7 @@ fn selector_commitment_matches_independent_rbs1_golden_vectors() -> TestResult {
         requirement.policy_epoch = policy.policy_epoch();
         refresh_evaluation_request(&mut evaluation)?;
         let mut attempt = selector_attempt();
-        attempt.mode = u8::try_from(mode)?;
+        attempt.mode = execution_mode(mode)?;
         let commitment = admitted.derive_selector_grant_commitment(
             &image,
             &launch,

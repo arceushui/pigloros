@@ -11,9 +11,10 @@ use crate::evaluator::{
     AttemptArtifact, AttemptTransportCaps, CaseAttempt, ResourceUsage, SubjectObservation,
     SubjectResult,
 };
+use crate::evaluator_domain::{ClaimLayer, DivergenceMismatchKind, ExecutionMode, FixtureFamily};
 use crate::evaluator_protocol::{
-    array, bool_value, decode_canonical_with_limit, encode_with_limit, fixed_bytes, text, uint,
-    ProtocolError,
+    array, bool_value, decode_canonical_with_limit, eight_uints, encode_with_limit, fixed_bytes,
+    text, uint, ProtocolError,
 };
 use crate::profile::{DeterministicBudget, NamespacedFailure};
 
@@ -61,9 +62,9 @@ struct Frame {
 
 struct AttemptHeader {
     case_id: String,
-    claim_layer: u8,
-    family: u8,
-    mode: u8,
+    claim_layer: ClaimLayer,
+    family: FixtureFamily,
+    mode: ExecutionMode,
     fixture_digest: [u8; 32],
     budget: DeterministicBudget,
     watchdog_ms: u64,
@@ -108,9 +109,9 @@ fn write_attempt_frames(
             text_value("EAI1"),
             unsigned(1),
             text_value(&attempt.case_id),
-            unsigned(u64::from(attempt.claim_layer)),
-            unsigned(u64::from(attempt.family)),
-            unsigned(u64::from(attempt.mode)),
+            unsigned(u64::from(attempt.claim_layer.code())),
+            unsigned(u64::from(attempt.family.code())),
+            unsigned(u64::from(attempt.mode.code())),
             bytes_value(&attempt.fixture_digest),
             budget_value(attempt.budget),
             unsigned(attempt.watchdog_ms),
@@ -190,9 +191,9 @@ fn decode_attempt_header(value: &Value) -> Result<AttemptHeader, TransportError>
     require_magic(fields, "EAI1")?;
     let header = AttemptHeader {
         case_id: identifier(&fields[2])?,
-        claim_layer: bounded_u8(&fields[3], 6)?,
-        family: bounded_u8(&fields[4], 6)?,
-        mode: bounded_u8(&fields[5], 3)?,
+        claim_layer: closed_code(&fields[3], ClaimLayer::from_code)?,
+        family: closed_code(&fields[4], FixtureFamily::from_code)?,
+        mode: closed_code(&fields[5], ExecutionMode::from_code)?,
         fixture_digest: nonzero_digest(&fields[6])?,
         budget: decode_budget(&fields[7])?,
         watchdog_ms: uint(&fields[8])?,
@@ -329,7 +330,7 @@ pub fn write_observation(
             Value::Null,
             Value::Null,
             Value::Array(vec![
-                unsigned(u64::from(*classification)),
+                unsigned(u64::from(classification.code())),
                 Value::Bytes(first_coordinate.clone()),
             ]),
         ),
@@ -564,7 +565,7 @@ fn decode_result(fields: &[Value], provisional: Vec<u8>) -> Result<SubjectResult
         2 if fields[3] == Value::Null && fields[4] == Value::Null && fields[5] == Value::Null => {
             let divergence = array(&fields[6], 2)?;
             Ok(SubjectResult::Divergence {
-                classification: bounded_u8(&divergence[0], 8)?,
+                classification: closed_code(&divergence[0], DivergenceMismatchKind::from_code)?,
                 first_coordinate: byte_string(&divergence[1])?.to_vec(),
             })
         }
@@ -588,13 +589,10 @@ fn validate_attempt(attempt: &CaseAttempt) -> Result<(), TransportError> {
 fn validate_attempt_fields(attempt: &CaseAttempt) -> Result<(), TransportError> {
     if attempt.case_id.is_empty()
         || attempt.case_id.len() > MAX_IDENTIFIER_BYTES
-        || attempt.claim_layer > 6
-        || attempt.family > 6
-        || attempt.mode > 3
         || attempt.fixture_digest == [0; 32]
         || attempt.capability_ids.len() > MAX_CAPABILITIES
         || !strict_strings(&attempt.capability_ids)
-        || budget_values(attempt.budget).contains(&0)
+        || attempt.budget.values().contains(&0)
         || attempt.budget.output_bytes > MAX_OUTPUT_BYTES
     {
         return Err(TransportError::FieldOutOfBounds);
@@ -656,18 +654,14 @@ fn validate_observation(
         }
         SubjectResult::Failure(value) => validate_failure(value),
         SubjectResult::Divergence {
-            classification,
-            first_coordinate,
-        } => validate_divergence(*classification, first_coordinate),
+            first_coordinate, ..
+        } => validate_divergence(first_coordinate),
         _ => Ok(()),
     }
 }
 
-const fn validate_divergence(
-    classification: u8,
-    first_coordinate: &[u8],
-) -> Result<(), TransportError> {
-    if classification > 8 || first_coordinate.is_empty() || first_coordinate.len() > 128 {
+const fn validate_divergence(first_coordinate: &[u8]) -> Result<(), TransportError> {
+    if first_coordinate.is_empty() || first_coordinate.len() > 128 {
         Err(TransportError::FieldOutOfBounds)
     } else {
         Ok(())
@@ -783,37 +777,12 @@ const fn validate_chunk(chunk: &[u8], final_chunk: bool) -> Result<(), Transport
 }
 
 fn budget_value(value: DeterministicBudget) -> Value {
-    Value::Array(budget_values(value).map(unsigned).to_vec())
-}
-
-const fn budget_values(value: DeterministicBudget) -> [u64; 8] {
-    [
-        value.memory_bytes,
-        value.cpu_fuel,
-        value.host_calls,
-        value.event_count,
-        value.output_bytes,
-        value.storage_bytes,
-        value.execution_steps,
-        value.simulation_time_ns,
-    ]
+    Value::Array(value.values().map(unsigned).to_vec())
 }
 
 fn decode_budget(value: &Value) -> Result<DeterministicBudget, TransportError> {
-    let values = eight_uints(value)?;
-    if values.contains(&0) {
-        return Err(TransportError::FieldOutOfBounds);
-    }
-    Ok(DeterministicBudget {
-        memory_bytes: values[0],
-        cpu_fuel: values[1],
-        host_calls: values[2],
-        event_count: values[3],
-        output_bytes: values[4],
-        storage_bytes: values[5],
-        execution_steps: values[6],
-        simulation_time_ns: values[7],
-    })
+    DeterministicBudget::from_nonzero_values(eight_uints(value)?)
+        .ok_or(TransportError::FieldOutOfBounds)
 }
 
 fn usage_value(value: ResourceUsage) -> Value {
@@ -845,16 +814,6 @@ fn decode_usage(value: &Value) -> Result<ResourceUsage, TransportError> {
         execution_steps: values[6],
         simulation_time_ns: values[7],
     })
-}
-
-fn eight_uints(value: &Value) -> Result<[u64; 8], TransportError> {
-    let fields = array(value, 8)?;
-    fields
-        .iter()
-        .map(uint)
-        .collect::<Result<Vec<_>, _>>()?
-        .try_into()
-        .map_err(|_| TransportError::InvalidEncoding)
 }
 
 fn failure_value(value: &NamespacedFailure) -> Value {
@@ -893,13 +852,11 @@ fn nonzero_digest(value: &Value) -> Result<[u8; 32], TransportError> {
     }
 }
 
-fn bounded_u8(value: &Value, maximum: u8) -> Result<u8, TransportError> {
-    let value = u8::try_from(uint(value)?).map_err(|_| TransportError::InvalidEncoding)?;
-    if value <= maximum {
-        Ok(value)
-    } else {
-        Err(TransportError::InvalidEncoding)
-    }
+fn closed_code<T>(value: &Value, from_code: fn(u8) -> Option<T>) -> Result<T, TransportError> {
+    u8::try_from(uint(value)?)
+        .ok()
+        .and_then(from_code)
+        .ok_or(TransportError::InvalidEncoding)
 }
 
 fn bounded_usize(value: &Value, maximum: usize) -> Result<usize, TransportError> {
