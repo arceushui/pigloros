@@ -25,6 +25,8 @@ mod recipient_owner;
 #[path = "sqlite/recipient_owner_unsupported.rs"]
 mod recipient_owner;
 pub use recipient_owner::RecipientKeyOwnerV1;
+mod recipient_decryption;
+pub use recipient_decryption::RecipientExportDecryptionErrorV1;
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
@@ -5164,7 +5166,7 @@ impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
             .as_ref()
             .unwrap_or(&self.conn);
         identity
-            .validate_historical_subject_decryption()
+            .validate_historical_decryption()
             .and_then(|()| {
                 connection
                     .execute_batch(begin_immediate_sql())
