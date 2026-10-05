@@ -1147,7 +1147,7 @@ impl DriverEventObservation {
         };
         observation
             .cursor_subscription_to_consent_sensitive_type()
-            .map_or(Ok(observation), Err)
+            .map_or_else(|| Ok(observation), Err)
     }
 
     /// The first consent-sensitive subscription of a cursor-based Driver.
@@ -2206,6 +2206,11 @@ impl PluginRegistry {
     }
 
     /// Fold a host-captured Event range into the registered reducers.
+    ///
+    /// State folded only through `fold_events` fences its source Timeline
+    /// alone. A host serving a Fork must bind the Fork's ancestry chain (from
+    /// [`pos_core::fork_ancestry()`]) through `refold_projection_events`,
+    /// `projection_state_for_reducer` or `ProjectionRegistry::bind_fork_ancestry`.
     pub fn fold_events(&mut self, timeline: TimelineId, events: &[Event]) {
         let visible_events = host_projection_events(events);
         self.projections.fold_events(timeline, &visible_events);
@@ -3849,6 +3854,10 @@ impl PluginRegistry {
     /// Register a direct driver in an explicit test-support harness.
     ///
     /// Ordinary builds cannot call this helper without the test-support feature.
+    ///
+    /// # Panics
+    /// Panics when the shared Driver rule rejects the Driver's cursor
+    /// subscription, unlike `register_driver`, which returns the error.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn register_test_driver(&mut self, driver: Box<dyn Driver>) {

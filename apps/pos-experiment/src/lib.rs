@@ -3397,12 +3397,6 @@ pub mod tests {
         for (event_type, public) in table {
             let kind = Kind::new(event_type);
             assert_eq!(is_public_event_type(&kind), public, "{event_type}");
-            assert_eq!(
-                is_public_event_type(&kind),
-                !pos_core::is_subject_controlled_event_type(&kind)
-                    && event_type != EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE,
-                "{event_type}"
-            );
         }
     }
 

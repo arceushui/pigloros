@@ -114,6 +114,7 @@ fn signalling_registry(
 fn decision<T>(result: &Result<T, RuntimeError>) -> String {
     match result {
         Ok(_) => "ok".to_owned(),
+        // Non-erasure errors render with their full Debug output.
         Err(RuntimeError::ErasureContainment(error)) => format!("{error:?}"),
         Err(error) => format!("{error:?}"),
     }
