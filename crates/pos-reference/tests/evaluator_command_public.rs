@@ -27,6 +27,8 @@ use pos_reference::evaluator_protocol::IndependenceEvidence;
 use pos_reference::evaluator_protocol::{CaseStatus, ConformanceReport, EvaluationRequest};
 use pos_reference::profile::Profile;
 use pos_reference::signed_bundle::preflight_signed_bundle;
+#[cfg(unix)]
+use support::cbor::rewrite_fields;
 use support::{
     gzip_bytes, pax_record, source_archive, source_tar, tar_header, write_checksum_inventory,
     write_evaluator_package, write_evaluator_provenance, write_tar_checksum,
@@ -210,14 +212,10 @@ fn rebind_source_archive(directory: &Path, source: &[u8]) -> TestResult {
 
 #[cfg(unix)]
 fn request_with_version(request: &[u8], version: u64) -> TestResult<Vec<u8>> {
-    let mut value: ciborium::value::Value = ciborium::from_reader(request)?;
-    let ciborium::value::Value::Array(fields) = &mut value else {
-        return Err("request is not an array".into());
-    };
-    fields[1] = ciborium::value::Value::Integer(version.into());
-    let mut bytes = Vec::new();
-    ciborium::into_writer(&value, &mut bytes)?;
-    Ok(bytes)
+    rewrite_fields(request, |fields| {
+        fields[1] = ciborium::value::Value::Integer(version.into());
+        Ok(())
+    })
 }
 
 #[cfg(unix)]
