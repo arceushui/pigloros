@@ -68,6 +68,13 @@ pub enum RecipientExportPublicationErrorV1 {
     /// The protected Timeline changed after the consent fence was checked.
     #[error("recipient export Timeline changed before publication")]
     SourceChanged,
+    /// A fresh random export ID already names an immutable catalog object.
+    #[error("recipient export ID collision")]
+    IdentifierCollision,
+    /// Recovery completed one bounded batch and must be retried before a new
+    /// publication can reserve an object name.
+    #[error("recipient export recovery requires another pass")]
+    RecoveryIncomplete,
     /// The active role-4 registry identity denied publication.
     #[error(transparent)]
     Registry(#[from] KeyRegistryErrorV1),

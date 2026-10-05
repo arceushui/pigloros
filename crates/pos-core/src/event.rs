@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use zeroize::Zeroize;
 
 use crate::{
     clock::{Seq, WallTime},
@@ -35,6 +36,28 @@ impl CanonicalBytes {
     pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    pub(crate) fn is_uniquely_owned(&self) -> bool {
+        self.0.is_empty() || self.0.is_unique()
+    }
+
+    pub(crate) fn zeroize_if_uniquely_owned(&mut self) -> bool {
+        if self.0.is_empty() {
+            return true;
+        }
+        let bytes = std::mem::replace(&mut self.0, Bytes::new());
+        match bytes.try_into_mut() {
+            Ok(mut bytes) => {
+                bytes.as_mut().zeroize();
+                self.0 = bytes.freeze();
+                true
+            }
+            Err(bytes) => {
+                self.0 = bytes;
+                false
+            }
+        }
+    }
 }
 
 /// Serde helper: serialize Bytes as byte array, not as a sequence of ints.
@@ -66,6 +89,10 @@ impl Kind {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn zeroize(&mut self) {
+        self.0.zeroize();
     }
 }
 
