@@ -97,7 +97,10 @@
 //!   are compared with the persisted basis before the frontier derivation
 //!   (`InvalidationConflict` on the first difference, in the port's
 //!   canonical order), the frontier's dependency-graph digest after it, and
-//!   all of them are rechecked by the store inside the transaction.
+//!   all of them are rechecked by the store inside the transaction. Because
+//!   the graph digest is compared after the epochs here, but before them by
+//!   the store's recheck, an admission whose graph digest and an epoch both
+//!   differ reports the epoch conflict.
 //! - **First recomputation Tick.** It is the `RCF1` global frontier Tick:
 //!   Ticks between the parent cut and the frontier are unaffected and are not
 //!   invalidated. The frontier must lie in `first_tick..=` the earliest
