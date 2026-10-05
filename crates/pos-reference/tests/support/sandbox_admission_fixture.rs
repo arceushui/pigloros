@@ -672,9 +672,11 @@ fn admission_grant(
     )
 }
 
+public_admission_tests! {
 fn execution_mode(code: u64) -> TestResult<ExecutionMode> {
     let code = u8::try_from(code)?;
     Ok(ExecutionMode::from_code(code).ok_or("unassigned execution mode")?)
+}
 }
 
 fn selector_attempt() -> CaseAttempt {
