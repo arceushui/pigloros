@@ -1320,9 +1320,10 @@ fn sqlite_owner_link_cut(
         )
         .and_then(|mut statement| {
             statement
-                .query_map(params![owner_id.as_slice(), timeline_id.as_slice()], |row| {
-                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
+                .query_map(
+                    params![owner_id.as_slice(), timeline_id.as_slice()],
+                    |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         })
         .map_err(|error| sqlite_owner_link_query_error(&error))?;
@@ -3268,7 +3269,9 @@ mod local_cut_owner_coverage {
     ) -> Fallible<ManifestOwnerLinkCutIdentityV1> {
         let recording = batch.recordings().first().ok_or("missing recording")?;
         let digest = recording.receipt.digest();
-        Ok(ManifestOwnerLinkCutIdentityV1::WorldRecordingReceipt(digest))
+        Ok(ManifestOwnerLinkCutIdentityV1::WorldRecordingReceipt(
+            digest,
+        ))
     }
 
     fn link_snapshot(

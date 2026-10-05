@@ -426,7 +426,10 @@ fn consumer_set(world: &World, scope: &ManifestOwnerScopeV1) -> Fallible<WorldCo
     Ok(WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
         scope: scope.scope,
         consumers: vec![consumer],
-        producers: vec![WorldProducerV1::new(producer.plugin_id(), producer.eop1_native_digest())?],
+        producers: vec![WorldProducerV1::new(
+            producer.plugin_id(),
+            producer.eop1_native_digest(),
+        )?],
         optional_view_roots: Vec::new(),
     })?)
 }
@@ -505,7 +508,10 @@ struct CutInputs<'a> {
 
 fn table(row_count: usize, byte: u8) -> Fallible<LocalCutTableRefV1> {
     let rows = u64::try_from(row_count)?;
-    Ok(LocalCutTableRefV1::new(rows, (rows != 0).then(|| hash(byte)))?)
+    Ok(LocalCutTableRefV1::new(
+        rows,
+        (rows != 0).then(|| hash(byte)),
+    )?)
 }
 
 fn recorded_lease(snapshot: &ManifestOwnerAdmissionSnapshotV1) -> Fallible<Hash> {
@@ -515,7 +521,11 @@ fn recorded_lease(snapshot: &ManifestOwnerAdmissionSnapshotV1) -> Fallible<Hash>
         .leaves
         .iter()
         .find(|member| member.leaf.as_input().kind == WorldArtifactKindV1::RetentionLease);
-    Ok(lease.ok_or("missing recorded lease")?.leaf.as_input().native_digest)
+    Ok(lease
+        .ok_or("missing recorded lease")?
+        .leaf
+        .as_input()
+        .native_digest)
 }
 
 fn composition_rows(
@@ -899,9 +909,9 @@ impl<S: ManifestOwnerLinkReadPortV1> ManifestOwnerLinkReadPortV1 for CraftedStor
         identity: ManifestOwnerLinkCutIdentityV1,
         timeline_id: TimelineId,
     ) -> Result<Option<ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
-        let found = self
-            .inner
-            .read_manifest_owner_link_snapshot_v1(self.owner_id, identity, timeline_id);
+        let found =
+            self.inner
+                .read_manifest_owner_link_snapshot_v1(self.owner_id, identity, timeline_id);
         found.map(|snapshot| {
             snapshot.map(|mut snapshot| {
                 (self.edit)(&mut snapshot);

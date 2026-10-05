@@ -349,7 +349,9 @@ pub fn verify_manifest_owner_link_v1<S: ManifestOwnerLinkReadPortV1 + ?Sized>(
     let operation = ErasureProtectedOperationV1::Read;
     let verify = || verify_and_release(store, request, authority, fence);
     let fenced = gate.with_fence_value(request.timeline_id, operation, verify);
-    fenced.unwrap_or(Err(ManifestOwnerLinkVerificationErrorV1::ProtectedUseDenied))
+    fenced.unwrap_or(Err(
+        ManifestOwnerLinkVerificationErrorV1::ProtectedUseDenied,
+    ))
 }
 
 /// The Timeline's admission and the kind-8 row at the same row position.
