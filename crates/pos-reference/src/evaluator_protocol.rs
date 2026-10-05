@@ -1008,11 +1008,11 @@ pub(crate) fn array_values(value: &Value) -> Result<&[Value], ProtocolError> {
 }
 
 pub(crate) fn eight_uints(value: &Value) -> Result<[u64; 8], ProtocolError> {
-    let mut values = [0_u64; 8];
-    for (slot, field) in values.iter_mut().zip(array(value, 8)?) {
-        *slot = uint(field)?;
-    }
-    Ok(values)
+    let values = array(value, 8)?
+        .iter()
+        .map(uint)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(std::array::from_fn(|index| values[index]))
 }
 
 pub(crate) fn text(value: &Value) -> Result<&str, ProtocolError> {

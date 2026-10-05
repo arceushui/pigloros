@@ -649,14 +649,20 @@ fn validate_observation(
     maximum: u64,
 ) -> Result<(), TransportError> {
     match &observation.result {
-        SubjectResult::Output(bytes) if as_u64(bytes.len())? > maximum => {
-            Err(TransportError::FieldOutOfBounds)
-        }
+        SubjectResult::Output(bytes) => validate_output_length(bytes.len(), maximum),
         SubjectResult::Failure(value) => validate_failure(value),
         SubjectResult::Divergence {
             first_coordinate, ..
         } => validate_divergence(first_coordinate),
-        _ => Ok(()),
+        SubjectResult::Unavailable => Ok(()),
+    }
+}
+
+fn validate_output_length(length: usize, maximum: u64) -> Result<(), TransportError> {
+    if as_u64(length)? > maximum {
+        Err(TransportError::FieldOutOfBounds)
+    } else {
+        Ok(())
     }
 }
 
