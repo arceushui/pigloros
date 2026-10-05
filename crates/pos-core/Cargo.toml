@@ -25,5 +25,9 @@ thiserror = { workspace = true }
 proptest = { workspace = true }
 sha2 = { workspace = true }
 
+[[test]]
+name = "fork_ancestry_public"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

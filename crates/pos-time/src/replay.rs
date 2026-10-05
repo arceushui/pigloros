@@ -106,7 +106,7 @@ fn replay_range(
         }
     };
     let fenced = sender
-        .with_protected_effect_fence(
+        .with_protected_ancestry_fence(
             request.timeline,
             ErasureProtectedOperationV1::Read,
             &mut effect,
@@ -234,6 +234,14 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    /// The one-member Fork ancestry of a fixture Timeline with no parent.
+    fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+        vec![pos_core::TimelineMeta {
+            id: timeline,
+            ..pos_core::TimelineMeta::root("root")
+        }]
+    }
 
     const ONE_EVENT_READ_BOUNDS: EventReadBounds =
         EventReadBounds::new_with_total_bytes_and_elapsed(65_536, 128, 8, 1, 65_536, 30_000_000);
@@ -400,7 +408,12 @@ mod tests {
                 )
                 .test_ok();
             let drafts = registry
-                .step_all_anchored_with_events(timeline, action.seq, std::slice::from_ref(&action))
+                .step_all_anchored_with_events(
+                    timeline,
+                    &root_ancestry(timeline),
+                    action.seq,
+                    std::slice::from_ref(&action),
+                )
                 .test_ok();
             let committed = commands.append(timeline, &drafts).test_ok();
             (timeline, action, committed)

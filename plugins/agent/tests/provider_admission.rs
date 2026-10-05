@@ -28,6 +28,14 @@ use pos_runtime::{
 use pos_store::memory::MemoryStore;
 use ulid::Ulid;
 
+/// The one-member Fork ancestry of a fixture Timeline with no parent.
+fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+    vec![pos_core::TimelineMeta {
+        id: timeline,
+        ..pos_core::TimelineMeta::root("root")
+    }]
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
@@ -257,7 +265,7 @@ fn provider_proposal_commits_only_through_host_admission() {
 
     // A validated provider proposal is still tentative: a stale basis
     // discards it and commits nothing.
-    ok(registry.step_all_anchored(timeline, Seq::ZERO));
+    ok(registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO));
     publish(
         &mut store,
         timeline,
@@ -277,7 +285,7 @@ fn provider_proposal_commits_only_through_host_admission() {
     assert!(ok(store.read(timeline, SeqRange::all())).is_empty());
     publish(&mut store, timeline, current);
 
-    let drafts = ok(registry.step_all_anchored(timeline, Seq::ZERO));
+    let drafts = ok(registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO));
     assert_eq!(calls.get(), 2);
     let admitted = admission(&store, timeline, current, 2);
     let receipt = ok(registry.admit_scheduled_pass(&mut store, &admitted))

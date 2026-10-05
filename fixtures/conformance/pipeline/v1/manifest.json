@@ -1544,6 +1544,113 @@
         "fresh-connection": "AuthorityRevoked",
         "committed-after-revocation": "true"
       }
+    },
+    {
+      "id": "PCF-R4-006",
+      "title": "A Fork of a frozen ancestor fails its Driver pass and its stitched read closed, and nothing commits",
+      "sources": [
+        "#499",
+        "ADR-021 R4"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "pass.child": "AccessFrozen",
+        "pass.grandchild": "AccessFrozen",
+        "admitted": "PendingDriverStep",
+        "driver.steps": "0",
+        "own-events.child": "0",
+        "read.child": "ErasureAccessFrozen",
+        "read.grandchild": "ErasureAccessFrozen",
+        "unrelated.committed": "ok",
+        "unrelated.events": "2"
+      }
+    },
+    {
+      "id": "PCF-R4-007",
+      "title": "After the ancestor's request completes, inherited reads follow its persisted state and an unrelated Fork reads normally",
+      "sources": [
+        "#499",
+        "ADR-021 R4"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "lifecycle": "Complete",
+        "ancestor.read": "ErasureAccessFrozen",
+        "fork.read": "ErasureAccessFrozen",
+        "fork.read-bounded": "ErasureAccessFrozen",
+        "fork.pass": "AccessFrozen",
+        "unrelated-fork.read": "1",
+        "unrelated-fork.pass": "ok"
+      }
+    },
+    {
+      "id": "PCF-R4-008",
+      "title": "A Fork's Export and projection-read paths fail closed under a frozen or completed ancestor, and an unrelated Fork succeeds",
+      "sources": [
+        "#499",
+        "ADR-021 R4"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "frozen.chain-hash": "ErasureAccessFrozen",
+        "frozen.unrelated.chain-hash": "ok",
+        "frozen.refold.refused": "true",
+        "frozen.unrelated.refold": "ok",
+        "frozen.projection": "AccessFrozen",
+        "completed.chain-hash": "ErasureAccessFrozen",
+        "completed.unrelated.chain-hash": "ok",
+        "completed.refold.refused": "true",
+        "completed.unrelated.refold": "ok",
+        "completed.projection": "AccessFrozen"
+      }
+    },
+    {
+      "id": "PCF-R4-009",
+      "title": "The unanchored step_all on a Fork of a frozen ancestor fails closed with AccessFrozen, and nothing commits",
+      "sources": [
+        "#499",
+        "ADR-021 R4"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "step_all": "AccessFrozen",
+        "frozen": "true",
+        "driver.steps": "0",
+        "admitted": "PendingDriverStep",
+        "own-events": "0"
+      }
     }
   ]
 }

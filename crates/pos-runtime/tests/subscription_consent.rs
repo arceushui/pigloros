@@ -45,6 +45,14 @@ impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
     }
 }
 
+/// The one-member Fork ancestry of a fixture Timeline with no parent.
+fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+    vec![pos_core::TimelineMeta {
+        id: timeline,
+        ..pos_core::TimelineMeta::root("root")
+    }]
+}
+
 const PERSONA: &str = "persona.prediction";
 const FORK: &str = "timeline.fork.requested";
 const RETENTION: &str = "retention.extended";
@@ -218,14 +226,26 @@ impl Fixture {
     fn public_view(&mut self) -> Vec<(String, EntityId)> {
         let (timeline, head) = (self.timeline, self.head());
         let registry = &mut self.registry;
-        let staged = registry.step_all_anchored_with_events(timeline, head, &self.events);
+        let staged = registry.step_all_anchored_with_events(
+            timeline,
+            &root_ancestry(timeline),
+            head,
+            &self.events,
+        );
         self.finish(staged)
     }
 
     fn protected_view(&mut self, token: ConsentCapabilityToken) -> Vec<(String, EntityId)> {
         let (timeline, head) = (self.timeline, self.head());
         let registry = &mut self.registry;
-        let staged = registry.step_all_anchored_protected(timeline, head, token, 0, &self.events);
+        let staged = registry.step_all_anchored_protected(
+            timeline,
+            &root_ancestry(timeline),
+            head,
+            token,
+            0,
+            &self.events,
+        );
         self.finish(staged)
     }
 }

@@ -24,7 +24,7 @@ use pos_core::{
     ErasureContainmentGateV1, ErasureGate, ErasureProtectedOperationV1, ErasureReferenceV1, Event,
     Hash, ObservationArtifactV1, ObservationRecordDraftV1, ObservationRecordV1,
     ObservationSnapshotDraftV1, ObservationSnapshotV1, ObservationStatusV1, PersistedAuthorityV1,
-    PluginId, Reducer, Relationship, Seq, State, StateRegistry, TimelineId,
+    PluginId, Reducer, Relationship, Seq, State, StateRegistry, TimelineId, TimelineMeta,
     EVENT_TYPE_CONSENT_REVOKED_V1, MAX_OBSERVATION_SNAPSHOT_RECORDS,
 };
 
@@ -154,6 +154,11 @@ fn fold_bound_event<T, E>(
 ///
 /// Plugins register reducers during Wave 3 initialisation; the registry then
 /// applies every incoming event to every registered reducer in insertion order.
+///
+/// A host serving a Fork must bind its chain from [`pos_core::fork_ancestry()`]
+/// through [`Self::bind_fork_ancestry`], [`Self::refold_events`],
+/// [`Self::restore_from_snapshot`] or [`Self::adopt_committed_fork`]; state
+/// folded only through [`Self::fold_events`] fences the source Timeline alone.
 pub struct ProjectionRegistry {
     /// Ordered list so iteration is deterministic.
     slots: Vec<(String, Slot)>,
@@ -164,6 +169,12 @@ pub struct ProjectionRegistry {
     erasure_gate_bound: bool,
     /// The Timeline and generation the accumulated State was folded from.
     source: ProjectionSourceV1,
+    /// One Timeline's host-supplied Fork ancestry, nearest first. Every
+    /// Snapshot fence of that Timeline also authorizes each scope in it.
+    /// It is not part of the `Copy` source, so it is reset wherever `source`
+    /// is cleared, and a staged install that moves `source` to another
+    /// Timeline leaves it unmatched, which fails closed.
+    source_ancestry: Option<(TimelineId, Vec<TimelineId>)>,
 }
 
 impl Default for ProjectionRegistry {
@@ -173,6 +184,7 @@ impl Default for ProjectionRegistry {
             erasure_gate: Some(Arc::new(ErasureContainmentGateV1::new_fail_closed())),
             erasure_gate_bound: false,
             source: ProjectionSourceV1::default(),
+            source_ancestry: None,
         }
     }
 }
@@ -239,11 +251,84 @@ impl ProjectionRegistry {
             .ok_or(AuthorityErrorV1::SourceUnavailable)?;
         let mut result = Err(AuthorityErrorV1::SourceUnavailable);
         let mut run = || {
-            result = self.apply_if_current_generation(gate.as_ref(), &mut effect);
+            result = self
+                .authorize_source_ancestry(gate.as_ref(), timeline)
+                .and_then(|()| self.apply_if_current_generation(gate.as_ref(), &mut effect));
         };
         gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut run)
             .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
         result
+    }
+
+    /// Bind `timeline`'s host-supplied Fork ancestry.
+    ///
+    /// The chain comes from [`pos_core::fork_ancestry()`], so every later
+    /// Snapshot fence of that Timeline also authorizes each inherited scope.
+    ///
+    /// # Errors
+    /// Returns a closed source error for an empty, wrongly rooted, or
+    /// non-contiguous ancestry.
+    pub fn bind_fork_ancestry(
+        &mut self,
+        timeline: TimelineId,
+        ancestry: &[TimelineMeta],
+    ) -> Result<(), AuthorityErrorV1> {
+        pos_core::validate_fork_ancestry(timeline, ancestry)
+            .map(|()| self.record_source_ancestry(timeline, ancestry))
+            .map_err(|_| AuthorityErrorV1::SourceUnavailable)
+    }
+
+    fn record_source_ancestry(&mut self, timeline: TimelineId, ancestry: &[TimelineMeta]) {
+        self.source_ancestry = Some((timeline, ancestry.iter().map(|meta| meta.id).collect()));
+    }
+
+    /// Keep `ancestry` bound only when the fenced effect actually applied.
+    fn record_applied_ancestry(
+        &mut self,
+        applied: bool,
+        timeline: TimelineId,
+        ancestry: &[TimelineMeta],
+    ) -> Result<(), AuthorityErrorV1> {
+        if applied {
+            self.record_source_ancestry(timeline, ancestry);
+            Ok(())
+        } else {
+            Err(AuthorityErrorV1::SourceUnavailable)
+        }
+    }
+
+    /// Require `ancestry` to be the committed child's complete chain through
+    /// `parent`.
+    fn validate_adopted_ancestry(
+        parent: TimelineId,
+        child: TimelineId,
+        ancestry: &[TimelineMeta],
+    ) -> Result<(), AuthorityErrorV1> {
+        pos_core::validate_fork_ancestry(child, ancestry)
+            .ok()
+            .filter(|()| ancestry.get(1).is_some_and(|meta| meta.id == parent))
+            .ok_or(AuthorityErrorV1::SourceUnavailable)
+    }
+
+    fn authorize_source_ancestry(
+        &self,
+        gate: &dyn ErasureGate,
+        timeline: TimelineId,
+    ) -> Result<(), AuthorityErrorV1> {
+        self.source_ancestry
+            .as_ref()
+            .map_or(Ok(()), |(head, scopes)| {
+                if *head == timeline {
+                    pos_core::authorize_fork_scopes(
+                        gate,
+                        scopes.iter().copied(),
+                        ErasureProtectedOperationV1::Snapshot,
+                    )
+                    .map_err(|_| AuthorityErrorV1::SourceUnavailable)
+                } else {
+                    Err(AuthorityErrorV1::SourceUnavailable)
+                }
+            })
     }
 
     fn source_matches_timeline(&self, timeline: TimelineId) -> bool {
@@ -436,11 +521,17 @@ impl ProjectionRegistry {
     /// Rebuild state from one host-captured Timeline prefix under its current
     /// containment fence after the inventory generation changes.
     ///
+    /// `ancestry` is the Timeline's Fork ancestry from
+    /// [`pos_core::fork_ancestry()`]. Every scope in it must permit the
+    /// `Snapshot`, and it stays bound for later reads of this Timeline.
+    ///
     /// # Errors
-    /// Returns a closed source error when the Timeline cannot be authorized.
+    /// Returns a closed source error when the Timeline cannot be authorized,
+    /// the ancestry is invalid, or any contributing scope denies.
     pub fn refold_events(
         &mut self,
         timeline: TimelineId,
+        ancestry: &[TimelineMeta],
         events: &[Event],
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<(), AuthorityErrorV1> {
@@ -457,24 +548,34 @@ impl ProjectionRegistry {
                 refolded = !self.source.is_mixed();
             }
         };
-        gate.with_fence(timeline, ErasureProtectedOperationV1::Snapshot, &mut refold)
-            .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
-        refolded
-            .then_some(())
-            .ok_or(AuthorityErrorV1::SourceUnavailable)
+        pos_core::with_fork_ancestry_fence(
+            &*gate,
+            timeline,
+            ancestry,
+            ErasureProtectedOperationV1::Snapshot,
+            &mut refold,
+        )
+        .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
+        self.record_applied_ancestry(refolded, timeline, ancestry)
     }
 
     /// Rebind a restored parent projection only after its child Fork has been
     /// committed and installed by the host. The child containment proof is
     /// checked before the inherited state can be exposed under that identity.
     ///
+    /// `ancestry` is the child's complete Fork ancestry from
+    /// [`pos_core::fork_ancestry()`], whose second member is `parent`. It stays
+    /// bound, so every later Snapshot read of the child fences each scope.
+    ///
     /// # Errors
-    /// Returns a closed source error for mixed or mismatched input or when the
-    /// committed child is not available in the current host gate.
+    /// Returns a closed source error for mixed or mismatched input, an
+    /// incomplete or foreign ancestry, or when the committed child is not
+    /// available in the current host gate.
     pub fn adopt_committed_fork(
         &mut self,
         parent: TimelineId,
         child: TimelineId,
+        ancestry: &[TimelineMeta],
     ) -> Result<(), AuthorityErrorV1> {
         if self.source.is_mixed()
             || self
@@ -484,17 +585,23 @@ impl ProjectionRegistry {
         {
             return Err(AuthorityErrorV1::SourceUnavailable);
         }
-        self.erasure_gate
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or(AuthorityErrorV1::SourceUnavailable)
+        Self::validate_adopted_ancestry(parent, child, ancestry)
+            .and_then(|()| {
+                self.erasure_gate
+                    .as_ref()
+                    .map(Arc::clone)
+                    .ok_or(AuthorityErrorV1::SourceUnavailable)
+            })
             .and_then(|gate| {
+                let mut applied = false;
                 let mut bind = || {
                     self.source =
                         ProjectionSourceV1::bound(child, gate.inventory_generation().ok());
+                    applied = true;
                 };
                 gate.with_fence(child, ErasureProtectedOperationV1::Fork, &mut bind)
                     .map_err(|_| AuthorityErrorV1::SourceUnavailable)
+                    .and_then(|()| self.record_applied_ancestry(applied, child, ancestry))
             })
     }
 
@@ -736,6 +843,7 @@ impl ProjectionRegistry {
             slot.registry = StateRegistry::new();
         }
         self.source = ProjectionSourceV1::default();
+        self.source_ancestry = None;
     }
 
     /// Retain only one subject's accumulated state in every reducer.
@@ -848,12 +956,18 @@ impl ProjectionRegistry {
     /// from the host-held snapshot. State is installed only while that exact
     /// generation is current and the Timeline snapshot fence is held.
     ///
+    /// `ancestry` is the Timeline's Fork ancestry from
+    /// [`pos_core::fork_ancestry()`]. Every scope in it must permit the
+    /// `Snapshot`, and it stays bound for later reads of this Timeline.
+    ///
     /// # Errors
     /// Returns a closed source error when the generation is stale or the
-    /// Timeline snapshot fence is unavailable or reducer names are ambiguous.
+    /// Timeline snapshot fence is unavailable or reducer names are ambiguous,
+    /// or when the ancestry is invalid or any contributing scope denies.
     pub fn restore_from_snapshot(
         &mut self,
         timeline: TimelineId,
+        ancestry: &[TimelineMeta],
         snapshot: &std::collections::HashMap<String, StateRegistry>,
         expected_generation: Option<ErasureReferenceV1>,
     ) -> Result<(), AuthorityErrorV1> {
@@ -873,15 +987,15 @@ impl ProjectionRegistry {
                 restored = true;
             }
         };
-        gate.with_fence(
+        pos_core::with_fork_ancestry_fence(
+            &*gate,
             timeline,
+            ancestry,
             ErasureProtectedOperationV1::Snapshot,
             &mut install,
         )
         .map_err(|_| AuthorityErrorV1::SourceUnavailable)?;
-        restored
-            .then_some(())
-            .ok_or(AuthorityErrorV1::SourceUnavailable)
+        self.record_applied_ancestry(restored, timeline, ancestry)
     }
 
     /// Materialize a snapshot of all per-reducer state inside the current
@@ -1340,6 +1454,13 @@ mod tests {
     fn test_timeline() -> TimelineId {
         static TIMELINE: std::sync::OnceLock<TimelineId> = std::sync::OnceLock::new();
         *TIMELINE.get_or_init(TimelineId::new)
+    }
+
+    fn root_ancestry(timeline: TimelineId) -> Vec<TimelineMeta> {
+        vec![TimelineMeta {
+            id: timeline,
+            ..TimelineMeta::root("root")
+        }]
     }
 
     trait ProjectionTestReads {
@@ -1885,7 +2006,12 @@ mod tests {
 
         let mut snapshot = std::collections::HashMap::new();
         snapshot.insert("other".to_owned(), StateRegistry::new());
-        test_ok(registry.restore_from_snapshot(test_timeline(), &snapshot, None));
+        test_ok(registry.restore_from_snapshot(
+            test_timeline(),
+            &root_ancestry(test_timeline()),
+            &snapshot,
+            None,
+        ));
 
         let count = registry
             .state_for_reducer_test("registered", &entity)
@@ -1906,7 +2032,12 @@ mod tests {
 
         let mut restored = open_projection_registry();
         restored.register("registered", Box::new(EntityStateProjection));
-        test_ok(restored.restore_from_snapshot(timeline, &snapshot, None));
+        test_ok(restored.restore_from_snapshot(
+            timeline,
+            &root_ancestry(timeline),
+            &snapshot,
+            None,
+        ));
 
         let count = restored
             .state_for_reducer_test("registered", &entity)
@@ -1930,6 +2061,7 @@ mod tests {
         assert_eq!(
             restored.restore_from_snapshot(
                 timeline,
+                &root_ancestry(timeline),
                 &snapshot,
                 Some(ErasureReferenceV1::from_digest([7; 32])),
             ),
@@ -1939,11 +2071,16 @@ mod tests {
 
         gate.block_timeline(timeline);
         assert_eq!(
-            restored.restore_from_snapshot(timeline, &snapshot, None),
+            restored.restore_from_snapshot(timeline, &root_ancestry(timeline), &snapshot, None),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
         assert_eq!(
-            ProjectionRegistry::new().restore_from_snapshot(timeline, &snapshot, None),
+            ProjectionRegistry::new().restore_from_snapshot(
+                timeline,
+                &root_ancestry(timeline),
+                &snapshot,
+                None,
+            ),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
     }
@@ -1961,6 +2098,7 @@ mod tests {
         assert_eq!(
             registry.refold_events(
                 timeline,
+                &root_ancestry(timeline),
                 std::slice::from_ref(&event),
                 Some(ErasureReferenceV1::from_digest([3; 32])),
             ),
@@ -1972,18 +2110,74 @@ mod tests {
         };
         assert_eq!(count(&registry), Some(2));
 
-        test_ok(registry.refold_events(timeline, std::slice::from_ref(&event), None));
+        test_ok(registry.refold_events(
+            timeline,
+            &root_ancestry(timeline),
+            std::slice::from_ref(&event),
+            None,
+        ));
         assert_eq!(count(&registry), Some(1));
 
         gate.block_timeline(timeline);
         assert_eq!(
-            registry.refold_events(timeline, std::slice::from_ref(&event), None),
+            registry.refold_events(
+                timeline,
+                &root_ancestry(timeline),
+                std::slice::from_ref(&event),
+                None,
+            ),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
         assert_eq!(
-            ProjectionRegistry::new().refold_events(timeline, &[event], None),
+            ProjectionRegistry::new().refold_events(
+                timeline,
+                &root_ancestry(timeline),
+                &[event],
+                None,
+            ),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
+    }
+
+    #[test]
+    fn adoption_fails_closed_when_the_gate_never_runs_the_bind() {
+        let parent = TimelineId::new();
+        let child = TimelineId::new();
+        let ancestry = [
+            TimelineMeta {
+                id: child,
+                ..TimelineMeta::forked_from(parent, Seq::ZERO, "child")
+            },
+            TimelineMeta {
+                id: parent,
+                ..TimelineMeta::root("parent")
+            },
+        ];
+        let mut registry = ProjectionRegistry::new()
+            .with_erasure_gate(Arc::new(pos_core::NonInvokingErasureGateForTest));
+        registry.register("events", Box::new(EntityStateProjection));
+        registry.apply_event(parent, &make_event(EntityId::new()));
+        assert_eq!(
+            registry.adopt_committed_fork(parent, child, &ancestry),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        assert_eq!(registry.source_ancestry, None);
+        assert_eq!(registry.source.timeline(), Some(parent));
+    }
+
+    #[test]
+    fn a_source_moved_to_another_timeline_never_keeps_a_stale_ancestry() {
+        let (first, second) = (TimelineId::new(), TimelineId::new());
+        let mut registry = open_projection_registry();
+        registry.register("events", Box::new(EntityStateProjection));
+        test_ok(registry.bind_fork_ancestry(first, &root_ancestry(first)));
+        registry.source = ProjectionSourceV1::bound(second, registry.current_generation());
+        assert_eq!(
+            registry.state_for(second, &EntityId::new()),
+            Err(AuthorityErrorV1::SourceUnavailable)
+        );
+        registry.clear_state();
+        assert_eq!(registry.source_ancestry, None);
     }
 
     #[test]
@@ -1995,8 +2189,18 @@ mod tests {
         let mut registry = open_projection_registry();
         registry.register("events", Box::new(EntityStateProjection));
         registry.apply_event(source, &make_event(entity));
+        let ancestry = [
+            TimelineMeta {
+                id: child,
+                ..TimelineMeta::forked_from(unrelated, Seq::ZERO, "child")
+            },
+            TimelineMeta {
+                id: unrelated,
+                ..TimelineMeta::root("unrelated")
+            },
+        ];
         assert_eq!(
-            registry.adopt_committed_fork(unrelated, child),
+            registry.adopt_committed_fork(unrelated, child, &ancestry),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
         assert!(test_ok(registry.state_for(source, &entity)).is_some());
@@ -2412,6 +2616,13 @@ mod wave3_tests {
         *TIMELINE.get_or_init(TimelineId::new)
     }
 
+    fn root_ancestry(timeline: TimelineId) -> Vec<TimelineMeta> {
+        vec![TimelineMeta {
+            id: timeline,
+            ..TimelineMeta::root("root")
+        }]
+    }
+
     fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         result.unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
@@ -2496,7 +2707,12 @@ mod wave3_tests {
             Err(AuthorityErrorV1::SourceUnavailable)
         ));
         assert_eq!(
-            registry.restore_from_snapshot(timeline, &single_slot_snapshot, None),
+            registry.restore_from_snapshot(
+                timeline,
+                &root_ancestry(timeline),
+                &single_slot_snapshot,
+                None,
+            ),
             Err(AuthorityErrorV1::SourceUnavailable)
         );
         assert_eq!(count(&registry, first), Some(1));
