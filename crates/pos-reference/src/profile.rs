@@ -1106,7 +1106,7 @@ fn validate_outcome_relationship(fixture: &Fixture) -> Result<(), ProfileError> 
     }
 }
 
-fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
+const fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
     if fixture.redaction_state.admits_replay(fixture.replay_claim) {
         Ok(())
     } else {
