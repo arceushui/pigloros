@@ -2,6 +2,7 @@
 //! first atomic Tick Boundary, against both `MemoryStore` and `SqliteStore`.
 #![cfg(target_os = "linux")]
 
+use std::cell::Cell;
 use std::error::Error as _;
 use std::sync::Arc;
 
@@ -23,7 +24,8 @@ use pos_conformance::{
     UnknownEdgePolicyV1,
 };
 use pos_core::{
-    CanonicalBytes, CoreError, CounterfactualBasisV1, CounterfactualFactsV1,
+    CanonicalBytes, CoreError, CounterfactualAdapterSealV1, CounterfactualBasisV1,
+    CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualGenerationRecordV1,
     CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
     ErasureContainmentGateV1, Event, EventDraft, EventStore, ForkGenerationV1, Hash,
@@ -34,9 +36,10 @@ use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
     CounterfactualCoordinatorV1, CounterfactualForkAppendAuthorityV1,
     CounterfactualFrontierDerivationV1, CounterfactualFrontierSourceV1,
-    CounterfactualInterventionAuthorityV1, CounterfactualProvisionalOutputV1,
-    CounterfactualTickFailureV1, CounterfactualTickInputsV1, CounterfactualTickStagerV1,
-    InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1, ENDOGENOUS_ARTIFACT_CLASS_V1,
+    CounterfactualInterventionAuthorityV1, CounterfactualPendingCommitV1,
+    CounterfactualProvisionalOutputV1, CounterfactualTickFailureV1, CounterfactualTickInputsV1,
+    CounterfactualTickStagerV1, InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
+    ENDOGENOUS_ARTIFACT_CLASS_V1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -51,7 +54,7 @@ use pos_time::counterfactual::frontier::{
 use ulid::Ulid;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-type Admission = Result<pos_core::CounterfactualGenerationReceiptV1, AdmissionError>;
+type Admission = Result<CounterfactualGenerationReceiptV1, AdmissionError>;
 
 const ENV: usize = 0;
 const WORLD_9: usize = 1;
@@ -153,14 +156,45 @@ const COMMIT_CONFLICTS: u8 = 1;
 const TIMELINE_FAILS: u8 = 2;
 /// [`Rigged`] mode: the persisted basis reports an exhausted generation.
 const GENERATION_EXHAUSTED: u8 = 3;
+/// [`Rigged`] mode: the commit lands but reports an unknown outcome.
+const LANDED_UNKNOWN: u8 = 4;
+/// [`Rigged`] mode: the commit is lost and reports an unknown outcome.
+const LOST_UNKNOWN: u8 = 5;
+/// [`Rigged`] mode: the commit lands and reports an unknown outcome, and the
+/// first recovery read fails.
+const RECOVERY_READ_FAILS: u8 = 6;
+/// [`Rigged`] mode: the commit lands and reports an unknown outcome, and the
+/// recovery read finds another invalidation's receipt.
+const OTHER_RECEIPT: u8 = 7;
+/// [`Rigged`] mode: every call is delegated.
+const DELEGATES: u8 = 8;
 
 /// A `MemoryStore` with one rigged operation, chosen by `MODE`; every other
-/// call is delegated.
-struct Rigged<const MODE: u8>(MemoryStore);
+/// call is delegated. It records every command it is asked to commit and
+/// counts the recovery reads.
+struct Rigged<const MODE: u8> {
+    store: MemoryStore,
+    commands: Vec<CounterfactualInvalidationCommandV1>,
+    recovery_reads: Cell<usize>,
+}
+
+/// The receipt of another invalidation of the same generation; only a test
+/// wrapper may mint one with the adapter seal.
+fn other_receipt(
+    receipt: CounterfactualGenerationReceiptV1,
+) -> Result<CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1> {
+    CounterfactualGenerationReceiptV1::from_record(
+        &CounterfactualAdapterSealV1::for_adapter(),
+        CounterfactualGenerationRecordV1 {
+            invalidation_digest: Hash::from_bytes([0xee; 32]),
+            ..receipt.record()
+        },
+    )
+}
 
 impl<const MODE: u8> EventStore for Rigged<MODE> {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
-        self.0.create_timeline(name)
+        self.store.create_timeline(name)
     }
 
     fn append(
@@ -168,31 +202,31 @@ impl<const MODE: u8> EventStore for Rigged<MODE> {
         timeline: TimelineId,
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
-        self.0.append(timeline, drafts)
+        self.store.append(timeline, drafts)
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
-        self.0.read(timeline, range)
+        self.store.read(timeline, range)
     }
 
     fn fork(&mut self, parent: TimelineId, at_seq: Seq, name: &str) -> Result<Timeline, CoreError> {
-        self.0.fork(parent, at_seq, name)
+        self.store.fork(parent, at_seq, name)
     }
 
     fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
-        self.0.list_timelines()
+        self.store.list_timelines()
     }
 
     fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
         if MODE == TIMELINE_FAILS {
             Err(CoreError::ArtifactUnavailable)
         } else {
-            self.0.get_timeline(id)
+            self.store.get_timeline(id)
         }
     }
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
-        self.0.logical_head(id)
+        self.store.logical_head(id)
     }
 }
 
@@ -202,19 +236,25 @@ impl<const MODE: u8> CounterfactualStorePortV1 for Rigged<MODE> {
         fork: TimelineId,
         facts: CounterfactualFactsV1,
     ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1> {
-        self.0.publish_counterfactual_facts(fork, facts)
+        self.store.publish_counterfactual_facts(fork, facts)
     }
 
     fn commit_counterfactual_invalidation(
         &mut self,
-        _command: &CounterfactualInvalidationCommandV1,
+        command: &CounterfactualInvalidationCommandV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
-        if MODE == COMMIT_CONFLICTS {
-            Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
+        self.commands.push(command.clone());
+        match MODE {
+            COMMIT_CONFLICTS => Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
                 InvalidationConflictV1::LogicalHead,
-            ))
-        } else {
-            Err(CounterfactualStoreErrorV1::StorageFailure)
+            )),
+            COMMIT_FAILS => Err(CounterfactualStoreErrorV1::StorageFailure),
+            LOST_UNKNOWN => Err(CounterfactualStoreErrorV1::OutcomeUnknown),
+            LANDED_UNKNOWN | RECOVERY_READ_FAILS | OTHER_RECEIPT => self
+                .store
+                .commit_counterfactual_invalidation(command)
+                .and(Err(CounterfactualStoreErrorV1::OutcomeUnknown)),
+            _ => self.store.commit_counterfactual_invalidation(command),
         }
     }
 
@@ -224,21 +264,22 @@ impl<const MODE: u8> CounterfactualStorePortV1 for Rigged<MODE> {
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
     ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
-        self.0.append_counterfactual_tick(fork, expected, drafts)
+        self.store
+            .append_counterfactual_tick(fork, expected, drafts)
     }
 
     fn current_fork_generation(
         &self,
         fork: TimelineId,
     ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1> {
-        self.0.current_fork_generation(fork)
+        self.store.current_fork_generation(fork)
     }
 
     fn current_counterfactual_basis(
         &self,
         fork: TimelineId,
     ) -> Result<CounterfactualBasisV1, CounterfactualStoreErrorV1> {
-        self.0.current_counterfactual_basis(fork).map(|basis| {
+        self.store.current_counterfactual_basis(fork).map(|basis| {
             if MODE == GENERATION_EXHAUSTED {
                 CounterfactualBasisV1 {
                     generation: u64::MAX,
@@ -250,18 +291,39 @@ impl<const MODE: u8> CounterfactualStorePortV1 for Rigged<MODE> {
         })
     }
 
+    fn committed_generation_receipt(
+        &self,
+        at: ForkGenerationV1,
+    ) -> Result<Option<CounterfactualGenerationReceiptV1>, CounterfactualStoreErrorV1> {
+        let reads = self.recovery_reads.get();
+        self.recovery_reads.set(reads + 1);
+        if MODE == RECOVERY_READ_FAILS && reads == 0 {
+            return Err(CounterfactualStoreErrorV1::StorageFailure);
+        }
+        let found = self.store.committed_generation_receipt(at)?;
+        if MODE == OTHER_RECEIPT {
+            found.map(other_receipt).transpose()
+        } else {
+            Ok(found)
+        }
+    }
+
     fn read_generation_artifact(
         &self,
         at: ForkGenerationV1,
         artifact_digest: Hash,
     ) -> Result<Option<Vec<u8>>, CounterfactualStoreErrorV1> {
-        self.0.read_generation_artifact(at, artifact_digest)
+        self.store.read_generation_artifact(at, artifact_digest)
     }
 }
 
 impl<const MODE: u8> Backend for Rigged<MODE> {
     fn open() -> TestResult<Self> {
-        <MemoryStore as Backend>::open().map(Self)
+        <MemoryStore as Backend>::open().map(|store| Self {
+            store,
+            commands: Vec::new(),
+            recovery_reads: Cell::new(0),
+        })
     }
 }
 
@@ -453,8 +515,13 @@ fn reseal(frontier: &mut RecomputationFrontierV1) {
 
 /// One frontier tamper and the admission error it must produce.
 type FrontierCase = (fn(&mut RecomputationFrontierV1), AdmissionError);
-/// One published-facts change and the conflict it must produce.
-type FactsCase = (fn(&mut CounterfactualFactsV1), InvalidationConflictV1);
+/// One published-facts change, the conflict it must produce, and how often
+/// the frontier source runs before it is detected.
+type FactsCase = (
+    fn(&mut CounterfactualFactsV1),
+    InvalidationConflictV1,
+    usize,
+);
 
 const fn untampered(_: &mut RecomputationFrontierV1) {}
 
@@ -864,10 +931,10 @@ fn expected_invalidation<B>(
 }
 
 /// Assert every `PresentationOnly` output `pos-time` reports stale for the
-/// graph is `expected` and is quarantined at `generation`.
-fn assert_affected_presentation_quarantined<B: Backend>(
+/// graph is `expected` and is in the committed invalid-artifact `index`.
+fn assert_affected_presentation_indexed<B: Backend>(
     setup: &Setup<B>,
-    generation: ForkGenerationV1,
+    index: &[Hash],
     expected: &[usize],
 ) -> TestResult {
     let affected = setup.source.affected_presentation(&setup.fixture.plan)?;
@@ -880,24 +947,16 @@ fn assert_affected_presentation_quarantined<B: Backend>(
             .collect::<Vec<_>>()
     );
     for node in affected {
-        assert_eq!(
-            setup
-                .coordinator
-                .store()
-                .read_generation_artifact(generation, Hash::from_bytes(node.artifact_digest)),
-            Err(CounterfactualStoreErrorV1::InvalidArtifactReuse)
-        );
+        assert!(index.contains(&Hash::from_bytes(node.artifact_digest)));
     }
     Ok(())
 }
 
 /// Assert generation-qualified reads after the first commit: the `RCF1` is
-/// readable, invalidated outputs, suffix presentation outputs, and evicted
-/// checkpoints are quarantined, outputs before the frontier and Intervention
-/// seeds are not, and the prior generation is unreadable.
+/// readable at the new generation and the prior generation is unreadable.
 fn assert_generation_reads<B: Backend>(
     setup: &Setup<B>,
-    receipt: &pos_core::CounterfactualGenerationReceiptV1,
+    receipt: &CounterfactualGenerationReceiptV1,
     frontier: &RecomputationFrontierV1,
 ) -> TestResult {
     let store = setup.coordinator.store();
@@ -906,30 +965,6 @@ fn assert_generation_reads<B: Backend>(
         store.read_generation_artifact(generation, receipt.frontier_digest())?,
         Some(frontier.to_canonical_cbor()?)
     );
-    // The presentation output in the suffix is quarantined through the index.
-    for digest in [
-        endogenous_digest(3),
-        endogenous_digest(4),
-        endogenous_digest(5),
-        endogenous_digest(7),
-        endogenous_digest(8),
-        [0xc1; 32],
-        [0xc2; 32],
-        [0xc3; 32],
-    ] {
-        assert_eq!(
-            store.read_generation_artifact(generation, Hash::from_bytes(digest)),
-            Err(CounterfactualStoreErrorV1::InvalidArtifactReuse)
-        );
-    }
-    // Outputs before the frontier and Intervention seeds stay unquarantined.
-    let seed = setup.fixture.plan.interventions[0].digest()?;
-    for digest in [endogenous_digest(2), EARLY_PRESENTATION, seed] {
-        assert_eq!(
-            store.read_generation_artifact(generation, Hash::from_bytes(digest)),
-            Ok(None)
-        );
-    }
     assert_eq!(
         store.read_generation_artifact(
             ForkGenerationV1 {
@@ -945,13 +980,6 @@ fn assert_generation_reads<B: Backend>(
 
 fn commits_one_generation_and_the_first_tick<B: Backend>() -> TestResult {
     let mut setup = setup::<B>(&BASE)?;
-    setup.source.extra_outputs = vec![CounterfactualProvisionalOutputV1 {
-        node: DependencyNodeV1 {
-            artifact_digest: EARLY_PRESENTATION,
-            ..setup.source.nodes[WORLD_10].node.clone()
-        },
-        class: DependencyClassV1::PresentationOnly,
-    }];
     let frontier = expected_frontier(&setup)?;
     let fork = setup.fixture.fork;
     let (result, stager) = admit(&mut setup);
@@ -987,7 +1015,6 @@ fn commits_one_generation_and_the_first_tick<B: Backend>() -> TestResult {
         expected
     );
     assert_generation_reads(&setup, &receipt, &frontier)?;
-    assert_affected_presentation_quarantined(&setup, generation, &[UI_15])?;
 
     // A second admission advances exactly one more generation on top of the
     // committed first Tick.
@@ -1032,8 +1059,6 @@ fn unknown_edge_fallback_recomputes_from_the_cut<B: Backend>() -> TestResult {
     let nodes = &setup.source.nodes;
     assert_eq!(invalidation.reason, reason);
     assert_eq!(invalidation.commit_tick, FIRST_TICK);
-    // Under the fallback every provisional presentation output is stale.
-    assert_affected_presentation_quarantined(&setup, receipt.generation(), &[UI_15])?;
     // The lowest invalidated producer and the highest one.
     assert_eq!(invalidation.invalid_start, nodes[WORLD_10].node);
     assert_eq!(invalidation.invalid_end, nodes[WEATHER_16].node);
@@ -1596,31 +1621,47 @@ fn failed_or_empty_staging_commits_nothing<B: Backend>() -> TestResult {
 both_backends!(failed_or_empty_staging_commits_nothing);
 
 fn changed_persisted_facts_conflict_atomically<B: Backend>() -> TestResult {
-    let cases: [FactsCase; 5] = [
+    let cases: [FactsCase; 6] = [
         (
             |facts| facts.plan_digest = Hash::from_bytes([1; 32]),
             InvalidationConflictV1::PlanDigest,
+            0,
         ),
         (
             |facts| facts.dependency_graph_digest = Hash::from_bytes([1; 32]),
             InvalidationConflictV1::DependencyGraphDigest,
+            1,
         ),
         (
             |facts| facts.trust_epoch += 1,
             InvalidationConflictV1::TrustEpoch,
+            0,
         ),
         (
             |facts| facts.revocation_epoch += 1,
             InvalidationConflictV1::RevocationEpoch,
+            0,
         ),
         (
             |facts| facts.erasure_epoch += 1,
             InvalidationConflictV1::ErasureEpoch,
+            0,
+        ),
+        // A stale epoch is reported before the frontier is derived, even
+        // when the graph digest differs too.
+        (
+            |facts| {
+                facts.dependency_graph_digest = Hash::from_bytes([1; 32]);
+                facts.erasure_epoch += 1;
+            },
+            InvalidationConflictV1::ErasureEpoch,
+            0,
         ),
     ];
-    // The persisted basis is read before staging, so a stale fact fails
-    // fast; the store's atomic recheck is covered by the rigged store.
-    for (facts, conflict) in cases {
+    // The plan digest and epochs are checked before the host derives a
+    // frontier, the graph digest right after; both before staging. The
+    // store's atomic recheck is covered by the rigged store.
+    for (facts, conflict, derivations) in cases {
         let mut setup = setup::<B>(&Spec { facts, ..BASE })?;
         let outcome = admit(&mut setup);
         assert_rejected(
@@ -1629,7 +1670,7 @@ fn changed_persisted_facts_conflict_atomically<B: Backend>() -> TestResult {
             &AdmissionError::InvalidationConflict(conflict),
             0,
         )?;
-        assert_eq!(setup.source.calls, 1);
+        assert_eq!(setup.source.calls, derivations);
     }
     Ok(())
 }
@@ -1653,6 +1694,121 @@ fn store_outcomes_without_a_commit_map_to_closed_errors() -> TestResult {
         &AdmissionError::InvalidationConflict(InvalidationConflictV1::LogicalHead),
         1,
     )
+}
+
+#[test]
+fn unknown_commit_outcomes_are_resolved_by_the_recovery_read() -> TestResult {
+    // The commit landed: its receipt is returned as if it had been reported.
+    let mut landed = setup::<Rigged<LANDED_UNKNOWN>>(&BASE)?;
+    let fork = landed.fixture.fork;
+    let receipt = admit(&mut landed).0?;
+    let generation = ForkGenerationV1 {
+        fork,
+        generation: 1,
+    };
+    let store = landed.coordinator.store();
+    assert_eq!(receipt.generation(), generation);
+    assert_eq!(
+        receipt.invalidation_digest(),
+        store.commands[0].invalidation().digest()
+    );
+    assert_eq!(store.current_fork_generation(fork)?, generation);
+    assert_eq!(store.recovery_reads.get(), 1);
+
+    // The commit was lost: nothing committed, so it is a storage failure
+    // after which the admission may be retried.
+    let mut lost = setup::<Rigged<LOST_UNKNOWN>>(&BASE)?;
+    let outcome = admit(&mut lost);
+    assert_rejected(
+        &lost,
+        &outcome,
+        &AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
+        1,
+    )?;
+    assert_eq!(lost.coordinator.store().recovery_reads.get(), 1);
+
+    // Another invalidation committed the generation.
+    let mut other = setup::<Rigged<OTHER_RECEIPT>>(&BASE)?;
+    assert_eq!(
+        admit(&mut other).0,
+        Err(AdmissionError::InvalidationConflict(
+            InvalidationConflictV1::PriorGeneration
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_recovery_read_keeps_the_commit_outcome_unknown() -> TestResult {
+    let mut setup = setup::<Rigged<RECOVERY_READ_FAILS>>(&BASE)?;
+    let fork = setup.fixture.fork;
+    let (result, stager) = admit(&mut setup);
+    let store = setup.coordinator.store();
+    let pending = CounterfactualPendingCommitV1 {
+        generation: ForkGenerationV1 {
+            fork,
+            generation: 1,
+        },
+        invalidation_digest: store.commands[0].invalidation().digest(),
+    };
+    assert_eq!(result, Err(AdmissionError::CommitOutcomeUnknown(pending)));
+    assert_eq!(stager.seen.len(), 1);
+    // The commit did land; repeating the read, not the commit, resolves it.
+    let committed = store
+        .store
+        .committed_generation_receipt(pending.generation)?
+        .ok_or("missing receipt")?;
+    assert_eq!(
+        setup.coordinator.resolve_pending_commit(pending),
+        Ok(committed)
+    );
+    assert_eq!(store.commands.len(), 1);
+    assert_eq!(store.recovery_reads.get(), 2);
+    Ok(())
+}
+
+/// The invalid-artifact index of the base scenario: every invalidated
+/// endogenous output and the suffix presentation output (`UI_15`).
+const BASE_INDEX: [u8; 5] = [3, 4, 5, 7, 8];
+
+#[test]
+fn index_and_eviction_set_cover_exactly_the_suffix() -> TestResult {
+    let mut setup = setup::<Rigged<DELEGATES>>(&BASE)?;
+    // A prior-generation presentation output before the global frontier.
+    setup.source.extra_outputs = vec![CounterfactualProvisionalOutputV1 {
+        node: DependencyNodeV1 {
+            artifact_digest: EARLY_PRESENTATION,
+            ..setup.source.nodes[WORLD_10].node.clone()
+        },
+        class: DependencyClassV1::PresentationOnly,
+    }];
+    admit(&mut setup).0?;
+    let command = &setup.coordinator.store().commands[0];
+    // Outputs before the frontier, the early presentation output, and the
+    // Intervention seeds stay out of the index.
+    assert_eq!(
+        command.invalid_artifacts(),
+        BASE_INDEX
+            .map(|seed| Hash::from_bytes(endogenous_digest(seed)))
+            .as_slice()
+    );
+    assert_eq!(
+        command.evictions(),
+        [[0xc1; 32], [0xc2; 32], [0xc3; 32]]
+            .map(Hash::from_bytes)
+            .as_slice()
+    );
+    assert_affected_presentation_indexed(&setup, command.invalid_artifacts(), &[UI_15])?;
+
+    // Under the fallback every provisional presentation output is stale.
+    let mut fallback = setup::<Rigged<DELEGATES>>(&Spec {
+        policy: UnknownEdgePolicyV1::FullSuffixFromCut,
+        omitted: WEATHER_EDGE,
+        ..BASE
+    })?;
+    admit(&mut fallback).0?;
+    let index = fallback.coordinator.store().commands[0].invalid_artifacts();
+    assert_affected_presentation_indexed(&fallback, index, &[UI_15])
 }
 
 #[test]
@@ -1711,6 +1867,13 @@ fn every_error_has_a_distinct_safe_message() {
         AdmissionError::ReservedEventType,
         AdmissionError::InvalidationConflict(InvalidationConflictV1::LogicalHead),
         AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
+        AdmissionError::CommitOutcomeUnknown(CounterfactualPendingCommitV1 {
+            generation: ForkGenerationV1 {
+                fork: TimelineId::new(),
+                generation: 1,
+            },
+            invalidation_digest: Hash::from_bytes([1; 32]),
+        }),
     ];
     let messages: std::collections::BTreeSet<String> =
         errors.iter().map(ToString::to_string).collect();

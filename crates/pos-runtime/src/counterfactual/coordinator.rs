@@ -18,15 +18,16 @@
 //! 5. the Fork: its persisted counterfactual basis (committed Logical Head,
 //!    generation, and published facts, read at one consistent point) and its
 //!    recorded parent cut against the CFP1 parent Timeline and cut `Seq`;
-//! 6. the closed dependency graph and the derived `RCF1` frontier, supplied
+//! 6. the expected plan digest and trust, revocation, and erasure epochs
+//!    against the persisted basis, so a stale plan or epoch fails fast before
+//!    the host derives a frontier;
+//! 7. the closed dependency graph and the derived `RCF1` frontier, supplied
 //!    by the host [`CounterfactualFrontierSourceV1`] and re-validated here;
-//! 7. the expected facts (plan digest, frontier dependency-graph digest, and
-//!    trust, revocation, and erasure epochs) against the persisted basis, so
-//!    a stale epoch fails fast before anything is staged;
-//! 8. the `SIV1` invalidation built here, with its invalid-artifact index and
+//! 8. the frontier's dependency-graph digest against the persisted basis;
+//! 9. the `SIV1` invalidation built here, with its invalid-artifact index and
 //!    cache/checkpoint eviction set;
-//! 9. the first recomputation Tick, staged by the
-//!    [`CounterfactualTickStagerV1`] from staged inputs only.
+//! 10. the first recomputation Tick, staged by the
+//!     [`CounterfactualTickStagerV1`] from staged inputs only.
 //!
 //! Only then does it make exactly one
 //! [`CounterfactualStorePortV1::commit_counterfactual_invalidation`] call.
@@ -38,6 +39,22 @@
 //! that one call. Success commits `RCF1`, `SIV1`, exactly one generation
 //! increment, the index, the eviction set, and the first recomputation Tick
 //! as one transaction, so readers never observe mixed generations.
+//!
+//! # Unknown commit outcome
+//!
+//! When the commit call reports `OutcomeUnknown` the transaction may or may
+//! not have landed, so the coordinator never reports that nothing committed.
+//! It runs the port's recovery read,
+//! [`CounterfactualStorePortV1::committed_generation_receipt`] at the
+//! command's new generation: this command's receipt is returned as if the
+//! commit had reported it; another invalidation's receipt is
+//! `InvalidationConflict(PriorGeneration)`; no receipt means nothing
+//! committed and is `Store(StorageFailure)`, after which `admit` may be
+//! retried. When the recovery read itself fails the outcome stays unknown:
+//! [`CounterfactualAdmissionErrorV1::CommitOutcomeUnknown`] carries the
+//! [`CounterfactualPendingCommitV1`] to re-read with
+//! [`CounterfactualCoordinatorV1::resolve_pending_commit`]; `admit` must not
+//! be retried blindly.
 //!
 //! # ADR gap decisions
 //!
@@ -76,10 +93,11 @@
 //!   validation as `Invalidation(PriorGenerationMismatch)`.
 //! - **Epochs.** The trust epoch is the TPS1 epoch of the plan, after the
 //!   host TPS1 snapshot is proven to be the plan's. The revocation and erasure
-//!   epochs are the host's current epochs. All three, with the plan and
-//!   dependency-graph digests, are compared with the persisted basis before
-//!   staging (`InvalidationConflict` on the first difference, in the port's
-//!   canonical order) and rechecked by the store inside the transaction.
+//!   epochs are the host's current epochs. All three, with the plan digest,
+//!   are compared with the persisted basis before the frontier derivation
+//!   (`InvalidationConflict` on the first difference, in the port's
+//!   canonical order), the frontier's dependency-graph digest after it, and
+//!   all of them are rechecked by the store inside the transaction.
 //! - **First recomputation Tick.** It is the `RCF1` global frontier Tick:
 //!   Ticks between the parent cut and the frontier are unaffected and are not
 //!   invalidated. The frontier must lie in `first_tick..=` the earliest
@@ -251,6 +269,20 @@ pub enum CounterfactualAdmissionErrorV1 {
     /// The counterfactual store rejected or failed the operation.
     #[error("counterfactual store operation failed")]
     Store(#[source] CounterfactualStoreErrorV1),
+    /// The commit may or may not have landed and the recovery read failed.
+    /// Re-read with [`CounterfactualCoordinatorV1::resolve_pending_commit`];
+    /// do not retry the admission blindly.
+    #[error("counterfactual commit outcome is unknown")]
+    CommitOutcomeUnknown(CounterfactualPendingCommitV1),
+}
+
+/// The coordinate of an invalidation whose commit outcome is unknown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CounterfactualPendingCommitV1 {
+    /// The Fork generation the invalidation would have committed.
+    pub generation: ForkGenerationV1,
+    /// The `SIV1` digest of the invalidation.
+    pub invalidation_digest: Hash,
 }
 
 /// Host-declared append authority of the Fork being admitted.
@@ -442,7 +474,10 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// See the module documentation for the validation order and rules.
     ///
     /// # Errors
-    /// Returns the first closed safe error; every error commits nothing.
+    /// Returns the first closed safe error. Every error except
+    /// [`CounterfactualAdmissionErrorV1::CommitOutcomeUnknown`] commits
+    /// nothing; that one means the commit may have landed: re-read it with
+    /// [`Self::resolve_pending_commit`] and never retry blindly.
     pub fn admit(
         &mut self,
         request: &CounterfactualAdmissionRequestV1<'_>,
@@ -460,13 +495,14 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         authorize(plan, authority)?;
         check_profile(request)?;
         let basis = fork_basis(&self.store, request)?;
+        check_persisted_facts(request, &basis)?;
         let derivation = frontier_source.derive_frontier(
             plan,
             request.frontier_id,
             request.provenance_digest,
         )?;
         let frontier = frontier_cbor(request, &derivation)?;
-        check_persisted_facts(request, &basis, &derivation.frontier)?;
+        check_graph_digest(&basis, &derivation.frontier)?;
         let invalidation = invalidation_parts(request, &basis, &derivation)?;
         let tick = derivation.frontier.global_frontier_tick;
         let generation = ForkGenerationV1 {
@@ -502,20 +538,52 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         self.commit(&command)
     }
 
-    /// Make the one store call and map its outcome.
+    /// Resolve an admission whose commit outcome was unknown by reading the
+    /// receipt committed at its generation.
+    ///
+    /// # Errors
+    /// Returns `InvalidationConflict(PriorGeneration)` when another
+    /// invalidation committed that generation, `Store(StorageFailure)` when
+    /// none did (nothing committed; the admission may be retried), and
+    /// `CommitOutcomeUnknown` again when the read fails: read again, never
+    /// retry the admission.
+    pub fn resolve_pending_commit(
+        &self,
+        pending: CounterfactualPendingCommitV1,
+    ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1> {
+        match self.store.committed_generation_receipt(pending.generation) {
+            Ok(Some(receipt)) if receipt.invalidation_digest() == pending.invalidation_digest => {
+                Ok(receipt)
+            }
+            Ok(Some(_)) => Err(CounterfactualAdmissionErrorV1::InvalidationConflict(
+                InvalidationConflictV1::PriorGeneration,
+            )),
+            Ok(None) => Err(STORAGE_FAILURE),
+            Err(_) => Err(CounterfactualAdmissionErrorV1::CommitOutcomeUnknown(
+                pending,
+            )),
+        }
+    }
+
+    /// Make the one store call and map its outcome; an unknown outcome is
+    /// resolved by the recovery read, never reported as nothing committed.
     fn commit(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
     ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1> {
-        self.store
-            .commit_counterfactual_invalidation(command)
-            .map_err(CounterfactualAdmissionErrorV1::Store)
-            .and_then(|outcome| match outcome {
-                CounterfactualInvalidationOutcomeV1::Committed(receipt) => Ok(*receipt),
-                CounterfactualInvalidationOutcomeV1::InvalidationConflict(conflict) => Err(
-                    CounterfactualAdmissionErrorV1::InvalidationConflict(conflict),
-                ),
-            })
+        match self.store.commit_counterfactual_invalidation(command) {
+            Ok(CounterfactualInvalidationOutcomeV1::Committed(receipt)) => Ok(*receipt),
+            Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(conflict)) => Err(
+                CounterfactualAdmissionErrorV1::InvalidationConflict(conflict),
+            ),
+            Err(CounterfactualStoreErrorV1::OutcomeUnknown) => {
+                self.resolve_pending_commit(CounterfactualPendingCommitV1 {
+                    generation: command.new_generation(),
+                    invalidation_digest: command.invalidation().digest(),
+                })
+            }
+            Err(error) => Err(CounterfactualAdmissionErrorV1::Store(error)),
+        }
     }
 }
 
@@ -583,20 +651,21 @@ const fn next_generation(basis: &CounterfactualBasisV1) -> u64 {
     basis.generation.wrapping_add(1)
 }
 
-/// Fail fast, before staging, when a persisted fact already differs from
-/// the facts this admission derives; the store rechecks them at commit.
+/// Fail fast, before the host derives a frontier, when the persisted plan
+/// digest or an epoch already differs from this admission's; the store
+/// rechecks them at commit. The dependency-graph digest is known only after
+/// the derivation and is checked by [`check_graph_digest`].
 fn check_persisted_facts(
     request: &CounterfactualAdmissionRequestV1<'_>,
     basis: &CounterfactualBasisV1,
-    frontier: &RecomputationFrontierV1,
 ) -> Result<(), CounterfactualAdmissionErrorV1> {
     let expected = CounterfactualBasisV1 {
         facts: CounterfactualFactsV1 {
             plan_digest: Hash::from_bytes(request.plan.plan_digest),
-            dependency_graph_digest: Hash::from_bytes(frontier.dependency_graph_digest),
             trust_epoch: request.plan.trust_policy.epoch,
             revocation_epoch: request.revocation_epoch,
             erasure_epoch: request.erasure_epoch,
+            ..basis.facts
         },
         ..*basis
     };
@@ -605,6 +674,21 @@ fn check_persisted_facts(
             conflict,
         ))
     })
+}
+
+/// Fail fast, before staging, when the derived frontier's dependency-graph
+/// digest is not the persisted one; the store rechecks it at commit.
+fn check_graph_digest(
+    basis: &CounterfactualBasisV1,
+    frontier: &RecomputationFrontierV1,
+) -> Result<(), CounterfactualAdmissionErrorV1> {
+    if Hash::from_bytes(frontier.dependency_graph_digest) == basis.facts.dependency_graph_digest {
+        Ok(())
+    } else {
+        Err(CounterfactualAdmissionErrorV1::InvalidationConflict(
+            InvalidationConflictV1::DependencyGraphDigest,
+        ))
+    }
 }
 
 /// Re-validate the derived frontier, bind it, check its range, and return
