@@ -10,10 +10,13 @@
 
 use std::path::PathBuf;
 
-use pos_core::{CoreError, EntityId, Hash, RecipientKeyDescriptorV1};
+use pos_core::{ConsentAuthority, CoreError, EntityId, Hash, RecipientKeyDescriptorV1};
 use pos_crypto::recipient_export::DecryptedTimelineExportV1;
 
-use super::{RecipientExportDecryptionErrorV1, SqliteStore};
+use super::{
+    PublishedRecipientExportV1, RecipientExportDecryptionErrorV1,
+    RecipientExportPublicationErrorV1, RecipientExportRequestV1, SqliteStore,
+};
 
 const UNSUPPORTED: &str = "recipient key custody requires Linux";
 
@@ -74,6 +77,51 @@ impl SqliteStore {
         _expected_recipient: RecipientKeyDescriptorV1,
     ) -> Result<DecryptedTimelineExportV1, RecipientExportDecryptionErrorV1> {
         Err(RecipientExportDecryptionErrorV1::MaterialUnavailable)
+    }
+
+    /// Refuse recipient-export publication without Linux private-file support.
+    ///
+    /// # Errors
+    ///
+    /// Always reports the Linux custody requirement.
+    pub fn publish_recipient_export(
+        &mut self,
+        _authority: &ConsentAuthority,
+        _owner: &RecipientKeyOwnerV1,
+        _request: RecipientExportRequestV1<'_>,
+    ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        Err(RecipientExportPublicationErrorV1::Store(
+            CoreError::Storage(UNSUPPORTED.to_owned()),
+        ))
+    }
+
+    /// Refuse recipient-export retrieval without Linux private-file support.
+    ///
+    /// # Errors
+    ///
+    /// Always reports the Linux custody requirement.
+    pub fn read_recipient_export(
+        &self,
+        _owner: &RecipientKeyOwnerV1,
+        _export_id: [u8; 16],
+    ) -> Result<Vec<u8>, RecipientExportPublicationErrorV1> {
+        Err(RecipientExportPublicationErrorV1::Store(
+            CoreError::Storage(UNSUPPORTED.to_owned()),
+        ))
+    }
+
+    /// Refuse recipient-export recovery without Linux private-file support.
+    ///
+    /// # Errors
+    ///
+    /// Always reports the Linux custody requirement.
+    pub fn recover_recipient_exports(
+        &mut self,
+        _owner: &RecipientKeyOwnerV1,
+    ) -> Result<(), RecipientExportPublicationErrorV1> {
+        Err(RecipientExportPublicationErrorV1::Store(
+            CoreError::Storage(UNSUPPORTED.to_owned()),
+        ))
     }
 
     /// Refuse destruction on platforms without the required file boundary.
