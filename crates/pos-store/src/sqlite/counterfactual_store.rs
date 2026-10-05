@@ -70,14 +70,27 @@
 //!   which equal the receipt's. The
 //!   [`CounterfactualStorePortV1::committed_generation_receipt`] read
 //!   rebuilds the receipt from that row; a generation above `i64::MAX`
-//!   cannot have committed and reads as `None`.
+//!   cannot have committed and reads as `None`. On a deleted or unpublished
+//!   Fork it returns `ForkNotFound`, never `Ok(None)`, even when the deleted
+//!   Fork committed that generation, so a recovering caller cannot mistake a
+//!   deleted Fork for "nothing committed", matching the `MemoryStore` adapter.
 //! - **Outcome unknown.** A write whose commit or rollback failed is
 //!   `CoreError::StorageOutcomeUnknown`, reported through the crate's shared
 //!   `counterfactual_port_error` as `OutcomeUnknown`; a rejection never hides
-//!   it. Port reads refuse to run on a connection that is already inside a
-//!   transaction (`StorageFailure`): one left open by an in-doubt write holds
-//!   unsettled state, and an outer host transaction cannot be told apart from
-//!   it, so recovery reads answer only from settled state.
+//!   it. That write also marks the store's connection in doubt. While the
+//!   mark is set and the connection is still inside a transaction (one the
+//!   failed write may have left open, or the host's outer transaction holding
+//!   the write's unreleased savepoint), every port read is refused with
+//!   `StorageFailure`, so a recovery read never answers from unsettled state.
+//!   The mark is cleared once the connection is seen in autocommit again, by
+//!   the next port read or by the host beginning a new protected-effect
+//!   interval; the recovery read then answers from settled state.
+//! - **Reads inside a host transaction.** Outside that in-doubt state, a
+//!   port read on a connection already inside a transaction (the host's
+//!   protected-effect interval runs `BEGIN IMMEDIATE` on this connection)
+//!   runs inside a savepoint of that transaction, exactly as the writes do,
+//!   so it sees the interval's own earlier, not yet committed writes at one
+//!   read point.
 //! - **Epoch monotonicity.** The store does not require a republished trust,
 //!   revocation, or erasure epoch to be at least the previously published
 //!   one; keeping the published epochs monotonic is a host obligation.
@@ -99,8 +112,10 @@
 //!   Event or derived artifact, and is not fenced.
 //! - **Concurrency.** Every port read runs its statements (Fork visibility,
 //!   the counterfactual rows, and the live Fork head) inside one deferred
-//!   read transaction, so they observe one consistent read point even when
-//!   another connection commits to the same file. Every write runs in its
+//!   read transaction, or one savepoint of an enclosing transaction, so they
+//!   observe one consistent read point even when another connection commits
+//!   to the same file. A read transaction whose `COMMIT` fails is rolled back
+//!   so the connection is never left inside it. Every write runs in its
 //!   `BEGIN IMMEDIATE` transaction and first compares `PRAGMA data_version`
 //!   with the bound erasure inventory, because another connection may have
 //!   changed the file; the single-handle `MemoryStore` has no equivalent
@@ -603,6 +618,27 @@ fn settle<T>(staged: Staged<T>) -> Result<T, StoreError> {
     staged.unwrap_or_else(|error| Err(counterfactual_port_error(&error)))
 }
 
+/// Statements that open, release, and abandon one port read: a deferred read
+/// transaction, or a savepoint of an enclosing transaction.
+struct ReadScopeSqlV1 {
+    begin: &'static str,
+    release: &'static str,
+    abandon: &'static str,
+}
+
+const READ_TRANSACTION: ReadScopeSqlV1 = ReadScopeSqlV1 {
+    begin: "BEGIN DEFERRED",
+    release: "COMMIT",
+    abandon: "ROLLBACK",
+};
+
+const READ_SAVEPOINT: ReadScopeSqlV1 = ReadScopeSqlV1 {
+    begin: "SAVEPOINT pigloros_counterfactual_read",
+    release: "RELEASE SAVEPOINT pigloros_counterfactual_read",
+    abandon: "ROLLBACK TO SAVEPOINT pigloros_counterfactual_read;
+              RELEASE SAVEPOINT pigloros_counterfactual_read",
+};
+
 /// Run `next` only when the previous staged step accepted.
 fn then_staged<T, U>(staged: Staged<T>, next: impl FnOnce(T) -> Staged<U>) -> Staged<U> {
     staged.and_then(|accepted| accepted.map_or_else(|rejected| Ok(Err(rejected)), next))
@@ -941,24 +977,54 @@ impl SqliteStore {
             })
     }
 
+    /// Clear the in-doubt mark once the connection is back in autocommit:
+    /// the transaction an in-doubt write could have left open has settled.
+    pub(super) fn settle_counterfactual_doubt(&self) {
+        self.counterfactual_write_in_doubt
+            .set(self.counterfactual_write_in_doubt.get() && !self.conn.is_autocommit());
+    }
+
+    /// Settle a write's result; an unknown outcome marks the connection in
+    /// doubt until it is next seen in autocommit.
+    fn settle_write<T>(&self, staged: Staged<T>) -> Result<T, StoreError> {
+        let settled = settle(staged);
+        self.counterfactual_write_in_doubt.set(
+            self.counterfactual_write_in_doubt.get()
+                || matches!(settled, Err(StoreError::OutcomeUnknown)),
+        );
+        settled
+    }
+
     /// Run a multi-statement port read at one consistent read point: one
-    /// deferred read transaction. A connection already inside a transaction
-    /// may hold the unsettled state of an in-doubt write, so the read is
-    /// refused rather than answered from it.
+    /// deferred read transaction, or, inside an enclosing transaction such as
+    /// the host's protected-effect interval, one savepoint of it. While an
+    /// in-doubt write may have left that enclosing transaction holding
+    /// unsettled state, the read is refused rather than answered from it. A
+    /// scope that cannot be released is abandoned, so a failed read never
+    /// leaves the connection inside its transaction.
     fn in_counterfactual_read<T>(&self, work: impl FnOnce(&Self) -> Staged<T>) -> Staged<T> {
-        if !self.conn.is_autocommit() {
+        self.settle_counterfactual_doubt();
+        if self.counterfactual_write_in_doubt.get() {
             return Err(CoreError::Storage(
-                "counterfactual read refused inside an open transaction".to_owned(),
+                "counterfactual read refused while an in-doubt write is unsettled".to_owned(),
             ));
         }
+        let scope = if self.conn.is_autocommit() {
+            &READ_TRANSACTION
+        } else {
+            &READ_SAVEPOINT
+        };
         self.conn
-            .execute_batch("BEGIN DEFERRED")
+            .execute_batch(scope.begin)
             .map_err(Self::into_storage_error)
             .and_then(|()| {
                 let result = work(self);
                 self.conn
-                    .execute_batch("COMMIT")
-                    .map_err(Self::into_storage_error)
+                    .execute_batch(scope.release)
+                    .map_err(|error| {
+                        drop(self.conn.execute_batch(scope.abandon));
+                        Self::into_storage_error(error)
+                    })
                     .and(result)
             })
     }
@@ -1085,7 +1151,7 @@ impl CounterfactualStorePortV1 for SqliteStore {
                 sql_integer(facts.erasure_epoch).map(|erasure| [trust, revocation, erasure])
             })
         })?;
-        settle(self.in_counterfactual_scope(|store| {
+        self.settle_write(self.in_counterfactual_scope(|store| {
             then_staged(store.visible_counterfactual_fork(fork), |()| {
                 then_staged(published_generation(&store.conn, fork), |published| {
                     write_fork_facts(&store.conn, fork, &facts, epochs, published.is_some()).map(
@@ -1108,31 +1174,30 @@ impl CounterfactualStorePortV1 for SqliteStore {
         let fork = command.fork();
         let generation = sql_integer(command.new_generation().generation)?;
         let first_tick = sql_integer(command.first_tick())?;
-        settle(
-            self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
-                store.in_counterfactual_scope(|store| {
-                    then_staged(store.writable_counterfactual_basis(fork), |persisted| {
-                        command
-                            .expected_basis()
-                            .first_conflict(&persisted)
-                            .map_or_else(
-                                || {
-                                    store.write_counterfactual_generation(
-                                        command, generation, first_tick,
-                                    )
-                                },
-                                |conflict| {
-                                    Ok(Ok(
-                                        CounterfactualInvalidationOutcomeV1::InvalidationConflict(
-                                            conflict,
-                                        ),
-                                    ))
-                                },
-                            )
-                    })
+        let staged = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
+            store.in_counterfactual_scope(|store| {
+                then_staged(store.writable_counterfactual_basis(fork), |persisted| {
+                    command
+                        .expected_basis()
+                        .first_conflict(&persisted)
+                        .map_or_else(
+                            || {
+                                store.write_counterfactual_generation(
+                                    command, generation, first_tick,
+                                )
+                            },
+                            |conflict| {
+                                Ok(Ok(
+                                    CounterfactualInvalidationOutcomeV1::InvalidationConflict(
+                                        conflict,
+                                    ),
+                                ))
+                            },
+                        )
                 })
-            }),
-        )
+            })
+        });
+        self.settle_write(staged)
     }
 
     fn append_counterfactual_tick(
@@ -1141,24 +1206,23 @@ impl CounterfactualStorePortV1 for SqliteStore {
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
     ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
-        settle(
-            self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
-                store.in_counterfactual_scope(|store| {
-                    then_staged(store.writable_counterfactual_basis(fork), |persisted| {
-                        expected.first_conflict(&persisted).map_or_else(
-                            || {
-                                // The outcome is built from the staged head; a
-                                // head that did not advance rolls back.
-                                store.append_tick_in_transaction(fork, drafts).map(|head| {
-                                    persisted.committed_tick(&COUNTERFACTUAL_SEAL, head)
-                                })
-                            },
-                            |conflict| Ok(Ok(CounterfactualTickOutcomeV1::Stale(conflict))),
-                        )
-                    })
+        let staged = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
+            store.in_counterfactual_scope(|store| {
+                then_staged(store.writable_counterfactual_basis(fork), |persisted| {
+                    expected.first_conflict(&persisted).map_or_else(
+                        || {
+                            // The outcome is built from the staged head; a
+                            // head that did not advance rolls back.
+                            store
+                                .append_tick_in_transaction(fork, drafts)
+                                .map(|head| persisted.committed_tick(&COUNTERFACTUAL_SEAL, head))
+                        },
+                        |conflict| Ok(Ok(CounterfactualTickOutcomeV1::Stale(conflict))),
+                    )
                 })
-            }),
-        )
+            })
+        });
+        self.settle_write(staged)
     }
 
     fn current_fork_generation(&self, fork: TimelineId) -> Result<ForkGenerationV1, StoreError> {
@@ -1238,7 +1302,8 @@ mod tests {
         frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, uint,
     };
     use pos_core::{
-        CanonicalBytes, CounterfactualInvalidationInputV1, EntityId, EventDraft, EventStore, Kind,
+        CanonicalBytes, CounterfactualInvalidationInputV1, EntityId, ErasurePersistencePortV1,
+        ErasureProtectedEffectDispositionV1, EventDraft, EventStore, Kind,
         RecomputationFrontierBytesV1, SuffixInvalidationBytesV1,
     };
 
@@ -1407,23 +1472,22 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn reads_run_in_one_transaction_and_refuse_unsettled_state() {
+    fn reads_run_in_one_transaction_or_one_savepoint() {
         let (store, fork) = published_store();
         let observed = store.in_counterfactual_read(|store| Ok(Ok(store.conn.is_autocommit())));
         assert!(matches!(observed, Ok(Ok(false))));
         assert!(store.conn.is_autocommit());
 
-        // A connection left inside a transaction may hold an in-doubt write.
+        // Inside an enclosing transaction the read is one savepoint of it.
         assert!(store.conn.execute_batch("BEGIN").is_ok());
-        assert!(matches!(
-            store.in_counterfactual_read(|_| Ok(Ok(()))),
-            Err(CoreError::Storage(_))
-        ));
-        assert_eq!(
-            store.current_counterfactual_basis(fork),
-            Err(StoreError::StorageFailure)
-        );
-        assert!(store.conn.execute_batch("ROLLBACK").is_ok());
+        let nested = store.in_counterfactual_read(|store| {
+            Ok(Ok(store
+                .conn
+                .execute_batch("ROLLBACK TO SAVEPOINT pigloros_counterfactual_read")
+                .is_ok()))
+        });
+        assert!(matches!(nested, Ok(Ok(true))));
+        assert!(!store.conn.is_autocommit());
         assert_eq!(
             store.current_fork_generation(fork),
             Ok(ForkGenerationV1 {
@@ -1431,6 +1495,127 @@ mod tests {
                 generation: 0
             })
         );
+        assert!(store.conn.execute_batch("ROLLBACK").is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reads_inside_a_protected_effect_interval_see_its_writes() {
+        let (mut store, fork) = published_store();
+        let command = command(fork);
+        let next = command.new_generation();
+        let before = ok(store.current_counterfactual_basis(fork));
+        let interval = ok(store.begin_protected_effect_interval());
+        assert!(!store.conn.is_autocommit());
+        assert_eq!(store.current_counterfactual_basis(fork), Ok(before));
+
+        let receipt = ok(command.committed_receipt(&COUNTERFACTUAL_SEAL, Seq::from_u64(2)));
+        assert_eq!(
+            store.commit_counterfactual_invalidation(&command),
+            Ok(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
+                receipt
+            )))
+        );
+        assert_eq!(store.current_fork_generation(fork), Ok(next));
+        assert_eq!(
+            store.current_counterfactual_basis(fork),
+            Ok(receipt.tick_basis(receipt.first_tick_head()))
+        );
+        assert_eq!(store.committed_generation_receipt(next), Ok(Some(receipt)));
+        assert_eq!(
+            store.read_generation_artifact(next, command.invalidation().digest()),
+            Ok(Some(command.invalidation().as_bytes().to_vec()))
+        );
+        assert!(!store.conn.is_autocommit());
+
+        ok(store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        ));
+        assert_eq!(store.current_counterfactual_basis(fork), Ok(before));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reads_after_an_in_doubt_write_wait_until_it_settles() {
+        let (store, fork) = published_store();
+        let settled = ForkGenerationV1 {
+            fork,
+            generation: 0,
+        };
+        let unknown = || CoreError::StorageOutcomeUnknown("in doubt".to_owned());
+
+        // A known failure leaves reads inside the transaction available.
+        assert!(store.conn.execute_batch("BEGIN").is_ok());
+        assert_eq!(
+            store.settle_write::<()>(Err(CoreError::Storage("known".to_owned()))),
+            Err(StoreError::StorageFailure)
+        );
+        assert_eq!(store.current_fork_generation(fork), Ok(settled));
+
+        // An unknown outcome refuses every read until the transaction settles.
+        assert_eq!(
+            store.settle_write::<()>(Err(unknown())),
+            Err(StoreError::OutcomeUnknown)
+        );
+        assert_eq!(
+            store.current_fork_generation(fork),
+            Err(StoreError::StorageFailure)
+        );
+        assert!(matches!(
+            store.in_counterfactual_read(|_| Ok(Ok(()))),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(store.conn.execute_batch("ROLLBACK").is_ok());
+
+        // Beginning a new protected-effect interval observes the settled
+        // connection, so reads inside it are answered again.
+        let interval = ok(store.begin_protected_effect_interval());
+        assert_eq!(store.current_fork_generation(fork), Ok(settled));
+        ok(store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        ));
+
+        // An unknown outcome that left the connection in autocommit is
+        // settled by the recovery read itself.
+        assert_eq!(
+            store.settle_write::<()>(Err(unknown())),
+            Err(StoreError::OutcomeUnknown)
+        );
+        assert_eq!(store.current_fork_generation(fork), Ok(settled));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_failed_read_commit_leaves_the_connection_in_autocommit() {
+        let store = super::super::tests::new_store();
+        assert!(store
+            .conn
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TEMP TABLE read_parent (id INTEGER PRIMARY KEY);
+                 CREATE TEMP TABLE read_child (
+                     parent INTEGER REFERENCES read_parent (id) DEFERRABLE INITIALLY DEFERRED
+                 );"
+            )
+            .is_ok());
+        // A deferred foreign-key violation fails the read's COMMIT and keeps
+        // its transaction open until the read abandons it.
+        let failed = store.in_counterfactual_read(|store| {
+            Ok(Ok(store
+                .conn
+                .execute_batch("INSERT INTO read_child VALUES (1)")
+                .is_ok()))
+        });
+        assert!(matches!(failed, Err(CoreError::Storage(_))));
+        assert!(store.conn.is_autocommit());
+        let children = store
+            .conn
+            .query_row("SELECT count(*) FROM read_child", [], |row| {
+                row.get::<_, i64>(0)
+            });
+        assert!(matches!(children, Ok(0)));
     }
 
     /// A rejection is reported only while its rollback is guaranteed: once

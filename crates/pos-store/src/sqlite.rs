@@ -249,6 +249,11 @@ pub struct SqliteStore {
     fork_admission_authority_enabled: bool,
     /// Per-adapter `FAI1`/`FAO1`/session state. It never enters `SQLite`.
     fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1,
+    /// Whether a counterfactual write reported an unknown outcome that no
+    /// later observation of this connection in autocommit has settled; while
+    /// set and the connection is inside a transaction, counterfactual port
+    /// reads are refused.
+    counterfactual_write_in_doubt: std::cell::Cell<bool>,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -1855,6 +1860,7 @@ impl SqliteStore {
             authority_persistence_binding: None,
             fork_admission_authority_enabled: true,
             fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1::default(),
+            counterfactual_write_in_doubt: std::cell::Cell::new(false),
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
@@ -9180,6 +9186,8 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn begin_protected_effect_interval(
         &self,
     ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
+        // A new interval starts after the previous transaction settled.
+        self.settle_counterfactual_doubt();
         let interval_connection = self
             .writer_reservation_connection
             .as_ref()
