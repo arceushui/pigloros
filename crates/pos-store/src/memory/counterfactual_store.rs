@@ -51,6 +51,9 @@
 //!   [`CounterfactualGenerationRecordV1`] keyed by its new generation, and
 //!   [`CounterfactualStorePortV1::committed_generation_receipt`] rebuilds the
 //!   receipt from it, under the same erasure read fence as every other read.
+//!   On a deleted or unpublished Fork it returns `ForkNotFound`, never
+//!   `Ok(None)`, even when the deleted Fork committed that generation, so a
+//!   recovering caller cannot mistake a deleted Fork for "nothing committed".
 //! - **Outcome unknown.** Backend failures map through the crate's shared
 //!   `counterfactual_port_error`, so a `CoreError::StorageOutcomeUnknown`
 //!   would surface as `OutcomeUnknown`. `MemoryStore` never produces one on
