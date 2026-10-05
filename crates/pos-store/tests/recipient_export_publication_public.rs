@@ -110,7 +110,7 @@ fn fixture(export_permitted: bool) -> TestResult<Fixture> {
     })
 }
 
-fn request<'a>(
+const fn request<'a>(
     timeline_id: pos_core::TimelineId,
     recipient: pos_core::RecipientKeyDescriptorV1,
     evaluation: &'a pos_core::ReplayClaimEvaluationV1,
