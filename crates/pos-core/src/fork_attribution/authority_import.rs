@@ -226,7 +226,10 @@ impl ImportedForkPublicationOperationV1 {
     /// Encode the exact canonical code-2 `FPO1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        with_imported_origin(self.operation.canonical_body(), self.authority_origin_digest)
+        with_imported_origin(
+            self.operation.canonical_body(),
+            self.authority_origin_digest,
+        )
     }
 
     /// The carried code-2 authority-origin digest.
