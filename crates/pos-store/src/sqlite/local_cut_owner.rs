@@ -15,8 +15,8 @@ use pos_core::{
     LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1, LocalCutManifestBindingTableV1,
     LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1, LocalCutOwnerErrorV1,
     LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1, LocalCutOwnerStateV1,
-    LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2,
-    LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestOwnerAdmissionErrorV1,
+    LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealV2,
+    LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionInputV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerLinkAncestorV1,
     ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1,
@@ -1306,28 +1306,30 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
 
 /// Find the owner's first visible cut, in cut order, whose WCR1 for
 /// `timeline_id` the identity selects, through the Timeline recording index.
+///
+/// Rows are read one at a time and the scan stops at the first match.
 fn sqlite_owner_link_cut(
     connection: &Connection,
     owner_id: [u8; 32],
     identity: ManifestOwnerLinkCutIdentityV1,
     timeline_id: TimelineId,
 ) -> Result<Option<u64>, LocalCutOwnerErrorV1> {
+    let failed = |error: rusqlite::Error| sqlite_local_cut_query_error(&error);
     let timeline_id = timeline_id.inner().to_bytes();
-    let rows = connection
+    let mut statement = connection
         .prepare(
             "SELECT cut_id, receipt_cbor FROM local_cut_world_recordings
              WHERE owner_id = ?1 AND timeline_id = ?2 ORDER BY cut_id",
         )
-        .and_then(|mut statement| {
-            statement
-                .query_map(
-                    params![owner_id.as_slice(), timeline_id.as_slice()],
-                    |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                )
-                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-        })
-        .map_err(|error| sqlite_local_cut_query_error(&error))?;
-    for (cut_id, receipt) in rows {
+        .map_err(failed)?;
+    let rows = statement
+        .query_map(
+            params![owner_id.as_slice(), timeline_id.as_slice()],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .map_err(failed)?;
+    for row in rows {
+        let (cut_id, receipt) = row.map_err(failed)?;
         let receipt = WorldRecordingReceiptV1::from_canonical_cbor(&receipt)
             .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
         if identity.selects(&receipt) {
@@ -1335,28 +1337,6 @@ fn sqlite_owner_link_cut(
         }
     }
     Ok(None)
-}
-
-/// The owner's visible cuts before `seal`, newest first, each loaded only
-/// when the ancestry walk reads it.
-fn sqlite_owner_link_earlier_cuts<'a>(
-    connection: &'a Connection,
-    owner_id: [u8; 32],
-    seal: &LocalCutSealInputV2,
-    cut_ids: &'a [Vec<u8>],
-) -> impl Iterator<Item = Result<ManifestOwnerLinkAncestorV1, LocalCutOwnerErrorV1>> + use<'a> {
-    let sealed_cut = seal.cut_id;
-    cut_ids
-        .iter()
-        .rev()
-        .map(|bytes| sqlite_local_cut_owner_u64(bytes))
-        .filter(move |cut_id| !matches!(cut_id, Ok(cut_id) if *cut_id >= sealed_cut))
-        .map(move |cut_id| {
-            let cut = cut_id.and_then(|cut_id| {
-                sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)
-            });
-            cut.map(|cut| ManifestOwnerLinkAncestorV1::of_result(&cut.result))
-        })
 }
 
 /// Read one retained WDB1 node of `scope` by digest, if it is retained.
@@ -1385,6 +1365,10 @@ fn sqlite_owner_link_branch(
 /// Read one selected cut, its kind-14 admissions, the earlier cuts its
 /// ancestry walk needs and its Timeline's WDB1 nodes inside the caller's
 /// read transaction.
+///
+/// Earlier cut ids are read newest first, one row at a time, so the walk
+/// loads only the cuts it uses. A selected cut without its Timeline's
+/// admission is corrupt, so the read fails before either walk.
 fn sqlite_owner_link_snapshot(
     store: &SqliteStore,
     connection: &Connection,
@@ -1411,9 +1395,25 @@ fn sqlite_owner_link_snapshot(
         .collect::<Result<Vec<_>, _>>()?;
     let admission = admissions
         .iter()
-        .find(|admission| admission.timeline.timeline_id == timeline_id);
-    let cut_ids = sqlite_local_cut_owner_cut_ids(connection, owner_id)?;
-    let earlier = sqlite_owner_link_earlier_cuts(connection, owner_id, seal, &cut_ids);
+        .find(|admission| admission.timeline.timeline_id == timeline_id)
+        .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+    let failed = |error: rusqlite::Error| sqlite_local_cut_query_error(&error);
+    let mut statement = connection
+        .prepare(
+            "SELECT cut_id FROM local_cut_owner_cuts
+             WHERE owner_id = ?1 AND cut_id < ?2 ORDER BY cut_id DESC",
+        )
+        .map_err(failed)?;
+    let sealed_cut = seal.cut_id.to_be_bytes();
+    let before_seal = params![owner_id.as_slice(), sealed_cut.as_slice()];
+    let cut_ids = statement
+        .query_map(before_seal, |row| row.get::<_, Vec<u8>>(0))
+        .map_err(failed)?;
+    let earlier = cut_ids.map(|cut_id| {
+        let cut_id = sqlite_local_cut_owner_u64(&cut_id.map_err(failed)?)?;
+        let cut = sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)?;
+        Ok::<_, LocalCutOwnerErrorV1>(ManifestOwnerLinkAncestorV1::of_result(&cut.result))
+    });
     let ancestors = collect_manifest_owner_link_ancestors_v1(seal, admission, earlier)?;
     let mut dependency_branches = BTreeMap::new();
     let selected = cut
@@ -1423,7 +1423,8 @@ fn sqlite_owner_link_snapshot(
         .filter(|recording| recording.binding.as_input().timeline_id == timeline_id);
     for recording in selected {
         let root = recording.binding.as_input().dependency_root_hash;
-        let nodes = collect_manifest_owner_link_branches_v1(root, |digest| {
+        let max_node_visits = admission.read_limits.max_node_visits;
+        let nodes = collect_manifest_owner_link_branches_v1(root, max_node_visits, |digest| {
             sqlite_owner_link_branch(connection, recording.scope, digest)
         })?;
         dependency_branches.extend(nodes);
@@ -1589,10 +1590,10 @@ mod local_cut_owner_coverage {
     use pos_core::{
         prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
         LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutOwnerVerifierV1,
-        LocalCutReceiptInputV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1,
-        ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
-        ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
-        ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
+        LocalCutReceiptInputV1, LocalCutSealInputV2, ManifestAdmissionCatalogV1,
+        ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerAdmissionSnapshotV1, ManifestOwnerAdmissionVerifierV1,
+        ManifestOwnerClassifiedLeafV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
         ManifestSlotAdmissionReceiptV1, PreparedManifestOwnerAdmissionV1,
     };
@@ -3348,6 +3349,19 @@ mod local_cut_owner_coverage {
         let denied = link_snapshot(store, &store.conn, newest);
         clear_authorizer(&store.conn)?;
         assert_eq!(denied, Err(LocalError::StorageFailure));
+        Ok(())
+    }
+
+    #[test]
+    fn owner_link_snapshot_rejects_a_cut_without_its_timelines_admission() -> TestResult {
+        let (fixture, second) = with_history()?;
+        let store = &fixture.store;
+        let newest = link_identity(&second)?;
+        let setup = "DELETE FROM manifest_owner_admissions";
+        let read = with_rollback(&store.conn, setup, |connection| {
+            link_snapshot(store, connection, newest)
+        })?;
+        assert_eq!(read, Err(LocalError::CorruptState));
         Ok(())
     }
 

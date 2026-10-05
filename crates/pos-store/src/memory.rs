@@ -11996,6 +11996,9 @@ struct MemoryOwnerLinkTargetV1 {
 
 /// Load one selected cut, its kind-14 admissions, the earlier cuts its
 /// ancestry walk needs and its Timeline's WDB1 nodes from one shared borrow.
+///
+/// A selected cut without its Timeline's admission is corrupt, so the read
+/// fails before either walk.
 fn memory_owner_link_snapshot(
     store: &MemoryStore,
     target: MemoryOwnerLinkTargetV1,
@@ -12015,7 +12018,8 @@ fn memory_owner_link_snapshot(
         .collect::<Result<Vec<_>, _>>()?;
     let admission = admissions
         .iter()
-        .find(|admission| admission.timeline.timeline_id == target.timeline_id);
+        .find(|admission| admission.timeline.timeline_id == target.timeline_id)
+        .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
     let earlier = store
         .local_cut_owner_cuts
         .range((owner_id, 0)..(owner_id, seal.cut_id))
@@ -12033,10 +12037,11 @@ fn memory_owner_link_snapshot(
     for recording in selected {
         let scope = recording.scope;
         let root = recording.binding.as_input().dependency_root_hash;
-        let Ok(nodes) = collect_manifest_owner_link_branches_v1(root, |digest| {
+        let max_node_visits = admission.read_limits.max_node_visits;
+        let nodes = collect_manifest_owner_link_branches_v1(root, max_node_visits, |digest| {
             let node = store.world_dependency_branches.get(&(scope, digest));
-            Ok::<_, std::convert::Infallible>(node.cloned())
-        });
+            Ok(node.cloned())
+        })?;
         dependency_branches.extend(nodes);
     }
     Ok(ManifestOwnerLinkSnapshotV1 {
@@ -15572,6 +15577,19 @@ mod local_cut_owner_coverage {
         let snapshot = snapshots.get_mut(&historical).ok_or("missing admission")?;
         snapshot.resulting_inventory_generation = Hash::zero();
         assert_eq!(link_read(&replaced, link_identity(&first)?), corrupt);
+        Ok(())
+    }
+
+    #[test]
+    fn owner_link_reads_fail_closed_without_the_timelines_admission() -> TestResult {
+        let (mut store, first) = cut_store()?;
+        let admitted = (CUT_OWNER, 1, CUT_TIMELINE);
+        let snapshots = &mut store.manifest_owner_admission_snapshots;
+        snapshots.remove(&admitted);
+        assert_eq!(
+            link_read(&store, link_identity(&first)?),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
         Ok(())
     }
 

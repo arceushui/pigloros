@@ -33,7 +33,8 @@ const INTENT_DOMAIN: &[u8] = b"pigloros.local-cut.owner.intent.v1\0";
 /// Closed owner preparation and persistence failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum LocalCutOwnerErrorV1 {
-    /// One prospective row or table exceeds the installed local-cut bounds.
+    /// One prospective row or table exceeds the installed local-cut bounds, or
+    /// an owner-link read reaches more WDB1 nodes than its read limits allow.
     #[error("local-cut owner request exceeds its accepted bounds")]
     BoundExceeded,
     /// The submitted rows, seal, admission, or result cannot form one cut.

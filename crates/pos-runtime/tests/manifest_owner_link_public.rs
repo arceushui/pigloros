@@ -14,18 +14,19 @@ use pos_core::trusted_clock::{
 };
 use pos_core::{
     build_manifest_owner_scope_v1, collect_manifest_owner_link_ancestors_v1,
-    derive_local_cut_world_closure_v1, ArtifactDataClassV1, ArtifactRegistrationV1,
-    ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
-    AuthenticatedPrincipalResultV1, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
-    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureVerifiedEmptyInventoryQueryV1,
-    ErasureVerifiedInventoryQueryV1, EventStore, Hash, KeyIdentityV1, KeyRegistrationOutcomeV1,
-    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, LocalCutCommitV1,
-    LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1,
-    LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1,
-    LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
-    LocalCutOwnerRequestV1, LocalCutOwnerStateV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
-    LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2,
-    LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldClosureSourceV1, LocalCutWorldRecordingV1,
+    collect_manifest_owner_link_branches_v1, derive_local_cut_world_closure_v1,
+    ArtifactDataClassV1, ArtifactRegistrationV1, ArtifactTransitionRuleV1, AssuranceLevelV1,
+    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, ErasureContainmentGateV1,
+    ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1, EventStore, Hash,
+    KeyIdentityV1, KeyRegistrationOutcomeV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+    LocalCutCommitV1, LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1,
+    LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
+    LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1, LocalCutOwnerErrorV1,
+    LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1, LocalCutOwnerStateV1,
+    LocalCutOwnerVerifierV1, LocalCutReceiptInputV1, LocalCutReceiptV1,
+    LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2, LocalCutSealV2,
+    LocalCutTableRefV1, LocalCutWorldClosureSourceV1, LocalCutWorldRecordingV1,
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
@@ -1229,25 +1230,50 @@ fn ancestor_walks_stop_at_the_admission_or_another_generation() -> TestResult {
     let ancestor = ManifestOwnerLinkAncestorV1::of_result;
     let request = by_recording(&world, first_recording(second)?);
     let snapshot = read_snapshot(&world, &store, &request)?;
+    let admission = snapshot.admissions.first().ok_or("missing admission")?;
     let walked = collect_manifest_owner_link_ancestors_v1(
         second.seal.as_input(),
-        snapshot.admissions.first(),
+        admission,
         [Ok(ancestor(first)), Err("an unread cut")],
     )?;
     assert_eq!(walked, vec![ancestor(first)]);
     assert_eq!(walked, snapshot.ancestors);
     let crossed = collect_manifest_owner_link_ancestors_v1(
         last.seal.as_input(),
-        None,
+        admission,
         [Ok::<_, &str>(ancestor(second)), Ok(ancestor(first))],
     )?;
     assert!(crossed.is_empty());
+    let unlinked = collect_manifest_owner_link_ancestors_v1(
+        second.seal.as_input(),
+        admission,
+        [Ok::<_, &str>(ancestor(second)), Ok(ancestor(first))],
+    )?;
+    assert!(unlinked.is_empty());
     let failed = collect_manifest_owner_link_ancestors_v1(
         second.seal.as_input(),
-        None,
+        admission,
         [Err::<ManifestOwnerLinkAncestorV1, _>("an unreadable cut")],
     );
     assert_eq!(failed, Err("an unreadable cut"));
+    Ok(())
+}
+
+#[test]
+fn branch_walks_stop_at_the_admitted_node_limit() -> TestResult {
+    let (world, store, request) = crafted_base()?;
+    let snapshot = read_snapshot(&world, &store, &request)?;
+    let recording = first_recording(&snapshot.result)?;
+    let root = recording.binding.as_input().dependency_root_hash;
+    let retained = |digest: Hash| {
+        let node = snapshot.dependency_branches.get(&digest);
+        Ok::<_, LocalCutOwnerErrorV1>(node.cloned())
+    };
+    let limit = READ_LIMITS.max_node_visits;
+    let nodes = collect_manifest_owner_link_branches_v1(root, limit, retained)?;
+    assert_eq!(nodes, snapshot.dependency_branches);
+    let bounded = collect_manifest_owner_link_branches_v1(root, 0, retained);
+    assert_eq!(bounded, Err(LocalCutOwnerErrorV1::BoundExceeded));
     Ok(())
 }
 

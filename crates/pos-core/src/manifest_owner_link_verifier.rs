@@ -202,28 +202,33 @@ const fn admitted_pre_state(admission: &ManifestOwnerAdmissionSnapshotV1) -> Pre
 /// Gather the earlier cuts that the ancestry walk needs, newest first.
 ///
 /// `earlier` yields the owner's visible cuts before `seal`, newest first, and
-/// is read lazily: gathering stops before reading another cut once the
-/// pre-state reaches the requested Timeline's `admission`, and at the first
-/// cut of another configuration generation. Both stores share this walk.
+/// is read lazily. Gathering stops before reading another cut once the
+/// pre-state reaches the requested Timeline's `admission`, and it stops
+/// without keeping the cut at the first cut of another configuration
+/// generation or the first cut that is not exactly the pre-state. A
+/// consistent history therefore reads only the cuts since the admission, and
+/// an admission that is never reached reads no further than its generation.
+/// Both stores share this walk.
 ///
 /// # Errors
 /// Returns the first error that `earlier` yields while it is read.
 pub fn collect_manifest_owner_link_ancestors_v1<E>(
     seal: &LocalCutSealInputV2,
-    admission: Option<&ManifestOwnerAdmissionSnapshotV1>,
+    admission: &ManifestOwnerAdmissionSnapshotV1,
     earlier: impl IntoIterator<Item = Result<ManifestOwnerLinkAncestorV1, E>>,
 ) -> Result<Vec<ManifestOwnerLinkAncestorV1>, E> {
-    let admitted = admission.map(admitted_pre_state);
+    let admitted = admitted_pre_state(admission);
     let mut earlier = earlier.into_iter();
     let mut pre_state = seal_pre_state(seal);
     let mut ancestors = Vec::new();
-    while Some(pre_state) != admitted {
+    while pre_state != admitted {
         let Some(next) = earlier.next() else {
             break;
         };
         let ancestor = next?;
         let earlier_seal = ancestor.seal.as_input();
-        if earlier_seal.configuration_generation != seal.configuration_generation {
+        let generation = earlier_seal.configuration_generation;
+        if generation != seal.configuration_generation || !precedes(&ancestor, pre_state) {
             break;
         }
         pre_state = seal_pre_state(earlier_seal);
@@ -237,19 +242,30 @@ pub fn collect_manifest_owner_link_ancestors_v1<E>(
 /// `node` reads one retained node of the root's scope by digest. A digest
 /// that names a WAL1 leaf, a missing node or a node whose content does not
 /// hash to its key is left out, so the walk stays within the content-addressed
-/// directory and ends; the verifier then requires every derived node.
+/// directory; the verifier then requires every derived node.
+///
+/// A packed directory within the admission's read limits has at most
+/// `max_node_visits` branch nodes, since those limits count every leaf and
+/// every branch. The walk reads at most that many nodes and then fails.
 ///
 /// # Errors
-/// Returns the first error that `node` returns.
-pub fn collect_manifest_owner_link_branches_v1<E>(
+/// Returns the first error that `node` returns, and `BoundExceeded` when more
+/// than `max_node_visits` retained nodes are reachable.
+pub fn collect_manifest_owner_link_branches_v1(
     root: Hash,
-    mut node: impl FnMut(Hash) -> Result<Option<WorldDependencyBranchV1>, E>,
-) -> Result<BTreeMap<Hash, WorldDependencyBranchV1>, E> {
+    max_node_visits: u64,
+    mut node: impl FnMut(Hash) -> Result<Option<WorldDependencyBranchV1>, LocalCutOwnerErrorV1>,
+) -> Result<BTreeMap<Hash, WorldDependencyBranchV1>, LocalCutOwnerErrorV1> {
     let mut nodes = BTreeMap::new();
     let mut pending = vec![root];
+    let mut visits = 0_u64;
     while let Some(digest) = pending.pop() {
         let found = node(digest)?.filter(|branch| branch.digest() == digest);
         if let Some(branch) = found {
+            visits += 1;
+            if visits > max_node_visits {
+                return Err(LocalCutOwnerErrorV1::BoundExceeded);
+            }
             pending.extend(branch.children().iter().map(|child| child.node_hash()));
             nodes.insert(digest, branch);
         }
