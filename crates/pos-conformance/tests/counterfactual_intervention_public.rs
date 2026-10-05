@@ -351,13 +351,21 @@ fn header_is_checked_before_the_field_count() -> TestResult {
 }
 
 #[test]
-fn supported_header_with_an_extra_field_is_invalid_encoding() -> TestResult {
+fn supported_header_with_a_wrong_field_count_is_rejected() -> TestResult {
+    let mut missing = fields()?;
+    missing.pop();
+    assert_eq!(missing.len(), FIELD_COUNT - 1);
+    assert_eq!(
+        decode_error(&encode(&Value::Array(missing))?)?,
+        InterventionError::InvalidEncoding
+    );
+    // The CBOR preflight item limit rejects an extra field before decoding.
     let mut extra = fields()?;
     extra.push(Value::Integer(0_u64.into()));
     assert_eq!(extra.len(), FIELD_COUNT + 1);
     assert_eq!(
         decode_error(&encode(&Value::Array(extra))?)?,
-        InterventionError::InvalidEncoding
+        InterventionError::FieldOutOfBounds
     );
     Ok(())
 }
