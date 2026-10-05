@@ -29,12 +29,15 @@ pub fn open_regular_file(path: &Path) -> Result<File, BoundedInputError> {
 
         options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
     }
-    let file = options.open(path)?;
-    if file.metadata()?.is_file() {
-        Ok(file)
-    } else {
-        Err(BoundedInputError)
-    }
+    options
+        .open(path)
+        .map_err(BoundedInputError::from)
+        .and_then(|file| {
+            file.metadata()
+                .is_ok_and(|metadata| metadata.is_file())
+                .then_some(file)
+                .ok_or(BoundedInputError)
+        })
 }
 
 /// Copy a regular file into private immutable storage, refusing more than `maximum` bytes.
@@ -43,14 +46,24 @@ pub fn open_regular_file(path: &Path) -> Result<File, BoundedInputError> {
 /// Returns [`BoundedInputError`] when the path is not a regular file, cannot be copied,
 /// or exceeds the bound.
 pub fn snapshot_bounded(path: &Path, maximum: u64) -> Result<File, BoundedInputError> {
-    let source = open_regular_file(path)?;
-    let mut snapshot = tempfile::tempfile()?;
-    let copied = io::copy(&mut source.take(maximum.saturating_add(1)), &mut snapshot)?;
-    if copied > maximum {
-        return Err(BoundedInputError);
-    }
-    snapshot.seek(SeekFrom::Start(0))?;
-    Ok(snapshot)
+    open_regular_file(path).and_then(|source| {
+        tempfile::tempfile()
+            .and_then(|mut snapshot| {
+                io::copy(&mut source.take(maximum.saturating_add(1)), &mut snapshot).and_then(
+                    |copied| {
+                        snapshot
+                            .seek(SeekFrom::Start(0))
+                            .map(|_| (snapshot, copied))
+                    },
+                )
+            })
+            .map_err(BoundedInputError::from)
+            .and_then(|(snapshot, copied)| {
+                (copied <= maximum)
+                    .then_some(snapshot)
+                    .ok_or(BoundedInputError)
+            })
+    })
 }
 
 /// Read a regular file completely, refusing more than `maximum` bytes.
@@ -59,7 +72,7 @@ pub fn snapshot_bounded(path: &Path, maximum: u64) -> Result<File, BoundedInputE
 /// Returns [`BoundedInputError`] when the path is not a regular file, cannot be read,
 /// or exceeds the bound.
 pub fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, BoundedInputError> {
-    read_to_bound(open_regular_file(path)?, maximum)
+    open_regular_file(path).and_then(|file| read_to_bound(file, maximum))
 }
 
 /// Read an already validated file from its start, refusing more than `maximum` bytes.
@@ -68,20 +81,22 @@ pub fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, BoundedInputEr
 /// Returns [`BoundedInputError`] when the file cannot be rewound or read, or exceeds the
 /// bound.
 pub fn read_bounded_file(file: &mut File, maximum: u64) -> Result<Vec<u8>, BoundedInputError> {
-    file.seek(SeekFrom::Start(0))?;
-    read_to_bound(file, maximum)
+    file.seek(SeekFrom::Start(0))
+        .map_err(BoundedInputError::from)
+        .and_then(|_| read_to_bound(file, maximum))
 }
 
 fn read_to_bound(reader: impl Read, maximum: u64) -> Result<Vec<u8>, BoundedInputError> {
     let mut bytes = Vec::new();
     reader
         .take(maximum.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > maximum {
-        Err(BoundedInputError)
-    } else {
-        Ok(bytes)
-    }
+        .read_to_end(&mut bytes)
+        .map_err(BoundedInputError::from)
+        .and_then(|_| {
+            (bytes.len() as u64 <= maximum)
+                .then_some(bytes)
+                .ok_or(BoundedInputError)
+        })
 }
 
 /// Parse exactly 64 lowercase hexadecimal digits into a digest that is not all zero.
