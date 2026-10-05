@@ -5257,6 +5257,14 @@ mod tests {
     #[test]
     fn recipient_export_recovery_maps_preflight_and_object_failures() -> RecipientTestResult {
         let fixture = recipient_publication_fixture()?;
+        set_begin_failure(true);
+        let begin_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        set_begin_failure(false);
+        assert!(begin_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
         std::fs::set_permissions(
             &fixture.owner.directory,
             std::fs::Permissions::from_mode(0o755),
@@ -5505,6 +5513,7 @@ mod tests {
             reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
         clear_recipient_export_authorizer(&fixture.store.conn)?;
         assert!(catalog_result.is_err());
+        remove_recipient_export_pending(&fixture.store.conn, [23; 16])?;
 
         let catalog_id = [24; 16];
         let publication = recipient_test_publication(&fixture, catalog_id);
@@ -5583,12 +5592,9 @@ mod tests {
             .store
             .conn
             .execute_batch("DELETE FROM recipient_export_pending_v1")?;
-        deny_recipient_export_sql_action(
-            &fixture.store.conn,
-            RecipientExportSqlAction::Read("recipient_export_pending_v1"),
-        )?;
+        fixture.store.conn.progress_handler(1, Some(|| true));
         let query_result = reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
-        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        fixture.store.conn.progress_handler(0, None::<fn() -> bool>);
         assert!(query_result.is_err());
         Ok(())
     }
