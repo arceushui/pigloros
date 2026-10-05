@@ -1850,7 +1850,10 @@ fn finish_recipient_export_durability<T>(
     // The transaction outcome is already conclusive. A best-effort setting
     // restoration failure leaves the safer FULL mode enabled and must not
     // reclassify a committed publication as failed.
-    let _ = restore_recipient_export_synchronous_level(connection, previous_synchronous);
+    drop(restore_recipient_export_synchronous_level(
+        connection,
+        previous_synchronous,
+    ));
     result
 }
 
