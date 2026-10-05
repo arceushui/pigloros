@@ -9,13 +9,15 @@
 //!
 //! One call:
 //!
-//! 1. validates the CFP1 plan and bounds the suffix to at most
+//! 1. validates the CFP1 plan, bounds the suffix to at most
 //!    [`MAX_COUNTERFACTUAL_RESULT_CHECKPOINTS_V1`] Ticks, so the `CFR1`
-//!    checkpoint list can hold one checkpoint per Tick;
+//!    checkpoint list can hold one checkpoint per Tick, and requires a
+//!    nonzero `CFR1` result ID and evaluator identity digest, so the result
+//!    can be sealed;
 //! 2. reads the Fork's persisted basis, proves the receipt's generation is
 //!    still the committed generation, and reads the generation's committed
-//!    `SIV1`, which must be the receipt's own `SIV1`
-//!    ([`CounterfactualGenerationReceiptV1::matches_invalidation`]) and must
+//!    `SIV1`, which must be the receipt's own `SIV1` (its digest, verified
+//!    once while decoding, is the receipt's invalidation digest) and must
 //!    bind the plan;
 //! 3. recovers the committed suffix from the Event Store alone (see
 //!    **Recovery** below);
@@ -34,15 +36,29 @@
 //! because the completed generation is stale and its result is not
 //! re-emitted.
 //!
-//! The first failed Tick stops the call. It commits nothing, because its
+//! The first failed Tick stops the call. A Tick that fails to stage, is
+//! stale, or whose append the store rejects commits nothing, because its
 //! only write is the one atomic append, and it is reported as
 //! [`CounterfactualSuffixRunV1::failure`] with a `Failed` `CFR1` whose
 //! committed range ends at the last committed Tick, so the suffix stays
 //! explicitly incomplete. Calling again recovers the same committed state and
 //! retries that Tick with the same staged inputs; a retry that succeeds
 //! produces the same checkpoints and result as an uninterrupted run.
-//! Errors returned as [`CounterfactualSuffixErrorV1`] are detected before
-//! any Tick is staged and commit nothing either.
+//!
+//! An append whose outcome is unknown (`OutcomeUnknown`) is resolved with
+//! the port's recovery read, the persisted basis. When it still equals the
+//! Tick basis, the Tick did not commit (a committed Tick always advances the
+//! head) and it fails as `AtomicCommitFailed` like a rejected append.
+//! Otherwise the head or a fact moved, or the read failed, so the Tick may
+//! have committed: the call returns
+//! [`CounterfactualSuffixErrorV1::TickOutcomeUnknown`] and seals no `CFR1`.
+//! Calling again derives the committed suffix from the Event Store alone.
+//! A store that reports a committed head other than the Tick's checkpoint
+//! Event is [`CounterfactualSuffixErrorV1::CommittedHeadMismatch`], also
+//! without a `CFR1`. Those two errors may follow Ticks this call already
+//! committed, which stay committed and are recovered by the next call; every
+//! other [`CounterfactualSuffixErrorV1`] is detected before any Tick is
+//! staged and commits nothing.
 //!
 //! # ADR gap decisions
 //!
@@ -104,8 +120,9 @@
 //!   Tick is the Events through the receipt's
 //!   first-Tick head; every later Tick ends with one checkpoint Event, and
 //!   the persisted head must be the last checkpoint Event, so a foreign or
-//!   unmarked trailing Event is a mismatch, and so is a recovered last Tick
-//!   past the plan horizon. Every committed `RCP1` is decoded and must be
+//!   unmarked trailing Event is a mismatch, and so are a recovered later Tick
+//!   without a recomputed Event before its checkpoint Event and a recovered
+//!   last Tick past the plan horizon. Every committed `RCP1` is decoded and must be
 //!   exactly this generation's checkpoint of the next Tick at its `Seq`
 //!   (plan, Tick, `Seq`, scheduler position, lists, cursor, and
 //!   provenance). An intermediate checkpoint's chained state is decoded but
@@ -129,7 +146,8 @@
 //! - **Terminal codes.** A stale Tick basis is `InvalidationConflict`; a
 //!   stager failure, an empty, malformed, or oversized staged batch, and a
 //!   reserved Event type are `PluginFailure`; an append the store rejects or
-//!   fails (`ForkNotFound`, `CorruptState`, or `StorageFailure`) is
+//!   fails (`ForkNotFound`, `CorruptState`, or `StorageFailure`), or whose
+//!   unknown outcome the persisted basis proves uncommitted, is
 //!   `AtomicCommitFailed`. The failing coordinate is the first uncommitted
 //!   Tick at scheduler position `0`, without a safe digest.
 //!
@@ -166,9 +184,9 @@ use pos_core::{
     pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualBasisV1,
     CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1,
     CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId, Event, EventDraft,
-    EventReadBounds, EventStore, InvalidationConflictV1, Kind, PipelineContractErrorV1,
-    PipelineDraftBatchV1, Seq, SeqRange, SuffixInvalidationBytesV1, TimelineId,
-    MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    EventReadBounds, EventStore, Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1,
+    PipelineDraftBatchV1, Seq, SeqRange, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 
 use super::coordinator::{
@@ -235,7 +253,11 @@ impl CounterfactualSuffixFailureV1 {
     }
 }
 
-/// Closed safe errors detected before any Tick is staged; nothing commits.
+/// Closed safe errors of one suffix recomputation call.
+///
+/// Every error except [`Self::TickOutcomeUnknown`] and
+/// [`Self::CommittedHeadMismatch`] is detected before any Tick is staged and
+/// commits nothing; those two may follow Ticks the call already committed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CounterfactualSuffixErrorV1 {
     /// The CFP1 plan is invalid.
@@ -244,6 +266,9 @@ pub enum CounterfactualSuffixErrorV1 {
     /// The suffix has more Ticks than one result can checkpoint.
     #[error("counterfactual suffix exceeds the checkpoint bound")]
     SuffixTooLong,
+    /// The `CFR1` result ID or evaluator identity digest is zero.
+    #[error("counterfactual result identity is invalid")]
+    InvalidResultIdentity,
     /// The committed generation's `SIV1` does not bind the plan.
     #[error("counterfactual suffix does not belong to the plan")]
     PlanMismatch,
@@ -255,11 +280,27 @@ pub enum CounterfactualSuffixErrorV1 {
     #[error("counterfactual generation is stale")]
     InvalidationConflict(InvalidationConflictV1),
     /// An `RCP1` or `CFR1` artifact could not be sealed.
+    ///
+    /// Every input of both is validated before the first Tick is staged (the
+    /// plan, the committed `SIV1`, and the result identity), and the first
+    /// Tick's `RCP1` is sealed during recovery, so sealing is not expected to
+    /// fail once a Tick is staged. Were it to, Ticks this call already
+    /// committed would stay committed and the next call would recover them.
     #[error("counterfactual suffix artifact could not be encoded")]
     ArtifactEncoding,
     /// The counterfactual store rejected or failed a read.
     #[error("counterfactual store operation failed")]
     Store(#[source] CounterfactualStoreErrorV1),
+    /// A Tick append's outcome is unknown and the persisted basis no longer
+    /// proves it uncommitted: the Tick may have committed. No `CFR1` is
+    /// sealed; call `recompute_suffix` again, whose recovery derives the
+    /// committed suffix from the Event Store.
+    #[error("counterfactual Tick outcome is unknown")]
+    TickOutcomeUnknown,
+    /// The store reported a committed head other than the appended Tick's
+    /// checkpoint Event, violating the port contract. No `CFR1` is sealed.
+    #[error("counterfactual store reported another committed head")]
+    CommittedHeadMismatch,
 }
 
 /// One suffix recomputation request for a committed generation.
@@ -336,7 +377,12 @@ struct CheckpointV1 {
 }
 
 impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
-    /// Release the exclusively owned store, for example to reopen it later.
+    /// Release the exclusively owned store, so a test can change it and hand
+    /// it to a new coordinator.
+    ///
+    /// Available only with the `test-support` feature: deployable builds
+    /// never hand the host-only port capability out of the coordinator.
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn into_store(self) -> S {
         self.store
@@ -349,10 +395,13 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// rules. A failed Tick is reported in the returned run, not as an error.
     ///
     /// # Errors
-    /// Returns the first closed safe error detected before any Tick is
-    /// staged; every error commits nothing. On an already complete
-    /// generation, a persisted fact that differs from the generation's Tick
-    /// basis is [`CounterfactualSuffixErrorV1::InvalidationConflict`].
+    /// Returns the first closed safe error. Every error except
+    /// [`CounterfactualSuffixErrorV1::TickOutcomeUnknown`] and
+    /// [`CounterfactualSuffixErrorV1::CommittedHeadMismatch`] is detected
+    /// before any Tick is staged and commits nothing; after those two, call
+    /// again to recover what committed. On an already complete generation, a
+    /// persisted fact that differs from the generation's Tick basis is
+    /// [`CounterfactualSuffixErrorV1::InvalidationConflict`].
     pub fn recompute_suffix(
         &mut self,
         request: &CounterfactualSuffixRequestV1<'_>,
@@ -366,6 +415,9 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             > MAX_SUFFIX_TICK_SPAN
         {
             return Err(CounterfactualSuffixErrorV1::SuffixTooLong);
+        }
+        if request.result_id == [0; 16] || request.evaluator_identity_digest == [0; 32] {
+            return Err(CounterfactualSuffixErrorV1::InvalidResultIdentity);
         }
         let (basis, invalidation) = self.committed_invalidation(request)?;
         let context = SuffixContextV1 {
@@ -418,9 +470,10 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             .store
             .read_generation_artifact(generation, receipt.invalidation_digest())
             .map_err(CounterfactualSuffixErrorV1::Store)?
-            .and_then(|bytes| SuffixInvalidationBytesV1::try_from_canonical(bytes).ok())
-            .filter(|bytes| receipt.matches_invalidation(bytes))
-            .and_then(|bytes| SuffixInvalidationV1::from_canonical_cbor(bytes.as_bytes()).ok())
+            .and_then(|bytes| SuffixInvalidationV1::from_canonical_cbor(&bytes).ok())
+            .filter(|invalidation| {
+                Hash::from_bytes(invalidation.invalidation_digest) == receipt.invalidation_digest()
+            })
             .ok_or(CounterfactualSuffixErrorV1::RecoveryMismatch)?;
         if invalidation.plan_digest == request.plan.plan_digest {
             Ok((basis, invalidation))
@@ -455,6 +508,11 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             let page = self.read_page(context.fork(), next, to)?;
             for (seq, event) in (next..).zip(&page) {
                 if event.event_type.as_str() == COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1 {
+                    // Every later Tick recomputes at least one Event before
+                    // its checkpoint Event.
+                    if seq <= progress.head.saturating_add(1) {
+                        return Err(CounterfactualSuffixErrorV1::RecoveryMismatch);
+                    }
                     let tick = progress.tick.saturating_add(1);
                     let payload = event.payload.as_slice();
                     let checkpoint = if tick == first_tick.saturating_add(1) || seq == head {
@@ -558,7 +616,8 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// Stage, checkpoint, and atomically commit the next Tick under the
     /// generation's Tick basis.
     ///
-    /// Returns the failure of a Tick that committed nothing.
+    /// Returns the failure of a Tick that committed nothing; see
+    /// [`Self::append_tick`] for the errors.
     fn commit_tick(
         &mut self,
         context: &SuffixContextV1<'_>,
@@ -575,13 +634,19 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         let seq = progress.head.saturating_add(drafts.len() as u64);
         // Sealing a well-formed `RCP1` does not fail; an error flows out as is.
         next_checkpoint(context, progress.state, tick, &bodies, seq)
-            .map(|checkpoint| self.append_tick(context, progress, tick, drafts, checkpoint))
+            .and_then(|checkpoint| self.append_tick(context, progress, tick, drafts, checkpoint))
     }
 
     /// Append the staged `drafts` and the Tick's checkpoint Event as one
     /// batch under the generation's Tick basis.
     ///
     /// Returns the failure of a Tick that committed nothing.
+    ///
+    /// # Errors
+    /// Returns `TickOutcomeUnknown` when the append's outcome is unknown and
+    /// the persisted basis does not prove it uncommitted, and
+    /// `CommittedHeadMismatch` when the store reports a committed head other
+    /// than the checkpoint Event's `Seq`; neither advances the progress.
     fn append_tick(
         &mut self,
         context: &SuffixContextV1<'_>,
@@ -589,28 +654,56 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         tick: u64,
         drafts: &[EventDraft],
         checkpoint: CheckpointV1,
-    ) -> Option<CounterfactualSuffixFailureV1> {
+    ) -> Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1> {
         let mut tick_drafts = drafts.to_vec();
         tick_drafts.push(checkpoint_draft(context.fork(), &checkpoint.bytes));
         let batch = match PipelineDraftBatchV1::try_new(tick_drafts) {
             Ok(batch) => batch,
             Err(rejection) => {
-                return Some(CounterfactualSuffixFailureV1::StagedTickRejected(rejection))
+                return Ok(Some(CounterfactualSuffixFailureV1::StagedTickRejected(
+                    rejection,
+                )))
             }
         };
         let expected = context.receipt.tick_basis(Seq::from_u64(progress.head));
+        // The checkpoint Event is the batch's last Event.
+        let checkpoint_seq = progress.head.saturating_add(batch.drafts().len() as u64);
         match self
             .store
             .append_counterfactual_tick(context.fork(), &expected, &batch)
         {
-            Ok(CounterfactualTickOutcomeV1::Committed { head }) => {
-                progress.advance(tick, head.as_u64(), checkpoint);
-                None
+            Ok(CounterfactualTickOutcomeV1::Committed { head })
+                if head.as_u64() == checkpoint_seq =>
+            {
+                progress.advance(tick, checkpoint_seq, checkpoint);
+                Ok(None)
             }
-            Ok(CounterfactualTickOutcomeV1::Stale(conflict)) => Some(
+            Ok(CounterfactualTickOutcomeV1::Committed { .. }) => {
+                Err(CounterfactualSuffixErrorV1::CommittedHeadMismatch)
+            }
+            Ok(CounterfactualTickOutcomeV1::Stale(conflict)) => Ok(Some(
                 CounterfactualSuffixFailureV1::InvalidationConflict(conflict),
-            ),
-            Err(_) => Some(CounterfactualSuffixFailureV1::AtomicCommitFailed),
+            )),
+            Err(CounterfactualStoreErrorV1::OutcomeUnknown) => {
+                self.unknown_tick_outcome(context.fork(), &expected)
+            }
+            Err(_) => Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed)),
+        }
+    }
+
+    /// Resolve an append whose outcome is unknown with the persisted basis:
+    /// an unchanged basis proves the Tick did not commit, because a committed
+    /// Tick always advances the head; anything else leaves it unknown.
+    fn unknown_tick_outcome(
+        &self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+    ) -> Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1> {
+        match self.store.current_counterfactual_basis(fork) {
+            Ok(persisted) if expected.first_conflict(&persisted).is_none() => {
+                Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed))
+            }
+            _ => Err(CounterfactualSuffixErrorV1::TickOutcomeUnknown),
         }
     }
 }

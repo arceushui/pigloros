@@ -26,14 +26,14 @@ use pos_conformance::{
     UnknownEdgePolicyV1,
 };
 use pos_core::{
-    pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualBasisV1,
-    CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
-    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    CounterfactualTickOutcomeV1, EntityId, ErasureContainmentGateV1, Event, EventDraft,
-    EventReadBounds, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
-    PipelineContractErrorV1, PipelineDraftBatchV1, Seq, SeqRange, Timeline, TimelineId,
-    TimelineMeta, MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_PIPELINE_DRAFTS_PER_BATCH,
-    MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualAdapterSealV1,
+    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
+    CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
+    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
+    ErasureContainmentGateV1, Event, EventDraft, EventReadBounds, EventStore, ForkGenerationV1,
+    Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1, Seq,
+    SeqRange, Timeline, TimelineId, TimelineMeta, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
@@ -240,6 +240,15 @@ enum Interference {
     Republish(usize, FactsChange),
     /// Append one foreign Event to the Fork.
     ForeignAppend(usize),
+    /// Commit nothing and report an unknown outcome.
+    LostUnknown(usize),
+    /// Commit nothing, report an unknown outcome, and fail every persisted
+    /// basis read from then on.
+    UnreadableUnknown(usize),
+    /// Commit the Tick but report an unknown outcome.
+    LandedUnknown(usize),
+    /// Commit the Tick but report a head one `Seq` past the real one.
+    MisreportedHead(usize),
 }
 
 /// A store whose reads and Tick appends are falsified as configured.
@@ -248,6 +257,23 @@ struct Faulty<B> {
     fault: StoreFault,
     interference: Interference,
     appends: usize,
+    /// Whether an [`Interference::UnreadableUnknown`] append happened.
+    in_doubt: bool,
+}
+
+/// Report a committed Tick one `Seq` past its real head; only a test wrapper
+/// may mint that outcome with the adapter seal.
+fn misreported(
+    expected: &CounterfactualBasisV1,
+    outcome: CounterfactualTickOutcomeV1,
+) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
+    match outcome {
+        CounterfactualTickOutcomeV1::Committed { head } => expected.committed_tick(
+            &CounterfactualAdapterSealV1::for_adapter(),
+            Seq::from_u64(head.as_u64() + 1),
+        ),
+        stale @ CounterfactualTickOutcomeV1::Stale(_) => Ok(stale),
+    }
 }
 
 impl<B> Faulty<B> {
@@ -338,16 +364,36 @@ impl<B: Backend> CounterfactualStorePortV1 for Faulty<B> {
         drafts: &PipelineDraftBatchV1,
     ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
         self.appends += 1;
+        let now = self.appends;
         match self.interference {
-            Interference::Republish(at, change) if at == self.appends => {
+            Interference::Republish(at, change) if at == now => {
                 let mut facts = self.inner.current_counterfactual_basis(fork)?.facts;
                 change(&mut facts);
                 self.inner.publish_counterfactual_facts(fork, facts)?;
             }
-            Interference::ForeignAppend(at) if at == self.appends => {
+            Interference::ForeignAppend(at) if at == now => {
                 self.inner
                     .append(fork, &[event_draft("counterfactual.world", vec![1])])
                     .or(Err(CounterfactualStoreErrorV1::StorageFailure))?;
+            }
+            Interference::LostUnknown(at) if at == now => {
+                return Err(CounterfactualStoreErrorV1::OutcomeUnknown);
+            }
+            Interference::UnreadableUnknown(at) if at == now => {
+                self.in_doubt = true;
+                return Err(CounterfactualStoreErrorV1::OutcomeUnknown);
+            }
+            Interference::LandedUnknown(at) if at == now => {
+                return self
+                    .inner
+                    .append_counterfactual_tick(fork, expected, drafts)
+                    .and(Err(CounterfactualStoreErrorV1::OutcomeUnknown));
+            }
+            Interference::MisreportedHead(at) if at == now => {
+                return self
+                    .inner
+                    .append_counterfactual_tick(fork, expected, drafts)
+                    .and_then(|outcome| misreported(expected, outcome));
             }
             _ => {}
         }
@@ -366,11 +412,18 @@ impl<B: Backend> CounterfactualStorePortV1 for Faulty<B> {
         &self,
         fork: TimelineId,
     ) -> Result<CounterfactualBasisV1, CounterfactualStoreErrorV1> {
-        if self.fault == StoreFault::Basis {
+        if self.fault == StoreFault::Basis || self.in_doubt {
             Err(CounterfactualStoreErrorV1::CorruptState)
         } else {
             self.inner.current_counterfactual_basis(fork)
         }
+    }
+
+    fn committed_generation_receipt(
+        &self,
+        at: ForkGenerationV1,
+    ) -> Result<Option<CounterfactualGenerationReceiptV1>, CounterfactualStoreErrorV1> {
+        self.inner.committed_generation_receipt(at)
     }
 
     fn read_generation_artifact(
@@ -395,6 +448,7 @@ impl<B: Backend> Backend for Faulty<B> {
             fault: StoreFault::None,
             interference: Interference::None,
             appends: 0,
+            in_doubt: false,
         })
     }
 }
@@ -863,6 +917,7 @@ fn configure<B: Backend>(
         store.fault = fault;
         store.interference = interference;
         store.appends = 0;
+        store.in_doubt = false;
         Ok(())
     })
 }
@@ -911,32 +966,52 @@ fn chain(previous: &[u8; 32], trust: u64, tick: u64) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+/// The sealed `RCP1` of `tick` with chained `state`, whose last recomputed
+/// Event is `seq`.
+fn checkpoint_at(
+    fixture: &Fixture,
+    tick: u64,
+    seq: u64,
+    state: [u8; 32],
+) -> TestResult<RecomputeCheckpointV1> {
+    let mut checkpoint = RecomputeCheckpointV1 {
+        plan_digest: fixture.plan.plan_digest,
+        tick,
+        seq,
+        scheduler_position: 0,
+        plugin_state_digests: Vec::new(),
+        projection_digests: Vec::new(),
+        state_digests: vec![CheckpointDigestEntryV1 {
+            owner_id: SUFFIX_STATE_OWNER_V1.to_owned(),
+            digest: state,
+        }],
+        exogenous_cursor: ExogenousCursorV1 {
+            consumed_descriptors: 1,
+            last_descriptor_digest: Some([0x50; 32]),
+        },
+        provenance_root: PROVENANCE,
+        checkpoint_digest: [0; 32],
+    };
+    checkpoint.checkpoint_digest = checkpoint.digest()?;
+    Ok(checkpoint)
+}
+
+/// The coordinator-owned checkpoint Event carrying `checkpoint`.
+fn checkpoint_event(checkpoint: &RecomputeCheckpointV1) -> TestResult<EventDraft> {
+    Ok(EventDraft::new(
+        EntityId::from_ulid(fork_id().inner()),
+        Kind::new(COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1),
+        CanonicalBytes::from_vec(checkpoint.to_canonical_cbor()?),
+    ))
+}
+
 /// The `RCP1` of every Tick from the frontier through `last`.
 fn expected_checkpoints(fixture: &Fixture, last: u64) -> TestResult<Vec<RecomputeCheckpointV1>> {
     let mut state = *fixture.receipt.invalidation_digest().as_bytes();
     let mut checkpoints = Vec::new();
     for tick in FRONTIER_TICK..=last {
         state = chain(&state, fixture.plan.trust_policy.epoch, tick);
-        let mut checkpoint = RecomputeCheckpointV1 {
-            plan_digest: fixture.plan.plan_digest,
-            tick,
-            seq: tick_seq(tick),
-            scheduler_position: 0,
-            plugin_state_digests: Vec::new(),
-            projection_digests: Vec::new(),
-            state_digests: vec![CheckpointDigestEntryV1 {
-                owner_id: SUFFIX_STATE_OWNER_V1.to_owned(),
-                digest: state,
-            }],
-            exogenous_cursor: ExogenousCursorV1 {
-                consumed_descriptors: 1,
-                last_descriptor_digest: Some([0x50; 32]),
-            },
-            provenance_root: PROVENANCE,
-            checkpoint_digest: [0; 32],
-        };
-        checkpoint.checkpoint_digest = checkpoint.digest()?;
-        checkpoints.push(checkpoint);
+        checkpoints.push(checkpoint_at(fixture, tick, tick_seq(tick), state)?);
     }
     Ok(checkpoints)
 }
@@ -1437,11 +1512,7 @@ fn recovered_tick_past_the_horizon_is_rejected<B: Backend>() -> TestResult {
         .pop()
         .ok_or("no checkpoint")?;
     let mut drafts = tick_drafts(past);
-    drafts.push(EventDraft::new(
-        EntityId::from_ulid(fork_id().inner()),
-        Kind::new(COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1),
-        CanonicalBytes::from_vec(checkpoint.to_canonical_cbor()?),
-    ));
+    drafts.push(checkpoint_event(&checkpoint)?);
     let mut setup = reopen(setup, |store| {
         store.append(fork_id(), &drafts)?;
         Ok(())
@@ -1544,6 +1615,115 @@ fn tampered_suffix_events_are_rejected<B: Backend>() -> TestResult {
 }
 both_backends!(tampered_suffix_events_are_rejected);
 
+fn recovered_tick_without_a_recomputed_event_is_rejected<B: Backend>() -> TestResult {
+    let mut setup = prepare::<B>()?;
+    run(&mut setup, &mut Stager::failing(14, Fault::Error))?;
+    // An intermediate Tick 14 of only an exact checkpoint Event, then a
+    // last Tick 15 whose checkpoint chains on it exactly.
+    let empty_state = [0x5a; 32];
+    let empty_seq = committed_head(13);
+    let empty = checkpoint_at(&setup.fixture, 14, empty_seq, empty_state)?;
+    let last_seq = empty_seq + 3;
+    let state = chain(&empty_state, setup.fixture.plan.trust_policy.epoch, 15);
+    let last = checkpoint_at(&setup.fixture, 15, last_seq, state)?;
+    let mut drafts = vec![checkpoint_event(&empty)?];
+    drafts.extend(tick_drafts(15));
+    drafts.push(checkpoint_event(&last)?);
+    let mut setup = reopen(setup, |store| {
+        store.append(fork_id(), &drafts)?;
+        Ok(())
+    })?;
+    assert_eq!(head(&setup)?, last_seq + 1);
+    assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+    Ok(())
+}
+both_backends!(recovered_tick_without_a_recomputed_event_is_rejected);
+
+fn unknown_tick_outcomes_are_resolved_from_the_basis<B: Backend>() -> TestResult {
+    let reference = reference()?;
+    // Tick 13 did not commit and the basis proves it: a retryable failure.
+    let setup = prepare::<Faulty<B>>()?;
+    let mut setup = configure(setup, StoreFault::None, Interference::LostUnknown(2))?;
+    let failed = run(&mut setup, &mut Stager::default())?;
+    assert_failed_at(
+        &setup,
+        &failed,
+        Failure::AtomicCommitFailed,
+        CounterfactualTerminalErrorCodeV1::AtomicCommitFailed,
+        13,
+    )?;
+    assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
+
+    // Tick 13 committed: no result is sealed, and the next call recovers it.
+    let setup = prepare::<Faulty<B>>()?;
+    let mut setup = configure(setup, StoreFault::None, Interference::LandedUnknown(2))?;
+    let mut stager = Stager::default();
+    assert_eq!(
+        run(&mut setup, &mut stager),
+        Err(SuffixError::TickOutcomeUnknown)
+    );
+    assert_eq!(stager.ticks(), vec![12, 13]);
+    assert_eq!(head(&setup)?, committed_head(13));
+    let mut stager = Stager::default();
+    assert_eq!(run(&mut setup, &mut stager)?, reference);
+    assert_eq!(stager.ticks(), (14..=HORIZON_TICK).collect::<Vec<_>>());
+
+    // The recovery read fails, so the outcome stays unknown.
+    let setup = prepare::<Faulty<B>>()?;
+    let mut setup = configure(setup, StoreFault::None, Interference::UnreadableUnknown(2))?;
+    assert_eq!(
+        run(&mut setup, &mut Stager::default()),
+        Err(SuffixError::TickOutcomeUnknown)
+    );
+    assert_eq!(head(&setup)?, committed_head(12));
+    let mut setup = configure(setup, StoreFault::None, Interference::None)?;
+    assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
+    Ok(())
+}
+both_backends!(unknown_tick_outcomes_are_resolved_from_the_basis);
+
+fn misreported_committed_head_is_rejected<B: Backend>() -> TestResult {
+    let reference = reference()?;
+    let setup = prepare::<Faulty<B>>()?;
+    let mut setup = configure(setup, StoreFault::None, Interference::MisreportedHead(2))?;
+    assert_eq!(
+        run(&mut setup, &mut Stager::default()),
+        Err(SuffixError::CommittedHeadMismatch)
+    );
+    // Tick 13 did commit; the next call recovers it from the Event Store.
+    assert_eq!(head(&setup)?, committed_head(13));
+    let mut stager = Stager::default();
+    assert_eq!(run(&mut setup, &mut stager)?, reference);
+    assert_eq!(stager.ticks(), (14..=HORIZON_TICK).collect::<Vec<_>>());
+    Ok(())
+}
+both_backends!(misreported_committed_head_is_rejected);
+
+#[test]
+fn zero_result_identities_are_rejected_before_staging() -> TestResult {
+    let mut setup = prepare::<MemoryStore>()?;
+    let cases = [
+        CounterfactualSuffixRequestV1 {
+            result_id: [0; 16],
+            ..suffix_request(&setup.fixture)
+        },
+        CounterfactualSuffixRequestV1 {
+            evaluator_identity_digest: [0; 32],
+            ..suffix_request(&setup.fixture)
+        },
+    ];
+    let mut stager = Stager::default();
+    for request in cases {
+        assert_eq!(
+            setup.coordinator.recompute_suffix(&request, &mut stager),
+            Err(SuffixError::InvalidResultIdentity)
+        );
+    }
+    assert!(stager.seen.is_empty());
+    assert_eq!(head(&setup)?, FIRST_TICK_HEAD);
+    Ok(())
+}
+
 /// A store fault with the error recovery reports for it.
 type FaultCase = (StoreFault, SuffixError);
 
@@ -1638,6 +1818,9 @@ fn every_error_has_a_distinct_safe_message() {
         SuffixError::InvalidationConflict(InvalidationConflictV1::TrustEpoch),
         SuffixError::ArtifactEncoding,
         STORAGE,
+        SuffixError::InvalidResultIdentity,
+        SuffixError::TickOutcomeUnknown,
+        SuffixError::CommittedHeadMismatch,
     ];
     let messages: std::collections::BTreeSet<String> =
         errors.iter().map(ToString::to_string).collect();
