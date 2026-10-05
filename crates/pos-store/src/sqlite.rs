@@ -14074,7 +14074,7 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
         .as_deref()
         .map(parse_correlation_id)
         .transpose()?;
-    let event = Event {
+    let mut event = Event {
         id,
         entity,
         event_type: Kind::new(std::mem::take(&mut *event_type)),
