@@ -3288,6 +3288,76 @@ mod tests {
         RECIPIENT_DURABILITY_SYNCHRONOUS_READ_FAILURE.with(|failure| failure.set(enabled));
     }
 
+    #[derive(Clone, Copy)]
+    enum DeniedRecipientExportPragma {
+        JournalMode,
+        SynchronousRead,
+        SynchronousWrite,
+    }
+
+    fn deny_recipient_export_pragma(
+        connection: &Connection,
+        denied: DeniedRecipientExportPragma,
+    ) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            let deny = match context.action {
+                AuthAction::Pragma { pragma_name, .. }
+                    if pragma_name.eq_ignore_ascii_case("journal_mode") =>
+                {
+                    matches!(denied, DeniedRecipientExportPragma::JournalMode)
+                }
+                AuthAction::Pragma {
+                    pragma_name,
+                    pragma_value,
+                } if pragma_name.eq_ignore_ascii_case("synchronous") => matches!(
+                    (denied, pragma_value),
+                    (DeniedRecipientExportPragma::SynchronousRead, None)
+                        | (DeniedRecipientExportPragma::SynchronousWrite, Some(_))
+                ),
+                _ => false,
+            };
+            if deny {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        Ok(())
+    }
+
+    fn deny_second_recipient_export_synchronous_write(
+        connection: &Connection,
+    ) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restore_writes = Arc::clone(&writes);
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Pragma {
+                    pragma_name,
+                    pragma_value: Some(_),
+                } if pragma_name.eq_ignore_ascii_case("synchronous")
+            ) && restore_writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+            {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        Ok(())
+    }
+
+    fn clear_recipient_export_authorizer(connection: &Connection) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        Ok(())
+    }
+
     fn override_next_recipient_random_bytes(bytes: Vec<u8>) {
         RECIPIENT_RANDOM_OVERRIDE.with(|override_bytes| {
             assert!(override_bytes.replace(Some(bytes)).is_none());
@@ -3407,84 +3477,29 @@ mod tests {
     }
 
     #[test]
-    fn recipient_export_durability_closes_pragma_failures() -> RecipientTestResult {
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-
-        #[derive(Clone, Copy)]
-        enum DeniedPragma {
-            JournalMode,
-            SynchronousRead,
-            SynchronousWrite,
-        }
-
+    fn recipient_export_durability_rejects_unavailable_pragmas() -> RecipientTestResult {
         for denied in [
-            DeniedPragma::JournalMode,
-            DeniedPragma::SynchronousRead,
-            DeniedPragma::SynchronousWrite,
+            DeniedRecipientExportPragma::JournalMode,
+            DeniedRecipientExportPragma::SynchronousRead,
+            DeniedRecipientExportPragma::SynchronousWrite,
         ] {
             let fixture = recipient_publication_fixture()?;
-            fixture
-                .store
-                .conn
-                .authorizer(Some(move |context: AuthContext<'_>| {
-                    let deny = match (denied, context.action) {
-                        (DeniedPragma::JournalMode, AuthAction::Pragma { pragma_name, .. }) => {
-                            pragma_name.eq_ignore_ascii_case("journal_mode")
-                        }
-                        (
-                            DeniedPragma::SynchronousRead,
-                            AuthAction::Pragma {
-                                pragma_name,
-                                pragma_value: None,
-                            },
-                        ) => pragma_name.eq_ignore_ascii_case("synchronous"),
-                        (
-                            DeniedPragma::SynchronousWrite,
-                            AuthAction::Pragma {
-                                pragma_name,
-                                pragma_value: Some(_),
-                            },
-                        ) => pragma_name.eq_ignore_ascii_case("synchronous"),
-                        _ => false,
-                    };
-                    if deny {
-                        Authorization::Deny
-                    } else {
-                        Authorization::Allow
-                    }
-                }))?;
+            deny_recipient_export_pragma(&fixture.store.conn, denied)?;
             let result = ensure_recipient_export_durability(&fixture.store.conn);
-            fixture
-                .store
-                .conn
-                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+            clear_recipient_export_authorizer(&fixture.store.conn)?;
             assert!(result.is_err());
         }
+        Ok(())
+    }
 
+    #[test]
+    fn recipient_export_durability_rejects_failed_restoration() -> RecipientTestResult {
         let fixture = recipient_publication_fixture()?;
         fixture
             .store
             .conn
             .execute_batch("PRAGMA synchronous=NORMAL")?;
-        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let restore_writes = Arc::clone(&writes);
-        fixture
-            .store
-            .conn
-            .authorizer(Some(move |context: AuthContext<'_>| {
-                if matches!(
-                    context.action,
-                    AuthAction::Pragma {
-                        pragma_name,
-                        pragma_value: Some(_),
-                    } if pragma_name.eq_ignore_ascii_case("synchronous")
-                ) && restore_writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
-                {
-                    Authorization::Deny
-                } else {
-                    Authorization::Allow
-                }
-            }))?;
+        deny_second_recipient_export_synchronous_write(&fixture.store.conn)?;
         RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(|override_value| {
             override_value.set(Some(1));
         });
@@ -3492,10 +3507,7 @@ mod tests {
         RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(|override_value| {
             override_value.set(None);
         });
-        fixture
-            .store
-            .conn
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
         assert!(restore_after_low_level.is_err());
 
         let fixture = recipient_publication_fixture()?;
@@ -3503,32 +3515,11 @@ mod tests {
             .store
             .conn
             .execute_batch("PRAGMA synchronous=NORMAL")?;
-        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let restore_writes = Arc::clone(&writes);
-        fixture
-            .store
-            .conn
-            .authorizer(Some(move |context: AuthContext<'_>| {
-                if matches!(
-                    context.action,
-                    AuthAction::Pragma {
-                        pragma_name,
-                        pragma_value: Some(_),
-                    } if pragma_name.eq_ignore_ascii_case("synchronous")
-                ) && restore_writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
-                {
-                    Authorization::Deny
-                } else {
-                    Authorization::Allow
-                }
-            }))?;
+        deny_second_recipient_export_synchronous_write(&fixture.store.conn)?;
         set_recipient_export_synchronous_read_failure(true);
         let restore_after_read_failure = ensure_recipient_export_durability(&fixture.store.conn);
         set_recipient_export_synchronous_read_failure(false);
-        fixture
-            .store
-            .conn
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
         assert!(restore_after_read_failure.is_err());
         Ok(())
     }
@@ -4748,15 +4739,9 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     #[test]
-    fn recipient_export_publication_rejects_tampered_material_and_seed_entropy(
-    ) -> RecipientTestResult {
+    fn recipient_export_publication_rejects_missing_or_mismatched_material() -> RecipientTestResult
+    {
         let fixture = recipient_publication_fixture()?;
-        let request = recipient_publication_request(
-            fixture.timeline,
-            fixture.descriptor,
-            &fixture.evaluation,
-            &fixture.token,
-        );
         let registry = fixture
             .store
             .load_key_registry()?
@@ -4815,7 +4800,20 @@ mod tests {
                 ),
             Err(RecipientExportPublicationErrorV1::MaterialUnavailable)
         ));
+        Ok(())
+    }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn recipient_export_publication_rejects_tampered_inventory_and_private_key(
+    ) -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
         let replacement_digest = Hash::from_bytes([93; 32]);
         fixture.store.conn.execute(
             "UPDATE recipient_key_inventory_v1 SET material_digest = ?1",
@@ -4861,7 +4859,12 @@ mod tests {
                 KeyRegistryErrorV1::EncryptionKeyMismatch
             ))
         ));
+        Ok(())
+    }
 
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn recipient_export_publication_recovers_after_seed_entropy_failure() -> RecipientTestResult {
         let mut entropy_fixture = recipient_publication_fixture()?;
         entropy_fixture
             .store
