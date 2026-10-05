@@ -92,7 +92,7 @@
 //! [`UnknownDependencyEdge`]: DependencyGraphErrorV1::UnknownDependencyEdge
 
 use pos_conformance::counterfactual::dependency::{
-    InputDependencyContractErrorV1, InputDependencyV1,
+    validate_input_dependency_list_order_v1, InputDependencyContractErrorV1, InputDependencyV1,
 };
 use pos_conformance::counterfactual::frontier_artifacts::{
     UnknownEdgeCoordinateV1, MAX_CAUSE_DIGESTS_V1, MAX_UNKNOWN_EDGE_COORDINATES_V1,
@@ -586,8 +586,9 @@ struct EdgeScan {
 ///
 /// An IDP1 digest validates its record first, so the first invalid record is
 /// reported before any order error, exactly as
-/// `validate_input_dependency_order_v1` does; the order check then compares
-/// the IDP1 order keys without validating every record a second time.
+/// `validate_input_dependency_order_v1` does; the order check then uses
+/// `validate_input_dependency_list_order_v1`, which compares the IDP1 order
+/// keys without validating every record a second time.
 fn validate_edges(
     bindings: &PlanBindings<'_>,
     nodes: &[DependencyGraphNodeV1],
@@ -598,14 +599,7 @@ fn validate_edges(
         .iter()
         .map(InputDependencyV1::digest)
         .collect::<Result<Vec<_>, _>>()
-        .and_then(|digests| {
-            edges
-                .windows(2)
-                .try_for_each(|pair| {
-                    edge_ordered(edge_order_key(&pair[0]).cmp(&edge_order_key(&pair[1])))
-                })
-                .map(|()| digests)
-        })
+        .and_then(|digests| validate_input_dependency_list_order_v1(edges).map(|()| digests))
         .map_err(DependencyGraphErrorV1::Dependency)?;
     let mut outgoing = Vec::with_capacity(edges.len());
     let mut first_error: Option<KeyedEdgeError> = None;
@@ -742,8 +736,8 @@ fn missing_edges(
 }
 
 /// Missing edges of one node: an unknown input closure of a provisional
-/// endogenous node first, then every
-/// declared input without a valid edge, in ascending digest order.
+/// endogenous node first, then every declared input without a valid edge, in
+/// ascending digest order.
 fn node_gaps<'g>(
     node: &'g DependencyGraphNodeV1,
     present: &'g BTreeSet<(&'g [u8; 32], &'g [u8; 32])>,
@@ -771,19 +765,6 @@ fn edge_coordinate(edge: &InputDependencyV1) -> UnknownEdgeCoordinateV1 {
     UnknownEdgeCoordinateV1 {
         consumer: edge.consumer.clone(),
         missing_source_digest: Some(edge.source.artifact_digest),
-    }
-}
-
-/// IDP1 edge-list order key `(consumer coordinate, source digest)`.
-const fn edge_order_key(edge: &InputDependencyV1) -> ((u64, u32, &str, u32), &[u8; 32]) {
-    (edge.consumer.coordinate_key(), &edge.source.artifact_digest)
-}
-
-const fn edge_ordered(ordering: Ordering) -> Result<(), InputDependencyContractErrorV1> {
-    match ordering {
-        Ordering::Less => Ok(()),
-        Ordering::Equal => Err(InputDependencyContractErrorV1::DuplicateIdentity),
-        Ordering::Greater => Err(InputDependencyContractErrorV1::NonCanonicalOrder),
     }
 }
 

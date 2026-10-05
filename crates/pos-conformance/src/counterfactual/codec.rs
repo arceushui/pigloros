@@ -112,9 +112,9 @@ const fn preflight_error(error: crate::CborPreflightError) -> WireError {
 
 /// Whether `bytes` holds any nonzero byte.
 ///
-/// Counterfactual records reserve the all-zero value of every fixed-width
-/// identity and digest as "absent", so each contract rejects it through this
-/// one predicate.
+/// Counterfactual records reserve the all-zero value of a fixed-width
+/// identity or digest as "absent"; every contract that requires such a field
+/// to be present rejects the all-zero value through this one predicate.
 pub(super) fn nonzero<const LENGTH: usize>(bytes: &[u8; LENGTH]) -> bool {
     *bytes != [0; LENGTH]
 }
@@ -210,13 +210,14 @@ impl<'a> FieldReader<'a> {
 
     /// Read a record array whose first two fields are `magic` and `version`.
     ///
-    /// The header is read before the field count is checked, so a record of
-    /// another magic or version is reported as such whatever its length:
-    /// a non-array value, a missing or wrongly typed header field records
+    /// A non-array value, or an array of fewer than two items, is malformed
+    /// as a whole and records [`WireError::InvalidEncoding`] at the array's
+    /// own slot 0. Otherwise the header is read before the field count is
+    /// checked: a wrongly typed magic or version records
     /// [`WireError::InvalidEncoding`]; a well-typed but different magic or
-    /// version records [`WireError::UnsupportedVersion`] at the magic slot;
-    /// only a supported header with other than `length` fields records
-    /// [`WireError::InvalidEncoding`] at the array's own slot 0.
+    /// version records [`WireError::UnsupportedVersion`] at the magic slot
+    /// whatever the record's length; and only a supported header with other
+    /// than `length` fields records [`WireError::InvalidEncoding`] at slot 0.
     pub(super) fn with_header(value: &'a Value, length: usize, magic: &str, version: u64) -> Self {
         let count = match value {
             Value::Array(fields) => fields.len(),
