@@ -108,8 +108,9 @@ pub fn invalidation_middle() -> Vec<u8> {
     .concat()
 }
 
-/// Frame the fields after the version as one self-digested record:
-/// `heads.0`, `prefix`, `fields`, `padding` zero bytes, then the digest
+/// Frame the fields after the version as one self-digested record.
+///
+/// The record is `heads.0`, `prefix`, `fields`, `padding` zero bytes, then the digest
 /// field over `domain`, a zero byte, `heads.1`, and everything after the
 /// record array head.
 #[must_use]
