@@ -368,6 +368,7 @@ fn read_complete_world_replay(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod inherited_scope_tests;
 
 #[cfg(test)]

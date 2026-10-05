@@ -3019,6 +3019,11 @@ pub struct ErasureCommandSenderV1<'host> {
 }
 
 impl ErasureCommandSenderV1<'_> {
+    /// Fence one authorization decision on a single Timeline.
+    ///
+    /// This is single-Timeline on purpose. It evaluates caller-supplied
+    /// authority and consent records and reads no stitched Fork content, so
+    /// ancestor gating belongs to the gated reads that produced those records.
     fn with_authorization_fence<T>(
         &mut self,
         target_timeline: TimelineId,

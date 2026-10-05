@@ -2,7 +2,11 @@
 //! fence every inherited ancestor scope (#499).
 //!
 //! Protected Snapshots are uniformly unavailable (ADR-113 §9), so no
-//! Snapshot case exists here.
+//! Snapshot case exists here; #502 re-pins them when they return.
+//!
+//! The exact test host is MemoryStore-only. The SQLite and runtime
+//! coverage of inherited gating lives in the `pos-store` and gateway
+//! PPC1 tests.
 
 use crate::test_support::{closure_for_host, open_exact_host, with_release, ProtectedFixture};
 use pos_core::{
