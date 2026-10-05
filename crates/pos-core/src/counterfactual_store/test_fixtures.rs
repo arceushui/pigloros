@@ -44,7 +44,7 @@ pub fn uint(value: u64) -> Vec<u8> {
 #[must_use]
 pub fn head(major: u8, argument: u64) -> Vec<u8> {
     let mut encoded = uint(argument);
-    encoded[0] |= major << 5;
+    encoded[0] += major << 5;
     encoded
 }
 
@@ -119,8 +119,7 @@ pub fn frame(
     fields: &[u8],
     padding: usize,
 ) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(7 + fields.len() + padding + DIGEST_FIELD_BYTES);
-    bytes.push(heads.0);
+    let mut bytes = vec![heads.0];
     bytes.extend_from_slice(&prefix);
     bytes.extend_from_slice(fields);
     bytes.resize(bytes.len() + padding, 0);
