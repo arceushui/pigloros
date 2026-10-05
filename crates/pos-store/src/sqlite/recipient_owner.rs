@@ -2232,8 +2232,7 @@ fn read_recipient_export_ciphertext(
             "recipient export object exceeds the TRX1 bound".to_owned(),
         ));
     }
-    // The checked bound is smaller than the minimum supported `usize` range.
-    let capacity = expected_length as usize;
+    let capacity = usize::try_from(expected_length).map_err(storage_error)?;
     validate_owner_directory(owner)?;
     let name = recipient_export_final_name(export_id);
     recipient_openat2(
@@ -4564,7 +4563,7 @@ mod tests {
         let fixture = recipient_publication_fixture()?;
         let epoch = i64::try_from(fixture.descriptor.identity().epoch)?;
         let owner_id = recipient_owner_id_from_grantee(fixture.owner.grantee_id)?;
-        let owner_id_text = owner_id.to_string();
+        let owner_id_text = owner_id.as_str().to_owned();
         let stored = |recipient_epoch, local_head, logical_head, ciphertext_length| {
             StoredRecipientExportV1 {
                 owner_id: owner_id_text.clone(),
