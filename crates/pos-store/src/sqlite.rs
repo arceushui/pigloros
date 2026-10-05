@@ -11,6 +11,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, TransactionBehavior,
 };
 use std::{
+    cell::Cell,
     collections::{BTreeSet, HashSet},
     sync::Arc,
     time::{Duration, Instant},
@@ -130,6 +131,7 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+mod counterfactual_store;
 mod fork_attribution_issuer_policy;
 mod local_cut_owner;
 mod pipeline_admission;
@@ -248,6 +250,11 @@ pub struct SqliteStore {
     fork_admission_authority_enabled: bool,
     /// Per-adapter `FAI1`/`FAO1`/session state. It never enters `SQLite`.
     fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1,
+    /// Whether a counterfactual write reported an unknown outcome while this
+    /// connection was inside a transaction, and no later observation of it
+    /// in autocommit has settled that; while set and the connection is inside
+    /// a transaction, counterfactual port reads are refused.
+    counterfactual_write_in_doubt: Cell<bool>,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -1854,6 +1861,7 @@ impl SqliteStore {
             authority_persistence_binding: None,
             fork_admission_authority_enabled: true,
             fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1::default(),
+            counterfactual_write_in_doubt: Cell::new(false),
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
@@ -1908,10 +1916,12 @@ impl SqliteStore {
                     self.validate_authority_schema_and_state()
                         .and_then(|()| self.validate_fork_admission_authority_schema())
                         .and_then(|()| self.validate_pipeline_admission_schema())
+                        .and_then(|()| self.validate_present_counterfactual_schema())
                 } else {
                     self.prepare_authority_schema()
                         .and_then(|()| self.prepare_fork_admission_authority_schema())
                         .and_then(|()| self.prepare_pipeline_admission_schema())
+                        .and_then(|()| self.prepare_counterfactual_schema())
                 }
             })
     }
@@ -9217,6 +9227,8 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn begin_protected_effect_interval(
         &self,
     ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
+        // A new interval starts after the previous transaction settled.
+        self.settle_counterfactual_doubt();
         let interval_connection = self
             .writer_reservation_connection
             .as_ref()
