@@ -118,6 +118,7 @@ pub use pos_core::{
     ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerAdmissionSnapshotV1,
+    ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1,
     OwnTracksEnrollmentStore, PersistedAuthorityV1, PipelineAdmissionFencePublisherV1,
     PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PreparedManifestOwnerAdmissionV1,
     TimelineId, ValidatedGeographicAdmissionV1, WallTime,

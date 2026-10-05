@@ -127,7 +127,8 @@ const MICROS_PER_SECOND: u64 = 1_000_000;
 const MAX_TRUSTED_MICROS: u64 = i64::MAX.unsigned_abs();
 const PRINCIPAL_DIGEST_DOMAIN: &[u8] = b"pigloros.trusted-clock.operator-principal.v1\0";
 
-/// Seal shared with [`crate::staged_install`], whose handoff targets must be
+/// Seal shared with [`crate::staged_install`] and
+/// [`crate::manifest_owner_link_verifier`], whose handoff targets must be
 /// declared beside it (ADR-113 §2).
 pub(crate) mod sealed {
     pub trait Sealed {}
