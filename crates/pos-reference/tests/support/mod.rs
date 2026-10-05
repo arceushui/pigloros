@@ -1,4 +1,6 @@
-pub mod cbor;
+pub mod cbor {
+    include!("cbor.rs");
+}
 
 use std::collections::BTreeMap;
 use std::error::Error;

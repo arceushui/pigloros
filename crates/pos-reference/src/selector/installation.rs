@@ -2542,7 +2542,10 @@ pub mod tests {
         assert_eq!(resolved.profile_digest(), request.profile_digest);
         assert_ne!(resolved.fixture_contract_digest(), [0; 32]);
         assert_eq!(resolved.attempt().case_id, "case-0");
-        assert_eq!(resolved.attempt().mode, 0);
+        assert_eq!(
+            resolved.attempt().mode,
+            crate::evaluator_domain::ExecutionMode::Local
+        );
         assert_eq!(archive.stream_position()?, 17);
         Ok(())
     }

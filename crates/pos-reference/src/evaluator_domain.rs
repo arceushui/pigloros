@@ -6,6 +6,9 @@
 //! an invalid discriminant. The wire codes are exactly the integers the codecs
 //! always emitted; `code` is the single place that maps a value back to them.
 //!
+//! `SafeErrorCode` and `VerificationOutcome` intentionally mirror the matching
+//! `pos-conformance` enums so the evaluator stays independent of that crate.
+//!
 //! This module owns only the vocabularies. The archive (CFB1) verifier and the
 //! profile (CPF1) verifier keep their own relationship checks on purpose: each
 //! re-derives closure, ordering, and binding rules from the bytes it receives,

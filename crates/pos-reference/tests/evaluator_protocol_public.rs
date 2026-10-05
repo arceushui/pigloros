@@ -30,10 +30,7 @@ const BOUNDED_REDACTION_CONTRACTS: [(RedactionState, ReplayClaim); 6] = [
         RedactionState::RedactedViews,
         ReplayClaim::IncompatibleProfile,
     ),
-    (
-        RedactionState::StructuralOnly,
-        ReplayClaim::StructuralOnly,
-    ),
+    (RedactionState::StructuralOnly, ReplayClaim::StructuralOnly),
     (
         RedactionState::StructuralOnly,
         ReplayClaim::IncompatibleProfile,

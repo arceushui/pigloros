@@ -1955,14 +1955,10 @@ fn validate_provider_contracts(
         .iter()
         .map(|provider| provider.package.member_path.as_str())
         .collect::<BTreeSet<_>>();
-    if bundle
-        .members
-        .iter()
-        .any(|(path, member)| {
-            member.role == MemberRole::FixtureProviderPackage
-                && !declared_packages.contains(path.as_str())
-        })
-    {
+    if bundle.members.iter().any(|(path, member)| {
+        member.role == MemberRole::FixtureProviderPackage
+            && !declared_packages.contains(path.as_str())
+    }) {
         return Err(ProfileError::ClosureIncomplete);
     }
     for fixture in fixtures {

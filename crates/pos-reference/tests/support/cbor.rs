@@ -1,7 +1,9 @@
-//! Canonical-CBOR and field-mutation helpers shared by the public tests.
-//!
-//! Every public contract test that builds or corrupts wire bytes goes through
-//! these helpers, so the encoding and the mutation primitives are defined once.
+// Canonical-CBOR and field-mutation helpers shared by the public tests.
+//
+// Every public contract test that builds or corrupts wire bytes goes through
+// these helpers, so the encoding and the mutation primitives are defined once.
+// This file is `include!`d into a `cbor` module so it also builds when
+// `support/mod.rs` itself is included from `src/lib.rs`.
 
 use std::error::Error;
 
