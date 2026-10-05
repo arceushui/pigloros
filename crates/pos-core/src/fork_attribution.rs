@@ -7,19 +7,26 @@
 //! The ADR-105 `FAE1` authority-import envelope and its nested records live in
 //! private submodules and are re-exported here. They carry the ADR-099
 //! records as exact opaque bytes, so authority-origin code 2 stays fail
-//! closed in every decoder in this module.
+//! closed in every decoder in this module. Only the import-only typed decoders
+//! of `authority_import` accept code 2, for the `FAE1` closure validator.
 
 use crate::{Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey, Signature, TimelineId};
 
 mod authority_admission;
+mod authority_closure;
 mod authority_envelope;
 mod authority_evidence;
+mod authority_import;
 mod authority_issuer;
 mod authority_wire;
 
 pub use authority_admission::{
     ImportedForkAttributionAdmissionInputV1, ImportedForkAttributionAdmissionV1,
     MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1,
+};
+pub use authority_closure::{
+    ForkAttributionImportClosureErrorV1, ForkAttributionImportClosureV1,
+    ImportedForkClassifierGraphV1,
 };
 pub use authority_envelope::{
     fork_attribution_authority_origin_digest_v1, fork_attribution_closure_leaf_v1,
@@ -35,6 +42,10 @@ pub use authority_evidence::{
     ImportedKeyTombstoneV1, MAX_FORK_EVENT_EVIDENCE_BYTES_V1, MAX_FORK_TIMELINE_IMPORT_BYTES_V1,
     MAX_FORK_TIMELINE_IMPORT_NAME_BYTES_V1, MAX_IMPORTED_KEY_RECORD_BYTES_V1,
     MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
+};
+pub use authority_import::{
+    ImportedForkAdmissionRecordV1, ImportedForkPublicationOperationV1,
+    ImportedPrincipalOwnerBindingV1,
 };
 pub use authority_issuer::{
     ForkAttributionIssuerPolicyEntryV1, ForkAttributionIssuerPolicyInputV1,
@@ -175,6 +186,14 @@ impl ForkAdmissionRecordV1 {
     /// Encode the exact 15-field deterministic-CBOR `FAR1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let mut out = self.canonical_body();
+        authority_origin(&mut out, self.0.origin);
+        out
+    }
+
+    /// Encode every `FAR1` byte before the final `authority-origin-v1`
+    /// field, which the ADR-105 code-2 encoder appends in its own form.
+    fn canonical_body(&self) -> Vec<u8> {
         let value = &self.0;
         let mut out = Vec::with_capacity(320);
         array(&mut out, 15);
@@ -192,7 +211,6 @@ impl ForkAdmissionRecordV1 {
         uint(&mut out, value.post_fold_tick_boundary);
         hash(&mut out, value.plugin_composition_hash);
         uint(&mut out, u64::from(value.attribution_required));
-        authority_origin(&mut out, value.origin);
         out
     }
 
@@ -639,6 +657,14 @@ impl ForkPublicationOperationV1 {
     /// Encode the exact 14-field deterministic-CBOR `FPO1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        let mut out = self.canonical_body();
+        authority_origin(&mut out, self.0.origin);
+        out
+    }
+
+    /// Encode every `FPO1` byte before the final `authority-origin-v1`
+    /// field, which the ADR-105 code-2 encoder appends in its own form.
+    fn canonical_body(&self) -> Vec<u8> {
         let value = &self.0;
         let mut out = Vec::with_capacity(512);
         array(&mut out, 14);
@@ -655,7 +681,6 @@ impl ForkPublicationOperationV1 {
         hash(&mut out, value.private_material_digest);
         bytes(&mut out, value.public_verification_key.as_bytes());
         hash(&mut out, value.signed_manifest_record_id);
-        authority_origin(&mut out, value.origin);
         out
     }
 
@@ -777,7 +802,10 @@ pub struct ForkPublicationArtifactInputV1 {
 
 /// Strict portable `FPA1` bytes carrying the sole complete `FSM1` copy.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ForkPublicationArtifactV1(ForkPublicationArtifactInputV1);
+pub struct ForkPublicationArtifactV1 {
+    input: ForkPublicationArtifactInputV1,
+    signed_manifest: SignedForkReproManifestV1,
+}
 
 impl ForkPublicationArtifactV1 {
     /// Construct an artifact only when its exact nested `FSM1` identifier agrees.
@@ -788,23 +816,34 @@ impl ForkPublicationArtifactV1 {
         if input.signed_manifest_record_id == Hash::zero() || input.operation_id == Hash::zero() {
             return Err(ForkAttributionCodecErrorV1::FieldOutOfBounds);
         }
-        let manifest =
+        let signed_manifest =
             SignedForkReproManifestV1::from_canonical_cbor(&input.signed_manifest_bytes)?;
-        if manifest.record_id() != input.signed_manifest_record_id {
+        if signed_manifest.record_id() != input.signed_manifest_record_id {
             return Err(ForkAttributionCodecErrorV1::FieldMismatch);
         }
-        Ok(Self(input))
+        Ok(Self {
+            input,
+            signed_manifest,
+        })
     }
 
     #[must_use]
     pub const fn input(&self) -> &ForkPublicationArtifactInputV1 {
-        &self.0
+        &self.input
+    }
+
+    /// Return the exact nested `FSM1`, decoded once by [`Self::new`].
+    ///
+    /// Its signature is not verified here.
+    #[must_use]
+    pub const fn signed_manifest(&self) -> &SignedForkReproManifestV1 {
+        &self.signed_manifest
     }
 
     /// Encode the exact five-field deterministic-CBOR `FPA1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let value = &self.0;
+        let value = &self.input;
         let mut out = Vec::with_capacity(value.signed_manifest_bytes.len() + 96);
         array(&mut out, 5);
         text(&mut out, "FPA1");

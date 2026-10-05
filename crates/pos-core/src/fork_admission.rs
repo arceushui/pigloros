@@ -13,6 +13,9 @@ use crate::{
 /// identifier: 1 + 5 + 1 + 34 + 34 + 130 + 2.
 pub const MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1: usize = 207;
 
+/// ADR-099 `POB1` digest domain, shared with the ADR-105 code-2 `POB1`.
+pub(crate) const PRINCIPAL_OWNER_BINDING_DOMAIN: &[u8] = b"pigloros/principal-owner-binding/v1";
+
 /// Trust anchor of a durable POB1 or FAR1 record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForkAuthorityOriginV1 {
@@ -166,24 +169,38 @@ impl PrincipalOwnerBindingV1 {
     /// Return the complete canonical POB1 bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
+        self.canonical_cbor_with_origin(None)
+    }
+
+    /// Encode these fields with the final `authority-origin-v1` set to the
+    /// local `[1]`, or to the code-2 `[2, digest]` for `Some(digest)`.
+    ///
+    /// Only the ADR-105 code-2 `POB1` encoder passes `Some`.
+    pub(crate) fn canonical_cbor_with_origin(&self, imported_origin: Option<Hash>) -> Vec<u8> {
         let input = self.input();
+        let origin = imported_origin.map_or_else(
+            || vec![Value::Integer(1.into())],
+            |digest| {
+                vec![
+                    Value::Integer(2.into()),
+                    Value::Bytes(digest.as_bytes().to_vec()),
+                ]
+            },
+        );
         canonical_bytes(&Value::Array(vec![
             Value::Bytes(b"POB1".to_vec()),
             Value::Integer(1.into()),
             Value::Bytes(input.operation_id.as_bytes().to_vec()),
             Value::Bytes(input.principal_digest.as_bytes().to_vec()),
             Value::Text(input.owner.as_str().to_owned()),
-            Value::Array(vec![Value::Integer(1.into())]),
+            Value::Array(origin),
         ]))
     }
 
     /// Return `BLAKE3("pigloros/principal-owner-binding/v1" || POB1 bytes)`.
     #[must_use]
     pub fn digest(&self) -> Hash {
-        digest(
-            b"pigloros/principal-owner-binding/v1",
-            &self.to_canonical_cbor(),
-        )
+        digest(PRINCIPAL_OWNER_BINDING_DOMAIN, &self.to_canonical_cbor())
     }
 }
 
