@@ -1029,10 +1029,11 @@ fn assert_transitive_closure(cut: &RecordedCut) -> TestResult {
     let profiles = kind_hashes(leaves, WorldArtifactKindV1::ExecutionProfile);
     let rows = snapshot.catalog.as_input().rows.len();
     assert_eq!(profiles.len(), rows.div_ceil(2));
-    let mut budget_children = Vec::new();
-    for budget in kind_leaves(leaves, WorldArtifactKindV1::ExecutableBudgetPolicy) {
-        budget_children.extend(budget.as_input().child_node_hashes.iter().copied());
-    }
+    let budgets = kind_leaves(leaves, WorldArtifactKindV1::ExecutableBudgetPolicy);
+    let mut budget_children: Vec<Hash> = budgets
+        .into_iter()
+        .flat_map(|budget| budget.as_input().child_node_hashes.iter().copied())
+        .collect();
     budget_children.sort();
     assert_eq!(budget_children, profiles);
     let audience = member_leaf(snapshot, WorldArtifactKindV1::AudiencePolicy)?;
