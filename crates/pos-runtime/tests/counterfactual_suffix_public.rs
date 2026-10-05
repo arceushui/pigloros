@@ -1256,23 +1256,31 @@ const TICK_FAULTS: [TickFault; 6] = [
     ),
 ];
 
+/// The first suffix Tick, an intermediate Tick and the final horizon Tick.
+const FAULT_TICKS: [u64; 3] = [FRONTIER_TICK + 1, FRONTIER_TICK + 2, HORIZON_TICK];
+
 fn failed_tick_commits_nothing_and_retries_deterministically<B: Backend>() -> TestResult {
     let reference = reference()?;
-    for (fault, failure, code) in TICK_FAULTS {
-        let mut setup = prepare::<B>()?;
-        let mut stager = Stager::failing(13, fault);
-        let failed = run(&mut setup, &mut stager)?;
-        assert_eq!(stager.ticks(), vec![12, 13]);
-        assert_failed_at(&setup, &failed, failure, code, 13)?;
+    for fault_tick in FAULT_TICKS {
+        for (fault, failure, code) in TICK_FAULTS {
+            let mut setup = prepare::<B>()?;
+            let mut attempt = Stager::failing(fault_tick, fault);
+            let failed = run(&mut setup, &mut attempt)?;
+            assert_eq!(attempt.ticks(), (FRONTIER_TICK + 1..=fault_tick).collect::<Vec<_>>());
+            assert_failed_at(&setup, &failed, failure, code, fault_tick)?;
 
-        // The failure is explicit and repeatable until the Tick succeeds.
-        let mut stager = Stager::failing(13, fault);
-        assert_eq!(run(&mut setup, &mut stager)?, failed);
-        assert_eq!(stager.ticks(), vec![13]);
+            // The failure is explicit and repeatable until the Tick succeeds,
+            // and every retry stages the Tick from the same inputs.
+            let mut retry = Stager::failing(fault_tick, fault);
+            assert_eq!(run(&mut setup, &mut retry)?, failed);
+            assert_eq!(retry.ticks(), vec![fault_tick]);
+            assert_eq!(retry.seen.last(), attempt.seen.last());
 
-        let mut stager = Stager::default();
-        assert_eq!(run(&mut setup, &mut stager)?, reference);
-        assert_eq!(stager.ticks(), (13..=HORIZON_TICK).collect::<Vec<_>>());
+            let mut finish = Stager::default();
+            assert_eq!(run(&mut setup, &mut finish)?, reference);
+            assert_eq!(finish.ticks(), (fault_tick..=HORIZON_TICK).collect::<Vec<_>>());
+            assert_eq!(finish.seen.first(), attempt.seen.last());
+        }
     }
     Ok(())
 }

@@ -30,7 +30,7 @@ use pos_core::{
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
     ErasureContainmentGateV1, Event, EventDraft, EventStore, ForkGenerationV1, Hash,
     InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1, Seq, SeqRange,
-    Timeline, TimelineId,
+    Timeline, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
@@ -105,6 +105,22 @@ const PROJECTIONS: [[u8; 32]; 2] = [[0xc2; 32], [0xc3; 32]];
 const INTERVENTION_A_ID: [u8; 16] = [1; 16];
 const INTERVENTION_B_ID: [u8; 16] = [2; 16];
 const TICK_EVENT_TYPE: &str = "counterfactual.tick";
+const LONGEST_TYPE_BYTES: [u8; MAX_FORK_EVENT_TYPE_BYTES_V1] =
+    [b't'; MAX_FORK_EVENT_TYPE_BYTES_V1];
+const LONG_TYPE_BYTES: [u8; MAX_FORK_EVENT_TYPE_BYTES_V1 + 1] =
+    [b't'; MAX_FORK_EVENT_TYPE_BYTES_V1 + 1];
+
+/// An Event type of exactly the largest accepted length.
+const LONGEST_TYPE: &str = match std::str::from_utf8(&LONGEST_TYPE_BYTES) {
+    Ok(text) => text,
+    Err(_) => "",
+};
+
+/// An Event type one byte longer than accepted.
+const LONG_TYPE: &str = match std::str::from_utf8(&LONG_TYPE_BYTES) {
+    Ok(text) => text,
+    Err(_) => "",
+};
 /// A prior-generation `PresentationOnly` output before the global frontier.
 const EARLY_PRESENTATION: [u8; 32] = [0xa7; 32];
 
@@ -1624,6 +1640,52 @@ fn failed_or_empty_staging_commits_nothing<B: Backend>() -> TestResult {
     Ok(())
 }
 both_backends!(failed_or_empty_staging_commits_nothing);
+
+fn first_tick_event_type_is_bounded<B: Backend>() -> TestResult {
+    // The longest accepted type is admitted: generation 1 holds the Tick.
+    let mut accepting = setup::<B>(&BASE)?;
+    let mut stager = Stager {
+        event_type: LONGEST_TYPE,
+        ..Stager::drafting(1)
+    };
+    let result = accepting.coordinator.admit(
+        &request(&accepting.fixture),
+        &Authority::default(),
+        &mut accepting.source,
+        &mut stager,
+    );
+    assert!(result.is_ok());
+    let store = accepting.coordinator.store();
+    let fork = accepting.fixture.fork;
+    assert_eq!(
+        store.current_fork_generation(fork)?,
+        ForkGenerationV1 {
+            fork,
+            generation: 1
+        }
+    );
+    assert_eq!(store.logical_head(fork)?, Seq::from_u64(CUT_SEQ + 1));
+
+    // One byte more is rejected while staging and commits nothing.
+    let mut rejecting = setup::<B>(&BASE)?;
+    let mut stager = Stager {
+        event_type: LONG_TYPE,
+        ..Stager::drafting(1)
+    };
+    let result = rejecting.coordinator.admit(
+        &request(&rejecting.fixture),
+        &Authority::default(),
+        &mut rejecting.source,
+        &mut stager,
+    );
+    assert_rejected(
+        &rejecting,
+        &(result, stager),
+        &AdmissionError::StagedTickRejected(PipelineContractErrorV1::FieldOutOfBounds),
+        1,
+    )
+}
+both_backends!(first_tick_event_type_is_bounded);
 
 fn changed_persisted_facts_conflict_atomically<B: Backend>() -> TestResult {
     let cases: [FactsCase; 6] = [
