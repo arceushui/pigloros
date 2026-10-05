@@ -2,10 +2,7 @@
 
 //! Public black-box contracts for retained role-4 recipient export decryption.
 
-use std::{
-    error::Error as _,
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
-};
+use std::{error::Error as _, os::unix::fs::PermissionsExt};
 
 use pos_core::{
     CanonicalBytes, EntityId, Event, EventId, EventStore, Hash, KeyDestructionRequestV1,
