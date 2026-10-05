@@ -117,12 +117,17 @@ fn a_bound_ancestry_fences_every_later_snapshot_read_of_its_timeline() {
     assert!(projections.state_snapshot(lineage.child).is_err());
     assert_eq!(projections.validate_fork_source(lineage.child), UNAVAILABLE);
 
-    // The bound ancestry belongs to its own Timeline only.
+    // A chain bound for another Timeline never serves the source Timeline.
     let unrelated = TimelineId::new();
     let mut other = registry(&gate);
     other.fold_events(unrelated, &[event(entity)]);
     other
         .bind_fork_ancestry(lineage.child, &lineage.child_ancestry())
+        .test_ok();
+    assert_eq!(read(&other, unrelated, entity), UNAVAILABLE);
+    // Binding the source Timeline's own chain restores service.
+    other
+        .bind_fork_ancestry(unrelated, &[Lineage::member(unrelated, None)])
         .test_ok();
     read(&other, unrelated, entity).test_ok();
 }
