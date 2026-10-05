@@ -180,7 +180,7 @@ struct Rigged<const MODE: u8> {
 
 /// The receipt of another invalidation of the same generation; only a test
 /// wrapper may mint one with the adapter seal.
-fn other_receipt(
+const fn other_receipt(
     receipt: CounterfactualGenerationReceiptV1,
 ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1> {
     CounterfactualGenerationReceiptV1::from_record(
