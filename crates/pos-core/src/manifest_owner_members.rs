@@ -221,7 +221,10 @@ pub fn validate_manifest_owner_lease_replacement_v1(
     Ok(())
 }
 
-fn recorded_lease(members: &ManifestOwnerScopeMembersV1) -> Option<WorldRetentionLeaseInputV1> {
+/// Decode the RLS1 lease recorded with a scope, if its RTP1/RLS1 bytes decode.
+pub(crate) fn recorded_lease(
+    members: &ManifestOwnerScopeMembersV1,
+) -> Option<WorldRetentionLeaseInputV1> {
     WorldRetentionPolicyV1::from_canonical_cbor(&members.rtp1_bytes)
         .ok()
         .and_then(|policy| {
