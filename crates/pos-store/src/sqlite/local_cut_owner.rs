@@ -1296,7 +1296,7 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
 }
 
 /// Classify a failed owner-link query; a mistyped stored column is corrupt.
-fn sqlite_owner_link_query_error(error: &rusqlite::Error) -> LocalCutOwnerErrorV1 {
+const fn sqlite_owner_link_query_error(error: &rusqlite::Error) -> LocalCutOwnerErrorV1 {
     if matches!(error, rusqlite::Error::InvalidColumnType(..)) {
         LocalCutOwnerErrorV1::CorruptState
     } else {
