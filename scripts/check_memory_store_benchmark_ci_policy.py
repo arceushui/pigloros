@@ -88,6 +88,100 @@ BENCHMARK_TRIGGERS = {
     "schedule": [{"cron": "17 4 * * 1"}],
     "workflow_dispatch": None,
 }
+TOOLCHAIN_ACTION = "dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de"
+RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16"
+BENCHMARK_WORKFLOW_ID = "350682006"
+BENCHMARK_JOB_ENVIRONMENT = {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_INCREMENTAL": "0",
+    "HEAD_BRANCH": "${{ github.head_ref || github.ref_name }}",
+    "HEAD_REPOSITORY_ID": "${{ github.event.pull_request.head.repo.id || github.repository_id }}",
+    "HEAD_SHA": BENCHMARK_SOURCE_REF,
+    "PIGLOROS_BENCH_OUTPUT": "${{ github.workspace }}/artifacts/memory-erasure-benchmark.csv",
+    "PIGLOROS_BENCH_SAMPLES": "10",
+    "RUSTFLAGS": "-D warnings",
+}
+METADATA_STEP_NAME = "Record runner and toolchain metadata"
+METADATA_COMMAND = r"""mkdir -p artifacts
+{
+  printf 'runner_image=%s\n' "$ImageOS-$ImageVersion"
+  printf 'architecture=%s\n' "$(uname -m)"
+  rustc --version --verbose
+  cargo --version --verbose
+} | tee artifacts/environment.txt
+"""
+MEASUREMENT_STEP_NAME = "Measure MemoryStore erasure persistence paths"
+MEASUREMENT_COMMAND = """set -o pipefail
+cargo bench --locked -p pos-store --bench memory_erasure 2>&1 |
+  tee artifacts/benchmark.log
+"""
+CHECKOUT_STEP = {
+    "uses": CHECKOUT_ACTION,
+    "with": {"ref": BENCHMARK_SOURCE_REF},
+}
+TOOLCHAIN_STEP = {
+    "uses": TOOLCHAIN_ACTION,
+    "with": {"toolchain": "1.97.1"},
+}
+RUST_CACHE_STEP = {
+    "uses": RUST_CACHE_ACTION,
+    "with": {"shared-key": "memory-store-benchmark"},
+}
+METADATA_STEP = {"name": METADATA_STEP_NAME, "run": METADATA_COMMAND}
+MEASUREMENT_STEP = {"name": MEASUREMENT_STEP_NAME, "run": MEASUREMENT_COMMAND}
+WRITE_MANIFEST_STEP = {
+    "name": WRITE_MANIFEST_STEP_NAME,
+    "run": WRITE_MANIFEST_COMMAND,
+}
+COMPARE_EVIDENCE_STEP = {
+    "name": COMPARE_EVIDENCE_STEP_NAME,
+    "if": COMPARE_EVIDENCE_CONDITION,
+    "env": {"GITHUB_TOKEN": "${{ github.token }}"},
+    "run": COMPARE_EVIDENCE_COMMAND,
+}
+TRUSTED_BASELINE_STEP = {
+    "name": "Upload trusted main benchmark baseline",
+    "if": TRUSTED_BASELINE_CONDITION,
+    "uses": UPLOAD_ACTION,
+    "with": {
+        "name": "${{ env.BASELINE_ARTIFACT_NAME }}",
+        "path": "artifacts/",
+        "retention-days": 90,
+        "overwrite": True,
+        "if-no-files-found": "error",
+    },
+}
+UNTRUSTED_EVIDENCE_STEP = {
+    "name": "Upload untrusted pull-request or manual benchmark evidence",
+    "if": UNTRUSTED_EVIDENCE_CONDITION,
+    "uses": UPLOAD_ACTION,
+    "with": {
+        "name": (
+            "memory-store-benchmark-evidence-${{ github.event_name }}-"
+            "${{ github.run_id }}-${{ github.run_attempt }}"
+        ),
+        "path": "artifacts/",
+        "retention-days": 14,
+        "if-no-files-found": "error",
+    },
+}
+EXPECTED_BENCHMARK_JOB = {
+    "name": "MemoryStore erasure benchmark",
+    "runs-on": "ubuntu-24.04",
+    "timeout-minutes": 30,
+    "env": BENCHMARK_JOB_ENVIRONMENT,
+    "steps": [
+        CHECKOUT_STEP,
+        TOOLCHAIN_STEP,
+        RUST_CACHE_STEP,
+        METADATA_STEP,
+        MEASUREMENT_STEP,
+        WRITE_MANIFEST_STEP,
+        COMPARE_EVIDENCE_STEP,
+        TRUSTED_BASELINE_STEP,
+        UNTRUSTED_EVIDENCE_STEP,
+    ],
+}
 
 
 class GithubActionsLoader(yaml.SafeLoader):
@@ -138,6 +232,26 @@ def load_comparator() -> Any:
 
 
 COMPARATOR = load_comparator()
+
+
+def expected_benchmark_workflow() -> dict[str, Any]:
+    """Return the complete executable policy for producing benchmark evidence."""
+
+    return {
+        "name": "memory-store-benchmark",
+        "on": BENCHMARK_TRIGGERS,
+        "permissions": {"actions": "read", "contents": "read"},
+        "concurrency": {
+            "group": "memory-store-benchmark-${{ github.workflow }}-${{ github.ref }}",
+            "cancel-in-progress": True,
+        },
+        "env": {
+            "BASELINE_ARTIFACT_NAME": COMPARATOR.ARTIFACT_NAME,
+            "BENCHMARK_WORKFLOW_ID": BENCHMARK_WORKFLOW_ID,
+            "BENCHMARK_WORKFLOW_PATH": COMPARATOR.WORKFLOW_PATH,
+        },
+        "jobs": {"benchmark": EXPECTED_BENCHMARK_JOB},
+    }
 
 
 def require_mapping(value: object, label: str) -> dict[str, Any]:
@@ -224,106 +338,16 @@ def check_ci_workflow(workflow_path: pathlib.Path) -> None:
 
 
 def check_benchmark_workflow(workflow_path: pathlib.Path) -> None:
-    """Bind benchmark source, trusted events, and artifact name to executable policy."""
+    """Require the complete, fail-closed benchmark evidence producer policy."""
 
     require(
         frozenset(COMPARATOR.TRUSTED_EVENTS) == frozenset(TRUSTED_EVENT_ORDER),
         "comparator trusted-event policy diverged from the benchmark contract",
     )
     workflow = load_workflow(workflow_path)
-    triggers = require_mapping(workflow.get("on"), "benchmark workflow triggers")
     require(
-        triggers == BENCHMARK_TRIGGERS,
-        "benchmark triggers must partition main baselines from PR/manual evidence",
-    )
-    require(
-        workflow.get("permissions") == {"actions": "read", "contents": "read"},
-        "benchmark workflow must retain read-only Actions and contents permissions",
-    )
-    environment = require_mapping(workflow.get("env"), "benchmark workflow environment")
-    require(
-        environment.get("BASELINE_ARTIFACT_NAME") == COMPARATOR.ARTIFACT_NAME,
-        "baseline artifact name must match the comparator",
-    )
-
-    jobs = require_mapping(workflow.get("jobs"), "benchmark workflow jobs")
-    benchmark = require_mapping(jobs.get("benchmark"), "missing benchmark job")
-    benchmark_environment = require_mapping(
-        benchmark.get("env"), "benchmark job environment"
-    )
-    require(
-        benchmark_environment.get("HEAD_SHA") == BENCHMARK_SOURCE_REF,
-        "manifest HEAD_SHA must identify the checked-out benchmark revision",
-    )
-    steps = require_steps(benchmark, "benchmark job")
-    checkouts = [step for step in steps if step.get("uses") == CHECKOUT_ACTION]
-    require(len(checkouts) == 1, "benchmark job must have exactly one checkout step")
-    require(
-        checkouts[0]
-        == {"uses": CHECKOUT_ACTION, "with": {"ref": BENCHMARK_SOURCE_REF}},
-        "benchmark checkout must match manifest HEAD_SHA for every event",
-    )
-
-    manifest_step = named_step(steps, WRITE_MANIFEST_STEP_NAME)
-    expected_manifest_step = {
-        "name": WRITE_MANIFEST_STEP_NAME,
-        "run": WRITE_MANIFEST_COMMAND,
-    }
-    require(
-        manifest_step == expected_manifest_step,
-        "manifest generation must fail closed and write the checked-out HEAD_SHA",
-    )
-
-    comparison_step = named_step(steps, COMPARE_EVIDENCE_STEP_NAME)
-    expected_comparison_step = {
-        "name": COMPARE_EVIDENCE_STEP_NAME,
-        "if": COMPARE_EVIDENCE_CONDITION,
-        "env": {"GITHUB_TOKEN": "${{ github.token }}"},
-        "run": COMPARE_EVIDENCE_COMMAND,
-    }
-    require(
-        comparison_step == expected_comparison_step,
-        "PR comparison must be a blocking, fail-closed evidence check",
-    )
-
-    trusted_step = named_step(steps, "Upload trusted main benchmark baseline")
-    expected_trusted_step = {
-        "name": "Upload trusted main benchmark baseline",
-        "if": TRUSTED_BASELINE_CONDITION,
-        "uses": UPLOAD_ACTION,
-        "with": {
-            "name": "${{ env.BASELINE_ARTIFACT_NAME }}",
-            "path": "artifacts/",
-            "retention-days": 90,
-            "overwrite": True,
-            "if-no-files-found": "error",
-        },
-    }
-    require(
-        trusted_step == expected_trusted_step,
-        "trusted baseline publication must use only successful main push or schedule events",
-    )
-
-    untrusted_step = named_step(
-        steps, "Upload untrusted pull-request or manual benchmark evidence"
-    )
-    expected_untrusted_step = {
-        "name": "Upload untrusted pull-request or manual benchmark evidence",
-        "if": UNTRUSTED_EVIDENCE_CONDITION,
-        "uses": UPLOAD_ACTION,
-        "with": {
-            "name": (
-                "memory-store-benchmark-evidence-${{ github.event_name }}-"
-                "${{ github.run_id }}-${{ github.run_attempt }}"
-            ),
-            "path": "artifacts/",
-            "retention-days": 14,
-            "if-no-files-found": "error",
-        },
-    }
-    require(
-        untrusted_step == expected_untrusted_step,
-        "untrusted PR/manual evidence must never share trusted baseline publication",
+        workflow == expected_benchmark_workflow(),
+        "benchmark workflow must retain the complete fail-closed evidence policy",
     )
 
 

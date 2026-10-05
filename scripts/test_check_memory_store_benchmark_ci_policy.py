@@ -74,6 +74,10 @@ class MemoryStoreBenchmarkCiPolicyTests(unittest.TestCase):
             if step.get("name") == name
         )
 
+    @staticmethod
+    def benchmark_job(workflow: dict[str, Any]) -> dict[str, Any]:
+        return workflow["jobs"]["benchmark"]
+
     def test_repository_workflows_pass(self) -> None:
         CHECKER.check_workflows(CI_WORKFLOW, BENCHMARK_WORKFLOW)
 
@@ -174,6 +178,84 @@ class MemoryStoreBenchmarkCiPolicyTests(unittest.TestCase):
             )
 
         self.assert_rejected(mutate_benchmark=replace_head_sha)
+
+    def test_rejects_replaced_measurement_producer(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.named_benchmark_step(
+                workflow, CHECKER.MEASUREMENT_STEP_NAME
+            ).update({"run": 'printf "fabricated\\n" > "$PIGLOROS_BENCH_OUTPUT"\n'})
+        )
+
+    def test_rejects_injected_pre_measurement_step(self) -> None:
+        def inject_step(workflow: dict[str, Any]) -> None:
+            steps = self.benchmark_job(workflow)["steps"]
+            measurement_index = next(
+                index
+                for index, step in enumerate(steps)
+                if step.get("name") == CHECKER.MEASUREMENT_STEP_NAME
+            )
+            steps.insert(
+                measurement_index,
+                {"name": "Fabricate benchmark evidence", "run": "exit 0\n"},
+            )
+
+        self.assert_rejected(mutate_benchmark=inject_step)
+
+    def test_rejects_reordered_measurement_steps(self) -> None:
+        def reorder_steps(workflow: dict[str, Any]) -> None:
+            steps = self.benchmark_job(workflow)["steps"]
+            steps[3], steps[4] = steps[4], steps[3]
+
+        self.assert_rejected(mutate_benchmark=reorder_steps)
+
+    def test_rejects_benchmark_output_environment_drift(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.benchmark_job(workflow)["env"].update(
+                {"PIGLOROS_BENCH_OUTPUT": "/tmp/fabricated.csv"}
+            )
+        )
+
+    def test_rejects_non_failing_benchmark_job(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.benchmark_job(workflow).update(
+                {"continue-on-error": True}
+            )
+        )
+
+    def test_rejects_disabled_benchmark_job(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.benchmark_job(workflow).update(
+                {"if": "${{ false }}"}
+            )
+        )
+
+    def test_rejects_benchmark_job_shell_override(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.benchmark_job(workflow).update(
+                {"defaults": {"run": {"shell": "sh"}}}
+            )
+        )
+
+    def test_rejects_benchmark_job_permission_override(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: self.benchmark_job(workflow).update(
+                {"permissions": {"contents": "write"}}
+            )
+        )
+
+    def test_rejects_workflow_identity_drift(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: workflow["env"].update(
+                {"BENCHMARK_WORKFLOW_ID": "1"}
+            )
+        )
+
+    def test_rejects_added_benchmark_job(self) -> None:
+        self.assert_rejected(
+            mutate_benchmark=lambda workflow: workflow["jobs"].update(
+                {"fabricate": {"runs-on": "ubuntu-24.04", "steps": []}}
+            )
+        )
 
     def test_rejects_non_failing_comparison_step(self) -> None:
         self.assert_rejected(
