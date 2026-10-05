@@ -102,7 +102,7 @@ use pos_core::{
 };
 
 use super::{MemoryStore, TimelineState};
-use crate::counterfactual_adapter::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
+use crate::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
 
 /// Test-only fault injected at the staged head, after staging and before
 /// installing anything.
