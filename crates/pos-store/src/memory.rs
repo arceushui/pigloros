@@ -15285,4 +15285,136 @@ mod local_cut_owner_coverage {
         }
         Ok(())
     }
+
+    /// One shared admission and two zero-Event cuts, recorded by both stores.
+    #[cfg(feature = "sqlite")]
+    mod sqlite_parity {
+        use super::*;
+        use crate::sqlite::SqliteStore;
+
+        /// One stored row as exact bytes: its scope, then two records or keys.
+        type StoredRow = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+        const RECORDING_COLUMNS: &str = "scope, binding_cbor, receipt_cbor";
+        const NODE_COLUMNS: &str = "scope, node_hash, node_cbor";
+
+        /// Prepare `plan` against the store's own admission readback and commit it.
+        fn commit_shared_cut<S>(
+            store: &mut S,
+            plan: &CutPlan,
+            previous: Option<Hash>,
+        ) -> FixtureResult<LocalCutOwnerCommitV1>
+        where
+            S: ManifestOwnerAdmissionPersistencePortV1 + LocalCutOwnerPersistencePortV1,
+        {
+            let state = store.read_manifest_owner_state_v1(CUT_OWNER)?;
+            let state = state.ok_or("missing admitted owner state")?;
+            let snapshot = store.read_manifest_owner_admission_v1(CUT_OWNER, 1, CUT_TIMELINE)?;
+            let snapshots = [snapshot.ok_or("missing admitted snapshot")?];
+            let predecessor = move |_: TimelineId| previous;
+            let request = cut_request(CUT_OWNER, &state, &snapshots, plan, &predecessor)?;
+            let current = store.read_local_cut_owner_state_v1(CUT_OWNER)?;
+            let batch = prepare_local_cut_owner_commit_v1(
+                request,
+                current.as_ref(),
+                &state,
+                &snapshots,
+                &AcceptingOwner,
+            )?;
+            let committed = store.commit_local_cut_owner_v1(batch)?;
+            Ok(committed)
+        }
+
+        /// Admit the shared fixture, then commit its first two chained cuts.
+        fn record_shared_fixture<S>(store: &mut S) -> FixtureResult<[LocalCutOwnerCommitV1; 2]>
+        where
+            S: ManifestOwnerAdmissionPersistencePortV1 + LocalCutOwnerPersistencePortV1,
+        {
+            let timelines = [CUT_TIMELINE];
+            let request = admission_request(CUT_OWNER, 1, &timelines, ADMISSION_OPERATION, None)?;
+            let batch = prepare_manifest_owner_admission_v1(request, &AcceptingOwner, None)?;
+            store.commit_manifest_owner_admission_v1(batch)?;
+            let first = commit_shared_cut(store, &FIRST_CUT, None)?;
+            let chained = first.recordings.first().ok_or("missing recording")?;
+            let previous = Some(chained.binding.digest());
+            let second = commit_shared_cut(store, &SECOND_CUT, previous)?;
+            Ok([first, second])
+        }
+
+        fn recording_row(recording: &pos_core::LocalCutWorldRecordingV1) -> StoredRow {
+            (
+                recording.scope.as_bytes().to_vec(),
+                recording.binding.to_canonical_cbor(),
+                recording.receipt.to_canonical_cbor(),
+            )
+        }
+
+        fn node_row(
+            (key, branch): (&(Hash, Hash), &pos_core::WorldDependencyBranchV1),
+        ) -> StoredRow {
+            let (scope, node) = key;
+            (
+                scope.as_bytes().to_vec(),
+                node.as_bytes().to_vec(),
+                branch.encode().as_slice().to_vec(),
+            )
+        }
+
+        fn memory_recordings(store: &MemoryStore) -> Vec<StoredRow> {
+            let recordings = store.local_cut_world_recordings.values();
+            let mut rows: Vec<StoredRow> = recordings.map(recording_row).collect();
+            rows.sort();
+            rows
+        }
+
+        fn memory_nodes(store: &MemoryStore) -> Vec<StoredRow> {
+            let nodes = store.world_dependency_branches.iter();
+            let mut rows: Vec<StoredRow> = nodes.map(node_row).collect();
+            rows.sort();
+            rows
+        }
+
+        fn stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }
+
+        /// Every `SQLite` row of `table` as exact bytes, sorted.
+        fn sqlite_rows(path: &str, columns: &str, table: &str) -> FixtureResult<Vec<StoredRow>> {
+            let connection = rusqlite::Connection::open(path)?;
+            let mut statement = connection.prepare(&format!("SELECT {columns} FROM {table}"))?;
+            let rows = statement.query_map([], stored_row)?;
+            let mut sorted = rows.collect::<Result<Vec<_>, _>>()?;
+            sorted.sort();
+            Ok(sorted)
+        }
+
+        #[test]
+        fn memory_and_sqlite_read_back_identical_cuts_recordings_and_nodes() -> TestResult {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("parity.db");
+            let path = path.to_str().ok_or("non-UTF-8 database path")?;
+            let mut database = SqliteStore::open(path)?;
+            let mut memory = MemoryStore::new();
+            let recorded = record_shared_fixture(&mut memory)?;
+            assert_eq!(record_shared_fixture(&mut database)?, recorded);
+            for cut_id in [FIRST_CUT.cut_id, SECOND_CUT.cut_id] {
+                let cut = memory.read_local_cut_owner_commit_v1(CUT_OWNER, cut_id)?;
+                assert!(cut.is_some());
+                let stored = database.read_local_cut_owner_commit_v1(CUT_OWNER, cut_id)?;
+                assert_eq!(stored, cut);
+            }
+            let history = memory.verify_local_cut_owner_history_v1(CUT_OWNER)?;
+            let stored = database.verify_local_cut_owner_history_v1(CUT_OWNER)?;
+            assert_eq!(stored, history);
+            let recordings = memory_recordings(&memory);
+            assert_eq!(recordings.len(), 2);
+            let stored = sqlite_rows(path, RECORDING_COLUMNS, "local_cut_world_recordings")?;
+            assert_eq!(stored, recordings);
+            let nodes = memory_nodes(&memory);
+            assert!(!nodes.is_empty());
+            let stored = sqlite_rows(path, NODE_COLUMNS, "world_dependency_branches")?;
+            assert_eq!(stored, nodes);
+            Ok(())
+        }
+    }
 }
