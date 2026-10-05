@@ -13,11 +13,22 @@ with `pos-core`'s `counterfactual-adapter` feature, so:
   crate's top-level `tests` directory (a `tests` directory beside a
   `Cargo.toml`, not `src/tests/`) may name `CounterfactualAdapterSealV1` in
   code (comments are ignored);
-- `crates/pos-store/src` never re-exports the seal (`pub use`, including a
-  glob over `pos_core`) and no public fn there returns it;
+- `crates/pos-store/src` never re-exports the seal: no `pub use` names it,
+  globs over a `pos_core` path (any `pos_core` module may carry it),
+  re-exports `pos_core::counterfactual_store`, or re-exports the `pos_core`
+  crate itself (`pub use pos_core as alias`,
+  `pub use pos_core::{self}`); no public fn there returns it; and no bare
+  `pub` type, static, const, struct, enum or field line names it
+  (`pub(crate)`/`pub(super)` items stay allowed);
 - CI workflows, Dockerfiles and `.cargo/config*` never name the
   `counterfactual-adapter` feature, so no build flag can enable it outside
   the manifests above.
+
+Stated limits: the check is textual. It does not cover `--all-features`
+builds (which enable the feature by construction) nor build configuration
+outside manifests, workflows, Dockerfiles and `.cargo/config*` (for example
+a Makefile, justfile, `*.sh` script or composite action); those stay a
+review responsibility.
 """
 
 from __future__ import annotations
@@ -32,8 +43,17 @@ from check_trusted_clock_port_impls import strip_comments
 
 FEATURE = "counterfactual-adapter"
 SEAL = re.compile(r"\bCounterfactualAdapterSealV1\b")
-SEAL_REEXPORT = re.compile(
-    r"\bpub\s+use\b[^;]*(?:\bCounterfactualAdapterSealV1\b|\bpos_core\s*::\s*\*)"
+PUBLIC_USE = re.compile(r"\bpub\s+use\s+([^;]*);")
+CRATE_REEXPORT = re.compile(
+    r"^(?:::)?pos_core(?:as\w+)?$|^(?:::)?pos_core::\{(?:.*,)?self(?:as\w+)?[,}]"
+)
+SEAL_MODULE = re.compile(
+    r"\bcounterfactual_store(?:as\w+)?(?:[,}]|$)|\bcounterfactual_store::\{(?:.*,)?self\b"
+)
+PUBLIC_ITEM = re.compile(
+    r"\bpub[ \t]+(?:type|static|struct|enum|"
+    r"const\b(?![ \t]+(?:(?:async|unsafe|extern[ \t]+\"[^\"\n]*\")[ \t]+)*fn\b)|"
+    r"(?:r#)?[A-Za-z_]\w*[ \t]*:(?!:))[^\n]*\bCounterfactualAdapterSealV1\b"
 )
 SEAL_RETURN = re.compile(
     r"\bpub\s+(?:(?:const|async|unsafe|extern\s+\"[^\"]*\")\s+)*fn\b[^{;]*?->[^{;]*"
@@ -93,10 +113,22 @@ def _in_crate_tests(relative: Path, root: Path) -> bool:
     )
 
 
+def _pos_core_leak(compact: str) -> bool:
+    if not compact.startswith(("pos_core::", "::pos_core::")):
+        return False
+    return "*" in compact or SEAL_MODULE.search(compact) is not None
+
+
 def _adapter_leaks(name: str, code: str) -> list[str]:
     found: list[str] = []
-    if SEAL_REEXPORT.search(code):
-        found.append(f"{name}: re-exports the counterfactual adapter seal")
+    for statement in PUBLIC_USE.findall(code):
+        compact = re.sub(r"\s+", "", statement)
+        if CRATE_REEXPORT.search(compact):
+            found.append(f"{name}: re-exports the pos_core crate")
+        elif SEAL.search(statement) or _pos_core_leak(compact):
+            found.append(f"{name}: re-exports the counterfactual adapter seal")
+    if PUBLIC_ITEM.search(code):
+        found.append(f"{name}: exposes the counterfactual adapter seal from a public item")
     if SEAL_RETURN.search(code):
         found.append(f"{name}: returns the counterfactual adapter seal from a public fn")
     return found

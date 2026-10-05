@@ -13,6 +13,7 @@ CHECKER = ROOT / "scripts/check_counterfactual_adapter_seal.py"
 
 ENABLING = 'pos-core = { path = "../pos-core", features = ["counterfactual-adapter"] }\n'
 DEV_ONLY = "[dev-dependencies]\n" + ENABLING
+MINT = "CounterfactualAdapterSealV1::for_adapter();\n"
 SEAL_USE = "let seal = pos_core::CounterfactualAdapterSealV1::for_adapter();\n"
 
 ALLOWED_MANIFESTS = {
@@ -24,6 +25,8 @@ ALLOWED_MANIFESTS = {
 DEPENDENCY = "enables counterfactual-adapter"
 OUTSIDE = "names the counterfactual adapter seal outside the adapters"
 REEXPORT = "re-exports the counterfactual adapter seal"
+CRATE = "re-exports the pos_core crate"
+ITEM = "exposes the counterfactual adapter seal from a public item"
 RETURNS = "returns the counterfactual adapter seal from a public fn"
 CONFIG = "enables counterfactual-adapter outside a manifest"
 FEATURES_FLAG = "cargo test -p pos-runtime --features pos-core/counterfactual-adapter\n"
@@ -53,6 +56,13 @@ ALLOWED_SOURCES = {
     "crates/pos-store/src/sqlite.rs": "pub(crate) fn seal() -> CounterfactualAdapterSealV1 {\n",
     "crates/pos-store/src/lib.rs": "pub use pos_core::{CoreError, Seq};\n"
     + "use pos_core::CounterfactualAdapterSealV1;\n",
+    "crates/pos-store/src/counterfactual_adapter.rs": "use pos_core::counterfactual_store::*;\n"
+    + "pub(crate) type Seal = CounterfactualAdapterSealV1;\n"
+    + "pub(super) const SEAL: CounterfactualAdapterSealV1 = " + MINT
+    + "pub(crate) use pos_core as core_api;\n"
+    + "pub use crate::counterfactual_store;\n"
+    + "pub use pos_core::store::{CounterfactualStoreErrorV1, Seq};\n"
+    + "pub const fn mint(seal: CounterfactualAdapterSealV1) -> u8 {\n",
     "crates/pos-core/src/counterfactual_store.rs": SEAL_USE,
     "crates/pos-runtime/tests/coordinator.rs": SEAL_USE,
     "crates/pos-runtime/tests/support/mod.rs": SEAL_USE,
@@ -73,6 +83,58 @@ REJECTED_SOURCES = {
         REEXPORT,
     ),
     "glob re-export": ("crates/pos-store/src/lib.rs", "pub use pos_core::*;\n", REEXPORT),
+    "module glob re-export": (
+        "crates/pos-store/src/lib.rs",
+        "pub use pos_core::counterfactual_store::*;\n",
+        REEXPORT,
+    ),
+    "nested glob re-export": (
+        "crates/pos-store/src/lib.rs",
+        "pub use pos_core::{\n    Seq,\n    counterfactual_store::*,\n};\n",
+        REEXPORT,
+    ),
+    "module re-export": (
+        "crates/pos-store/src/lib.rs",
+        "pub use pos_core::counterfactual_store as cf;\n",
+        REEXPORT,
+    ),
+    "renamed crate re-export": ("crates/pos-store/src/lib.rs", "pub use pos_core as api;\n", CRATE),
+    "crate re-export": ("crates/pos-store/src/lib.rs", "pub use ::pos_core;\n", CRATE),
+    "self re-export": (
+        "crates/pos-store/src/lib.rs",
+        "pub use pos_core::{self as api, Seq};\n",
+        CRATE,
+    ),
+    "public type alias": (
+        "crates/pos-store/src/lib.rs",
+        "pub type Seal = pos_core::CounterfactualAdapterSealV1;\n",
+        ITEM,
+    ),
+    "public static": (
+        "crates/pos-store/src/lib.rs",
+        "pub static SEAL: CounterfactualAdapterSealV1 = " + MINT,
+        ITEM,
+    ),
+    "public const": (
+        "crates/pos-store/src/lib.rs",
+        "pub const SEAL: CounterfactualAdapterSealV1 = " + MINT,
+        ITEM,
+    ),
+    "public tuple struct": (
+        "crates/pos-store/src/lib.rs",
+        "pub struct Holder(pub CounterfactualAdapterSealV1);\n",
+        ITEM,
+    ),
+    "public enum": (
+        "crates/pos-store/src/lib.rs",
+        "pub enum Minted { Seal(CounterfactualAdapterSealV1) }\n",
+        ITEM,
+    ),
+    "public field": (
+        "crates/pos-store/src/lib.rs",
+        "pub(crate) struct Holder {\n    pub seal: CounterfactualAdapterSealV1,\n}\n",
+        ITEM,
+    ),
     "public fn": (
         "crates/pos-store/src/memory.rs",
         "pub const fn seal() -> pos_core::CounterfactualAdapterSealV1 {\n",
