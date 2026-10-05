@@ -4,7 +4,7 @@
 //! Protected Snapshots are uniformly unavailable (ADR-113 §9), so no
 //! Snapshot case exists here; #502 re-pins them when they return.
 //!
-//! The exact test host is MemoryStore-only. The SQLite and runtime
+//! The exact test host is MemoryStore-only. The `SQLite` and runtime
 //! coverage of inherited gating lives in the `pos-store` and gateway
 //! PPC1 tests.
 
@@ -56,8 +56,10 @@ fn closure_of(
     closures
         .iter()
         .find(|(member, _)| *member == timeline)
-        .map(|(_, closure)| closure)
-        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("closure fixture missing")))
+        .map_or_else(
+            || std::panic::resume_unwind(Box::new("closure fixture missing")),
+            |(_, closure)| closure,
+        )
 }
 
 struct Hosted {
