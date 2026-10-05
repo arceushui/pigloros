@@ -171,6 +171,9 @@ thread_local! {
     static RECIPIENT_OPEN_REPLACEMENT: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const {
         std::cell::RefCell::new(None)
     };
+    static RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE: std::cell::Cell<Option<i64>> = const {
+        std::cell::Cell::new(None)
+    };
 }
 
 #[cfg(feature = "test-support")]
@@ -1717,6 +1720,17 @@ impl StoredRecipientExportV1 {
     }
 }
 
+fn recipient_export_synchronous_level(connection: &Connection) -> Result<i64, CoreError> {
+    #[cfg(test)]
+    if let Some(synchronous) = RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(std::cell::Cell::take)
+    {
+        return Ok(synchronous);
+    }
+    connection
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(storage_error)
+}
+
 fn ensure_recipient_export_durability(connection: &Connection) -> Result<(), CoreError> {
     let journal_mode: String = connection
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -1729,9 +1743,7 @@ fn ensure_recipient_export_durability(connection: &Connection) -> Result<(), Cor
     connection
         .execute_batch("PRAGMA synchronous=FULL")
         .map_err(storage_error)?;
-    let synchronous: i64 = connection
-        .query_row("PRAGMA synchronous", [], |row| row.get(0))
-        .map_err(storage_error)?;
+    let synchronous = recipient_export_synchronous_level(connection)?;
     if synchronous < 2 {
         return Err(CoreError::Storage(
             "recipient export publication requires SQLite synchronous=FULL".to_owned(),
@@ -3224,6 +3236,16 @@ mod tests {
         assert_eq!(retained_payload.as_slice(), b"shared plaintext");
         assert!(RecipientExportPlaintextStagingV1::new(shared_export).is_err());
 
+        let mut lost_ownership = RecipientExportPlaintextStagingV1::new(plaintext_staging_export(
+            CanonicalBytes::from_vec(b"lost ownership".to_vec()),
+        ))?;
+        let retained_lost_ownership = lost_ownership.source.events[0].payload.clone();
+        assert!(matches!(
+            lost_ownership.zeroize(),
+            Err(CoreError::Storage(message)) if message.contains("lost exclusive ownership")
+        ));
+        assert_eq!(retained_lost_ownership.as_slice(), b"lost ownership");
+
         let unique_export =
             plaintext_staging_export(CanonicalBytes::from_vec(b"owned plaintext".to_vec()));
         let mut staging = RecipientExportPlaintextStagingV1::new(unique_export)?;
@@ -3242,6 +3264,41 @@ mod tests {
         ))?;
         drop(dropped_staging);
         Ok(())
+    }
+
+    #[test]
+    fn recipient_export_durability_requires_wal_and_full_synchronous_mode() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA journal_mode=DELETE")?;
+        assert!(matches!(
+            ensure_recipient_export_durability(&fixture.store.conn),
+            Err(CoreError::Storage(message)) if message.contains("requires SQLite WAL")
+        ));
+
+        let fixture = recipient_publication_fixture()?;
+        RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(|override_value| {
+            override_value.set(Some(1));
+        });
+        assert!(matches!(
+            ensure_recipient_export_durability(&fixture.store.conn),
+            Err(CoreError::Storage(message)) if message.contains("synchronous=FULL")
+        ));
+        assert!(ensure_recipient_export_durability(&fixture.store.conn).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_recipient_export_id_rejects_zero_bytes() {
+        override_next_recipient_random_bytes(vec![0; 16]);
+        assert!(matches!(
+            fresh_recipient_export_id(),
+            Err(RecipientExportPublicationErrorV1::Export(
+                RecipientExportErrorV1::FieldOutOfBounds
+            ))
+        ));
     }
 
     #[test]
