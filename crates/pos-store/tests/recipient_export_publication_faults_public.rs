@@ -349,6 +349,71 @@ fn erasure_block_cannot_interleave_with_catalog_publication() -> TestResult {
 }
 
 #[test]
+fn test_support_pause_failures_stay_closed() -> TestResult {
+    let mut fixture = fixture()?;
+    let (entered_tx, entered) = mpsc::channel();
+    let (_release, release_rx) = mpsc::channel();
+    fixture
+        .store
+        .pause_recipient_export_publication_after_fences_for_test(
+            fixture.timeline,
+            entered_tx,
+            release_rx,
+        )?;
+    let (duplicate_entered_tx, _duplicate_entered) = mpsc::channel();
+    let (_duplicate_release, duplicate_release_rx) = mpsc::channel();
+    assert!(fixture
+        .store
+        .pause_recipient_export_publication_after_fences_for_test(
+            fixture.timeline,
+            duplicate_entered_tx,
+            duplicate_release_rx,
+        )
+        .is_err());
+    drop(entered);
+    assert!(fixture
+        .store
+        .publish_recipient_export(
+            &fixture.authority,
+            &fixture.owner,
+            &request(
+                fixture.timeline,
+                fixture.descriptor,
+                &fixture.evaluation,
+                &fixture.token,
+            ),
+        )
+        .is_err());
+
+    let mut fixture = fixture()?;
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    fixture
+        .store
+        .pause_recipient_export_publication_after_fences_for_test(
+            fixture.timeline,
+            entered_tx,
+            release_rx,
+        )?;
+    drop(release);
+    assert!(fixture
+        .store
+        .publish_recipient_export(
+            &fixture.authority,
+            &fixture.owner,
+            &request(
+                fixture.timeline,
+                fixture.descriptor,
+                &fixture.evaluation,
+                &fixture.token,
+            ),
+        )
+        .is_err());
+    entered.recv_timeout(Duration::from_secs(1))?;
+    Ok(())
+}
+
+#[test]
 fn interrupted_publications_stay_hidden_and_recover_after_restart() -> TestResult {
     for (fault, export_id, expected_before_recovery) in [
         (
