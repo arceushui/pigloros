@@ -13,7 +13,8 @@ use std::{
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
-    close_adapter_recording_v1, completed_adapter_call_v1,
+    close_adapter_recording_v1, collect_manifest_owner_link_ancestors_v1,
+    collect_manifest_owner_link_branches_v1, completed_adapter_call_v1,
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft, EventOriginV1, Kind},
@@ -76,7 +77,8 @@ use pos_core::{
     LocalCutOwnerRequestV1, LocalCutOwnerStateV1, ManifestOwnerAdmissionCommitKindV1,
     ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
-    ManifestOwnerAdmissionSnapshotV1, OwnerIdV1, PersistedAuthorityV1,
+    ManifestOwnerAdmissionSnapshotV1, ManifestOwnerLinkAncestorV1, ManifestOwnerLinkCutIdentityV1,
+    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1, OwnerIdV1, PersistedAuthorityV1,
     PreparedArtifactRegistrationBatchV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
     PreparedErasureRecoveryErrorV1, PreparedLocalCutOwnerCommitV1,
     PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
@@ -11957,62 +11959,51 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
 
 /// Find the owner's first visible cut, in cut order, whose WCR1 for
 /// `timeline_id` the identity selects, with the operation that cut links.
+///
+/// A visible cut whose operation row is missing fails closed.
 fn memory_owner_link_cut(
     store: &MemoryStore,
     owner_id: [u8; 32],
-    identity: pos_core::ManifestOwnerLinkCutIdentityV1,
+    identity: ManifestOwnerLinkCutIdentityV1,
     timeline_id: TimelineId,
-) -> Option<(u64, Hash)> {
-    store
+) -> Result<Option<(u64, Hash)>, LocalCutOwnerErrorV1> {
+    let cuts = store
         .local_cut_owner_cuts
-        .range((owner_id, 0)..=(owner_id, u64::MAX))
-        .find(|(_, operation_id)| {
-            let operation = store
-                .local_cut_owner_operations
-                .get(&(owner_id, **operation_id));
-            operation.is_some_and(|operation| {
-                operation.result.recordings.iter().any(|recording| {
-                    recording.binding.as_input().timeline_id == timeline_id
-                        && identity.selects(&recording.receipt)
-                })
-            })
-        })
-        .map(|(&(_, cut_id), &operation_id)| (cut_id, operation_id))
-}
-
-/// Load the owner's visible cuts before `seal`, newest first, until one was
-/// sealed in another configuration generation.
-fn memory_owner_link_ancestors(
-    store: &MemoryStore,
-    owner_id: [u8; 32],
-    seal: &pos_core::LocalCutSealInputV2,
-) -> Result<Vec<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
-    let mut ancestors = Vec::new();
-    let earlier = store
-        .local_cut_owner_cuts
-        .range((owner_id, 0)..(owner_id, seal.cut_id));
-    for (&(_, cut_id), &operation_id) in earlier.rev() {
-        let operation = memory_linked_local_cut_operation(store, owner_id, cut_id, operation_id)?;
-        let generation = operation.result.seal.as_input().configuration_generation;
-        if generation != seal.configuration_generation {
-            break;
+        .range((owner_id, 0)..=(owner_id, u64::MAX));
+    for (&(_, cut_id), &operation_id) in cuts {
+        let operation = store
+            .local_cut_owner_operations
+            .get(&(owner_id, operation_id))
+            .ok_or(LocalCutOwnerErrorV1::CorruptState)?;
+        let selected = operation.result.recordings.iter().any(|recording| {
+            recording.binding.as_input().timeline_id == timeline_id
+                && identity.selects(&recording.receipt)
+        });
+        if selected {
+            return Ok(Some((cut_id, operation_id)));
         }
-        ancestors.push(operation.result.clone());
     }
-    Ok(ancestors)
+    Ok(None)
 }
 
-/// Load one selected cut with its same-generation ancestors, kind-14
-/// admissions and WDB1 nodes from the store's single shared borrow.
+/// The selected cut's owner, Timeline and current owner state.
+struct MemoryOwnerLinkTargetV1 {
+    owner_state: LocalCutOwnerStateV1,
+    timeline_id: TimelineId,
+    cut_id: u64,
+    operation_id: Hash,
+}
+
+/// Load one selected cut, its kind-14 admissions, the earlier cuts its
+/// ancestry walk needs and its Timeline's WDB1 nodes from one shared borrow.
 fn memory_owner_link_snapshot(
     store: &MemoryStore,
-    owner_id: [u8; 32],
-    owner_state: LocalCutOwnerStateV1,
-    (cut_id, operation_id): (u64, Hash),
-) -> Result<pos_core::ManifestOwnerLinkSnapshotV1, LocalCutOwnerErrorV1> {
-    let operation = memory_linked_local_cut_operation(store, owner_id, cut_id, operation_id)?;
+    target: MemoryOwnerLinkTargetV1,
+) -> Result<ManifestOwnerLinkSnapshotV1, LocalCutOwnerErrorV1> {
+    let owner_id = target.owner_state.owner_id;
+    let operation =
+        memory_linked_local_cut_operation(store, owner_id, target.cut_id, target.operation_id)?;
     let seal = operation.result.seal.as_input();
-    let ancestors = memory_owner_link_ancestors(store, owner_id, seal)?;
     let generation = seal.configuration_generation;
     let admissions = operation
         .request
@@ -12022,19 +12013,34 @@ fn memory_owner_link_snapshot(
         .map(|row| store.read_manifest_owner_admission_v1(owner_id, generation, row.timeline_id))
         .filter_map(Result::transpose)
         .collect::<Result<Vec<_>, _>>()?;
-    let dependency_branches = operation
-        .result
-        .recordings
+    let admission = admissions
         .iter()
-        .flat_map(|recording| {
-            let first = (recording.scope, Hash::zero());
-            let last = (recording.scope, Hash::from_bytes([u8::MAX; 32]));
-            let branches = store.world_dependency_branches.range(first..=last);
-            branches.map(|(_, branch)| branch.clone())
-        })
-        .collect();
-    Ok(pos_core::ManifestOwnerLinkSnapshotV1 {
-        owner_state,
+        .find(|admission| admission.timeline.timeline_id == target.timeline_id);
+    let earlier = store
+        .local_cut_owner_cuts
+        .range((owner_id, 0)..(owner_id, seal.cut_id))
+        .rev()
+        .map(|(&(_, cut_id), &operation_id)| {
+            memory_linked_local_cut_operation(store, owner_id, cut_id, operation_id)
+                .map(|earlier| ManifestOwnerLinkAncestorV1::of_result(&earlier.result))
+        });
+    let ancestors = collect_manifest_owner_link_ancestors_v1(seal, admission, earlier)?;
+    let mut dependency_branches = BTreeMap::new();
+    let recordings = &operation.result.recordings;
+    let selected = recordings
+        .iter()
+        .filter(|recording| recording.binding.as_input().timeline_id == target.timeline_id);
+    for recording in selected {
+        let scope = recording.scope;
+        let root = recording.binding.as_input().dependency_root_hash;
+        let Ok(nodes) = collect_manifest_owner_link_branches_v1(root, |digest| {
+            let node = store.world_dependency_branches.get(&(scope, digest));
+            Ok::<_, std::convert::Infallible>(node.cloned())
+        });
+        dependency_branches.extend(nodes);
+    }
+    Ok(ManifestOwnerLinkSnapshotV1 {
+        owner_state: target.owner_state,
         request: operation.request.clone(),
         result: operation.result.clone(),
         ancestors,
@@ -12043,19 +12049,27 @@ fn memory_owner_link_snapshot(
     })
 }
 
-impl pos_core::ManifestOwnerLinkReadPortV1 for MemoryStore {
+impl ManifestOwnerLinkReadPortV1 for MemoryStore {
     fn read_manifest_owner_link_snapshot_v1(
         &self,
         owner_id: [u8; 32],
-        identity: pos_core::ManifestOwnerLinkCutIdentityV1,
+        identity: ManifestOwnerLinkCutIdentityV1,
         timeline_id: TimelineId,
-    ) -> Result<Option<pos_core::ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
+    ) -> Result<Option<ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
         let Some(owner_state) = self.read_local_cut_owner_state_v1(owner_id)? else {
             return Ok(None);
         };
-        memory_owner_link_cut(self, owner_id, identity, timeline_id)
-            .map(|cut| memory_owner_link_snapshot(self, owner_id, owner_state, cut))
-            .transpose()
+        let found = memory_owner_link_cut(self, owner_id, identity, timeline_id)?;
+        let Some((cut_id, operation_id)) = found else {
+            return Ok(None);
+        };
+        let target = MemoryOwnerLinkTargetV1 {
+            owner_state,
+            timeline_id,
+            cut_id,
+            operation_id,
+        };
+        memory_owner_link_snapshot(self, target).map(Some)
     }
 }
 
@@ -15522,24 +15536,19 @@ mod local_cut_owner_coverage {
         }
     }
 
-    fn link_identity(
-        cut: &LocalCutOwnerCommitV1,
-    ) -> FixtureResult<pos_core::ManifestOwnerLinkCutIdentityV1> {
+    fn link_identity(cut: &LocalCutOwnerCommitV1) -> FixtureResult<ManifestOwnerLinkCutIdentityV1> {
         let recording = cut.recordings.first().ok_or("missing recording")?;
         let digest = recording.receipt.digest();
-        Ok(pos_core::ManifestOwnerLinkCutIdentityV1::WorldRecordingReceipt(digest))
+        Ok(ManifestOwnerLinkCutIdentityV1::WorldRecordingReceipt(
+            digest,
+        ))
     }
 
     fn link_read(
         store: &MemoryStore,
-        identity: pos_core::ManifestOwnerLinkCutIdentityV1,
-    ) -> Result<Option<pos_core::ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
-        pos_core::ManifestOwnerLinkReadPortV1::read_manifest_owner_link_snapshot_v1(
-            store,
-            CUT_OWNER,
-            identity,
-            CUT_TIMELINE,
-        )
+        identity: ManifestOwnerLinkCutIdentityV1,
+    ) -> Result<Option<ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
+        store.read_manifest_owner_link_snapshot_v1(CUT_OWNER, identity, CUT_TIMELINE)
     }
 
     #[test]
@@ -15563,6 +15572,19 @@ mod local_cut_owner_coverage {
         let snapshot = snapshots.get_mut(&historical).ok_or("missing admission")?;
         snapshot.resulting_inventory_generation = Hash::zero();
         assert_eq!(link_read(&replaced, link_identity(&first)?), corrupt);
+        Ok(())
+    }
+
+    #[test]
+    fn owner_link_lookup_fails_closed_on_a_missing_operation_row() -> TestResult {
+        let (mut store, _) = cut_store()?;
+        let second = commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
+        let first_key = (CUT_OWNER, FIRST_CUT.operation_id);
+        store.local_cut_owner_operations.remove(&first_key);
+        assert_eq!(
+            link_read(&store, link_identity(&second)?),
+            Err(LocalCutOwnerErrorV1::CorruptState)
+        );
         Ok(())
     }
 }

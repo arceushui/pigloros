@@ -1631,7 +1631,7 @@ impl PluginRegistry {
     /// # Errors
     /// Returns `CompositionUnavailable` when either installed hook is absent,
     /// otherwise the closed result of [`pos_core::verify_manifest_owner_link_v1`].
-    pub fn verify_manifest_owner_link_v1<S: ManifestOwnerLinkReadPortV1>(
+    pub fn verify_manifest_owner_link_v1<S: ManifestOwnerLinkReadPortV1 + ?Sized>(
         &self,
         store: &S,
         request: &ManifestOwnerLinkRequestV1,

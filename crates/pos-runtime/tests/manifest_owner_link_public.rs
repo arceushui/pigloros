@@ -13,30 +13,30 @@ use pos_core::trusted_clock::{
     SystemTrustedWallSourceV1, TrustedWallSourceV1, WaitBudgetV1,
 };
 use pos_core::{
-    build_manifest_owner_scope_v1, derive_local_cut_world_closure_v1, ArtifactDataClassV1,
-    ArtifactRegistrationV1, ArtifactTransitionRuleV1, AssuranceLevelV1,
-    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, ErasureContainmentGateV1,
-    ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1, EventStore, Hash,
-    KeyIdentityV1, KeyRegistrationOutcomeV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
-    LocalCutCommitV1, LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1,
-    LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
-    LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1, LocalCutOwnerErrorV1,
-    LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1, LocalCutOwnerStateV1,
-    LocalCutOwnerVerifierV1, LocalCutReceiptInputV1, LocalCutReceiptV1,
-    LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2, LocalCutSealV2,
-    LocalCutTableRefV1, LocalCutWorldClosureSourceV1, LocalCutWorldRecordingV1,
+    build_manifest_owner_scope_v1, collect_manifest_owner_link_ancestors_v1,
+    derive_local_cut_world_closure_v1, ArtifactDataClassV1, ArtifactRegistrationV1,
+    ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
+    AuthenticatedPrincipalResultV1, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureVerifiedEmptyInventoryQueryV1,
+    ErasureVerifiedInventoryQueryV1, EventStore, Hash, KeyIdentityV1, KeyRegistrationOutcomeV1,
+    KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, LocalCutCommitV1,
+    LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1,
+    LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1,
+    LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
+    LocalCutOwnerRequestV1, LocalCutOwnerStateV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
+    LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2,
+    LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldClosureSourceV1, LocalCutWorldRecordingV1,
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
     ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
     ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
-    ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkDigestsV1, ManifestOwnerLinkHeadV1,
-    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkRequestV1, ManifestOwnerLinkSnapshotV1,
-    ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1, ManifestOwnerPolicyCopiesV1,
-    ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1,
-    ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
-    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1,
+    ManifestOwnerLinkAncestorV1, ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkDigestsV1,
+    ManifestOwnerLinkHeadV1, ManifestOwnerLinkReadPortV1, ManifestOwnerLinkRequestV1,
+    ManifestOwnerLinkSnapshotV1, ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1,
+    ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
+    ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
+    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, ManifestSlotBindingV1,
     OutputPolicyClosureEnvelopeV1, OwnerIdV1, Plugin, PluginId, PrincipalRefV1, TimelineId,
     VerifiedManifestOwnerLinkV1, WallTime, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
     WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
@@ -812,6 +812,11 @@ struct Fences<'a> {
     release: Release,
 }
 
+/// The current fences, whose premise lease is the lease of every scope.
+///
+/// The earliest applicable expiry therefore equals the premise deadline, so
+/// every verification under these fences exercises the inclusive
+/// `E_min <= deadline` boundary of the fresh-use fence.
 const fn current(world: &World) -> Fences<'_> {
     Fences {
         gate: &world.gate,
@@ -1089,6 +1094,9 @@ fn separate_same_head_cuts_stay_distinct_and_pairings_must_match() -> TestResult
         ..by_recording(&world, first)
     };
     assert_eq!(paired(&later_head)?, wrong_cut);
+    let mut restitched = by_recording(&world, first);
+    restitched.expected_head.stitched_head_hash = hash(0x56);
+    assert_eq!(paired(&restitched)?, wrong_cut);
     let other_scope = ManifestOwnerLinkRequestV1 {
         expected_scope: other.scope,
         ..by_recording(&world, first)
@@ -1208,6 +1216,39 @@ fn a_later_generation_admission_cannot_stand_for_a_historical_cut() -> TestResul
     );
     let request = by_recording(&world, first);
     assert_edits(&world, &store, &request, vec![substituted])
+}
+
+#[test]
+fn ancestor_walks_stop_at_the_admission_or_another_generation() -> TestResult {
+    let world = world(1)?;
+    let mut store = MemoryStore::new();
+    let history = replaced_history(&world, &mut store)?;
+    let [first, second, last] = history.cuts.as_slice() else {
+        return Err("expected three cuts".into());
+    };
+    let ancestor = ManifestOwnerLinkAncestorV1::of_result;
+    let request = by_recording(&world, first_recording(second)?);
+    let snapshot = read_snapshot(&world, &store, &request)?;
+    let walked = collect_manifest_owner_link_ancestors_v1(
+        second.seal.as_input(),
+        snapshot.admissions.first(),
+        [Ok(ancestor(first)), Err("an unread cut")],
+    )?;
+    assert_eq!(walked, vec![ancestor(first)]);
+    assert_eq!(walked, snapshot.ancestors);
+    let crossed = collect_manifest_owner_link_ancestors_v1(
+        last.seal.as_input(),
+        None,
+        [Ok::<_, &str>(ancestor(second)), Ok(ancestor(first))],
+    )?;
+    assert!(crossed.is_empty());
+    let failed = collect_manifest_owner_link_ancestors_v1(
+        second.seal.as_input(),
+        None,
+        [Err::<ManifestOwnerLinkAncestorV1, _>("an unreadable cut")],
+    );
+    assert_eq!(failed, Err("an unreadable cut"));
+    Ok(())
 }
 
 #[test]
@@ -1520,6 +1561,76 @@ fn crafted_admissions_must_match_the_sealed_policy_selection() -> TestResult {
     assert_edits(&world, &store, &request, cases)
 }
 
+/// A copy of `catalog` with another owner or configuration generation.
+fn recatalogued(
+    catalog: &ManifestAdmissionCatalogV1,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+) -> Fallible<ManifestAdmissionCatalogV1> {
+    let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
+        owner_id,
+        configuration_generation,
+        ..catalog.as_input().clone()
+    })?;
+    Ok(catalog)
+}
+
+/// A copy of `binding` whose `plugin_id` row names another EOP1 WAL1.
+fn rebound(
+    binding: &ManifestSlotBindingV1,
+    plugin_id: PluginId,
+) -> Fallible<ManifestSlotBindingV1> {
+    let mut input = binding.as_input().clone();
+    let rows = &mut input.rows;
+    let row = rows.iter_mut().find(|row| row.plugin_id == plugin_id);
+    row.ok_or("missing bound row")?.eop1_wal1_hash = hash(0x69);
+    Ok(ManifestSlotBindingV1::new(input)?)
+}
+
+#[test]
+fn crafted_admission_rows_and_producers_must_match_the_seal() -> TestResult {
+    let (world, store, request) = crafted_base()?;
+    let snapshot = read_snapshot(&world, &store, &request)?;
+    let admission = snapshot.admissions.first().ok_or("missing admission")?;
+    let catalog = &admission.catalog;
+    let owner = catalog.as_input().owner_id;
+    let rehomed = recatalogued(catalog, [0x52; 32], 1)?;
+    let regenerated = recatalogued(catalog, owner, 2)?;
+    let wcs1 = &admission.timeline.wcs1;
+    let producer = wcs1.producers().first().ok_or("missing producer")?;
+    let unknown = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
+        scope: wcs1.scope(),
+        consumers: wcs1.consumers().to_vec(),
+        producers: vec![WorldProducerV1::new(PluginId::new(), hash(0x6a))?],
+        optional_view_roots: Vec::new(),
+    })?;
+    let unretained = rebound(&admission.timeline.binding, producer.plugin_id())?;
+    let unowned = TimelineId::from_ulid(ulid::Ulid::from(1_u128));
+    let cases = vec![
+        (
+            edit(move |snapshot| selected(snapshot).catalog.clone_from(&rehomed)),
+            LinkError::CompositionUnavailable,
+        ),
+        (
+            edit(move |snapshot| selected(snapshot).catalog.clone_from(&regenerated)),
+            LinkError::CompositionUnavailable,
+        ),
+        (
+            edit(move |snapshot| snapshot.admissions[1].timeline.timeline_id = unowned),
+            LinkError::CompositionUnavailable,
+        ),
+        (
+            edit(move |snapshot| selected(snapshot).timeline.wcs1.clone_from(&unknown)),
+            LinkError::PolicyMismatch,
+        ),
+        (
+            edit(move |snapshot| selected(snapshot).timeline.binding.clone_from(&unretained)),
+            LinkError::PolicyMismatch,
+        ),
+    ];
+    assert_edits(&world, &store, &request, cases)
+}
+
 #[test]
 fn crafted_ancestry_closures_and_static_pins_must_hold() -> TestResult {
     let (world, store, request) = crafted_base()?;
@@ -1543,7 +1654,11 @@ fn crafted_ancestry_closures_and_static_pins_must_hold() -> TestResult {
             LinkError::CompositionUnavailable,
         ),
         (
-            edit(|snapshot| snapshot.ancestors[0].kind = LocalCutOwnerCommitKindV1::ExactRetry),
+            edit(|snapshot| snapshot.ancestors[0].commit = snapshot.ancestors[1].commit),
+            LinkError::CompositionUnavailable,
+        ),
+        (
+            edit(|snapshot| snapshot.ancestors[0].seal = snapshot.ancestors[1].seal),
             LinkError::CompositionUnavailable,
         ),
         (

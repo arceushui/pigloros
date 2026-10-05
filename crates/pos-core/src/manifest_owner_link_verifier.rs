@@ -15,11 +15,15 @@
 //! ADR-081 Revision 2 closures carry unavailable reference leaves, so the
 //! capability never grants an Exact claim.
 
+use std::collections::BTreeMap;
+
+use crate::local_cut_commit::{LocalCutCommitV1, LocalCutReceiptV1};
 use crate::local_cut_owner::{
     local_cut_owner_intent_digest_v1, validate_local_cut_owner_result_v1, LocalCutOwnerCommitV1,
     LocalCutOwnerErrorV1, LocalCutOwnerRequestV1, LocalCutOwnerStateV1, LocalCutOwnerVerifierV1,
     LocalCutRecordingContextRowV1,
 };
+use crate::local_cut_seal::{LocalCutManifestBindingRowV1, LocalCutSealInputV2, LocalCutSealV2};
 use crate::local_cut_world_closure::{
     derive_local_cut_world_closure_v1, validate_local_cut_owner_recordings_v1,
     LocalCutWorldClosureSourceV1, LocalCutWorldRecordingV1,
@@ -139,13 +143,118 @@ pub struct ManifestOwnerLinkSnapshotV1 {
     pub request: LocalCutOwnerRequestV1,
     /// Retained LCS2, LCC1, LCQ1 and every WCB1/WCR1 of the selected cut.
     pub result: LocalCutOwnerCommitV1,
-    /// Earlier visible cuts of the same configuration generation, newest first.
-    pub ancestors: Vec<LocalCutOwnerCommitV1>,
+    /// Earlier visible cuts of the same configuration generation, newest
+    /// first, as gathered by [`collect_manifest_owner_link_ancestors_v1`].
+    pub ancestors: Vec<ManifestOwnerLinkAncestorV1>,
     /// Admission snapshot of each kind-14 row found at the sealed generation,
     /// in row order.
     pub admissions: Vec<ManifestOwnerAdmissionSnapshotV1>,
-    /// Every retained WDB1 node in the scopes of the selected cut's recordings.
-    pub dependency_branches: Vec<WorldDependencyBranchV1>,
+    /// Retained WDB1 nodes reachable from the requested Timeline's WCB1
+    /// dependency root, keyed by digest, as gathered by
+    /// [`collect_manifest_owner_link_branches_v1`].
+    pub dependency_branches: BTreeMap<Hash, WorldDependencyBranchV1>,
+}
+
+/// One earlier visible cut: its LCS2 seal, LCC1 commit and LCQ1 receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ManifestOwnerLinkAncestorV1 {
+    /// Retained LCS2 seal.
+    pub seal: LocalCutSealV2,
+    /// Retained LCC1 commit record.
+    pub commit: LocalCutCommitV1,
+    /// Retained LCQ1 receipt.
+    pub receipt: LocalCutReceiptV1,
+}
+
+impl ManifestOwnerLinkAncestorV1 {
+    /// Copy the seal, commit and receipt of one retained cut result.
+    #[must_use]
+    pub const fn of_result(result: &LocalCutOwnerCommitV1) -> Self {
+        Self {
+            seal: result.seal,
+            commit: result.commit,
+            receipt: result.receipt,
+        }
+    }
+}
+
+/// An owner pre-state: the previous visible LCQ1 and the inventory generation.
+type PreStateV1 = (Option<Hash>, Hash);
+
+/// The pre-state a seal names.
+const fn seal_pre_state(seal: &LocalCutSealInputV2) -> PreStateV1 {
+    (
+        seal.previous_visible_receipt_hash,
+        seal.expected_inventory_generation,
+    )
+}
+
+/// The pre-state an admission produced: its MSR1 previous LCQ1 and its
+/// committed inventory generation.
+const fn admitted_pre_state(admission: &ManifestOwnerAdmissionSnapshotV1) -> PreStateV1 {
+    let receipt = admission.timeline.receipt.as_input();
+    (
+        receipt.previous_visible_lcq1_hash,
+        admission.resulting_inventory_generation,
+    )
+}
+
+/// Gather the earlier cuts that the ancestry walk needs, newest first.
+///
+/// `earlier` yields the owner's visible cuts before `seal`, newest first, and
+/// is read lazily: gathering stops before reading another cut once the
+/// pre-state reaches the requested Timeline's `admission`, and at the first
+/// cut of another configuration generation. Both stores share this walk.
+///
+/// # Errors
+/// Returns the first error that `earlier` yields while it is read.
+pub fn collect_manifest_owner_link_ancestors_v1<E>(
+    seal: &LocalCutSealInputV2,
+    admission: Option<&ManifestOwnerAdmissionSnapshotV1>,
+    earlier: impl IntoIterator<Item = Result<ManifestOwnerLinkAncestorV1, E>>,
+) -> Result<Vec<ManifestOwnerLinkAncestorV1>, E> {
+    let admitted = admission.map(admitted_pre_state);
+    let mut earlier = earlier.into_iter();
+    let mut pre_state = seal_pre_state(seal);
+    let mut ancestors = Vec::new();
+    while let Some(next) = (Some(pre_state) != admitted)
+        .then(|| earlier.next())
+        .flatten()
+    {
+        let ancestor = next?;
+        let earlier_seal = ancestor.seal.as_input();
+        if earlier_seal.configuration_generation != seal.configuration_generation {
+            break;
+        }
+        pre_state = seal_pre_state(earlier_seal);
+        ancestors.push(ancestor);
+    }
+    Ok(ancestors)
+}
+
+/// Gather the retained WDB1 nodes reachable from one dependency root.
+///
+/// `node` reads one retained node of the root's scope by digest. A digest
+/// that names a WAL1 leaf, a missing node or a node whose content does not
+/// hash to its key is left out, so the walk stays within the content-addressed
+/// directory and ends; the verifier then requires every derived node.
+///
+/// # Errors
+/// Returns the first error that `node` returns.
+pub fn collect_manifest_owner_link_branches_v1<E>(
+    root: Hash,
+    mut node: impl FnMut(Hash) -> Result<Option<WorldDependencyBranchV1>, E>,
+) -> Result<BTreeMap<Hash, WorldDependencyBranchV1>, E> {
+    let mut nodes = BTreeMap::new();
+    let mut pending = vec![root];
+    while let Some(digest) = pending.pop() {
+        let found = node(digest)?.filter(|branch| branch.digest() == digest);
+        if let Some(branch) = found {
+            pending.extend(branch.children().iter().map(|child| child.node_hash()));
+            nodes.insert(digest, branch);
+        }
+    }
+    Ok(nodes)
 }
 
 /// Same-store read port for the installed owner-link verifier.
@@ -333,7 +442,9 @@ pub fn test_verified_manifest_owner_link(
 /// to cover the selected scope's RLS1 retention deadline, every key
 /// dependency of the scope to name the owner's active live key, and the gate
 /// to keep its inventory through the read. The capability is released only
-/// through [`handoff_checked`]; on any failure the snapshot is discarded.
+/// through [`handoff_checked`]; on success and on every failure the snapshot
+/// is dropped before anything is released. Dropping releases the memory; it
+/// does not zeroize it.
 ///
 /// # Errors
 /// Returns one closed [`ManifestOwnerLinkVerificationErrorV1`]; an
@@ -408,7 +519,7 @@ fn verify_and_release<S: ManifestOwnerLinkReadPortV1 + ?Sized>(
         return Err(denied);
     }
     let link = mint(request, &snapshot, &selected, generation);
-    // Discard the private materialization before anything is released.
+    // Drop the private materialization before anything is released.
     drop(snapshot);
     let staged = StagedProtectedOutputV1::stage(StagedManifestOwnerLinkV1 { link });
     handoff_checked(guard, expiries, staged, wall, mono).map_err(|_| denied)
@@ -483,6 +594,10 @@ fn verify_cut_chain(
 ) -> Result<(), ManifestOwnerLinkVerificationErrorV1> {
     let result = &snapshot.result;
     let commit = result.commit.as_input();
+    // The retained seal is typed as LCS2, so an LCS1 cut cannot reach this
+    // check. An LCC1 that names any other digest is therefore either an
+    // unsupported seal format or a substituted seal; both are deliberately
+    // reported as `UnsupportedSealVersion`.
     if commit.seal_hash != result.seal.digest() {
         return Err(ManifestOwnerLinkVerificationErrorV1::UnsupportedSealVersion);
     }
@@ -538,6 +653,23 @@ fn selected_admission<'s>(
 fn verify_admitted_policy(
     admission: &ManifestOwnerAdmissionSnapshotV1,
 ) -> Result<(), ManifestOwnerLinkVerificationErrorV1> {
+    verify_admitted_copies(admission)?;
+    let producers = admission.timeline.wcs1.producers();
+    let producers_admitted = producers.iter().all(|producer| {
+        bound_eop1_digest(admission, producer.plugin_id()) == Some(producer.output_policy_hash())
+    });
+    if producers_admitted {
+        Ok(())
+    } else {
+        Err(ManifestOwnerLinkVerificationErrorV1::PolicyMismatch)
+    }
+}
+
+/// Compare MSB1 with MCA1 and every admitted Plugin's retained EOP1/OPC1
+/// bytes, zero-output Plugins included, with its MCA1 row.
+fn verify_admitted_copies(
+    admission: &ManifestOwnerAdmissionSnapshotV1,
+) -> Result<(), ManifestOwnerLinkVerificationErrorV1> {
     let catalog = &admission.catalog.as_input().rows;
     let copies = &admission.timeline.policy_copies;
     let admitted = catalog
@@ -558,15 +690,7 @@ fn verify_admitted_policy(
             .ok_or(ManifestOwnerLinkVerificationErrorV1::ClosureUnavailable)?;
         verify_policy_copy(row, copy)?;
     }
-    let producers = admission.timeline.wcs1.producers();
-    let producers_admitted = producers.iter().all(|producer| {
-        bound_eop1_digest(admission, producer.plugin_id()) == Some(producer.output_policy_hash())
-    });
-    if producers_admitted {
-        Ok(())
-    } else {
-        Err(ManifestOwnerLinkVerificationErrorV1::PolicyMismatch)
-    }
+    Ok(())
 }
 
 /// The native digest of the EOP1 leaf whose WAL1 hash a Plugin's MSB1 row names.
@@ -630,30 +754,7 @@ fn verify_admission_links(
         return Err(ManifestOwnerLinkVerificationErrorV1::CompositionUnavailable);
     }
     for (row, admission) in rows.iter().zip(&snapshot.admissions) {
-        let catalog = admission.catalog.as_input();
-        let timeline = &admission.timeline;
-        let admitted = (
-            catalog.owner_id,
-            catalog.configuration_generation,
-            timeline.timeline_id,
-        );
-        let sealed = (
-            seal.owner_id,
-            seal.configuration_generation,
-            row.timeline_id,
-        );
-        if admitted != sealed || validate_manifest_owner_admission_snapshot_v1(admission).is_err() {
-            return Err(ManifestOwnerLinkVerificationErrorV1::CompositionUnavailable);
-        }
-        let selected = (
-            timeline.scope,
-            timeline.wcs1.digest(),
-            timeline.receipt.digest(),
-            timeline.binding.digest(),
-        );
-        if selected != (row.scope, row.wcs_hash, row.msr_hash, row.msb_hash) {
-            return Err(ManifestOwnerLinkVerificationErrorV1::SlotBindingMismatch);
-        }
+        verify_admission_row(seal, row, admission)?;
     }
     let contexts = snapshot
         .request
@@ -667,6 +768,39 @@ fn verify_admission_links(
     Ok(())
 }
 
+/// Bind one kind-14 row to the admission of the same owner, sealed
+/// configuration generation and Timeline, with exactly the row's MSR1.
+///
+/// The existing snapshot validation re-derives the admission's member leaves
+/// from their native bytes and binds its MSR1 to its scope, WCS1, MSB1 and
+/// MCA1 and to the stored pre-CAS pair (previous LCQ1 and expected inventory
+/// generation). An admission whose MSR1 is the sealed row's MSR1 therefore
+/// also has the row's scope, WCS1 and MSB1, so the MSR1 digest alone selects it.
+fn verify_admission_row(
+    seal: &LocalCutSealInputV2,
+    row: &LocalCutManifestBindingRowV1,
+    admission: &ManifestOwnerAdmissionSnapshotV1,
+) -> Result<(), ManifestOwnerLinkVerificationErrorV1> {
+    let catalog = admission.catalog.as_input();
+    let admitted = (
+        catalog.owner_id,
+        catalog.configuration_generation,
+        admission.timeline.timeline_id,
+    );
+    let sealed = (
+        seal.owner_id,
+        seal.configuration_generation,
+        row.timeline_id,
+    );
+    if admitted != sealed || validate_manifest_owner_admission_snapshot_v1(admission).is_err() {
+        Err(ManifestOwnerLinkVerificationErrorV1::CompositionUnavailable)
+    } else if admission.timeline.receipt.digest() != row.msr_hash {
+        Err(ManifestOwnerLinkVerificationErrorV1::SlotBindingMismatch)
+    } else {
+        Ok(())
+    }
+}
+
 /// Whether the admission's committed result is an ancestor of the seal's
 /// pre-state.
 ///
@@ -675,21 +809,15 @@ fn verify_admission_links(
 /// pre-state, and then yields its own seal's pre-state, until one equals the
 /// admission's MSR1 previous LCQ1 and committed inventory generation. Every
 /// admission commits a fresh inventory generation, so a cut sealed before it
-/// can never stand for its result.
+/// can never stand for its result. This checks the admission's post-CAS
+/// result; its pre-CAS pair is bound to the same row by
+/// [`verify_admission_row`].
 fn admission_is_ancestor(
     snapshot: &ManifestOwnerLinkSnapshotV1,
     admission: &ManifestOwnerAdmissionSnapshotV1,
 ) -> bool {
-    let seal = snapshot.result.seal.as_input();
-    let receipt = admission.timeline.receipt.as_input();
-    let admitted = (
-        receipt.previous_visible_lcq1_hash,
-        admission.resulting_inventory_generation,
-    );
-    let mut pre_state = (
-        seal.previous_visible_receipt_hash,
-        seal.expected_inventory_generation,
-    );
+    let admitted = admitted_pre_state(admission);
+    let mut pre_state = seal_pre_state(snapshot.result.seal.as_input());
     for ancestor in &snapshot.ancestors {
         if pre_state == admitted {
             return true;
@@ -697,24 +825,24 @@ fn admission_is_ancestor(
         if !precedes(ancestor, pre_state) {
             return false;
         }
-        let earlier = ancestor.seal.as_input();
-        pre_state = (
-            earlier.previous_visible_receipt_hash,
-            earlier.expected_inventory_generation,
-        );
+        pre_state = seal_pre_state(ancestor.seal.as_input());
     }
     pre_state == admitted
 }
 
-/// Whether one earlier cut's LCQ1 and committed inventory are the pre-state.
-fn precedes(ancestor: &LocalCutOwnerCommitV1, pre_state: (Option<Hash>, Hash)) -> bool {
-    let seal = ancestor.seal.as_input();
+/// Whether one earlier cut's LCQ1 names its LCC1, its LCC1 names its LCS2,
+/// and its LCQ1 and committed inventory are exactly the pre-state.
+fn precedes(ancestor: &ManifestOwnerLinkAncestorV1, pre_state: PreStateV1) -> bool {
+    let commit = ancestor.commit.as_input();
+    let linked = (
+        ancestor.receipt.as_input().commit_record_hash,
+        commit.seal_hash,
+    );
     let committed = (
         Some(ancestor.receipt.digest()),
-        ancestor.commit.as_input().result_inventory_generation,
+        commit.result_inventory_generation,
     );
-    validate_local_cut_owner_result_v1(seal.owner_id, seal.cut_id, ancestor).is_ok()
-        && committed == pre_state
+    linked == (ancestor.commit.digest(), ancestor.seal.digest()) && committed == pre_state
 }
 
 /// Re-derive the Timeline's WCB1 and complete WDB1 directory from the
@@ -735,11 +863,15 @@ fn verify_dependency_closure(
         genesis_hash: recording.binding.as_input().stitched_head_hash,
     })
     .map_err(|_| unavailable)?;
+    // The retained nodes were gathered from the committed root, so a node
+    // outside the derived directory is never read: "extra" means extra
+    // relative to the derived directory, which the binding equality below
+    // pins to the committed root.
     let retained = closure
         .directory()
         .branches()
         .iter()
-        .all(|branch| snapshot.dependency_branches.contains(branch));
+        .all(|branch| snapshot.dependency_branches.get(&branch.digest()) == Some(branch));
     if retained && *closure.binding() == recording.binding {
         Ok(())
     } else {

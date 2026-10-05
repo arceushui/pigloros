@@ -5,7 +5,10 @@
 //! beside the manifest-owner admission tables so one transaction can publish a
 //! cut together with the admitted owner's receipt and inventory generation.
 
+use std::collections::BTreeMap;
+
 use pos_core::{
+    collect_manifest_owner_link_ancestors_v1, collect_manifest_owner_link_branches_v1,
     local_cut_owner_intent_digest_v1, validate_local_cut_owner_predecessors_v1,
     validate_local_cut_owner_recordings_v1, validate_local_cut_owner_result_v1,
     validate_local_cut_owner_successor_v1, CanonicalBytes, CoreError, Hash, LocalCutCommitV1,
@@ -15,10 +18,10 @@ use pos_core::{
     LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2,
     LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionInputV1, ManifestOwnerAdmissionOwnerStateV1,
-    ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerLinkCutIdentityV1,
-    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1, PluginId,
-    PreparedLocalCutOwnerCommitV1, TimelineId, WorldClosureBindingV1, WorldDependencyBranchV1,
-    WorldRecordingReceiptV1, MAX_LOCAL_CUT_OWNER_ROWS_V1,
+    ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerLinkAncestorV1,
+    ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1,
+    PluginId, PreparedLocalCutOwnerCommitV1, TimelineId, WorldClosureBindingV1,
+    WorldDependencyBranchV1, WorldRecordingReceiptV1, MAX_LOCAL_CUT_OWNER_ROWS_V1,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -959,6 +962,15 @@ fn sqlite_read_local_cut_owner_state(
     Ok(Some(state))
 }
 
+/// Classify a failed local-cut query; a mistyped stored column is corrupt.
+const fn sqlite_local_cut_query_error(error: &rusqlite::Error) -> LocalCutOwnerErrorV1 {
+    if matches!(error, rusqlite::Error::InvalidColumnType(..)) {
+        LocalCutOwnerErrorV1::CorruptState
+    } else {
+        LocalCutOwnerErrorV1::StorageFailure
+    }
+}
+
 /// List one owner's raw retained cut identities in ascending order.
 ///
 /// A retained `cut_id` that is not a blob fails the typed `Vec<u8>` read with
@@ -978,10 +990,7 @@ fn sqlite_local_cut_owner_cut_ids(
                 .query_map(params![owner_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         })
-        .map_err(|error| match error {
-            rusqlite::Error::InvalidColumnType(..) => LocalCutOwnerErrorV1::CorruptState,
-            _ => LocalCutOwnerErrorV1::StorageFailure,
-        })
+        .map_err(|error| sqlite_local_cut_query_error(&error))
 }
 
 /// Fully validate the owner state and every retained cut, oldest first.
@@ -1295,15 +1304,6 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
     }
 }
 
-/// Classify a failed owner-link query; a mistyped stored column is corrupt.
-const fn sqlite_owner_link_query_error(error: &rusqlite::Error) -> LocalCutOwnerErrorV1 {
-    if matches!(error, rusqlite::Error::InvalidColumnType(..)) {
-        LocalCutOwnerErrorV1::CorruptState
-    } else {
-        LocalCutOwnerErrorV1::StorageFailure
-    }
-}
-
 /// Find the owner's first visible cut, in cut order, whose WCR1 for
 /// `timeline_id` the identity selects, through the Timeline recording index.
 fn sqlite_owner_link_cut(
@@ -1326,7 +1326,7 @@ fn sqlite_owner_link_cut(
                 )
                 .and_then(Iterator::collect::<Result<Vec<_>, _>>)
         })
-        .map_err(|error| sqlite_owner_link_query_error(&error))?;
+        .map_err(|error| sqlite_local_cut_query_error(&error))?;
     for (cut_id, receipt) in rows {
         let receipt = WorldRecordingReceiptV1::from_canonical_cbor(&receipt)
             .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
@@ -1337,57 +1337,54 @@ fn sqlite_owner_link_cut(
     Ok(None)
 }
 
-/// Load the owner's visible cuts before `seal`, newest first, until one was
-/// sealed in another configuration generation.
-fn sqlite_owner_link_ancestors(
-    connection: &Connection,
+/// The owner's visible cuts before `seal`, newest first, each loaded only
+/// when the ancestry walk reads it.
+fn sqlite_owner_link_earlier_cuts<'a>(
+    connection: &'a Connection,
     owner_id: [u8; 32],
     seal: &LocalCutSealInputV2,
-) -> Result<Vec<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
-    let mut ancestors = Vec::new();
-    let cut_ids = sqlite_local_cut_owner_cut_ids(connection, owner_id)?;
-    for cut_bytes in cut_ids.iter().rev() {
-        let cut_id = sqlite_local_cut_owner_u64(cut_bytes)?;
-        if cut_id >= seal.cut_id {
-            continue;
-        }
-        let cut = sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)?;
-        if cut.result.seal.as_input().configuration_generation != seal.configuration_generation {
-            break;
-        }
-        ancestors.push(cut.result);
-    }
-    Ok(ancestors)
+    cut_ids: &'a [Vec<u8>],
+) -> impl Iterator<Item = Result<ManifestOwnerLinkAncestorV1, LocalCutOwnerErrorV1>> + 'a {
+    let sealed_cut = seal.cut_id;
+    cut_ids
+        .iter()
+        .rev()
+        .map(|bytes| sqlite_local_cut_owner_u64(bytes))
+        .filter(move |cut_id| !matches!(cut_id, Ok(cut_id) if *cut_id >= sealed_cut))
+        .map(move |cut_id| {
+            let cut = cut_id.and_then(|cut_id| {
+                sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)
+            });
+            cut.map(|cut| ManifestOwnerLinkAncestorV1::of_result(&cut.result))
+        })
 }
 
-/// Read and decode every retained WDB1 node of one scope.
-fn sqlite_owner_link_branches(
+/// Read one retained WDB1 node of `scope` by digest, if it is retained.
+fn sqlite_owner_link_branch(
     connection: &Connection,
     scope: Hash,
-) -> Result<Vec<WorldDependencyBranchV1>, LocalCutOwnerErrorV1> {
-    let scope = *scope.as_bytes();
+    digest: Hash,
+) -> Result<Option<WorldDependencyBranchV1>, LocalCutOwnerErrorV1> {
+    let (scope, digest) = (*scope.as_bytes(), *digest.as_bytes());
     let encoded = connection
-        .prepare(
-            "SELECT node_cbor FROM world_dependency_branches
-             WHERE scope = ?1 ORDER BY node_hash",
+        .query_row(
+            "SELECT node_cbor FROM world_dependency_branches WHERE scope = ?1 AND node_hash = ?2",
+            params![scope.as_slice(), digest.as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
         )
-        .and_then(|mut statement| {
-            statement
-                .query_map(params![scope.as_slice()], |row| row.get::<_, Vec<u8>>(0))
-                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-        })
-        .map_err(|error| sqlite_owner_link_query_error(&error))?;
+        .optional()
+        .map_err(|error| sqlite_local_cut_query_error(&error))?;
     encoded
-        .into_iter()
         .map(|bytes| {
             WorldDependencyBranchV1::decode(&CanonicalBytes::from_vec(bytes))
                 .map_err(|_| LocalCutOwnerErrorV1::CorruptState)
         })
-        .collect()
+        .transpose()
 }
 
-/// Read one selected cut with its same-generation ancestors, kind-14
-/// admissions and WDB1 nodes inside the caller's read transaction.
+/// Read one selected cut, its kind-14 admissions, the earlier cuts its
+/// ancestry walk needs and its Timeline's WDB1 nodes inside the caller's
+/// read transaction.
 fn sqlite_owner_link_snapshot(
     store: &SqliteStore,
     connection: &Connection,
@@ -1403,7 +1400,6 @@ fn sqlite_owner_link_snapshot(
     };
     let cut = sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)?;
     let seal = cut.result.seal.as_input();
-    let ancestors = sqlite_owner_link_ancestors(connection, owner_id, seal)?;
     let generation = seal.configuration_generation;
     let admissions = cut
         .request
@@ -1413,9 +1409,24 @@ fn sqlite_owner_link_snapshot(
         .map(|row| store.read_manifest_owner_admission_v1(owner_id, generation, row.timeline_id))
         .filter_map(Result::transpose)
         .collect::<Result<Vec<_>, _>>()?;
-    let mut dependency_branches = Vec::new();
-    for recording in &cut.result.recordings {
-        dependency_branches.extend(sqlite_owner_link_branches(connection, recording.scope)?);
+    let admission = admissions
+        .iter()
+        .find(|admission| admission.timeline.timeline_id == timeline_id);
+    let cut_ids = sqlite_local_cut_owner_cut_ids(connection, owner_id)?;
+    let earlier = sqlite_owner_link_earlier_cuts(connection, owner_id, seal, &cut_ids);
+    let ancestors = collect_manifest_owner_link_ancestors_v1(seal, admission, earlier)?;
+    let mut dependency_branches = BTreeMap::new();
+    let selected = cut
+        .result
+        .recordings
+        .iter()
+        .filter(|recording| recording.binding.as_input().timeline_id == timeline_id);
+    for recording in selected {
+        let root = recording.binding.as_input().dependency_root_hash;
+        let nodes = collect_manifest_owner_link_branches_v1(root, |digest| {
+            sqlite_owner_link_branch(connection, recording.scope, digest)
+        })?;
+        dependency_branches.extend(nodes);
     }
     Ok(Some(ManifestOwnerLinkSnapshotV1 {
         owner_state,

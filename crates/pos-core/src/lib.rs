@@ -285,10 +285,12 @@ pub use manifest_owner_link::{
     MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
 };
 pub use manifest_owner_link_verifier::{
-    verify_manifest_owner_link_v1, ManifestOwnerLinkAuthorityV1, ManifestOwnerLinkCutIdentityV1,
-    ManifestOwnerLinkDigestsV1, ManifestOwnerLinkHeadV1, ManifestOwnerLinkReadPortV1,
-    ManifestOwnerLinkReleaseV1, ManifestOwnerLinkRequestV1, ManifestOwnerLinkSnapshotV1,
-    ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1, VerifiedManifestOwnerLinkV1,
+    collect_manifest_owner_link_ancestors_v1, collect_manifest_owner_link_branches_v1,
+    verify_manifest_owner_link_v1, ManifestOwnerLinkAncestorV1, ManifestOwnerLinkAuthorityV1,
+    ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkDigestsV1, ManifestOwnerLinkHeadV1,
+    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkReleaseV1, ManifestOwnerLinkRequestV1,
+    ManifestOwnerLinkSnapshotV1, ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1,
+    VerifiedManifestOwnerLinkV1,
 };
 pub use manifest_owner_members::{
     build_manifest_owner_scope_v1, validate_manifest_owner_lease_replacement_v1,
