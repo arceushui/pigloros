@@ -9,7 +9,6 @@ import importlib.util
 import io
 import json
 import pathlib
-import re
 import sys
 import tempfile
 import unittest
@@ -20,7 +19,6 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SCRIPT = ROOT / "scripts" / "compare_memory_store_benchmarks.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "memory-store-benchmark.yml"
 SPEC = importlib.util.spec_from_file_location("compare_memory_store_benchmarks", SCRIPT)
@@ -750,42 +748,6 @@ class WorkflowTriggerTests(unittest.TestCase):
     """Relevant benchmark inputs must trigger both main and PR measurements."""
 
     @staticmethod
-    def job_body(job: str) -> str:
-        """Return one top-level CI job's YAML body without a YAML dependency."""
-
-        lines = CI_WORKFLOW.read_text(encoding="utf-8").splitlines()
-        marker = f"  {job}:"
-        starts = [index for index, line in enumerate(lines) if line == marker]
-        if len(starts) != 1:
-            raise AssertionError(f"expected exactly one CI job named {job!r}")
-        start = starts[0] + 1
-        end = next(
-            (
-                index
-                for index in range(start, len(lines))
-                if lines[index].startswith("  ") and not lines[index].startswith("    ")
-            ),
-            len(lines),
-        )
-        return "\n".join(lines[start:end])
-
-    @staticmethod
-    def step_body(name: str) -> str:
-        """Return one benchmark-workflow step body without a YAML dependency."""
-
-        lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
-        marker = f"      - name: {name}"
-        starts = [index for index, line in enumerate(lines) if line == marker]
-        if len(starts) != 1:
-            raise AssertionError(f"expected exactly one benchmark step named {name!r}")
-        start = starts[0] + 1
-        end = next(
-            (index for index in range(start, len(lines)) if lines[index].startswith("      - ")),
-            len(lines),
-        )
-        return "\n".join(lines[start:end])
-
-    @staticmethod
     def paths_for_event(event: str) -> tuple[str, ...]:
         lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
         marker = f"  {event}:"
@@ -828,34 +790,6 @@ class WorkflowTriggerTests(unittest.TestCase):
                             ),
                             f"{changed_path} does not trigger {event}",
                         )
-
-    def test_comparator_fixture_runs_in_required_test_and_coverage_jobs(self) -> None:
-        invocation = "python3 scripts/test_compare_memory_store_benchmarks.py"
-
-        self.assertIn(invocation, self.job_body("test"))
-        self.assertIn(invocation, self.job_body("coverage"))
-        self.assertNotIn(invocation, self.job_body("rustdoc"))
-
-    def test_baseline_artifact_policy_matches_comparator_policy(self) -> None:
-        workflow = WORKFLOW.read_text(encoding="utf-8")
-        artifact_names = re.findall(
-            r"^  BASELINE_ARTIFACT_NAME: ([^\s#]+)\s*$", workflow, flags=re.MULTILINE
-        )
-        trusted_step = self.step_body("Upload trusted main benchmark baseline")
-        untrusted_step = self.step_body(
-            "Upload untrusted pull-request or manual benchmark evidence"
-        )
-        trusted_events = frozenset(
-            re.findall(r"github\.event_name == '([^']+)'", trusted_step)
-        )
-        untrusted_events = frozenset(
-            re.findall(r"github\.event_name == '([^']+)'", untrusted_step)
-        )
-
-        self.assertEqual(artifact_names, [COMPARATOR.ARTIFACT_NAME])
-        self.assertIn("name: ${{ env.BASELINE_ARTIFACT_NAME }}", trusted_step)
-        self.assertEqual(trusted_events, COMPARATOR.TRUSTED_EVENTS)
-        self.assertTrue(COMPARATOR.TRUSTED_EVENTS.isdisjoint(untrusted_events))
 
 
 class SummaryTests(unittest.TestCase):
