@@ -2,11 +2,18 @@
 
 //! Public failure contracts for durable recipient-export publication.
 
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
+use std::{
+    io,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    sync::{mpsc, Arc},
+    thread,
+    time::Duration,
+};
 
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-    ArtifactTransitionRuleV1, CanonicalBytes, ConsentAuthority, ConsentError, CoreError, EntityId,
+    ArtifactTransitionRuleV1, CanonicalBytes, ConsentAuthority, ConsentGate, EntityId,
     ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
     EventDraft, EventStore, Kind, RegisteredArtifactV1, ReplayClaimEvaluationV1,
     ReplayClaimEvaluatorV1, TimelineMeta,
@@ -33,6 +40,14 @@ struct Fixture {
     timeline: pos_core::TimelineId,
     descriptor: pos_core::RecipientKeyDescriptorV1,
     evaluation: ReplayClaimEvaluationV1,
+    gate: Arc<ErasureContainmentGateV1>,
+}
+
+struct PausedPublication {
+    _temporary: tempfile::TempDir,
+    entered: mpsc::Receiver<()>,
+    release: mpsc::Sender<()>,
+    join: thread::JoinHandle<Result<(), io::Error>>,
 }
 
 fn evaluation() -> TestResult<ReplayClaimEvaluationV1> {
@@ -62,7 +77,8 @@ fn fixture() -> TestResult<Fixture> {
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
     let database = temporary.path().join("recipient.sqlite");
     let mut store = SqliteStore::open(database.to_str().ok_or("database path is not UTF-8")?)?;
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    store.bind_erasure_gate(Arc::clone(&gate))?;
 
     let subject = EntityId::new();
     let grantee = EntityId::new();
@@ -108,6 +124,7 @@ fn fixture() -> TestResult<Fixture> {
         timeline: timeline.id(),
         descriptor,
         evaluation: evaluation()?,
+        gate,
     })
 }
 
@@ -155,6 +172,51 @@ fn assert_not_public(
     Ok(())
 }
 
+fn start_paused_publication(fixture: Fixture) -> TestResult<PausedPublication> {
+    let Fixture {
+        temporary,
+        store,
+        owner,
+        authority,
+        token,
+        timeline,
+        descriptor,
+        evaluation,
+        ..
+    } = fixture;
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    store.pause_recipient_export_publication_after_fences_for_test(
+        timeline, entered_tx, release_rx,
+    )?;
+    let join = thread::spawn(move || {
+        let mut store = store;
+        store
+            .publish_recipient_export(
+                &authority,
+                &owner,
+                &request(timeline, descriptor, &evaluation, &token),
+            )
+            .map(|_| ())
+            .map_err(|error| io::Error::other(error.to_string()))
+    });
+    Ok(PausedPublication {
+        _temporary: temporary,
+        entered,
+        release,
+        join,
+    })
+}
+
+fn join_publication(publication: PausedPublication) -> TestResult {
+    let result = publication
+        .join
+        .join()
+        .map_err(|_| io::Error::other("recipient publication thread panicked"))?;
+    result?;
+    Ok(())
+}
+
 fn restart(fixture: Fixture) -> TestResult<(tempfile::TempDir, SqliteStore, RecipientKeyOwnerV1)> {
     let Fixture {
         temporary,
@@ -173,29 +235,19 @@ fn restart(fixture: Fixture) -> TestResult<(tempfile::TempDir, SqliteStore, Reci
 }
 
 #[test]
-fn publication_races_fail_closed_at_the_public_boundary() -> TestResult {
-    for (fault, export_id) in [
-        (
+fn source_head_race_fails_closed_at_the_public_boundary() -> TestResult {
+    let mut fixture = fixture()?;
+    let export_id = [41; 16];
+    fixture
+        .store
+        .set_recipient_export_publication_test_export_id(export_id)?;
+    fixture
+        .store
+        .inject_recipient_export_publication_test_fault(
             RecipientExportPublicationTestFaultV1::SourceHeadChanged,
-            [41; 16],
-        ),
-        (
-            RecipientExportPublicationTestFaultV1::ConsentRevoked,
-            [42; 16],
-        ),
-        (
-            RecipientExportPublicationTestFaultV1::ErasureBlocked,
-            [43; 16],
-        ),
-    ] {
-        let mut fixture = fixture()?;
-        fixture
-            .store
-            .set_recipient_export_publication_test_export_id(export_id)?;
-        fixture
-            .store
-            .inject_recipient_export_publication_test_fault(fault)?;
-        let publication = fixture.store.publish_recipient_export(
+        )?;
+    assert!(matches!(
+        fixture.store.publish_recipient_export(
             &fixture.authority,
             &fixture.owner,
             &request(
@@ -204,48 +256,95 @@ fn publication_races_fail_closed_at_the_public_boundary() -> TestResult {
                 &fixture.evaluation,
                 &fixture.token,
             ),
-        );
-        match fault {
-            RecipientExportPublicationTestFaultV1::SourceHeadChanged => {
-                assert!(matches!(
-                    publication,
-                    Err(RecipientExportPublicationErrorV1::SourceChanged)
-                ));
-            }
-            RecipientExportPublicationTestFaultV1::ConsentRevoked => {
-                assert!(matches!(
-                    publication,
-                    Err(RecipientExportPublicationErrorV1::Consent(
-                        ConsentError::Revoked
-                    ))
-                ));
-            }
-            RecipientExportPublicationTestFaultV1::ErasureBlocked => {
-                assert!(matches!(
-                    publication,
-                    Err(RecipientExportPublicationErrorV1::Store(
-                        CoreError::ErasureContainmentUnavailable
-                    ))
-                ));
-            }
-            _ => {
-                return Err(std::io::Error::other("only public race faults are configured").into())
-            }
-        }
-        assert_not_public(
-            &fixture.store,
-            &fixture.owner,
-            export_id,
-            artifacts(false, false),
-        )?;
-        fixture.store.recover_recipient_exports(&fixture.owner)?;
-        assert_not_public(
-            &fixture.store,
-            &fixture.owner,
-            export_id,
-            artifacts(false, false),
-        )?;
-    }
+        ),
+        Err(RecipientExportPublicationErrorV1::SourceChanged)
+    ));
+    assert_not_public(
+        &fixture.store,
+        &fixture.owner,
+        export_id,
+        artifacts(false, false),
+    )?;
+    fixture.store.recover_recipient_exports(&fixture.owner)?;
+    assert_not_public(
+        &fixture.store,
+        &fixture.owner,
+        export_id,
+        artifacts(false, false),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn consent_revocation_cannot_interleave_with_catalog_publication() -> TestResult {
+    let fixture = fixture()?;
+    let revocation_authority = fixture.authority.clone();
+    let subject = fixture.token.subject_id();
+    let timeline = fixture.timeline;
+    let publication = start_paused_publication(fixture)?;
+    publication.entered.recv_timeout(Duration::from_secs(1))?;
+
+    let (started_tx, started) = mpsc::channel();
+    let (finished_tx, finished) = mpsc::channel();
+    let revoker = thread::spawn(move || -> Result<(), io::Error> {
+        started_tx
+            .send(())
+            .map_err(|_| io::Error::other("revocation start observer is unavailable"))?;
+        let mut append = || {};
+        ConsentGate::with_revocation_fence(
+            &revocation_authority,
+            timeline,
+            Some(subject),
+            2,
+            &mut append,
+        )
+        .map_err(|error| io::Error::other(error.to_string()))?;
+        finished_tx
+            .send(())
+            .map_err(|_| io::Error::other("revocation completion observer is unavailable"))
+    });
+    started.recv_timeout(Duration::from_secs(1))?;
+    assert!(finished.recv_timeout(Duration::from_millis(100)).is_err());
+    assert!(!publication.join.is_finished());
+    publication.release.send(())?;
+    join_publication(publication)?;
+    finished.recv_timeout(Duration::from_secs(1))?;
+    let result = revoker
+        .join()
+        .map_err(|_| io::Error::other("revocation thread panicked"))?;
+    result?;
+    Ok(())
+}
+
+#[test]
+fn erasure_block_cannot_interleave_with_catalog_publication() -> TestResult {
+    let fixture = fixture()?;
+    let blocking_gate = Arc::clone(&fixture.gate);
+    let timeline = fixture.timeline;
+    let publication = start_paused_publication(fixture)?;
+    publication.entered.recv_timeout(Duration::from_secs(1))?;
+
+    let (started_tx, started) = mpsc::channel();
+    let (finished_tx, finished) = mpsc::channel();
+    let blocker = thread::spawn(move || -> Result<(), io::Error> {
+        started_tx
+            .send(())
+            .map_err(|_| io::Error::other("erasure-block start observer is unavailable"))?;
+        blocking_gate.block_timeline(timeline);
+        finished_tx
+            .send(())
+            .map_err(|_| io::Error::other("erasure-block completion observer is unavailable"))
+    });
+    started.recv_timeout(Duration::from_secs(1))?;
+    assert!(finished.recv_timeout(Duration::from_millis(100)).is_err());
+    assert!(!publication.join.is_finished());
+    publication.release.send(())?;
+    join_publication(publication)?;
+    finished.recv_timeout(Duration::from_secs(1))?;
+    let result = blocker
+        .join()
+        .map_err(|_| io::Error::other("erasure-block thread panicked"))?;
+    result?;
     Ok(())
 }
 

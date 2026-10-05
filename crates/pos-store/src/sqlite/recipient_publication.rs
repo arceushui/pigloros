@@ -100,10 +100,6 @@ pub enum RecipientExportPublicationErrorV1 {
 pub enum RecipientExportPublicationTestFaultV1 {
     /// Advance the source Timeline after the initial head observation.
     SourceHeadChanged,
-    /// Revoke the capability after the initial head observation.
-    ConsentRevoked,
-    /// Block the erasure boundary after the initial head observation.
-    ErasureBlocked,
     /// Fail while the encrypted staging object is being written.
     StagingWrite,
     /// Fail the staged ciphertext file sync.
