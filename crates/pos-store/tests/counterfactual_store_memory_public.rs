@@ -3,8 +3,11 @@
 
 use std::sync::Arc;
 
+use pos_core::counterfactual_store::test_fixtures::{
+    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, uint,
+};
 use pos_core::{
-    CanonicalBytes, CounterfactualBasisV1, CounterfactualFactsV1,
+    CanonicalBytes, CounterfactualAdapterSealV1, CounterfactualBasisV1, CounterfactualFactsV1,
     CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
@@ -15,6 +18,9 @@ use pos_core::{
 use pos_store::{memory::MemoryStore, EventStore};
 
 type StoreError = CounterfactualStoreErrorV1;
+
+/// The adapter seal, minted here only to build expected receipts.
+const SEAL: CounterfactualAdapterSealV1 = CounterfactualAdapterSealV1::for_adapter();
 
 /// One stale-basis case: how the expectation is altered and the conflict.
 type StaleCase<T> = (fn(&mut T), InvalidationConflictV1);
@@ -55,90 +61,6 @@ fn tick_drafts(count: u8, guarded: Option<&str>) -> PipelineDraftBatchV1 {
             .chain(guarded.map(|kind| typed_draft(kind, 0)))
             .collect(),
     ))
-}
-
-fn id_field(value: [u8; 16]) -> Vec<u8> {
-    [&[0x50][..], &value[..]].concat()
-}
-
-fn hash_field(value: Hash) -> Vec<u8> {
-    [&[0x58, 0x20][..], &value.as_bytes()[..]].concat()
-}
-
-/// Encode one shortest-form CBOR unsigned integer.
-fn uint(value: u64) -> Vec<u8> {
-    let bytes = value.to_be_bytes();
-    match value {
-        0..=23 => vec![bytes[7]],
-        24..=0xff => vec![0x18, bytes[7]],
-        0x100..=0xffff => [&[0x19][..], &bytes[6..]].concat(),
-        0x1_0000..=0xffff_ffff => [&[0x1a][..], &bytes[4..]].concat(),
-        _ => [&[0x1b][..], &bytes[..]].concat(),
-    }
-}
-
-/// Encode one shortest-form CBOR head of `major` with `argument`.
-fn head(major: u8, argument: u64) -> Vec<u8> {
-    let mut encoded = uint(argument);
-    encoded[0] |= major << 5;
-    encoded
-}
-
-fn text_field(value: &str) -> Vec<u8> {
-    [
-        head(3, ok(u64::try_from(value.len()))),
-        value.as_bytes().to_vec(),
-    ]
-    .concat()
-}
-
-/// Encode one six-field dependency-node coordinate.
-fn node_field(tick: u64, owner: &str) -> Vec<u8> {
-    [
-        vec![0x86],
-        uint(tick),
-        uint(0),
-        text_field(owner),
-        uint(0),
-        uint(7),
-        hash_field(hash(21)),
-    ]
-    .concat()
-}
-
-/// Encode `SIV1` fields 8 through 14, as the `pos-core` port tests do.
-fn invalidation_middle() -> Vec<u8> {
-    [
-        node_field(5, "agent-a"),
-        node_field(4_294_967_296, "an-owner-identifier-of-thirty-"),
-        vec![0x81, 0x86],
-        text_field("event"),
-        uint(70_000),
-        hash_field(hash(22)),
-        node_field(5, "agent-a"),
-        uint(300),
-        uint(0),
-        vec![0x81],
-        hash_field(hash(23)),
-        vec![0x80, 0x80],
-        uint(0),
-    ]
-    .concat()
-}
-
-/// Frame fields after the version as one self-digested record.
-fn frame(heads: (u8, u8), magic: [u8; 4], domain: &[u8], fields: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![heads.0, 0x64];
-    bytes.extend_from_slice(&magic);
-    bytes.push(0x01);
-    bytes.extend_from_slice(fields);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(&[0, heads.1]);
-    hasher.update(&bytes[1..]);
-    bytes.extend_from_slice(&[0x58, 0x20]);
-    bytes.extend_from_slice(hasher.finalize().as_bytes());
-    bytes
 }
 
 const fn facts() -> CounterfactualFactsV1 {
@@ -188,39 +110,39 @@ impl Spec {
     }
 
     fn command(&self) -> CounterfactualInvalidationCommandV1 {
-        let frontier = ok(RecomputationFrontierBytesV1::try_from_canonical(frame(
-            (0x91, 0x90),
-            *b"RCF1",
-            b"PiglorOS.RecomputationFrontier.v1",
-            &[
-                id_field([self.record_id; 16]),
-                hash_field(self.plan),
-                hash_field(hash(2)),
-                hash_field(self.graph),
-                vec![0x01],
-            ]
-            .concat(),
-        )));
-        let invalidation = ok(SuffixInvalidationBytesV1::try_from_canonical(frame(
-            (0x92, 0x91),
-            *b"SIV1",
-            b"PiglorOS.SuffixInvalidation.v1",
-            &[
-                id_field([self.record_id; 16]),
-                hash_field(self.plan),
-                id_field(self.fork.inner().to_bytes()),
-                uint(self.prior),
-                uint(self.prior + 1),
-                hash_field(frontier.digest()),
-                invalidation_middle(),
-                // Commit coordinate: the Fork, its expected head, the first Tick.
-                vec![0x83],
-                id_field(self.fork.inner().to_bytes()),
-                uint(self.head),
-                uint(FIRST_TICK),
-            ]
-            .concat(),
-        )));
+        let frontier = ok(RecomputationFrontierBytesV1::try_from_canonical(
+            frontier_frame(
+                &[
+                    id_field([self.record_id; 16]),
+                    hash_field(self.plan),
+                    hash_field(hash(2)),
+                    hash_field(self.graph),
+                    vec![0x01],
+                ]
+                .concat(),
+                0,
+            ),
+        ));
+        let invalidation = ok(SuffixInvalidationBytesV1::try_from_canonical(
+            invalidation_frame(
+                &[
+                    id_field([self.record_id; 16]),
+                    hash_field(self.plan),
+                    id_field(self.fork.inner().to_bytes()),
+                    uint(self.prior),
+                    uint(self.prior + 1),
+                    hash_field(frontier.digest()),
+                    invalidation_middle(),
+                    // Commit coordinate: the Fork, its expected head, the first Tick.
+                    vec![0x83],
+                    id_field(self.fork.inner().to_bytes()),
+                    uint(self.head),
+                    uint(FIRST_TICK),
+                ]
+                .concat(),
+                0,
+            ),
+        ));
         ok(CounterfactualInvalidationCommandV1::try_new(
             CounterfactualInvalidationInputV1 {
                 fork: self.fork,
@@ -338,7 +260,10 @@ fn commit_installs_the_whole_generation() {
 
     let receipt = committed(store, &command);
 
-    assert_eq!(receipt, ok(command.committed_receipt(Seq::from_u64(3))));
+    assert_eq!(
+        receipt,
+        ok(command.committed_receipt(&SEAL, Seq::from_u64(3)))
+    );
     assert_eq!(receipt.generation(), at(fork, 1));
     assert_eq!(receipt.first_tick_head(), Seq::from_u64(3));
     assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 1)));
@@ -356,10 +281,11 @@ fn commit_installs_the_whole_generation() {
         store.read_generation_artifact(at(fork, 1), hash(99)),
         Ok(None)
     );
+    // A quarantined digest this store holds no bytes for reads as absent.
     for quarantined in [hash(10), hash(11), hash(12)] {
         assert_eq!(
             store.read_generation_artifact(at(fork, 1), quarantined),
-            Err(StoreError::InvalidArtifactReuse)
+            Ok(None)
         );
     }
     for stale in [0, 2] {
@@ -411,13 +337,116 @@ fn later_generation_quarantines_prior_artifacts_and_keeps_its_generation() {
     );
     assert_eq!(
         store.read_generation_artifact(at(fork, 2), hash(10)),
-        Err(StoreError::InvalidArtifactReuse)
+        Ok(None)
     );
     assert_eq!(
         store.publish_counterfactual_facts(fork, facts()),
         Ok(at(fork, 2))
     );
     assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 2)));
+}
+
+#[test]
+fn bytes_rewritten_by_a_later_generation_are_readable_there() {
+    let mut fixture = published();
+    let fork = fixture.fork;
+    let store = &mut fixture.store;
+    let first = Spec::new(fork).command();
+    committed(store, &first);
+    let second = Spec {
+        record_id: 2,
+        head: 3,
+        prior: 1,
+        invalid_artifacts: vec![first.frontier().digest()],
+        evictions: Vec::new(),
+        drafts: 1,
+        ..Spec::new(fork)
+    }
+    .command();
+    committed(store, &second);
+    // The third generation recomputes the first generation's exact frontier.
+    let third = Spec {
+        head: 4,
+        prior: 2,
+        invalid_artifacts: Vec::new(),
+        evictions: Vec::new(),
+        drafts: 1,
+        ..Spec::new(fork)
+    }
+    .command();
+    assert_eq!(third.frontier(), first.frontier());
+    assert_eq!(
+        store.read_generation_artifact(at(fork, 2), first.frontier().digest()),
+        Err(StoreError::InvalidArtifactReuse)
+    );
+
+    assert_eq!(committed(store, &third).generation(), at(fork, 3));
+
+    assert_eq!(
+        store.read_generation_artifact(at(fork, 3), first.frontier().digest()),
+        Ok(Some(first.frontier().as_bytes().to_vec()))
+    );
+    assert_eq!(
+        store.read_generation_artifact(at(fork, 3), third.invalidation().digest()),
+        Ok(Some(third.invalidation().as_bytes().to_vec()))
+    );
+}
+
+#[test]
+fn committed_generation_receipts_are_recoverable() {
+    let mut fixture = fixture();
+    let fork = fixture.fork;
+    let store = &mut fixture.store;
+    assert_eq!(
+        store.committed_generation_receipt(at(fork, 1)),
+        Err(StoreError::ForkNotFound)
+    );
+    ok(store.publish_counterfactual_facts(fork, facts()));
+    assert_eq!(store.committed_generation_receipt(at(fork, 0)), Ok(None));
+    let first = committed(store, &Spec::new(fork).command());
+    let second = committed(
+        store,
+        &Spec {
+            record_id: 2,
+            head: 3,
+            prior: 1,
+            drafts: 1,
+            ..Spec::new(fork)
+        }
+        .command(),
+    );
+
+    // Earlier generations stay recoverable; nothing committed generation 0
+    // or any generation after the committed one.
+    assert_eq!(
+        store.committed_generation_receipt(at(fork, 1)),
+        Ok(Some(first))
+    );
+    assert_eq!(
+        store.committed_generation_receipt(at(fork, 2)),
+        Ok(Some(second))
+    );
+    for absent in [0, 3, u64::MAX] {
+        assert_eq!(
+            store.committed_generation_receipt(at(fork, absent)),
+            Ok(None)
+        );
+    }
+    assert_eq!(
+        store.committed_generation_receipt(at(fixture.root, 1)),
+        Err(StoreError::ForkNotFound)
+    );
+
+    fixture.gate.block_timeline(fork);
+    assert_eq!(
+        fixture.store.committed_generation_receipt(at(fork, 1)),
+        Err(StoreError::StorageFailure)
+    );
+    let ungated = fixture.store.without_erasure_gate();
+    assert_eq!(
+        ungated.committed_generation_receipt(at(fork, 1)),
+        Err(StoreError::StorageFailure)
+    );
 }
 
 #[test]

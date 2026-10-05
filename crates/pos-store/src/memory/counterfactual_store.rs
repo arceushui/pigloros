@@ -39,10 +39,24 @@
 //!   were quarantined: they are retained audit records by design, not
 //!   authoritative Fork state. Staging later recomputed outputs is owned by
 //!   the coordinator slices, not this adapter.
-//! - **Quarantine.** Every digest in a committed invalid-artifact index or
-//!   eviction set is quarantined permanently: reads report it as
-//!   [`StoredCounterfactualArtifactV1::Quarantined`] even when this store
-//!   holds its bytes, which stay retained for audit only.
+//! - **Quarantine by generation.** The adapter keeps, per artifact digest,
+//!   its bytes with the latest generation that wrote them, and the latest
+//!   [`CounterfactualInvalidationCommandV1::quarantines_through`] of a
+//!   committed index or eviction set that named it, and resolves every read
+//!   with [`ForkGenerationV1::resolve_read`]. Quarantined bytes written at or
+//!   before that generation stay retained for audit only; the same bytes
+//!   written again by a later generation are readable there. A quarantined
+//!   digest this store holds no bytes for reads as absent.
+//! - **Recovery read.** Every invalidation persists its receipt's
+//!   [`CounterfactualGenerationRecordV1`] keyed by its new generation, and
+//!   [`CounterfactualStorePortV1::committed_generation_receipt`] rebuilds the
+//!   receipt from it, under the same erasure read fence as every other read.
+//! - **Outcome unknown.** Backend failures map through the crate's shared
+//!   `counterfactual_port_error`, so a `CoreError::StorageOutcomeUnknown`
+//!   would surface as `OutcomeUnknown`. `MemoryStore` never produces one on
+//!   these paths: every fallible step runs on staged copies, and installing
+//!   is infallible, so a write either commits entirely or fails having
+//!   committed nothing, and its state is always settled.
 //! - **Deleted Forks.** Deleting a Fork Timeline keeps its counterfactual
 //!   state, exactly like the `SQLite` adapter, so a generation never
 //!   decreases and the audit bytes are retained. Publication, reads, Tick
@@ -51,18 +65,25 @@
 //!   Events, so they run under the ADR-060 erasure write fence and, like every
 //!   generic Fork append, are rejected on an ADR-099 admitted Fork whose
 //!   appends are reserved for the classified append authority. The
-//!   generation, basis, and artifact reads are derived from the Fork
+//!   generation, basis, receipt, and artifact reads are derived from the Fork
 //!   Timeline, so they run under the ADR-060 erasure read fence like every
 //!   other `MemoryStore` Timeline read, and fail closed without a bound
-//!   erasure gate. Publishing facts writes host-owned facts only, touches no
+//!   erasure gate. Both fences validate the bound erasure inventory
+//!   generation. Publishing facts writes host-owned facts only, touches no
 //!   Timeline Event or derived artifact, and is not fenced.
+//! - **No data-version check.** The `SQLite` adapter also compares the
+//!   database's `PRAGMA data_version` with the bound erasure inventory inside
+//!   every counterfactual write transaction (publication, commit, and Tick
+//!   append), because another connection may change the same file. A
+//!   `MemoryStore` is owned by one handle and has no other writer, so it has
+//!   no equivalent check.
 //! - **Errors.** A missing, deleted, non-Fork, unpublished, or protected
 //!   Timeline, and a Tick draft the generic append guard rejects, is
 //!   `ForkNotFound`; a staged head that did not advance is `CorruptState`;
 //!   every other backend failure, including a containment denial or an
 //!   admitted Fork, is `StorageFailure`.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use pos_core::{
     clock::Seq,
@@ -70,13 +91,15 @@ use pos_core::{
     error::CoreError,
     hasher::Hasher,
     ids::{EventId, TimelineId},
-    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualInvalidationCommandV1,
+    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
+    CounterfactualGenerationRecordV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     CounterfactualTickOutcomeV1, ErasureProtectedOperationV1, ForkGenerationV1,
     PipelineDraftBatchV1, StoredCounterfactualArtifactV1,
 };
 
 use super::{MemoryStore, TimelineState};
+use crate::counterfactual_adapter::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
 
 /// Test-only fault injected at the staged head, after staging and before
 /// installing anything.
@@ -96,13 +119,24 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Retained bytes of one artifact digest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactBytesV1 {
+    bytes: Vec<u8>,
+    /// Latest generation that wrote these bytes.
+    written_generation: u64,
+}
+
 /// Committed counterfactual state of one Fork.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CounterfactualForkStateV1 {
     facts: CounterfactualFactsV1,
     generation: u64,
-    artifacts: BTreeMap<Hash, Vec<u8>>,
-    quarantined: BTreeSet<Hash>,
+    artifacts: BTreeMap<Hash, ArtifactBytesV1>,
+    /// Latest generation each digest was quarantined through.
+    quarantined: BTreeMap<Hash, u64>,
+    /// Receipt record of every committed generation, keyed by generation.
+    receipts: BTreeMap<u64, CounterfactualGenerationRecordV1>,
 }
 
 impl CounterfactualForkStateV1 {
@@ -111,7 +145,8 @@ impl CounterfactualForkStateV1 {
             facts,
             generation: 0,
             artifacts: BTreeMap::new(),
-            quarantined: BTreeSet::new(),
+            quarantined: BTreeMap::new(),
+            receipts: BTreeMap::new(),
         }
     }
 
@@ -124,37 +159,56 @@ impl CounterfactualForkStateV1 {
         }
     }
 
-    /// This store's view of one artifact digest; quarantine wins over bytes.
+    /// This store's view of one artifact digest, for
+    /// [`ForkGenerationV1::resolve_read`].
     fn stored(&self, digest: Hash) -> StoredCounterfactualArtifactV1 {
-        if self.quarantined.contains(&digest) {
-            StoredCounterfactualArtifactV1::Quarantined
-        } else {
-            self.artifacts.get(&digest).cloned().map_or(
-                StoredCounterfactualArtifactV1::Absent,
-                StoredCounterfactualArtifactV1::Authoritative,
-            )
-        }
+        self.artifacts
+            .get(&digest)
+            .map_or(StoredCounterfactualArtifactV1::Absent, |artifact| {
+                StoredCounterfactualArtifactV1::Stored {
+                    bytes: artifact.bytes.clone(),
+                    written_generation: artifact.written_generation,
+                    quarantined_through: self.quarantined.get(&digest).copied(),
+                }
+            })
     }
 
     /// Apply the command's whole generation in place. Infallible, so it runs
     /// only after every fallible step of the commit succeeded.
-    fn advance(&mut self, command: &CounterfactualInvalidationCommandV1) {
-        self.generation = command.new_generation().generation;
+    ///
+    /// Generations only increase, so overwriting keeps the latest writing and
+    /// quarantining generation per digest.
+    fn advance(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: CounterfactualGenerationRecordV1,
+    ) {
+        let generation = command.new_generation().generation;
+        let through = command.quarantines_through();
+        self.generation = generation;
         self.quarantined.extend(
             command
                 .invalid_artifacts()
                 .iter()
                 .chain(command.evictions())
-                .copied(),
+                .map(|digest| (*digest, through)),
         );
-        self.artifacts.insert(
-            command.frontier().digest(),
-            command.frontier().as_bytes().to_vec(),
-        );
-        self.artifacts.insert(
-            command.invalidation().digest(),
-            command.invalidation().as_bytes().to_vec(),
-        );
+        for (digest, bytes) in [
+            (command.frontier().digest(), command.frontier().as_bytes()),
+            (
+                command.invalidation().digest(),
+                command.invalidation().as_bytes(),
+            ),
+        ] {
+            self.artifacts.insert(
+                digest,
+                ArtifactBytesV1 {
+                    bytes: bytes.to_vec(),
+                    written_generation: generation,
+                },
+            );
+        }
+        self.receipts.insert(generation, record);
     }
 }
 
@@ -195,7 +249,7 @@ impl ForkEntriesV1<'_> {
             })
             .and_then(|()| staged_tick_head(&timeline))
             .map(|head| StagedTickV1 { timeline, head })
-            .map_err(|error| store_error(&error))
+            .map_err(|error| counterfactual_port_error(&error))
     }
 
     /// Install a staged Tick's Events on the Fork Timeline. Infallible.
@@ -215,15 +269,6 @@ struct StagedTickV1 {
     timeline: TimelineState,
     /// Fork Logical Head after the Tick.
     head: Seq,
-}
-
-/// Map a backend failure onto the closed port errors.
-const fn store_error(error: &CoreError) -> CounterfactualStoreErrorV1 {
-    if matches!(error, CoreError::TimelineNotFound(_)) {
-        CounterfactualStoreErrorV1::ForkNotFound
-    } else {
-        CounterfactualStoreErrorV1::StorageFailure
-    }
 }
 
 /// The inherited logical prefix of one Timeline state.
@@ -262,7 +307,7 @@ fn staged_tick_head(staged: &TimelineState) -> Result<Seq, CoreError> {
 impl MemoryStore {
     fn ensure_visible_fork(&self, fork: TimelineId) -> Result<(), CounterfactualStoreErrorV1> {
         self.ensure_generic_timeline_visibility(fork)
-            .map_err(|error| store_error(&error))
+            .map_err(|error| counterfactual_port_error(&error))
             .and_then(|()| {
                 if self.state(fork).timeline.meta.fork_point.is_some() {
                     Ok(())
@@ -335,11 +380,13 @@ impl MemoryStore {
         let tick = entries.stage_tick(command.first_tick_drafts())?;
         // The receipt is built before anything is installed, so even its
         // `CorruptState` rejection commits nothing.
-        command.committed_receipt(tick.head).map(|receipt| {
-            entries.install_tick(tick);
-            entries.counterfactual.advance(command);
-            CounterfactualInvalidationOutcomeV1::Committed(Box::new(receipt))
-        })
+        command
+            .committed_receipt(&COUNTERFACTUAL_SEAL, tick.head)
+            .map(|receipt| {
+                entries.install_tick(tick);
+                entries.counterfactual.advance(command, receipt.record());
+                CounterfactualInvalidationOutcomeV1::Committed(Box::new(receipt))
+            })
     }
 
     /// Recheck the persisted basis, stage one later Tick, build its outcome,
@@ -359,7 +406,7 @@ impl MemoryStore {
         // The outcome is built before the Tick is installed, so even its
         // `CorruptState` rejection commits nothing.
         persisted
-            .committed_tick(tick.head)
+            .committed_tick(&COUNTERFACTUAL_SEAL, tick.head)
             .inspect(|_| entries.install_tick(tick))
     }
 }
@@ -393,7 +440,7 @@ impl CounterfactualStorePortV1 for MemoryStore {
                 .ensure_generic_fork_append_is_rejected(fork)
                 .map(|()| store.commit_visible_counterfactual(command))
         })
-        .map_err(|error| store_error(&error))
+        .map_err(|error| counterfactual_port_error(&error))
         .and_then(std::convert::identity)
     }
 
@@ -408,7 +455,7 @@ impl CounterfactualStorePortV1 for MemoryStore {
                 .ensure_generic_fork_append_is_rejected(fork)
                 .map(|()| store.append_visible_counterfactual_tick(fork, expected, drafts))
         })
-        .map_err(|error| store_error(&error))
+        .map_err(|error| counterfactual_port_error(&error))
         .and_then(std::convert::identity)
     }
 
@@ -424,7 +471,7 @@ impl CounterfactualStorePortV1 for MemoryStore {
                     generation: state.generation,
                 }))
         })
-        .map_err(|error| store_error(&error))
+        .map_err(|error| counterfactual_port_error(&error))
         .and_then(std::convert::identity)
     }
 
@@ -435,8 +482,28 @@ impl CounterfactualStorePortV1 for MemoryStore {
         self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
             Ok(store.persisted_counterfactual_basis(fork))
         })
-        .map_err(|error| store_error(&error))
+        .map_err(|error| counterfactual_port_error(&error))
         .and_then(std::convert::identity)
+    }
+
+    fn committed_generation_receipt(
+        &self,
+        at: ForkGenerationV1,
+    ) -> Result<Option<CounterfactualGenerationReceiptV1>, CounterfactualStoreErrorV1> {
+        self.with_erasure_read_fence(at.fork, ErasureProtectedOperationV1::Read, |store| {
+            Ok(store
+                .counterfactual_fork(at.fork)
+                .map(|state| state.receipts.get(&at.generation).copied()))
+        })
+        .map_err(|error| counterfactual_port_error(&error))
+        .and_then(std::convert::identity)
+        .and_then(|record| {
+            record
+                .map(|record| {
+                    CounterfactualGenerationReceiptV1::from_record(&COUNTERFACTUAL_SEAL, record)
+                })
+                .transpose()
+        })
     }
 
     fn read_generation_artifact(
@@ -449,7 +516,7 @@ impl CounterfactualStorePortV1 for MemoryStore {
                 .counterfactual_fork(at.fork)
                 .and_then(|state| at.resolve_read(state.generation, state.stored(artifact_digest))))
         })
-        .map_err(|error| store_error(&error))
+        .map_err(|error| counterfactual_port_error(&error))
         .and_then(std::convert::identity)
     }
 }
@@ -458,6 +525,9 @@ impl CounterfactualStorePortV1 for MemoryStore {
 mod tests {
     use std::sync::Arc;
 
+    use pos_core::counterfactual_store::test_fixtures::{
+        frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, uint,
+    };
     use pos_core::{
         event::Event, CanonicalBytes, CounterfactualInvalidationInputV1, EntityId,
         ErasureContainmentGateV1, EventDraft, EventStore, ForkAdmissionRecordInputV1,
@@ -489,88 +559,6 @@ mod tests {
         )
     }
 
-    /// Frame fields after the version as one self-digested record.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn frame(heads: (u8, u8), magic: [u8; 4], domain: &[u8], fields: &[u8]) -> Vec<u8> {
-        let mut bytes = vec![heads.0, 0x64];
-        bytes.extend_from_slice(&magic);
-        bytes.push(0x01);
-        bytes.extend_from_slice(fields);
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(domain);
-        hasher.update(&[0, heads.1]);
-        hasher.update(&bytes[1..]);
-        bytes.extend_from_slice(&[0x58, 0x20]);
-        bytes.extend_from_slice(hasher.finalize().as_bytes());
-        bytes
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn digest_field(value: Hash) -> Vec<u8> {
-        [&[0x58, 0x20][..], &value.as_bytes()[..]].concat()
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn id_field(value: [u8; 16]) -> Vec<u8> {
-        [&[0x50][..], &value[..]].concat()
-    }
-
-    /// Encode one shortest-form CBOR unsigned integer.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn uint(value: u64) -> Vec<u8> {
-        let bytes = value.to_be_bytes();
-        match value {
-            0..=23 => vec![bytes[7]],
-            24..=0xff => vec![0x18, bytes[7]],
-            0x100..=0xffff => [&[0x19][..], &bytes[6..]].concat(),
-            0x1_0000..=0xffff_ffff => [&[0x1a][..], &bytes[4..]].concat(),
-            _ => [&[0x1b][..], &bytes[..]].concat(),
-        }
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn text_field(value: &str) -> Vec<u8> {
-        let mut encoded = uint(ok(u64::try_from(value.len())));
-        encoded[0] |= 3 << 5;
-        [encoded, value.as_bytes().to_vec()].concat()
-    }
-
-    /// Encode one six-field dependency-node coordinate.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn node_field(tick: u64, owner: &str) -> Vec<u8> {
-        [
-            vec![0x86],
-            uint(tick),
-            uint(0),
-            text_field(owner),
-            uint(0),
-            uint(7),
-            digest_field(Hash::from_bytes([21; 32])),
-        ]
-        .concat()
-    }
-
-    /// Encode `SIV1` fields 8 through 14, as the `pos-core` port tests do.
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn invalidation_middle() -> Vec<u8> {
-        [
-            node_field(5, "agent-a"),
-            node_field(4_294_967_296, "an-owner-identifier-of-thirty-"),
-            vec![0x81, 0x86],
-            text_field("event"),
-            uint(70_000),
-            digest_field(Hash::from_bytes([22; 32])),
-            node_field(5, "agent-a"),
-            uint(300),
-            uint(0),
-            vec![0x81],
-            digest_field(Hash::from_bytes([23; 32])),
-            vec![0x80, 0x80],
-            uint(0),
-        ]
-        .concat()
-    }
-
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn command(fork: TimelineId) -> CounterfactualInvalidationCommandV1 {
         command_with_trust_epoch(fork, 0)
@@ -582,38 +570,38 @@ mod tests {
         fork: TimelineId,
         trust_epoch: u64,
     ) -> CounterfactualInvalidationCommandV1 {
-        let frontier = ok(RecomputationFrontierBytesV1::try_from_canonical(frame(
-            (0x91, 0x90),
-            *b"RCF1",
-            b"PiglorOS.RecomputationFrontier.v1",
-            &[
-                id_field([1; 16]),
-                digest_field(Hash::from_bytes([5; 32])),
-                digest_field(Hash::from_bytes([2; 32])),
-                digest_field(Hash::from_bytes([3; 32])),
-                vec![0x01],
-            ]
-            .concat(),
-        )));
-        let invalidation = ok(SuffixInvalidationBytesV1::try_from_canonical(frame(
-            (0x92, 0x91),
-            *b"SIV1",
-            b"PiglorOS.SuffixInvalidation.v1",
-            &[
-                id_field([4; 16]),
-                digest_field(Hash::from_bytes([5; 32])),
-                id_field(fork.inner().to_bytes()),
-                vec![0x00, 0x01],
-                digest_field(frontier.digest()),
-                invalidation_middle(),
-                // Commit coordinate: the Fork, its expected head, the first Tick.
-                vec![0x83],
-                id_field(fork.inner().to_bytes()),
-                uint(1),
-                uint(1),
-            ]
-            .concat(),
-        )));
+        let frontier = ok(RecomputationFrontierBytesV1::try_from_canonical(
+            frontier_frame(
+                &[
+                    id_field([1; 16]),
+                    hash_field(Hash::from_bytes([5; 32])),
+                    hash_field(Hash::from_bytes([2; 32])),
+                    hash_field(Hash::from_bytes([3; 32])),
+                    vec![0x01],
+                ]
+                .concat(),
+                0,
+            ),
+        ));
+        let invalidation = ok(SuffixInvalidationBytesV1::try_from_canonical(
+            invalidation_frame(
+                &[
+                    id_field([4; 16]),
+                    hash_field(Hash::from_bytes([5; 32])),
+                    id_field(fork.inner().to_bytes()),
+                    vec![0x00, 0x01],
+                    hash_field(frontier.digest()),
+                    invalidation_middle(),
+                    // Commit coordinate: the Fork, its expected head, the first Tick.
+                    vec![0x83],
+                    id_field(fork.inner().to_bytes()),
+                    uint(1),
+                    uint(1),
+                ]
+                .concat(),
+                0,
+            ),
+        ));
         ok(CounterfactualInvalidationCommandV1::try_new(
             CounterfactualInvalidationInputV1 {
                 fork,
@@ -679,7 +667,7 @@ mod tests {
         assert_eq!(
             retried,
             Ok(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
-                ok(command.committed_receipt(Seq::from_u64(2)))
+                ok(command.committed_receipt(&COUNTERFACTUAL_SEAL, Seq::from_u64(2)))
             )))
         );
         assert_eq!(store.state(fork).events.len(), 1);

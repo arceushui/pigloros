@@ -35,6 +35,7 @@
 //! Disable `SQLite` entirely: `--no-default-features`
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+mod counterfactual_adapter;
 pub mod fork_admission_authority;
 pub mod fork_attribution_issuer_policy;
 pub mod fork_delivery_journal;
