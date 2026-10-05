@@ -1453,11 +1453,12 @@ impl SqliteStore {
         RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED
             .with(|observed| observed.set(false));
         RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|configured| {
-            if configured.replace(Some(fault)).is_some() {
+            if configured.get().is_some() {
                 return Err(CoreError::Storage(
                     "recipient export test fault is already configured".to_owned(),
                 ));
             }
+            configured.set(Some(fault));
             Ok(())
         })
     }
