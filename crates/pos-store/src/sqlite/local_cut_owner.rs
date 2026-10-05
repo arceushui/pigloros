@@ -1344,7 +1344,7 @@ fn sqlite_owner_link_earlier_cuts<'a>(
     owner_id: [u8; 32],
     seal: &LocalCutSealInputV2,
     cut_ids: &'a [Vec<u8>],
-) -> impl Iterator<Item = Result<ManifestOwnerLinkAncestorV1, LocalCutOwnerErrorV1>> + 'a {
+) -> impl Iterator<Item = Result<ManifestOwnerLinkAncestorV1, LocalCutOwnerErrorV1>> + use<'a> {
     let sealed_cut = seal.cut_id;
     cut_ids
         .iter()
