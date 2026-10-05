@@ -4606,7 +4606,7 @@ mod tests {
             .execute_batch("PRAGMA ignore_check_constraints = ON")?;
         fixture.store.conn.execute(
             "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
-            rusqlite::params![vec![1; 15], owner_id.as_str()],
+            rusqlite::params![vec![1_u8; 15], owner_id.as_str()],
         )?;
         fixture
             .store
