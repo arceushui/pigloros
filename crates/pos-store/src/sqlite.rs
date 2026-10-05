@@ -11,6 +11,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, TransactionBehavior,
 };
 use std::{
+    cell::Cell,
     collections::{BTreeSet, HashSet},
     sync::Arc,
     time::{Duration, Instant},
@@ -253,7 +254,7 @@ pub struct SqliteStore {
     /// connection was inside a transaction, and no later observation of it
     /// in autocommit has settled that; while set and the connection is inside
     /// a transaction, counterfactual port reads are refused.
-    counterfactual_write_in_doubt: std::cell::Cell<bool>,
+    counterfactual_write_in_doubt: Cell<bool>,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -1860,7 +1861,7 @@ impl SqliteStore {
             authority_persistence_binding: None,
             fork_admission_authority_enabled: true,
             fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1::default(),
-            counterfactual_write_in_doubt: std::cell::Cell::new(false),
+            counterfactual_write_in_doubt: Cell::new(false),
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
