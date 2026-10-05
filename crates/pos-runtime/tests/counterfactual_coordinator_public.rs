@@ -1773,17 +1773,17 @@ const BASE_INDEX: [u8; 5] = [3, 4, 5, 7, 8];
 
 #[test]
 fn index_and_eviction_set_cover_exactly_the_suffix() -> TestResult {
-    let mut setup = setup::<Rigged<DELEGATES>>(&BASE)?;
+    let mut exact = setup::<Rigged<DELEGATES>>(&BASE)?;
     // A prior-generation presentation output before the global frontier.
-    setup.source.extra_outputs = vec![CounterfactualProvisionalOutputV1 {
+    exact.source.extra_outputs = vec![CounterfactualProvisionalOutputV1 {
         node: DependencyNodeV1 {
             artifact_digest: EARLY_PRESENTATION,
-            ..setup.source.nodes[WORLD_10].node.clone()
+            ..exact.source.nodes[WORLD_10].node.clone()
         },
         class: DependencyClassV1::PresentationOnly,
     }];
-    admit(&mut setup).0?;
-    let command = &setup.coordinator.store().commands[0];
+    admit(&mut exact).0?;
+    let command = &exact.coordinator.store().commands[0];
     // Outputs before the frontier, the early presentation output, and the
     // Intervention seeds stay out of the index.
     assert_eq!(
@@ -1798,7 +1798,7 @@ fn index_and_eviction_set_cover_exactly_the_suffix() -> TestResult {
             .map(Hash::from_bytes)
             .as_slice()
     );
-    assert_affected_presentation_indexed(&setup, command.invalid_artifacts(), &[UI_15])?;
+    assert_affected_presentation_indexed(&exact, command.invalid_artifacts(), &[UI_15])?;
 
     // Under the fallback every provisional presentation output is stale.
     let mut fallback = setup::<Rigged<DELEGATES>>(&Spec {
