@@ -376,6 +376,9 @@ struct CheckpointV1 {
     digest: [u8; 32],
 }
 
+/// One Tick step: a closed failure that committed nothing, or a closed error.
+type TickStepV1 = Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1>;
+
 impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// Release the exclusively owned store, so a test can change it and hand
     /// it to a new coordinator.
@@ -623,7 +626,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         context: &SuffixContextV1<'_>,
         progress: &mut ProgressV1,
         stager: &mut impl CounterfactualTickStagerV1,
-    ) -> Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1> {
+    ) -> TickStepV1 {
         let tick = progress.tick.saturating_add(1);
         let batch = match stage_tick(stager, context.plan, context.receipt.generation(), tick) {
             Ok(batch) => batch,
@@ -654,7 +657,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         tick: u64,
         drafts: &[EventDraft],
         checkpoint: CheckpointV1,
-    ) -> Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1> {
+    ) -> TickStepV1 {
         let mut tick_drafts = drafts.to_vec();
         tick_drafts.push(checkpoint_draft(context.fork(), &checkpoint.bytes));
         let batch = match PipelineDraftBatchV1::try_new(tick_drafts) {
@@ -698,7 +701,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         &self,
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
-    ) -> Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1> {
+    ) -> TickStepV1 {
         match self.store.current_counterfactual_basis(fork) {
             Ok(persisted) if expected.first_conflict(&persisted).is_none() => {
                 Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed))
