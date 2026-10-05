@@ -66,6 +66,10 @@ impl DependencyClassV1 {
     }
 
     /// Class carrying wire code `code`, or `None` outside the closed set.
+    ///
+    /// It takes the decoded CBOR wire integer (`u64`) so any out-of-range
+    /// value is rejected here without a narrowing cast, while
+    /// [`Self::wire_code`] returns the closed set's compact `u8` index.
     #[must_use]
     pub fn from_wire_code(code: u64) -> Option<Self> {
         usize::try_from(code)
@@ -273,6 +277,14 @@ impl InputDependencyV1 {
         self.to_canonical_cbor()
             .map(|bytes| domain_digest(DIGEST_DOMAIN_V1, &bytes))
     }
+
+    /// Compare two edges by the IDP1 edge-list order key only: `(consumer
+    /// tick, consumer scheduler position, consumer owner bytes, consumer
+    /// output ordinal, source digest)`. Neither edge is validated.
+    #[must_use]
+    pub fn order_cmp(&self, other: &Self) -> Ordering {
+        edge_order_key(self).cmp(&edge_order_key(other))
+    }
 }
 
 /// Validate every edge and the canonical edge-list order.
@@ -293,14 +305,31 @@ pub fn validate_input_dependency_order_v1(
     dependencies
         .iter()
         .try_for_each(InputDependencyV1::validate)
-        .and_then(|()| {
-            dependencies.windows(2).try_for_each(|pair| {
-                match edge_order_key(&pair[0]).cmp(&edge_order_key(&pair[1])) {
-                    Ordering::Less => Ok(()),
-                    Ordering::Equal => Err(InputDependencyContractErrorV1::DuplicateIdentity),
-                    Ordering::Greater => Err(InputDependencyContractErrorV1::NonCanonicalOrder),
-                }
-            })
+        .and_then(|()| validate_input_dependency_list_order_v1(dependencies))
+}
+
+/// Check only the canonical edge-list order with
+/// [`InputDependencyV1::order_cmp`], without validating any edge.
+///
+/// Callers that already validated every edge (for example through its
+/// digest) use this to avoid validating each record a second time.
+///
+/// # Errors
+///
+/// Returns [`DuplicateIdentity`] for a repeated key or [`NonCanonicalOrder`]
+/// for a descending pair.
+///
+/// [`DuplicateIdentity`]: InputDependencyContractErrorV1::DuplicateIdentity
+/// [`NonCanonicalOrder`]: InputDependencyContractErrorV1::NonCanonicalOrder
+pub fn validate_input_dependency_list_order_v1(
+    dependencies: &[InputDependencyV1],
+) -> Result<(), InputDependencyContractErrorV1> {
+    dependencies
+        .windows(2)
+        .try_for_each(|pair| match pair[0].order_cmp(&pair[1]) {
+            Ordering::Less => Ok(()),
+            Ordering::Equal => Err(InputDependencyContractErrorV1::DuplicateIdentity),
+            Ordering::Greater => Err(InputDependencyContractErrorV1::NonCanonicalOrder),
         })
 }
 

@@ -4,9 +4,10 @@
 
 use ciborium::value::Value;
 use pos_conformance::counterfactual::dependency::{
-    validate_input_dependency_order_v1, DependencyClassificationRuleV1, DependencyTickRangeV1,
-    InputDependencyContractErrorV1, InputDependencyV1, INPUT_DEPENDENCY_MAGIC_V1,
-    MAX_DEPENDENCY_OWNER_ID_BYTES_V1, MAX_INPUT_DEPENDENCY_BYTES_V1,
+    validate_input_dependency_list_order_v1, validate_input_dependency_order_v1,
+    DependencyClassificationRuleV1, DependencyTickRangeV1, InputDependencyContractErrorV1,
+    InputDependencyV1, INPUT_DEPENDENCY_MAGIC_V1, MAX_DEPENDENCY_OWNER_ID_BYTES_V1,
+    MAX_INPUT_DEPENDENCY_BYTES_V1,
 };
 use pos_conformance::{DependencyClassV1, DependencyNodeV1};
 use std::collections::BTreeSet;
@@ -641,6 +642,30 @@ fn edge_lists_follow_the_canonical_consumer_and_source_order() {
     assert_eq!(
         validate_input_dependency_order_v1(&[base, invalid]),
         Err(ErrorV1::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn list_order_compares_only_the_order_key() {
+    let base = dependency();
+    let later = with(|v| v.source.artifact_digest = [0x12; 32]);
+    let same_key = with(|v| v.provenance_digest = [0; 32]);
+    assert_eq!(base.order_cmp(&later), std::cmp::Ordering::Less);
+    assert_eq!(later.order_cmp(&base), std::cmp::Ordering::Greater);
+    assert_eq!(base.order_cmp(&same_key), std::cmp::Ordering::Equal);
+    assert_eq!(validate_input_dependency_list_order_v1(&[]), Ok(()));
+    let invalid_but_ordered = [same_key.clone(), later.clone()];
+    assert_eq!(
+        validate_input_dependency_list_order_v1(&invalid_but_ordered),
+        Ok(())
+    );
+    assert_eq!(
+        validate_input_dependency_list_order_v1(&[later, base.clone()]),
+        Err(ErrorV1::NonCanonicalOrder)
+    );
+    assert_eq!(
+        validate_input_dependency_list_order_v1(&[base, same_key]),
+        Err(ErrorV1::DuplicateIdentity)
     );
 }
 
