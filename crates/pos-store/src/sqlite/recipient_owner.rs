@@ -3358,6 +3358,106 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Clone, Copy)]
+    enum RecipientExportSqlAction {
+        CreateTable(&'static str),
+        Delete(&'static str),
+        Insert(&'static str),
+        Read(&'static str),
+        Select,
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum RecipientExportSqlOperation {
+        CreateTable,
+        Delete,
+        Insert,
+        Read,
+    }
+
+    impl RecipientExportSqlAction {
+        const fn operation(self) -> Option<RecipientExportSqlOperation> {
+            match self {
+                Self::CreateTable(_) => Some(RecipientExportSqlOperation::CreateTable),
+                Self::Delete(_) => Some(RecipientExportSqlOperation::Delete),
+                Self::Insert(_) => Some(RecipientExportSqlOperation::Insert),
+                Self::Read(_) => Some(RecipientExportSqlOperation::Read),
+                Self::Select => None,
+            }
+        }
+
+        const fn table(self) -> Option<&'static str> {
+            match self {
+                Self::CreateTable(table)
+                | Self::Delete(table)
+                | Self::Insert(table)
+                | Self::Read(table) => Some(table),
+                Self::Select => None,
+            }
+        }
+    }
+
+    fn deny_recipient_export_sql_action(
+        connection: &Connection,
+        action: RecipientExportSqlAction,
+    ) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            let observed = match context.action {
+                AuthAction::CreateTable { table_name } => {
+                    Some((RecipientExportSqlOperation::CreateTable, table_name))
+                }
+                AuthAction::Delete { table_name } => {
+                    Some((RecipientExportSqlOperation::Delete, table_name))
+                }
+                AuthAction::Insert { table_name } => {
+                    Some((RecipientExportSqlOperation::Insert, table_name))
+                }
+                AuthAction::Read { table_name, .. } => {
+                    Some((RecipientExportSqlOperation::Read, table_name))
+                }
+                _ => None,
+            };
+            let denied = (matches!(action, RecipientExportSqlAction::Select)
+                && matches!(context.action, AuthAction::Select))
+                || observed.is_some_and(|(operation, table)| {
+                    action.operation() == Some(operation) && action.table() == Some(table)
+                });
+            if denied {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        Ok(())
+    }
+
+    fn deny_nth_recipient_export_begin(
+        connection: &Connection,
+        denied_begin: usize,
+    ) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let begins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_begins = Arc::clone(&begins);
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Begin
+                }
+            ) && observed_begins.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+                == denied_begin
+            {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        Ok(())
+    }
+
     fn override_next_recipient_random_bytes(bytes: Vec<u8>) {
         RECIPIENT_RANDOM_OVERRIDE.with(|override_bytes| {
             assert!(override_bytes.replace(Some(bytes)).is_none());
@@ -4888,6 +4988,608 @@ mod tests {
         entropy_fixture
             .store
             .recover_recipient_exports(&entropy_fixture.owner)?;
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_publication_maps_initial_preflight_failures() -> RecipientTestResult {
+        let mut head_fixture = recipient_publication_fixture()?;
+        let head_request = recipient_publication_request(
+            head_fixture.timeline,
+            head_fixture.descriptor,
+            &head_fixture.evaluation,
+            &head_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &head_fixture.store.conn,
+            RecipientExportSqlAction::Select,
+        )?;
+        let head_result = head_fixture.store.publish_recipient_export(
+            &head_fixture.authority,
+            &head_fixture.owner,
+            &head_request,
+        );
+        clear_recipient_export_authorizer(&head_fixture.store.conn)?;
+        assert!(head_result.is_err());
+
+        let mut gate_fixture = recipient_publication_fixture()?;
+        let gate_request = recipient_publication_request(
+            gate_fixture.timeline,
+            gate_fixture.descriptor,
+            &gate_fixture.evaluation,
+            &gate_fixture.token,
+        );
+        gate_fixture.store.erasure_gate = None;
+        assert!(gate_fixture
+            .store
+            .publish_recipient_export(&gate_fixture.authority, &gate_fixture.owner, &gate_request)
+            .is_err());
+
+        let mut durability_fixture = recipient_publication_fixture()?;
+        let durability_request = recipient_publication_request(
+            durability_fixture.timeline,
+            durability_fixture.descriptor,
+            &durability_fixture.evaluation,
+            &durability_fixture.token,
+        );
+        durability_fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA journal_mode=DELETE")?;
+        assert!(durability_fixture
+            .store
+            .publish_recipient_export(
+                &durability_fixture.authority,
+                &durability_fixture.owner,
+                &durability_request,
+            )
+            .is_err());
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn recipient_export_publication_maps_source_head_append_failure() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        fixture
+            .store
+            .inject_recipient_export_publication_test_fault(
+                RecipientExportPublicationTestFaultV1::SourceHeadChanged,
+            )?;
+        set_begin_failure(true);
+        let result =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request);
+        set_begin_failure(false);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_publication_maps_inner_writer_reservation_failure() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        deny_nth_recipient_export_begin(&fixture.store.conn, 3)?;
+        let result =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_pre_authorization_maps_query_failures() -> RecipientTestResult {
+        let mut owner_fixture = recipient_publication_fixture()?;
+        let owner_request = recipient_publication_request(
+            owner_fixture.timeline,
+            owner_fixture.descriptor,
+            &owner_fixture.evaluation,
+            &owner_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &owner_fixture.store.conn,
+            RecipientExportSqlAction::Read("timeline_owners"),
+        )?;
+        let owner_result = owner_fixture.store.publish_recipient_export(
+            &owner_fixture.authority,
+            &owner_fixture.owner,
+            &owner_request,
+        );
+        clear_recipient_export_authorizer(&owner_fixture.store.conn)?;
+        assert!(owner_result.is_err());
+
+        let mut registry_fixture = recipient_publication_fixture()?;
+        let registry_request = recipient_publication_request(
+            registry_fixture.timeline,
+            registry_fixture.descriptor,
+            &registry_fixture.evaluation,
+            &registry_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &registry_fixture.store.conn,
+            RecipientExportSqlAction::Read("key_registry"),
+        )?;
+        let registry_result = registry_fixture.store.publish_recipient_export(
+            &registry_fixture.authority,
+            &registry_fixture.owner,
+            &registry_request,
+        );
+        clear_recipient_export_authorizer(&registry_fixture.store.conn)?;
+        assert!(registry_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_pre_authorization_rejects_lost_pending_reservation() -> RecipientTestResult
+    {
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        fixture.store.conn.execute_batch(
+            "CREATE TRIGGER remove_recipient_export_reservation
+             AFTER INSERT ON recipient_export_pending_v1
+             BEGIN
+                 DELETE FROM recipient_export_pending_v1 WHERE export_id = NEW.export_id;
+             END",
+        )?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let expected_head =
+            SqliteStore::logical_head_unchecked_on(&fixture.store.conn, fixture.timeline)?;
+        assert!(matches!(
+            fixture.store.publish_recipient_export_under_fences(
+                &fixture.owner,
+                &request,
+                expected_head,
+            ),
+            Err(RecipientExportPublicationErrorV1::Store(CoreError::Storage(message)))
+                if message.contains("reservation is unavailable")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reservation_maps_begin_and_directory_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        set_begin_failure(true);
+        let begin_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        set_begin_failure(false);
+        assert!(begin_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let directory_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        assert!(directory_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("DROP TABLE recipient_key_inventory_v1")?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::CreateTable("recipient_key_inventory_v1"),
+        )?;
+        let custody_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(custody_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Read("recipient_custody_directory_claims_v1"),
+        )?;
+        let claim_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(claim_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reservation_maps_catalog_and_pending_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        fixture
+            .store
+            .conn
+            .execute_batch("DROP TABLE recipient_export_catalog_v1")?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::CreateTable("recipient_export_catalog_v1"),
+        )?;
+        let catalog_setup_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_setup_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Read("recipient_export_catalog_v1"),
+        )?;
+        let catalog_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Read("recipient_export_pending_v1"),
+        )?;
+        let pending_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(pending_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Insert("recipient_export_pending_v1"),
+        )?;
+        let insert_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(insert_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_recovery_maps_preflight_and_object_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let directory_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        assert!(directory_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("DROP TABLE recipient_key_inventory_v1")?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::CreateTable("recipient_key_inventory_v1"),
+        )?;
+        let custody_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(custody_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        fixture
+            .store
+            .conn
+            .execute_batch("DROP TABLE recipient_export_catalog_v1")?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::CreateTable("recipient_export_catalog_v1"),
+        )?;
+        let catalog_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [17; 16])?;
+        set_stat_failure(true);
+        let object_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        set_stat_failure(false);
+        assert!(object_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_recovery_rejects_unavailable_durability() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA journal_mode=DELETE")?;
+        assert!(fixture
+            .store
+            .recover_recipient_exports(&fixture.owner)
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reader_maps_directory_catalog_and_object_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let directory_result = fixture
+            .store
+            .read_recipient_export(&fixture.owner, [18; 16]);
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        assert!(directory_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(&fixture.store.conn, RecipientExportSqlAction::Select)?;
+        let catalog_result = fixture
+            .store
+            .read_recipient_export(&fixture.owner, [19; 16]);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        let publication = recipient_test_publication(&fixture, [20; 16]);
+        record_recipient_export_catalog(&fixture.store.conn, &fixture.owner, &publication)?;
+        set_open_failure(true);
+        let object_result = fixture
+            .store
+            .read_recipient_export(&fixture.owner, publication.export_id);
+        set_open_failure(false);
+        assert!(object_result.is_err());
+
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let ciphertext_result = read_recipient_export_ciphertext(&fixture.owner, [21; 16], 0);
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        assert!(ciphertext_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_catalog_reader_maps_schema_and_column_failures() -> RecipientTestResult {
+        let connection = Connection::open_in_memory()?;
+        deny_recipient_export_sql_action(&connection, RecipientExportSqlAction::Select)?;
+        let schema_result = load_recipient_export_catalog(&connection, [1; 16]);
+        clear_recipient_export_authorizer(&connection)?;
+        assert!(schema_result.is_err());
+
+        connection.execute_batch(
+            "CREATE TABLE recipient_export_catalog_v1 (
+                export_id,
+                owner_id,
+                recipient_epoch,
+                recipient_descriptor,
+                timeline_id,
+                local_head,
+                logical_head,
+                ciphertext_length,
+                ciphertext_digest
+            )",
+        )?;
+        for values in [
+            "X'01010101010101010101010101010101', X'00', 1, X'00', 'timeline', 1, 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', X'00', X'00', 'timeline', 1, 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, 1, 'timeline', 1, 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', X'00', 1, 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', 'timeline', X'00', 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', 'timeline', 1, X'00', 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', 'timeline', 1, 1, X'00', X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', 'timeline', 1, 1, 1, 1",
+        ] {
+            connection.execute_batch("DELETE FROM recipient_export_catalog_v1")?;
+            connection.execute_batch(&format!(
+                "INSERT INTO recipient_export_catalog_v1 VALUES ({values})"
+            ))?;
+            assert!(load_recipient_export_catalog(&connection, [1; 16]).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_publication_maps_export_catalog_and_pending_failures() -> RecipientTestResult
+    {
+        let mut catalog_fixture = recipient_publication_fixture()?;
+        let catalog_request = recipient_publication_request(
+            catalog_fixture.timeline,
+            catalog_fixture.descriptor,
+            &catalog_fixture.evaluation,
+            &catalog_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &catalog_fixture.store.conn,
+            RecipientExportSqlAction::Insert("recipient_export_catalog_v1"),
+        )?;
+        let catalog_result = catalog_fixture.store.publish_recipient_export(
+            &catalog_fixture.authority,
+            &catalog_fixture.owner,
+            &catalog_request,
+        );
+        clear_recipient_export_authorizer(&catalog_fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+
+        let mut pending_fixture = recipient_publication_fixture()?;
+        let pending_request = recipient_publication_request(
+            pending_fixture.timeline,
+            pending_fixture.descriptor,
+            &pending_fixture.evaluation,
+            &pending_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &pending_fixture.store.conn,
+            RecipientExportSqlAction::Delete("recipient_export_pending_v1"),
+        )?;
+        let pending_result = pending_fixture.store.publish_recipient_export(
+            &pending_fixture.authority,
+            &pending_fixture.owner,
+            &pending_request,
+        );
+        clear_recipient_export_authorizer(&pending_fixture.store.conn)?;
+        assert!(pending_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_publication_maps_source_export_failure() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        let registry = fixture
+            .store
+            .load_key_registry()?
+            .ok_or("recipient registry is unavailable")?;
+        let registered_digest = registry
+            .key_record(fixture.descriptor.identity())
+            .and_then(|record| record.private_material_digest)
+            .ok_or("recipient material is unavailable")?;
+        let absent_timeline = TimelineId::from_ulid(Ulid::from(96_u128));
+        let request = recipient_publication_request(
+            absent_timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        assert!(fixture
+            .store
+            .publish_recipient_export_with_registered_material(
+                &fixture.owner,
+                &request,
+                registered_digest,
+                [22; 16],
+                Seq::from_u64(1),
+            )
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reconciliation_maps_loader_and_catalog_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        let empty = Connection::open_in_memory()?;
+        assert!(reconcile_recipient_export_objects(&empty, &fixture.owner).is_err());
+
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [23; 16])?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Read("recipient_export_catalog_v1"),
+        )?;
+        let catalog_result =
+            reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+
+        let catalog_id = [24; 16];
+        let publication = recipient_test_publication(&fixture, catalog_id);
+        record_recipient_export_catalog(&fixture.store.conn, &fixture.owner, &publication)?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, catalog_id)?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Delete("recipient_export_pending_v1"),
+        )?;
+        let delete_result = reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(delete_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reconciliation_maps_object_and_pending_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [25; 16])?;
+        set_stat_failure(true);
+        let object_result = reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        set_stat_failure(false);
+        assert!(object_result.is_err());
+
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [26; 16])?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Delete("recipient_export_pending_v1"),
+        )?;
+        let pending_result =
+            reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(pending_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_pending_helpers_reject_absent_and_invalid_rows() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        assert!(remove_recipient_export_pending(&fixture.store.conn, [27; 16]).is_err());
+        let owner_id = recipient_owner_id_from_grantee(fixture.owner.grantee_id)?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        fixture.store.conn.execute(
+            "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
+            rusqlite::params![1_i64, owner_id.as_str()],
+        )?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = OFF")?;
+        assert!(load_recipient_export_pending(&fixture.store.conn, &fixture.owner).is_err());
+        fixture
+            .store
+            .conn
+            .execute_batch("DELETE FROM recipient_export_pending_v1")?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        fixture.store.conn.execute(
+            "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
+            rusqlite::params![vec![1_u8; 15], owner_id.as_str()],
+        )?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = OFF")?;
+        assert!(reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner).is_err());
+
+        fixture
+            .store
+            .conn
+            .execute_batch("DELETE FROM recipient_export_pending_v1")?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Read("recipient_export_pending_v1"),
+        )?;
+        let query_result = reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(query_result.is_err());
         Ok(())
     }
 }
