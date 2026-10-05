@@ -125,7 +125,7 @@
 //! Receipts and committed Tick outcomes are evidence that a transaction
 //! committed, so they are built only with a [`CounterfactualAdapterSealV1`].
 //! The seal is constructible only through
-//! [`CounterfactualAdapterSealV1::for_adapter`], which exists only with this
+//! `CounterfactualAdapterSealV1::for_adapter`, which exists only with this
 //! crate's `counterfactual-adapter` cargo feature. Only `pos-store`, which
 //! owns the Memory and `SQLite` adapters, enables that feature outside
 //! dev-dependencies, and outside `pos-core`, `pos-store`, and test
@@ -228,7 +228,7 @@ pub enum CounterfactualStoreErrorV1 {
 /// [`CounterfactualGenerationReceiptV1::from_record`], and
 /// [`CounterfactualBasisV1::committed_tick`] require it, so only an adapter
 /// can mint commit evidence. It is constructible only with
-/// [`Self::for_adapter`], which exists only with this crate's
+/// `Self::for_adapter`, which exists only with this crate's
 /// `counterfactual-adapter` cargo feature; only `pos-store` enables that
 /// feature outside dev-dependencies, and it must not re-export the seal.
 #[derive(Debug)]
@@ -652,9 +652,10 @@ pub struct CounterfactualBasisV1 {
 }
 
 impl CounterfactualBasisV1 {
-    /// Return the first persisted fact that differs from this expected basis,
-    /// in canonical order: Logical Head, plan digest, dependency-graph
-    /// digest, generation, then the epochs of
+    /// Return the first persisted fact that differs from this expected basis.
+    ///
+    /// Facts are compared in canonical order: Logical Head, plan digest,
+    /// dependency-graph digest, generation, then the epochs of
     /// [`CounterfactualFactsV1::first_epoch_change`].
     #[must_use]
     pub fn first_conflict(&self, persisted: &Self) -> Option<InvalidationConflictV1> {
@@ -1312,10 +1313,11 @@ pub trait CounterfactualStorePortV1 {
         fork: TimelineId,
     ) -> Result<CounterfactualBasisV1, CounterfactualStoreErrorV1>;
 
-    /// Return the receipt of the invalidation that committed generation
-    /// `at`, rebuilt from its persisted record, or `None` when no
-    /// invalidation committed that generation (including generation 0 and
-    /// every generation after the committed one).
+    /// Return the receipt of the invalidation that committed generation `at`.
+    ///
+    /// The receipt is rebuilt from its persisted record; the result is `None`
+    /// when no invalidation committed that generation (including generation 0
+    /// and every generation after the committed one).
     ///
     /// This is the recovery read after an `OutcomeUnknown` invalidation; it
     /// also serves earlier generations, so it never reports
