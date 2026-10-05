@@ -1525,15 +1525,11 @@ fn corrupt_receipts_and_artifact_rows_are_rejected_closed() {
             ),
         ));
         let reopened = open(&fixture.path);
+        let frontier = Spec::new(fork).command().frontier().as_bytes().to_vec();
         let (receipt_read, artifact_read) = if table == "counterfactual_artifacts" {
             (Ok(Some(receipt)), Err(StoreError::CorruptState))
         } else {
-            (
-                Err(StoreError::CorruptState),
-                Ok(Some(
-                    Spec::new(fork).command().frontier().as_bytes().to_vec(),
-                )),
-            )
+            (Err(StoreError::CorruptState), Ok(Some(frontier)))
         };
         assert_eq!(
             reopened.committed_generation_receipt(at(fork, 1)),

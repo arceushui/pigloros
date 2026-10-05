@@ -1310,9 +1310,9 @@ mod tests {
         frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, uint,
     };
     use pos_core::{
-        CanonicalBytes, CounterfactualInvalidationInputV1, EntityId, ErasurePersistencePortV1,
-        ErasureProtectedEffectDispositionV1, EventDraft, EventStore, Kind,
-        RecomputationFrontierBytesV1, SuffixInvalidationBytesV1,
+        CanonicalBytes, CounterfactualInvalidationInputV1, EntityId,
+        ErasureInventoryPersistencePortV1, ErasureProtectedEffectDispositionV1, EventDraft,
+        EventStore, Kind, RecomputationFrontierBytesV1, SuffixInvalidationBytesV1,
     };
 
     use super::*;
