@@ -3206,6 +3206,27 @@ mod tests {
         assert!(unique_events[0].payload.is_empty());
     }
 
+    #[test]
+    fn timeline_export_plaintext_staging_scrubs_optional_names() {
+        let mut named = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("plaintext staging")),
+            events: vec![validation_test_event(1, EventId::new())],
+            parent_fork_hash: None,
+        };
+        assert!(named.zeroize_plaintext_staging());
+        assert_eq!(named.timeline.meta.name.as_deref(), Some(""));
+
+        let mut unnamed_meta = TimelineMeta::root("plaintext staging");
+        unnamed_meta.name = None;
+        let mut unnamed = TimelineExport {
+            timeline: Timeline::new(unnamed_meta),
+            events: vec![validation_test_event(1, EventId::new())],
+            parent_fork_hash: None,
+        };
+        assert!(unnamed.zeroize_plaintext_staging());
+        assert!(unnamed.timeline.meta.name.is_none());
+    }
+
     struct ValidationTestHasher {
         should_match: bool,
     }
