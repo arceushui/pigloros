@@ -199,7 +199,7 @@ pub const SUFFIX_STATE_OWNER_V1: &str = "counterfactual.suffix";
 
 /// The largest Tick span after the first recomputation Tick: one checkpoint
 /// per Tick must fit [`MAX_COUNTERFACTUAL_RESULT_CHECKPOINTS_V1`].
-const MAX_SUFFIX_TICK_SPAN: u64 = 65_535;
+const MAX_SUFFIX_TICK_SPAN: u64 = MAX_COUNTERFACTUAL_RESULT_CHECKPOINTS_V1 as u64 - 1;
 const SUFFIX_STATE_DOMAIN: &[u8] = b"PiglorOS.CounterfactualSuffixState.v1\0";
 /// Events per recovery read: one Tick batch, so a Tick never needs two.
 const PAGE_EVENTS: u64 = MAX_PIPELINE_DRAFTS_PER_BATCH as u64;
@@ -209,6 +209,10 @@ const PAGE_EVENTS: u64 = MAX_PIPELINE_DRAFTS_PER_BATCH as u64;
 const PAGE_TOTAL_BYTES: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES;
 /// Bounds of one recovery read: one page of Events within one batch's bytes,
 /// each Event type within the bound the staging seam enforces.
+///
+/// The payload cap equals the total cap on purpose: one honest draft may
+/// carry nearly all of its batch's bytes, so no single payload needs a
+/// tighter cap than the whole page.
 const PAGE_BOUNDS: EventReadBounds = EventReadBounds::new_with_total_bytes(
     MAX_PIPELINE_DRAFT_BATCH_BYTES,
     MAX_FORK_EVENT_TYPE_BYTES_V1,
@@ -562,9 +566,8 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         &self,
         fork: TimelineId,
         from: u64,
-        to: u64,
+        mut to: u64,
     ) -> Result<Vec<Event>, CounterfactualSuffixErrorV1> {
-        let mut to = to;
         loop {
             match self
                 .store
@@ -960,6 +963,3 @@ fn finish(
         })
         .or(Err(CounterfactualSuffixErrorV1::ArtifactEncoding))
 }
-
-/// Keep the bound constant tied to the `CFR1` checkpoint limit.
-const _: () = assert!(MAX_SUFFIX_TICK_SPAN + 1 == MAX_COUNTERFACTUAL_RESULT_CHECKPOINTS_V1 as u64);
