@@ -32,7 +32,10 @@ pos-conformance = { path = "../pos-conformance" }
 [dev-dependencies]
 ciborium = { workspace = true }
 # The rigged test store mints a foreign receipt with the adapter seal.
-pos-core = { path = "../pos-core", features = ["test-support", "counterfactual-adapter"] }
+pos-core = { path = "../pos-core", features = [
+  "test-support",
+  "counterfactual-adapter",
+] }
 pos-crypto = { path = "../pos-crypto" }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
