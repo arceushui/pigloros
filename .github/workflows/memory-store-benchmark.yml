@@ -1,26 +1,58 @@
-# Reproducible, non-gating measurements for Redmine #224. Wall-clock results
-# remain evidence, not correctness thresholds: hosted runner noise must not
-# turn performance sampling into a flaky merge gate.
+# Reproducible, non-gating measurements for Redmine #224 and advisory
+# comparison evidence for #297. Hosted-runner wall-clock results remain
+# review evidence, not a flaky correctness or merge gate.
 name: memory-store-benchmark
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/memory-store-benchmark.yml
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/pos-conformance/**
+      - crates/pos-core/**
+      - crates/pos-crypto/**
+      - crates/pos-reference/**
+      - crates/pos-store/Cargo.toml
+      - crates/pos-store/benches/**
+      - crates/pos-store/src/**
+      - scripts/compare_memory_store_benchmarks.py
+      - scripts/test_compare_memory_store_benchmarks.py
   pull_request:
     paths:
       - .github/workflows/memory-store-benchmark.yml
-      - crates/pos-core/src/erasure.rs
-      - crates/pos-core/src/erasure/**
-      - crates/pos-core/tests/support/erasure.rs
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/pos-conformance/**
+      - crates/pos-core/**
+      - crates/pos-crypto/**
+      - crates/pos-reference/**
       - crates/pos-store/Cargo.toml
       - crates/pos-store/benches/**
-      - crates/pos-store/src/memory.rs
+      - crates/pos-store/src/**
+      - scripts/compare_memory_store_benchmarks.py
+      - scripts/test_compare_memory_store_benchmarks.py
+  schedule:
+    - cron: 17 4 * * 1
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
   group: memory-store-benchmark-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  BASELINE_ARTIFACT_NAME: memory-store-benchmark-baseline-v1
+  # This is the repository-owned Actions workflow ID for the path below. Keep
+  # both identities explicit so artifact provenance fails closed if either drifts.
+  BENCHMARK_WORKFLOW_ID: "350682006"
+  BENCHMARK_WORKFLOW_PATH: .github/workflows/memory-store-benchmark.yml
 
 jobs:
   benchmark:
@@ -30,11 +62,19 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
+      HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
+      HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       PIGLOROS_BENCH_OUTPUT: ${{ github.workspace }}/artifacts/memory-erasure-benchmark.csv
       PIGLOROS_BENCH_SAMPLES: "10"
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Benchmark the same immutable revision recorded in the manifest.
+          # On pull requests this avoids labelling GitHub's synthetic merge
+          # checkout as the contributor's head SHA.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
@@ -55,10 +95,55 @@ jobs:
           set -o pipefail
           cargo bench --locked -p pos-store --bench memory_erasure 2>&1 |
             tee artifacts/benchmark.log
-      - name: Upload benchmark evidence
-        if: always()
+      - name: Validate current benchmark evidence and write manifest
+        run: |
+          set -euo pipefail
+          toolchain="$(rustc --version --verbose)"
+          python3 scripts/compare_memory_store_benchmarks.py write-manifest \
+            --csv "$PIGLOROS_BENCH_OUTPUT" \
+            --output "artifacts/memory-erasure-benchmark-manifest.json" \
+            --architecture "$(uname -m)" \
+            --event "$GITHUB_EVENT_NAME" \
+            --head-branch "$HEAD_BRANCH" \
+            --head-repository-id "$HEAD_REPOSITORY_ID" \
+            --head-sha "$HEAD_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --repository-id "$GITHUB_REPOSITORY_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --runner-image "$ImageOS-$ImageVersion" \
+            --toolchain "$toolchain" \
+            --workflow-id "$BENCHMARK_WORKFLOW_ID" \
+            --workflow-path "$BENCHMARK_WORKFLOW_PATH" \
+            --workflow-run-id "$GITHUB_RUN_ID"
+      - name: Compare PR evidence with the latest trusted main baseline
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/compare_memory_store_benchmarks.py compare \
+            --csv "$PIGLOROS_BENCH_OUTPUT" \
+            --manifest "artifacts/memory-erasure-benchmark-manifest.json" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --token "$GITHUB_TOKEN" \
+            --repository "$GITHUB_REPOSITORY" \
+            --repository-id "$GITHUB_REPOSITORY_ID" \
+            --workflow-id "$BENCHMARK_WORKFLOW_ID" \
+            --workflow-path "$BENCHMARK_WORKFLOW_PATH"
+      - name: Upload trusted main benchmark baseline
+        if: ${{ success() && (github.event_name == 'push' || github.event_name == 'schedule') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: memory-store-erasure-benchmark-${{ github.run_attempt }}
+          name: ${{ env.BASELINE_ARTIFACT_NAME }}
           path: artifacts/
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: error
+      - name: Upload untrusted pull-request or manual benchmark evidence
+        if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: memory-store-benchmark-evidence-${{ github.event_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          retention-days: 14
           if-no-files-found: error

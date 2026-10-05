@@ -4868,6 +4868,8 @@ dependencies = [
 name = "pos-time"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "pos-conformance",
  "pos-core",
  "pos-plugin-world",
  "pos-runtime",

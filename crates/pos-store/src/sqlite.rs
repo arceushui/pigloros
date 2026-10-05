@@ -25,6 +25,8 @@ mod recipient_owner;
 #[path = "sqlite/recipient_owner_unsupported.rs"]
 mod recipient_owner;
 pub use recipient_owner::RecipientKeyOwnerV1;
+mod recipient_decryption;
+pub use recipient_decryption::RecipientExportDecryptionErrorV1;
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
@@ -57,41 +59,42 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
     validate_artifact_registration_catalog_graph_v1, validate_closed_adapter_recording_v1,
-    validate_manifest_owner_admission_snapshot_v1, AdapterAdmissionV1,
-    AdapterCallReservationOutcomeV1, AdapterCallReservationV1, AdapterInvocationV1,
-    AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1, AdapterRecordingStoreV1,
-    AdapterTranscriptV1, ArtifactRegistrationCatalogRowV1, ArtifactRegistrationCommitOutcomeV1,
-    ArtifactRegistrationPersistenceErrorV1, ArtifactRegistrationPersistencePortV1,
-    AuthorityCommitOutcomeV1, AuthorityMutationPermitV1, AuthorityPersistenceBindingV1,
-    AuthorityPersistenceErrorV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
-    CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit, CoreError,
-    ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1, ErasureErrorV1,
-    ErasureForkPersistencePortV1, ErasureForkRecoveryMutationV1, ErasureForkRecoveryProofV1,
-    ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1, ErasureInventoryPersistencePortV1,
-    ErasurePersistenceInventorySnapshotV1, ErasurePersistencePortV1,
-    ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1,
-    ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureStateResolverV1, ErasureTopologyStoreBindingV1, ErasureTopologyTransitionPermitV1,
-    ErasureVerifiedInventoryV1, EventOriginRecordV1, ForkAdmissionHostCommandV1,
-    ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1, ForkAdmissionOpenChallengeV1,
-    ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1, ForkAdmissionReceiptV1,
-    ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAdmissionRecoveryProofV1,
-    ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkAttributionOriginV1,
-    ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
-    ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
-    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, KeyRoleV1,
-    ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
-    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionInputV1,
+    validate_manifest_owner_admission_snapshot_v1, validate_manifest_owner_lease_replacement_v1,
+    AdapterAdmissionV1, AdapterCallReservationOutcomeV1, AdapterCallReservationV1,
+    AdapterInvocationV1, AdapterRecordingSessionV1, AdapterRecordingStoreErrorV1,
+    AdapterRecordingStoreV1, AdapterTranscriptV1, ArtifactRegistrationCatalogRowV1,
+    ArtifactRegistrationCommitOutcomeV1, ArtifactRegistrationPersistenceErrorV1,
+    ArtifactRegistrationPersistencePortV1, AuthorityCommitOutcomeV1, AuthorityMutationPermitV1,
+    AuthorityPersistenceBindingV1, AuthorityPersistenceErrorV1, AuthorityPersistencePortV1,
+    AuthorityPersistenceStateV1, CapabilityGrantV1, CapabilityRevocationV1, ConsentAppendPermit,
+    CoreError, ErasureArtifactClassV1, ErasureCasOutcomeV1, ErasureContainmentGateV1,
+    ErasureErrorV1, ErasureForkPersistencePortV1, ErasureForkRecoveryMutationV1,
+    ErasureForkRecoveryProofV1, ErasureForkRecoveryV1, ErasureGate, ErasureIndexInsertV1,
+    ErasureInventoryPersistencePortV1, ErasurePersistenceInventorySnapshotV1,
+    ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1,
+    ErasureProtectedEffectIntervalV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1,
+    ErasureReferenceV1, ErasureStateResolverV1, ErasureTopologyStoreBindingV1,
+    ErasureTopologyTransitionPermitV1, ErasureVerifiedInventoryV1, EventOriginRecordV1,
+    ForkAdmissionHostCommandV1, ForkAdmissionHostRecordV1, ForkAdmissionInitializeChallengeV1,
+    ForkAdmissionOpenChallengeV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,
+    ForkAdmissionReceiptV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
+    ForkAdmissionRecoveryProofV1, ForkAppendOperationV1, ForkAppendSourceIdentityV1,
+    ForkAttributionOriginV1, ForkAuthorityOriginV1, ForkClassifiedEventV1,
+    ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
+    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1,
+    ForkInterventionAdmissionV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1,
+    KeyRoleV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1,
+    ManifestOwnerAdmissionCommitV1, ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionInputV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
-    ManifestOwnerAdmissionSnapshotV1, ManifestOwnerPolicyCopiesV1,
-    ManifestOwnerTimelineAdmissionV1, ManifestSlotAdmissionReceiptV1, ManifestSlotBindingV1,
-    OwnerIdV1, PersistedAuthorityV1, PluginId, PreparedArtifactRegistrationBatchV1,
-    PreparedArtifactRegistrationRecordV1, PreparedErasureCasV1, PreparedErasureForkBatchV1,
-    PreparedErasureRecoveryErrorV1, PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1,
-    PrincipalOwnerBindingV1, PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1,
-    WorldArtifactLeafV1, WorldConsumerSetV1, WorldReplayHandleV1, ERASURE_MAX_RECOVERY_ERRORS,
+    ManifestOwnerAdmissionSnapshotV1, ManifestOwnerMemberLeafV1, ManifestOwnerPolicyCopiesV1,
+    ManifestOwnerScopeMembersV1, ManifestOwnerTimelineAdmissionV1, ManifestSlotAdmissionReceiptV1,
+    ManifestSlotBindingV1, OwnerIdV1, PersistedAuthorityV1, PluginId,
+    PreparedArtifactRegistrationBatchV1, PreparedArtifactRegistrationRecordV1,
+    PreparedErasureCasV1, PreparedErasureForkBatchV1, PreparedErasureRecoveryErrorV1,
+    PreparedManifestOwnerAdmissionV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
+    PublicKey, ReproManifestRootV1, Signature, StoredErasureManifestV1, WorldArtifactLeafV1,
+    WorldClosureReadLimitsV1, WorldConsumerSetV1, WorldReplayHandleV1, ERASURE_MAX_RECOVERY_ERRORS,
     GEOGRAPHIC_EVENT_TYPE, MAX_ADAPTER_TRANSCRIPT_CALLS_V1,
 };
 
@@ -1178,6 +1181,9 @@ const ARTIFACT_REGISTRATION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS artif
              REFERENCES adapter_recording_sessions(owner_reference, run_operation_id)
      );";
 
+// `manifest_owner_member_leaves.native_bytes <= 16777216` mirrors
+// `pos_core::MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1`, which preparation
+// enforces first, so the memory and SQLite stores accept the same members.
 const MANIFEST_OWNER_ADMISSION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS manifest_owner_admission_state (
          owner_id BLOB PRIMARY KEY CHECK (length(owner_id) = 32),
          configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
@@ -1224,6 +1230,45 @@ const MANIFEST_OWNER_ADMISSION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS ma
          FOREIGN KEY (owner_id, configuration_generation, timeline_id)
              REFERENCES manifest_owner_admissions(owner_id, configuration_generation, timeline_id),
          CHECK (length(eop1_bytes) <= 16777216)
+     );
+     CREATE TABLE IF NOT EXISTS manifest_owner_admission_read_limits (
+         owner_id BLOB NOT NULL CHECK (length(owner_id) = 32),
+         configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
+         max_node_visits BLOB NOT NULL CHECK (length(max_node_visits) = 8),
+         max_native_bytes BLOB NOT NULL CHECK (length(max_native_bytes) = 8),
+         max_combined_depth INTEGER NOT NULL CHECK (max_combined_depth BETWEEN 1 AND 32),
+         PRIMARY KEY (owner_id, configuration_generation)
+     );
+     CREATE TABLE IF NOT EXISTS manifest_owner_scope_leases (
+         owner_id BLOB NOT NULL CHECK (length(owner_id) = 32),
+         configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
+         timeline_id BLOB NOT NULL CHECK (length(timeline_id) = 16),
+         rtp1_bytes BLOB NOT NULL CHECK (length(rtp1_bytes) <= 512),
+         rls1_bytes BLOB NOT NULL CHECK (length(rls1_bytes) <= 512),
+         PRIMARY KEY (owner_id, configuration_generation, timeline_id),
+         FOREIGN KEY (owner_id, configuration_generation, timeline_id)
+             REFERENCES manifest_owner_admissions(owner_id, configuration_generation, timeline_id)
+     );
+     CREATE TABLE IF NOT EXISTS manifest_owner_member_leaves (
+         scope BLOB NOT NULL CHECK (length(scope) = 32),
+         kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 14),
+         native_digest BLOB NOT NULL CHECK (length(native_digest) = 32),
+         leaf_cbor BLOB NOT NULL CHECK (length(leaf_cbor) <= 16384),
+         native_bytes BLOB NOT NULL CHECK (length(native_bytes) <= 16777216),
+         PRIMARY KEY (scope, kind, native_digest)
+     );
+     CREATE TABLE IF NOT EXISTS manifest_owner_admission_members (
+         owner_id BLOB NOT NULL CHECK (length(owner_id) = 32),
+         configuration_generation BLOB NOT NULL CHECK (length(configuration_generation) = 8),
+         timeline_id BLOB NOT NULL CHECK (length(timeline_id) = 16),
+         scope BLOB NOT NULL CHECK (length(scope) = 32),
+         kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 14),
+         native_digest BLOB NOT NULL CHECK (length(native_digest) = 32),
+         PRIMARY KEY (owner_id, configuration_generation, timeline_id, kind, native_digest),
+         FOREIGN KEY (owner_id, configuration_generation, timeline_id)
+             REFERENCES manifest_owner_admissions(owner_id, configuration_generation, timeline_id),
+         FOREIGN KEY (scope, kind, native_digest)
+             REFERENCES manifest_owner_member_leaves(scope, kind, native_digest)
      );";
 
 const SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1: u32 = 1_048_576;
@@ -1885,10 +1930,13 @@ impl SqliteStore {
         if read_only {
             Ok(())
         } else {
+            // Hot-path local-cut reads decode only the current visible cut, so
+            // a read-write open verifies every retained cut once.
             self.conn
                 .execute_batch(MANIFEST_OWNER_ADMISSION_SCHEMA_SQL)
                 .and_then(|()| self.conn.execute_batch(LOCAL_CUT_OWNER_SCHEMA_SQL))
                 .map_err(Self::into_storage_error)
+                .and_then(|()| self.verify_local_cut_owner_histories())
         }
     }
 
@@ -5118,7 +5166,7 @@ impl KeyRegistryHistoricalDecryptionPortV1 for SqliteStore {
             .as_ref()
             .unwrap_or(&self.conn);
         identity
-            .validate_historical_subject_decryption()
+            .validate_historical_decryption()
             .and_then(|()| {
                 connection
                     .execute_batch(begin_immediate_sql())
@@ -6706,7 +6754,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
             }
             let configuration_generation = input.catalog.as_input().configuration_generation;
             sqlite_validate_manifest_owner_transition(input, current_state.as_ref())?;
-            sqlite_insert_manifest_owner_rows(&self.conn, input)?;
+            sqlite_insert_manifest_owner_admission(&self.conn, input)?;
             sqlite_write_manifest_owner_state(&self.conn, input)?;
             sqlite_sync_local_cut_owner_after_admission(&self.conn, input, current_state.as_ref())?;
             let receipt_hashes = input
@@ -7051,6 +7099,224 @@ fn sqlite_validate_manifest_owner_transition(
         }
         _ => Err(ManifestOwnerAdmissionErrorV1::Conflict),
     }
+}
+
+/// Record one complete admission: the no-renewal lease guard runs before any
+/// row of the new generation exists, then the #418 rows, read limits, leases
+/// and member leaves are written in the caller's owner transaction.
+fn sqlite_insert_manifest_owner_admission(
+    connection: &Connection,
+    input: &ManifestOwnerAdmissionInputV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    sqlite_validate_manifest_owner_lease_replacements(connection, input)
+        .and_then(|()| sqlite_insert_manifest_owner_rows(connection, input))
+        .and_then(|()| sqlite_insert_manifest_owner_members(connection, input))
+}
+
+fn sqlite_validate_manifest_owner_lease_replacements(
+    connection: &Connection,
+    input: &ManifestOwnerAdmissionInputV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let owner_id = input.catalog.as_input().owner_id;
+    for timeline in &input.timelines {
+        let previous =
+            sqlite_latest_manifest_owner_lease(connection, owner_id, timeline.timeline_id)?;
+        if let Some(previous) = previous {
+            validate_manifest_owner_lease_replacement_v1(&previous, &timeline.members)?;
+        }
+    }
+    Ok(())
+}
+
+/// Latest recorded lease for one owned Timeline across every generation, so a
+/// Timeline removed and later re-added still cannot renew its lease.
+fn sqlite_latest_manifest_owner_lease(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    timeline_id: TimelineId,
+) -> Result<Option<ManifestOwnerScopeMembersV1>, ManifestOwnerAdmissionErrorV1> {
+    connection
+        .query_row(
+            "SELECT rtp1_bytes, rls1_bytes FROM manifest_owner_scope_leases
+             WHERE owner_id = ?1 AND timeline_id = ?2
+             ORDER BY configuration_generation DESC LIMIT 1",
+            params![
+                owner_id.as_slice(),
+                timeline_id.inner().to_bytes().as_slice(),
+            ],
+            sqlite_manifest_owner_lease,
+        )
+        .optional()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)
+}
+
+/// Map one `(rtp1_bytes, rls1_bytes)` lease row to a leaf-less member record.
+fn sqlite_manifest_owner_lease(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ManifestOwnerScopeMembersV1> {
+    Ok(ManifestOwnerScopeMembersV1 {
+        rtp1_bytes: row.get(0)?,
+        rls1_bytes: row.get(1)?,
+        leaves: Vec::new(),
+    })
+}
+
+/// Raw `manifest_owner_admission_read_limits` columns before decoding.
+struct SqliteReadLimitsRow {
+    node_visits: Vec<u8>,
+    native_bytes: Vec<u8>,
+    combined_depth: u8,
+}
+
+fn sqlite_read_limits_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SqliteReadLimitsRow> {
+    Ok(SqliteReadLimitsRow {
+        node_visits: row.get(0)?,
+        native_bytes: row.get(1)?,
+        combined_depth: row.get(2)?,
+    })
+}
+
+/// One joined member row: the canonical WAL1 leaf and its native bytes.
+struct SqliteMemberLeafRow {
+    leaf_cbor: Vec<u8>,
+    native_bytes: Vec<u8>,
+}
+
+fn sqlite_member_leaf_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SqliteMemberLeafRow> {
+    Ok(SqliteMemberLeafRow {
+        leaf_cbor: row.get(0)?,
+        native_bytes: row.get(1)?,
+    })
+}
+
+fn sqlite_manifest_owner_member_leaf(
+    row: SqliteMemberLeafRow,
+) -> Result<ManifestOwnerMemberLeafV1, ManifestOwnerAdmissionErrorV1> {
+    let leaf = WorldArtifactLeafV1::from_canonical_cbor(&row.leaf_cbor)
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    Ok(ManifestOwnerMemberLeafV1 {
+        leaf,
+        native_bytes: row.native_bytes,
+    })
+}
+
+fn sqlite_insert_manifest_owner_members(
+    connection: &Connection,
+    input: &ManifestOwnerAdmissionInputV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let owner_id = input.catalog.as_input().owner_id;
+    let generation_bytes = input
+        .catalog
+        .as_input()
+        .configuration_generation
+        .to_be_bytes();
+    let limits = input.read_limits;
+    sqlite_execute_manifest_owner(
+        connection,
+        "INSERT INTO manifest_owner_admission_read_limits
+         (owner_id, configuration_generation, max_node_visits, max_native_bytes,
+          max_combined_depth)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            owner_id.as_slice(),
+            generation_bytes.as_slice(),
+            limits.max_node_visits.to_be_bytes().as_slice(),
+            limits.max_native_bytes.to_be_bytes().as_slice(),
+            limits.max_combined_depth,
+        ],
+    )?;
+    for timeline in &input.timelines {
+        let timeline_bytes = timeline.timeline_id.inner().to_bytes();
+        sqlite_execute_manifest_owner(
+            connection,
+            "INSERT INTO manifest_owner_scope_leases
+             (owner_id, configuration_generation, timeline_id, rtp1_bytes, rls1_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                owner_id.as_slice(),
+                generation_bytes.as_slice(),
+                timeline_bytes.as_slice(),
+                timeline.members.rtp1_bytes.as_slice(),
+                timeline.members.rls1_bytes.as_slice(),
+            ],
+        )?;
+        for member in &timeline.members.leaves {
+            let leaf = member.leaf.as_input();
+            sqlite_insert_manifest_owner_member_leaf(connection, timeline.scope, member)?;
+            sqlite_execute_manifest_owner(
+                connection,
+                "INSERT INTO manifest_owner_admission_members
+                 (owner_id, configuration_generation, timeline_id, scope, kind, native_digest)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    owner_id.as_slice(),
+                    generation_bytes.as_slice(),
+                    timeline_bytes.as_slice(),
+                    timeline.scope.as_bytes().as_slice(),
+                    leaf.kind.code(),
+                    leaf.native_digest.as_bytes().as_slice(),
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Register one scoped member leaf: an identical WAL1 registration (whose
+/// native digest and length fix its bytes) deduplicates; any other leaf under
+/// the same `(scope, kind, native digest)` key conflicts.
+///
+/// Native bytes are deliberately not compared: preparation derived them from
+/// the native records and the leaf's native digest commits to them, so an
+/// equal leaf can only carry equal bytes.
+fn sqlite_insert_manifest_owner_member_leaf(
+    connection: &Connection,
+    scope: Hash,
+    member: &ManifestOwnerMemberLeafV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    let leaf = member.leaf.as_input();
+    let leaf_bytes = member.leaf.to_canonical_cbor();
+    let stored = connection
+        .query_row(
+            "SELECT leaf_cbor FROM manifest_owner_member_leaves
+             WHERE scope = ?1 AND kind = ?2 AND native_digest = ?3",
+            params![
+                scope.as_bytes().as_slice(),
+                leaf.kind.code(),
+                leaf.native_digest.as_bytes().as_slice(),
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    match stored {
+        None => sqlite_execute_manifest_owner(
+            connection,
+            "INSERT INTO manifest_owner_member_leaves
+             (scope, kind, native_digest, leaf_cbor, native_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                scope.as_bytes().as_slice(),
+                leaf.kind.code(),
+                leaf.native_digest.as_bytes().as_slice(),
+                leaf_bytes.as_slice(),
+                member.native_bytes.as_slice(),
+            ],
+        ),
+        Some(stored_leaf) if stored_leaf == leaf_bytes => Ok(()),
+        Some(_) => Err(ManifestOwnerAdmissionErrorV1::Conflict),
+    }
+}
+
+fn sqlite_execute_manifest_owner(
+    connection: &Connection,
+    sql: &str,
+    values: &[&dyn rusqlite::ToSql],
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    connection
+        .execute(sql, values)
+        .map(drop)
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)
 }
 
 fn sqlite_insert_manifest_owner_rows(
@@ -7469,7 +7735,7 @@ fn sqlite_decode_manifest_owner_admission(
         .map(manifest_owner_hash)
         .transpose()?;
     let resulting_inventory_generation = manifest_owner_hash(row.result_inventory)?;
-    let policy_copies = sqlite_read_manifest_owner_policy_copies(
+    let (policy_copies, members, read_limits) = sqlite_read_manifest_owner_scope_parts(
         connection,
         owner_id,
         configuration_generation,
@@ -7484,10 +7750,12 @@ fn sqlite_decode_manifest_owner_admission(
             binding,
             receipt,
             policy_copies,
+            members,
         },
         operation_id,
         expected_inventory_generation,
         resulting_inventory_generation,
+        read_limits,
     };
     sqlite_validate_manifest_owner_snapshot(
         connection,
@@ -7496,6 +7764,108 @@ fn sqlite_decode_manifest_owner_admission(
         &snapshot,
     )?;
     Ok(snapshot)
+}
+
+type SqliteManifestOwnerScopePartsV1 = (
+    Vec<ManifestOwnerPolicyCopiesV1>,
+    ManifestOwnerScopeMembersV1,
+    WorldClosureReadLimitsV1,
+);
+
+fn sqlite_read_manifest_owner_scope_parts(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+    timeline_id: TimelineId,
+) -> Result<SqliteManifestOwnerScopePartsV1, ManifestOwnerAdmissionErrorV1> {
+    let policy_copies = sqlite_read_manifest_owner_policy_copies(
+        connection,
+        owner_id,
+        configuration_generation,
+        timeline_id,
+    )?;
+    let members = sqlite_read_manifest_owner_scope_members(
+        connection,
+        owner_id,
+        configuration_generation,
+        timeline_id,
+    )?;
+    let read_limits =
+        sqlite_read_manifest_owner_read_limits(connection, owner_id, configuration_generation)?;
+    Ok((policy_copies, members, read_limits))
+}
+
+fn sqlite_read_manifest_owner_read_limits(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+) -> Result<WorldClosureReadLimitsV1, ManifestOwnerAdmissionErrorV1> {
+    let row = connection
+        .query_row(
+            "SELECT max_node_visits, max_native_bytes, max_combined_depth
+             FROM manifest_owner_admission_read_limits
+             WHERE owner_id = ?1 AND configuration_generation = ?2",
+            params![
+                owner_id.as_slice(),
+                configuration_generation.to_be_bytes().as_slice(),
+            ],
+            sqlite_read_limits_row,
+        )
+        .optional()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let row = row.ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    Ok(WorldClosureReadLimitsV1 {
+        max_node_visits: manifest_owner_generation(row.node_visits)?,
+        max_native_bytes: manifest_owner_generation(row.native_bytes)?,
+        max_combined_depth: row.combined_depth,
+    })
+}
+
+fn sqlite_read_manifest_owner_scope_members(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    configuration_generation: u64,
+    timeline_id: TimelineId,
+) -> Result<ManifestOwnerScopeMembersV1, ManifestOwnerAdmissionErrorV1> {
+    let generation_bytes = configuration_generation.to_be_bytes();
+    let timeline_bytes = timeline_id.inner().to_bytes();
+    let key = params![
+        owner_id.as_slice(),
+        generation_bytes.as_slice(),
+        timeline_bytes.as_slice(),
+    ];
+    let mut members = connection
+        .query_row(
+            "SELECT rtp1_bytes, rls1_bytes FROM manifest_owner_scope_leases
+             WHERE owner_id = ?1 AND configuration_generation = ?2 AND timeline_id = ?3",
+            key,
+            sqlite_manifest_owner_lease,
+        )
+        .optional()
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?
+        .ok_or(ManifestOwnerAdmissionErrorV1::CorruptState)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT leaf.leaf_cbor, leaf.native_bytes
+             FROM manifest_owner_admission_members AS member
+             JOIN manifest_owner_member_leaves AS leaf
+               ON leaf.scope = member.scope AND leaf.kind = member.kind
+              AND leaf.native_digest = member.native_digest
+             WHERE member.owner_id = ?1 AND member.configuration_generation = ?2
+               AND member.timeline_id = ?3
+             ORDER BY member.kind, member.native_digest",
+        )
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    let rows = statement
+        .query_map(key, sqlite_member_leaf_row)
+        .and_then(Iterator::collect::<rusqlite::Result<Vec<_>>>)
+        .map_err(|_| ManifestOwnerAdmissionErrorV1::StorageFailure)?;
+    drop(statement);
+    members.leaves = rows
+        .into_iter()
+        .map(sqlite_manifest_owner_member_leaf)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(members)
 }
 
 fn sqlite_read_manifest_owner_policy_copies(
@@ -27846,11 +28216,12 @@ pub(super) mod key_registry_coverage {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod manifest_owner_admission_coverage {
     use super::*;
-    use crate::manifest_owner_fixtures::{catalog, hash, plugin, policy_copies, AcceptingOwner};
+    use crate::manifest_owner_fixtures::{
+        catalog, hash, timeline_request, AcceptingOwner, READ_LIMITS,
+    };
     use pos_core::{
         prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionErrorV1 as AdmissionError,
-        ManifestOwnerAdmissionRequestV1, ManifestOwnerTimelineAdmissionRequestV1,
-        WorldConsumerSetInputV1, WorldConsumerV1, WorldProducerV1,
+        ManifestOwnerAdmissionRequestV1,
     };
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
@@ -27868,6 +28239,10 @@ mod manifest_owner_admission_coverage {
     const OPERATIONS: &str = "manifest_owner_admission_operations";
     const ADMISSIONS: &str = "manifest_owner_admissions";
     const COPIES: &str = "manifest_owner_policy_copies";
+    const LIMITS: &str = "manifest_owner_admission_read_limits";
+    const LEASES: &str = "manifest_owner_scope_leases";
+    const MEMBER_LEAVES: &str = "manifest_owner_member_leaves";
+    const MEMBERS: &str = "manifest_owner_admission_members";
     const ALL: &str = "1";
     const FIRST_SCOPE: &str = "timeline_id = X'01010101010101010101010101010101'";
     const SECOND_SCOPE: &str = "timeline_id = X'02020202020202020202020202020202'";
@@ -27890,6 +28265,9 @@ mod manifest_owner_admission_coverage {
     const MISSING_COPY: &str = "DELETE FROM manifest_owner_policy_copies \
                                 WHERE plugin_id = X'01010101010101010101010101010101'";
     const DELETE_OPERATIONS: &str = "DELETE FROM manifest_owner_admission_operations";
+    const DROP_MEMBERS: &str = "DROP TABLE manifest_owner_admission_members";
+    const DELETE_LEASES: &str = "DELETE FROM manifest_owner_scope_leases";
+    const DELETE_LIMITS: &str = "DELETE FROM manifest_owner_admission_read_limits";
     const UNREADABLE_OPERATION: &str =
         "UPDATE manifest_owner_admission_operations SET request_digest = 7";
     const SHORT_RECEIPT_COUNT: &str =
@@ -27984,8 +28362,27 @@ mod manifest_owner_admission_coverage {
         "receipt_set_digest = X'00'",
     ];
 
+    // Non-BLOB lease, member-leaf and read-limit columns: decoding fails (StorageFailure).
+    const LEASE_TYPES: [&str; 2] = ["rtp1_bytes = 7", "rls1_bytes = 7"];
+    const MEMBER_TYPES: [&str; 2] = ["leaf_cbor = 7", "native_bytes = 7"];
+    const LIMIT_TYPES: [&str; 3] = [
+        "max_node_visits = 7",
+        "max_native_bytes = 7",
+        "max_combined_depth = 'x'",
+    ];
+    // Undecodable or inconsistent lease, member-leaf and read-limit values: CorruptState.
+    const LEASE_SHAPES: [&str; 2] = ["rtp1_bytes = X'FF'", "rls1_bytes = X'FF'"];
+    const MEMBER_SHAPES: [&str; 2] = ["leaf_cbor = X'FF'", "native_bytes = X'00'"];
+    const LIMIT_SHAPES: [&str; 5] = [
+        "max_node_visits = X'00'",
+        "max_native_bytes = zeroblob(8)",
+        "max_native_bytes = X'0000000000000001'",
+        "max_combined_depth = 0",
+        "max_combined_depth = 33",
+    ];
+
     // Dropped tables (StorageFailure) and missing rows of a committed generation (CorruptState).
-    const STRUCTURE_FAULTS: [(&str, AdmissionError); 7] = [
+    const STRUCTURE_FAULTS: [(&str, AdmissionError); 10] = [
         (UNREADABLE_ORPHANS, STORAGE),
         (DROP_ADMISSIONS, STORAGE),
         (DROP_COPIES, STORAGE),
@@ -27993,6 +28390,9 @@ mod manifest_owner_admission_coverage {
         (EMPTY_ADMISSIONS, CORRUPT),
         (MISSING_COPY, CORRUPT),
         (DELETE_OPERATIONS, CORRUPT),
+        (DROP_MEMBERS, STORAGE),
+        (DELETE_LEASES, CORRUPT),
+        (DELETE_LIMITS, CORRUPT),
     ];
     // Operation and admission damage that exact-retry resolution must not replay.
     const RETRY_FAULTS: [(&str, AdmissionError); 4] = [
@@ -28008,10 +28408,14 @@ mod manifest_owner_admission_coverage {
         ("scope = 7", STORAGE),
     ];
     // Tables whose INSERT an injected trigger aborts mid-commit, with the mapped error.
-    const INSERT_FAULTS: [(&str, AdmissionError); 3] = [
+    const INSERT_FAULTS: [(&str, AdmissionError); 7] = [
         (ADMISSIONS, STORAGE),
         (STATE, CONFLICT),
         (OPERATIONS, STORAGE),
+        (LIMITS, STORAGE),
+        (LEASES, STORAGE),
+        (MEMBER_LEAVES, STORAGE),
+        (MEMBERS, STORAGE),
     ];
 
     #[derive(Clone, Copy)]
@@ -28032,28 +28436,9 @@ mod manifest_owner_admission_coverage {
         timeline_ids: &[TimelineId],
     ) -> Fallible<ManifestOwnerAdmissionRequestV1> {
         let (catalog, sources) = catalog(OWNER, transition.generation)?;
-        let producer = sources.first().ok_or("missing fixture policy")?.0.digest();
         let mut timelines = Vec::with_capacity(timeline_ids.len());
-        for (index, timeline_id) in timeline_ids.iter().enumerate() {
-            let offset = u8::try_from(index)?;
-            let scope = hash(70 + offset);
-            let wcs1 = WorldConsumerSetV1::new(WorldConsumerSetInputV1 {
-                scope,
-                consumers: vec![WorldConsumerV1::new(
-                    "local-observer".to_owned(),
-                    hash(130),
-                    hash(131),
-                    hash(132),
-                )?],
-                producers: vec![WorldProducerV1::new(plugin(1), producer)?],
-                optional_view_roots: Vec::new(),
-            })?;
-            timelines.push(ManifestOwnerTimelineAdmissionRequestV1 {
-                timeline_id: *timeline_id,
-                scope,
-                wcs1,
-                policy_copies: policy_copies(OWNER, scope, &sources, hash(80 + offset))?,
-            });
+        for timeline_id in timeline_ids {
+            timelines.push(timeline_request(OWNER, *timeline_id, &sources)?);
         }
         Ok(ManifestOwnerAdmissionRequestV1 {
             operation_id: transition.operation_id,
@@ -28062,6 +28447,7 @@ mod manifest_owner_admission_coverage {
             previous_visible_lcq1_hash: None,
             expected_inventory_generation: transition.expected_inventory,
             resulting_inventory_generation: transition.resulting_inventory,
+            read_limits: READ_LIMITS,
             timelines,
         })
     }
@@ -28274,6 +28660,9 @@ mod manifest_owner_admission_coverage {
         assert_read_faults(STATE, ALL, &STATE_TYPES, STORAGE)?;
         assert_read_faults(ADMISSIONS, FIRST_SCOPE, &ADMISSION_TYPES, STORAGE)?;
         assert_read_faults(COPIES, FIRST_COPY, &COPY_TYPES, STORAGE)?;
+        assert_read_faults(LEASES, FIRST_SCOPE, &LEASE_TYPES, STORAGE)?;
+        assert_read_faults(MEMBER_LEAVES, ALL, &MEMBER_TYPES, STORAGE)?;
+        assert_read_faults(LIMITS, ALL, &LIMIT_TYPES, STORAGE)?;
         assert_read_faults(OPERATIONS, ALL, &OPERATION_TYPES, STORAGE)
     }
 
@@ -28282,6 +28671,9 @@ mod manifest_owner_admission_coverage {
         assert_read_faults(STATE, ALL, &STATE_SHAPES, CORRUPT)?;
         assert_read_faults(ADMISSIONS, FIRST_SCOPE, &ADMISSION_SHAPES, CORRUPT)?;
         assert_read_faults(COPIES, FIRST_COPY, &COPY_SHAPES, CORRUPT)?;
+        assert_read_faults(LEASES, FIRST_SCOPE, &LEASE_SHAPES, CORRUPT)?;
+        assert_read_faults(MEMBER_LEAVES, ALL, &MEMBER_SHAPES, CORRUPT)?;
+        assert_read_faults(LIMITS, ALL, &LIMIT_SHAPES, CORRUPT)?;
         assert_read_faults(OPERATIONS, ALL, &OPERATION_SHAPES, CORRUPT)
     }
 
@@ -28498,6 +28890,36 @@ mod manifest_owner_admission_coverage {
             sqlite_insert_manifest_owner_operation(&store.conn, &input, hash(78), &[]),
             Err(BOUND)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn commits_map_missing_lease_and_member_leaf_tables() -> TestResult {
+        for table in [LEASES, MEMBER_LEAVES] {
+            let mut store = SqliteStore::open_in_memory()?;
+            run_sql(&store, &format!("DROP TABLE {table}"))?;
+            let prepared = prepare(genesis_request()?, None)?;
+            assert_eq!(
+                store.commit_manifest_owner_admission_v1(prepared),
+                Err(STORAGE)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn readback_returns_recorded_leases_members_and_limits() -> TestResult {
+        let mut store = SqliteStore::open_in_memory()?;
+        let prepared = prepare(genesis_request()?, None)?;
+        let expected = prepared.input().clone();
+        store.commit_manifest_owner_admission_v1(prepared)?;
+        for timeline in &expected.timelines {
+            let snapshot = store
+                .read_manifest_owner_admission_v1(OWNER, 1, timeline.timeline_id)?
+                .ok_or("missing admitted snapshot")?;
+            assert_eq!(snapshot.timeline, *timeline);
+            assert_eq!(snapshot.read_limits, READ_LIMITS);
+        }
         Ok(())
     }
 }

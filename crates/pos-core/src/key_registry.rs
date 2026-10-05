@@ -181,21 +181,27 @@ impl KeyIdentityV1 {
         Self::from_parts(owner_id.into(), role, epoch)
     }
 
-    /// Check the role and epoch admitted for retained subject-data decryption.
+    /// Check the role and epoch admitted for retained-epoch decryption.
     ///
-    /// Adapters call this before reading the registry or taking the `SQLite`
-    /// writer reservation, preserving error precedence at every boundary.
+    /// ADR-091 admits `SubjectDataEncryption`; ADR-098 explicitly extends the
+    /// same decryption-only policy to `ExportRecipientEncryption`. Adapters
+    /// call this before reading the registry or taking the `SQLite` writer
+    /// reservation, preserving error precedence at every boundary.
     ///
     /// # Errors
-    /// Rejects epoch zero or a role other than `SubjectDataEncryption`.
-    pub fn validate_historical_subject_decryption(self) -> Result<(), KeyRegistryErrorV1> {
+    /// Rejects epoch zero or any signing role.
+    pub const fn validate_historical_decryption(self) -> Result<(), KeyRegistryErrorV1> {
         if self.epoch == 0 {
             return Err(KeyRegistryErrorV1::InvalidEpoch);
         }
-        if self.role != KeyRoleV1::SubjectDataEncryption {
-            return Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired);
+        match self.role {
+            KeyRoleV1::SubjectDataEncryption | KeyRoleV1::ExportRecipientEncryption => Ok(()),
+            KeyRoleV1::SubjectAttributionSigning
+            | KeyRoleV1::TimelineIntegritySigning
+            | KeyRoleV1::PluginReleaseSigning => {
+                Err(KeyRegistryErrorV1::HistoricalDecryptionRoleRequired)
+            }
         }
-        Ok(())
     }
 }
 
@@ -487,16 +493,17 @@ pub trait KeyRegistryEncryptionPortV1 {
         F: FnOnce() -> T;
 }
 
-/// Decryption-only authorization for retained subject-data key epochs.
+/// Decryption-only authorization for retained encryption-role key epochs.
 ///
 /// The adapter validates the exact owner, role, epoch, and private-material
 /// fingerprint while holding its registry transaction/lock through the
 /// non-escaping callback. An older live epoch may decrypt after rotation;
 /// this port never authorizes new encryption or restores destroyed material.
-/// The first consumer is `SubjectDataEncryption` under ADR-091. Any other
-/// role requires its own accepted policy extension.
+/// Exactly two roles are admitted, each by its own accepted policy:
+/// `SubjectDataEncryption` under ADR-091 and `ExportRecipientEncryption`
+/// under ADR-098. Signing roles are always rejected.
 pub trait KeyRegistryHistoricalDecryptionPortV1 {
-    /// Run one decryption operation under a live subject-data key identity.
+    /// Run one decryption operation under a live retained key identity.
     ///
     /// # Errors
     ///
@@ -982,7 +989,8 @@ impl KeyRegistryStateV1 {
         Ok(operation())
     }
 
-    /// Run one decryption-only operation for a live subject-data key epoch.
+    /// Run one decryption-only operation for a live subject-data or
+    /// export-recipient key epoch.
     ///
     /// Unlike encryption authorization, this permits a retained old epoch
     /// after rotation. The mutable borrow holds the reference registry state
@@ -1002,7 +1010,7 @@ impl KeyRegistryStateV1 {
         F: FnOnce() -> T,
     {
         identity
-            .validate_historical_subject_decryption()
+            .validate_historical_decryption()
             .and_then(|()| {
                 self.validate()
                     .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)
