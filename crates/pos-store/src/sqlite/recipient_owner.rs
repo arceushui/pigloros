@@ -1347,14 +1347,14 @@ impl SqliteStore {
     /// Recover one bounded batch of pending staging and final ciphertext files.
     ///
     /// Recovery never scans the directory, creates catalog entries, or
-    /// reconstructs an export. The SQLite catalog remains the only visibility
+    /// reconstructs an export. The `SQLite` catalog remains the only visibility
     /// marker.
     ///
     /// # Errors
     ///
     /// Returns a closed error if the durable directory or catalog cannot be
-    /// inspected under the SQLite writer reservation. Returns
-    /// [RecipientExportPublicationErrorV1::RecoveryIncomplete] after committing
+    /// inspected under the `SQLite` writer reservation. Returns
+    /// [`RecipientExportPublicationErrorV1::RecoveryIncomplete`] after committing
     /// a bounded batch when another pass is required.
     pub fn recover_recipient_exports(
         &mut self,
@@ -2047,20 +2047,23 @@ fn load_recipient_export_pending(
 }
 
 fn fresh_recipient_export_id() -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
-    let mut export_id = [0_u8; 16];
     #[cfg(feature = "test-support")]
-    if let Some(test_export_id) =
-        RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(std::cell::Cell::take)
-    {
-        export_id = test_export_id;
-    } else {
-        recipient_random_bytes(&mut export_id).map_err(|error| {
-            RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
-        })?;
-    }
+    let configured_export_id =
+        RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(std::cell::Cell::take);
     #[cfg(not(feature = "test-support"))]
-    recipient_random_bytes(&mut export_id)
-        .map_err(|error| RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error)))?;
+    let configured_export_id = None;
+
+    let export_id = configured_export_id.map_or_else(
+        || {
+            let mut export_id = [0_u8; 16];
+            recipient_random_bytes(&mut export_id)
+                .map_err(|error| {
+                    RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
+                })
+                .map(|()| export_id)
+        },
+        |test_export_id| Ok(test_export_id),
+    )?;
     if export_id == [0; 16] {
         return Err(RecipientExportPublicationErrorV1::Export(
             RecipientExportErrorV1::FieldOutOfBounds,

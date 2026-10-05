@@ -350,37 +350,37 @@ fn erasure_block_cannot_interleave_with_catalog_publication() -> TestResult {
 
 #[test]
 fn test_support_pause_failures_stay_closed() -> TestResult {
-    let mut fixture = fixture()?;
+    let mut first_fixture = fixture()?;
     let (entered_tx, entered) = mpsc::channel();
     let (_release, release_rx) = mpsc::channel();
-    fixture
+    first_fixture
         .store
         .pause_recipient_export_publication_after_fences_for_test(
-            fixture.timeline,
+            first_fixture.timeline,
             entered_tx,
             release_rx,
         )?;
     let (duplicate_entered_tx, _duplicate_entered) = mpsc::channel();
     let (_duplicate_release, duplicate_release_rx) = mpsc::channel();
-    assert!(fixture
+    assert!(first_fixture
         .store
         .pause_recipient_export_publication_after_fences_for_test(
-            fixture.timeline,
+            first_fixture.timeline,
             duplicate_entered_tx,
             duplicate_release_rx,
         )
         .is_err());
     drop(entered);
-    assert!(fixture
+    assert!(first_fixture
         .store
         .publish_recipient_export(
-            &fixture.authority,
-            &fixture.owner,
+            &first_fixture.authority,
+            &first_fixture.owner,
             &request(
-                fixture.timeline,
-                fixture.descriptor,
-                &fixture.evaluation,
-                &fixture.token,
+                first_fixture.timeline,
+                first_fixture.descriptor,
+                &first_fixture.evaluation,
+                &first_fixture.token,
             ),
         )
         .is_err());
