@@ -783,6 +783,11 @@ impl SqliteStore {
         owner: &RecipientKeyOwnerV1,
         request: RecipientExportRequestV1<'_>,
     ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        if self.consent_authority_permit != Some(authority.append_permit()) {
+            return Err(RecipientExportPublicationErrorV1::Consent(
+                ConsentError::NoConsent,
+            ));
+        }
         if request.token.timeline_id() != request.timeline_id {
             return Err(RecipientExportPublicationErrorV1::Consent(
                 ConsentError::NoConsent,
@@ -860,7 +865,7 @@ impl SqliteStore {
             .execute_batch(begin_immediate_sql())
             .map_err(storage_error)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
-        let result = (|| {
+        let pre_authorization = (|| {
             validate_owner_directory(owner).map_err(RecipientExportPublicationErrorV1::Store)?;
             ensure_recipient_custody_tables(&self.conn)
                 .map_err(RecipientExportPublicationErrorV1::Store)?;
@@ -907,19 +912,33 @@ impl SqliteStore {
             let identity = request.recipient.identity();
             let registered_digest =
                 registered_material_digest_or_absent_sentinel(&registry, identity);
-            registry
-                .with_encryption_authorization(identity, registered_digest, || {
-                    self.publish_recipient_export_with_registered_material(
-                        owner,
-                        request.recipient,
-                        registered_digest,
-                        &source,
-                        logical_head,
-                    )
-                })
-                .map_err(RecipientExportPublicationErrorV1::Registry)?
+            Ok((source, registry, identity, registered_digest, logical_head))
         })();
-        finish_recipient_export_transaction(&self.conn, result)
+        let (source, mut registry, identity, registered_digest, logical_head) =
+            match pre_authorization {
+                Ok(value) => value,
+                Err(error) => return finish_recipient_export_transaction(&self.conn, Err(error)),
+            };
+        match registry.with_encryption_authorization(identity, registered_digest, || {
+            // The registry authorization includes the commit itself. The
+            // SQLite writer reservation prevents a concurrent rotation or
+            // destruction from changing the active role-4 identity between
+            // this check and the catalog visibility marker.
+            let result = self.publish_recipient_export_with_registered_material(
+                owner,
+                request.recipient,
+                registered_digest,
+                &source,
+                logical_head,
+            );
+            finish_recipient_export_transaction(&self.conn, result)
+        }) {
+            Ok(publication) => publication,
+            Err(error) => finish_recipient_export_transaction(
+                &self.conn,
+                Err(RecipientExportPublicationErrorV1::Registry(error)),
+            ),
+        }
     }
 
     fn publish_recipient_export_with_registered_material(
@@ -948,6 +967,13 @@ impl SqliteStore {
         }
 
         let export_id = fresh_recipient_export_id()?;
+        if recipient_export_catalog_contains(&self.conn, export_id)
+            .map_err(RecipientExportPublicationErrorV1::Store)?
+        {
+            return Err(RecipientExportPublicationErrorV1::Store(
+                CoreError::Storage("recipient export ID collision".to_owned()),
+            ));
+        }
         let mut seed = Zeroizing::new([0_u8; 32]);
         recipient_random_bytes(&mut *seed).map_err(|error| {
             RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
@@ -994,7 +1020,7 @@ impl SqliteStore {
             .map_err(RecipientExportPublicationErrorV1::Store)?
             .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
         let expected = stored
-            .validate_for(owner, export_id)
+            .validate_for(owner)
             .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
         let encoded =
             read_recipient_export_ciphertext(owner, export_id, expected.ciphertext_length)
@@ -1320,7 +1346,6 @@ impl StoredRecipientExportV1 {
     fn validate_for(
         self,
         owner: &RecipientKeyOwnerV1,
-        _export_id: [u8; 16],
     ) -> Option<ValidatedRecipientExportCatalogV1> {
         let expected_owner = recipient_owner_id_from_grantee(owner.grantee_id).ok()?;
         let recipient = RecipientKeyDescriptorV1::decode(&self.recipient_descriptor).ok()?;
