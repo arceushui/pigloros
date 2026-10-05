@@ -617,8 +617,8 @@ fn import_decoders_reject_bounds_local_origin_and_malformed_tails() -> TestResul
     Ok(())
 }
 
-/// A local record with version 2: it ends in the local `[1]` origin but is not
-/// a valid local record.
+/// A local record whose second field (the version) is replaced by 2: it still
+/// ends in the local `[1]` origin, but is not a valid local record.
 fn malformed_local(record: &[u8]) -> Fallible<Vec<u8>> {
     let bytes = edited(record, 1, int(2))?;
     assert!(bytes.ends_with(&[0x81, 0x01]));

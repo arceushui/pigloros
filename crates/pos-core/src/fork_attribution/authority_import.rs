@@ -93,7 +93,7 @@ impl ImportedPrincipalOwnerBindingV1 {
     /// Give one source binding the code-2 origin, as the `FAE1` producer does
     /// after deriving the `FAO1` digest.
     ///
-    /// The production caller is the #519 `FAE1` producer; integration tests
+    /// The production caller is the `FAE1` producer; integration tests
     /// use it to build code-2 records.
     #[must_use]
     pub const fn from_local(
@@ -161,7 +161,7 @@ impl ImportedForkAdmissionRecordV1 {
     /// Give one source admission the code-2 origin, as the `FAE1` producer
     /// does after deriving the `FAO1` digest.
     ///
-    /// The production caller is the #519 `FAE1` producer; integration tests
+    /// The production caller is the `FAE1` producer; integration tests
     /// use it to build code-2 records.
     #[must_use]
     pub const fn from_local(record: ForkAdmissionRecordV1, authority_origin_digest: Hash) -> Self {
@@ -225,7 +225,7 @@ impl ImportedForkPublicationOperationV1 {
     /// Give one source publication operation the code-2 origin, as the
     /// `FAE1` producer does after deriving the `FAO1` digest.
     ///
-    /// The production caller is the #519 `FAE1` producer; integration tests
+    /// The production caller is the `FAE1` producer; integration tests
     /// use it to build code-2 records.
     #[must_use]
     pub const fn from_local(
