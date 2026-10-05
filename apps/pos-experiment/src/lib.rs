@@ -30,7 +30,7 @@ use pos_core::{
     store::{EventReadBounds, EventStore, SeqRange},
     ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureContainmentGateV1,
     ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event,
-    PipelineSecurityRevisionsV1, ReproManifest, Seq, Timeline,
+    PipelineSecurityRevisionsV1, ReproManifest, Seq, Timeline, TimelineMeta,
 };
 use pos_runtime::{LocalScheduledAdmissionHostV1, PluginRegistry, ScheduledAdmissionStoreV1};
 use pos_store::StoreConfig;
@@ -269,13 +269,13 @@ fn current_now_secs() -> u64 {
     WallTime::now().as_micros() / 1_000_000
 }
 
+/// Whether an Event type may leave the experiment host.
+///
+/// A public type is not subject-controlled (ADR-021 Revision 4 Decision 2)
+/// and is not the experiment's own consent-closed marker.
 fn is_public_event_type(event_type: &Kind) -> bool {
-    !pos_core::is_consent_event_type(event_type)
+    !pos_core::is_subject_controlled_event_type(event_type)
         && event_type.as_str() != EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE
-        && !pos_core::is_geographic_event_type(event_type)
-        && pos_core::required_modality_for_event(event_type) == 0
-        && !event_type.as_str().starts_with("timeline.fork.")
-        && !event_type.as_str().starts_with("retention.")
 }
 
 /// Keep only the public Events of a read, in Timeline Order.
@@ -438,9 +438,13 @@ impl RunResult {
             .and_then(|store| {
                 store
                     .logical_head(self.timeline_id)
+                    .and_then(|head| {
+                        pos_core::fork_ancestry(&store, self.timeline_id)
+                            .map(|ancestry| (head, ancestry))
+                    })
                     .map_err(ExperimentError::from)
             })
-            .and_then(|timeline_head| {
+            .and_then(|(timeline_head, ancestry)| {
                 self.projections
                     .clone_erasure_gate()
                     .ok_or(ExperimentError::Runtime(
@@ -470,18 +474,19 @@ impl RunResult {
                                         )))
                                 });
                         };
-                        erasure_gate
-                            .with_fence(
-                                self.timeline_id,
-                                ErasureProtectedOperationV1::Snapshot,
-                                &mut read,
+                        pos_core::with_fork_ancestry_fence(
+                            &*erasure_gate,
+                            self.timeline_id,
+                            &ancestry,
+                            ErasureProtectedOperationV1::Snapshot,
+                            &mut read,
+                        )
+                        .map_err(|_| {
+                            ExperimentError::Runtime(
+                                pos_runtime::RuntimeError::ErasureOperationUnavailable,
                             )
-                            .map_err(|_| {
-                                ExperimentError::Runtime(
-                                    pos_runtime::RuntimeError::ErasureOperationUnavailable,
-                                )
-                            })
-                            .and(result)
+                        })
+                        .and(result)
                     })
             })
     }
@@ -895,14 +900,19 @@ fn refold_host_projection_prefix(
     timeline: TimelineId,
     through: pos_core::clock::Seq,
 ) -> Result<Vec<Event>, ExperimentError> {
-    let (events, generation) = lock_store(store).and_then(|store| {
-        let events = read_completed_prefix(&**store, timeline, through)?;
+    let (events, generation, ancestry) = lock_store(store).and_then(|store| {
+        let (events, ancestry) =
+            read_completed_prefix(&**store, timeline, through).and_then(|events| {
+                pos_core::fork_ancestry(&**store, timeline)
+                    .map(|ancestry| (events, ancestry))
+                    .map_err(ExperimentError::from)
+            })?;
         let generation = registry
             .clone_erasure_gate()
             .and_then(|gate| gate.inventory_generation().ok());
-        Ok((events, generation))
+        Ok((events, generation, ancestry))
     })?;
-    registry.refold_projection_events(timeline, &events, generation)?;
+    registry.refold_projection_events(timeline, &ancestry, &events, generation)?;
     Ok(events)
 }
 
@@ -1076,9 +1086,14 @@ fn step_driver_with_completed_prefix(
     registry: &mut PluginRegistry,
     observed_through: pos_core::clock::Seq,
 ) -> Result<Vec<EventDraft>, ExperimentError> {
-    let committed_events = read_completed_prefix(store, timeline_id, observed_through)?;
+    let (committed_events, ancestry) = read_completed_prefix(store, timeline_id, observed_through)
+        .and_then(|events| {
+            pos_core::fork_ancestry(store, timeline_id)
+                .map(|ancestry| (events, ancestry))
+                .map_err(ExperimentError::from)
+        })?;
     registry
-        .step_all_anchored_with_events(timeline_id, observed_through, &committed_events)
+        .step_all_anchored_with_events(timeline_id, &ancestry, observed_through, &committed_events)
         .map_err(|error| {
             registry.abort_step();
             error.into()
@@ -1935,11 +1950,19 @@ impl ExperimentSession {
         {
             return Err(ExperimentError::ConsentRevokedV1);
         }
-        let timeline_head = lock_store(&self.store)
-            .and_then(|store| Ok(store.logical_head(self.timeline.id())?))?;
+        let (timeline_head, ancestry) = lock_store(&self.store).and_then(|store| {
+            store
+                .logical_head(self.timeline.id())
+                .and_then(|head| {
+                    pos_core::fork_ancestry(&**store, self.timeline.id())
+                        .map(|ancestry| (head, ancestry))
+                })
+                .map_err(ExperimentError::from)
+        })?;
         self.registry
             .projection_state_for_reducer(
                 self.timeline.id(),
+                &ancestry,
                 timeline_head,
                 now_secs,
                 token,
@@ -2331,11 +2354,13 @@ impl ExperimentSession {
     fn select_step_drafts(
         &mut self,
         request: StepRequest,
+        ancestry: &[TimelineMeta],
         committed_events: &[pos_core::Event],
     ) -> Result<Vec<EventDraft>, pos_runtime::RuntimeError> {
         match (request, self.operation_token.clone()) {
             (StepRequest::AllDrivers, Some(token)) => self.registry.step_all_anchored_protected(
                 self.timeline.id(),
+                ancestry,
                 self.boundary.folded_through,
                 token,
                 current_now_secs(),
@@ -2344,6 +2369,7 @@ impl ExperimentSession {
             (StepRequest::Cadenced(now_ns), Some(token)) => {
                 self.registry.tick_cadenced_anchored_protected(
                     self.timeline.id(),
+                    ancestry,
                     now_ns,
                     self.boundary.folded_through,
                     token,
@@ -2353,12 +2379,14 @@ impl ExperimentSession {
             }
             (StepRequest::AllDrivers, None) => self.registry.step_all_anchored_with_events(
                 self.timeline.id(),
+                ancestry,
                 self.boundary.folded_through,
                 committed_events,
             ),
             (StepRequest::Cadenced(now_ns), None) => {
                 self.registry.tick_cadenced_anchored_with_events(
                     self.timeline.id(),
+                    ancestry,
                     now_ns,
                     self.boundary.folded_through,
                     committed_events,
@@ -2378,10 +2406,16 @@ impl ExperimentSession {
         request: StepRequest,
         committed_events: &[pos_core::Event],
     ) -> Result<(PipelineSecurityRevisionsV1, Vec<EventDraft>), ExperimentError> {
-        let revisions = lock_store(&self.store).and_then(|mut store| {
-            observe_scheduled_admission(&mut **store, &self.registry, self.timeline.id())
+        let (revisions, ancestry) = lock_store(&self.store).and_then(|mut store| {
+            observe_scheduled_admission(&mut **store, &self.registry, self.timeline.id()).and_then(
+                |revisions| {
+                    pos_core::fork_ancestry(&**store, self.timeline.id())
+                        .map(|ancestry| (revisions, ancestry))
+                        .map_err(ExperimentError::from)
+                },
+            )
         })?;
-        self.select_step_drafts(request, committed_events)
+        self.select_step_drafts(request, &ancestry, committed_events)
             .map(|drafts| (revisions, drafts))
             .map_err(|error| {
                 self.registry.abort_step();
@@ -3344,6 +3378,33 @@ pub mod tests {
     };
     use pos_runtime::{Driver, ObservationView, ProjectionKey, RuntimeError, StepOutput};
     use pos_store::StoreConfig;
+
+    /// ADR-021 Revision 4 Decision 2: the public filter is exactly the shared
+    /// subject-controlled predicate plus the experiment's consent-closed marker.
+    #[test]
+    fn public_event_types_match_the_shared_subject_controlled_predicate() {
+        let table = [
+            (pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE, false),
+            (pos_core::GEOGRAPHIC_EVENT_TYPE, false),
+            (pos_core::GEOGRAPHIC_CELL_EVENT_TYPE, false),
+            ("consent.x", false),
+            ("persona.prediction", false),
+            ("timeline.fork.requested", false),
+            ("retention.extended", false),
+            ("world.observation.v1", true),
+            ("ordinary.event", true),
+        ];
+        for (event_type, public) in table {
+            let kind = Kind::new(event_type);
+            assert_eq!(is_public_event_type(&kind), public, "{event_type}");
+            assert_eq!(
+                is_public_event_type(&kind),
+                !pos_core::is_subject_controlled_event_type(&kind)
+                    && event_type != EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE,
+                "{event_type}"
+            );
+        }
+    }
 
     // ── Inline test helpers ───────────────────────────────────────────────
 

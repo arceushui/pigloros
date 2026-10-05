@@ -17,13 +17,32 @@ use pos_core::{
     PipelineAttemptIdV1, PipelineOutcomeV1, PipelineReceiptLookupV1, Plugin, PluginId,
     ProposedAction, PurgeOutcome, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
     ReplayClaimEvaluatorV1, ScheduledObservationProfileV1, Seq, SeqRange, State, TimelineId,
-    MODALITY_PERSONA,
+    TimelineMeta, MODALITY_PERSONA,
 };
 use pos_runtime::{
     Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, RuntimeError,
     ScheduledAdmissionStoreV1, StepOutput,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore, StoreConfig};
+
+/// A Timeline's Fork ancestry, read from the store through the shared
+/// `pos_core::fork_ancestry` helper.
+#[must_use]
+pub fn ancestry<S: pos_core::EventStore + ?Sized>(
+    store: &S,
+    timeline: TimelineId,
+) -> Vec<TimelineMeta> {
+    pos_core::fork_ancestry(store, timeline).test_ok()
+}
+
+/// The one-member ancestry of a store-less fixture Timeline with no parent.
+#[must_use]
+pub fn root_ancestry(timeline: TimelineId) -> Vec<TimelineMeta> {
+    vec![TimelineMeta {
+        id: timeline,
+        ..TimelineMeta::root("root")
+    }]
+}
 
 /// Unwrap a fixture step, failing the runner with the unexpected error.
 ///
@@ -195,13 +214,14 @@ pub fn stage(
     registry.compose_non_participant_drivers()?;
     let head = store.logical_head(timeline).test_ok();
     let prefix = store.read(timeline, SeqRange::all()).test_ok();
+    let chain = ancestry(store, timeline);
     if let Some(token) = token {
         return registry
-            .step_all_anchored_protected(timeline, head, token.clone(), 0, &prefix)
+            .step_all_anchored_protected(timeline, &chain, head, token.clone(), 0, &prefix)
             .map(|drafts| (head, drafts));
     }
     registry
-        .step_all_anchored_with_events(timeline, head, &prefix)
+        .step_all_anchored_with_events(timeline, &chain, head, &prefix)
         .map(|drafts| (head, drafts))
 }
 

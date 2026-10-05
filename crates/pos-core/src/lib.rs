@@ -28,6 +28,7 @@ pub mod executable_budget;
 pub mod fork_admission;
 pub mod fork_admission_authority;
 pub mod fork_admission_command;
+pub mod fork_ancestry;
 pub mod fork_attribution;
 pub mod fork_authentication;
 pub mod fork_event_provenance;
@@ -331,15 +332,17 @@ pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
 };
 pub use consent::{
-    is_consent_event_type, is_consent_sensitive_event_type, required_modality_for_event,
-    ConsentAppendPermit, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError, ConsentError,
-    ConsentGate, ConsentGrantedV1, ConsentRevocationFoldListener, ConsentRevocationReservation,
-    ConsentRevokedV1, FieldStateV1, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
-    HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_CONSENT_HISTORY_EVENTS, MODALITY_EXPORT, MODALITY_LOCATION,
-    MODALITY_MODEL_FIT, MODALITY_PERSONA,
+    is_consent_event_type, is_consent_sensitive_event_type, is_subject_controlled_event_type,
+    required_modality_for_event, ConsentAppendPermit, ConsentAuthority, ConsentCapabilityToken,
+    ConsentCodecError, ConsentError, ConsentGate, ConsentGrantedV1, ConsentRevocationFoldListener,
+    ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1, EVENT_TYPE_CONSENT_GRANTED_V1,
+    EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_CONSENT_HISTORY_EVENTS,
+    MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT, MODALITY_PERSONA,
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
+#[cfg(any(test, feature = "test-support"))]
+pub use erasure::NonInvokingErasureGateForTest;
 pub use erasure::{
     acknowledgement_inventory_reference, destruction_command_reference,
     erasure_evidence_set_reference, extract_adapter_admission_registration_v1,
@@ -451,6 +454,9 @@ pub use fork_admission_command::{
     MAX_FORK_ADMISSION_HOST_COMMAND_BYTES_V1, MAX_FORK_ADMISSION_RECOVERY_COMMAND_BYTES_V1,
     MAX_FORK_ADMISSION_RECOVERY_PROOF_BYTES_V1, MAX_FORK_CREATE_COMMAND_BYTES_V1,
     MAX_PRINCIPAL_OWNER_COMMAND_BYTES_V1,
+};
+pub use fork_ancestry::{
+    authorize_fork_scopes, fork_ancestry, validate_fork_ancestry, with_fork_ancestry_fence,
 };
 pub use fork_attribution::{
     fork_attribution_authority_origin_digest_v1, fork_attribution_closure_leaf_v1,

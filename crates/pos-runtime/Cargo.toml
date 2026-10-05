@@ -10,7 +10,7 @@ publish.workspace = true
 # Enables downstream fixture registration and verifier-seam tests only.
 # Never enable in deployable builds; fixtures do not establish installed authority.
 # Enforced by scripts/check_test_support_features.py in CI.
-test-support = ["local-admission-host"]
+test-support = ["local-admission-host", "pos-core/test-support"]
 # Exposes the process-wide local scheduled-admission host to the local
 # experiment composition root. Keeps the host out of deployable Plugin,
 # Driver, and provider graphs; it is not an in-process security boundary.
@@ -42,6 +42,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "human_admission"
+required-features = ["test-support"]
+
+[[test]]
+name = "inherited_scope_passes"
 required-features = ["test-support"]
 
 [[test]]

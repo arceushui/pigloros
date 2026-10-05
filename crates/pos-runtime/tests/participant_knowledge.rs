@@ -32,8 +32,19 @@ use pos_state::{
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use std::{
     fmt::Debug,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
+
+/// The one-member Fork ancestry of a fixture Timeline with no parent.
+fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+    vec![pos_core::TimelineMeta {
+        id: timeline,
+        ..pos_core::TimelineMeta::root("root")
+    }]
+}
 
 trait TestOk<T> {
     fn test_ok(self) -> T;
@@ -728,7 +739,13 @@ fn stage_view(
     view: AuthorizedDriverViewV1,
     authority: AuthorizedViewAuthorityV1<'_>,
 ) -> Result<Vec<EventDraft>, RuntimeError> {
-    registry.stage_authorized_scheduled_pass(timeline, Seq::from_u64(12), &[view], &[authority])
+    registry.stage_authorized_scheduled_pass(
+        timeline,
+        &root_ancestry(timeline),
+        Seq::from_u64(12),
+        &[view],
+        &[authority],
+    )
 }
 
 /// Host admission inputs for a port that has no published fence.
@@ -1587,7 +1604,11 @@ fn authorized_commit_rejects_a_legacy_pending_step() {
     let fixture = fixture();
     let (mut registry, state) = non_participant_registry(&fixture);
     registry
-        .step_all_anchored(fixture.timeline_id, Seq::from_u64(12))
+        .step_all_anchored(
+            fixture.timeline_id,
+            &root_ancestry(fixture.timeline_id),
+            Seq::from_u64(12),
+        )
         .test_ok();
     let evaluation = observation_evaluation(&fixture.observation);
     let authority = current_authority(&fixture);
@@ -1689,7 +1710,13 @@ fn admit_recorded(
     authorities: &[AuthorizedViewAuthorityV1<'_>],
 ) -> (Seq, Hash) {
     registry
-        .stage_authorized_scheduled_pass(prepared.timeline, Seq::from_u64(12), views, authorities)
+        .stage_authorized_scheduled_pass(
+            prepared.timeline,
+            &root_ancestry(prepared.timeline),
+            Seq::from_u64(12),
+            views,
+            authorities,
+        )
         .test_ok();
     let admission = prepared.admission(key);
     let mut port = RecordingPort {
@@ -1809,6 +1836,7 @@ fn late_revocation_of_one_view_aborts_the_whole_scheduled_pass() {
         registry
             .stage_authorized_scheduled_pass(
                 prepared.timeline,
+                &root_ancestry(prepared.timeline),
                 Seq::from_u64(12),
                 &[driver_view(&first), driver_view(&second)],
                 &[
@@ -1858,6 +1886,7 @@ fn a_failing_driver_aborts_every_driver_staged_by_the_pass() {
     assert_eq!(
         authority_error(registry.stage_authorized_scheduled_pass(
             timeline,
+            &root_ancestry(timeline),
             Seq::from_u64(12),
             &[driver_view(&first), driver_view(&second)],
             &[
@@ -1891,6 +1920,7 @@ fn views_must_follow_host_schedule_order_and_share_the_base_cut() {
     assert_eq!(
         authority_error(registry.stage_authorized_scheduled_pass(
             timeline,
+            &root_ancestry(timeline),
             Seq::from_u64(12),
             &[driver_view(&second), driver_view(&first)],
             &[
@@ -1903,6 +1933,7 @@ fn views_must_follow_host_schedule_order_and_share_the_base_cut() {
     assert_eq!(
         authority_error(registry.stage_authorized_scheduled_pass(
             timeline,
+            &root_ancestry(timeline),
             Seq::from_u64(11),
             &[driver_view(&first)],
             &[view_authority(&first, &first_evaluation, &first_authority)],
@@ -1912,6 +1943,7 @@ fn views_must_follow_host_schedule_order_and_share_the_base_cut() {
     assert_eq!(
         authority_error(registry.stage_authorized_scheduled_pass(
             timeline,
+            &root_ancestry(timeline),
             Seq::from_u64(12),
             &[driver_view(&first), driver_view(&second)],
             &[view_authority(&first, &first_evaluation, &first_authority)],
@@ -1947,7 +1979,13 @@ fn an_empty_authorized_pass_commits_without_admission() {
     let fixture = fixture();
     let (mut registry, state) = registry(&fixture, false);
     assert!(registry
-        .stage_authorized_scheduled_pass(fixture.timeline_id, Seq::from_u64(12), &[], &[])
+        .stage_authorized_scheduled_pass(
+            fixture.timeline_id,
+            &root_ancestry(fixture.timeline_id),
+            Seq::from_u64(12),
+            &[],
+            &[],
+        )
         .test_ok()
         .is_empty());
 
@@ -2007,6 +2045,7 @@ fn authorized_pass_rejects_another_plugins_event_type_and_commits_nothing() {
         assert_eq!(
             authority_error(registry.stage_authorized_scheduled_pass(
                 prepared.timeline,
+                &root_ancestry(prepared.timeline),
                 Seq::from_u64(12),
                 &[driver_view(&first), driver_view(&second)],
                 &authorities,
@@ -2327,4 +2366,104 @@ fn revocation_before_recovery_is_caught_by_the_store_fence() {
         );
         assert_eq!(prepared.committed().len(), 1, "{name}");
     }
+}
+
+/// A participant Driver whose live Event-subscription answer flips once
+/// `changed` is set, after registration (ADR-021 Revision 4 Decision 1).
+struct ChangingSubscriptionDriver {
+    inner: ParticipantDriver,
+    before: Vec<Kind>,
+    after: Vec<Kind>,
+    changed: Arc<AtomicBool>,
+}
+
+impl Driver for ChangingSubscriptionDriver {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn event_subscriptions(&self) -> &[Kind] {
+        if self.changed.load(Ordering::SeqCst) {
+            &self.after
+        } else {
+            &self.before
+        }
+    }
+
+    fn requires_verified_event_prefix(&self) -> bool {
+        self.changed.load(Ordering::SeqCst)
+    }
+
+    fn step(
+        &mut self,
+        timeline: TimelineId,
+        observations: ObservationView<'_>,
+    ) -> Result<StepOutput, RuntimeError> {
+        self.inner.step(timeline, observations)
+    }
+
+    fn commit_step(&mut self) {
+        self.inner.commit_step();
+    }
+
+    fn abort_step(&mut self) {
+        self.inner.abort_step();
+    }
+}
+
+/// Register and bind a participant Driver whose Event subscriptions are
+/// `before` at registration and `after` once the returned flag is set.
+fn changing_registry(
+    fixture: &Fixture,
+    before: &[&str],
+    after: &[&str],
+) -> (PluginRegistry, Arc<Mutex<DriverState>>, Arc<AtomicBool>) {
+    let state = Arc::new(Mutex::new(DriverState::default()));
+    let changed = Arc::new(AtomicBool::new(false));
+    let driver = ChangingSubscriptionDriver {
+        inner: ParticipantDriver {
+            state: Arc::clone(&state),
+            entity: EntityId::new(),
+            event_type: Kind::new("participant.planned"),
+            ambient_subscription: None,
+        },
+        before: before.iter().copied().map(Kind::new).collect(),
+        after: after.iter().copied().map(Kind::new).collect(),
+        changed: Arc::clone(&changed),
+    };
+    let mut registry = gated_registry();
+    registry
+        .register_generated(
+            &TestPlugin {
+                id: fixture.plugin_id,
+                event_type: "participant.planned",
+            },
+            None,
+            Some(Box::new(driver)),
+        )
+        .test_ok();
+    bind_participant(&mut registry, fixture);
+    (registry, state, changed)
+}
+
+#[test]
+fn the_authorized_pass_ignores_event_subscriptions_added_after_registration() {
+    let fixture = fixture();
+    let (mut registry, state, changed) =
+        changing_registry(&fixture, &[], &["ordinary.event", "persona.prediction"]);
+    changed.store(true, Ordering::SeqCst);
+
+    assert_eq!(stage_current(&mut registry, &fixture).test_ok().len(), 1);
+    assert_eq!(observed(&state).steps, 1);
+}
+
+#[test]
+fn the_authorized_pass_keeps_event_subscriptions_dropped_after_registration() {
+    let fixture = fixture();
+    let (mut registry, state, changed) = changing_registry(&fixture, &["ordinary.event"], &[]);
+    changed.store(true, Ordering::SeqCst);
+
+    assert!(error_text(stage_current(&mut registry, &fixture))
+        .contains("authority source is unauthorized"));
+    assert_eq!(observed(&state).steps, 0);
 }

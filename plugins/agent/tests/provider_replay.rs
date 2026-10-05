@@ -21,6 +21,14 @@ use pos_runtime::{
 use std::sync::Arc;
 use ulid::Ulid;
 
+/// The one-member Fork ancestry of a fixture Timeline with no parent.
+fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
+    vec![pos_core::TimelineMeta {
+        id: timeline,
+        ..pos_core::TimelineMeta::root("root")
+    }]
+}
+
 const PLUGIN_VERSION: &str = "1.0.0";
 const PROVIDER_ID: &str = "fixture-1";
 const PROVIDER_VERSION: &str = "v1";
@@ -1071,7 +1079,11 @@ fn provider_driver_recovers_only_from_selected_evidence_and_remains_fresh_only()
     assert!(registry.restore_driver_state(&segments, &events).is_err());
 
     let drafts = registry
-        .step_all_anchored(host.timeline, Seq::from_u64(2))
+        .step_all_anchored(
+            host.timeline,
+            &root_ancestry(host.timeline),
+            Seq::from_u64(2),
+        )
         .test_ok();
     assert_eq!(calls.get(), 1);
     let record = DecisionRecordV1::decode(drafts[0].payload.as_slice()).test_ok();
@@ -1262,7 +1274,7 @@ fn live_driver_provider_call_count_does_not_change_during_replay() {
         .test_ok();
     registry.compose_non_participant_drivers().test_ok();
     let drafts = registry
-        .step_all_anchored(host.timeline, Seq::ZERO)
+        .step_all_anchored(host.timeline, &root_ancestry(host.timeline), Seq::ZERO)
         .test_ok();
     assert_eq!(calls.get(), 1);
     let events: Vec<Event> = drafts
