@@ -31,10 +31,20 @@ pos-conformance = { path = "../pos-conformance" }
 
 [dev-dependencies]
 ciborium = { workspace = true }
-pos-core = { path = "../pos-core", features = ["test-support"] }
+# The rigged test store mints a foreign receipt with the adapter seal.
+pos-core = { path = "../pos-core", features = [
+  "test-support",
+  "counterfactual-adapter",
+] }
 pos-crypto = { path = "../pos-crypto" }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
+
+# The counterfactual coordinator tests reuse the pos-time graph and frontier
+# derivation. pos-time depends on this crate, so this is a dev-only cycle;
+# pos-time links pos-conformance, which builds only on Linux.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+pos-time = { path = "../pos-time" }
 
 [[test]]
 name = "event_type_ownership"
