@@ -962,6 +962,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "ulid",
+ "zeroize",
 ]
 
 [[package]]
