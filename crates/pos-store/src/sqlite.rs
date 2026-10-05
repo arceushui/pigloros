@@ -2680,13 +2680,14 @@ impl SqliteStore {
             #[cfg(test)]
             bounded_read_delay_for_test(1);
             ensure_read_time_bound(started, max_elapsed_micros)?;
-            let next = rows.next();
             #[cfg(test)]
             let next = if FAIL_ROWS_NEXT.with(std::cell::Cell::get) {
                 Err(rusqlite::Error::InvalidQuery)
             } else {
-                next
+                rows.next()
             };
+            #[cfg(not(test))]
+            let next = rows.next();
             let row = match next.map_err(|e| CoreError::Storage(e.to_string())) {
                 Ok(Some(row)) => row,
                 Ok(None) => break,
