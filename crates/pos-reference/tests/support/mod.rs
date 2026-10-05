@@ -3495,7 +3495,10 @@ fn profile_with_selected_closure_caps(
         }
         return Err(io::Error::other("exact profile byte cap did not converge").into());
     }
-    if matches!(mutation, Some(ProfileMutation::SelectedClosureCapExact(3))) {
+    if matches!(
+        mutation,
+        Some(ProfileMutation::SelectedClosureCapExact(ClosureCap::TotalBytes))
+    ) {
         const MAX_CONVERGENCE_STEPS: usize = 8;
         for _ in 0..MAX_CONVERGENCE_STEPS {
             let profile_bytes = encoded_profile_length(&profile_value)?;
